@@ -1,8 +1,8 @@
 use tracing::trace;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ModalChoice, ReplacementDefinition, StaticDefinition,
-    TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, Effect, ModalChoice, PlayerFilter, ReplacementDefinition,
+    StaticDefinition, TargetFilter, TargetSelectionMode, TriggerDefinition,
 };
 use crate::types::card::CardFace;
 use crate::types::keywords::Keyword;
@@ -176,6 +176,10 @@ fn translate_charm(
         allow_repeat_modes: false,
         constraints: Vec::new(),
         mode_costs: Vec::new(),
+        mode_pawprints: Vec::new(),
+        entwine_cost: None,
+        chooser: PlayerFilter::Controller,
+        selection: TargetSelectionMode::Chosen,
         dynamic_max_choices: None,
     };
 

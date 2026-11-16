@@ -105,6 +105,7 @@ mod tests {
         scope: SkipScope,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            coin_branches: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
@@ -185,6 +186,7 @@ mod tests {
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             control_change_instruction: None,
         }
     }

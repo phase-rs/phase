@@ -103,6 +103,7 @@ pub(crate) fn reveal_if_from_hand(
         .unwrap_or_default();
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: state.disclosed_occurrences(&[chosen_id]),
         card_ids: vec![chosen_id],
         card_names: vec![name],
     });

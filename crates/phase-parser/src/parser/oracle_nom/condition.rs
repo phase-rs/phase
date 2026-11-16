@@ -24,18 +24,20 @@ use super::quantity as nom_quantity;
 use super::target as nom_target;
 use super::target::{controller_phrase_among, ControllerPhrase};
 use crate::parser::oracle_target::{
-    cast_capable_zones_except, parse_shared_quality, parse_type_phrase_folding, parse_zone_suffix,
-    parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
+    parse_shared_quality, parse_source_anaphoric_pronoun, parse_type_phrase_folding,
+    parse_zone_suffix, parse_zone_word, peek_zone_boundary, superlative_property_filter_prop,
 };
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
-    AbilityCondition, AggregateFunction, AttachmentReferent, AttackedYouScope, CardTypeSetSource,
-    CastManaObjectScope, CastManaSpentMetric, CommanderOwnership, Comparator, ControllerRef,
-    CountScope, DamageChannel, DamageGroupKey, DamageKindFilter, FilterProp, NumberQuality,
-    ObjectProperty, ObjectScope, Parity, PlayerFilter, PlayerRelation, PlayerScope,
-    PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality, SharedQualityRelation,
-    StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter, TypedFilter, ZoneRef,
+    is_any_target_filter, AbilityCondition, AggregateFunction, AttachmentReferent,
+    AttackedYouScope, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric,
+    CommanderOwnership, Comparator, ControllerRef, CountScope, DamageChannel, DamageGroupKey,
+    DamageKindFilter, FilterProp, NumberQuality, ObjectProperty, ObjectScope, Parity, PlayerFilter,
+    PlayerRelation, PlayerScope, PropertyAggregate, QuantityExpr, QuantityRef, SharedQuality,
+    SharedQualityRelation, StaticCondition, TargetFilter, TrackedAnaphorSource, TypeFilter,
+    TypedFilter, ZoneRef,
 };
+use crate::types::card_type::CoreType;
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::event_kinds::PlayerActionKind;
 use crate::types::game_state_kinds::DayNight;
@@ -628,6 +630,10 @@ fn parse_remaining_state_presence_conditions_tail(
         parse_no_cards_in_your_zone,
         parse_no_cards_in_that_graveyard,
         parse_card_exiled_with_source_condition,
+        // CR 205.2a + CR 607.2a: "all cards exiled with ~ share a <quality>" —
+        // anchored on the literal "all cards exiled with " head, disjoint from
+        // every other arm in this group.
+        parse_all_cards_exiled_with_source_share_quality,
         parse_there_are_conditions,
         parse_there_exists_compound_zone_condition,
         parse_there_exists_condition,
@@ -1273,12 +1279,8 @@ fn parse_put_onto_battlefield_this_way(input: &str) -> OracleResult<'_, StaticCo
 /// The noun ("card[s]") only consumes text; the count is unfiltered.
 fn parse_exiled_this_way_count(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you exiled ").parse(input)?;
-    let (rest, n) = parse_number(rest)?;
-    let (rest, comparator) = alt((
-        value(Comparator::GE, tag(" or more ")),
-        value(Comparator::LE, tag(" or fewer ")),
-    ))
-    .parse(rest)?;
+    // The shared comparator-aware threshold authority; its comparator is kept.
+    let (rest, (n, comparator)) = parse_count_threshold(rest)?;
     let (rest, _) = alt((tag("cards this way"), tag("card this way"))).parse(rest)?;
     Ok((
         rest,
@@ -3176,6 +3178,9 @@ fn parse_strict_n_counters(input: &str) -> OracleResult<'_, (u32, Option<u32>)> 
 /// Fails if the input does not contain `" counter"` before end of string,
 /// or if the token slice is empty (that case is the caller's `Any` branch).
 fn parse_typed_counter_noun(input: &str) -> OracleResult<'_, CounterMatch> {
+    // CR 122.1: "[different] kinds of counters on ~" quantifies over counter
+    // kinds; it names none, so it must not become `Generic("kinds of")`.
+    let (input, _) = super::primitives::not_counter_kind_quantifier(input)?;
     let (rest_after_noun, type_slice) = take_until(" counter").parse(input)?;
     if type_slice.is_empty() {
         // Fail so the caller's `Any` branch (bare "counter[s]") can try.
@@ -4715,6 +4720,393 @@ fn parse_parent_target_referent(input: &str) -> OracleResult<'_, ParentTargetRef
     .parse(input)
 }
 
+/// CR 115.1: the object kind a "that spell/creature/permanent" referent names.
+/// "its" has no printed noun and inherits the declared target's kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObjectReferentNoun {
+    Pronoun,
+    Spell,
+    Creature,
+    Permanent,
+}
+
+/// The player a trailing condition names as the controller of the instruction's
+/// declared object target (CR 608.2c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TargetControllerReferent {
+    /// "that opponent" — bound only when the target's own type phrase
+    /// introduced the opponent ("target creature an opponent controls").
+    IntroducedOpponent,
+    /// "its controller" / "that spell's | creature's | permanent's controller".
+    ObjectController { noun: ObjectReferentNoun },
+}
+
+/// CR 608.2c: the subject of a trailing condition that names the controller of
+/// the instruction's declared object target.
+pub(crate) fn parse_target_controller_referent(
+    input: &str,
+) -> OracleResult<'_, TargetControllerReferent> {
+    alt((
+        value(
+            TargetControllerReferent::IntroducedOpponent,
+            tag("that opponent"),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Pronoun,
+            },
+            terminated(tag("its"), tag(" controller")),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Spell,
+            },
+            terminated(
+                (tag("that "), tag("spell"), parse_apostrophe_s),
+                tag(" controller"),
+            ),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Creature,
+            },
+            terminated(
+                (tag("that "), tag("creature"), parse_apostrophe_s),
+                tag(" controller"),
+            ),
+        ),
+        value(
+            TargetControllerReferent::ObjectController {
+                noun: ObjectReferentNoun::Permanent,
+            },
+            terminated(
+                (tag("that "), tag("permanent"), parse_apostrophe_s),
+                tag(" controller"),
+            ),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 109.2b: a "that spell" referent names a spell on the stack. A typed
+/// spell restriction ("target creature spell") lowers to
+/// `And([StackSpell, Typed(Creature)])`, so the stack-spell kind is matched
+/// through the typed restriction. A disjunction that admits a non-spell branch
+/// ("target spell or ability") does not guarantee the noun and declines.
+fn filter_is_spell_slot(filter: &TargetFilter) -> bool {
+    if let TargetFilter::StackSpell = filter {
+        return true;
+    }
+    if let TargetFilter::And { filters } = filter {
+        return filters.iter().any(filter_is_spell_slot);
+    }
+    if let TargetFilter::Or { filters } = filter {
+        return filters.iter().all(filter_is_spell_slot);
+    }
+    false
+}
+
+/// CR 115.1: whether the declared target slot can be the object the referent
+/// names. Every noun requires a slot that guarantees an object controller. "That
+/// spell" requires a spell slot. "That creature" requires a type axis that is
+/// creature, and "that permanent" a type axis that is a permanent type or a
+/// property-only typed slot (such as "target token an opponent controls");
+/// neither matches a stack object. A disjunction matches only when every branch
+/// does and a conjunction when any conjunct does. Any other shape (no type axis,
+/// a non-typed filter) fails closed rather than binding by name alone.
+pub(crate) fn referent_noun_matches_slot(noun: ObjectReferentNoun, filter: &TargetFilter) -> bool {
+    let guarantees_controller = filter_guarantees_object_controller(filter);
+    match noun {
+        ObjectReferentNoun::Pronoun => guarantees_controller,
+        ObjectReferentNoun::Spell => filter_is_spell_slot(filter) && guarantees_controller,
+        // A stack object is not a permanent even when its type axis is a
+        // permanent type (Essence Scatter's creature spell).
+        ObjectReferentNoun::Creature => {
+            typed_slot_type_axis_matches(filter, |t| matches!(t, TypeFilter::Creature))
+                && guarantees_controller
+                && !slot_is_stack_object(filter)
+        }
+        ObjectReferentNoun::Permanent => {
+            (typed_slot_type_axis_matches(filter, type_filter_is_permanent)
+                || property_only_permanent_slot(filter))
+                && guarantees_controller
+                && !slot_is_stack_object(filter)
+        }
+    }
+}
+
+/// CR 110.1 + CR 111.1: a property-only typed filter (a token) denotes a
+/// permanent even without a type axis; the caller's controller guard
+/// (`filter_guarantees_object_controller`) confines it to battlefield objects.
+fn property_only_permanent_slot(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Typed(tf)
+        if tf.type_filters.is_empty() && !tf.properties.is_empty())
+}
+
+/// CR 110.1 + CR 109.2: a stack object (spell or ability) is never a battlefield
+/// permanent. Checked across the whole slot so a typed spell leg cannot make
+/// an `And` look like a permanent.
+fn slot_is_stack_object(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => true,
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(slot_is_stack_object)
+        }
+        _ => false,
+    }
+}
+
+fn typed_slot_type_axis_matches(
+    filter: &TargetFilter,
+    predicate: impl Fn(&TypeFilter) -> bool + Copy,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .type_filters
+            .iter()
+            .any(|type_filter| type_filter_every_branch_matches(type_filter, predicate)),
+        // Composition: an `Or` guarantees the noun only when every branch does;
+        // an `And` narrows one object, so any typed conjunct is enough.
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .all(|filter| typed_slot_type_axis_matches(filter, predicate)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .any(|filter| typed_slot_type_axis_matches(filter, predicate)),
+        // Every non-`Typed` shape names no type axis this projection can
+        // classify, so it fails closed. Listed explicitly rather than with a
+        // wildcard so a new variant requires a compiler-checked decision.
+        TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::Not { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::SpecificPlayer { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SourceController
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::StackSpell
+        | TargetFilter::CastingSpell
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::ExiledBySource
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+fn type_filter_every_branch_matches(
+    type_filter: &TypeFilter,
+    predicate: impl Fn(&TypeFilter) -> bool + Copy,
+) -> bool {
+    match type_filter {
+        // A disjunctive type axis matches the referent's noun only when every
+        // branch does: "target creature or enchantment" cannot guarantee the
+        // "that creature" antecedent.
+        TypeFilter::AnyOf(inner) => inner
+            .iter()
+            .all(|inner| type_filter_every_branch_matches(inner, predicate)),
+        other => predicate(other),
+    }
+}
+
+/// CR 110.4: a typed axis is permanent when its core type is one of the six
+/// permanent types; `TypeFilter::Permanent` is the direct spelling.
+fn type_filter_is_permanent(type_filter: &TypeFilter) -> bool {
+    matches!(type_filter, TypeFilter::Permanent)
+        || type_filter_to_core_type(type_filter).is_some_and(CoreType::is_permanent_type)
+}
+
+/// The card type a type-axis filter names, or `None` for a filter that names no
+/// single card type.
+pub(crate) fn type_filter_to_core_type(type_filter: &TypeFilter) -> Option<CoreType> {
+    match type_filter {
+        TypeFilter::Creature => Some(CoreType::Creature),
+        TypeFilter::Land => Some(CoreType::Land),
+        TypeFilter::Artifact => Some(CoreType::Artifact),
+        TypeFilter::Enchantment => Some(CoreType::Enchantment),
+        TypeFilter::Instant => Some(CoreType::Instant),
+        TypeFilter::Sorcery => Some(CoreType::Sorcery),
+        TypeFilter::Planeswalker => Some(CoreType::Planeswalker),
+        TypeFilter::Battle => Some(CoreType::Battle),
+        // CR 308.1: Kindred maps to its core type.
+        TypeFilter::Kindred => Some(CoreType::Kindred),
+        TypeFilter::Permanent
+        | TypeFilter::Card
+        | TypeFilter::Any
+        | TypeFilter::Non(_)
+        | TypeFilter::Subtype(_)
+        | TypeFilter::AnyOf(_) => None,
+    }
+}
+
+/// CR 109.4: whether the declared slot names an object that can have a
+/// controller. Player and off-zone object slots cannot; battlefield objects
+/// and stack objects can. Composite filters fail closed unless every
+/// disjunct (or an object conjunct) guarantees one.
+pub(crate) fn filter_guarantees_object_controller(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::StackSpell | TargetFilter::StackAbility { .. } => true,
+        TargetFilter::Or { filters } => filters.iter().all(filter_guarantees_object_controller),
+        TargetFilter::And { filters } => filters.iter().any(filter_guarantees_object_controller),
+        // CR 109.4 + CR 111.1: a property-only typed filter (Kraul Whipcracker's
+        // "target token") still denotes a battlefield object;
+        // `denotes_battlefield_objects` rejects it only because it requires a
+        // type axis. Keep the player/zone guards and accept a property axis.
+        TargetFilter::Typed(tf) => {
+            let typed = TargetFilter::Typed(tf.clone());
+            !typed.denotes_player_target()
+                && !is_any_target_filter(&typed)
+                && typed
+                    .extract_zones()
+                    .iter()
+                    .all(|zone| *zone == Zone::Battlefield)
+                && (!tf.type_filters.is_empty() || !tf.properties.is_empty())
+        }
+        other => other.denotes_battlefield_objects(),
+    }
+}
+
+/// CR 109.4: the permanents the declared target's controller controls.
+fn target_controller_population(filter: TargetFilter) -> TargetFilter {
+    inject_controller(filter, ControllerRef::ParentTargetController)
+}
+
+/// A non-empty typed type phrase consuming the whole input ("creatures").
+///
+/// CR 109.4 + CR 608.2c: a population that already carries a controller
+/// declines here. `inject_controller` would overwrite that qualifier, so
+/// "creatures you control" must not silently become "creatures the target's
+/// controller controls".
+fn parse_counted_type_phrase(input: &str) -> OracleResult<'_, TypedFilter> {
+    let (filter, rest) = parse_type_phrase_folding(input);
+    match filter {
+        TargetFilter::Typed(tf)
+            if tf.controller.is_none() && !tf.type_filters.is_empty() && rest.is_empty() =>
+        {
+            Ok((rest, tf))
+        }
+        _ => Err(oracle_err(input)),
+    }
+}
+
+/// CR 608.2c + CR 608.2h + CR 109.4: a trailing condition comparing what the
+/// controller of the instruction's declared object target controls, checked
+/// as the instruction resolves:
+/// - "<subject> controls no [other] <type>" (Skulking Killer) → that player's
+///   count is zero; "other" excludes the target itself.
+/// - "you control more <type> than <subject>" (Unified Will) → your count
+///   exceeds that player's count.
+///
+/// This is the single recognition authority. It deliberately is not reachable
+/// from [`parse_inner_condition`]: the referent must be bound by the caller
+/// against a declared target, and a static or trigger condition has no
+/// resolving ability to bind it. Predator's Gambit's "as long as its controller
+/// controls no other creatures" therefore stays explicitly unsupported rather
+/// than reading an unbound parent-target controller.
+pub(crate) fn parse_target_controller_count_condition(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, StaticCondition)> {
+    alt((
+        parse_target_controller_controls_no,
+        parse_you_control_more_than_target_controller,
+    ))
+    .parse(input)
+}
+
+fn parse_target_controller_controls_no(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, StaticCondition)> {
+    let (rest, referent) =
+        terminated(parse_target_controller_referent, tag(" controls no ")).parse(input)?;
+    let (rest, other) = opt(value(
+        FilterProp::DistinctFrom {
+            reference: Box::new(TargetFilter::ParentTarget),
+        },
+        tag("other "),
+    ))
+    .parse(rest)?;
+    let (rest, mut tf) = parse_counted_type_phrase(rest)?;
+    tf.properties.extend(other);
+    let condition = StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: target_controller_population(TargetFilter::Typed(tf)),
+            },
+        },
+        comparator: Comparator::EQ,
+        rhs: QuantityExpr::Fixed { value: 0 },
+    };
+    Ok((rest, (referent, condition)))
+}
+
+fn parse_you_control_more_than_target_controller(
+    input: &str,
+) -> OracleResult<'_, (TargetControllerReferent, StaticCondition)> {
+    let (rest, type_text) =
+        preceded(tag("you control more "), take_until(" than ")).parse(input)?;
+    let (rest, referent) = preceded(tag(" than "), parse_target_controller_referent).parse(rest)?;
+    let (_, tf) = nom::combinator::all_consuming(parse_counted_type_phrase).parse(type_text)?;
+    let filter = TargetFilter::Typed(tf);
+    let condition = StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: inject_controller_you(filter.clone()),
+            },
+        },
+        comparator: Comparator::GT,
+        rhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: target_controller_population(filter),
+            },
+        },
+    };
+    Ok((rest, (referent, condition)))
+}
+
 /// CR 119 + CR 603.4: The " or less life" / " or more life" suffix shared by every
 /// life-threshold predicate ("you have N …", "that player has N …", "an opponent
 /// has N …", "each player has N …"). Returns the `Comparator` the suffix names;
@@ -5054,12 +5446,20 @@ pub(crate) fn parse_otherwise_branch_connector(input: &str) -> OracleResult<'_, 
 /// `QuantityComparison { ObjectCountDistinct[quality](filter) >= N }`.
 ///
 /// Field of the Dead: "if you control seven or more lands with different
-/// names". Coven cards: "if you control three or more creatures with different
-/// powers". The quality axis is shared with search selection constraints and
+/// names". Seven of Nine, Unassimilated: "unless you control five or more
+/// differently named lands" (prefix-adjective spelling). Coven cards: "if you
+/// control three or more creatures with different powers". The quality axis is shared with search selection constraints and
 /// `QuantityRef::ObjectCountDistinct`.
 fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you control ").parse(input)?;
     let (rest, n) = parse_ge_threshold(rest)?;
+    // CR 201.2b: the distinct-name quality is printed either as the prefix
+    // adjective "differently named <type>" (Seven of Nine, Unassimilated) or as
+    // the suffix "<type> with different names" (Field of the Dead). Both are the
+    // same `ObjectCountDistinct[Name]` count; the prefix form owns its quality,
+    // so it must not also carry a "with different ..." suffix.
+    let (rest, prefix_quality) =
+        opt(value(SharedQuality::Name, tag("differently named "))).parse(rest)?;
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase_folding(type_text);
     if matches!(filter, TargetFilter::Any) {
@@ -5068,15 +5468,17 @@ fn parse_control_count_ge_distinct_quality(input: &str) -> OracleResult<'_, Stat
             nom::error::ErrorKind::Fail,
         )));
     }
-    let trimmed = remainder.trim_start();
-    let (after_suffix, quality) = preceded(
-        tag("with different "),
-        alt((
-            value(SharedQuality::Name, tag("names")),
-            value(SharedQuality::Power, tag("powers")),
-        )),
-    )
-    .parse(trimmed)?;
+    let (after_suffix, quality) = match prefix_quality {
+        Some(quality) => (remainder, quality),
+        None => preceded(
+            tag("with different "),
+            alt((
+                value(SharedQuality::Name, tag("names")),
+                value(SharedQuality::Power, tag("powers")),
+            )),
+        )
+        .parse(remainder.trim_start())?,
+    };
     let filter = inject_controller_you(filter);
     let consumed = after_suffix.as_ptr() as usize - input.as_ptr() as usize;
     Ok((
@@ -7129,6 +7531,17 @@ fn target_filter_origin_zones(filter: &TargetFilter) -> Option<Vec<Zone>> {
         TargetFilter::Typed(typed) => typed.properties.iter().find_map(|prop| match prop {
             FilterProp::InZone { zone } => Some(vec![*zone]),
             FilterProp::InAnyZone { zones } => Some(zones.clone()),
+            // CR 305.1 + CR 601.2a: "from anywhere other than <zone>" is the negation
+            // of a single origin zone. A land is always played from a ZONE (it can't
+            // come from outside the game, CR 400.11), so the land-play history keeps
+            // the explicit zone list — every zone a card can be played from except
+            // `zone` — while the spell half keeps the negation itself.
+            FilterProp::Not { prop } => match prop.as_ref() {
+                FilterProp::InZone { zone } => Some(
+                    crate::parser::oracle_target::cast_capable_zones_except(*zone),
+                ),
+                _ => None,
+            },
             _ => None,
         }),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
@@ -7390,13 +7803,20 @@ fn parse_subtype_cards_in_your_graveyard(input: &str) -> OracleResult<'_, Quanti
     ))
 }
 
+/// CR 400.7 + CR 400.3 + CR 603.4: "a[n] <type> was put into | returned to your
+/// hand from the battlefield this turn" — a per-turn battlefield-to-hand
+/// zone-change count over objects you OWN (a card can only go to its owner's
+/// hand, CR 400.3), so "your hand" binds the owner, not the controller.
+/// "Returned to" (Miles O'Brien, Transporter Ops) and "put into" (Barrin,
+/// Tolarian Archmage) are the same zone change; only the verb differs.
 fn parse_permanent_put_into_your_hand_from_battlefield_this_turn(
     input: &str,
 ) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_article(input)?;
-    let (rest, type_text) =
-        take_until(" was put into your hand from the battlefield this turn").parse(rest)?;
-    let (rest, _) = tag(" was put into your hand from the battlefield this turn").parse(rest)?;
+    let (rest, type_text) = take_until(" was ").parse(rest)?;
+    let (rest, _) = tag(" was ").parse(rest)?;
+    let (rest, _) = alt((tag("put into"), tag("returned to"))).parse(rest)?;
+    let (rest, _) = tag(" your hand from the battlefield this turn").parse(rest)?;
     let (filter, leftover) = parse_type_phrase_folding(type_text.trim());
     if !leftover.trim().is_empty() || filter == TargetFilter::Any {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -9719,9 +10139,13 @@ fn parse_cast_origin_anywhere_other_than_suffix(input: &str) -> Option<(Vec<Filt
     let (rest, _) = peek_zone_boundary(rest).ok()?;
 
     let consumed = leading_ws + trimmed.len() - rest.len();
+    // CR 601.2a + CR 707.13 + CR 400.11: "from anywhere other than <zone>" is the
+    // NEGATION of "from <zone>", not a positive list of the remaining zones — a spell
+    // cast from outside the game (Garth One-Eye's copy) is from no zone, so it is
+    // not from <zone> and must satisfy the clause.
     Some((
-        vec![FilterProp::InAnyZone {
-            zones: cast_capable_zones_except(zone),
+        vec![FilterProp::Not {
+            prop: Box::new(FilterProp::InZone { zone }),
         }],
         consumed,
     ))
@@ -10348,7 +10772,8 @@ fn parse_filtered_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> 
         return Err(oracle_err(input));
     }
     let (filter, remainder) = parse_type_phrase_folding(noun);
-    if !remainder.trim().is_empty() || !is_admissible_zone_card_count_filter(&filter) {
+    if !remainder.trim().is_empty() || !nom_quantity::is_admissible_zone_card_count_filter(&filter)
+    {
         return Err(oracle_err(input));
     }
     let (rest, _) = tag(" in ").parse(rest_after_noun)?;
@@ -10366,113 +10791,6 @@ fn parse_filtered_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> 
             scope,
         },
     ))
-}
-
-/// Limits the filtered zone-count bridge to card descriptions whose semantics
-/// remain valid in every counted zone. All other filter forms deliberately fall
-/// through to the legacy quantity grammar instead of being partially accepted.
-///
-/// CR 109.2a + CR 404.1: a card description that names a zone counts matching
-/// cards in that zone.
-/// CR 205.1 + CR 205.2a + CR 205.3m: juxtaposed subtype + non-`Card` core type
-/// ("Zombie creature cards") is a type-line conjunction (creature AND the
-/// Zombie creature type). Empty-`properties` nouns are admitted only in that
-/// shape, encoded as `filter: Some(Typed { .. })` so `matches_target_filter`
-/// ANDs the type filters. Property-free core-only ("creature cards") or
-/// subtype-only ("Lesson cards" / "Zombie cards") nouns stay on the legacy
-/// `card_types` path.
-fn is_admissible_zone_card_count_filter(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller,
-            properties,
-        }) => {
-            controller.is_none()
-                && !type_filters.is_empty()
-                && !type_filters.iter().any(type_filter_contains_any)
-                && if properties.is_empty() {
-                    type_filters_are_juxtaposed_subtype_and_core(type_filters)
-                } else {
-                    properties
-                        .iter()
-                        .all(is_admissible_zone_card_count_property)
-                }
-        }
-        TargetFilter::Or { filters } => {
-            !filters.is_empty() && filters.iter().all(is_admissible_zone_card_count_filter)
-        }
-        _ => false,
-    }
-}
-
-/// `TypeFilter::Any` would make this bridge a broad unfiltered count. Descend
-/// through its recursive variants so nested `Any` filters cannot bypass that
-/// boundary.
-fn type_filter_contains_any(filter: &TypeFilter) -> bool {
-    match filter {
-        TypeFilter::Any => true,
-        TypeFilter::Non(filter) => type_filter_contains_any(filter),
-        TypeFilter::AnyOf(filters) => filters.iter().any(type_filter_contains_any),
-        TypeFilter::Creature
-        | TypeFilter::Land
-        | TypeFilter::Artifact
-        | TypeFilter::Enchantment
-        | TypeFilter::Instant
-        | TypeFilter::Sorcery
-        | TypeFilter::Planeswalker
-        | TypeFilter::Battle
-        | TypeFilter::Kindred
-        | TypeFilter::Permanent
-        | TypeFilter::Card
-        | TypeFilter::Subtype(_) => false,
-    }
-}
-
-/// CR 205.2a: non-`Card` core types that can juxtapose with a subtype in a
-/// zone-card description. `Card` / `Any` / `Subtype` / `Non` / `AnyOf` are not
-/// cores for this gate — admitting them would steal `"creature cards"` /
-/// `"Lesson cards"` / `"instant or sorcery cards"` onto the filtered bridge.
-fn type_filter_is_non_card_core(filter: &TypeFilter) -> bool {
-    match filter {
-        TypeFilter::Creature
-        | TypeFilter::Land
-        | TypeFilter::Artifact
-        | TypeFilter::Enchantment
-        | TypeFilter::Instant
-        | TypeFilter::Sorcery
-        | TypeFilter::Planeswalker
-        | TypeFilter::Battle
-        | TypeFilter::Kindred
-        | TypeFilter::Permanent => true,
-        TypeFilter::Card
-        | TypeFilter::Any
-        | TypeFilter::Subtype(_)
-        | TypeFilter::Non(_)
-        | TypeFilter::AnyOf(_) => false,
-    }
-}
-
-/// CR 205.1 + CR 205.3m: a juxtaposed subtype + non-`Card` core type
-/// ("Zombie creature") is a type-line conjunction, not a disjunction.
-fn type_filters_are_juxtaposed_subtype_and_core(type_filters: &[TypeFilter]) -> bool {
-    type_filters
-        .iter()
-        .any(|filter| matches!(filter, TypeFilter::Subtype(_)))
-        && type_filters.iter().any(type_filter_is_non_card_core)
-}
-
-/// Only static card-description properties can be evaluated meaningfully in a
-/// named card zone. The default is intentionally reject-by-default so a future
-/// property cannot widen this parser without an explicit admissibility decision.
-fn is_admissible_zone_card_count_property(property: &FilterProp) -> bool {
-    matches!(
-        property,
-        FilterProp::Historic
-            | FilterProp::NotHistoric
-            | FilterProp::HasSupertype { .. }
-            | FilterProp::NotSupertype { .. }
-    )
 }
 
 /// Self-referential source alternatives shared by the "exiled with [source]"
@@ -10602,6 +10920,58 @@ fn parse_card_exiled_with_source_condition(input: &str) -> OracleResult<'_, Stat
     Ok((
         rest,
         make_quantity_comparison(QuantityRef::CardsExiledBySource, comparator, n),
+    ))
+}
+
+/// CR 205.2a + CR 607.2a + CR 603.4: "all cards exiled with [source] share a
+/// <quality>" — a universal shared-characteristic gate over the source's
+/// linked-exile pool (All Good Things...: "If all cards exiled with this Saga
+/// share a card type, you gain 10 life").
+///
+/// The pool shares a quality exactly when one quality value is held by EVERY
+/// card in it, i.e. when the largest same-value bucket
+/// (`ObjectCountBySharedQuality { aggregate: Max }`) is as large as the pool
+/// itself (`CardsExiledBySource`). The bucket can never exceed the pool, so the
+/// GE comparison is the equality test. The pool must also be non-empty: an
+/// empty set of cards has no card type to share, so "all cards exiled with ~
+/// share a card type" is false when nothing was exiled with it (the vacuous
+/// reading would award the life for exiling nothing).
+///
+/// The quality axis reuses `parse_shared_quality` (card type, color, creature
+/// type, mana value, name, ...), so every "share a <quality>" wording over the
+/// linked pool lowers through this one production.
+fn parse_all_cards_exiled_with_source_share_quality(
+    input: &str,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("all cards exiled with ").parse(input)?;
+    let (rest, _) = parse_exiled_with_source_self_ref(rest)?;
+    let (rest, _) = tag(" share a ").parse(rest)?;
+    let (rest, quality) = parse_shared_quality(rest)?;
+    let pool = || QuantityExpr::Ref {
+        qty: QuantityRef::CardsExiledBySource,
+    };
+    Ok((
+        rest,
+        StaticCondition::And {
+            conditions: vec![
+                StaticCondition::QuantityComparison {
+                    lhs: pool(),
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 1 },
+                },
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCountBySharedQuality {
+                            filter: TargetFilter::ExiledBySource,
+                            quality,
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                    comparator: Comparator::GE,
+                    rhs: pool(),
+                },
+            ],
+        },
     ))
 }
 
@@ -10842,9 +11212,14 @@ fn parse_there_are_counters_on_source(input: &str) -> OracleResult<'_, StaticCon
 /// SELF_REF normalization set: `~` plus the long-form noun phrases that survive
 /// normalization in some Oracle prints. Bare `"it"` is included for the
 /// continuation form ("Then if there are N or more counters on it") used by
-/// Brass's Tunnel-Grinder and similar.
+/// Brass's Tunnel-Grinder and similar. CR 201.5: a gendered pronoun ("him" /
+/// "her") on a personified card is that card's printed-name self-reference
+/// (Beckett Mariner, Impetuous Ensign: "if there are three or more promotion
+/// counters on her"), so it names the source exactly as "~" does — routed
+/// through the shared `parse_source_anaphoric_pronoun` authority.
 fn parse_counter_on_source_subject(input: &str) -> OracleResult<'_, &str> {
     alt((
+        recognize(parse_source_anaphoric_pronoun),
         tag("~"),
         tag("this creature"),
         tag("this permanent"),
@@ -11513,7 +11888,8 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// CR 400.7 + CR 608.2c: Parse "a[n] [type] (is|was) [verb-phrase] this way"
 /// — the noun-anaphoric clause that gates a sub-ability on the LKI of an
 /// object the parent effect just operated on (destroyed, exiled, sacrificed,
-/// returned, discarded, milled, countered, or "put onto the battlefield").
+/// returned, discarded, milled, countered, "put onto the battlefield",
+/// "put into a graveyard", or "put into exile").
 ///
 /// CR 303.4f / CR 301.5b are the host-rules that motivate the present-tense
 /// "is put onto the battlefield this way" variant — Aura/Equipment ETB
@@ -11533,9 +11909,9 @@ pub(crate) fn parse_unless_condition(input: &str) -> OracleResult<'_, StaticCond
 /// `remainder` is the input after the consumed " this way" suffix (caller is
 /// responsible for stripping any trailing punctuation like ", " or ".").
 /// `destination` is `Some(zone)` for wording that names an arrival zone
-/// ("enters", "put onto the battlefield", "dies", or "put into a graveyard")
-/// and `None` for cause-bound verbs. On `wasn't`/`was not` the negation is
-/// exposed via `negated`.
+/// ("enters", "put onto the battlefield", "dies", "put into a graveyard",
+/// or "put into exile") and `None` for cause-bound verbs. On `wasn't`/`was not`
+/// the negation is exposed via `negated`.
 pub fn parse_zone_changed_this_way_clause(
     input: &str,
 ) -> OracleResult<'_, (TargetFilter, bool, Option<crate::types::zones::Zone>)> {
@@ -11638,8 +12014,9 @@ fn parse_active_this_way_quantifier(input: &str) -> OracleResult<'_, ThisWayOccu
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThisWayVerbScope {
     /// Every verb the rider grammar covers: the present-tense "enters"/"enter"
-    /// branch plus "put onto the battlefield", "destroyed", "exiled",
-    /// "sacrificed", "returned", "discarded", "milled", "countered".
+    /// branch plus "put onto the battlefield", "put into a graveyard",
+    /// "put into exile", "destroyed", "exiled", "sacrificed", "returned",
+    /// "discarded", "milled", "countered".
     AnyZoneChange,
     /// Battlefield-entry verbs only: the present-tense "enters"/"enter" branch
     /// plus "put onto the battlefield". CR 614.1c replacement classification is
@@ -11787,6 +12164,15 @@ pub fn parse_zone_changed_this_way_head_scoped(
             value(
                 (Some(crate::types::zones::Zone::Graveyard), ThisWayVerb::Die),
                 tag("put into a graveyard"),
+            ),
+            // CR 608.2c + CR 701.13a + CR 614.6: "put into exile" names the
+            // arrival (Corpse Appraiser: "If a card is put into exile this
+            // way, …"). Distinct from cause-bound "exiled this way": a
+            // replacement that redirects the move away from exile defeats
+            // this clause, because the replaced event never happened.
+            value(
+                (Some(crate::types::zones::Zone::Exile), ThisWayVerb::Exile),
+                tag("put into exile"),
             ),
         ))
         .parse(rest)?,
@@ -12457,6 +12843,7 @@ pub fn parse_you_put_counters_on_type_this_way_condition(
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(filter),
                     caused_by: None,
+                    destination: None,
                 },
             },
             comparator: Comparator::GE,
@@ -12528,14 +12915,18 @@ pub fn parse_you_control_or_returned_this_way_condition(
     ))
 }
 
-/// CR 121 + CR 608.2c: Parse "you draw [one or more] card[s] this
-/// way" — the active-voice draw-count gate (Transcendent Archaic: "you may draw
-/// X cards … If you draw one or more cards this way, discard two cards"). Reads
-/// the amount moved by the immediately preceding draw effect in the sub-ability
-/// chain via `QuantityRef::PreviousEffectAmount`.
+/// CR 121 + CR 608.2c: Parse "you draw <threshold> card[s] this way", with the
+/// threshold read by the shared `parse_count_threshold`: the active-voice
+/// draw-count gate (Transcendent Archaic: "If you draw one or more cards this way, discard
+/// two cards"; Sarek, Federation Ambassador: "If you draw three or more cards
+/// this way, put two +1/+1 counters …"). Reads the amount moved by the
+/// immediately preceding draw effect in the sub-ability chain via
+/// `QuantityRef::PreviousEffectAmount`, compared against the printed threshold.
 pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, AbilityCondition> {
     let (rest, _) = tag("you draw ").parse(input)?;
-    let (rest, _) = alt((tag("one or more "), tag("at least one "))).parse(rest)?;
+    // The shared comparator-aware threshold authority ("one or more", "at
+    // least one", "three or more", "two or fewer", …); its comparator is kept.
+    let (rest, (threshold, comparator)) = parse_count_threshold(rest)?;
     let (rest, _) = alt((tag("cards this way"), tag("card this way"))).parse(rest)?;
     Ok((
         rest,
@@ -12546,8 +12937,10 @@ pub fn parse_you_draw_this_way_condition(input: &str) -> OracleResult<'_, Abilit
                     aggregate: AggregateFunction::Sum,
                 },
             },
-            comparator: Comparator::GE,
-            rhs: QuantityExpr::Fixed { value: 1 },
+            comparator,
+            rhs: QuantityExpr::Fixed {
+                value: i32::try_from(threshold).unwrap_or(i32::MAX),
+            },
         },
     ))
 }
@@ -14567,14 +14960,14 @@ mod tests {
             );
         };
 
-        let zones = properties.iter().find_map(|prop| match prop {
-            FilterProp::InAnyZone { zones } => Some(zones),
-            _ => None,
-        });
-        let zones = zones.expect("expected InAnyZone origin qualifier");
-        assert!(!zones.contains(&Zone::Hand));
-        assert!(zones.contains(&Zone::Exile));
-        assert!(zones.contains(&Zone::Graveyard));
+        // CR 601.2a + CR 400.11: the spell half is the negation of a cast from the hand.
+        assert!(
+            properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+            }),
+            "expected Not(InZone(Hand)) origin qualifier, got {properties:?}"
+        );
+        assert!(land_zones.contains(&Zone::Graveyard));
     }
 
     /// Helper: assert a condition is `LandsPlayedThisTurn{Controller, None} >= 1`.
@@ -15066,6 +15459,43 @@ mod tests {
             ),
             "expected DistinctCounterKindsAmong >= 2, got {cond:?}"
         );
+    }
+
+    /// CR 122.1: the counter-has condition family never reads the counter-kind
+    /// quantifier ("[different] kind(s) of") as a counter NAME — no counter is
+    /// named "kind". A kinds census on a single object has no condition arm, so
+    /// it fails closed instead of becoming `HasCounters` over a counter named
+    /// "kinds of".
+    #[test]
+    fn counter_has_condition_never_names_a_kind_of_counter() {
+        // Reach guards: both surface forms still read a named counter.
+        for (text, minimum) in [
+            ("there are two or more ki counters on ~", 2),
+            ("~ has a ki counter on it", 1),
+        ] {
+            assert_eq!(
+                parse_inner_condition(text),
+                Ok((
+                    "",
+                    StaticCondition::HasCounters {
+                        counters: CounterMatch::OfType(CounterType::Generic("ki".into())),
+                        minimum,
+                        maximum: None,
+                    }
+                )),
+                "{text:?}"
+            );
+        }
+        for text in [
+            "there are three or more different kinds of counters on ~",
+            "there are two or more kinds of counters on ~",
+            "there are three or more kinds of counters on it",
+            "~ has a kind of counter on it",
+            "~ has two or more kinds of counters on it",
+        ] {
+            let parsed = parse_inner_condition(text);
+            assert!(parsed.is_err(), "{text:?} must fail closed, got {parsed:?}");
+        }
     }
 
     /// Kavu Runner / Skittish Kavu: "... as long as no opponent controls a white
@@ -15584,6 +16014,31 @@ mod tests {
             }
             _ => panic!("expected QuantityComparison, got {:?}", c),
         }
+    }
+
+    #[test]
+    fn test_you_control_n_or_more_differently_named_matches_suffix_spelling() {
+        // CR 201.2b: "differently named <type>" (prefix adjective) and "<type>
+        // with different names" (suffix) are one distinct-name threshold.
+        for (n, word) in [(5, "five"), (7, "seven")] {
+            let prefix_text = format!("you control {word} or more differently named lands");
+            let suffix_text = format!("you control {word} or more lands with different names");
+            let (rest, prefix) = parse_inner_condition(&prefix_text).unwrap();
+            assert_eq!(rest, "");
+            let (_, suffix) = parse_inner_condition(&suffix_text).unwrap();
+            assert_eq!(prefix, suffix);
+            let StaticCondition::QuantityComparison { rhs, .. } = prefix else {
+                panic!("expected QuantityComparison, got {prefix:?}");
+            };
+            assert_eq!(rhs, QuantityExpr::Fixed { value: n });
+        }
+        // The prefix form owns its quality: a second "with different ..."
+        // suffix is not consumed into the condition.
+        let (rest, _) = parse_inner_condition(
+            "you control five or more differently named lands with different powers",
+        )
+        .unwrap();
+        assert_ne!(rest, "", "doubled quality must not be all-consumed");
     }
 
     #[test]
@@ -22299,11 +22754,18 @@ mod tests {
 
     #[test]
     fn test_permanent_put_into_your_hand_from_battlefield_this_turn() {
-        let (rest, c) = parse_inner_condition(
+        // "put into" (Barrin) and "returned to" (Miles O'Brien) are one verb axis.
+        for text in [
             "a permanent was put into your hand from the battlefield this turn",
-        )
-        .unwrap();
-        assert_eq!(rest, "");
+            "a permanent was returned to your hand from the battlefield this turn",
+        ] {
+            assert_owned_permanent_battlefield_to_hand_count(text);
+        }
+    }
+
+    fn assert_owned_permanent_battlefield_to_hand_count(text: &str) {
+        let (rest, c) = parse_inner_condition(text).unwrap();
+        assert_eq!(rest, "", "{text}");
         match c {
             StaticCondition::QuantityComparison {
                 lhs:
@@ -22327,6 +22789,61 @@ mod tests {
                 )));
             }
             other => panic!("expected owned permanent battlefield-to-hand count, got {other:?}"),
+        }
+    }
+
+    /// CR 205.2a + CR 607.2a: "all cards exiled with ~ share a <quality>" is a
+    /// non-empty linked pool whose largest same-quality bucket covers the whole
+    /// pool, across every `parse_shared_quality` axis.
+    #[test]
+    fn all_cards_exiled_with_source_share_quality() {
+        for (text, expected) in [
+            (
+                "all cards exiled with ~ share a card type",
+                SharedQuality::CardType,
+            ),
+            (
+                "all cards exiled with ~ share a color",
+                SharedQuality::Color,
+            ),
+            (
+                "all cards exiled with it share a creature type",
+                SharedQuality::CreatureType,
+            ),
+            (
+                "all cards exiled with ~ share a mana value",
+                SharedQuality::ManaValue,
+            ),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "", "{text}");
+            let pool = QuantityExpr::Ref {
+                qty: QuantityRef::CardsExiledBySource,
+            };
+            assert_eq!(
+                c,
+                StaticCondition::And {
+                    conditions: vec![
+                        StaticCondition::QuantityComparison {
+                            lhs: pool.clone(),
+                            comparator: Comparator::GE,
+                            rhs: QuantityExpr::Fixed { value: 1 },
+                        },
+                        StaticCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::ObjectCountBySharedQuality {
+                                    filter: TargetFilter::ExiledBySource,
+                                    quality: expected,
+                                    aggregate: AggregateFunction::Max,
+                                },
+                            },
+                            comparator: Comparator::GE,
+                            rhs: pool,
+                        },
+                    ],
+                },
+                "{text}"
+            );
         }
     }
 
@@ -25038,6 +25555,22 @@ mod tests {
         assert_eq!(rest, ", draw a card");
         assert!(!negated);
         assert_eq!(destination, Some(Zone::Graveyard));
+
+        // CR 608.2c + CR 701.13a + CR 614.6: destination-bound exile wording
+        // (Corpse Appraiser) is the exile sibling of "put into a graveyard".
+        let (rest, (filter, negated, destination)) = parse_zone_changed_this_way_clause(
+            "a card is put into exile this way, look at the top three cards",
+        )
+        .unwrap();
+        assert_eq!(rest, ", look at the top three cards");
+        assert!(!negated);
+        assert_eq!(destination, Some(Zone::Exile));
+        match filter {
+            TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                assert_eq!(type_filters, vec![TypeFilter::Card]);
+            }
+            other => panic!("expected Typed Card, got {other:?}"),
+        }
     }
 
     /// Every imperative verb in the `alt` chain must round-trip; this guards
@@ -26044,6 +26577,71 @@ mod tests {
             ),
             "got {c:?}"
         );
+    }
+
+    /// CR 121 + CR 608.2c: the draw-count gate reads the printed threshold and
+    /// comparator, not a fixed "one or more" — Sarek ("three or more"), the
+    /// "or fewer" mirror, and the legacy "one or more" / "at least one" forms.
+    #[test]
+    fn parse_you_draw_this_way_condition_reads_threshold_and_comparator() {
+        let previous = QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: crate::types::ability::DamageChannel::Total,
+                aggregate: AggregateFunction::Sum,
+            },
+        };
+        for (text, comparator, value) in [
+            ("you draw three or more cards this way", Comparator::GE, 3),
+            ("you draw two or fewer cards this way", Comparator::LE, 2),
+            ("you draw one or more cards this way", Comparator::GE, 1),
+            ("you draw at least one card this way", Comparator::GE, 1),
+            ("you draw at least two cards this way", Comparator::GE, 2),
+            ("you draw exactly two cards this way", Comparator::EQ, 2),
+            (
+                "you draw fewer than three cards this way",
+                Comparator::LT,
+                3,
+            ),
+        ] {
+            let (rest, condition) = parse_you_draw_this_way_condition(text).unwrap();
+            assert!(rest.is_empty(), "{text}: leftover {rest:?}");
+            assert_eq!(
+                condition,
+                AbilityCondition::QuantityCheck {
+                    lhs: previous.clone(),
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                },
+                "{text}"
+            );
+        }
+        assert!(parse_you_draw_this_way_condition("you draw three cards this way").is_err());
+    }
+
+    /// The exiled-this-way gate reads its threshold through the shared
+    /// `parse_count_threshold` authority, so every threshold idiom keeps its
+    /// printed comparator.
+    #[test]
+    fn parse_inner_condition_exiled_this_way_reads_shared_threshold() {
+        for (text, comparator, value) in [
+            ("you exiled at least four cards this way", Comparator::GE, 4),
+            ("you exiled exactly one card this way", Comparator::EQ, 1),
+            ("you exiled more than two cards this way", Comparator::GT, 2),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert!(rest.is_empty(), "{text}: leftover {rest:?}");
+            assert_eq!(
+                c,
+                StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize
+                    },
+                    comparator,
+                    rhs: QuantityExpr::Fixed { value },
+                },
+                "{text}"
+            );
+        }
     }
 
     /// The mirror "or fewer" form maps to the `LE` comparator (class coverage —
@@ -27556,16 +28154,30 @@ mod counters_among_condition_tests {
             (Some(CounterType::Stun), Comparator::GE, 2)
         );
     }
+
+    /// Jace, Reality Sculptor — "Jaces" is a pluralized planeswalker subtype.
+    #[test]
+    fn loyalty_counters_among_plural_planeswalker_subtype() {
+        assert_eq!(
+            counters_among(
+                "there are twenty-five or more loyalty counters among Jaces you control"
+            ),
+            (Some(CounterType::Loyalty), Comparator::GE, 25)
+        );
+    }
 }
 
 /// CR 603.4 + CR 105.2 + CR 109.2: the universal/existential state
 /// conditions an intervening-if commonly uses, at the building-block level.
 #[cfg(test)]
 mod intervening_if_state_condition_tests {
-    use super::parse_inner_condition;
+    use super::{
+        parse_inner_condition, parse_target_controller_count_condition, referent_noun_matches_slot,
+        ObjectReferentNoun,
+    };
     use crate::types::ability::{
         AggregateFunction, Comparator, FilterProp, PlayerScope, QuantityExpr, QuantityRef,
-        StaticCondition, TargetFilter,
+        StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -27676,5 +28288,76 @@ mod intervening_if_state_condition_tests {
         assert!(properties
             .iter()
             .any(|prop| matches!(prop, FilterProp::InZone { .. })));
+    }
+
+    /// CR 608.2c + CR 109.4: one recognizer owns the target-controller count
+    /// grammar, and it returns the referent rather than binding it. Only a
+    /// caller with a declared target can bind it; the static path keeps the
+    /// clause explicitly unsupported.
+    #[test]
+    fn target_controller_count_conditions_require_a_caller_referent() {
+        for condition in [
+            "that opponent controls no other creatures",
+            "its controller controls no creatures",
+            "you control more creatures than that spell's controller",
+        ] {
+            // The shared recognizer is the single grammar, and the effect
+            // parser binds its returned referent against the instruction's
+            // declared target.
+            let (rest, (_referent, parsed)) = parse_target_controller_count_condition(condition)
+                .unwrap_or_else(|_| panic!("must parse: {condition}"));
+            assert_eq!(rest, "", "{condition}");
+            assert!(matches!(parsed, StaticCondition::QuantityComparison { .. }));
+
+            // No static/trigger caller can bind the referent: Predator's Gambit
+            // ("as long as its controller controls no other creatures") has no
+            // resolving target, so `parse_inner_condition` must keep the clause
+            // explicitly unsupported rather than read an unbound parent-target
+            // controller.
+            assert!(
+                parse_inner_condition(condition).is_err(),
+                "a static condition cannot bind {condition}"
+            );
+        }
+    }
+
+    /// CR 115.1: the spell noun requires a spell slot; a typed creature slot
+    /// does not satisfy it.
+    #[test]
+    fn referent_noun_spell_requires_a_spell_slot() {
+        assert!(referent_noun_matches_slot(
+            ObjectReferentNoun::Spell,
+            &TargetFilter::StackSpell
+        ));
+        assert!(!referent_noun_matches_slot(
+            ObjectReferentNoun::Spell,
+            &TargetFilter::Typed(TypedFilter::creature())
+        ));
+    }
+
+    /// CR 115.1 + CR 205.2a: a disjunctive type axis can name the referent's
+    /// noun only when every branch matches; "creature or enchantment" cannot
+    /// guarantee "that creature", while both branches are permanents.
+    #[test]
+    fn referent_noun_requires_every_disjunct_to_match() {
+        let creature_or_enchantment = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::AnyOf(vec![
+                TypeFilter::Creature,
+                TypeFilter::Enchantment,
+            ])],
+            ..Default::default()
+        });
+        assert!(!referent_noun_matches_slot(
+            ObjectReferentNoun::Creature,
+            &creature_or_enchantment
+        ));
+        assert!(referent_noun_matches_slot(
+            ObjectReferentNoun::Permanent,
+            &creature_or_enchantment
+        ));
+        assert!(referent_noun_matches_slot(
+            ObjectReferentNoun::Creature,
+            &TargetFilter::Typed(TypedFilter::creature())
+        ));
     }
 }

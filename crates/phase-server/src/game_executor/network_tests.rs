@@ -136,7 +136,7 @@ impl NativeTable {
                 main_deck: vec!["Network Test Land".to_string(); 60],
                 ..Default::default()
             };
-            let deck = crate::resolve_deck(&app.db, &names).unwrap();
+            let deck = crate::resolve_deck(&app.db, &app.combos, &names).unwrap();
             let mut manager = app.sessions.lock().await;
             let (code, token) = manager
                 .create_game_n_players_with_code(
@@ -166,6 +166,7 @@ impl NativeTable {
             }
             session.set_card_names(app.db.card_names());
             session.start_game(&app.db).unwrap();
+            crate::socket_test_hooks::elect_contest_winner_to_play(session);
             let key = crate::bind_full_session_key(&app.game_db, &code).unwrap();
             crate::initialize_full_runtime(&app.game_db, session, key.clone()).unwrap();
             (key, tokens)

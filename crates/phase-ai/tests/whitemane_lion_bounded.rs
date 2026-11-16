@@ -100,7 +100,7 @@ fn whitemane_lion_self_bounce_does_not_infinite_loop() {
         ai_difficulties: Vec::new(),
         ..Default::default()
     };
-    let payload = resolve_deck_list(&db, &list);
+    let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
 
     let mut state = GameState::new_two_player(1);
     load_deck_into_state(&mut state, &payload);

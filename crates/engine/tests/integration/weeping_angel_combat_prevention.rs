@@ -37,6 +37,7 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -64,9 +65,10 @@ fn run_combat(
     attacker: engine::types::identifiers::ObjectId,
     defend_player: engine::types::player::PlayerId,
     blocker: Option<engine::types::identifiers::ObjectId>,
-) {
+) -> Vec<GameEvent> {
     let mut attacked = false;
     let mut blocked = false;
+    let mut events = Vec::new();
 
     for _ in 0..400 {
         match runner.state().phase {
@@ -74,17 +76,14 @@ fn run_combat(
             _ => {}
         }
         match runner.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } => {
-                if runner.act(GameAction::PassPriority).is_err() {
-                    break;
-                }
-            }
+            WaitingFor::Priority { .. } => match runner.act(GameAction::PassPriority) {
+                Ok(outcome) => events.extend(outcome.events),
+                Err(_) => break,
+            },
             WaitingFor::OrderTriggers { .. } => {
-                if runner
-                    .act(GameAction::OrderTriggers { order: vec![0] })
-                    .is_err()
-                {
-                    break;
+                match runner.act(GameAction::OrderTriggers { order: vec![0] }) {
+                    Ok(outcome) => events.extend(outcome.events),
+                    Err(_) => break,
                 }
             }
             WaitingFor::DeclareAttackers { player, .. } if !attacked => {
@@ -94,15 +93,15 @@ fn run_combat(
                 } else {
                     vec![]
                 };
-                if runner.declare_attackers(&attacks).is_err() {
-                    break;
+                match runner.declare_attackers(&attacks) {
+                    Ok(outcome) => events.extend(outcome.events),
+                    Err(_) => break,
                 }
             }
-            WaitingFor::DeclareAttackers { .. } => {
-                if runner.declare_attackers(&[]).is_err() {
-                    break;
-                }
-            }
+            WaitingFor::DeclareAttackers { .. } => match runner.declare_attackers(&[]) {
+                Ok(outcome) => events.extend(outcome.events),
+                Err(_) => break,
+            },
             WaitingFor::DeclareBlockers { .. } if !blocked => {
                 blocked = true;
                 let blocks = if let Some(blk) = blocker {
@@ -110,18 +109,19 @@ fn run_combat(
                 } else {
                     vec![]
                 };
-                if runner.declare_blockers(&blocks).is_err() {
-                    break;
+                match runner.declare_blockers(&blocks) {
+                    Ok(outcome) => events.extend(outcome.events),
+                    Err(_) => break,
                 }
             }
-            WaitingFor::DeclareBlockers { .. } => {
-                if runner.declare_blockers(&[]).is_err() {
-                    break;
-                }
-            }
+            WaitingFor::DeclareBlockers { .. } => match runner.declare_blockers(&[]) {
+                Ok(outcome) => events.extend(outcome.events),
+                Err(_) => break,
+            },
             _ => break,
         }
     }
+    events
 }
 
 /// CR 615.1a + CR 615.5: When Weeping Angel deals combat damage to a creature,
@@ -157,7 +157,7 @@ fn weeping_angel_combat_damage_to_blocker_shuffles_into_owners_library() {
     let mut runner = scenario.build();
 
     runner.advance_to_combat();
-    run_combat(&mut runner, P0, angel, P1, Some(victim));
+    let combat_events = run_combat(&mut runner, P0, angel, P1, Some(victim));
     // Drain any remaining post-combat priority windows and triggered abilities.
     runner.advance_until_stack_empty();
 
@@ -182,6 +182,24 @@ fn weeping_angel_combat_damage_to_blocker_shuffles_into_owners_library() {
     assert!(
         victim_in_p1_library,
         "the creature must be in P1's library (its owner), not P0's"
+    );
+
+    let shuffles_for_owner = combat_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P1
+            )
+        })
+        .count();
+    assert_eq!(
+        shuffles_for_owner, 1,
+        "the single recipient owner's library is shuffled exactly once"
     );
 
     // Weeping Angel is still on the battlefield: the prevention shields itself

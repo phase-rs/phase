@@ -16,8 +16,8 @@ pub fn resolve(
     // context-ref filters (Controller, etc.) MUST NOT consult `ability.targets`
     // because chained sub-abilities inherit the parent's Player targets — a
     // `Shuffle { target: Controller }` chained off a Player-targeting parent
-    // would otherwise shuffle the wrong library. `Owner` ("its owner's library")
-    // resolves against `source_id`, not targets, so it is handled separately.
+    // would otherwise shuffle the wrong library. The shared player-reference
+    // authority resolves Owner from the source rather than inherited targets.
     let shuffle_target = match &ability.effect {
         Effect::Shuffle { target } => target.clone(),
         _ => TargetFilter::Controller,
@@ -57,12 +57,6 @@ pub fn resolve(
     }
 
     let target_player = match &shuffle_target {
-        // CR 400.3: "its owner's library" resolves to the owner of source_id.
-        TargetFilter::Owner => state
-            .objects
-            .get(&ability.source_id)
-            .map(|obj| obj.owner)
-            .unwrap_or(ability.controller),
         // CR 608.2b: a slot that was an illegal target names no player, so no library is shuffled.
         TargetFilter::ParentTargetSlot { index } => {
             match crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
@@ -99,9 +93,17 @@ pub fn resolve(
 
     // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
     // if a player would shuffle their library and can't, they don't shuffle.
+    // CR 800.4a + CR 609.3: a player who has left the game no longer has a
+    // library; the instruction does only as much as possible, so it shuffles
+    // nothing. Without this liveness check an owner who conceded in response
+    // still admits a ShuffledLibrary action (which can trigger Cosi's Trickster).
     // The effect itself still resolves (EffectResolved fires below).
-    let suppressed =
-        crate::game::static_abilities::player_has_static_other(state, target_player, "CantShuffle");
+    let suppressed = !crate::game::players::is_alive(state, target_player)
+        || crate::game::static_abilities::player_has_static_other(
+            state,
+            target_player,
+            "CantShuffle",
+        );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Shuffle,

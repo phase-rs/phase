@@ -13,7 +13,9 @@ const persistenceMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../services/draftPersistence", () => persistenceMocks);
-vi.mock("../draft-adapter", () => ({
+vi.mock("../draft-adapter", async (importOriginal) => ({
+  draftViewPresentation: (await importOriginal<typeof import("../draft-adapter")>()).draftViewPresentation,
+  isSharedStackDistribution: (await importOriginal<typeof import("../draft-adapter")>()).isSharedStackDistribution,
   DraftAdapter: vi.fn().mockImplementation(function () {
     return { boosterPackPoolForGame: vi.fn(async () => null) };
   }),
@@ -213,7 +215,7 @@ describe("P2P draft workspace persistence", () => {
           order.push("workspace-view");
           return workspaceView.promise;
         }
-        return view("host");
+        return { ...view("host"), status: "Drafting" as const, seats: [] };
       }),
       submitPickForSeat: vi.fn(async () => {
         order.push("pick");

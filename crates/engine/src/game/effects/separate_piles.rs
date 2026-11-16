@@ -226,6 +226,7 @@ fn resolve_revealed_from_library_top(
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: controller,
+        occurrences: state.disclosed_occurrences(&revealed_ids),
         card_ids: revealed_ids.clone(),
         card_names,
     });
@@ -451,6 +452,7 @@ fn sub_effect_as_resolved(
 ) -> ResolvedAbility {
     let mut resolved =
         ResolvedAbility::new((*def.effect).clone(), Vec::new(), source_id, controller);
+    crate::game::ability_utils::materialize_coin_branches(&mut resolved);
     resolved.kind = def.kind;
     resolved.sub_ability = def
         .sub_ability

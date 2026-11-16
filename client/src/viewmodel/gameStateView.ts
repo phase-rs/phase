@@ -18,6 +18,9 @@ import {
   partitionByType,
   type GroupedPermanent,
 } from "./battlefieldProps";
+import { getSeatCount } from "./seatCount";
+
+export { getSeatCount };
 
 export interface PlayerBattlefieldView {
   creatures: GroupedPermanent[];
@@ -67,17 +70,6 @@ export function resolveFocusedOpponent(
     return focusedOpponent;
   }
   return liveOpponents[0] ?? null;
-}
-
-// The game's seat count, stable across eliminations — the engine never
-// removes from `seat_order`. Single source of truth for layout decisions
-// like "is this 1v1?". Keep all callers (GameBoard, OpponentHud,
-// BlockAssignmentLines, AttackTargetLines) routed through here so they
-// cannot drift apart — the bug this helper exists to prevent is exactly
-// that drift.
-export function getSeatCount(gameState: GameState | null): number {
-  if (!gameState) return 0;
-  return gameState.seat_order?.length ?? gameState.players.length;
 }
 
 export function isOneOnOne(gameState: GameState | null): boolean {
@@ -949,6 +941,7 @@ export function getBattlefieldSacrificeChoice(
 export function buildPlayerBattlefieldView(
   gameState: GameState | null,
   playerId: PlayerId,
+  showOwnerPrintings: boolean,
 ): PlayerBattlefieldView {
   if (!gameState) {
     return emptyBattlefieldView();
@@ -981,6 +974,7 @@ export function buildPlayerBattlefieldView(
     ringBearerIds,
     unboundedPileIds,
     gameState.derived?.counter_display,
+    showOwnerPrintings,
   );
 }
 
@@ -989,6 +983,7 @@ export function buildPlayerBattlefieldViewFromObjects(
   ringBearerIds: ReadonlySet<ObjectId> = new Set(),
   unboundedPileIds: ReadonlySet<ObjectId> = new Set(),
   counterDisplay: Record<string, ObjectCounterDisplay> | undefined,
+  showOwnerPrintings: boolean,
 ): PlayerBattlefieldView {
   const partition = partitionByType(playerObjects);
   const objectMap = new Map(playerObjects.map((object) => [object.id, object]));
@@ -998,11 +993,11 @@ export function buildPlayerBattlefieldViewFromObjects(
       .filter(Boolean) as GameObject[];
 
   return {
-    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds, unboundedPileIds, counterDisplay),
-    lands: groupByName(resolveObjects(partition.lands), ringBearerIds, unboundedPileIds, counterDisplay),
-    support: groupByName(resolveObjects(partition.support), ringBearerIds, unboundedPileIds, counterDisplay),
-    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds, unboundedPileIds, counterDisplay),
-    other: groupByName(resolveObjects(partition.other), ringBearerIds, unboundedPileIds, counterDisplay),
+    creatures: groupByName(resolveObjects(partition.creatures), ringBearerIds, unboundedPileIds, counterDisplay, showOwnerPrintings),
+    lands: groupByName(resolveObjects(partition.lands), ringBearerIds, unboundedPileIds, counterDisplay, showOwnerPrintings),
+    support: groupByName(resolveObjects(partition.support), ringBearerIds, unboundedPileIds, counterDisplay, showOwnerPrintings),
+    planeswalkers: groupByName(resolveObjects(partition.planeswalkers), ringBearerIds, unboundedPileIds, counterDisplay, showOwnerPrintings),
+    other: groupByName(resolveObjects(partition.other), ringBearerIds, unboundedPileIds, counterDisplay, showOwnerPrintings),
   };
 }
 

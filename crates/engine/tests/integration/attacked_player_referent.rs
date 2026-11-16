@@ -1994,6 +1994,108 @@ fn raid_bombardment_deals_damage_only_for_the_creature_attacking_a_player() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The ability's source attacks a different player than the triggering creature
+// ---------------------------------------------------------------------------------------------
+
+const OPALESCENCE: &str = "Each other non-Aura enchantment is a creature in addition to its other types and has base power and base toughness each equal to its mana value.";
+
+/// The life each player lost to `source`, as `(P0, P1, P2)`.
+fn player_damage_from(events: &[GameEvent], source: ObjectId) -> (u32, u32, u32) {
+    damage_from(events, source)
+        .into_iter()
+        .fold((0, 0, 0), |(p0, p1, p2), (target, amount)| match target {
+            TargetRef::Player(P0) => (p0 + amount, p1, p2),
+            TargetRef::Player(P1) => (p0, p1 + amount, p2),
+            TargetRef::Player(P2) => (p0, p1, p2 + amount),
+            other => panic!("unexpected recipient {other:?}"),
+        })
+}
+
+/// CR 508.5a: Hellrider attacks P1 while the Goblin attacks P2. Each trigger answers for ITS
+/// attacker (Hellrider ruling 2017-03-14: "For each attacking creature, Hellrider will deal
+/// damage to the corresponding player or planeswalker"), so the Goblin's trigger damages P2
+/// even though the ability's source is itself attacking P1. Hellrider's own trigger (P1) is
+/// the source-self control.
+#[test]
+fn hellrider_trigger_follows_the_triggering_attacker_not_the_attacking_source() {
+    let mut b = hell_board();
+    attack(
+        &mut b.r,
+        &[
+            (b.hellrider, AttackTarget::Player(P1)),
+            (b.goblin, AttackTarget::Player(P2)),
+        ],
+    );
+    assert_untargeted_triggers(&b.r, b.hellrider, 2);
+    let mut ev = Vec::new();
+    settle(&mut b.r, &mut ev, true, 0);
+    assert_eq!(deal_damage_resolutions(&ev, b.hellrider), 2);
+    assert_eq!(
+        player_damage_from(&ev, b.hellrider),
+        (0, 1, 1),
+        "one damage to each attacked player; none to the source's defender twice"
+    );
+    assert_eq!(
+        (life(&b.r, P0), life(&b.r, P1), life(&b.r, P2)),
+        (20, 19, 19)
+    );
+    assert_eq!(loyalty(&b.r, b.karn), 5, "the bystander planeswalker");
+}
+
+/// CR 508.5a + CR 613.1d: Opalescence makes Cavalcade of Calamity a 2/2 enchantment creature
+/// that attacks P1 (power 2, so it does not trigger itself) while a qualifying 1/1 attacks P2.
+/// Cavalcade's damage goes to what "that creature" (the 1/1) is attacking: P2, not the
+/// attacking source's P1.
+#[test]
+fn animated_cavalcade_attacking_damages_what_the_triggering_creature_attacks() {
+    let mut sc = scenario();
+    sc.add_enchantment_from_oracle(P0, "Opalescence", OPALESCENCE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::White; 2],
+        });
+    let ench = sc
+        .add_enchantment_from_oracle(P0, "Cavalcade of Calamity", CAVALCADE)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        })
+        .id();
+    let small = sc.add_creature(P0, "One-Power", 1, 1).id();
+    let mut r = sc.build();
+    // CR 613.1: project Opalescence's layer-4/7b effects onto the board before combat.
+    r.state_mut().layers_dirty.mark_full();
+    engine::game::layers::evaluate_layers(r.state_mut());
+    {
+        let cavalcade = &r.state().objects[&ench];
+        assert!(
+            cavalcade
+                .card_types
+                .core_types
+                .contains(&CoreType::Creature),
+            "reach guard: Opalescence animates Cavalcade"
+        );
+        assert_eq!((cavalcade.power, cavalcade.toughness), (Some(2), Some(2)));
+    }
+    attack(
+        &mut r,
+        &[
+            (ench, AttackTarget::Player(P1)),
+            (small, AttackTarget::Player(P2)),
+        ],
+    );
+    assert_untargeted_triggers(&r, ench, 1);
+    let mut ev = Vec::new();
+    settle(&mut r, &mut ev, true, 0);
+    assert_eq!(deal_damage_resolutions(&ev, ench), 1);
+    assert_eq!(
+        player_damage_from(&ev, ench),
+        (0, 0, 1),
+        "the 1/1 is attacking P2; the attacking Cavalcade's P1 is not the referent"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // Parser rows
 // ---------------------------------------------------------------------------------------------
 
