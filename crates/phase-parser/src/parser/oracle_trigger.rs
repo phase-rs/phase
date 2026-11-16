@@ -14425,6 +14425,7 @@ fn trigger_condition_objects(
         scry_bottom_count: _,
         damage_amount: _,
         life_amount: _,
+        blocker_count: _,
         coin_flip_result: _,
         die_result: _,
         taps_for_mana_produced: _,
