@@ -4626,6 +4626,9 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
         // mirroring `WasStartingPlayer { controller }`'s delegation to
         // `scan_controller_ref`.
         TriggerCondition::IsMonarch { player } => scan_player_scope(player),
+        // CR 122.1f: the poison predicate itself reads no axis; its subject
+        // scope classifies per-axis exactly like the monarch's.
+        TriggerCondition::IsPoisoned { player } => scan_player_scope(player),
         // Digital-only Alchemy (no CR entry): "if you have a boon" — the
         // subject scope classifies exactly like the monarch's.
         TriggerCondition::HasBoon { player } => scan_player_scope(player),

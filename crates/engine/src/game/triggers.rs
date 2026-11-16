@@ -2070,9 +2070,9 @@ fn trigger_condition_node_references_turn_player(cond: &TriggerCondition) -> boo
         TriggerCondition::QuantityQuality { quantity, .. } => {
             quantity_expr_refs_turn_player(quantity)
         }
-        TriggerCondition::IsMonarch { player } | TriggerCondition::HasBoon { player } => {
-            matches!(player, PlayerScope::ScopedPlayer)
-        }
+        TriggerCondition::IsMonarch { player }
+        | TriggerCondition::HasBoon { player }
+        | TriggerCondition::IsPoisoned { player } => matches!(player, PlayerScope::ScopedPlayer),
         // Only the event-read `TriggeringPlayer` differentiates per
         // occurrence; `Controller`/`Opponent` read global state (CR 102.1).
         TriggerCondition::DuringPlayersTurn { player } => {
@@ -20130,6 +20130,22 @@ fn evaluate_trigger_condition_with_source(
                 trigger_event,
             )
             .is_some_and(|pid| eval_is_monarch(state, pid))
+        }
+        // CR 122.1f + CR 508.5: "if defending player is poisoned" — poison is a
+        // player-counter read on the scoped player (CR 122.1f DEFINES "poisoned"
+        // as one or more poison counters), and CR 508.5 binds "defending player"
+        // to the player the triggering creature is attacking. CR 810.10a: in
+        // Two-Headed Giant a player is poisoned through their team's shared
+        // total, matching every other poison read.
+        TriggerCondition::IsPoisoned { player } => {
+            crate::game::quantity::resolve_player_scope_for_trigger_check(
+                state,
+                player,
+                controller,
+                source_context,
+                trigger_event,
+            )
+            .is_some_and(|pid| crate::game::players::team_poison_total(state, pid) >= 1)
         }
         // CR 726.3: True when the controller has the initiative.
         TriggerCondition::IsInitiative => eval_is_initiative(state, controller),
