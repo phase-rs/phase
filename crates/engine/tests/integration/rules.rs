@@ -208,26 +208,13 @@ fn run_combat_with_blocker_divisions_and_events(
     blocker_assignments: Vec<(ObjectId, ObjectId)>,
     blocker_divisions: &[(ObjectId, Vec<(ObjectId, u32)>)],
 ) -> Vec<GameEvent> {
-    let mut events = drive_to_first_damage_window(
-        runner,
-        attacker_ids,
-        blocker_assignments,
-        blocker_divisions,
-    );
+    let mut events =
+        drive_to_first_damage_window(runner, attacker_ids, blocker_assignments, blocker_divisions);
 
     // CR 510.4 + CR 510.3: the first combat damage step ended with an empty
-    // priority window; pass it (ONE pass per iteration, the predicate re-checked
-    // each time, so any seat count works and the last pass is the one that
-    // enters the regular step), then answer the regular step's prompts.
-    // A non-empty stack leaves the predicate false and the window open.
-    while runner.between_combat_damage_steps() {
-        events.extend(
-            runner
-                .act(GameAction::PassPriority)
-                .expect("passing the window between the combat damage steps should succeed")
-                .events,
-        );
-    }
+    // priority window; pass it (a non-empty stack leaves the window open), then
+    // answer the regular step's prompts.
+    events.extend(runner.pass_combat_damage_window());
     answer_combat_damage_prompts(runner, blocker_divisions, &mut events);
     events
 }

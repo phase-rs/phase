@@ -163,14 +163,7 @@ pub(super) fn reach_combat_damage(
             // CR 510.4 + CR 510.3: a first-strike combat's first combat damage step
             // ends with an empty priority window; pass it so the second step runs and
             // every caller sees the complete damage.
-            while runner.between_combat_damage_steps() {
-                events.extend(
-                    runner
-                        .act(GameAction::PassPriority)
-                        .expect("pass the window between the combat damage steps")
-                        .events,
-                );
-            }
+            events.extend(runner.pass_combat_damage_window());
             return events;
         }
         match &runner.state().waiting_for {

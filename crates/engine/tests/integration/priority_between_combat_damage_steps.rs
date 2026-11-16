@@ -135,19 +135,6 @@ fn assert_window_open(runner: &GameRunner) {
     );
 }
 
-/// Pass the window one seat at a time until the regular step begins (one pass
-/// per iteration, so any seat count works; CR 117.4).
-fn pass_through_window(runner: &mut GameRunner) {
-    let mut passes = 0;
-    while runner.between_combat_damage_steps() {
-        runner
-            .act(GameAction::PassPriority)
-            .expect("passing the window");
-        passes += 1;
-        assert!(passes <= 8, "the window must close within a pass round");
-    }
-}
-
 fn combat_damage_steps(runner: &GameRunner) -> u32 {
     runner
         .state()
@@ -206,7 +193,7 @@ fn bolt_in_the_empty_window_kills_a_double_striker_before_its_second_hit() {
         "Bolt killed the Ace in the window"
     );
 
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
     assert!(combat(&runner).regular_damage_done);
     assert_eq!(
         runner.life(P1),
@@ -229,7 +216,7 @@ fn passing_the_window_lets_the_regular_step_follow() {
         "one combat damage step has begun at the window"
     );
 
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
 
     assert!(combat(&runner).regular_damage_done);
     assert_eq!(runner.life(P1), 18, "CR 702.4b: the second hit lands");
@@ -266,7 +253,7 @@ fn first_striker_alone_gets_a_window_then_an_empty_second_step() {
     assert_window_open(&runner);
     assert_eq!(runner.life(P1), 18, "the Knight's first-strike hit landed");
 
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
 
     assert!(combat(&runner).regular_damage_done);
     assert_eq!(
@@ -311,7 +298,7 @@ fn first_striker_and_regular_creature_assign_in_different_steps() {
         "only the Knight's 2 so far: Grizzly Bears has no first strike, so it did not deal damage"
     );
 
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
 
     assert!(combat(&runner).regular_damage_done);
     assert_eq!(
@@ -392,7 +379,7 @@ fn trick_between_the_steps_changes_the_second_step_of_a_blocked_double_striker()
     run_combat_first_damage_step(&mut runner, vec![ace], vec![(bears, ace)], &[]);
     assert_window_open(&runner);
     assert_eq!(runner.state().objects[&bears].damage_marked, 1);
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
     assert_eq!(runner.state().objects[&ace].zone, Zone::Graveyard);
     assert_eq!(
         runner.state().objects[&bears].zone,
@@ -416,7 +403,7 @@ fn trick_between_the_steps_changes_the_second_step_of_a_blocked_double_striker()
         "the Bears have no first strike, so the Ace has taken nothing yet"
     );
     runner.cast(trick).target_objects(&[ace]).resolve();
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
     assert!(combat(&runner).regular_damage_done);
     assert_eq!(
         runner.state().objects[&bears].zone,
@@ -471,7 +458,7 @@ fn double_cleave_in_the_window_gives_a_first_striker_a_second_hit() {
         runner.state().objects[&knight].has_keyword(&Keyword::DoubleStrike),
         "Double Cleave granted double strike"
     );
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
 
     assert_eq!(
         runner.life(P1),
@@ -526,7 +513,7 @@ fn damage_assignment_prompt_in_the_first_step_resumes_into_the_window() {
     let hit = damaged[0];
     let other = if hit == bear_a { bear_b } else { bear_a };
 
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
 
     assert_eq!(combat_damage_steps(&runner), 2);
     let WaitingFor::AssignCombatDamage {
@@ -723,7 +710,7 @@ fn zero_power_first_step_still_opens_a_window_and_a_pump_changes_the_second_step
     let (mut runner, rumbler) = rumbler_attack();
     run_combat_first_damage_step(&mut runner, vec![rumbler], vec![], &[]);
     assert_window_open(&runner);
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
     assert!(combat(&runner).regular_damage_done);
     assert_eq!(runner.life(P1), 20, "control: power -1 deals no damage");
     assert_eq!(combat_damage_steps(&runner), 2, "the second step happened");
@@ -740,7 +727,7 @@ fn zero_power_first_step_still_opens_a_window_and_a_pump_changes_the_second_step
     runner.activate(rumbler, 0).resolve();
     runner.activate(rumbler, 0).resolve();
     assert_eq!(runner.state().objects[&rumbler].power, Some(1));
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
     assert_eq!(
         runner.life(P1),
         19,
@@ -837,7 +824,7 @@ fn targeted_first_strike_damage_trigger_is_collected_once() {
     );
     assert_window_open(&runner);
 
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
 
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
@@ -911,7 +898,7 @@ fn ninjutsu_in_the_window_puts_a_ninja_into_the_second_step() {
     assert_eq!(runner.state().objects[&ace].zone, Zone::Hand);
     assert_window_open(&runner);
 
-    pass_through_window(&mut runner);
+    runner.pass_combat_damage_window();
 
     assert!(combat(&runner).regular_damage_done);
     assert_eq!(
