@@ -828,6 +828,9 @@ impl EventObjectSnapshot {
             // CR 702.122c: the crew ledger is keyed by the subject's own
             // incarnation, which the snapshot carries (look-back arm in filter.rs).
             FilterProp::CrewedThisTurn { .. } => Supported,
+            // CR 701.14a: the fight ledger is keyed by the subject's own
+            // incarnation, which the snapshot carries (look-back arm in filter.rs).
+            FilterProp::FoughtThisTurn => Supported,
 
             // ---- embedded per-turn history ----
             FilterProp::WasDealtDamageThisTurn
