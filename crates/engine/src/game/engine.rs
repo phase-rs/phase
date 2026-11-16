@@ -7389,7 +7389,8 @@ pub enum ShortcutEvidence {
 /// suggestion) conforms at `Fixed(n)` iff its pins conform and, performed forward from the offer
 /// frame, its proposer is still in the game after `n` repetitions: what it reaches is performed,
 /// not modelled. Its performance is read from the period's record when the offer already
-/// performed it; with no record, `Measured` evidence admits it and `Performed` performs it.
+/// performed it; with no record, `Measured` evidence admits it and `Performed` performs it,
+/// unless the window's declarations have spent its budget, which refuses it unperformed.
 pub(crate) fn performance_conforms(
     state: &GameState,
     schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
@@ -7411,11 +7412,12 @@ pub(crate) fn performance_conforms(
         aim.per_cycle,
         period.recorded_answers(),
         state,
-    ) && period
-        .declared_reach(&declared.decisions, state.state_revision)
-        .or_else(|| match evidence {
-            ShortcutEvidence::Measured => None,
-            ShortcutEvidence::Performed => Some(
+    ) && match period.declared_reach(&declared.decisions, state.state_revision) {
+        Some(reach) => reach >= *n,
+        None if period.receipts.declare_budget_spent(state.state_revision) => false,
+        None => match evidence {
+            ShortcutEvidence::Measured => true,
+            ShortcutEvidence::Performed => {
                 super::period_confirm::perform_declared_on(
                     state,
                     period,
@@ -7423,10 +7425,11 @@ pub(crate) fn performance_conforms(
                     declared,
                     *n,
                 )
-                .reach,
-            ),
-        })
-        .is_none_or(|reach| reach >= *n)
+                .reach
+                    >= *n
+            }
+        },
+    }
 }
 
 /// CR 732.2a + CR 732.2b: performs a loop-shortcut answer's take once, before the answer is
@@ -7499,7 +7502,7 @@ pub(crate) fn record_answer_receipt(state: &mut GameState, action: &GameAction) 
 }
 
 /// The receipts of the loop-shortcut window `waiting_for` holds open, if any.
-fn answer_receipts(
+pub(crate) fn answer_receipts(
     waiting_for: &mut WaitingFor,
 ) -> Option<&mut super::period_confirm::AnswerReceipts> {
     match waiting_for {

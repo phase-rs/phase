@@ -3672,6 +3672,159 @@ mod recorded_niv_table {
         ));
     }
 
+    /// CR 732.2a: one offer window performs novel declarations only within its budget; past it,
+    /// a novel declaration is refused unperformed while the suggestion and performed declarations
+    /// stay declarable.
+    #[test]
+    fn distinct_refused_declarations_spend_one_window_budget() {
+        use engine::game::interaction::{preview_interaction, submit_interaction};
+        use engine::game::period_confirm::leave_declare_budget_for_tests;
+        use engine::types::interaction::{
+            InteractionPreviewRequest, InteractionPreviewStatus, InteractionReasonCode,
+            InteractionResponse, InteractionShortcutDecision, InteractionSubmission,
+            PreviewRequestId,
+        };
+        let Some(runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let window = runner.state().clone();
+        let response = |state: &mut GameState, seats: Vec<(PlayerId, Option<u32>)>, n: u32| {
+            let (interaction_id, pins) = shortcut_interaction(state, |_| seats.clone());
+            (
+                interaction_id,
+                InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::Fixed { iterations: n },
+                    pins,
+                },
+            )
+        };
+        let submit = |state: &mut GameState, seats: Vec<(PlayerId, Option<u32>)>, n: u32| {
+            let (interaction_id, response) = response(state, seats, n);
+            let before = play_trace_counters();
+            let submitted = submit_interaction(
+                state,
+                P0,
+                InteractionSubmission {
+                    interaction_id,
+                    response,
+                },
+            )
+            .map(drop)
+            .map_err(|error| error.code);
+            (submitted, play_trace_counters().since(before).probe_entries)
+        };
+        let refused = Err(InteractionReasonCode::ConstraintUnsatisfied);
+        let novel: Vec<_> = (1..=8)
+            .map(|a| vec![(P2, Some(a)), (P3, Some(40 - a))])
+            .collect();
+
+        // Every ping at P2 reaches 13, so its performance spends 14.
+        for (left, novel_cost) in [(14, false), (15, true)] {
+            let mut state = window.clone();
+            leave_declare_budget_for_tests(&mut state, left);
+            let (first, cost) = submit(&mut state, vec![(P2, None)], 14);
+            assert_eq!(first, refused);
+            assert!(cost > 0, "reach: the declaration is performed");
+            let (next, cost) = submit(&mut state, novel[0].clone(), 40);
+            assert_eq!(next, refused);
+            assert_eq!(cost > 0, novel_cost, "{left} left");
+        }
+
+        let mut spent = window.clone();
+        leave_declare_budget_for_tests(&mut spent, 1);
+        let costs: Vec<u64> = std::iter::once(submit(&mut spent, vec![(P2, None)], 14))
+            .chain(
+                novel
+                    .iter()
+                    .map(|seats| submit(&mut spent, seats.clone(), 40)),
+            )
+            .map(|(submitted, cost)| {
+                assert_eq!(submitted, refused);
+                cost
+            })
+            .collect();
+        assert!(costs[0] > 0, "reach: the first declaration is performed");
+        assert!(costs[1..].iter().all(|cost| *cost == 0), "{costs:?}");
+        assert_eq!(submit(&mut spent, vec![(P2, None)], 14), (refused, 0));
+        assert_eq!(submit(&mut spent, novel[0].clone(), 40), (refused, 0));
+        assert!(matches!(spent.waiting_for, WaitingFor::LoopShortcut { .. }));
+
+        let (interaction_id, preview_response) = response(&mut spent, vec![(P3, None)], 12);
+        let before = play_trace_counters();
+        let preview = preview_interaction(
+            &spent,
+            P0,
+            &InteractionPreviewRequest {
+                request_id: PreviewRequestId("niv-table".to_string()),
+                interaction_id,
+                response: preview_response,
+            },
+        );
+        assert_eq!(
+            preview.status,
+            InteractionPreviewStatus::Rejected {
+                reason: InteractionReasonCode::ConstraintUnsatisfied
+            }
+        );
+        let mut legal = spent.clone();
+        assert_eq!(submit(&mut legal, vec![(P3, None)], 12), (refused, 0));
+        assert_eq!(play_trace_counters().since(before).probe_entries, 0);
+        let mut fresh = window.clone();
+        let (admitted, cost) = submit(&mut fresh, vec![(P3, None)], 12);
+        assert_eq!(admitted, Ok(()));
+        assert!(cost > 0);
+        assert!(matches!(
+            fresh.waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+
+        let before = play_trace_counters();
+        let mut direct_runner = GameRunner::from_state(spent.clone());
+        direct_runner
+            .act(GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(12),
+                template: Some(every_ping_at(&suggestion(&spent), P3, 12)),
+            })
+            .expect("the declaration is handed back");
+        assert_eq!(play_trace_counters().since(before).probe_entries, 0);
+        assert_eq!(
+            direct_runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        );
+
+        let mut suggested = spent.clone();
+        let IterationCount::Fixed(count) = offer_count(&suggested) else {
+            panic!("a fixed count");
+        };
+        let declared = suggestion(&suggested);
+        let (interaction_id, pins) =
+            shortcut_interaction(&mut suggested, |slot| stated_seats(&declared, slot, count));
+        let before = play_trace_counters();
+        submit_interaction(
+            &mut suggested,
+            P0,
+            InteractionSubmission {
+                interaction_id,
+                response: InteractionResponse::Shortcut {
+                    decision: InteractionShortcutDecision::AcceptSuggested,
+                    pins,
+                },
+            },
+        )
+        .expect("the published suggestion is declarable");
+        assert_eq!(play_trace_counters().since(before).probe_entries, 0);
+        assert!(matches!(
+            suggested.waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+
+        assert_eq!(submit(&mut spent, vec![(P2, None)], 13), (Ok(()), 0));
+        assert!(matches!(
+            spent.waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+    }
+
     /// CR 732.2a: the suggestion of a period whose drain resolves before its pings is
     /// confirmable at the ingress and taken through it to the count the offer published.
     #[test]

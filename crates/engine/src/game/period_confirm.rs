@@ -143,6 +143,8 @@ pub(crate) struct AnswerReceipts {
     revision: u64,
     /// Declarations the offer did not publish, each performed from the offer frame to its count.
     declared: Vec<PerformedReach>,
+    /// Repetitions the performances in `declared` spent, summed.
+    declared_spent: u32,
     /// CR 732.2b: per responder, the one forward performance every place they name is read from.
     shortened: Vec<ShortenRun>,
 }
@@ -238,7 +240,20 @@ impl AnswerReceipts {
     }
 
     pub(crate) fn record_declared(&mut self, revision: u64, record: PerformedReach) {
-        self.at_mut(revision).declared.push(record);
+        let receipts = self.at_mut(revision);
+        // A performance stops in the repetition after the last one its proposer survives.
+        receipts.declared_spent = receipts
+            .declared_spent
+            .saturating_add(record.reach.saturating_add(1));
+        receipts.declared.push(record);
+    }
+
+    /// IMPLEMENTATION BUDGET BOUND (see `MAX_SHORTCUT_CYCLES`): whether the declarations
+    /// performed at `revision` spent the window's repetitions.
+    pub(crate) fn declare_budget_spent(&self, revision: u64) -> bool {
+        self.at(revision).is_some_and(|receipts| {
+            receipts.declared_spent >= crate::game::engine::MAX_SHORTCUT_CYCLES
+        })
     }
 
     /// `seat`'s run at `revision`, if one was performed there.
@@ -3921,6 +3936,16 @@ pub(crate) fn perform_declared(
     }
 }
 
+/// Leaves `remaining` repetitions of the open offer's declare budget at `state`'s revision.
+#[cfg(any(test, feature = "test-support"))]
+pub fn leave_declare_budget_for_tests(state: &mut GameState, remaining: u32) {
+    let revision = state.state_revision;
+    crate::game::engine::answer_receipts(&mut state.waiting_for)
+        .expect("an open loop-shortcut offer")
+        .at_mut(revision)
+        .declared_spent = crate::game::engine::MAX_SHORTCUT_CYCLES.saturating_sub(remaining);
+}
+
 /// [`perform_declared`] of `period` from `state`'s view for `holder`, as its offer frame was.
 pub(crate) fn perform_declared_on(
     state: &GameState,
@@ -5515,5 +5540,26 @@ mod tests {
         assert_eq!(choice_options(&prompt, ORDER_EDGES), None);
         let wide = reveal_prompt((1..=40).map(ObjectId).collect(), Card::AnyNumber);
         assert_eq!(choice_options(&wide, usize::MAX), None);
+    }
+
+    /// Every recorded declaration charges at least one repetition, so a window retains at most
+    /// `MAX_SHORTCUT_CYCLES` declarations before its budget refuses the next.
+    #[test]
+    fn reach_zero_declarations_spend_the_budget_at_the_cap() {
+        use crate::game::engine::MAX_SHORTCUT_CYCLES;
+        let unreached = PerformedReach {
+            decisions: Vec::new(),
+            reach: 0,
+            ending: None,
+            departures: Vec::new(),
+        };
+        let mut receipts = AnswerReceipts::default();
+        for _ in 1..MAX_SHORTCUT_CYCLES {
+            receipts.record_declared(7, unreached.clone());
+        }
+        assert!(!receipts.declare_budget_spent(7));
+        receipts.record_declared(7, unreached);
+        assert!(receipts.declare_budget_spent(7));
+        assert!(!receipts.declare_budget_spent(8));
     }
 }
