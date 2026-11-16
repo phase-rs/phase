@@ -5907,10 +5907,8 @@ mod tests {
         );
     }
 
-    /// CR 608.2d + CR 101.4: the unspent case. Nobody accepts, so the rider fires
-    /// once the last seat declines — including when the poll's chain context
-    /// carries an acceptance INHERITED from an enclosing optional, which is what
-    /// `effects::declined_by_every_seat_branch` resets the performed bit for.
+    /// CR 608.2d + CR 101.4: the unspent case. Nobody accepts a fresh poll, so
+    /// its rider fires once the last seat declines.
     #[test]
     fn an_unspent_rider_fires_when_every_responder_declines() {
         let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
