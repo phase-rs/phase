@@ -14428,6 +14428,118 @@ mod staged_batch_tests {
         )
     }
 
+    /// CR 303.4g through the staged ChangeZone batch producer: an Aura entering
+    /// the battlefield with no legal object or player to enchant is denied by the
+    /// shared Aura-host seam (`deliver_replaced_zone_change_with_aura_host`), the
+    /// same one the legacy mover uses. It "remains in its current zone, unless that
+    /// zone is the stack", where it "is put into its owner's graveyard instead of
+    /// entering the battlefield", while the batch's other member still enters.
+    ///
+    /// Removing the denial from the shared seam lets the Aura enter unattached
+    /// here, which fails every assertion on the Aura below.
+    #[test]
+    fn staged_battlefield_entry_denies_an_unhosted_aura_by_its_origin() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+
+        for (origin, expected) in [
+            (Zone::Exile, Zone::Exile),
+            (Zone::Graveyard, Zone::Graveyard),
+            (Zone::Stack, Zone::Graveyard),
+        ] {
+            let mut state = GameState::new_two_player(7);
+            let controller = PlayerId(0);
+            let source = effect_source(&mut state);
+            let aura = create_object(
+                &mut state,
+                CardId(90_301),
+                controller,
+                "Unhosted Aura".to_string(),
+                origin,
+            );
+            {
+                let obj = state.objects.get_mut(&aura).expect("just created");
+                obj.card_types.core_types.push(CoreType::Enchantment);
+                obj.card_types.subtypes.push("Aura".to_string());
+                obj.base_card_types = obj.card_types.clone();
+                obj.keywords
+                    .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::new(
+                        TypeFilter::Creature,
+                    ))));
+                obj.base_keywords = obj.keywords.clone();
+            }
+            let bear = create_object(
+                &mut state,
+                CardId(90_302),
+                controller,
+                "Entering Bear".to_string(),
+                Zone::Exile,
+            );
+            {
+                let obj = state.objects.get_mut(&bear).expect("just created");
+                obj.card_types.core_types.push(CoreType::Creature);
+                obj.base_card_types = obj.card_types.clone();
+            }
+            let members = [aura, bear];
+            let group =
+                crate::game::triggers::allocate_logical_zone_change_group(&mut state, &members);
+            let tail = ChangeZoneBatchTail {
+                group_id: group.logical_group_id,
+                effect_kind: EffectKind::ChangeZone,
+                source_id: source,
+                controller,
+                destination: Zone::Battlefield,
+                count: ChangeZoneCountPolicy::MassAllMembers,
+                pending_return_result_producer: None,
+                own_exile_links: crate::types::game_state::OwnExileLinkSettlement::Retain,
+                entry_collector: Default::default(),
+            };
+            let requests = members
+                .iter()
+                .map(|&id| ZoneMoveRequest::effect(id, Zone::Battlefield, source))
+                .collect();
+            let mut events = Vec::new();
+            assert!(
+                matches!(
+                    deliver_staged_change_zone_batch(
+                        &mut state,
+                        requests,
+                        group,
+                        tail,
+                        None,
+                        &mut events
+                    ),
+                    StagedChangeZoneOutcome::Settled { .. }
+                ),
+                "{origin:?}: the batch settles without a prompt"
+            );
+            assert_eq!(
+                state.objects[&aura].zone, expected,
+                "CR 303.4g: an unhosted Aura entering from {origin:?} ends in {expected:?}"
+            );
+            assert!(
+                !state.battlefield.contains(&aura),
+                "{origin:?}: the Aura never enters the battlefield"
+            );
+            assert!(
+                !events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        to: Zone::Battlefield,
+                        ..
+                    } if *object_id == aura
+                )),
+                "{origin:?}: nothing may observe the denied entry"
+            );
+            assert_eq!(
+                state.objects[&bear].zone,
+                Zone::Battlefield,
+                "{origin:?}: the batch's other member still enters"
+            );
+        }
+    }
+
     fn graveyard_card(state: &mut GameState, card: u64) -> ObjectId {
         create_object(
             state,
