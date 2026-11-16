@@ -21681,7 +21681,22 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
         return Ok(Vec::new());
     }
 
-    let prepared = prepare_spell_cast(state, player, object_id)?;
+    // CR 113.2c + CR 601.2b: a sole option that names a keyword instance is
+    // prepared for that instance, exactly as the cast announces it.
+    let prepared = match choices.options.first() {
+        Some(option) if option.alternative_cost_keyword.is_some() => prepare_spell_cast_announced(
+            state,
+            player,
+            object_id,
+            Some(option.variant),
+            None,
+            None,
+            CastingMode::Actual,
+            None,
+            InstanceElection::Announced(option.alternative_cost_keyword.as_ref()),
+        )?,
+        _ => prepare_spell_cast(state, player, object_id)?,
+    };
     // CR 601.2b: Modal choices are announced before targets, so a modal spell
     // has no single target-slot preview until modes are chosen.
     if prepared.modal.is_some() {

@@ -176,6 +176,9 @@ impl ReachSource {
                 let election = default_cast_election(state, ai_player, *object_id)?;
                 let route = has_alternative_cost_instance_choice(state, *object_id)
                     .then(|| {
+                        // Without a single base auto route, fall back to the
+                        // preparation default: it can only certify lines base
+                        // left Stuck at the menu.
                         base_auto_cast_option(state, ai_player, *object_id).or_else(|| {
                             current_casting_variant_choice_options(state, ai_player, *object_id)
                                 .into_iter()

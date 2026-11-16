@@ -13,9 +13,13 @@
 //! Verbatim Oracle text (Scryfall, 2026-11-16) for every fixture below.
 
 use engine::ai_support::legal_actions;
+use engine::game::casting::legal_target_slots_for_castable_spell;
 use engine::game::keywords::effective_keyword_instances;
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ModalSelectionCondition, ModalSelectionConstraint, TargetRef};
+use engine::game::scenario::{GameRunner, GameScenario, OptionalPolicy, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
+use engine::types::ability::{
+    AbilityCost, AdditionalCostOrigin, ModalSelectionCondition, ModalSelectionConstraint, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastingVariant, CastingVariantChoiceOption, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -218,17 +222,29 @@ fn each_flashback_instance_is_its_own_offer() {
 }
 
 /// At 2 life the printed instance's "Pay 3 life" can't be paid (CR 119.4):
-/// only Lier's instance is offered, and it charges no life.
+/// only Lier's instance is offered, and it charges no life. Its targets
+/// preview (CR 601.2c) as the cast will announce them; with two options the
+/// preview waits for the choice.
 #[test]
 fn unpayable_life_leaves_only_the_granted_flashback() {
     let (mut r, da) = lier_board(2, 4);
     assert!(menu(&r, da).is_empty(), "only Lier's option: no menu");
     assert_eq!(casts_offered(&r, da), 1);
+    let slots = legal_target_slots_for_castable_spell(r.state(), da);
+    assert_eq!(slots.len(), 1, "{slots:?}");
+    let legal = &slots[0].legal_targets;
+    assert!(
+        legal.contains(&player(P0)) && legal.contains(&player(P1)),
+        "{legal:?}"
+    );
     r.cast(da).target_player(P0).resolve();
     assert_eq!(r.life(P0), 2);
-    assert_eq!(pool_colors(&r), vec![(ManaType::Red, SPARE_SOURCE)]);
+    assert_eq!(r.state().players[0].hand.len(), 2, "drew two");
+    assert_paid(&r, da, 1, None);
+    assert_settled(&r);
     let (r, da) = lier_board(4, 4);
     assert_eq!(menu(&r, da).len(), 2, "life-payable control");
+    assert!(legal_target_slots_for_castable_spell(r.state(), da).is_empty());
 }
 
 fn uro_board(breach: bool, others: usize, colors: &str) -> (GameRunner, ObjectId) {
@@ -273,13 +289,23 @@ fn each_escape_instance_is_its_own_offer() {
     let (r, uro) = uro_board(true, 5, "GGUU");
     let options = menu(&r, uro);
     assert_eq!(options.len(), 2, "{options:?}");
-    assert!(
-        options.iter().all(|o| o.additional_cost.is_some()),
-        "each escape option shows its own exile clause"
-    );
     let [printed, granted] = <[Keyword; 2]>::try_from(instances(&r, uro, KeywordKind::Escape))
         .expect("two escape instances");
-    for (keyword, exiled) in [(printed, 5), (granted, 3)] {
+    let gguu = vec![
+        ManaCostShard::Green,
+        ManaCostShard::Green,
+        ManaCostShard::Blue,
+        ManaCostShard::Blue,
+    ];
+    let breach = cost(1, vec![ManaCostShard::Green, ManaCostShard::Blue]);
+    for (keyword, exiled, mana, left) in [(printed, 5, cost(0, gguu), 1), (granted, 3, breach, 2)] {
+        let option = options
+            .iter()
+            .find(|o| o.alternative_cost_keyword.as_ref() == Some(&keyword));
+        let option = option.expect("each instance is offered");
+        assert_eq!(option.mana_cost, mana, "its own mana");
+        let exile = matches!(option.additional_cost, Some(AbilityCost::Exile { count, .. }) if count as usize == exiled);
+        assert!(exile, "its own exile count: {option:?}");
         let (mut r, uro) = uro_board(true, 5, "GGUU");
         let before = graveyard_len(&r);
         let fodder = others(&r, uro, exiled);
@@ -291,6 +317,9 @@ fn each_escape_instance_is_its_own_offer() {
             .resolve();
         assert_eq!(before - 1 - graveyard_len(&r), exiled);
         assert_eq!(r.state().objects[&uro].zone, Zone::Battlefield, "escaped");
+        let pool = pool_colors(&r);
+        assert_eq!(pool.len(), left, "{pool:?}");
+        assert!(pool.contains(&(ManaType::Red, SPARE_SOURCE)));
         assert_settled(&r);
     }
 }
@@ -319,6 +348,7 @@ fn escape_options_intersect_mana_and_exile_on_the_same_instance() {
         .iter()
         .any(|(c, s)| *s != SPARE_SOURCE && matches!(c, ManaType::Green | ManaType::Blue)));
     assert_eq!(r.state().objects[&uro].zone, Zone::Battlefield);
+    assert_settled(&r);
     // Completion with exactly Breach's mana.
     let (mut r, uro) = uro_board(true, 3, "CGU");
     let fodder = others(&r, uro, 3);
@@ -343,6 +373,7 @@ fn printed_escape_alone_pays_its_own_cost() {
     assert_eq!(graveyard_len(&r), 0, "five others exiled");
     assert_eq!(pool_colors(&r), vec![(ManaType::Red, SPARE_SOURCE)]);
     assert_eq!(r.state().objects[&uro].zone, Zone::Battlefield);
+    assert_settled(&r);
 }
 
 /// Lier and Return the Past grant the same "flashback equal to its mana cost":
@@ -364,7 +395,8 @@ fn identical_grants_are_one_offer() {
     assert_eq!(instances(&r, divination, KeywordKind::Flashback).len(), 1);
     assert!(menu(&r, divination).is_empty());
     r.cast(divination).resolve();
-    assert_eq!(pool_colors(&r), vec![(ManaType::Red, SPARE_SOURCE)]);
+    assert_paid(&r, divination, 1, None);
+    assert_settled(&r);
 }
 
 /// Coffin Purge's printed {B} and Lier's "its mana cost" ({B}) are distinct
@@ -390,7 +422,8 @@ fn instances_with_the_same_total_are_one_option() {
     );
     r.cast(purge).target_object(target).resolve();
     assert_eq!(r.state().objects[&target].zone, Zone::Exile);
-    assert_eq!(r.state().objects[&purge].zone, Zone::Exile);
+    assert_paid(&r, purge, 1, None);
+    assert_settled(&r);
 }
 
 /// Lier dies in response to Deep Analysis cast for Lier's cost: it still
@@ -424,6 +457,7 @@ fn granted_flashback_survives_its_grantor_leaving() {
     assert_eq!(r.state().players[0].hand.len(), 2, "Deep Analysis resolved");
     assert_eq!(r.state().objects[&da].zone, Zone::Exile);
     assert_eq!(r.life(P0), 20);
+    assert_settled(&r);
 }
 
 /// Breach is destroyed in response to Uro cast for Breach's escape: Uro still
@@ -469,6 +503,7 @@ fn granted_escape_survives_its_grantor_leaving() {
     r.advance_until_stack_empty();
     assert_eq!(r.state().objects[&breach].zone, Zone::Graveyard);
     assert_eq!(r.state().objects[&uro].zone, Zone::Battlefield, "escaped");
+    assert_settled(&r);
 }
 
 // ── The Fugitive Doctor grants a second, distinct flashback ──
@@ -573,10 +608,10 @@ fn elect(r: &mut GameRunner, card: ObjectId, keyword: &Keyword) -> WaitingFor {
 }
 
 /// How [`finish`] answers the announcement: each target slot gets the next of
-/// `targets`; optional costs are declined unless `accept_costs`.
+/// `targets`; optional costs follow `optional_costs`.
 #[derive(Default)]
 struct Answers {
-    accept_costs: bool,
+    optional_costs: OptionalPolicy,
     targets: Vec<TargetRef>,
     x: u32,
     modes: Vec<usize>,
@@ -602,9 +637,9 @@ impl Answers {
     }
 
     fn paying(self) -> Self {
-        let accept_costs = true;
+        let optional_costs = OptionalPolicy::Accept;
         Self {
-            accept_costs,
+            optional_costs,
             ..self
         }
     }
@@ -626,8 +661,10 @@ fn finish(r: &mut GameRunner, keyword: &Keyword, answers: Answers) {
         }
         let action = match &r.state().waiting_for {
             WaitingFor::Priority { .. } => break,
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost {
-                index: if answers.accept_costs { 0 } else { 1 },
+            WaitingFor::OptionalCostChoice { .. } => match answers.optional_costs {
+                OptionalPolicy::Accept => GameAction::DecideOptionalCost { index: 0 },
+                OptionalPolicy::Decline => GameAction::DecideOptionalCost { index: 1 },
+                OptionalPolicy::Stop => break,
             },
             WaitingFor::SpliceOffer { .. } => GameAction::RespondToSpliceOffer { card: None },
             WaitingFor::ChooseXValue { .. } => GameAction::ChooseX { value: answers.x },
@@ -654,6 +691,7 @@ fn finish(r: &mut GameRunner, keyword: &Keyword, answers: Answers) {
         r.act(action).expect("the announcement step is accepted");
     }
     r.advance_until_stack_empty();
+    assert_settled(r);
 }
 
 /// Elects `keyword` for `card`, checks the first prompt after the menu with
@@ -770,14 +808,6 @@ fn splice_offer_keeps_the_elected_flashback() {
     assert_paid(&r, spike, 1, None);
 }
 
-/// Conflagrate's spell line; its "Flashback—{R}{R}, Discard X cards." line is
-/// seeded from card-data.json (`CONFLAGRATE_PRINTED`), because inline Oracle
-/// seeding without MTGJSON processing reads that line as a spell effect.
-const CONFLAGRATE: &str =
-    "Conflagrate deals X damage divided as you choose among any number of targets.";
-
-const CONFLAGRATE_PRINTED: &str = r#"{"Flashback":{"type":"NonMana","data":{"type":"Composite","costs":[{"type":"Mana","cost":{"type":"Cost","shards":["Red","Red"],"generic":0}},{"type":"Discard","count":{"type":"Ref","qty":{"type":"Variable","name":"X"}},"filter":null,"random":false,"self_ref":false}]}}}"#;
-
 fn deferred_x(w: &WaitingFor) -> bool {
     matches!(w, WaitingFor::ChooseXValue { pending_cast, .. }
         if pending_cast.deferred_target_selection)
@@ -789,16 +819,17 @@ fn x_before_targets_keeps_the_elected_flashback() {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     lier(&mut s);
-    let xxr = vec![ManaCostShard::X, ManaCostShard::X, ManaCostShard::Red];
-    let conflagrate = s
-        .add_spell_to_graveyard(P0, "Conflagrate", false)
-        .with_mana_cost(cost(0, xxr))
-        .from_oracle_text(CONFLAGRATE)
-        .with_keyword(serde_json::from_str(CONFLAGRATE_PRINTED).unwrap())
-        .id();
+    let db = crate::support::shared_card_db().expect("the integration card database");
+    let conflagrate = s.add_real_card(P0, "Conflagrate", Zone::Graveyard, db);
     let keep = s.add_card_to_hand(P0, "Keep");
     pool(&mut s, P0, "RRR");
     let mut r = s.build();
+    let printed = instances(&r, conflagrate, KeywordKind::Flashback);
+    assert_eq!(
+        printed.len(),
+        2,
+        "the printed and Lier's flashback: {printed:?}"
+    );
     let answers = aim(&[player(P1)]).x(1);
     cast_row(&mut r, conflagrate, &lier_flashback(), deferred_x, answers);
     assert_eq!(r.life(P1), 19);
@@ -908,7 +939,6 @@ fn mode_choice_keeps_the_elected_flashback() {
     );
     assert_eq!(r.state().objects[&relic].zone, Zone::Graveyard);
     assert_paid(&r, wreck, 1, None);
-    assert_settled(&r);
 }
 
 const INSCRIPTION_OF_RUIN: &str = "Kicker {2}{B}{B}\nChoose one. If this spell was kicked, choose any number instead.\n• Target opponent discards two cards.\n• Return target creature card with mana value 2 or less from your graveyard to the battlefield.\n• Destroy target creature with mana value 3 or less.";
@@ -967,7 +997,10 @@ fn conditional_modes_keep_the_elected_flashback() {
             matches!(
                 constraint,
                 ModalSelectionConstraint::ConditionalMaxChoices {
-                    condition: ModalSelectionCondition::AdditionalCostPaid { .. },
+                    condition: ModalSelectionCondition::AdditionalCostPaid {
+                        origin: Some(AdditionalCostOrigin::Teamwork),
+                        ..
+                    },
                     ..
                 }
             )
@@ -989,39 +1022,51 @@ fn conditional_modes_keep_the_elected_flashback() {
     assert_paid(&r, atlantis, 3, Some(ManaType::Blue));
 }
 
-const EVANGELIZE: &str = "Buyback {2}{W}{W} (You may pay an additional {2}{W}{W} as you cast this spell. If you do, put this card into your hand as it resolves.)\nGain control of target creature of an opponent's choice they control.";
-
-fn battlefield_named(r: &GameRunner, name: &str) -> ObjectId {
-    let state = r.state();
-    let mut ids = state.battlefield.iter().copied();
-    ids.find(|id| state.objects[id].name == name)
-        .expect("on the battlefield")
-}
-
-/// CR 601.2c: an opponent's choice of target is announced while casting.
+/// CR 601.2c: an opponent chooses some of the targets while the spell is
+/// cast. Volcanic Offering (card-data): "Destroy target nonbasic land you
+/// don't control and target nonbasic land of an opponent's choice you don't
+/// control. Volcanic Offering deals 7 damage to target creature you don't
+/// control and 7 damage to target creature of an opponent's choice you don't
+/// control." P1 announces and picks P2's land and its own other creature.
 #[test]
 fn announcing_opponent_keeps_the_elected_flashback() {
     let mut s = GameScenario::new_n_player(3, 7);
     let p2 = PlayerId(2);
-    s.add_vanilla(P1, 2, 2);
-    s.add_vanilla(p2, 2, 2);
-    let (mut r, evangelize) = doctor_grant(&mut s, |s| {
-        let mana = cost(4, vec![ManaCostShard::White]);
-        graveyard_card(s, ("Evangelize", false), mana, &["Buyback"], EVANGELIZE)
+    let land_one = s
+        .add_land_from_oracle(P1, "Ruins One", "{T}: Add {C}.")
+        .id();
+    let bear = s.add_vanilla(P1, 3, 3);
+    let cub = s.add_vanilla(P1, 2, 2);
+    let land_two = s
+        .add_land_from_oracle(p2, "Ruins Two", "{T}: Add {C}.")
+        .id();
+    let wolf = s.add_vanilla(p2, 4, 4);
+    let db = crate::support::shared_card_db().expect("the integration card database");
+    let (mut r, offering) = doctor_grant(&mut s, |s| {
+        s.add_real_card(P0, "Volcanic Offering", Zone::Graveyard, db)
     });
-    fund(&mut r, "WCCCCRG");
+    fund(&mut r, "RCCCCG");
     let announce = |w: &WaitingFor| {
         matches!(w, WaitingFor::ChooseAnnouncingOpponent { candidates, .. }
             if candidates.len() == 2 && candidates.contains(&P1) && candidates.contains(&p2))
     };
-    // The export parses "they control" as `controller: You` (the caster), so
-    // P1's legal choices are P0's creatures; P1 picks Lier.
-    let lier = battlefield_named(&r, "Lier, Disciple of the Drowned");
-    let answers = aim(&[object(lier)]).announcer(P1);
-    cast_row(&mut r, evangelize, &lier_flashback(), announce, answers);
-    assert_eq!(r.state().objects[&lier].controller, P0);
-    assert!(r.state().stack.is_empty());
-    assert_paid(&r, evangelize, 3, Some(ManaType::White));
+    let picks = [
+        object(land_one),
+        object(land_two),
+        object(bear),
+        object(cub),
+    ];
+    let answers = aim(&picks).announcer(P1);
+    cast_row(&mut r, offering, &lier_flashback(), announce, answers);
+    for id in [land_one, land_two, bear, cub] {
+        assert_eq!(r.state().objects[&id].zone, Zone::Graveyard);
+    }
+    assert_eq!(
+        r.state().objects[&wolf].zone,
+        Zone::Battlefield,
+        "not chosen"
+    );
+    assert_paid(&r, offering, 2, None);
 }
 
 /// The public-action companion: once Lier is gone, the printed instance is
@@ -1094,7 +1139,6 @@ fn paused_keyed_cast_round_trips() {
     finish(&mut r, &printed, aim(&[player(P0)]));
     assert_eq!(r.life(P0), 17);
     assert_paid(&r, da, 3, None);
-    assert_settled(&r);
 }
 
 /// A legacy pending cast (no carrier) over two instances can't pick one: it
