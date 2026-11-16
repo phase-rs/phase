@@ -37538,6 +37538,7 @@ mod tests {
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
                     caused_by: None,
+                    destination: None,
                 },
             }
         ));
