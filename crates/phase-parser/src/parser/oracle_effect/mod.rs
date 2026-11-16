@@ -4036,6 +4036,7 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
         .parse(lower)
         .ok()?;
     let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("that permanent"),
         tag::<_, _, OracleError<'_>>("that creature or planeswalker"),
         tag("that creature"),
         tag("that planeswalker"),
@@ -28224,6 +28225,162 @@ fn explicit_any_target_clause(effect: &Effect, lower: &str) -> bool {
         && nom_primitives::scan_contains(lower, "any target")
 }
 
+/// CR 608.2c + CR 120.1: Keep a named/self damage subject when its recipient is
+/// independent from the earlier object target. An anaphor in the amount does
+/// not name the recipient: Volcanic Vision reads the returned card's mana
+/// value, while "to that creature" still binds to the earlier chosen target.
+/// Player anaphors
+/// belong to the player-binding authorities, even when the amount names an
+/// earlier object, so object-target rewrites must preserve their operand.
+/// A new explicit target stays independent when an earlier target already
+/// exists (Pyretic Rebirth); without one, it is promoted to the enclosing
+/// ability's announced target (Cragganwick Cremator).
+fn self_damage_subject_has_independent_recipient(
+    effect: &Effect,
+    lower: &str,
+    has_prior_typed_target: bool,
+) -> bool {
+    if !matches!(effect, Effect::DealDamage { .. } | Effect::DamageAll { .. }) {
+        return false;
+    }
+
+    match self_named_damage_recipient_segment(lower) {
+        None => false,
+        Some(None) => true,
+        Some(Some(recipient)) => {
+            if has_anaphoric_reference(recipient) {
+                return false;
+            }
+
+            let declares_target = preceded(
+                opt(tag::<_, _, OracleError<'_>>("random ")),
+                nom_target::parse_declared_target_prefix,
+            )
+            .parse(recipient)
+            .is_ok();
+            !declares_target || has_prior_typed_target
+        }
+    }
+}
+
+/// CR 608.2c: In a same-instruction "unless ... have [source] deal that much
+/// damage" alternative, the demonstrative names the primary damage amount.
+/// The alternative is parsed before the primary effect is available, so bind
+/// its generic event-context placeholder after parsing the primary clause.
+fn bind_unless_pay_damage_event_context_amount(
+    primary_effect: &Effect,
+    unless_pay: Option<&mut UnlessPayModifier>,
+) {
+    let Some(unless_pay) = unless_pay else {
+        return;
+    };
+    let AbilityCost::EffectCost { effect } = &mut unless_pay.cost else {
+        return;
+    };
+    let Effect::DealDamage {
+        amount: alternative_amount,
+        ..
+    } = effect.as_mut()
+    else {
+        return;
+    };
+    let Effect::DealDamage {
+        amount: primary_amount,
+        ..
+    } = primary_effect
+    else {
+        return;
+    };
+
+    if let QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    } = alternative_amount
+    {
+        *alternative_amount = primary_amount.clone();
+    } else if let QuantityExpr::Ref { qty } = primary_amount {
+        alternative_amount.rebind_event_context_amount(qty);
+    }
+}
+
+/// Preserve the damage source at the source-binding seam while allowing the
+/// normal recipient rewriters to resolve "that creature" independently. A
+/// named self source ("~ deals damage", "this spell deals damage") is the
+/// resolving object under CR 120.1 even when an amount anaphor names an earlier
+/// object.
+fn preserve_self_damage_source(effect: &mut Effect, lower: &str) {
+    if self_named_damage_recipient_segment(lower).is_none() {
+        return;
+    }
+    match effect {
+        Effect::DealDamage { damage_source, .. } | Effect::DamageAll { damage_source, .. } => {
+            *damage_source = None;
+        }
+        _ => {}
+    }
+}
+
+/// Recognize a self-named damage subject and return its parsed recipient, when
+/// the recipient boundary is one of the supported damage forms. The outer
+/// `Option` distinguishes a different subject from a recognized self subject
+/// whose recipient boundary is not established.
+fn self_named_damage_recipient_segment(lower: &str) -> Option<Option<&str>> {
+    let Ok((after_damage, _)) = preceded(
+        opt(tag::<_, _, OracleError<'_>>("then ")),
+        preceded(
+            alt((
+                tag::<_, _, OracleError<'_>>("~"),
+                tag("this creature"),
+                tag("this permanent"),
+                tag("this spell"),
+                tag("this card"),
+            )),
+            tag(" deals damage"),
+        ),
+    )
+    .parse(lower) else {
+        return None;
+    };
+    Some(explicit_self_damage_recipient(after_damage))
+}
+
+/// Return the recipient segment for recipient-first and amount-first Oracle
+/// damage forms. The count-first form reuses `parse_count_expr`, the same
+/// quantity authority used by damage parsing. This keeps amount anaphors out
+/// of recipient detection.
+fn explicit_self_damage_recipient(text_after_damage: &str) -> Option<&str> {
+    let (tail, _) = space0::<_, OracleError<'_>>.parse(text_after_damage).ok()?;
+
+    // Recipient-first: "deals damage to that creature equal to its power".
+    if let Ok((after_to, _)) = tag::<_, _, OracleError<'_>>("to ").parse(tail) {
+        let recipient = take_until::<_, _, OracleError<'_>>(" equal to ")
+            .parse(after_to)
+            .map(|(_, recipient)| recipient)
+            .unwrap_or(after_to);
+        return Some(recipient);
+    }
+
+    // Expression-first: "deals damage equal to its power to that creature".
+    if let Ok((amount, _)) = tag::<_, _, OracleError<'_>>("equal to ").parse(tail) {
+        let (recipient_tail, _) = take_until::<_, _, OracleError<'_>>(" to ")
+            .parse(amount)
+            .ok()?;
+        let (_, recipient) = preceded(tag::<_, _, OracleError<'_>>(" to "), rest)
+            .parse(recipient_tail)
+            .ok()?;
+        return Some(recipient);
+    }
+
+    // Count-first: "deals 3 damage to that creature".
+    let (_, after_count) = parse_count_expr(tail)?;
+    let (after_damage_noun, _) = tag::<_, _, OracleError<'_>>("damage")
+        .parse(after_count)
+        .ok()?;
+    let (_, recipient) = preceded(tag::<_, _, OracleError<'_>>(" to "), rest)
+        .parse(after_damage_noun)
+        .ok()?;
+    Some(recipient)
+}
+
 fn rewrite_triggering_spell_controller_to_parent_target_controller(effect: &mut Effect) {
     each_target_filter_mut(effect, &mut |filter| {
         if matches!(filter, TargetFilter::TriggeringSpellController) {
@@ -52386,17 +52543,39 @@ fn parse_effect_chain_ir_body(
             }
         });
         // CR 608.2c + CR 608.2d + CR 118.12: an "any opponent / any player / any other
-        // player may" body is performed by the player who accepts, so its third-person
-        // anaphors name that player. Only when no rung above supplied a scope, the seed
-        // is applied to a counterfactual parse of the body and recorded as operand
-        // bindings (`lower::accepting_player_bindings`), emitted under
-        // `lower_effect_chain_ir`'s confinement check. It never enters the chunk context.
-        let accepting_player_bindings = match opponent_may_scope {
-            Some(_) if ctx.relative_player_scope.is_none() => {
+        // player may" action is performed by the player who accepts. Its immediate
+        // "if a player does" consequence names that same player, even when an enclosing
+        // trigger has a different relative player (for example, the upkeep player).
+        // Seed that consequence only when it directly follows an accepting-may clause;
+        // unrelated trigger-event anaphors keep the existing scope. The counterfactual
+        // parse records direct operand changes as bindings and lowering admits them only
+        // when they remain inside the accepting frame. The seed never enters chunk ctx.
+        let follows_accepting_may_action = opponent_may_scope.is_none()
+            && condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed)
+            && builder
+                .clauses()
+                .last()
+                .is_some_and(|previous| previous.opponent_may_scope.is_some());
+        let accepting_player_bindings = match (opponent_may_scope, follows_accepting_may_action) {
+            (Some(_), false) if ctx.relative_player_scope.is_none() => {
                 lower::accepting_player_bindings(&text_no_qty, ctx)
             }
+            (None, true) => lower::accepting_player_bindings(&text_no_qty, ctx),
             _ => Vec::new(),
         };
+        // A direct player context-reference does not enter the untargeted-object
+        // timing inference, but its accepting-player binding is read inside the
+        // accepting frame at resolution and creates no announced target slot.
+        // Keep typed bindings and clauses with a printed target on their existing
+        // timing path.
+        let accepting_clause_lower = text_no_qty.to_ascii_lowercase();
+        let accepting_player_resolution_timing =
+            (accepting_player_bindings.iter().any(|binding| {
+                binding.node == 0 && matches!(&binding.seeded, TargetFilter::ScopedPlayer)
+            }) && !nom_primitives::scan_contains(&accepting_clause_lower, "target "))
+            .then_some(TargetChoiceTiming::Resolution);
         // CR 608.2c + CR 614.1c: an entry-counter rider binds to the producer of
         // the clause right before it, so it is read here, where that clause and
         // this clause's own condition are both in scope.
@@ -52484,6 +52663,7 @@ fn parse_effect_chain_ir_body(
             }
         };
         let mut clause = clause;
+        bind_unless_pay_damage_event_context_amount(&clause.effect, unless_pay.as_mut());
         if inherited_compound_owner_seed.is_some() {
             // CR 608.2c: every inherited owner instruction needs an announced
             // object, including a shuffle after a conditionally skipped draw.
@@ -52911,6 +53091,7 @@ fn parse_effect_chain_ir_body(
         // chunks. The deeper links are never visited by these rewriters anyway,
         // which is exactly why a head-only rewrite corrupts the chain.
         let is_distributed_chunk = text_is_compound_subject_distribution(&text);
+        let has_prior_typed_target = chain_has_prior_typed_referent(builder.clauses(), false);
         // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
         // CR 608.2c: its `!builder.is_empty()` gate is intentionally broad
         // (many antecedent shapes reach this without a `target_filter()`, e.g. a typed
@@ -52929,6 +53110,11 @@ fn parse_effect_chain_ir_body(
             && !condition
                 .as_ref()
                 .is_some_and(condition_measures_tracked_set)
+            && !self_damage_subject_has_independent_recipient(
+                &clause.effect,
+                &text_lower,
+                has_prior_typed_target,
+            )
             // CR 608.2k: only a GENUINE source-counter gate (no prior chosen
             // target — see `binds_source_counter_pronoun`) keeps the SelfRef
             // binding; a mis-scoped bare "it" over a prior typed target
@@ -53018,6 +53204,11 @@ fn parse_effect_chain_ir_body(
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && !typed_trigger_subject
             && !explicit_any_target_clause(&clause.effect, &text_lower)
+            && !self_damage_subject_has_independent_recipient(
+                &clause.effect,
+                &text_lower,
+                has_prior_typed_target,
+            )
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -53046,10 +53237,15 @@ fn parse_effect_chain_ir_body(
         // (Nissa, Who Shakes the World).
         if condition.is_none()
             && !is_distributed_chunk
-            && chain_has_prior_typed_referent(builder.clauses(), false)
+            && has_prior_typed_target
             && has_anaphoric_reference(&recipient_anaphor_lower)
             && !typed_trigger_subject
             && !explicit_any_target_clause(&clause.effect, &text_lower)
+            && !self_damage_subject_has_independent_recipient(
+                &clause.effect,
+                &text_lower,
+                has_prior_typed_target,
+            )
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,
@@ -54388,6 +54584,8 @@ fn parse_effect_chain_ir_body(
                 continue 'chunks;
             }
 
+            preserve_self_damage_source(&mut clause.effect, &text_lower);
+
             let clause_declared_group = chunk_ctx.clause_declared_group.take();
             if let Some(group) = clause_declared_group {
                 declarations.push((builder.clauses().len(), group));
@@ -54449,7 +54647,12 @@ fn parse_effect_chain_ir_body(
                 .unless_pay(unless_pay)
                 .target_selection_mode(chunk_ctx.target_selection_mode)
                 .target_chooser(chunk_ctx.target_chooser.clone())
-                .declared_target_choice_timing(chunk_ctx.declared_target_choice_timing.take())
+                .declared_target_choice_timing(
+                    chunk_ctx
+                        .declared_target_choice_timing
+                        .take()
+                        .or(accepting_player_resolution_timing),
+                )
                 .printed_color_choice(chunk_ctx.pending_printed_color_choice.take())
                 .head_window(head_window.clone())
                 .declared_player_group(clause_declared_group)
@@ -61946,6 +62149,123 @@ mod iteration_destination_rebinding_tests {
             destination_of(&folded(TokenAttackDestination::ControllerChooses, &qty)),
             &TokenAttackDestination::ControllerChooses
         );
+    }
+}
+
+#[cfg(test)]
+mod essence_burn_parser_tests {
+    use super::*;
+    use crate::parser::oracle::parse_oracle_text;
+
+    const ESSENCE_BURN: &str = "Essence Burn deals 5 damage to target black or green creature or planeswalker. If that permanent would die this turn, exile it instead.";
+
+    #[test]
+    fn essence_burn_full_document_parse_keeps_all_four_targets_and_rider() {
+        let parsed = parse_oracle_text(
+            ESSENCE_BURN,
+            "Essence Burn",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "the exact Oracle text must have no swallowed-clause warning: {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(parsed.abilities.len(), 1, "one spell ability");
+        let damage = &parsed.abilities[0];
+        let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {
+            panic!(
+                "the first clause must be DealDamage, got {:?}",
+                damage.effect
+            );
+        };
+        assert_eq!(
+            amount,
+            &crate::types::ability::QuantityExpr::Fixed { value: 5 }
+        );
+        let TargetFilter::Or { filters } = target else {
+            panic!("the target must retain its color/type alternatives, got {target:?}");
+        };
+        assert_eq!(filters.len(), 4, "exactly four type/color legs");
+        let expected = [
+            (TypeFilter::Creature, crate::types::mana::ManaColor::Black),
+            (TypeFilter::Creature, crate::types::mana::ManaColor::Green),
+            (
+                TypeFilter::Planeswalker,
+                crate::types::mana::ManaColor::Black,
+            ),
+            (
+                TypeFilter::Planeswalker,
+                crate::types::mana::ManaColor::Green,
+            ),
+        ];
+        for (type_filter, color) in expected {
+            assert!(
+                filters.iter().any(|leg| {
+                    let TargetFilter::Typed(typed) = leg else {
+                        return false;
+                    };
+                    typed.type_filters == vec![type_filter.clone()]
+                        && typed.properties.contains(&FilterProp::HasColor { color })
+                }),
+                "missing target combination {type_filter:?} / {color:?}: {filters:?}"
+            );
+        }
+
+        let rider = damage
+            .sub_ability
+            .as_deref()
+            .expect("the die-exile clause must be absorbed by the damage ability");
+        let Effect::AddTargetReplacement { replacement, .. } = rider.effect.as_ref() else {
+            panic!(
+                "the second clause must install a replacement, got {:?}",
+                rider.effect
+            );
+        };
+        assert_eq!(replacement.event, ReplacementEvent::Moved);
+        assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(replacement.expiry, Some(RestrictionExpiry::EndOfTurn));
+        assert!(replacement.consume_on_apply);
+        let exile = replacement
+            .execute
+            .as_deref()
+            .expect("the replacement must redirect the matching move");
+        assert!(matches!(
+            exile.effect.as_ref(),
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ordinary_creature_die_exile_rider_remains_supported() {
+        let parsed = parse_oracle_text(
+            "Lava Coil deals 4 damage to target creature. If that creature would die this turn, exile it instead.",
+            "Lava Coil",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "{:?}",
+            parsed.parse_warnings
+        );
+        let damage = parsed.abilities.first().expect("spell ability");
+        assert!(matches!(damage.effect.as_ref(), Effect::DealDamage { .. }));
+        assert!(matches!(
+            damage
+                .sub_ability
+                .as_deref()
+                .map(|rider| rider.effect.as_ref()),
+            Some(Effect::AddTargetReplacement { .. })
+        ));
     }
 }
 
