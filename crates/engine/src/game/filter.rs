@@ -374,6 +374,7 @@ fn filter_prop_uses_object_population(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -948,6 +949,7 @@ fn filter_prop_characteristic_reads_at(prop: &FilterProp, depth: u32) -> Charact
         | FilterProp::EnteredThisTurn
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::HasSingleTarget
         | FilterProp::Modal
@@ -1210,6 +1212,7 @@ fn entered_object_perturbs_filter_prop(
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -3125,6 +3128,7 @@ fn filter_prop_contains_input(
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -3911,6 +3915,7 @@ fn declared_group_controller(prop: &mut FilterProp) -> Option<&mut ControllerRef
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -4496,6 +4501,7 @@ fn absent_search_property_truth(prop: &FilterProp) -> Option<bool> {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -5569,6 +5575,37 @@ thread_local! {
         const { core::cell::Cell::new(0) };
 }
 
+/// Test-support work counts for the CR 614.12 token projection seams only.
+/// Thread-local so parallel tests cannot charge one another's batches.
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenEntryProjectionWork {
+    pub pre_entry_boards: usize,
+    pub pre_entry_state_clones: usize,
+    pub projection_state_clones: usize,
+    pub pre_entry_layer_passes: usize,
+    pub projections: usize,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    static TOKEN_ENTRY_PROJECTION_WORK: core::cell::Cell<TokenEntryProjectionWork> =
+        const { core::cell::Cell::new(TokenEntryProjectionWork {
+            pre_entry_boards: 0, pre_entry_state_clones: 0, projection_state_clones: 0,
+            pre_entry_layer_passes: 0, projections: 0,
+        }) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn token_entry_projection_work() -> TokenEntryProjectionWork {
+    TOKEN_ENTRY_PROJECTION_WORK.with(core::cell::Cell::get)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_token_entry_projection_work() {
+    TOKEN_ENTRY_PROJECTION_WORK.with(|work| work.set(TokenEntryProjectionWork::default()));
+}
+
 /// CR 712.14 + CR 712.14a: the face a double-faced entrant has up as it is put onto the battlefield.
 /// Engine-internal: the entry event and `BattlefieldEntrantProjection::new` keep their
 /// `enter_transformed` flag, converted once here (`EntryFace::from_enter_transformed`).
@@ -5874,31 +5911,27 @@ impl BattlefieldEntrantProjection {
         {
             return None;
         }
-        let pre_entry = pre_entry_board(state, co_entrants);
-        // CR 111.1: a token comes from no zone, so no origin-zone population is pinned.
-        let mut scratch = pre_entry.clone().into_owned();
-        let entry = scratch.liminal_entries.remove(&entrant)?;
-        crate::game::effects::token::place_liminal_token_on_battlefield(
-            &mut scratch,
-            entrant,
-            entry.object.into_projected(),
-        );
-        if scratch.objects.get(&entrant)?.zone != Zone::Battlefield {
-            return None;
-        }
-        Some(Self::finish(
-            scratch,
-            Some((&pre_entry, None)),
-            entrant,
-            None,
-        ))
+        Self::token_on_pre_entry_board(
+            pre_entry_board(state, co_entrants),
+            state.liminal_entries.get(&entrant)?.object.projected(),
+        )
     }
 
-    /// CR 614.12 + CR 707.9b: a token the non-liminal copy seam has already created, as it
-    /// would exist on the battlefield. `body` is the entrant with its immediate copy
-    /// exceptions folded in (they are part of its copiable values, so they decide whether a
-    /// resident effect applies to it). The board is the one before its entry event: the
-    /// entrant itself and each of `co_entrants` are absent.
+    /// CR 614.12: use a caller-owned batch board, while reading the current liminal body.
+    pub(crate) fn liminal_token_on_board(
+        state: &GameState,
+        entrant: ObjectId,
+        pre_entry: &GameState,
+    ) -> Option<Self> {
+        let entry = state.liminal_entries.get(&entrant)?;
+        if !entry.object.is_token_projection() {
+            return None;
+        }
+        Self::token_on_pre_entry_board(Cow::Borrowed(pre_entry), entry.object.projected())
+    }
+
+    /// CR 614.12 + CR 707.9b: the placed copy body includes its immediate copy exceptions.
+    #[cfg(test)]
     pub(crate) fn for_placed_token(
         state: &GameState,
         entrant: ObjectId,
@@ -5910,21 +5943,43 @@ impl BattlefieldEntrantProjection {
             .copied()
             .chain(std::iter::once(entrant))
             .collect();
-        let pre_entry = pre_entry_board(state, &absent);
-        // CR 111.1: a token comes from no zone, so no origin-zone population is pinned.
+        Self::token_on_pre_entry_board(pre_entry_board(state, &absent), body)
+    }
+
+    /// CR 614.12: capture only the population condition rewrites, then consume an owned
+    /// board directly. No full pre-entry state is needed after capture. A borrowed batch
+    /// board needs one scratch clone; an already-owned board needs none.
+    pub(crate) fn token_on_pre_entry_board(
+        pre_entry: Cow<'_, GameState>,
+        body: &GameObject,
+    ) -> Option<Self> {
         let mut placed = body.clone();
         placed.phase_status = crate::game::game_object::PhaseStatus::PhasedIn;
         if placed.zone != Zone::Battlefield {
             return None;
         }
-        let mut scratch = pre_entry.clone().into_owned();
-        scratch.objects.insert(entrant, placed);
-        Some(Self::finish(
-            scratch,
-            Some((&pre_entry, None)),
-            entrant,
-            None,
-        ))
+        let entrant = placed.id;
+        let pins = crate::game::layers::EntryPopulationRewrites::for_token(&pre_entry, &placed);
+        #[cfg(any(test, feature = "test-support"))]
+        TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+            let mut counts = work.get();
+            counts.projections += 1;
+            counts.projection_state_clones += usize::from(matches!(pre_entry, Cow::Borrowed(_)));
+            work.set(counts);
+        });
+        let mut scratch = pre_entry.into_owned();
+        scratch.liminal_entries.remove(&entrant);
+        if scratch.battlefield.contains(&entrant) {
+            scratch.objects.insert(entrant, placed);
+        } else {
+            crate::game::effects::token::place_liminal_token_on_battlefield(
+                &mut scratch,
+                entrant,
+                placed,
+            );
+        }
+        pins.apply(&mut scratch);
+        Some(Self::finish(scratch, None, entrant, None))
     }
 
     /// Install the carried effect (if any) on the scratch entrant, pin the pre-entry
@@ -5998,6 +6053,14 @@ pub(crate) fn pre_entry_board<'a>(state: &'a GameState, absent: &[ObjectId]) -> 
     if !absent.iter().any(present) {
         return Cow::Borrowed(state);
     }
+    #[cfg(any(test, feature = "test-support"))]
+    TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+        let mut counts = work.get();
+        counts.pre_entry_boards += 1;
+        counts.pre_entry_state_clones += 1;
+        counts.pre_entry_layer_passes += 1;
+        work.set(counts);
+    });
     let mut board = state.clone();
     for id in absent.iter().filter(|id| present(id)) {
         if let Some(obj) = board.objects.get_mut(id) {
@@ -6009,6 +6072,110 @@ pub(crate) fn pre_entry_board<'a>(state: &'a GameState, absent: &[ObjectId]) -> 
     crate::game::layers::mark_layers_full(&mut board);
     crate::game::layers::flush_layers(&mut board);
     Cow::Owned(board)
+}
+
+/// A call-local token batch cache. The object-store snapshot is persistent/shared:
+/// it lets refresh skip co-entrants whose live object has not been written since
+/// the previous consult, without retaining another full game state.
+pub(crate) struct TokenEntryBatchBoard {
+    board: GameState,
+    source_objects: crate::types::object_map::ObjectMap,
+}
+
+impl TokenEntryBatchBoard {
+    pub(crate) fn new(state: &GameState, absent: &[ObjectId]) -> Self {
+        let board = pre_entry_board(state, absent);
+        #[cfg(any(test, feature = "test-support"))]
+        if matches!(board, Cow::Borrowed(_)) {
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.pre_entry_boards += 1;
+                counts.pre_entry_state_clones += 1;
+                work.set(counts);
+            });
+        }
+        Self {
+            board: board.into_owned(),
+            source_objects: state.objects.clone(),
+        }
+    }
+
+    pub(crate) fn board(&self) -> &GameState {
+        &self.board
+    }
+
+    /// CR 614.12: extend a batch's pre-entry board with the live, phased-out co-entrants.
+    /// They are frozen by the layer engine, so copying these objects needs no layer pass.
+    /// Entry/counter histories and resolution referents still advance in the live engine;
+    /// keep those reads current, and conservatively flush when an existing static or a
+    /// transient could read the changed context. No whole-state clone is taken here.
+    pub(crate) fn refresh(&mut self, state: &GameState, absent: &[ObjectId]) {
+        let board = &mut self.board;
+        for id in absent {
+            if self.source_objects.shares_object_with(&state.objects, *id) {
+                continue;
+            }
+            let Some(live) = state.objects.get(id) else {
+                continue;
+            };
+            let mut object = live.clone();
+            if object.is_phased_in_permanent() {
+                object.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
+                    cause: crate::game::game_object::PhaseOutCause::Directly,
+                };
+            }
+            if !board.battlefield.contains(id) && object.zone == Zone::Battlefield {
+                crate::game::effects::token::place_liminal_token_on_battlefield(board, *id, object);
+            } else {
+                board.objects.insert(*id, object);
+            }
+        }
+        let mut context_changed = false;
+        macro_rules! refresh {
+        ($($field:ident),+ $(,)?) => { $(
+            if board.$field != state.$field {
+                board.$field.clone_from(&state.$field);
+                context_changed = true;
+            }
+        )+ };
+    }
+        refresh!(
+            created_tokens_this_turn,
+            players_who_created_token_this_turn,
+            counter_added_this_turn,
+            object_counter_placement_count_this_turn,
+            zone_changes_this_turn,
+            battlefield_entries_this_turn,
+            battlefield_entry_observations,
+            last_created_token_ids,
+            last_effect_amount,
+            last_effect_count,
+            last_effect_excess_amount,
+            last_effect_counts_by_player,
+            combat,
+            transient_continuous_effects,
+        );
+        // The current liminal body is supplied separately by the caller; other explicit
+        // object references must still see the same parked entries as the live board.
+        board.liminal_entries.clone_from(&state.liminal_entries);
+        if context_changed
+            && (!board.transient_continuous_effects.is_empty()
+                || board
+                    .objects
+                    .values()
+                    .any(|object| !object.static_definitions.is_empty()))
+        {
+            #[cfg(any(test, feature = "test-support"))]
+            TOKEN_ENTRY_PROJECTION_WORK.with(|work| {
+                let mut counts = work.get();
+                counts.pre_entry_layer_passes += 1;
+                work.set(counts);
+            });
+            crate::game::layers::mark_layers_full(board);
+            crate::game::layers::flush_layers(board);
+        }
+        self.source_objects = state.objects.clone();
+    }
 }
 
 /// CR 614.12: whether an entrant gets a projection for `consumer` — it has a
@@ -9575,6 +9742,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         // CR 122.6: A spell on the stack hasn't received counters as a
         // permanent — fail closed against the spell-cast snapshot.
@@ -11491,6 +11659,10 @@ fn matches_filter_prop(
         },
         // CR 509.1a: Creature was declared as a blocker this turn.
         FilterProp::BlockedThisTurn => state.creatures_blocked_this_turn.contains(&object_id),
+        // CR 701.14a + CR 400.7: fought this turn, keyed by exact incarnation.
+        FilterProp::FoughtThisTurn => state
+            .creatures_fought_this_turn
+            .contains(&ObjectIncarnationRef::from_object(obj)),
         // CR 508.1a + CR 509.1a: Creature attacked or blocked this turn.
         FilterProp::AttackedOrBlockedThisTurn => {
             state.creatures_attacked_this_turn.contains(&object_id)
@@ -12146,6 +12318,12 @@ fn zone_change_record_matches_property(
         // CR 509.1a + CR 608.2h: sibling of `AttackedThisTurn` — same durable id-keyed ledger,
         // same look-back reasoning.
         FilterProp::BlockedThisTurn => state.creatures_blocked_this_turn.contains(&record.object_id),
+        // CR 701.14a + CR 608.2h: answer from the record's own departing
+        // incarnation; a record without one fails closed.
+        FilterProp::FoughtThisTurn => record
+            .trigger_source_context()
+            .map(|context| context.identity.reference)
+            .is_some_and(|candidate| state.creatures_fought_this_turn.contains(&candidate)),
         // CR 508.1a + CR 509.1a + CR 608.2h: disjunction of the two ledgers above.
         FilterProp::AttackedOrBlockedThisTurn => {
             state
@@ -15584,10 +15762,18 @@ mod tests {
                 .clone();
             body.id = placed;
             paused.state.objects.insert(placed, body.clone());
+            #[cfg(feature = "test-support")]
+            let copies_before = crate::game::perf_counters::take_cost_snapshot().state_copies;
             let placed_retains =
                 BattlefieldEntrantProjection::for_placed_token(&paused.state, placed, &body, &[])
                     .expect("a placed token is projectable")
                     .retains_replacement(&paused.own);
+            #[cfg(feature = "test-support")]
+            assert_eq!(
+                crate::game::perf_counters::take_cost_snapshot().state_copies - copies_before,
+                1,
+                "an owned pre-entry board is consumed without another whole-state clone",
+            );
             assert_eq!(
                 placed_retains,
                 liminal_retains(&paused, &[]),
@@ -17664,7 +17850,12 @@ mod tests {
         });
         std::sync::Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities)
             .push(ability);
-        state.pending_activations.push((source, 0));
+        // CR 602.2a: the pending entry is the announcement-bound usage key,
+        // not a `(source, index)` pair — the unbound read below must ignore
+        // it either way.
+        let pending = crate::game::restrictions::ability_usage_key(&state, source, 0)
+            .expect("the pushed ability resolves at slot 0");
+        state.pending_activations.push(pending);
 
         let filter = TargetFilter::And {
             filters: vec![
@@ -27529,6 +27720,7 @@ mod characteristic_read_classification_tests {
             | FilterProp::ControlledContinuouslySinceTurnBegan
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown

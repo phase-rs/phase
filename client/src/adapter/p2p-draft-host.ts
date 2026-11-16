@@ -88,10 +88,24 @@ function sanitizePublicBackup(
   const publicSnapshot = JSON.parse(JSON.stringify(snapshot)) as PersistedDraftHostSession;
   const rawPublicSnapshot = publicSnapshot as unknown as Record<string, unknown>;
   delete rawPublicSnapshot.booster_pack_pool;
+  // DECK COPIES. Another seat's submitted deck is private until its match
+  // launches it, and the backup row is readable by any pod guest who can derive
+  // the host peer id. `payloadFingerprint` is the submitted card-name/count JSON
+  // itself, not a one-way hash, and a workspace snapshot is the seat's
+  // main/sideboard partition. IndexedDB keeps both for recovery. Mirrors
+  // `P2P_BACKUP_SECRET_KEYS` in `server-core::p2p_backup_guard`.
+  delete rawPublicSnapshot.deckSubmissionReceipts;
+  delete rawPublicSnapshot.perSeatWorkspaceSnapshots;
+  // DIGESTS OF DECK-BEARING PAYLOADS. `draftIntergameDigest` is an unsalted,
+  // deterministic 32-bit checksum: a pod member who already knows a candidate
+  // deck or partition can test guesses against it offline, so a retained digest
+  // is a verification oracle for the very contents removed above.
+  delete rawPublicSnapshot.launchDigests;
 
   redactPoolInputCubeList(publicSnapshot.poolInput);
   redactMatchLaunchPools(rawPublicSnapshot.matchLaunches);
   redactIntergameCommandLaunchPools(rawPublicSnapshot.intergameCommands);
+  redactBo3StateDecks(rawPublicSnapshot.bo3State);
   redactDraftSessionPoolAndChaos(rawPublicSnapshot);
   return publicSnapshot;
 }
@@ -101,23 +115,46 @@ function redactPoolInputCubeList(poolInput: unknown): void {
   delete poolInput.data.cube_list_text;
 }
 
+/** A launch descriptor's decks (`deckPayload` for host/bot launches,
+ * `localDeck` for a guest launch) are another seat's private contents. The whole
+ * payload goes, which also removes the booster pool it carries. */
+function redactLaunchDecks(launch: Record<string, unknown>): void {
+  delete launch.deckPayload;
+  delete launch.localDeck;
+}
+
 function redactMatchLaunchPools(matchLaunches: unknown): void {
   if (!Array.isArray(matchLaunches)) return;
   for (const matchLaunch of matchLaunches) {
     if (!isJsonRecord(matchLaunch) || !isJsonRecord(matchLaunch.launch)) continue;
-    if (!isJsonRecord(matchLaunch.launch.deckPayload)) continue;
-    delete matchLaunch.launch.deckPayload.booster_pack_pool;
+    redactLaunchDecks(matchLaunch.launch);
   }
 }
 
-/** Held Bo3 commands retain their original launch payload for recovery. That
- * payload is just as public in an HTTP backup as an ordinary match launch. */
+/** Bo3 phase data keeps its phase but not each seat's main/sideboard partition. */
+function redactBo3StateDecks(bo3State: unknown): void {
+  if (!Array.isArray(bo3State)) return;
+  for (const match of bo3State) {
+    if (isJsonRecord(match)) delete match.decks;
+  }
+}
+
+/** Held Bo3 commands retain their original launch payload for recovery, and a
+ * `SubmitSideboard` command carries the submitted partition itself. Both are
+ * just as public in an HTTP backup as an ordinary match launch. */
 function redactIntergameCommandLaunchPools(intergameCommands: unknown): void {
   if (!Array.isArray(intergameCommands)) return;
   for (const command of intergameCommands) {
-    if (!isJsonRecord(command) || !isJsonRecord(command.launchPayload)) continue;
-    if (!isJsonRecord(command.launchPayload.deckPayload)) continue;
-    delete command.launchPayload.deckPayload.booster_pack_pool;
+    if (!isJsonRecord(command)) continue;
+    if (isJsonRecord(command.launchPayload)) redactLaunchDecks(command.launchPayload);
+    if (isJsonRecord(command.payload)) {
+      delete command.payload.main;
+      delete command.payload.sideboard;
+    }
+    // Checksums of the launch / sideboard payload just redacted (see the
+    // `launchDigests` note in `sanitizePublicBackup`).
+    delete command.launchDigest;
+    delete command.payloadDigest;
   }
 }
 
@@ -164,6 +201,9 @@ function redactDraftSessionObject(session: Record<string, unknown>): void {
   // knowing every card still to come. Listed last but redacted on the same
   // terms: the mirror above is only true if it is complete.
   delete session.packs_by_seat;
+  // EVERY SEAT'S ACCEPTED DECK. Private until the match launches it to the
+  // opponent. Mirrors `submitted_decks` in `NESTED_DRAFT_SECRET_KEYS`.
+  delete session.submitted_decks;
   if (isJsonRecord(session.config)) {
     // THE SEED IS THE DRAW ORDER. `main_stack`'s order "is the `rng_seed`'s
     // secret" (`draft_core::types`), so shipping the seed while stripping the
@@ -328,6 +368,13 @@ function hostDraftSeed(): number {
   return values[0]!;
 }
 
+// The backup server accepts exactly six uppercase ASCII alphanumerics as a
+// `draft_code` (`is_valid_draft_code`, crates/phase-server/src/admin.rs) and
+// answers 400 to anything else. Reduced modulo 36^6 from one 32-bit draw; the
+// code is a public row key, so the slight modulo bias is not a secrecy concern.
+const DRAFT_CODE_LENGTH = 6;
+const DRAFT_CODE_SPACE = 36 ** DRAFT_CODE_LENGTH;
+
 /**
  * A public draft code, drawn from its OWN randomness.
  *
@@ -347,7 +394,7 @@ function hostDraftSeed(): number {
 function hostDraftCode(): string {
   const values = new Uint32Array(1);
   crypto.getRandomValues(values);
-  return `draft-${values[0]!.toString(16).padStart(8, "0")}`;
+  return (values[0]! % DRAFT_CODE_SPACE).toString(36).toUpperCase().padStart(DRAFT_CODE_LENGTH, "0");
 }
 
 /**
@@ -1417,7 +1464,12 @@ export class P2PDraftHost {
       // abandoned. Retained, it would sit in `pendingDraftSnapshot` and be
       // flushed AHEAD of newer state by the next persist, writing the
       // abandoned draft to IndexedDB where a reload would restore it.
-      await this.persistSessionStrict({ retainFailedDraftSnapshot: false });
+      //
+      // `forceBackupUpload` makes THIS started snapshot attempt the existing
+      // best-effort backup POST at startup (when persistence and a backup
+      // endpoint are configured) instead of waiting BACKUP_INTERVAL_PICKS
+      // picks. It does not guarantee the server stored the row.
+      await this.persistSessionStrict({ retainFailedDraftSnapshot: false, forceBackupUpload: true });
     } catch (err) {
       this.draftStarted = false;
       this.draftCode = "";
@@ -3777,12 +3829,13 @@ export class P2PDraftHost {
    * retaining its failed engine snapshot for replay.
    */
   private persistSessionStrict(
-    options: { retainFailedDraftSnapshot?: boolean } = {},
+    options: { retainFailedDraftSnapshot?: boolean; forceBackupUpload?: boolean } = {},
   ): Promise<void> {
     if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
     return this.enqueuePersistSession(
       this.draftStarted ? undefined : this.buildPersistedSnapshot(null),
       options.retainFailedDraftSnapshot,
+      options.forceBackupUpload,
     );
   }
 
@@ -3794,6 +3847,7 @@ export class P2PDraftHost {
   private enqueuePersistSession(
     snapshotAtMutation?: PersistedDraftHostSession,
     retainFailedDraftSnapshot = true,
+    forceBackupUpload = false,
   ): Promise<void> {
     if (!this.persistenceId || this.persistenceClosed) return Promise.resolve();
     const persist = this.persistQueue.then(async () => {
@@ -3820,6 +3874,9 @@ export class P2PDraftHost {
       }
 
       // Server backup upload (D-08, T-60-11: rate-limited to every N picks)
+      // `forceBackupUpload` is bound to this queued snapshot, so an earlier
+      // queued lobby save cannot consume it.
+      if (forceBackupUpload) this.picksSinceLastBackup = P2PDraftHost.BACKUP_INTERVAL_PICKS;
       this.picksSinceLastBackup++;
       if (this.backupEndpoint && this.picksSinceLastBackup >= P2PDraftHost.BACKUP_INTERVAL_PICKS) {
         this.picksSinceLastBackup = 0;

@@ -181,8 +181,8 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
 
     // `PlayerDeckPayload`'s deck fields are plain `Vec<DeckEntry>` — deref
     // the Arc then deep-clone so the payload owns its own vec.
-    // Propagate `bracket_tier` so the pool rebuilt by `load_next_game_decks`
-    // in the next game carries the same declared tier as the current game.
+    // Propagate both bracket inputs and the printings record so the pool rebuilt by
+    // `load_next_game_decks` in the next game retains the same reconciled effective tier.
     //
     // Seats >= 2 are AI players (e.g., cEDH 4-player Bo3). Collect their pools
     // so `bracket_tier = Cedh` is not silently dropped between games.
@@ -215,6 +215,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                         .unwrap_or_default(),
                     signature_spell: (*p.current_signature_spell).clone(),
                     bracket_tier: p.bracket_tier,
+                    estimated_bracket_tier: p.estimated_bracket_tier,
                     printings: Vec::new(),
                     printing_entry_names: Vec::new(),
                 },
@@ -237,6 +238,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 sticker_sheets: state.players[0].sticker_sheets.clone(),
                 signature_spell: (*p0.current_signature_spell).clone(),
                 bracket_tier: p0.bracket_tier,
+                estimated_bracket_tier: p0.estimated_bracket_tier,
                 printings: Vec::new(),
                 printing_entry_names: Vec::new(),
             },
@@ -255,6 +257,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 sticker_sheets: state.players[1].sticker_sheets.clone(),
                 signature_spell: (*p1.current_signature_spell).clone(),
                 bracket_tier: p1.bracket_tier,
+                estimated_bracket_tier: p1.estimated_bracket_tier,
                 printings: Vec::new(),
                 printing_entry_names: Vec::new(),
             },
@@ -327,6 +330,25 @@ pub fn handle_game_over_transition(state: &mut GameState) {
         }
     };
     state.waiting_for = between_games_sideboard_prompt(state, PlayerId(0));
+}
+
+/// The game of the match whose position `state` holds: the game in progress,
+/// or, between games, the game that just ended.
+///
+/// `handle_game_over_transition` numbers the next game as soon as one ends,
+/// while the board and the log still hold the game that ended, and the
+/// decisions taken before the restart (the sideboarding, CR 100.4, and the
+/// loser's play/draw choice, CR 103.1) are made on that position. A match a
+/// game's end completes keeps that game's number. One a trusted forfeit
+/// completes between games
+/// (`apply_trusted_match_forfeit`) keeps the number of a game that never
+/// began, but no caller logs its events and a completed match asks no
+/// decision.
+pub fn game_on_board(state: &GameState) -> u8 {
+    match state.match_phase {
+        MatchPhase::InGame | MatchPhase::Completed => state.game_number,
+        MatchPhase::BetweenGames => state.game_number.saturating_sub(1),
+    }
 }
 
 /// Completes an unfinished two-seat best-of-three through a transport-trusted
@@ -1550,19 +1572,19 @@ mod tests {
         state.deck_pools = vec![
             PlayerDeckPool {
                 player: PlayerId(0),
-                bracket_tier: CommanderBracketTier::Core,
+                bracket_tier: Some(CommanderBracketTier::Core),
                 current_main: std::sync::Arc::new(vec![entry("P0", 1)]),
                 ..Default::default()
             },
             PlayerDeckPool {
                 player: PlayerId(1),
-                bracket_tier: CommanderBracketTier::Optimized,
+                bracket_tier: Some(CommanderBracketTier::Optimized),
                 current_main: std::sync::Arc::new(vec![entry("P1", 1)]),
                 ..Default::default()
             },
             PlayerDeckPool {
                 player: PlayerId(2),
-                bracket_tier: CommanderBracketTier::Cedh,
+                bracket_tier: Some(CommanderBracketTier::Cedh),
                 current_main: std::sync::Arc::new(vec![entry("AI", 1)]),
                 ..Default::default()
             },
@@ -1573,7 +1595,7 @@ mod tests {
 
         assert_eq!(
             payload.player.bracket_tier,
-            CommanderBracketTier::Core,
+            Some(CommanderBracketTier::Core),
             "player seat bracket_tier must round-trip"
         );
         assert!(
@@ -1582,7 +1604,7 @@ mod tests {
         );
         assert_eq!(
             payload.opponent.bracket_tier,
-            CommanderBracketTier::Optimized,
+            Some(CommanderBracketTier::Optimized),
             "opponent seat bracket_tier must round-trip"
         );
         assert_eq!(
@@ -1592,8 +1614,49 @@ mod tests {
         );
         assert_eq!(
             payload.ai_decks[0].bracket_tier,
-            CommanderBracketTier::Cedh,
+            Some(CommanderBracketTier::Cedh),
             "AI seat bracket_tier (Cedh) must be propagated — not silently dropped"
+        );
+    }
+
+    #[test]
+    fn deck_payload_from_current_pools_propagates_estimated_bracket_tier() {
+        use crate::game::bracket_estimate::CommanderBracketTier;
+        use crate::types::game_state::PlayerDeckPool;
+
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools = vec![
+            PlayerDeckPool {
+                player: PlayerId(0),
+                estimated_bracket_tier: Some(CommanderBracketTier::Upgraded),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(1),
+                estimated_bracket_tier: Some(CommanderBracketTier::Optimized),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(2),
+                estimated_bracket_tier: Some(CommanderBracketTier::Core),
+                ..Default::default()
+            },
+        ];
+
+        let payload = deck_payload_from_current_pools(&state)
+            .expect("deck_payload_from_current_pools must succeed with three pools");
+
+        assert_eq!(
+            payload.player.estimated_bracket_tier,
+            Some(CommanderBracketTier::Upgraded)
+        );
+        assert_eq!(
+            payload.opponent.estimated_bracket_tier,
+            Some(CommanderBracketTier::Optimized)
+        );
+        assert_eq!(
+            payload.ai_decks[0].estimated_bracket_tier,
+            Some(CommanderBracketTier::Core)
         );
     }
 
@@ -1791,6 +1854,14 @@ mod tests {
         assert!(
             result.log_entries.iter().all(|entry| entry.turn <= 1),
             "a fresh game must not inherit the previous game's turn 73 context"
+        );
+        assert!(
+            !result.log_entries.is_empty()
+                && result
+                    .log_entries
+                    .iter()
+                    .all(|entry| entry.game_number == 2),
+            "the action that starts game two logs it in game two"
         );
     }
 }

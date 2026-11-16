@@ -265,16 +265,96 @@
     "clearOverride": "Borrar anulación de ilustración"
   },
   "bracket": {
-    "unavailable": "La estimación de nivel no está disponible en esta versión.",
+    "card": {
+      "estimatedLabel": "Bracket estimado",
+      "tierName": "B{{tier}} {{label}}",
+      "tierShort": "B{{tier}}",
+      "declaredNone": "Declarado: ninguno",
+      "declared": "Declarado: B{{tier}} {{label}}",
+      "youMarker": "Tú",
+      "belowFloor": "Declaraste B{{declared}}, pero este mazo no puede estar por debajo de B{{floor}}. La IA juega tu B{{declared}} declarado.",
+      "partialCoverage_one": "No se encontró {{count}} nombre de carta; los recuentos pueden ser bajos",
+      "partialCoverage_few": "No se encontraron {{count}} nombres de cartas; los recuentos pueden ser bajos",
+      "partialCoverage_many": "No se encontraron {{count}} nombres de cartas; los recuentos pueden ser bajos",
+      "partialCoverage_other": "No se encontraron {{count}} nombres de cartas; los recuentos pueden ser bajos",
+      "combosUnchecked": "Los combos de dos cartas no se comprobaron en esta compilación. Responde la pregunta de combos de arriba para incluirlos.",
+      "tabsLabel": "Detalles del bracket",
+      "tabWhy": "Por qué B{{tier}}",
+      "tabBringDown": "Bajarlo",
+      "commanderTag": "Comandante",
+      "listComma": ", ",
+      "listOr": " o ",
+      "why": {
+        "nothingRaises": "Nada en este mazo lo eleva por encima de B2, donde empieza toda estimación.",
+        "rulesOutB1": "Esto descarta declarar B1:"
+      },
+      "reason": {
+        "cardRule": "{{axis}}: {{count}}",
+        "comboStandalone": "Combo de dos cartas",
+        "comboEarly": "Combo temprano de dos cartas",
+        "ownerAnswer": "Tu respuesta sobre combos",
+        "ownerIntended": "Indicaste que este mazo tiene un combo de dos cartas intencionado.",
+        "ownerIntendedEarly": "Indicaste que este mazo tiene un combo de dos cartas temprano.",
+        "ownerIntendedLate": "Indicaste que este mazo tiene un combo de dos cartas que se arma tarde.",
+        "comboFromTable": "(combo)"
+      },
+      "combo": {
+        "assembles": "se arma por {{cost}} de maná"
+      },
+      "explain": {
+        "cardRule": "B{{tier}} permite hasta {{allowed}}; este mazo tiene {{observed}}.",
+        "cardRuleNone": "B{{tier}} no permite ninguna; este mazo tiene {{observed}}.",
+        "comboStandalone": "B1 y B2 no permiten combos infinitos de dos cartas intencionados.",
+        "comboEarly": "B3 solo permite combos de dos cartas si se arman tarde (más de {{ceiling}} de maná).",
+        "ownerAnswer": "phase no puede comprobar esta respuesta; usa lo que indicaste. Cámbiala en la pregunta de combos de arriba."
+      },
+      "source": "{{document}}, {{published}} ↗",
+      "ladder": {
+        "removeAll_one": "Quítala:",
+        "removeAll_few": "Quita las {{count}}:",
+        "removeAll_many": "Quita las {{count}}:",
+        "removeAll_other": "Quita las {{count}}:",
+        "removeSome_one": "Quita {{count}} de:",
+        "removeSome_few": "Quita {{count}} de:",
+        "removeSome_many": "Quita {{count}} de:",
+        "removeSome_other": "Quita {{count}} de:",
+        "breakCombo": "Rompe el combo",
+        "removeOneOf": "Quita una de:",
+        "removeThis": "Quita:",
+        "replaceCommander_one": "Para bajar más también hace falta otro comandante:",
+        "replaceCommander_few": "Para bajar más también hacen falta {{count}} comandantes distintos:",
+        "replaceCommander_many": "Para bajar más también hacen falta {{count}} comandantes distintos:",
+        "replaceCommander_other": "Para bajar más también hacen falta {{count}} comandantes distintos:",
+        "changeComboAnswer": "Cambia tu respuesta sobre combos en la pregunta de arriba.",
+        "footnote": "B2 es lo más bajo que llega la estimación; B1 depende de la temática del mazo."
+      }
+    },
+    "unavailable": "La estimación de nivel necesita datos de cartas que aún no se han cargado.",
     "addCommander": "Añade un comandante para ver tu estimación de nivel.",
-    "estimated": "Estimado: B{{tier}} {{label}}",
-    "manual": "Manual: B{{tier}} {{label}}",
-    "mismatch": " ⚠ discrepancia",
-    "hideBreakdown": "Ocultar desglose",
-    "showBreakdown": "Mostrar desglose",
-    "hideBreakdownButton": "▲ Ocultar desglose",
-    "showBreakdownButton": "▼ Mostrar desglose",
-    "forced": "(forzado B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Negación masiva de tierras",
+      "extraTurns": "Turnos extra",
+      "efficientTutors": "Tutores eficientes"
+    },
+    "combo": {
+      "attribution": "Datos de combos: {{attribution}}, captura del {{date}}",
+      "outcome": {
+        "wins": "Gana la partida",
+        "unbounded": "{{resource}} sin límite"
+      },
+      "resource": {
+        "mana": "maná",
+        "damage": "daño",
+        "lifeLoss": "pérdida de vidas",
+        "lifegain": "ganancia de vidas",
+        "mill": "milleo",
+        "draw": "robo de cartas",
+        "tokens": "fichas",
+        "combat": "fases de combate",
+        "turns": "turnos"
+      }
+    },
     "dataVersion": "Datos: {{version}}",
     "aboutBrackets": "Acerca de los niveles ↗",
     "estimatedChip": "Estimado: B{{tier}}",
@@ -285,6 +365,37 @@
   "bracketPicker": {
     "ariaLabel": "Nivel del mazo",
     "unrated": "Sin clasificar"
+  },
+  "signals": {
+    "title": "Señales del mazo",
+    "disclaimer": "Estadísticas descriptivas del texto de carta analizado del mazo. No son criterios de nivel y nunca cambian la estimación.",
+    "avgManaValue": "Valor de maná promedio (no tierras): {{value}}",
+    "notMeasurable": "no medible",
+    "noCommander": "Añade un comandante para ver las señales del mazo.",
+    "unavailable": "Las señales del mazo necesitan datos de cartas, que aún no se han cargado.",
+    "unresolved": "No se encontraron {{n}} nombres de cartas en los datos de cartas.",
+    "kind": {
+      "counterspells": "Contrahechizos",
+      "spot_removal": "Remoción puntual",
+      "sweepers": "Limpiamesas",
+      "card_advantage": "Ventaja de cartas",
+      "free_interaction": "Interacción gratuita",
+      "mana_producers": "Productores de maná",
+      "land_fetch": "Búsqueda de tierras",
+      "rituals": "Rituales",
+      "extra_land_drops": "Tierras adicionales por turno"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Combo infinito de dos cartas",
+    "question": "¿Combo infinito intencional de dos cartas?",
+    "undeclared": "Sin respuesta",
+    "noneIntended": "Ninguno intencional",
+    "intended": "Intencional",
+    "windowAriaLabel": "¿Cuándo puede montarse?",
+    "windowUnstated": "Sin especificar",
+    "windowEarly": "Juego temprano",
+    "windowLate": "Solo juego tardío"
   },
   "warnings": {
     "commanderCount": "El mazo tiene {{count}} cartas (necesita exactamente {{expected}})",

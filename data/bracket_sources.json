@@ -1,0 +1,46 @@
+{
+  "description": "Official Wizards of the Coast Commander bracket sources. The source text is downloaded locally and is not redistributed by this repository. Each SHA-256 value fingerprints the .txt rendition retrieved on 2026-09-12 and is used only as a drift detector; the per-source anchor is the assertion enforced by the fetch script. These are live pages, so drift is expected over time and a drift warning is not a failure.",
+  "retrieved": "2026-09-12",
+  "sources": [
+    {
+      "slug": "commander-format-page",
+      "url": "https://magic.wizards.com/en/formats/commander",
+      "published": "2026-02-09",
+      "retrieved": "2026-09-12",
+      "sha256": "a73bb9bf8759187eef733a4f94dc45fa423e6c1d0e6358ce94778a8e8f7e3082",
+      "anchor": "There is also a list of what is expected at that level in a few barometers: two-card infinite combos, extra turns, mass land denial.",
+      "paraphrase": "The live format page; names the three bracket barometers and the Game Changers list.",
+      "implements": []
+    },
+    {
+      "slug": "introducing-commander-brackets-beta",
+      "url": "https://magic.wizards.com/en/news/announcements/introducing-commander-brackets-beta",
+      "published": "2025-02-11",
+      "retrieved": "2026-09-12",
+      "sha256": "3ebe0a5d61a1bfb26a54228cd55dd43571a6dac78de8dea9d0ace5cdb175fc20",
+      "anchor": "keep lands tapped, or change what mana is produced by four or more lands per player",
+      "paraphrase": "Original bracket announcement; defines the mass land denial class and names its five examples.",
+      "implements": []
+    },
+    {
+      "slug": "commander-brackets-beta-update-october-21-2025",
+      "url": "https://magic.wizards.com/en/news/announcements/commander-brackets-beta-update-october-21-2025",
+      "published": "2025-10-21",
+      "retrieved": "2026-09-12",
+      "sha256": "67c10df306cf9132ebc7d7595314a33ec617e9cef47e0d680a283a45ff88d4b9",
+      "anchor": "remove the tutor restrictions from Commander Brackets entirely",
+      "paraphrase": "Re-anchors each bracket on a turns-before-win expectation, decouples Bracket 2 from precons, and removes the tutor restrictions entirely.",
+      "implements": []
+    },
+    {
+      "slug": "commander-brackets-beta-update-february-9-2026",
+      "url": "https://magic.wizards.com/en/news/announcements/commander-brackets-beta-update-february-9-2026",
+      "published": "2026-02-09",
+      "retrieved": "2026-09-12",
+      "sha256": "99122a108786d945e8218f141d1d55cf3f0b92beb1a75d6af7451778483d40a7",
+      "anchor": "tool to guide pregame conversations",
+      "paraphrase": "Latest update; adds Farewell and Biorhythm to Game Changers and restates that brackets guide a pregame conversation rather than arbitrate one.",
+      "implements": []
+    }
+  ]
+}
