@@ -660,7 +660,7 @@ fn colorless_requirement_case(
     let object = &runner.state().objects[&colorless];
     assert_eq!(
         object.mana_spent_to_cast_amount, expected_mana_amount,
-        "the Swamps paid the {C} pip and any generic cost"
+        "the Swamps paid the {{C}} pip and any generic cost"
     );
     // CR 609.4b: the concession never changes what mana was actually spent.
     let black = expected_mana_amount - u32::from(wastes.is_some());
