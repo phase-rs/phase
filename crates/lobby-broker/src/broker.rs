@@ -67,7 +67,8 @@ pub const MAX_TOURNAMENT_ENTRIES: usize =
 /// retained decks — serialized as one value.
 ///
 /// The whole broker is persisted under a single Durable Object storage key
-/// (`ctx.storage.put(SNAPSHOT_KEY, broker.snapshot())`, where
+/// (`ctx.storage.put(SNAPSHOT_KEY, broker.snapshot())`, where `SNAPSHOT_KEY` is
+/// [`SNAPSHOT_STORAGE_KEY`] and
 /// [`WasmBroker::snapshot`](../../../lobby-worker/broker-wasm) is
 /// `serde_json::to_string(&broker)`). Cloudflare's SQLite-backed Durable Objects
 /// document that a write's *key and value combined cannot exceed 8 MB* (the same
@@ -83,24 +84,40 @@ pub const MAX_TOURNAMENT_ENTRIES: usize =
 /// crosses; a refusal rolls the growth back so the last persistable state — decks and readiness included —
 /// is preserved.
 ///
-/// Set to 7 MiB, a deliberate 1 MiB margin below the 8 MB ceiling: it absorbs the
-/// storage key's own bytes, SQLite per-row overhead, the ambiguity between 8 MB
-/// as 8·10⁶ and 8·2²⁰, and future `Broker` fields, while still leaving room for
+/// Set to 7 MiB, a deliberate margin of over 640 KiB below
+/// [`PHYSICAL_SNAPSHOT_LIMIT_BYTES`] (which already takes the decimal reading of
+/// 8 MB and subtracts the storage key): it absorbs SQLite per-row overhead and
+/// future `Broker` fields, while still leaving room for
 /// [`MAX_TOURNAMENT_ENTRIES`] events at the full per-event guarantee
 /// ([`EVENT_RESERVE_ENCODED_BYTES`]). Conservative on purpose —
 /// the cost of refusing one late submission is far lower than the cost of a
 /// snapshot that cannot be written at all.
 pub const MAX_SNAPSHOT_ENCODED_BYTES: usize = 7 * 1024 * 1024;
 
-/// The physical single-key value ceiling of the Durable Object store the broker
-/// snapshot lives under (Cloudflare's 8 MiB). Distinct from
-/// [`MAX_SNAPSHOT_ENCODED_BYTES`], which is the *admission* budget kept
-/// deliberately below it: reservations make growth inside unused room free of
-/// charge against the committed total, so a restored snapshot already over the
-/// admission budget can still grow in actual encoded bytes. The persistence
-/// boundary therefore also refuses any growth of the actual encoded size past
-/// this value, so the Worker's `put` can never be handed an unstorable value.
-pub const PHYSICAL_SNAPSHOT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
+/// The Durable Object storage key the Worker persists the broker snapshot
+/// under. The Worker reads it through the broker WASM glue rather than spelling
+/// its own copy, so the key whose bytes [`PHYSICAL_SNAPSHOT_LIMIT_BYTES`]
+/// subtracts is the key the `put` writes.
+pub const SNAPSHOT_STORAGE_KEY: &str = "broker_snapshot";
+
+/// Cloudflare's per-write ceiling for SQLite-backed Durable Objects: "Key and
+/// value combined cannot exceed 8 MB"
+/// (<https://developers.cloudflare.com/durable-objects/platform/limits/>). The
+/// page never says whether that MB is 10⁶ or 2²⁰ bytes, so this takes the
+/// smaller, decimal reading.
+const DURABLE_OBJECT_KEY_VALUE_LIMIT_BYTES: usize = 8_000_000;
+
+/// The largest encoded snapshot value the store accepts under
+/// [`SNAPSHOT_STORAGE_KEY`]: the key-and-value ceiling less the key's own
+/// bytes. Distinct from [`MAX_SNAPSHOT_ENCODED_BYTES`], which is the
+/// *admission* budget kept deliberately below it: reservations make growth
+/// inside unused room free of charge against the committed total, so a
+/// restored snapshot already over the admission budget can still grow in
+/// actual encoded bytes. The persistence boundary therefore also refuses any
+/// growth of the actual encoded size past this value, so the Worker's `put` can
+/// never be handed an unstorable key and value.
+pub const PHYSICAL_SNAPSHOT_LIMIT_BYTES: usize =
+    DURABLE_OBJECT_KEY_VALUE_LIMIT_BYTES - SNAPSHOT_STORAGE_KEY.len();
 
 const _: () = assert!(MAX_SNAPSHOT_ENCODED_BYTES < PHYSICAL_SNAPSHOT_LIMIT_BYTES);
 
@@ -8137,6 +8154,83 @@ mod tests {
             let out = broker.handle(&mut alice, submit_frame(&victim, &token, 2_000, 43), &env);
             assert_eq!(ack_of(&out).0, TournamentRequestId(43));
             assert!(broker.snapshot_encoded_bytes() < size_before);
+        }
+
+        /// The physical ceiling leaves room for the storage key: a restored
+        /// over-budget snapshot may grow to exactly [`PHYSICAL_SNAPSHOT_LIMIT_BYTES`]
+        /// of value, whose `put` together with [`SNAPSHOT_STORAGE_KEY`] fills the
+        /// store's decimal 8 MB, and one byte more is refused with its request id
+        /// and the prior state intact; a write that shrinks the value still
+        /// succeeds from the boundary.
+        #[test]
+        fn the_physical_ceiling_counts_the_storage_key_at_the_exact_boundary() {
+            assert_eq!(
+                PHYSICAL_SNAPSHOT_LIMIT_BYTES + SNAPSHOT_STORAGE_KEY.len(),
+                8_000_000,
+                "key and value together fill exactly the decimal 8 MB"
+            );
+            let env = FakeEnv::new();
+            let (mut broker, victim) = restored_near_the_physical_ceiling(&env, 20_000);
+            let mut alice = ConnState::default();
+            let token = join_tournament(&mut alice, &mut broker, &env, &victim, "a", "Alice");
+            let restore = |broker: &Broker| -> Broker {
+                serde_json::from_str(&serialized(broker)).expect("snapshot restores")
+            };
+
+            // The submission's exact growth, measured on a restored copy.
+            let growth = {
+                let mut probe = restore(&broker);
+                let mut conn = alice.clone();
+                let before = probe.snapshot_encoded_bytes();
+                let out = probe.handle(&mut conn, submit_frame(&victim, &token, 10_000, 40), &env);
+                ack_of(&out);
+                probe.snapshot_encoded_bytes() - before
+            };
+            // Tune the victim's name so the same submission lands `over` bytes past
+            // the ceiling, then restore the result the way a cold start would.
+            let land_past_ceiling = |broker: &Broker, over: usize| -> Broker {
+                let mut tuned = restore(broker);
+                let name = tuned.tournaments().get(&victim).expect("event").name.len();
+                let target = PHYSICAL_SNAPSHOT_LIMIT_BYTES + over - growth;
+                let chars = name + target - tuned.snapshot_encoded_bytes();
+                set_event_name_chars(&mut tuned, &victim, chars);
+                assert_eq!(
+                    tuned.snapshot_encoded_bytes(),
+                    target,
+                    "fixture lands on target"
+                );
+                let restored = restore(&tuned);
+                assert!(
+                    restored.committed_bytes() > MAX_SNAPSHOT_ENCODED_BYTES,
+                    "reach guard: the boundary is reached only past the admission budget"
+                );
+                restored
+            };
+
+            // One byte past the ceiling: refused, correlated, nothing changed.
+            let mut broker = land_past_ceiling(&broker, 1);
+            let before = serialized(&broker);
+            let before_conn = alice.clone();
+            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 10_000, 41), &env);
+            assert_eq!(serialized(&broker), before, "the prior snapshot is intact");
+            assert_eq!(alice, before_conn);
+            let (id, reason) = rejection_of(&out);
+            assert_eq!(id, TournamentRequestId(41), "refusal keeps its correlation");
+            assert!(reason.contains("at capacity"), "{reason}");
+
+            // Exactly at the ceiling: admitted, and the value fills it to the byte.
+            let mut broker = land_past_ceiling(&broker, 0);
+            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 10_000, 42), &env);
+            assert_eq!(ack_of(&out).0, TournamentRequestId(42));
+            assert_eq!(
+                broker.snapshot_encoded_bytes(),
+                PHYSICAL_SNAPSHOT_LIMIT_BYTES
+            );
+
+            // From the boundary, a write that reduces the encoded size succeeds.
+            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 2_000, 43), &env);
+            assert_eq!(ack_of(&out).0, TournamentRequestId(43));
+            assert!(broker.snapshot_encoded_bytes() < PHYSICAL_SNAPSHOT_LIMIT_BYTES);
         }
 
         /// F4: a request for a tournament that does not exist is refused with its

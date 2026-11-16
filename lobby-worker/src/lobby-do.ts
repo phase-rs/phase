@@ -33,6 +33,7 @@ import {
   lobby_protocol_version,
   min_supported_lobby_protocol,
   protocol_version,
+  snapshot_storage_key,
   WasmBroker,
 } from "../broker-wasm-pkg/broker.js";
 import {
@@ -207,7 +208,8 @@ interface CallResult {
   reject?: string;
 }
 
-const SNAPSHOT_KEY = "broker_snapshot";
+// From the broker, whose snapshot capacity bound subtracts this key's bytes.
+const SNAPSHOT_KEY = snapshot_storage_key();
 
 // ── Usage analytics (durable, DO-storage-backed) ────────────────────────────
 // The single global DO is a globally-consistent ledger, so a handful of KV

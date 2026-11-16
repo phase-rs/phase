@@ -17,7 +17,7 @@ use lobby_broker::{
     score, validate_announcement, Broker, BrokerEnv, ConnState, InfoMatch, InfoMismatchField,
     LobbyServerMessage, Outbound, ParsedFrame, PersistedChange, RawAnnouncement,
     ServerAnnouncement, ServerCounters, ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH,
-    PROTOCOL_VERSION, RTT_BUCKET_EDGES_MS, SCORE_BUCKET_MS, SCORE_WINDOW_MS,
+    PROTOCOL_VERSION, RTT_BUCKET_EDGES_MS, SCORE_BUCKET_MS, SCORE_WINDOW_MS, SNAPSHOT_STORAGE_KEY,
 };
 use rand::Rng;
 use serde::Serialize;
@@ -339,6 +339,15 @@ impl Default for WasmBroker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The Durable Object storage key the shell persists [`WasmBroker::snapshot`]
+/// under. Read from the broker, which subtracts this key's bytes from the
+/// store's key-and-value ceiling when it admits a write, so the key the shell
+/// writes cannot drift from the one the capacity bound accounts for.
+#[wasm_bindgen]
+pub fn snapshot_storage_key() -> String {
+    SNAPSHOT_STORAGE_KEY.to_string()
 }
 
 /// The broker's per-viewer projection of one serialized fan-out frame.
