@@ -32708,6 +32708,9 @@ pub mod tests {
     /// exactly like its printed twin: on a shared team turn one `PhaseChanged`
     /// yields one firing per eligible opponent, each firing bound to its own
     /// player (occurrence event + scoped-player stamp).
+    /// No printed card has this delayed shape; the nearest is Jace, Multiverse
+    /// Architect's printed "At the beginning of combat on each opponent's turn,
+    /// they may pay {2}" trigger.
     /// REVERT-FAIL (fan-out removed): a single firing bound to P2.
     #[test]
     fn delayed_phase_trigger_fans_out_per_opponent_on_shared_turn() {
@@ -32783,8 +32786,8 @@ pub mod tests {
 
     /// CR 805.4d + the Bow 2017-06-13 ruling — Bow to My Command's "your
     /// opponents' end step" names the TEAM, so its trigger carries no
-    /// per-player scope and keeps the single firing; the same body under an
-    /// "each opponent's" scope fans out.
+    /// per-player scope and keeps the single firing; a body that refers to the
+    /// scoped player under an "each opponent's" scope fans out.
     #[test]
     fn collective_team_payment_keeps_single_firing_on_shared_turn() {
         // Same shared-turn board as the parity test: P0+P1 vs P2+P3, P0
@@ -32809,9 +32812,7 @@ pub mod tests {
         trigger.phase = Some(crate::types::phase::Phase::BeginCombat);
         trigger.constraint =
             Some(crate::types::ability::TriggerConstraint::OnlyDuringOpponentsTurn);
-        // Bow's shape: optional team-collective tap payment by the triggering
-        // opponent. The payer IS turn-player-bound — only the `collective`
-        // stamp keeps this singular, which is exactly what the test pins.
+        // Bow's body: what keeps it singular is that its trigger has no per-player scope.
         let mut ability = ResolvedAbility::new(
             Effect::PayCost {
                 cost: crate::types::ability::AbilityCost::TapCreatures {
@@ -32843,12 +32844,21 @@ pub mod tests {
             None,
             "the collective firing must stay single on a shared turn"
         );
+        // Control: the per-player scope with a body that reads the scoped player fans out.
         trigger.valid_target = Some(TargetFilter::Opponent);
+        let scoped = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            controller,
+        );
         assert_eq!(
-            phase_firing_players(&state, &raw, &trigger, &ctx, &ability)
-                .map(|(_, players)| players),
+            phase_firing_players(&state, &raw, &trigger, &ctx, &scoped).map(|(_, players)| players),
             Some(vec![p2, PlayerId(3)]),
-            "control: an \"each opponent's\" scope fans the same body out"
+            "control: an \"each opponent's\" scope fans a scoped-player body out"
         );
     }
 
