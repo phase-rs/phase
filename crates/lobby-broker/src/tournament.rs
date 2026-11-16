@@ -1138,10 +1138,8 @@ impl TournamentMeta {
         self.players.iter().find(|p| p.player_key == player_key)
     }
 
-    /// The bytes this event's retained decks add to its persisted record: each
-    /// submitted deck's encoding ([`deck_encoded_bytes`]) plus the
-    /// [`DECK_FIELD_ENCODED_OVERHEAD_BYTES`] of its `deck` field, which is omitted
-    /// from the record while no deck is held. Exactly what a submission or
+    /// The bytes this event's retained decks add to its persisted record: the sum
+    /// of each submitted deck's [`retained_deck_charge`]. Exactly what a submission or
     /// withdrawal changes in the record's encoded size, so the rest of the record
     /// (the event's metadata) is independent of deck traffic. The deck account of
     /// the persistence boundary's reservation
@@ -1150,7 +1148,7 @@ impl TournamentMeta {
         self.players
             .iter()
             .filter_map(|p| p.deck.as_ref())
-            .map(|deck| deck_encoded_bytes(deck).saturating_add(DECK_FIELD_ENCODED_OVERHEAD_BYTES))
+            .map(retained_deck_charge)
             .fold(0usize, usize::saturating_add)
     }
 
@@ -2205,8 +2203,8 @@ pub enum TournamentExpiryEvent {
 /// whole broker under one Durable Object key — enforced on the complete snapshot
 /// by the caller against [`crate::broker::MAX_SNAPSHOT_ENCODED_BYTES`], because
 /// entrant/pairing metadata in that same value grows independently of deck bytes
-/// and no deck sub-budget can bound it. Measured with the [`deck_encoded_bytes`]
-/// codec.
+/// and no deck sub-budget can bound it. Measured in [`retained_deck_charge`], the
+/// same unit the persistence boundary's deck reservation is charged in.
 pub const MAX_EVENT_DECK_ENCODED_BYTES: usize = 8 * MAX_SINGLE_DECK_ENCODED_BYTES;
 
 /// Per-deck ceiling on a single entrant's encoded deck, enforced at
@@ -2217,8 +2215,9 @@ pub const MAX_EVENT_DECK_ENCODED_BYTES: usize = 8 * MAX_SINGLE_DECK_ENCODED_BYTE
 /// entrants can always submit per event while sitting far above any
 /// legitimate deck: a full Commander or Oathbreaker deck with a printing for every
 /// card encodes to ~15 KB, an oversized supplementary deck to well under 64 KB. It
-/// is an abuse ceiling, not an expected size. Measured with the same
-/// [`deck_encoded_bytes`] codec as the per-event budget.
+/// is an abuse ceiling, not an expected size. Measured in the same
+/// [`retained_deck_charge`] as the per-event budget, so eight decks at this ceiling
+/// fill the event budget exactly.
 pub const MAX_SINGLE_DECK_ENCODED_BYTES: usize = 64 * 1024;
 
 /// What a retained deck adds to its entrant record beyond its own encoding: the
@@ -2226,17 +2225,24 @@ pub const MAX_SINGLE_DECK_ENCODED_BYTES: usize = 64 * 1024;
 /// restored from a released snapshot re-serializes byte for byte).
 const DECK_FIELD_ENCODED_OVERHEAD_BYTES: usize = ",\"deck\":".len();
 
-/// The exact byte cost `deck` adds to the persisted broker snapshot: its
-/// `serde_json` encoding, the same codec the lobby Durable Object snapshots the
-/// whole broker with ([`Broker::snapshot_json`](crate::Broker::snapshot_json), the ASCII-only codec in [`crate::snapshot_codec`]). Charging
-/// the encoded form — not a hand-picked subset of fields — counts every persisted
-/// field (the `printings` sidecar included, which a name-list sum omits entirely),
-/// JSON string escaping and per-entry / collection overhead, and stays correct
-/// when `DeckData` grows a field. Serialization is infallible for `DeckData`; a
+/// The exact byte cost `deck` adds to the persisted broker snapshot when an
+/// entrant retains it: its `serde_json` encoding plus the
+/// [`DECK_FIELD_ENCODED_OVERHEAD_BYTES`] of the `deck` member that holds it. The
+/// one unit every deck limit is checked in — the per-deck cap, the per-event
+/// budget and the persistence boundary's deck reservation
+/// ([`TournamentMeta::retained_deck_bytes`]) — so a deck admission accepts can
+/// never be charged more by the reservation. Encoded with the same codec the
+/// lobby Durable Object snapshots the whole broker with
+/// ([`Broker::snapshot_json`](crate::Broker::snapshot_json), the ASCII-only codec
+/// in [`crate::snapshot_codec`]). Charging the encoded form — not a hand-picked
+/// subset of fields — counts every persisted field (the `printings` sidecar
+/// included, which a name-list sum omits entirely), JSON string escaping and
+/// per-entry / collection overhead, and stays correct when `DeckData` grows a
+/// field. Serialization is infallible for `DeckData`; a
 /// hypothetical failure charges `usize::MAX`, so the budget check refuses rather
 /// than under-counts.
-fn deck_encoded_bytes(deck: &DeckData) -> usize {
-    crate::snapshot_codec::encoded_len(deck)
+pub(crate) fn retained_deck_charge(deck: &DeckData) -> usize {
+    crate::snapshot_codec::encoded_len(deck).saturating_add(DECK_FIELD_ENCODED_OVERHEAD_BYTES)
 }
 
 /// The pure registry of tournaments, mirroring
@@ -2790,8 +2796,8 @@ impl TournamentManager {
         env: &impl BrokerEnv,
     ) -> Result<(), String> {
         let now = env.now_ms() / 1000;
-        let incoming_bytes = deck_encoded_bytes(&deck);
-        // Sum the encoded bytes of every OTHER retained deck IN THIS EVENT — for the
+        let incoming_bytes = retained_deck_charge(&deck);
+        // Sum the charge of every OTHER retained deck IN THIS EVENT — for the
         // per-event isolation gate — minus the (code, player_key) slot this
         // submission overwrites, while the registry is still borrowed immutably so
         // the gate below is checked before any mutation. A resubmission replaces its
@@ -2809,7 +2815,7 @@ impl TournamentManager {
                 meta.players
                     .iter()
                     .filter(|p| p.player_key != player_key)
-                    .filter_map(|p| p.deck.as_ref().map(deck_encoded_bytes))
+                    .filter_map(|p| p.deck.as_ref().map(retained_deck_charge))
                     .sum()
             })
             .unwrap_or(0);
@@ -4357,7 +4363,7 @@ mod tests {
         // per-deck cap so each is individually admitted — the witness a name-only
         // accounting would score as zero bytes.
         let heavy = printings_only_deck(120);
-        let each = deck_encoded_bytes(&heavy);
+        let each = retained_deck_charge(&heavy);
         assert!(
             each > 0
                 && each <= MAX_SINGLE_DECK_ENCODED_BYTES
@@ -4412,10 +4418,10 @@ mod tests {
         // under the 512 KiB per-event budget — so only the individual cap can
         // refuse it (the per-event gate would not fire first).
         let oversized = printings_only_deck(300);
-        let encoded = deck_encoded_bytes(&oversized);
+        let charge = retained_deck_charge(&oversized);
         assert!(
-            encoded > MAX_SINGLE_DECK_ENCODED_BYTES && encoded < MAX_EVENT_DECK_ENCODED_BYTES,
-            "witness must sit between the per-deck cap and the per-event budget (was {encoded})"
+            charge > MAX_SINGLE_DECK_ENCODED_BYTES && charge < MAX_EVENT_DECK_ENCODED_BYTES,
+            "witness must sit between the per-deck cap and the per-event budget (was {charge})"
         );
         let err = mgr
             .submit_deck("T", &key(0), oversized, &env)

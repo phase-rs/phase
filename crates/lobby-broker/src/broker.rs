@@ -7586,7 +7586,10 @@ mod tests {
     // budget), then exercise each growth path at that edge.
     mod persistence_boundary {
         use super::*;
-        use crate::tournament::{MAX_EVENT_DECK_ENCODED_BYTES, MAX_SINGLE_DECK_ENCODED_BYTES};
+        use crate::inbound_guard::MAX_MAIN_DECK_ENTRIES;
+        use crate::tournament::{
+            retained_deck_charge, MAX_EVENT_DECK_ENCODED_BYTES, MAX_SINGLE_DECK_ENCODED_BYTES,
+        };
         use engine::starter_decks::DeckData;
 
         /// A deck whose encoded size grows by exactly one byte per character, so a
@@ -8091,6 +8094,111 @@ mod tests {
                 host.host_game.is_some(),
                 "a lobby listing is admitted at the ceiling: {out:?}"
             );
+        }
+
+        /// A deck that passes the inbound wire guard and whose
+        /// [`retained_deck_charge`] is exactly `charge` bytes: a full main deck of
+        /// 120-byte names, topped up with sideboard names, then trimmed one byte
+        /// per main-deck name. `fill` varies the content between submissions.
+        fn deck_charging(charge: usize, fill: char) -> DeckData {
+            let name = fill.to_string().repeat(120);
+            let mut deck = DeckData {
+                main_deck: vec![name.clone(); MAX_MAIN_DECK_ENTRIES],
+                ..Default::default()
+            };
+            while retained_deck_charge(&deck) < charge {
+                deck.sideboard.push(name.clone());
+            }
+            let over = retained_deck_charge(&deck) - charge;
+            for name in deck.main_deck.iter_mut().take(over) {
+                name.pop();
+            }
+            assert_eq!(retained_deck_charge(&deck), charge, "fixture: exact charge");
+            deck
+        }
+
+        /// Deck admission and the deck reservation charge the same unit. With the
+        /// shared store at its ceiling, an admitted event takes eight decks at the
+        /// per-deck limit through `Broker::handle` (its whole advertised deck
+        /// allowance) and an exact-limit resubmission, all inside its reservation.
+        /// A resubmission one byte over the limit is refused by the per-deck cap
+        /// and a ninth entrant's deck by the event budget, each with its own
+        /// reason and prior state intact, never by the capacity boundary.
+        /// REVERT-FAIL: gate admission on the bare deck encoding while the
+        /// reservation also charges the `deck` member, and the one-byte-over
+        /// resubmission passes both admission gates and is refused at capacity.
+        #[test]
+        fn exact_limit_decks_fill_the_event_allowance_at_the_ceiling() {
+            let env = FakeEnv::new();
+            let mut broker = Broker::new();
+            let mut organizer = ConnState::default();
+            let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+            let mut entrants: Vec<(ConnState, String)> = (0..9)
+                .map(|seat| {
+                    let mut conn = ConnState::default();
+                    let key = format!("p{seat}");
+                    let token = join_tournament(&mut conn, &mut broker, &env, &code, &key, &key);
+                    (conn, token)
+                })
+                .collect();
+            let _filler = fill_to_headroom(&mut broker, &env, 0);
+            assert_eq!(broker.committed_bytes(), MAX_SNAPSHOT_ENCODED_BYTES);
+
+            let submit = |broker: &mut Broker,
+                          (conn, token): &mut (ConnState, String),
+                          deck: DeckData,
+                          request: u64| {
+                broker.handle(
+                    conn,
+                    LobbyClientMessage::SubmitTournamentDeck {
+                        code: code.clone(),
+                        player_token: token.clone(),
+                        deck,
+                        request_id: Some(TournamentRequestId(request)),
+                    },
+                    &env,
+                )
+            };
+
+            for (seat, entrant) in entrants.iter_mut().take(8).enumerate() {
+                let request = 40 + seat as u64;
+                let deck = deck_charging(MAX_SINGLE_DECK_ENCODED_BYTES, 'y');
+                let out = submit(&mut broker, entrant, deck, request);
+                assert_eq!(
+                    ack_of(&out).0,
+                    TournamentRequestId(request),
+                    "exact-limit deck {seat} is inside the event's allowance"
+                );
+            }
+            let event = broker.tournaments().get(&code).expect("event");
+            assert_eq!(
+                event.retained_deck_bytes(),
+                EVENT_DECK_RESERVE_ENCODED_BYTES
+            );
+            assert_eq!(broker.committed_bytes(), MAX_SNAPSHOT_ENCODED_BYTES);
+
+            let resubmit = deck_charging(MAX_SINGLE_DECK_ENCODED_BYTES, 'z');
+            let out = submit(&mut broker, &mut entrants[0], resubmit, 50);
+            assert_eq!(
+                ack_of(&out).0,
+                TournamentRequestId(50),
+                "an exact-limit resubmission replaces its own charge"
+            );
+            assert_eq!(broker.committed_bytes(), MAX_SNAPSHOT_ENCODED_BYTES);
+
+            let before = serialized(&broker);
+            let over = deck_charging(MAX_SINGLE_DECK_ENCODED_BYTES + 1, 'y');
+            let out = submit(&mut broker, &mut entrants[0], over, 51);
+            let (request, reason) = rejection_of(&out);
+            assert_eq!(request, TournamentRequestId(51));
+            assert!(reason.contains("per-deck limit"), "{reason}");
+            assert_eq!(serialized(&broker), before);
+
+            let out = submit(&mut broker, &mut entrants[8], deck_of(1), 52);
+            let (request, reason) = rejection_of(&out);
+            assert_eq!(request, TournamentRequestId(52));
+            assert!(reason.contains("this event's deck budget"), "{reason}");
+            assert_eq!(serialized(&broker), before);
         }
 
         /// The boundary refuses *growth*, never a write that does not enlarge the
