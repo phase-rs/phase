@@ -6522,6 +6522,23 @@ mod tests {
         );
     }
 
+    /// A 101-card Whtz Commander deck is legal too: the marker removes only
+    /// the maximum, so every size at or above the 100-card floor validates.
+    /// Pins the `Exactly(100)` → `Minimum(100)` widening at the first size
+    /// the legacy rule would reject.
+    #[test]
+    fn whtz_commander_accepts_101_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = whtz_commander_request(100);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result.commander.compatible,
+            "expected a compatible 101-card Whtz deck, got: {:?}",
+            result.commander.reasons
+        );
+    }
+
     /// V4: the summary path agrees with the full path on the V1 list.
     #[test]
     fn whtz_quick_check_agrees_with_full_check_on_120_card_deck() {
