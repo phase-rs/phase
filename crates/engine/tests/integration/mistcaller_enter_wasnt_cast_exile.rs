@@ -1560,3 +1560,27 @@ fn divine_visitation_substitute_keeps_a_copy_batchs_tapped_state() {
     assert_eq!(angels.len(), 1, "one Angel");
     assert!(outcome.state().objects[&angels[0]].tapped, "tapped");
 }
+
+/// KNOWN LIMITATION (negative test documenting current behaviour, not the rule).
+/// CR 616.1c orders an as-enters copy first and CR 614.12 evaluates the remaining entry
+/// replacements against the entrant as it will exist, so a Phyrexian Metamorph token that
+/// copies a noncreature artifact is not "a creature entering" and Hallowed Moonlight should
+/// not exile it. The engine applies the chosen copy only after the replacement pipeline has
+/// discovered and applied Moonlight against the original creature body
+/// (`engine_replacement.rs` commits the entry before `BecomeCopy` resolves), so the token is
+/// exiled. The same ordering applies to card entries on main. When the pipeline settles the
+/// copy first, this assertion must flip to the token entering.
+#[test]
+fn known_limitation_metamorph_copy_of_noncreature_is_exiled_under_moonlight() {
+    let run = run_vat(true, Some("trinket"));
+    assert!(
+        run.prompts[0].contains("You may have ~ enter as a copy"),
+        "the entrant's own copy is offered first, got {:?}",
+        run.prompts
+    );
+    assert!(
+        battlefield_tokens_named(run.runner.state(), TRINKET).is_empty(),
+        "current behaviour: the token is exiled although CR 616.1c/614.12 say it should enter"
+    );
+    assert_settled(run.runner.state(), "known limitation");
+}
