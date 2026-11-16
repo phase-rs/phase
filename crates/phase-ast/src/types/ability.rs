@@ -14470,6 +14470,17 @@ pub enum QuantityRef {
         filter: Box<TargetFilter>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
+        /// CR 614.6 + CR 701.17c: the zone a member must have ACTUALLY arrived
+        /// in for "<verb phrase> this way" to count it — "put into a graveyard
+        /// this way" names the graveyard as the destination, so a milled card
+        /// that a replacement (Rest in Peace, Leyline of the Void) sent to exile
+        /// instead was never put into a graveyard and is not counted. `None`
+        /// (the action-named forms — "milled this way", "sacrificed this way" —
+        /// and the Locke-style reference to the milled cards wherever they are)
+        /// admits a member in any zone. Read against the member's CURRENT zone,
+        /// never its departure snapshot (which is the zone it LEFT).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<Zone>,
     },
     /// CR 608.2c + CR 107.3e + CR 202.3: Reduce a numeric property
     /// over the most recent chain tracked set (sum/max/min), reading the same set as

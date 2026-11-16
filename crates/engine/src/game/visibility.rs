@@ -1312,6 +1312,7 @@ fn redact_activation_records(filtered: &mut GameState) {
             PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => clear(pending_cast),
                 CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::Resolution { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => {}
             },
             PendingCostMoveResume::LoyaltyActivation { resolved, .. } => {
@@ -4715,6 +4716,8 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
             CollectEvidenceResume::Effect { pending_ability } => {
                 redact_ability_payment(pending_ability, hidden_ids);
             }
+            // Carries only the source id: no ability payment to redact.
+            CollectEvidenceResume::Resolution { .. } => {}
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
@@ -5110,6 +5113,7 @@ fn redact_counter_added_record(record: &mut crate::types::game_state::CounterAdd
     let crate::types::game_state::CounterAddedRecord {
         actor: _,
         object_id: _,
+        incarnation: _,
         counter_type: _,
         count: _,
         name,
@@ -5923,6 +5927,7 @@ mod tests {
         let counter_record = |object_id: ObjectId, name: &str| CounterAddedRecord {
             actor: owner,
             object_id,
+            incarnation: Some(0),
             counter_type: CounterType::Plus1Plus1,
             count: 1,
             name: name.to_string(),
@@ -13289,6 +13294,7 @@ mod tests {
                 prevention_tally: Vec::new(),
                 lives_before: vec![20, 20],
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                replacement: None,
                 phase_c_remnant: None,
             }));
 
