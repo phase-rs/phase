@@ -858,7 +858,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
         // CR 732.2a is the OPERATIVE rule for this arm, and the mode split is the one
         // `Effect::Token` and `Effect::Mana` already ship: under `Conservative` this stays
         // the blanket every non-firewall consumer already sees on every axis except
-        // `source_counters`, which the pump's own fields decide; under
+        // `source_counters` and `that_player`, which the pump's own fields decide; under
         // `LoopFirewall` it DESCENDS, because CR 732.2a admits a proposal only on "the
         // predictable results of the sequence of choices" and bars "conditional actions,
         // where the outcome of a game event determines the next action a player takes".
@@ -876,7 +876,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             target,
         } => match mode {
             // CR 608.2h + CR 400.7: every axis stays fail-closed; only the
-            // source-counter dependency is read from the pump's own fields.
+            // source-counter dependency and `that_player` are read from the pump's own fields.
             ScanMode::Conservative => pump_payload_source_counters(
                 scan_pt_value(power, mode)
                     .or(scan_pt_value(toughness, mode))
@@ -1107,7 +1107,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes<'_> {
             acc
         }
         // CR 608.2h + CR 400.7: the recipient set is a live population, so every
-        // axis stays fail-closed, but the source-counter dependency is exactly
+        // axis stays fail-closed, but the source-counter dependency and `that_player` are exactly
         // what the pump's own amounts and recipient filter read ("for each lore
         // counter among Sagas you control" names no source).
         Effect::PumpAll {
@@ -9369,7 +9369,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         // sibling veto catches it. Pinned EXACTLY by `census_tag_set_is_exactly_enumerated`.
         // Defense-in-depth: PumpAll/DamageEachPlayer are census-
         // tagged even though their scan_effect arm is CONSERVATIVE on every axis a
-        // loop consumer reads (PumpAll descends only to derive `source_counters`),
+        // loop consumer reads (PumpAll descends only to derive `source_counters` and `that_player`),
         // so a future descent into their mass filter cannot silently relax.
         Effect::EachSourceDealsDamage { .. }
         | Effect::EachDealsDamageEqualToPower { .. }
