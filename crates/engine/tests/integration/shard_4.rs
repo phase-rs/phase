@@ -8,6 +8,7 @@
 
 pub mod support;
 
+mod issue_10442_dusk_mangler_additional_cost;
 mod issue_5274_call_the_spirit_dragons;
 mod issue_5279_grave_sifter;
 mod issue_5282_nissa_ultimate_emblem_search;

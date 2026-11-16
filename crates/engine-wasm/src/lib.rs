@@ -7492,7 +7492,7 @@ mod legacy_pending_cast_timing_restore_tests {
         let before = pool(&restored);
         let mut runner = GameRunner::from_state(restored);
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("P0 kicks Gnarlid Colony");
         assert!(
             matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
@@ -7672,10 +7672,15 @@ mod legacy_pending_cast_timing_restore_tests {
         };
         match &restored.waiting_for {
             WaitingFor::OptionalCostChoice {
-                cost:
-                    AdditionalCost::Choice(AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }),
+                cost: AdditionalCost::Choice(costs),
                 ..
-            } => assert_eq!((alt, cost), (&wubrg, &printed)),
+            } => {
+                let (alt, cost) = match costs.as_slice() {
+                    [AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }] => (alt, cost),
+                    other => panic!("expected Fist of Suns' mana alternatives, got {other:?}"),
+                };
+                assert_eq!((alt, cost), (&wubrg, &printed))
+            }
             other => panic!("expected Fist of Suns' offer, got {other:?}"),
         }
         assert_eq!(pending_route(&restored), Some(CastTimingRoute::Permission));
@@ -7686,7 +7691,7 @@ mod legacy_pending_cast_timing_restore_tests {
 
         let mut runner = GameRunner::from_state(restored);
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("P0 accepts Fist of Suns' cost");
         assert!(
             matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
