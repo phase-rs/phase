@@ -51625,6 +51625,9 @@ fn parse_effect_chain_ir_body(
             if is_optional {
                 def.optional = true;
                 def.optional_for = opponent_may_scope;
+                // CR 118.12 + CR 115.10a: same binding as the IR assembly path —
+                // see `clause_shell::bind_offered_payment_possessive`.
+                super::clause_shell::bind_offered_payment_possessive(&mut def);
             }
             if let Some(ref condition) = condition {
                 def = def.condition(condition.clone());

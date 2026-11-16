@@ -1,8 +1,8 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, PlayerScope,
-    ResolvedAbility, SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
+    SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
@@ -443,37 +443,28 @@ fn handle_opponent_may_choice_inner(
             // it. `set_scoped_player_recursive` above has already bound the
             // scope to the promptee.
             //
-            // CR 119.4 + CR 608.2c: the amount is likewise the accepting
-            // player's — "pay half THEIR life". A third-person possessive
-            // lowers to `PlayerScope::Target`, which is the correct encoding
-            // when the ability has a player target (Astarion's "life they lost
-            // this turn" resolves against its target, not its controller), but
-            // this class of trigger has no targets at all, so the anaphor
-            // dangles and the amount resolves to 0 — the cost becomes free and
-            // the "If that player does" rider fires for nothing. Rebind the
-            // dangling anaphor onto the scoped player, through the traversal
-            // authorities (`for_each_quantity_expr_mut` -> `each_ref_mut` ->
-            // `player_scope_mut`) rather than matching one cost shape, so every
-            // quantity-bearing cost in the class is covered. Guarded on the
-            // absence of a player target so a genuine target-relative amount is
-            // never redirected.
-            let payer_anaphor_dangles = !ability
-                .targets
-                .iter()
-                .any(|target| matches!(target, TargetRef::Player(_)));
-            if let Effect::PayCost { payer, cost, .. } = &mut ability.effect {
+            // CR 119.4 + CR 608.2c: the AMOUNT is likewise the accepting
+            // player's — "pay half THEIR life" — but that binding is no longer
+            // made here. It is made during typed lowering, by
+            // `clause_shell::bind_offered_payment_possessive`, where the shell's
+            // subject is known.
+            //
+            // It cannot be made correctly at this layer. This code used to read
+            // "no `TargetRef::Player` in `ability.targets`" as proof that the
+            // ability announced no player target, and rebind the possessive only
+            // then. But `ability_with_event_context_targets` also populates
+            // those slots from the triggering event — Myriad's defending player,
+            // `post_replacement_event_target()` — and CR 115.10a distinguishes
+            // an affected object or player from a target. An event-hydrated slot
+            // therefore read as an announced target and suppressed a rebind that
+            // was owed, leaving the amount to resolve to 0: a free cost whose
+            // "If a player does" rider still fires. The grammar knows which
+            // antecedent a possessive has; the event does not.
+            //
+            // The payer itself still binds here, because it names who performs
+            // the action this responder accepted, not what the text said.
+            if let Effect::PayCost { payer, .. } = &mut ability.effect {
                 *payer = TargetFilter::ScopedPlayer;
-                if payer_anaphor_dangles {
-                    cost.for_each_quantity_expr_mut(&mut |expr| {
-                        expr.each_ref_mut(&mut |qty| {
-                            if let Some(scope) = qty.player_scope_mut() {
-                                if *scope == PlayerScope::Target {
-                                    *scope = PlayerScope::ScopedPlayer;
-                                }
-                            }
-                        });
-                    });
-                }
             }
 
             // CR 118.3 + CR 608.2d: "A player can't pay a cost without having
