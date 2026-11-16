@@ -11050,7 +11050,8 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// against a `BattlefieldEntryRecord`?
 ///
 /// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types::game_state::BattlefieldEntryRecord`). Every other
+/// supertypes / colors / keywords / controller / face_state`
+/// (`types::game_state::BattlefieldEntryRecord`). Every other
 /// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
 /// matcher fails closed at the `FilterProp` match's fail-closed arm inside
 /// `battlefield_entry_matches_filter`'s `TargetFilter::Typed` case, and at the fail-closed
@@ -11058,7 +11059,7 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// a silent constant 0 — but see the `Or` exception documented beside that function's
 /// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
 /// instead. Measured: 100
-/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
+/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 5.
 ///
 /// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
 /// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
@@ -11069,8 +11070,8 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// `ledger_guard_agrees_with_matcher` (test, `crate::game::restrictions`).
 ///
 /// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
-/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
-/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
+/// / `record.name` TODAY — one matcher arm plus one line here. `Token`/`NonToken` and `Tapped`
+/// need a new snapshot field on `BattlefieldEntryRecord`.
 ///
 /// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
 /// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
@@ -11090,6 +11091,7 @@ pub fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
                         FilterProp::HasColor { .. }
                             | FilterProp::InZone { .. }
                             | FilterProp::WithKeyword { .. }
+                            | FilterProp::FaceDown
                             | FilterProp::Another
                     )
                 })
@@ -14470,6 +14472,17 @@ pub enum QuantityRef {
         filter: Box<TargetFilter>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
+        /// CR 614.6 + CR 701.17c: the zone a member must have ACTUALLY arrived
+        /// in for "<verb phrase> this way" to count it — "put into a graveyard
+        /// this way" names the graveyard as the destination, so a milled card
+        /// that a replacement (Rest in Peace, Leyline of the Void) sent to exile
+        /// instead was never put into a graveyard and is not counted. `None`
+        /// (the action-named forms — "milled this way", "sacrificed this way" —
+        /// and the Locke-style reference to the milled cards wherever they are)
+        /// admits a member in any zone. Read against the member's CURRENT zone,
+        /// never its departure snapshot (which is the zone it LEFT).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<Zone>,
     },
     /// CR 608.2c + CR 107.3e + CR 202.3: Reduce a numeric property
     /// over the most recent chain tracked set (sum/max/min), reading the same set as
@@ -21135,9 +21148,9 @@ pub enum AdditionalCost {
         )]
         repeatability: AdditionalCostRepeatability,
     },
-    /// "[cost A] or [cost B]" — player must pay exactly one.
-    /// Choosing the first cost sets `additional_cost_paid = true`.
-    Choice(AbilityCost, AbilityCost),
+    /// "[cost A] or [cost B] or [cost C]..." — player must pay exactly one.
+    /// Choosing any cost sets `additional_cost_paid = true`.
+    Choice(Vec<AbilityCost>),
     /// Mandatory additional cost (e.g., "As an additional cost, waterbend {5}").
     Required(AbilityCost),
 }

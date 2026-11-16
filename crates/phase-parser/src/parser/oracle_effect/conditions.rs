@@ -1841,6 +1841,7 @@ fn parse_if_all_revealed_cards_type_conditional(text: &str) -> Option<(AbilityCo
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(TargetFilter::Typed(TypedFilter::new(type_filter))),
                     caused_by: None,
+                    destination: None,
                 },
             },
             comparator: Comparator::EQ,

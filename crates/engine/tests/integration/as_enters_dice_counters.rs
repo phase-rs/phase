@@ -1807,6 +1807,8 @@ fn eureka_peacekeeper_board(seed: u64) -> (GameRunner, ObjectId, ObjectId, Objec
         builder.with_mana_cost(ManaCost::generic(0));
         builder.id()
     };
+    // Keep P2's decline observable: an empty hand has no optional put to offer.
+    scenario.add_creature_to_hand(P2, "Seat Two Bear", 2, 2);
     let mut runner = scenario.build();
     seed_card_names(&mut runner);
     (runner, imp, eureka, peacekeeper)
@@ -2542,6 +2544,8 @@ fn a_mid_entry_capture_keeps_another_entrants_entry() {
         scenario.add_enchantment_from_oracle(P0, "Barbarian Class", BARBARIAN_CLASS_L1);
         scenario.add_creature_from_oracle(P1, "Soul Warden", 1, 1, SOUL_WARDEN);
         let donor = scenario.add_creature(P1, "Vanilla Bear", 2, 2).id();
+        // P1 must have a legal put to decline before P2's Clone offer.
+        scenario.add_creature_to_hand(P1, "Seat One Bear", 2, 2);
         let imp = free_creature(&mut scenario, "Jumbo Imp", 0, 0, JUMBO_IMP);
         let eureka = free_spell(&mut scenario, "Eureka", false, EUREKA);
         scenario
@@ -3994,8 +3998,13 @@ fn festival_board(seed: u64, add_fold: fn(&mut GameScenario)) -> FestivalBoard {
 /// deferred events.
 fn rolled_so_far(state: &GameState, events: &[GameEvent]) -> Vec<u32> {
     let mut rolls = die_results(events);
-    if let Some(batch) = state.active_batch_delivery() {
-        rolls.extend(die_results(&batch.deferred_events));
+    for frame in state.resolution_stack.iter() {
+        if let ResolutionFrame::BatchDelivery(batch) = frame {
+            let owner = state
+                .batch_delivery_for_group(batch.logical_zone_change_group.logical_group_id)
+                .expect("retained batch has its logical owner");
+            rolls.extend(die_results(&owner.deferred_events));
+        }
     }
     rolls
 }
@@ -6376,9 +6385,9 @@ fn a_newcomer_does_not_see_an_earlier_members_roll() {
             assert_eq!(
                 frames,
                 vec![
+                    FrameKind::BatchDelivery,
                     FrameKind::PostReplacement,
                     FrameKind::CounterAdditions,
-                    FrameKind::BatchDelivery,
                 ],
                 "{what}"
             );
@@ -8500,9 +8509,9 @@ fn a_co_entrants_static_does_not_remove_a_residents_roll_replacement() {
                     assert_eq!(
                         stack_frames(board.festival.runner.state()),
                         vec![
+                            FrameKind::BatchDelivery,
                             FrameKind::PostReplacement,
                             FrameKind::AbilityContinuation,
-                            FrameKind::BatchDelivery
                         ],
                         "{what}: reach: the roll's prompt is inside the batch"
                     );
@@ -9545,18 +9554,17 @@ fn a_resumed_batch_parks_again_at_its_next_members_counter_prompt() {
             prompts.counters,
             vec![
                 vec![
+                    FrameKind::BatchDelivery,
                     FrameKind::PostReplacement,
                     FrameKind::CounterAdditions,
-                    FrameKind::BatchDelivery,
                 ],
                 vec![
+                    FrameKind::BatchDelivery,
                     FrameKind::PostReplacement,
                     FrameKind::CounterAdditions,
-                    FrameKind::CounterAdditions,
-                    FrameKind::BatchDelivery,
                 ],
             ],
-            "{what}: one counter prompt per Jammer, the batch on top at each"
+            "{what}: one counter prompt per Jammer, the retained batch below its child at each"
         );
         let rolls = die_results(&events);
         assert_ne!(rolls[0], rolls[1], "{what}: reach: the seed's rolls differ");
@@ -9657,9 +9665,9 @@ fn a_resumed_batch_parks_again_after_a_creature_type_choice() {
     assert_eq!(
         prompts.counters,
         vec![vec![
+            FrameKind::BatchDelivery,
             FrameKind::PostReplacement,
             FrameKind::CounterAdditions,
-            FrameKind::BatchDelivery,
         ]]
     );
     assert!(

@@ -125,6 +125,13 @@
 //! large rarely-populated field went inline, so the ceiling moves by the rule
 //! to 15,376.next_multiple_of(256) + 256 = 15,872.
 //!
+//! `GameState` re-measured on x86_64-unknown-linux-gnu while merging main into
+//! the as-enters dice/counters branch at 15,888 B, 16 B over the 15,872 ceiling.
+//! The union includes main's small step-entry/day-night bookkeeping alongside
+//! the branch's parked-entry/dice bookkeeping; no whole ability-sized field
+//! was added inline. `PendingLiminalEntryResume` measures 208 B. The ceiling
+//! follows the existing calibration: 15,888.next_multiple_of(256) + 256 = 16,384.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
@@ -134,7 +141,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 15_872,
+        size_of::<crate::types::game_state::GameState>() <= 16_384,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

@@ -1312,6 +1312,7 @@ fn redact_activation_records(filtered: &mut GameState) {
             PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => clear(pending_cast),
                 CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::Resolution { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => {}
             },
             PendingCostMoveResume::LoyaltyActivation { resolved, .. } => {
@@ -4246,6 +4247,10 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.spellbook.clear();
     obj.parse_warnings.clear();
     obj.back_face = None;
+    // Redacted with `back_face`. Only a double-faced copy token carries it. Such a token can be in a
+    // hidden zone only between a zone change and the state-based action that removes it (CR 111.7),
+    // and it can't be turned face down (CR 712.16); the redaction covers that window.
+    obj.double_faced_token_alternative = None;
     // CR 400.2: a hidden card's token-ness identifies its pile position
     // (Horde libraries mix tokens and cards), so it redacts like every other
     // printed characteristic — mirroring `redact_zone_change_record`'s
@@ -4730,6 +4735,8 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
             CollectEvidenceResume::Effect { pending_ability } => {
                 redact_ability_payment(pending_ability, hidden_ids);
             }
+            // Carries only the source id: no ability payment to redact.
+            CollectEvidenceResume::Resolution { .. } => {}
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
@@ -5125,6 +5132,7 @@ fn redact_counter_added_record(record: &mut crate::types::game_state::CounterAdd
     let crate::types::game_state::CounterAddedRecord {
         actor: _,
         object_id: _,
+        incarnation: _,
         counter_type: _,
         count: _,
         name,
@@ -5196,6 +5204,8 @@ fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastReco
 
 /// The entry ledger's id is a non-optional key, so the record keeps its id and controller
 /// (the count is preserved) and loses every characteristic that identifies the card.
+/// Status is not a characteristic (CR 110.5a), and a permanent's face-up/face-down
+/// status is public (CR 110.5), so the redacted record keeps its face state.
 fn redact_battlefield_entry_record(record: &mut crate::types::game_state::BattlefieldEntryRecord) {
     let crate::types::game_state::BattlefieldEntryRecord {
         object_id: _,
@@ -5206,6 +5216,9 @@ fn redact_battlefield_entry_record(record: &mut crate::types::game_state::Battle
         colors,
         keywords,
         controller: _,
+        // CR 110.5: status is public and is not a characteristic, so redaction
+        // preserves it.
+        face_state: _,
     } = record;
     *name = HIDDEN_CARD_NAME.to_string();
     core_types.clear();
@@ -5894,6 +5907,7 @@ mod tests {
                 colors: Vec::new(),
                 keywords: Vec::new(),
                 controller: owner,
+                face_state: crate::types::game_state::FaceState::FaceDown,
             });
         state
             .sacrificed_permanents_this_turn
@@ -5938,6 +5952,7 @@ mod tests {
         let counter_record = |object_id: ObjectId, name: &str| CounterAddedRecord {
             actor: owner,
             object_id,
+            incarnation: Some(0),
             counter_type: CounterType::Plus1Plus1,
             count: 1,
             name: name.to_string(),
@@ -6014,6 +6029,11 @@ mod tests {
         assert!(opponent.battlefield_entries_this_turn[0]
             .core_types
             .is_empty());
+        assert_eq!(
+            opponent.battlefield_entries_this_turn[0].face_state,
+            crate::types::game_state::FaceState::FaceDown,
+            "CR 110.5: face-up/face-down status is public and survives redaction"
+        );
         assert_eq!(opponent.sacrificed_permanents_this_turn.len(), 1);
         assert_eq!(
             opponent.sacrificed_permanents_this_turn[0].name,
@@ -13357,6 +13377,7 @@ mod tests {
                 prevention_tally: Vec::new(),
                 lives_before: vec![20, 20],
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                replacement: None,
                 phase_c_remnant: None,
             }));
 

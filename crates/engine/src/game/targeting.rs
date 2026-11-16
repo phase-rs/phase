@@ -1419,9 +1419,8 @@ pub fn resolved_targets(
     }
     // CR 608.2k: "the exiled/sacrificed/discarded <noun>" — an untargeted
     // reference to the object referred to by this ability's cost. Resolved
-    // from the recursively-stamped `cost_paid_object`. Mirrors the local
-    // resolution `token_copy.rs` already performs for `CopyTokenOf`; this is
-    // the general chokepoint for every effect that targets a cost-paid object.
+    // from the recursively-stamped `cost_paid_object`. This is the general
+    // chokepoint for every effect that targets a cost-paid object.
     if matches!(target_filter, TargetFilter::CostPaidObject) {
         // CR 608.2k: resolve through the documented `cost_paid_object →
         // effect_context_object` ladder — slot 1 is the cost-paid referent
@@ -5298,6 +5297,7 @@ mod tests {
                 applied: HashSet::new(),
                 event_source: Some(c0),
                 event_target: None,
+                event_amount: None,
                 controller: None,
                 parked_entrants: Vec::new(),
             },
@@ -5346,6 +5346,7 @@ mod tests {
                 applied: HashSet::new(),
                 event_target: Some(TargetRef::Object(c1)),
                 event_source: None,
+                event_amount: None,
                 controller: None,
                 parked_entrants: Vec::new(),
             },

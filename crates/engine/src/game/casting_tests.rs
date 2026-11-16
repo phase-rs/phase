@@ -15987,12 +15987,12 @@ fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
-            cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
+            cost: AdditionalCost::Choice(ref costs),
             ..
-        }
+        } if costs.len() == 2
     ));
 
-    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("paying alternative life cost should cast");
 
     assert_eq!(state.players[0].life, 16);
@@ -16023,7 +16023,7 @@ fn choice_additional_cost_filters_unpayable_casts() {
             shards: vec![ManaCostShard::Black],
             generic: 1,
         };
-        spell.additional_cost = Some(AdditionalCost::Choice(
+        spell.additional_cost = Some(AdditionalCost::Choice(vec![
             AbilityCost::Discard {
                 count: QuantityExpr::Fixed { value: 1 },
                 filter: None,
@@ -16033,7 +16033,7 @@ fn choice_additional_cost_filters_unpayable_casts() {
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 3 },
             },
-        ));
+        ]));
         let abilities = Arc::make_mut(&mut spell.abilities);
         abilities.clear();
         abilities.push(AbilityDefinition::new(
@@ -16184,19 +16184,14 @@ fn cast_without_mana_cost_option_checks_commander_control() {
     )
     .expect("cast should reach the free-cast choice");
     assert!(matches!(
-        state.waiting_for,
+        &state.waiting_for,
         WaitingFor::OptionalCostChoice {
-            cost: AdditionalCost::Choice(
-                AbilityCost::Mana {
-                    cost: ManaCost::NoCost
-                },
-                _
-            ),
+            cost: AdditionalCost::Choice(costs),
             ..
-        }
+        } if matches!(costs.first(), Some(AbilityCost::Mana { cost: ManaCost::NoCost })),
     ));
 
-    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("choosing the free-cast branch should cast the spell");
 
     assert_eq!(state.stack.len(), 1);
@@ -16298,14 +16293,14 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
     )
     .expect("Snuff Out should reach the alternative-cost choice");
     assert!(matches!(
-        state.waiting_for,
+        &state.waiting_for,
         WaitingFor::OptionalCostChoice {
-            cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
+            cost: AdditionalCost::Choice(costs),
             ..
-        }
+        } if matches!(costs.first(), Some(AbilityCost::PayLife { .. })),
     ));
 
-    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("paying 4 life should commit Snuff Out to the stack");
 
     assert_eq!(state.players[0].life, 16);
@@ -16423,7 +16418,7 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
     assert_eq!(*player, PlayerId(0));
     assert_eq!(
         *cost,
-        AdditionalCost::Choice(
+        AdditionalCost::Choice(vec![
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 4 },
             },
@@ -16433,7 +16428,7 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
                     generic: 3,
                 },
             },
-        )
+        ])
     );
     // CR 601.2c: the pending announcement retains this spell and its one target.
     assert_eq!(pending_cast.object_id, spell_id);
@@ -16443,7 +16438,7 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
         &[TargetRef::Object(target_id)]
     );
 
-    apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("paying 4 life should commit Snuff Out to the stack");
 
     // CR 118.3b + CR 601.2h + CR 601.2i: pay four life exactly once and finish
@@ -19396,7 +19391,7 @@ fn gift_recipient_auto_cast_remains_offered_and_reaches_gift_recipient_choice() 
         state.waiting_for,
         WaitingFor::OptionalCostChoice { .. }
     ));
-    apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("promising the gift must be legal");
     let WaitingFor::ChooseGiftRecipient {
         pending_cast,
@@ -25910,7 +25905,7 @@ fn modal_kicker_declined_caps_modes_before_mode_choice() {
         PlayerId(0),
         pending,
         &cost,
-        false,
+        1,
         &mut events,
     )
     .unwrap();
@@ -26059,7 +26054,7 @@ fn modal_kicker_paid_allows_extra_modes_and_reaches_stack_context() {
         PlayerId(0),
         pending,
         &cost,
-        true,
+        0,
         &mut events,
     )
     .unwrap();
@@ -26121,7 +26116,7 @@ fn first_kicked_spell_reducer_recomputes_after_kicker_declared() {
         PlayerId(0),
         pending,
         &cost,
-        true,
+        0,
         &mut events,
     )
     .unwrap();
@@ -26177,7 +26172,7 @@ fn second_kicked_spell_not_reduced_after_first_kicked_this_turn() {
         PlayerId(0),
         pending,
         &cost,
-        true,
+        0,
         &mut events,
     )
     .unwrap();
@@ -26489,7 +26484,7 @@ fn kicker_instead_target_declines_before_base_target_selection() {
         PlayerId(0),
         pending_cast,
         &cost,
-        false,
+        1,
         &mut events,
     )
     .expect("declining kicker should continue to target selection");
@@ -26544,7 +26539,7 @@ fn kicker_instead_target_paid_selects_replacement_target_only() {
         PlayerId(0),
         pending_cast,
         &cost,
-        true,
+        0,
         &mut events,
     )
     .expect("paying kicker should continue to replacement target selection");
@@ -26596,7 +26591,7 @@ fn kicked_bloodchiefs_thirst_like_spell_targets_three_mv_creature() {
         PlayerId(0),
         pending_cast,
         &cost,
-        true,
+        0,
         &mut events,
     )
     .expect("paying kicker should continue to replacement target selection");
@@ -27805,7 +27800,7 @@ fn spell_one_of_cost_auto_cast_remains_offered_and_reaches_one_of_choice() {
         .add_spell_to_hand(P0, "One-Of Cost Offer Spell", false)
         .with_mana_cost(ManaCost::zero())
         .from_oracle_text("Draw a card.")
-        .with_additional_cost(AdditionalCost::Choice(
+        .with_additional_cost(AdditionalCost::Choice(vec![
             AbilityCost::PayLife {
                 amount: QuantityExpr::Fixed { value: 1 },
             },
@@ -27815,7 +27810,7 @@ fn spell_one_of_cost_auto_cast_remains_offered_and_reaches_one_of_choice() {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 self_scope: crate::types::ability::DiscardSelfScope::FromHand,
             },
-        ))
+        ]))
         .id();
     let mut runner = scenario.build();
     let action = GameAction::CastSpell {
@@ -27833,7 +27828,7 @@ fn spell_one_of_cost_auto_cast_remains_offered_and_reaches_one_of_choice() {
     runner.act(action).expect("one-of-cost cast must start");
     let WaitingFor::OptionalCostChoice {
         pending_cast,
-        cost: AdditionalCost::Choice(_, _),
+        cost: AdditionalCost::Choice(_),
         ..
     } = &runner.state().waiting_for
     else {
@@ -28091,7 +28086,9 @@ fn drive_deadly(
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: pay_evidence })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_evidence { 0 } else { 1 },
+                    })
                     .expect("optional collect-evidence decision accepted");
             }
             WaitingFor::CollectEvidenceChoice { cards, .. } => {
@@ -28138,7 +28135,7 @@ fn collect_evidence_auto_cast_remains_offered_and_reaches_evidence_choice() {
             WaitingFor::OptionalCostChoice { pending_cast, .. } => {
                 assert_eq!(pending_cast.object_id, deadly);
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("collect evidence must be accepted");
             }
             WaitingFor::TargetSelection {
@@ -60458,7 +60455,7 @@ mod x_sentinel_tap_creatures_activation_cost {
 /// silently rewrote the spell's X to the number of creatures the player happened
 /// to tap.
 ///
-/// Production route: `GameAction::CastSpell` → `DecideOptionalCost{pay:true}` →
+/// Production route: `GameAction::CastSpell` → `DecideOptionalCost { index: 0 }` →
 /// `pay_additional_cost_with_source`'s `Aggregate` sub-arm →
 /// `WaitingFor::PayCost` → `handle_tap_creatures_for_spell_cost` (the fixed
 /// line) → `ChooseXValue` → `ManaPayment` → resolution.
@@ -60535,7 +60532,7 @@ mod aggregate_tap_cost_does_not_clobber_chosen_x {
                 }
                 WaitingFor::OptionalCostChoice { .. } => {
                     runner
-                        .act(GameAction::DecideOptionalCost { pay: true })
+                        .act(GameAction::DecideOptionalCost { index: 0 })
                         .expect("opting to pay teamwork must be accepted");
                 }
                 WaitingFor::PayCost {

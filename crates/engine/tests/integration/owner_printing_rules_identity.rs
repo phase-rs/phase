@@ -772,7 +772,7 @@ fn pay_by_discarding(runner: &mut GameRunner, spell: ObjectId, fodder: ObjectId)
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("choose to discard");
     runner
         .act(GameAction::SelectCards {

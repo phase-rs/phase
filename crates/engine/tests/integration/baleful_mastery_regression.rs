@@ -84,7 +84,7 @@ fn baleful_mastery_cast_targeting_excludes_opponent_player_slot() {
         match &runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: false })
+                    .act(GameAction::DecideOptionalCost { index: 1 })
                     .expect("optional cost decision should succeed");
             }
             WaitingFor::TargetSelection { target_slots, .. } => {
@@ -149,7 +149,7 @@ fn baleful_mastery_alternative_cost_makes_chosen_opponent_draw() {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("alternative cost decision should succeed");
             }
             WaitingFor::TargetSelection { target_slots, .. } => {
