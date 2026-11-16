@@ -1251,6 +1251,27 @@ impl std::fmt::Debug for TriggerSourceContext {
 }
 
 impl TriggerSourceContext {
+    /// CR 400.7 + CR 608.2h: a source context that names no object (id 0,
+    /// incarnation 0) and records only `counters`, the last-known counters a
+    /// departed source's pending ability reads. Loop normalization substitutes it
+    /// for the real context so two positions compare on what the read would
+    /// answer, never on which incarnation answers it.
+    pub(crate) fn counters_only_projection(counters: HashMap<CounterType, u32>) -> Self {
+        let mut blank = GameObject::new(
+            ObjectId(0),
+            CardId(0),
+            PlayerId(0),
+            String::new(),
+            Zone::Battlefield,
+        );
+        blank.counters = counters;
+        blank
+            .snapshot_for_zone_change(ObjectId(0), Some(Zone::Battlefield), Zone::Battlefield)
+            .trigger_source_context()
+            .cloned()
+            .expect("zone-change source snapshot always owns its trigger source context")
+    }
+
     /// Returns the exact definition reference for an entry captured with this
     /// source. No caller may infer provenance from definition payload bytes.
     pub fn definition_ref(&self, entry: &TriggerEntry) -> TriggerDefinitionRef {
@@ -3428,6 +3449,13 @@ impl Default for DamageRecord {
 pub struct CounterAddedRecord {
     pub actor: PlayerId,
     pub object_id: ObjectId,
+    /// CR 400.7: the recipient's incarnation when the counters were put on it. A zone
+    /// change reuses the storage `ObjectId` but is a new object, so current-object
+    /// readers (`FilterProp::CountersPutOnThisTurn`) must match this too. `None` only for a
+    /// record restored from a save that predates the stamp: its recipient incarnation is
+    /// unprovable, so readers fall back to the object-id-only match.
+    #[serde(default)]
+    pub incarnation: Option<u64>,
     pub counter_type: CounterType,
     pub count: u32,
     pub name: String,
@@ -3452,6 +3480,7 @@ impl Clone for CounterAddedRecord {
         let Self {
             actor,
             object_id,
+            incarnation,
             counter_type,
             count,
             name,
@@ -3470,6 +3499,7 @@ impl Clone for CounterAddedRecord {
         Self {
             actor: *actor,
             object_id: *object_id,
+            incarnation: *incarnation,
             counter_type: counter_type.clone(),
             count: *count,
             name: name.clone(),
@@ -7669,6 +7699,17 @@ pub struct PendingBatchDeliveries {
     /// the full action settles so one co-departure/LKI batch is observable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_events: Vec<GameEvent>,
+    /// CR 614.12 + CR 614.1c: the battlefield as it stood before this
+    /// simultaneous battlefield entry began, captured once before the first
+    /// member entered. The batch owns it across every replacement pause so each
+    /// later member's as-enters read excludes co-entrants delivered earlier
+    /// (never re-captured on resume); it ends with the batch.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::types::deterministic_serde::option_hash_set"
+    )]
+    pub pre_entry_battlefield: Option<HashSet<ObjectId>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32463,13 +32504,27 @@ impl GameState {
         self.resolution_stack.take_active_change_zone()
     }
 
-    /// Returns the Devour eligibility snapshot owned by the active ChangeZone
-    /// frame. A post-replacement drain raised by that same zone change may be
-    /// its exact active child; no other buried frame is consulted.
+    /// The Devour eligibility pool: a thin view over the single frame-owned
+    /// pre-entry authority, [`Self::active_pre_entry_battlefield_snapshot`]
+    /// (CR 614.13a: a devourer cannot choose any object entering at the same
+    /// time, whether the entry is a ChangeZone loop or a batch delivery).
     pub fn active_devour_eligible_snapshot(&self) -> Option<&HashSet<ObjectId>> {
+        self.active_pre_entry_battlefield_snapshot()
+    }
+
+    /// CR 614.12 + CR 614.1c: the battlefield as it stood before the active
+    /// simultaneous entry began, when the entry captured one (a co-entering
+    /// Devour sacrifice pool or population-counting as-enters replacement).
+    /// The same frame-owned snapshot as [`Self::active_devour_eligible_snapshot`].
+    pub fn active_pre_entry_battlefield_snapshot(&self) -> Option<&HashSet<ObjectId>> {
         self.resolution_stack
             .active_change_zone_or_post_replacement_child()
             .and_then(|frame| frame.devour_eligible_snapshot.as_ref())
+            .or_else(|| {
+                self.resolution_stack
+                    .active_batch_delivery_or_post_replacement_child()
+                    .and_then(|batch| batch.pre_entry_battlefield.as_ref())
+            })
     }
 
     /// Begins a Devour co-entry in a frame that remains authoritative even
@@ -32598,6 +32653,32 @@ impl GameState {
     /// Park a complete BatchDelivery owner as the active inner frame.
     pub fn push_batch_delivery(&mut self, pending: PendingBatchDeliveries) {
         self.resolution_stack.push_batch_delivery(pending);
+    }
+
+    /// The BatchDelivery owner of one logical group, addressed by identity.
+    pub fn batch_delivery_for_group(
+        &self,
+        group: LogicalZoneChangeGroupId,
+    ) -> Option<&PendingBatchDeliveries> {
+        self.resolution_stack.batch_delivery_for_group(group)
+    }
+
+    /// Mutable form of [`Self::batch_delivery_for_group`].
+    pub fn batch_delivery_for_group_mut(
+        &mut self,
+        group: LogicalZoneChangeGroupId,
+    ) -> Option<&mut PendingBatchDeliveries> {
+        self.resolution_stack.batch_delivery_for_group_mut(group)
+    }
+
+    /// Re-park a batch's owner in place by its logical group identity, leaving
+    /// any child frames above it untouched.
+    pub fn replace_batch_delivery_for_group(
+        &mut self,
+        pending: PendingBatchDeliveries,
+    ) -> Result<(), ResolutionStackError> {
+        self.resolution_stack
+            .replace_batch_delivery_for_group(pending)
     }
 
     /// Re-park the active BatchDelivery owner after another replacement pause.
@@ -37440,6 +37521,23 @@ impl GameState {
 
     fn normalize_for_loop_with_rank(&self, rank: LoopIdentityRank) -> GameState {
         let mut clone = self.clone();
+        // CR 608.2h + CR 400.7: a pending ability that reads its departed source's
+        // counters keeps the counter map it would read, as an identity-free
+        // projection (`TriggerSourceContext::counters_only_projection`) resolved
+        // from `self` BEFORE the identities below are cleared. Idempotent: the
+        // projection names no object, so it resolves to itself on a second pass.
+        let carry_source_counters =
+            |source: &TriggerSourceContext| self.departed_source_counters_projection(source);
+        let clear_identity = |ability: &mut ResolvedAbility, carrier_source: ObjectId| {
+            if crate::game::ability_scan::ability_reads_source_counters(ability) {
+                ability.clear_source_provenance_for_loop_carrying_source(
+                    carrier_source,
+                    &carry_source_counters,
+                );
+            } else {
+                ability.clear_source_provenance_for_loop_recursive(carrier_source);
+            }
+        };
         // apply() resets these at the start of every player action, so a position compares as
         // the next action starts from it.
         clone.clear_player_action_transients();
@@ -37677,7 +37775,7 @@ impl GameState {
         for entry in clone.stack.iter_mut() {
             let carrier_source = entry.source_id;
             if let Some(ability) = entry.ability_mut() {
-                ability.clear_source_provenance_for_loop_recursive(carrier_source);
+                clear_identity(ability, carrier_source);
                 ability.normalize_cast_occurrence_for_loop_recursive();
                 ability.rename_epic_effect_handles_recursive(&rename_stack_epic_handle);
             }
@@ -37685,7 +37783,7 @@ impl GameState {
         if let Some(entry) = clone.resolving_stack_entry.as_mut() {
             let carrier_source = entry.source_id;
             if let Some(ability) = entry.ability_mut() {
-                ability.clear_source_provenance_for_loop_recursive(carrier_source);
+                clear_identity(ability, carrier_source);
                 ability.normalize_cast_occurrence_for_loop_recursive();
                 ability.rename_epic_effect_handles_recursive(&rename_stack_epic_handle);
             }
@@ -37697,9 +37795,7 @@ impl GameState {
         // `game::triggers`.
         let normalize_pending_trigger = |pending: &mut crate::game::triggers::PendingTrigger| {
             pending.timestamp = 0;
-            pending
-                .ability
-                .clear_source_provenance_for_loop_recursive(pending.source_id);
+            clear_identity(&mut pending.ability, pending.source_id);
         };
         if let Some(pt) = clone.pending_trigger.as_mut() {
             normalize_pending_trigger(pt);
@@ -37793,6 +37889,27 @@ impl GameState {
         }
     }
 
+    /// CR 400.7 + CR 608.2h: the identity-free stand-in for the departed triggered
+    /// source `source` names, for loop normalization. A source gone from its
+    /// observed incarnation answers a counter read from its exit snapshot
+    /// (`quantity::latched_source_counters`), so the stand-in carries exactly that
+    /// counter map and no object id or incarnation; a source still live at its
+    /// observed incarnation reads the object itself, which loop equality already
+    /// compares, so it needs no stand-in.
+    fn departed_source_counters_projection(
+        &self,
+        source: &TriggerSourceContext,
+    ) -> Option<TriggerSourceContext> {
+        match source.source_read(self) {
+            TriggerSourceRead::ExactLive(_) => None,
+            TriggerSourceRead::Latched(context) => {
+                Some(TriggerSourceContext::counters_only_projection(
+                    crate::game::quantity::latched_source_counters(self, context).clone(),
+                ))
+            }
+        }
+    }
+
     pub(crate) fn retain_carrier_referenced_lki(&mut self) {
         // CR 104.4b + CR 732.2a: incarnation-versioned LKI is historical support
         // state, not independently loop-material state. Retain only snapshots
@@ -37803,7 +37920,7 @@ impl GameState {
         // WaitingFor copies are intentionally not a separate authority: every
         // trigger-event-bearing prompt has one of those pending/continuation
         // carriers, and loop samples are taken at the post-pipeline Priority frame.
-        let mut referenced_lki = HashSet::new();
+        let mut referenced_lki: HashSet<ObjectIncarnationRef> = HashSet::new();
         let mut record_event = |event: &GameEvent| {
             if let GameEvent::ZoneChanged {
                 object_id, record, ..
@@ -39092,6 +39209,13 @@ impl GameState {
                 });
             });
         });
+        // CR 122.6 + CR 400.7: a counter record's recipient stamp is ranked with the live
+        // incarnation it is compared against, so a stale stamp stays distinct from the current one.
+        for record in self.counter_added_this_turn.iter() {
+            if let Some(stamp) = record.incarnation {
+                present.entry(record.object_id).or_default().push(stamp);
+            }
+        }
         may_trigger_origins(self, &mut |definition_ref| {
             definition_ref.for_each_incarnation_mut(&mut |object_id, incarnation| {
                 present.entry(object_id).or_default().push(*incarnation);
@@ -39411,6 +39535,11 @@ impl GameState {
         self.for_each_loop_ability_carrier_mut(&mut |_, ability| {
             ability.for_each_creation_lookback_event_mut(&mut rank_event);
         });
+        for record in self.counter_added_this_turn.iter_mut() {
+            if let Some(stamp) = record.incarnation.as_mut() {
+                *stamp = canonical(record.object_id, *stamp);
+            }
+        }
         for record in self.damage_dealt_this_turn.iter_mut() {
             #[cfg(test)]
             LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(visits.get() + 1));
@@ -52261,6 +52390,518 @@ mod tests {
             "a targeter naming the other spell is a different position"
         );
         assert_eq!(early.next_spell_announcement, 0);
+    }
+
+    fn counter_record(object_id: ObjectId, stamp: Option<u64>) -> CounterAddedRecord {
+        CounterAddedRecord {
+            actor: PlayerId(0),
+            object_id,
+            incarnation: stamp,
+            counter_type: crate::types::counter::CounterType::Plus1Plus1,
+            count: 1,
+            name: "Runner".to_string(),
+            core_types: vec![crate::types::card_type::CoreType::Creature],
+            subtypes: Vec::new(),
+            supertypes: Vec::new(),
+            keywords: Vec::new(),
+            power: Some(2),
+            toughness: Some(2),
+            colors: Vec::new(),
+            mana_value: 0,
+            controller: PlayerId(0),
+            owner: PlayerId(0),
+            counters: HashMap::new(),
+        }
+    }
+
+    /// CR 122.6 + CR 400.7 + CR 104.4b: normalization remaps a counter record's recipient
+    /// stamp with the same map as the object's live incarnation, so the current stamp still
+    /// matches and a stale one stays distinct.
+    #[test]
+    fn normalize_for_loop_remaps_counter_stamps_with_the_object_incarnation() {
+        use crate::game::filter::{matches_target_filter, FilterContext};
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        use crate::types::counter::CounterMatch;
+        let mut state = GameState::new_two_player(7);
+        let runner = create_object(
+            &mut state,
+            CardId(710),
+            PlayerId(0),
+            "Runner".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let object = state.objects.get_mut(&runner).unwrap();
+            object.incarnation = 5;
+            object.card_types.core_types = vec![crate::types::card_type::CoreType::Creature];
+        }
+        for stamp in [Some(5), Some(3)] {
+            state
+                .counter_added_this_turn
+                .push_back(counter_record(runner, stamp));
+        }
+        // Only the current-incarnation record counts: exactly one counter, not two.
+        let filter: TargetFilter = TypedFilter::creature()
+            .properties(vec![FilterProp::CountersPutOnThisTurn {
+                actor: crate::types::ability::CountScope::Controller,
+                counters: CounterMatch::OfType(crate::types::counter::CounterType::Plus1Plus1),
+                comparator: crate::types::ability::Comparator::EQ,
+                count: 1,
+            }])
+            .into();
+        let read = |state: &GameState| {
+            matches_target_filter(
+                state,
+                runner,
+                &filter,
+                &FilterContext::from_source(state, runner),
+            )
+        };
+        assert!(read(&state), "reach guard: the stale stamp is excluded");
+        let normalized = state.normalize_for_loop();
+        assert!(
+            read(&normalized),
+            "the current stamp is remapped with the object"
+        );
+        let live = normalized.objects[&runner].incarnation;
+        let stamps: Vec<Option<u64>> = normalized
+            .counter_added_this_turn
+            .iter()
+            .map(|record| record.incarnation)
+            .collect();
+        assert_eq!(stamps.iter().filter(|s| **s == Some(live)).count(), 1);
+        assert!(stamps.iter().all(Option::is_some));
+        // A legacy record (no stamp) keeps the object-id-only match and survives normalization.
+        state
+            .counter_added_this_turn
+            .push_back(counter_record(runner, None));
+        assert!(!read(&state), "legacy record adds a second counter");
+        assert!(!read(&state.normalize_for_loop()));
+    }
+
+    const CHONG_AND_LILY_ORACLE: &str =
+        "Whenever one or more Bards you control attack, choose one —
+• Put a lore counter on each of any number of target Sagas you control.
+• Creatures you control get +1/+0 until end of turn for each lore counter among Sagas you control.";
+    const BLITZBALL_STADIUM_ORACLE: &str = "When this artifact enters, support X. (Put a +1/+1 counter on each of up to X target creatures.)
+Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenever this creature deals combat damage to a player, draw a card for each kind of counter on it\" and it can't be blocked this turn.";
+
+    /// What a pending departed-source trigger's effect reads.
+    #[derive(Clone, Copy, Debug)]
+    enum DepartedSourceRead {
+        /// Nothing.
+        Nothing,
+        /// The source's own counters (`CountersOn` at `Source`).
+        SourceCounters,
+        /// A population count of live permanents (`CountersOnObjects`).
+        LiveBoardCensus,
+        /// The pump Chong and Lily, Nomads' second mode resolves: parsed from its
+        /// printed Oracle text. It reads the lore counters among Sagas you control
+        /// and names no source.
+        ChongAndLilyPump,
+        /// The draw Blitzball Stadium's "Go for the Goal!" grant resolves
+        /// ("draw a card for each kind of counter on it"), parsed from its printed
+        /// Oracle text. The granted trigger's source is the creature it was granted
+        /// to, so the read is that source's own counter kinds.
+        BlitzballGrantDraw,
+    }
+
+    /// The ability a printed card's text parses to, found by `select` over the
+    /// parsed card, as the resolved ability of a trigger whose source is `source`.
+    fn parsed_printed_ability(
+        oracle: &str,
+        name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+        select: impl FnOnce(
+            &crate::parser::oracle::ParsedAbilities,
+        ) -> crate::types::ability::AbilityDefinition,
+        source: ObjectId,
+    ) -> ResolvedAbility {
+        let types: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|t| t.to_string()).collect();
+        let parsed = crate::parser::oracle::parse_oracle_text(oracle, name, &[], &types, &subtypes);
+        crate::game::ability_utils::build_resolved_from_def(&select(&parsed), source, PlayerId(0))
+    }
+
+    /// A state whose pending trigger belongs to a source that has since left the
+    /// battlefield carrying `counters` +1/+1 counters. The trigger's effect reads
+    /// the source's counters when `reads_counters`; otherwise it reads nothing.
+    fn pending_departed_source_state(
+        spacer_objects: u64,
+        counters: u32,
+        read: DepartedSourceRead,
+    ) -> GameState {
+        use crate::types::counter::CounterType;
+        pending_departed_source_state_with_counters(
+            spacer_objects,
+            &[(CounterType::Plus1Plus1, counters)],
+            read,
+        )
+    }
+
+    /// As [`pending_departed_source_state`], with the source's exact counter map.
+    fn pending_departed_source_state_with_counters(
+        spacer_objects: u64,
+        counters: &[(crate::types::counter::CounterType, u32)],
+        read: DepartedSourceRead,
+    ) -> GameState {
+        use crate::game::zones::move_to_zone;
+        use crate::types::ability::{ObjectScope, QuantityExpr, QuantityRef, TargetFilter};
+        use crate::types::counter::CounterType;
+        let mut state = GameState::new_two_player(7);
+        for n in 0..spacer_objects {
+            create_object(
+                &mut state,
+                CardId(900 + n),
+                PlayerId(0),
+                "Spacer".to_string(),
+                Zone::Battlefield,
+            );
+        }
+        let runner = create_object(
+            &mut state,
+            CardId(720),
+            PlayerId(0),
+            "Runner".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&runner)
+            .unwrap()
+            .counters
+            .extend(counters.iter().cloned());
+        let context = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&runner],
+        );
+        let gain_life = |qty: QuantityRef| Effect::GainLife {
+            amount: QuantityExpr::Ref { qty },
+            player: TargetFilter::Controller,
+        };
+        let plain = |effect: Effect| ResolvedAbility::new(effect, Vec::new(), runner, PlayerId(0));
+        let mut ability = match read {
+            DepartedSourceRead::SourceCounters => plain(gain_life(QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: Some(CounterType::Plus1Plus1),
+            })),
+            // A live-board population read: it is mutable by siblings (the
+            // `sibling` scan axis) but names objects by filter, never the source.
+            DepartedSourceRead::LiveBoardCensus => {
+                plain(gain_life(QuantityRef::CountersOnObjects {
+                    filter: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::creature()
+                            .controller(crate::types::ability::ControllerRef::You),
+                    ),
+                    counter_type: Some(CounterType::Plus1Plus1),
+                }))
+            }
+            DepartedSourceRead::Nothing => plain(Effect::NoOp),
+            DepartedSourceRead::ChongAndLilyPump => parsed_printed_ability(
+                CHONG_AND_LILY_ORACLE,
+                "Chong and Lily, Nomads",
+                &["Creature"],
+                &["Human", "Bard", "Ally"],
+                |parsed| {
+                    let attack = parsed.triggers[0]
+                        .execute
+                        .as_deref()
+                        .expect("Chong and Lily's attack trigger has a body");
+                    let pump = attack.mode_abilities[1].clone();
+                    assert!(
+                        matches!(&*pump.effect, Effect::PumpAll { .. }),
+                        "PREMISE: mode two parses to the mass pump, got {:?}",
+                        pump.effect
+                    );
+                    pump
+                },
+                runner,
+            ),
+            DepartedSourceRead::BlitzballGrantDraw => parsed_printed_ability(
+                BLITZBALL_STADIUM_ORACLE,
+                "Blitzball Stadium",
+                &["Artifact"],
+                &[],
+                |parsed| {
+                    let Effect::GenericEffect {
+                        static_abilities, ..
+                    } = &*parsed.abilities[0].effect
+                    else {
+                        panic!("PREMISE: the grant parses to a GenericEffect");
+                    };
+                    let [crate::types::ability::ContinuousModification::GrantTrigger { trigger }] =
+                        static_abilities[0].modifications.as_slice()
+                    else {
+                        panic!("PREMISE: the grant carries one granted trigger");
+                    };
+                    let draw = trigger
+                        .execute
+                        .as_deref()
+                        .expect("the granted trigger has a body")
+                        .clone();
+                    assert!(
+                        matches!(&*draw.effect, Effect::Draw { .. }),
+                        "PREMISE: the granted trigger draws, got {:?}",
+                        draw.effect
+                    );
+                    draw
+                },
+                runner,
+            ),
+        };
+        ability.trigger_source = Some(context);
+        state.pending_trigger = Some(Box::new(crate::game::triggers::PendingTrigger {
+            source_id: runner,
+            controller: PlayerId(0),
+            condition: None,
+            ability: Box::new(ability),
+            timestamp: 0,
+            target_constraints: Vec::new(),
+            distribute: None,
+            trigger_event: None,
+            modal: None,
+            mode_abilities: vec![],
+            description: None,
+            may_trigger_origin: None,
+            subject_match_count: None,
+            die_result: None,
+            provenance: None,
+        }));
+        move_to_zone(&mut state, runner, Zone::Exile, &mut Vec::new());
+        state
+    }
+
+    fn pending_trigger_ability(state: &GameState) -> &ResolvedAbility {
+        &state.pending_trigger.as_deref().unwrap().ability
+    }
+
+    /// CR 400.7 + CR 608.2h + CR 104.4b: a pending trigger whose source has left the battlefield
+    /// and whose effect reads the source's counters carries the counters that read would answer —
+    /// resolved from the exit snapshot, as an identity-free value.
+    #[test]
+    fn normalize_for_loop_carries_the_counters_a_pending_departed_source_trigger_reads() {
+        use crate::types::counter::CounterType;
+        let state = pending_departed_source_state(0, 2, DepartedSourceRead::SourceCounters);
+        let normalized = state.normalize_for_loop();
+        let projection = pending_trigger_ability(&normalized)
+            .trigger_source
+            .as_ref()
+            .expect("a counter-reading ability of a departed source keeps its read");
+        assert_eq!(
+            projection.lki.counters,
+            HashMap::from([(CounterType::Plus1Plus1, 2)])
+        );
+        assert_eq!(
+            projection.identity.reference,
+            ObjectIncarnationRef::of(ObjectId(0), 0),
+            "the carried read names no object"
+        );
+        assert!(
+            normalized.lki_by_incarnation.is_empty(),
+            "no raw-incarnation exit row is needed once the read is carried"
+        );
+    }
+
+    /// An ability that never reads its source's counters contributes nothing.
+    #[test]
+    fn normalize_for_loop_drops_a_departed_source_no_pending_ability_reads_counters_of() {
+        let state = pending_departed_source_state(0, 2, DepartedSourceRead::Nothing);
+        let normalized = state.normalize_for_loop();
+        assert!(pending_trigger_ability(&normalized)
+            .trigger_source
+            .is_none());
+        assert!(normalized.lki_by_incarnation.is_empty());
+    }
+
+    /// CR 104.4b: normalizing a normalized position changes nothing, including the
+    /// carried read of a departed source.
+    #[test]
+    fn normalize_for_loop_is_idempotent_with_a_pending_counter_reading_departed_source() {
+        for read in [
+            DepartedSourceRead::SourceCounters,
+            DepartedSourceRead::LiveBoardCensus,
+            DepartedSourceRead::Nothing,
+        ] {
+            let once = pending_departed_source_state(0, 2, read).normalize_for_loop();
+            let twice = once.normalize_for_loop();
+            assert!(once == twice, "read = {read:?}");
+            assert_eq!(
+                pending_trigger_ability(&once),
+                pending_trigger_ability(&twice)
+            );
+        }
+    }
+
+    /// CR 104.4b: two positions whose pending reads answer the same counters compare equal
+    /// though the departed sources are different objects (different ids and incarnations);
+    /// positions whose reads answer different counters do not.
+    #[test]
+    fn normalize_for_loop_compares_pending_departed_source_reads_by_the_counters_they_answer() {
+        let first = pending_departed_source_state(0, 2, DepartedSourceRead::SourceCounters)
+            .normalize_for_loop();
+        let relocated = pending_departed_source_state(3, 2, DepartedSourceRead::SourceCounters)
+            .normalize_for_loop();
+        let heavier = pending_departed_source_state(0, 3, DepartedSourceRead::SourceCounters)
+            .normalize_for_loop();
+        assert_eq!(
+            pending_trigger_ability(&first),
+            pending_trigger_ability(&relocated)
+        );
+        assert_ne!(
+            pending_trigger_ability(&first),
+            pending_trigger_ability(&heavier)
+        );
+    }
+
+    /// CR 104.4b + CR 608.2h: two positions that differ ONLY in the departed
+    /// source's counters are the same position when the pending ability never
+    /// reads them. A live-board population count is a sibling-mutable read but
+    /// names no source counter, so it must not distinguish them; the paired
+    /// control reads the source's own counters, where the same two positions
+    /// differ.
+    #[test]
+    fn departed_source_counters_distinguish_positions_only_for_a_source_counter_read() {
+        let position = |counters: u32, read: DepartedSourceRead| {
+            let mut state = pending_departed_source_state(0, counters, read);
+            // The departure also leaves the source's counters in the id-keyed LKI
+            // cache and the turn's zone-change journal. Those history surfaces are
+            // compared on their own terms; clearing them leaves the pending
+            // ability's carried read as the only place the counters can show.
+            state.lki_cache.clear();
+            state.zone_changes_this_turn.clear();
+            state.normalize_for_loop()
+        };
+        for read in [
+            DepartedSourceRead::LiveBoardCensus,
+            DepartedSourceRead::Nothing,
+        ] {
+            assert!(
+                loop_states_equal(&position(2, read), &position(3, read)),
+                "{read:?} reads no source counter, so the departed counters are not position"
+            );
+        }
+        assert!(
+            !loop_states_equal(
+                &position(2, DepartedSourceRead::SourceCounters),
+                &position(3, DepartedSourceRead::SourceCounters),
+            ),
+            "a real source-counter read answers different counters, a different position"
+        );
+    }
+
+    /// The classifier the projection gates on: a source-counter read, and only
+    /// that, including inside a chained sub-ability.
+    #[test]
+    fn ability_reads_source_counters_is_true_only_for_a_source_counter_read() {
+        use crate::game::ability_scan::{
+            ability_reads_sibling_mutable, ability_reads_source_counters,
+        };
+        let ability = |read: DepartedSourceRead| {
+            let state = pending_departed_source_state(0, 2, read);
+            pending_trigger_ability(&state).clone()
+        };
+        let source = ability(DepartedSourceRead::SourceCounters);
+        let census = ability(DepartedSourceRead::LiveBoardCensus);
+        let nothing = ability(DepartedSourceRead::Nothing);
+        assert!(ability_reads_source_counters(&source));
+        assert!(!ability_reads_source_counters(&census));
+        assert!(!ability_reads_source_counters(&nothing));
+        assert!(
+            ability_reads_sibling_mutable(&census),
+            "the census IS sibling-mutable: the broader axis cannot gate the projection"
+        );
+        let mut chained = ability(DepartedSourceRead::Nothing);
+        chained.sub_ability = Some(Box::new(source));
+        assert!(ability_reads_source_counters(&chained));
+    }
+
+    /// A loop position whose departed source left carrying `counters`, with the id-keyed
+    /// LKI cache and the zone-change journal cleared so the pending ability's carried read
+    /// is the only place those counters can show. `passes` normalizations are applied.
+    fn departed_counter_position(
+        counters: &[(crate::types::counter::CounterType, u32)],
+        read: DepartedSourceRead,
+        passes: usize,
+    ) -> GameState {
+        let mut state = pending_departed_source_state_with_counters(0, counters, read);
+        state.lki_cache.clear();
+        state.zone_changes_this_turn.clear();
+        (0..passes).fold(state, |state, _| state.normalize_for_loop())
+    }
+
+    /// CR 608.2h + CR 400.7 + CR 732.2a: the pump Chong and Lily's second mode
+    /// resolves counts the lore counters among Sagas you control, a live
+    /// population that names no source. Two positions that differ only in the
+    /// counters its departed source carried are therefore the same position, and
+    /// the classifier keeps every other axis fail-closed (the population is
+    /// sibling-mutable).
+    #[test]
+    fn selected_chong_and_lily_pump_ignores_the_departed_sources_counters() {
+        use crate::game::ability_scan::{
+            ability_reads_sibling_mutable, ability_reads_source_counters,
+        };
+        use crate::types::counter::CounterType;
+        let pump = pending_trigger_ability(&pending_departed_source_state(
+            0,
+            1,
+            DepartedSourceRead::ChongAndLilyPump,
+        ))
+        .clone();
+        assert!(!ability_reads_source_counters(&pump));
+        assert!(
+            ability_reads_sibling_mutable(&pump),
+            "the saga census stays sibling-mutable: only the source-counter axis narrows"
+        );
+        for passes in [1, 2] {
+            assert!(
+                loop_states_equal(
+                    &departed_counter_position(
+                        &[(CounterType::Lore, 1)],
+                        DepartedSourceRead::ChongAndLilyPump,
+                        passes,
+                    ),
+                    &departed_counter_position(
+                        &[(CounterType::Lore, 4), (CounterType::Plus1Plus1, 2)],
+                        DepartedSourceRead::ChongAndLilyPump,
+                        passes,
+                    ),
+                ),
+                "the pump never reads its source's counters (passes={passes})"
+            );
+        }
+    }
+
+    /// CR 608.2h + CR 400.7 + CR 732.2a: Blitzball Stadium's granted draw reads the
+    /// kinds of counter on its source, the creature it was granted to. Departed
+    /// counter maps that change the draw count stay different positions, including
+    /// after the normal form is normalized again.
+    #[test]
+    fn blitzball_grant_draw_keeps_the_departed_sources_counter_kinds() {
+        use crate::game::ability_scan::ability_reads_source_counters;
+        use crate::types::counter::CounterType;
+        let draw = pending_trigger_ability(&pending_departed_source_state(
+            0,
+            1,
+            DepartedSourceRead::BlitzballGrantDraw,
+        ))
+        .clone();
+        assert!(ability_reads_source_counters(&draw));
+        let one_kind = [(CounterType::Plus1Plus1, 2)];
+        let two_kinds = [(CounterType::Plus1Plus1, 2), (CounterType::Shield, 1)];
+        for passes in [1, 2, 3] {
+            let position = |counters: &[(CounterType, u32)]| {
+                departed_counter_position(counters, DepartedSourceRead::BlitzballGrantDraw, passes)
+            };
+            assert!(
+                !loop_states_equal(&position(&one_kind), &position(&two_kinds)),
+                "one kind versus two draws a different number of cards (passes={passes})"
+            );
+            assert!(
+                loop_states_equal(&position(&two_kinds), &position(&two_kinds)),
+                "identical maps stay equal (passes={passes})"
+            );
+        }
     }
 
     fn announced_departure(
@@ -66036,6 +66677,7 @@ mod restored_exact_attack_authority_tests {
                         attempted: Vec::new(),
                         zone_change_record_start: 0,
                         deferred_events: Vec::new(),
+                        pre_entry_battlefield: None,
                     });
                     state.waiting_for.clone()
                 }

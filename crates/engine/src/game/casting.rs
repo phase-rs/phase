@@ -1387,6 +1387,7 @@ pub(crate) fn is_blocked_by_cant_play_lands(
                         triggering_object: None,
                         declared_slot_view: None,
                         granting_object: None,
+                        pre_entry_battlefield: None,
                     },
                 ),
                 None => true,
@@ -5577,6 +5578,39 @@ pub(super) fn player_mana_spend_permission_for_payment(
         },
         _ => player_mana_spend_permission_for_optional_spell(state, player, source_id),
     }
+}
+
+/// CR 609.4b: The spend-as-though concession that applies when `player` pays the
+/// locked mana cost of the spell `spell_id` — the value
+/// [`player_mana_spend_permission_for_payment`] yields for a spell payment
+/// context (static grants, the elected graveyard latch, the elected exile static,
+/// the object permission and the pre-announcement exile fallback). The spell's
+/// pool finalizer and the AI's payment-surplus certificate both read it here, so
+/// the certificate refuses exactly when the allocator may stretch a unit.
+pub fn cast_payment_mana_spend_permission(
+    state: &GameState,
+    player: PlayerId,
+    spell_id: ObjectId,
+) -> Option<crate::types::ability::ManaSpendPermission> {
+    player_mana_spend_permission_for_optional_spell(state, player, Some(spell_id))
+}
+
+/// CR 106.3 + CR 601.2h: The source snapshot a spend of `unit` records on the
+/// spell it pays for — the live source's public characteristics, or its
+/// last-known information once it has left. `None` when neither exists.
+pub(crate) fn mana_spent_source_snapshot(
+    state: &GameState,
+    unit: &crate::types::mana::ManaUnit,
+) -> Option<crate::types::game_state::ManaSpentSourceSnapshot> {
+    state
+        .objects
+        .get(&unit.source_id)
+        .map(|source| source.snapshot_for_mana_spent())
+        .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
+        .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
+            source_id: unit.source_id,
+            lki,
+        })
 }
 
 /// CR 601.2a + CR 611.2a: Check if an object has an alt-cost cast-from-exile
@@ -24814,17 +24848,7 @@ pub(super) fn pay_mana_cost_with_choices_and_resume(
     if !mana_spent_units.is_empty() {
         let source_snapshots: Vec<_> = mana_spent_units
             .iter()
-            .filter_map(|unit| {
-                state
-                    .objects
-                    .get(&unit.source_id)
-                    .map(|source| source.snapshot_for_mana_spent())
-                    .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
-                    .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
-                        source_id: unit.source_id,
-                        lki,
-                    })
-            })
+            .filter_map(|unit| mana_spent_source_snapshot(state, unit))
             .collect();
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
@@ -24860,12 +24884,7 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
     let spell_meta = build_spell_meta(state, player, source_id);
     let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     let permissions = {
-        let mana_spend_permission = player_mana_spend_permission_for_payment(
-            state,
-            player,
-            Some(source_id),
-            spell_ctx.as_ref(),
-        );
+        let mana_spend_permission = cast_payment_mana_spend_permission(state, player, source_id);
         super::static_abilities::build_cost_permission_context(state, player, mana_spend_permission)
     };
     {
@@ -24952,17 +24971,7 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
     if !mana_spent_units.is_empty() {
         let source_snapshots: Vec<_> = mana_spent_units
             .iter()
-            .filter_map(|unit| {
-                state
-                    .objects
-                    .get(&unit.source_id)
-                    .map(|source| source.snapshot_for_mana_spent())
-                    .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
-                    .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
-                        source_id: unit.source_id,
-                        lki,
-                    })
-            })
+            .filter_map(|unit| mana_spent_source_snapshot(state, unit))
             .collect();
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
@@ -26157,6 +26166,7 @@ fn apply_mana_spell_grants(
                 triggering_object: None,
                 declared_slot_view: None,
                 granting_object: None,
+                pre_entry_battlefield: None,
             };
             if !crate::game::filter::matches_target_filter(
                 rider_view.as_ref().unwrap_or(state),
@@ -33021,12 +33031,10 @@ fn cost_reduction_reads_targets(reduction: &CostReduction, read: TargetRead) -> 
 // and so are `TargetFilter` and its `FilterProp`s, the leaves every filter-scoped
 // count and condition recurses into.
 //
-// Measured on the corpus: of the 84 printed self cost riders, exactly 2 carry any
-// target reference (Dragonfire Blade, Raft Security Officer), both on targeted
-// abilities, and both were already classified as target-dependent before these
-// classifiers were widened. Neither reads through a newly covered shape (a
-// player predicate, a typed-filter property) nor an unbindable one, so widening
-// them changes no current card.
+// Every self rider whose count reads ObjectScope::Target (Dragonfire Blade,
+// Warrior's Blades), and Raft Security Officer's target-referencing rider, sits
+// on a targeted ability and is classified target-dependent, so it is priced at
+// target settlement.
 
 /// Which reads of an activation's chosen targets a classifier reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
