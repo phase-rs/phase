@@ -31094,8 +31094,11 @@ struct ConditionReferent {
 
 /// CR 603.2 + CR 608.2h: the incarnation of the spell a `SpellCast`/`SpellCopied` event
 /// names. The event carries none, so it is read from the object: still on the stack, the
-/// live incarnation; otherwise the incarnation of its latest recorded exit (the stack
-/// exit that `exit_lki_for_incarnation` answers from). `None` when no record survives.
+/// live incarnation; otherwise the incarnation of its latest recorded exit, which for a
+/// spell countered or otherwise moved off the stack before its trigger resolves is the stack
+/// exit that `exit_lki_for_incarnation` answers from (limit: a spell that went on to leave
+/// exile or the battlefield before the trigger resolved has a later record, which answers
+/// instead). `None` when no record survives.
 fn spell_event_incarnation(state: &GameState, id: ObjectId) -> Option<ObjectIncarnationRef> {
     if let Some(object) = state.objects.get(&id).filter(|o| o.zone == Zone::Stack) {
         return Some(ObjectIncarnationRef::from_object(object));

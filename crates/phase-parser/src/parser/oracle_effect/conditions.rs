@@ -3056,8 +3056,10 @@ enum ReferentSurface {
     NonbasicLand,
     /// Bare possessive "its power|toughness is <threshold>".
     ItsStat,
-    /// `that spell|permanent|creature|card` + "'s mana value was|is N or less|greater" /
-    /// " has mana value N or less|greater". The noun names the referent (see [`ReferentNoun`]).
+    /// `that spell|permanent` + "'s mana value was N or less|greater" / " has mana value N or
+    /// less|greater". The noun names the referent (see [`ReferentNoun`]). The present-tense
+    /// possessive "that spell's mana value is N or greater" keeps its quantity route
+    /// (`parse_inner_condition`; Prismari Pianist, Zaffai), so this surface does not claim it.
     NounManaValue,
 }
 
@@ -3067,7 +3069,7 @@ enum ReferentNoun {
     /// "that spell": a declared spell target (Reject Imperfection) or the spell the trigger
     /// event names (Prismari Apprentice, Herald of Ilharg).
     Spell,
-    /// "that permanent|creature|card": the earlier instruction's declared target.
+    /// "that permanent": the earlier instruction's declared target.
     Object,
 }
 
@@ -3219,10 +3221,7 @@ fn parse_referent_predicate(
                 tag("that "),
                 alt((
                     value(ReferentNoun::Spell, tag("spell")),
-                    value(
-                        ReferentNoun::Object,
-                        alt((tag("permanent"), tag("creature"), tag("card"))),
-                    ),
+                    value(ReferentNoun::Object, tag("permanent")),
                 )),
             )
             .parse(input)?;
@@ -3232,10 +3231,6 @@ fn parse_referent_predicate(
                 preceded(
                     tag("'s mana value was "),
                     map(parse_mana_value_or_threshold, |t| (true, t)),
-                ),
-                preceded(
-                    tag("'s mana value is "),
-                    map(parse_mana_value_or_threshold, |t| (false, t)),
                 ),
                 preceded(
                     tag(" has mana value "),
@@ -3463,7 +3458,7 @@ fn spell_referent_scope(ctx: &ParseContext) -> ObjectScope {
 
 /// CR 202.3 + CR 608.2c: "that spell's mana value was N or less" / "that permanent's mana
 /// value was N or less" / "that spell has mana value N or greater" — the owner's noun
-/// surface. `that permanent|creature|card` read the earlier instruction's declared target
+/// surface. `that permanent` reads the earlier instruction's declared target
 /// (the P/T threshold family's binding guard applies); `that spell` binds through
 /// [`spell_referent_scope`].
 fn parse_referent_noun_mana_value_condition_text(

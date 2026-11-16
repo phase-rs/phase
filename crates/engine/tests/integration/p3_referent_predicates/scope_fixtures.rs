@@ -284,21 +284,23 @@ fn departed_event_spell_reads_its_stack_exit_snapshot() {
     );
 }
 
-/// The evaluator admits `Target` and `EventSource` only; any other scope has no referent.
+/// The evaluator admits `Target` and `EventSource` only; any other scope has no referent. The
+/// `Target` row is the reach guard: the same fixture and gate DO fire for an admitted scope.
 #[test]
 fn unadmitted_scope_fails_closed() {
-    for scope in [
-        ObjectScope::Source,
-        ObjectScope::CostPaidObject,
-        ObjectScope::Recipient,
+    for (scope, expected) in [
+        (ObjectScope::Target, 1),
+        (ObjectScope::Source, 0),
+        (ObjectScope::CostPaidObject, 0),
+        (ObjectScope::Recipient, 0),
     ] {
         let mut state = GameState::new_two_player(7);
         let source = object(&mut state, 1, Zone::Battlefield, CoreType::Creature, 0);
         let target = object(&mut state, 2, Zone::Battlefield, CoreType::Creature, 1);
         assert_eq!(
             gated_life_gain(&mut state, source, target, condition(3, false, scope)),
-            0,
-            "{scope:?} is not an admitted scope for TargetMatchesFilter"
+            expected,
+            "{scope:?}: only Target and EventSource name a referent for TargetMatchesFilter"
         );
     }
 }

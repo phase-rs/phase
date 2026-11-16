@@ -422,3 +422,72 @@ fn p3s2a_prismari_twincast_trigger_events() {
     }
     assert_eq!(seen.len(), 3, "printed: magecraft triggers for the cast of Overrun, the cast of Twincast and the copy of Overrun");
 }
+
+/// CR 702.50a + CR 707.10: Endless Swarm's Epic copy is put on the stack at P0's upkeep and is not cast, so the
+/// only event Prismari Apprentice ("whenever you cast or copy an instant or sorcery spell") can see is
+/// `SpellCopied`, which Epic's resolver pushes without collecting its observers inline. The copy of the
+/// MV 8 sorcery earns the printed +1/+1 counter. Guards the duplicate-collection fix: the pass must still
+/// collect a `SpellCopied` that no effect collected itself.
+#[test]
+fn p3s2a_epic_copy_triggers_prismari_apprentice_once() {
+    let mut sc = scenario();
+    sc.with_mana_pool(P0, mana_for(&[ENDLESS_SWARM_COST], 0));
+    sc.with_library_top(
+        P0,
+        &["Forest", "Forest", "Forest", "Forest", "Forest", "Forest"],
+    );
+    sc.with_library_top(
+        P1,
+        &["Island", "Island", "Island", "Island", "Island", "Island"],
+    );
+    let p = add_prismari(&mut sc);
+    let swarm = sc
+        .add_spell_to_hand_from_oracle(P0, "Endless Swarm", false, ENDLESS_SWARM)
+        .from_oracle_text_with_keywords(&["Epic"], ENDLESS_SWARM)
+        .with_mana_cost(cost(ENDLESS_SWARM_COST))
+        .id();
+    let mut r = sc.build();
+    cast_spell(&mut r, swarm);
+    // Magecraft on the CAST of the MV 8 sorcery.
+    let w = drain(&mut r);
+    assert!(
+        matches!(w, WaitingFor::Priority { .. }),
+        "Swarm resolved, got {w:?}"
+    );
+    assert_eq!(
+        zone(r.state(), swarm),
+        Zone::Graveyard,
+        "Endless Swarm resolved"
+    );
+    let after_cast = plus_counters(r.state(), p);
+    assert_eq!(after_cast, 1, "one counter for casting the MV 8 sorcery");
+    // Next upkeep of P0: the Epic copy goes on the stack, then resolves.
+    for _ in 0..80 {
+        if r.state().phase == engine::types::phase::Phase::Upkeep
+            && r.state().active_player == P0
+            && r.state().turn_number > 1
+        {
+            break;
+        }
+        match r.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                r.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                r.declare_attackers(&[]).expect("declare no attackers");
+            }
+            other => panic!("unexpected decision on the way to P0's upkeep: {other:?}"),
+        }
+    }
+    assert_eq!(r.state().active_player, P0, "P0's next upkeep reached");
+    let w = drain(&mut r);
+    assert!(
+        matches!(w, WaitingFor::Priority { .. }),
+        "Epic copy resolved, got {w:?}"
+    );
+    assert_eq!(
+        plus_counters(r.state(), p),
+        2,
+        "the Epic copy of the MV 8 sorcery triggers magecraft exactly once"
+    );
+}

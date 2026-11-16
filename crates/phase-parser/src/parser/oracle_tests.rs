@@ -36448,27 +36448,22 @@ fn mana_value_referent_gate_binds_the_object_the_clause_names() {
         );
     }
 
-    // The same words bind by context, not by card: "that spell" in a resolving spell's body is the
-    // announced target, under a cast trigger it is the event's spell, and "that permanent" is
-    // always the declared target. A gate with no antecedent in scope is not invented.
-    let resolving = gates_of(
-        "Counter target spell. If that spell has mana value 5 or greater, draw a card.",
-        "Fixture",
-        &["Instant"],
-    );
-    assert_eq!(
-        resolving.iter().map(|g| g.1).collect::<Vec<_>>(),
-        vec![ObjectScope::Target],
-        "resolving spell: the announced spell target"
-    );
-    let triggered = gates_of(
-        "Whenever you cast an instant or sorcery spell, draw a card. If that spell's mana value is 5 or greater, scry 1.",
-        "Fixture",
-        &["Creature"],
-    );
-    assert_eq!(
-        triggered.iter().map(|g| (g.1, g.2)).collect::<Vec<_>>(),
-        vec![(ObjectScope::EventSource, false)],
-        "cast trigger: the event's spell, present tense reads the live object"
-    );
+    // Claim set: the present-tense possessive "that spell's mana value is N or greater" keeps
+    // its quantity route (it is not claimed by the mana-value noun surface), so the printed
+    // cards that use it stay as they were (Prismari Pianist, Zaffai, Thunder Conductor).
+    for (name, text) in [
+        (
+            "Prismari Pianist",
+            "Whenever you cast an instant or sorcery spell, create a 1/1 blue and red Elemental creature token. If that spell's mana value is 5 or greater, create three of those tokens instead.",
+        ),
+        (
+            "Zaffai, Thunder Conductor",
+            "Magecraft — Whenever you cast or copy an instant or sorcery spell, scry 1. If that spell's mana value is 5 or greater, create a 4/4 blue and red Elemental creature token. If that spell's mana value is 10 or greater, Zaffai deals 10 damage to an opponent chosen at random.",
+        ),
+    ] {
+        assert!(
+            gates_of(text, name, &["Creature"]).is_empty(),
+            "{name}: the present-tense `is` form is not a TargetMatchesFilter mana-value gate"
+        );
+    }
 }

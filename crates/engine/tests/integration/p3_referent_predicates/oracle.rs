@@ -78,3 +78,7 @@ pub const VINDICTIVE_TRIUMPH: &str = "Exile target creature or planeswalker. If 
 pub const VINDICTIVE_TRIUMPH_COST: &str = "{W}{B}{B}";
 pub const WALKING_BALLISTA: &str = "This creature enters with X +1/+1 counters on it.\n{4}: Put a +1/+1 counter on this creature.\nRemove a +1/+1 counter from this creature: It deals 1 damage to any target.";
 pub const WALKING_BALLISTA_COST: &str = "{X}{X}";
+
+/// Scryfall `cards/named?exact=Endless+Swarm` (fetched 2026-11-16).
+pub const ENDLESS_SWARM: &str = "Create a 1/1 green Snake creature token for each card in your hand.\nEpic (For the rest of the game, you can't cast spells. At the beginning of each of your upkeeps, copy this spell except for its epic ability.)";
+pub const ENDLESS_SWARM_COST: &str = "{5}{G}{G}{G}";
