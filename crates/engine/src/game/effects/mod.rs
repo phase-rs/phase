@@ -18905,6 +18905,8 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
         AbilityCost::TapCreatures { .. } | AbilityCost::SayPhrase { .. }
     ) || matches!(cost, AbilityCost::PayLife { amount }
             if !crate::types::ability::is_pay_any_amount(amount))
+        || matches!(cost, AbilityCost::Mana { cost }
+            if !crate::game::casting_costs::cost_has_x(cost))
 }
 
 /// CR 608.2d: "A player can't choose an impossible option." An optional effect
@@ -18972,9 +18974,15 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         } => transform_effect::optional_self_transform_is_impossible(state, ability),
         // CR 118.3 + CR 119.4 + CR 608.2d: a player without the resources can't pay, so an
         // unaffordable optional payment is an impossible option and is never offered.
-        Effect::PayCost { cost, payer, .. }
-            if optional_pay_cost_affordability_is_decidable(cost) =>
-        {
+        // Scaled costs are excluded (mirrors `is_synchronous_mana_pay_cost`): a
+        // pay-any-amount scale resolves times=0 to a trivially payable {0}
+        // (pay.rs), so the offer is always possible and never decidable here.
+        Effect::PayCost {
+            cost,
+            payer,
+            scale: None,
+            ..
+        } if optional_pay_cost_affordability_is_decidable(cost) => {
             let Some(payer) =
                 crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
             else {
@@ -19031,6 +19039,22 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
                 effective.as_ref(),
                 *origin,
             )
+        }
+        // CR 608.2d + CR 400.7: "that player may exile a card from their
+        // graveyard" (Web of Inertia) is impossible with no eligible card —
+        // an exact typed selection from an empty set cannot be performed, so
+        // the offer is skipped and resolution proceeds to the "doesn't"
+        // branch. Hydrate event-context targets first, exactly as resolution
+        // does.
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: TargetFilter::Typed { .. },
+            up_to: false,
+            ..
+        } if ability.multi_target.is_none() => {
+            let effective = hydrate_event_context_targets(state, ability);
+            change_zone::optional_exact_graveyard_exile_is_infeasible(state, effective.as_ref())
         }
         // CR 608.2d + CR 701.20a: "you may reveal the top card of your library"
         // (Priority Boarding) is impossible when it would reveal no card. Hydrate
@@ -63243,7 +63267,11 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
-    /// Accept extort with no {W/B} available — drain must not run (CR 702.101a).
+    /// Extort with no {W/B} available — the offer is never made (CR 608.2d via
+    /// the F1 feasibility gate) and the drain must not run (CR 702.101a).
+    /// Post-F1 this replaces the old accept-path pin: an infeasible offer has
+    /// no accept leg to exercise, so the test asserts suppression (no prompt)
+    /// plus the same terminal no-drain invariant.
     #[test]
     fn issue_1972_extort_accept_without_payable_mana_does_not_drain() {
         let mut face = CardFace::default();
@@ -63269,22 +63297,11 @@ mod tests {
         let mut events = Vec::new();
         resolve_ability_chain(&mut state, &resolved, &mut events, 0).unwrap();
         assert!(
-            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
-            "extort must prompt before draining, got {:?}",
+            !matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "an infeasible extort offer must be suppressed, got {:?}",
             state.waiting_for
         );
 
-        crate::game::engine_payment_choices::handle_optional_effect_choice(
-            &mut state,
-            true,
-            &mut events,
-        )
-        .unwrap();
-
-        assert!(
-            state.cost_payment_failed_flag,
-            "PayCost with no W/B must set cost_payment_failed_flag"
-        );
         assert_eq!(
             (
                 state.players[0].life,
@@ -63292,8 +63309,9 @@ mod tests {
                 state.players[2].life
             ),
             (20, 20, 20),
-            "accepting without payable mana must not drain opponents or grant life"
+            "a suppressed offer must not drain opponents or grant life"
         );
+        assert_eq!(state.players[0].mana_pool.total(), 0, "nothing was spent");
     }
 
     #[test]
