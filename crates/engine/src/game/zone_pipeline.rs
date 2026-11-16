@@ -1358,7 +1358,9 @@ enum BatchDeliveryResult {
 #[derive(Clone, Copy)]
 enum BatchDeliveryParking {
     NewChild,
-    ReparkActive,
+    /// Re-park the batch's own owner frame, addressed by its logical group
+    /// identity (child frames may sit above it).
+    ReparkOwner,
 }
 
 /// CR 603.10a batch entry: move many objects to one destination through the
@@ -1434,14 +1436,50 @@ pub(crate) fn move_objects_simultaneously_settling_then(
     let logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
     let destination = reqs.first().map(|r| r.to);
-    match deliver_batch(
-        state,
-        reqs,
-        logical_zone_change_group,
-        BatchDeliveryParking::NewChild,
-        events,
-    ) {
+    // CR 614.12 + CR 614.1c: a simultaneous battlefield batch (Dig kept cards)
+    // snapshots the pre-entry battlefield before its first member enters. The
+    // batch frame owns the snapshot from the start, so a replacement pause
+    // re-parks it (see `stash_batch_tail`) and the resume never re-captures it.
+    let pre_entry_battlefield = destination.and_then(|zone| {
+        crate::game::engine_replacement::pre_entry_snapshot_for_entry(
+            state,
+            ids.iter().copied(),
+            zone,
+        )
+    });
+    let parking = if pre_entry_battlefield.is_some() {
+        state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
+            logical_zone_change_group: logical_zone_change_group.clone(),
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: destination.unwrap_or(Zone::Battlefield),
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start,
+            deferred_events: Vec::new(),
+            pre_entry_battlefield,
+        });
+        BatchDeliveryParking::ReparkOwner
+    } else {
+        BatchDeliveryParking::NewChild
+    };
+    let owns_pre_entry_snapshot = matches!(parking, BatchDeliveryParking::ReparkOwner);
+    let owner_group = logical_zone_change_group.logical_group_id;
+    match deliver_batch(state, reqs, logical_zone_change_group, parking, events) {
         BatchDeliveryResult::Done(mut logical_zone_change_group) => {
+            if owns_pre_entry_snapshot {
+                // The simultaneous entry is over; the snapshot ends with it.
+                state
+                    .take_active_batch_delivery()
+                    .expect("snapshot-owning batch frame must be the active owner");
+            }
             crate::game::triggers::complete_logical_zone_trigger_collection(
                 state,
                 &mut logical_zone_change_group,
@@ -1475,7 +1513,15 @@ pub(crate) fn move_objects_simultaneously_settling_then(
             // paused object was the last member and the undelivered tail is empty.
             // Attach the completion to that same owner so its drain can run it
             // once, after logical settlement.
-            let pending = ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard));
+            let pending = if owns_pre_entry_snapshot {
+                // The re-parked owner may have child frames above it, so it is
+                // addressed by its group identity, not by stack position.
+                state
+                    .batch_delivery_for_group_mut(owner_group)
+                    .expect("paused snapshot-owning batch retains its owner frame")
+            } else {
+                ensure_batch_record(state, destination.unwrap_or(Zone::Graveyard))
+            };
             pending.completion = completion;
             // CR 701.20d + CR 616.1: the reorder rides the same parked owner; its
             // drain settles the reorder before running this completion.
@@ -1541,6 +1587,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
             attempted: Vec::new(),
             zone_change_record_start,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
     }
     state
@@ -1696,6 +1743,14 @@ fn stash_batch_tail(
         .into_iter()
         .map(ZoneMoveRequest::into_pending)
         .collect();
+    // CR 614.12: a re-parked batch keeps the snapshot captured before its first
+    // member entered.
+    let pre_entry_battlefield = match parking {
+        BatchDeliveryParking::ReparkOwner => state
+            .batch_delivery_for_group(logical_zone_change_group.logical_group_id)
+            .and_then(|owner| owner.pre_entry_battlefield.clone()),
+        BatchDeliveryParking::NewChild => None,
+    };
     let pending = PendingBatchDeliveries {
         library_reorder: None,
         logical_zone_change_group,
@@ -1715,12 +1770,13 @@ fn stash_batch_tail(
         attempted: Vec::new(),
         zone_change_record_start: state.zone_changes_this_turn.len(),
         deferred_events: Vec::new(),
+        pre_entry_battlefield,
     };
     match parking {
         BatchDeliveryParking::NewChild => state.push_batch_delivery(pending),
-        BatchDeliveryParking::ReparkActive => state
-            .replace_active_batch_delivery(pending)
-            .expect("re-paused batch delivery must own the active frame"),
+        BatchDeliveryParking::ReparkOwner => state
+            .replace_batch_delivery_for_group(pending)
+            .expect("re-paused batch delivery must retain its owner frame"),
     }
 }
 
@@ -1831,8 +1887,10 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             attempted,
             zone_change_record_start,
             mut deferred_events,
+            pre_entry_battlefield: _,
         } = pending;
         deferred_events.append(events);
+        let owner_group = logical_zone_change_group.logical_group_id;
         let attempted = if attempted.is_empty() {
             remaining.clone()
         } else {
@@ -1892,7 +1950,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             state,
             reqs,
             logical_zone_change_group,
-            BatchDeliveryParking::ReparkActive,
+            BatchDeliveryParking::ReparkOwner,
             events,
         ) {
             BatchDeliveryResult::Done(mut logical_zone_change_group) => {
@@ -1965,7 +2023,9 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 // `deliver_batch` already re-parked the exact same owner,
                 // including a pause on its final member. Re-attach only the
                 // completion and external output; never replace that owner.
-                let reparking = ensure_batch_record(state, destination);
+                let reparking = state
+                    .batch_delivery_for_group_mut(owner_group)
+                    .expect("re-parked batch retains its owner frame");
                 reparking.completion = completion;
                 // CR 701.20d + CR 616.1: the re-parked tail still owes the
                 // library reorder this instruction performs.
@@ -2048,6 +2108,7 @@ mod paused_search_audience_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         drain_pending_batch_deliveries(&mut state, &mut Vec::new());
@@ -2135,6 +2196,7 @@ mod paused_search_audience_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         // An answer pins the boundary, then changes the proposal.
@@ -2727,9 +2789,10 @@ pub(crate) enum EnteringAuraAttachment {
 pub(crate) fn resolve_entering_aura_attachment(
     state: &mut GameState,
     object_id: ObjectId,
+    events: &mut Vec<GameEvent>,
 ) -> EnteringAuraAttachment {
     let hosts = entering_aura_hosts(state, object_id);
-    apply_entering_aura_hosts(state, object_id, hosts)
+    apply_entering_aura_hosts(state, object_id, hosts, events)
 }
 
 /// The legal hosts an entering Aura may be attached to, decided but NOT applied.
@@ -2901,6 +2964,7 @@ pub(crate) fn apply_entering_aura_hosts(
     state: &mut GameState,
     object_id: ObjectId,
     hosts: EnteringAuraHosts,
+    events: &mut Vec<GameEvent>,
 ) -> EnteringAuraAttachment {
     // Any authority parked by an earlier entering-Aura decision is spent or
     // stale by the time another one is being ACTED on: the only way to reach
@@ -2921,22 +2985,30 @@ pub(crate) fn apply_entering_aura_hosts(
         // caller decide the entrant's fate.
         [] => EnteringAuraAttachment::NoLegalHost,
         [TargetRef::Object(id)] => {
-            crate::game::effects::attach::attach_to_with_authority(
+            if crate::game::effects::attach::attach_to_with_authority_and_events(
                 state,
                 object_id,
                 *id,
                 entrant.authority(),
-            );
-            EnteringAuraAttachment::Attached
+                events,
+            ) {
+                EnteringAuraAttachment::Attached
+            } else {
+                EnteringAuraAttachment::NoLegalHost
+            }
         }
         [TargetRef::Player(id)] => {
-            crate::game::effects::attach::attach_to_player_with_authority(
+            if crate::game::effects::attach::attach_to_player_with_authority_and_events(
                 state,
                 object_id,
                 *id,
                 entrant.authority(),
-            );
-            EnteringAuraAttachment::Attached
+                events,
+            ) {
+                EnteringAuraAttachment::Attached
+            } else {
+                EnteringAuraAttachment::NoLegalHost
+            }
         }
         _ => {
             // CR 303.4f: the choice returns to the event loop, so the entrant has
@@ -2961,20 +3033,16 @@ pub(crate) fn apply_entering_aura_hosts(
 }
 
 /// CR 303.4f + CR 701.3b: attach an entering Aura to the host its controller
-/// chose, judged against the entrant the choice was offered for.
+/// chose, judged against the entrant the choice was offered for, recording
+/// `GameEvent::Unattached` and `GameEvent::Attached` into `events`.
 ///
-/// The single authority behind the `WaitingFor::ReturnAsAuraTarget` resume arm's
-/// attach. That arm is shared by seams that park no
-/// [`EnteringAuraAuthority`] — `ReturnAsAura` (Old-Growth Troll), the plain
-/// non-spell Aura ZoneChange entry, and the on-battlefield `BecomeCopy`
-/// realization — and for all of those the absent authority selects
-/// [`EnteringAuraEntrant::Stored`], i.e. byte-for-byte the `attach_to` /
-/// `attach_to_player` behaviour they had before.
+/// Returns `true` if the attachment succeeded.
 pub(crate) fn attach_chosen_entering_aura_host(
     state: &mut GameState,
     aura_id: ObjectId,
     chosen: &TargetRef,
-) -> Option<TargetRef> {
+    events: &mut Vec<GameEvent>,
+) -> bool {
     // Taken unconditionally: a parked authority belongs to exactly one pause, so
     // whichever pause is resuming, it must not survive into a later one. It is
     // then honoured only for the Aura it was parked for.
@@ -2983,23 +3051,24 @@ pub(crate) fn attach_chosen_entering_aura_host(
         .take()
         .filter(|authority| authority.aura_id == aura_id)
         .map(|authority| EnteringAuraEntrant::Projected(authority.entrant));
-    let entrant = parked.unwrap_or(EnteringAuraEntrant::Stored);
-    match chosen {
-        TargetRef::Object(host_id) => crate::game::effects::attach::attach_to_with_authority(
-            state,
-            aura_id,
-            *host_id,
-            entrant.authority(),
-        ),
-        TargetRef::Player(host_player) => {
-            crate::game::effects::attach::attach_to_player_with_authority(
-                state,
-                aura_id,
-                *host_player,
-                entrant.authority(),
-            )
-        }
+    // CR 101.2 + CR 603.2g: defense in depth for the delivered-entry gate — an
+    // Aura that did not actually enter the battlefield (a refused "can't enter"
+    // return) is never attached, so no graph edit or `Attached` event occurs.
+    if !state
+        .objects
+        .get(&aura_id)
+        .is_some_and(|obj| obj.zone == Zone::Battlefield)
+    {
+        return false;
     }
+    let entrant = parked.unwrap_or(EnteringAuraEntrant::Stored);
+    crate::game::effects::attach::attach_target_with_authority_and_events(
+        state,
+        aura_id,
+        chosen,
+        entrant.authority(),
+        events,
+    )
 }
 
 #[cfg(test)]
@@ -3071,7 +3140,7 @@ mod entering_aura_attachment_tests {
             .push(CoreType::Creature);
 
         assert!(matches!(
-            resolve_entering_aura_attachment(&mut state, id),
+            resolve_entering_aura_attachment(&mut state, id, &mut Vec::new()),
             EnteringAuraAttachment::NotApplicable
         ));
     }
@@ -3085,7 +3154,7 @@ mod entering_aura_attachment_tests {
         let id = aura(&mut state, P0, enchant_creature());
 
         assert!(matches!(
-            resolve_entering_aura_attachment(&mut state, id),
+            resolve_entering_aura_attachment(&mut state, id, &mut Vec::new()),
             EnteringAuraAttachment::NoLegalHost
         ));
         assert!(
@@ -3105,15 +3174,23 @@ mod entering_aura_attachment_tests {
         let mut state = GameState::new_two_player(1);
         let host = creature(&mut state, P0, "Host");
         let id = aura(&mut state, P0, enchant_creature());
+        let mut events = Vec::new();
 
         assert!(matches!(
-            resolve_entering_aura_attachment(&mut state, id),
+            resolve_entering_aura_attachment(&mut state, id, &mut events),
             EnteringAuraAttachment::Attached
         ));
         assert_eq!(
             state.objects[&id].attached_to,
             Some(crate::game::game_object::AttachTarget::Object(host))
         );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::Attached {
+                attachment_id,
+                target: TargetRef::Object(h)
+            } if *attachment_id == id && *h == host
+        )));
     }
 
     /// CR 303.4f: more than one legal host IS a choice.
@@ -3127,7 +3204,7 @@ mod entering_aura_attachment_tests {
         let EnteringAuraAttachment::NeedsChoice {
             controller,
             legal_targets,
-        } = resolve_entering_aura_attachment(&mut state, id)
+        } = resolve_entering_aura_attachment(&mut state, id, &mut Vec::new())
         else {
             panic!("two legal hosts must produce a choice");
         };
@@ -3720,8 +3797,9 @@ mod entering_aura_attachment_tests {
              host (P0 is protected from enchantments either way)"
         );
 
+        let mut events = Vec::new();
         assert!(matches!(
-            apply_entering_aura_hosts(&mut state, id, hosts),
+            apply_entering_aura_hosts(&mut state, id, hosts, &mut events),
             EnteringAuraAttachment::Attached
         ));
         assert_eq!(
@@ -3730,6 +3808,13 @@ mod entering_aura_attachment_tests {
             "CR 303.4i: the player gate must read the ENTRANT — the stored body's \
              artifact type is not the Aura that is entering"
         );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::Attached {
+                attachment_id,
+                target: TargetRef::Player(p)
+            } if *attachment_id == id && *p == P1
+        )));
     }
 
     /// CR 303.4f: the multi-host pause parks the entrant, and only a real
@@ -3748,7 +3833,7 @@ mod entering_aura_attachment_tests {
 
         let stored_hosts = entering_aura_hosts(&state, id);
         assert!(matches!(
-            apply_entering_aura_hosts(&mut state, id, stored_hosts),
+            apply_entering_aura_hosts(&mut state, id, stored_hosts, &mut Vec::new()),
             EnteringAuraAttachment::NeedsChoice { .. }
         ));
         assert!(
@@ -3759,7 +3844,7 @@ mod entering_aura_attachment_tests {
         let entrant = state.objects[&id].clone();
         let projected_hosts = entering_aura_hosts_projected(&state, id, &entrant);
         assert!(matches!(
-            apply_entering_aura_hosts(&mut state, id, projected_hosts),
+            apply_entering_aura_hosts(&mut state, id, projected_hosts, &mut Vec::new()),
             EnteringAuraAttachment::NeedsChoice { .. }
         ));
         let parked = state
@@ -3770,9 +3855,14 @@ mod entering_aura_attachment_tests {
 
         // Spent by the resume, and honoured only for its own Aura.
         let other = aura(&mut state, P0, enchant_creature());
+        let mut events = Vec::new();
         assert!(
-            attach_chosen_entering_aura_host(&mut state, other, &TargetRef::Object(id)).is_none()
-                || state.entering_aura_authority.is_none(),
+            !attach_chosen_entering_aura_host(
+                &mut state,
+                other,
+                &TargetRef::Object(id),
+                &mut events
+            ) || state.entering_aura_authority.is_none(),
             "a resume for a different Aura must not consume the parked entrant as its own"
         );
         assert!(
@@ -4515,6 +4605,10 @@ pub(crate) fn deliver_replaced_zone_change(
                 enter_as_copy.as_deref(),
                 events,
             );
+            // The face-down profile (morph/manifest/disguise/cloak) may have changed
+            // the object's characteristics (e.g., a manifested land becomes a creature).
+            // Update the battlefield entry record to reflect the entry-time state.
+            crate::game::restrictions::update_battlefield_entry_record_for_object(state, object_id);
         }
         // CR 614.1c + CR 611.2a + CR 616.1: install every "and with …" entry
         // grant the applied replacements folded onto this event, in
@@ -4604,19 +4698,24 @@ pub(crate) fn deliver_replaced_zone_change(
                 );
             }
         }
-        // CR 303.4f + CR 701.3a: A non-spell Aura entry carries its chosen
-        // enchant host through the ZoneChange event so it is attached before
-        // the effect finishes resolving.
-        if to == Zone::Battlefield {
+        // CR 303.4 + CR 701.3a: A non-spell Aura entry carries its host through
+        // the ZoneChange event, whether the effect specified it or a player
+        // chose it under CR 303.4f. CR 614.17d: gated on
+        // `entered_battlefield` (the delivered entry), not the intended
+        // destination: when a "can't enter the battlefield" static refused the
+        // entry the Aura never entered, so nothing attaches and no
+        // `GameEvent::Attached` reaches attachment observers.
+        if entered_battlefield {
             if let Some(target) = attach_to {
                 match target {
                     crate::game::game_object::AttachTarget::Object(target_id) => {
-                        let _ =
-                            crate::game::effects::attach::attach_to(state, object_id, target_id);
+                        crate::game::effects::attach::attach_to_with_events(
+                            state, object_id, target_id, events,
+                        );
                     }
                     crate::game::game_object::AttachTarget::Player(player_id) => {
-                        let _ = crate::game::effects::attach::attach_to_player(
-                            state, object_id, player_id,
+                        crate::game::effects::attach::attach_to_player_with_events(
+                            state, object_id, player_id, events,
                         );
                     }
                 }
@@ -5480,11 +5579,19 @@ fn execute_zone_move_with_applied_terminal(
                     events,
                 ) {
                     ZoneDeliveryResult::Done => {
-                        debug_assert_eq!(
-                            zone_move_completion_from_delivery(member, &events[delivery_start..]),
-                            ZoneMoveCompletion::Moved,
-                            "an Aura host choice follows a completed battlefield entry"
-                        );
+                        // CR 101.2 + CR 614.17: a "can't enter the battlefield"
+                        // effect (Weathered Runestone, Grafdigger's Cage) takes
+                        // precedence, so the delivery can complete with the Aura
+                        // still in its origin zone. The host choice is only
+                        // offered for an Aura that actually entered: a refused
+                        // return settles here with no prompt, attachment, or
+                        // `Attached` event (CR 603.2g: nothing occurred to
+                        // trigger observers).
+                        let completion =
+                            zone_move_completion_from_delivery(member, &events[delivery_start..]);
+                        if completion != ZoneMoveCompletion::Moved {
+                            return ZoneMoveTerminalResult::Completed(completion);
+                        }
                     }
                     ZoneDeliveryResult::NeedsChoice(player) => {
                         return ZoneMoveTerminalResult::NeedsChoice(player);
@@ -6772,6 +6879,7 @@ mod w3_library_placement_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
         install_library_to_exile_redirect(&mut state);
         install_library_to_exile_redirect(&mut state);
@@ -8743,6 +8851,7 @@ mod library_reorder_carrier_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
         assert!(
             state.active_batch_delivery().is_some(),
@@ -8912,6 +9021,7 @@ mod library_reorder_carrier_tests {
             attempted: vec![pile.b, pile.a],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         let mut events = Vec::new();

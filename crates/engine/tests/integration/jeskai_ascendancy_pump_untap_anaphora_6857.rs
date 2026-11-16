@@ -31,7 +31,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{BattlefieldEntryRecord, CastPaymentMode, GameState, WaitingFor};
+use engine::types::game_state::{
+    BattlefieldEntryRecord, CastPaymentMode, FaceState, GameState, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -348,6 +350,7 @@ fn motivated_pony_untaps_only_the_attacking_creatures_it_pumped() {
             colors: vec![],
             keywords: vec![],
             controller: P0,
+            face_state: FaceState::FaceUp,
         });
     runner.advance_to_combat();
     runner

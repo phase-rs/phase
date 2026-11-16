@@ -60,6 +60,7 @@ impl Default for ComboRegistry {
 impl ComboRegistry {
     /// Returns all combo lines that are reachable (this turn or next turn) for
     /// the given AI player. Lines that are `NotReachable` are filtered out.
+    /// Per-candidate callers should use `AiSession::get_or_reachable_lines`.
     pub fn reachable_lines(
         &self,
         state: &GameState,

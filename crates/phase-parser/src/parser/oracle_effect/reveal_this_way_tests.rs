@@ -459,6 +459,7 @@ fn goblin_charbelcher_lowers_to_typed_damage_override_and_whole_pile_bottom() {
         qty: QuantityRef::FilteredTrackedSetSize {
             filter: Box::new(nonland_card()),
             caused_by: None,
+            destination: None,
         },
     };
     let Effect::DealDamage { amount, target, .. } = damage.effect.as_ref() else {

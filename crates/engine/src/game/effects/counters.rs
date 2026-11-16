@@ -963,10 +963,10 @@ fn apply_pending_counter_post_action(
             if let Some(host) = attach_to {
                 match host {
                     crate::game::game_object::AttachTarget::Object(id) => {
-                        super::attach::attach_to(state, object_id, id);
+                        super::attach::attach_to_with_events(state, object_id, id, events);
                     }
                     crate::game::game_object::AttachTarget::Player(pid) => {
-                        super::attach::attach_to_player(state, object_id, pid);
+                        super::attach::attach_to_player_with_events(state, object_id, pid, events);
                     }
                 }
             }
@@ -1514,6 +1514,7 @@ pub fn apply_resolved_counter_edit(
                 Some(CounterAddedRecord {
                     actor: *actor,
                     object_id: object.id,
+                    incarnation: Some(object.incarnation),
                     counter_type: command.counter_type.clone(),
                     count: *count,
                     name: object.name.clone(),

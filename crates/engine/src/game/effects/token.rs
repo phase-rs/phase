@@ -38,7 +38,8 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest, TokenSpec,
+    CopiedFaceUp, CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest,
+    TokenSpec,
 };
 use crate::types::resolution::{ChildStackDepth, ResolutionFrame};
 use crate::types::resolved_commands::{
@@ -971,6 +972,36 @@ fn intrinsic_equip_abilities_from_token_statics(
         .collect()
 }
 
+/// CR 111.3 + CR 702.5a: Extract the unconditional intrinsic `Enchant`
+/// restrictions from token `static_abilities`. "The token has enchant player"
+/// is parsed as an unconditional `SelfRef` `AddKeyword(Enchant(..))` static; the
+/// creating effect's text IS the token's characteristics (CR 111.3), so the
+/// restriction is part of the entrant when it is created rather than a grant the
+/// layer pass has yet to apply. Conditional or non-`SelfRef` grants stay
+/// layer-only.
+fn intrinsic_enchant_keywords_from_token_statics(
+    static_abilities: &[StaticDefinition],
+) -> Vec<Keyword> {
+    static_abilities
+        .iter()
+        .filter(|static_def| {
+            static_def.condition.is_none()
+                && matches!(static_def.affected, None | Some(TargetFilter::SelfRef))
+        })
+        .flat_map(|static_def| {
+            static_def
+                .modifications
+                .iter()
+                .filter_map(|modification| match modification {
+                    ContinuousModification::AddKeyword {
+                        keyword: keyword @ Keyword::Enchant(_),
+                    } => Some(keyword.clone()),
+                    _ => None,
+                })
+        })
+        .collect()
+}
+
 /// CR 111.1 + CR 614.1a: Apply an accepted `CreateToken` proposed event.
 ///
 /// Extracted from `resolve` so `handle_replacement_choice` can deliver tokens
@@ -992,14 +1023,17 @@ fn intrinsic_equip_abilities_from_token_statics(
 /// Both halves are answered by the authority that already owns them —
 /// [`attach::authority_is_aura`] for Aura-ness (CR 205.1a: a copy exception can
 /// add or remove the subtype, so it reads characteristics, not the effect's
-/// `types`), and [`attach::can_attach_to_object`] / [`attach::can_attach_to_player`]
-/// for "can't legally enchant". That second pair is the SAME verdict
-/// `attach::attach_to` consumes a few lines later, so the gate and the
-/// attachment can never disagree about one host.
+/// `types`), and [`attach::can_attach_to_object`] /
+/// [`attach::can_enchant_player_with_authority`] for "can't legally enchant".
+/// That pair is the SAME verdict the attachment action consumes a few lines
+/// later, so the gate and the attachment can never disagree about one host. The
+/// token's intrinsic `Enchant` is already part of its characteristics here
+/// (see [`intrinsic_enchant_keywords_from_token_statics`]), which is what lets
+/// a player-enchanting token's own restriction be judged before it is attached.
 ///
 /// [`attach::authority_is_aura`]: super::attach::authority_is_aura
 /// [`attach::can_attach_to_object`]: super::attach::can_attach_to_object
-/// [`attach::can_attach_to_player`]: super::attach::can_attach_to_player
+/// [`attach::can_enchant_player_with_authority`]: super::attach::can_enchant_player_with_authority
 fn aura_token_entry_denied(state: &GameState, entrant: ObjectId, host: TokenHostRequest) -> bool {
     // CR 303.4h: "If an effect attempts to put a permanent that isn't an Aura,
     // Equipment, or Fortification onto the battlefield attached to an object or
@@ -1027,7 +1061,12 @@ fn aura_token_entry_denied(state: &GameState, entrant: ObjectId, host: TokenHost
             !super::attach::can_attach_to_object(state, entrant, host_id)
         }
         TokenHostRequest::Bound(AttachTarget::Player(host_player)) => {
-            !super::attach::can_attach_to_player(state, entrant, host_player)
+            !super::attach::can_enchant_player_with_authority(
+                state,
+                entrant,
+                host_player,
+                super::attach::AttachmentAuthority::Stored,
+            )
         }
     }
 }
@@ -1786,10 +1825,10 @@ fn apply_create_token_batch(
         if let Some(host) = spec.attach_to.bound() {
             match host {
                 AttachTarget::Object(id) => {
-                    super::attach::attach_to(state, obj_id, id);
+                    super::attach::attach_to_with_events(state, obj_id, id, events);
                 }
                 AttachTarget::Player(pid) => {
-                    super::attach::attach_to_player(state, obj_id, pid);
+                    super::attach::attach_to_player_with_events(state, obj_id, pid, events);
                 }
             }
         }
@@ -2110,6 +2149,20 @@ pub(crate) fn materialize_token_spec_body(
             Arc::make_mut(&mut object.abilities).extend(equip_abilities.iter().cloned());
             Arc::make_mut(&mut object.base_abilities).extend(equip_abilities);
         }
+        // CR 111.3 + CR 702.5a: Likewise an intrinsic `Enchant` restriction is
+        // part of the entrant's characteristics from creation, so CR 303.4i's
+        // legality decision and the attachment action read the same restriction
+        // before any layer pass has run. The static stays for the layer path;
+        // Layer 6 deduplicates the identical keyword.
+        for keyword in intrinsic_enchant_keywords_from_token_statics(&spec.static_abilities) {
+            if !object.base_keywords.contains(&keyword) {
+                object.base_keywords.push(keyword.clone());
+            }
+            // allow-raw-authority: materialization write — exact-payload dedup while installing the intrinsic Enchant into the entrant's own characteristics before any layer pass, not a presence query (has_keyword is discriminant-only and would drop a distinct Enchant filter)
+            if !object.keywords.contains(&keyword) {
+                object.keywords.push(keyword);
+            }
+        }
     }
 }
 
@@ -2122,9 +2175,8 @@ pub(crate) fn materialize_token_spec_body(
 /// rather than on `GameState`, which is what lets one implementation serve the
 /// liminal build-then-insert ordering and the direct insert-then-build ordering.
 ///
-/// `reset_for_battlefield_entry` touches no copiable characteristic, so running
-/// it after the keyword grant (the liminal order) is equivalent to running it
-/// before (the former direct order).
+/// Entry under `RoomDoorAssignment::CopiableValues` assigns no door, so running it
+/// after the exceptions keeps a CR 707.9a grant outside both doors (CR 709.5).
 pub(crate) fn materialize_token_copy_body(
     object: &mut GameObject,
     copy: &CopyTokenSpec,
@@ -2147,18 +2199,7 @@ pub(crate) fn materialize_token_copy_body(
     values.static_definitions = Arc::new(cda_pruning.definitions);
     apply_copiable_values_to_liminal_object(object, &values, &copy.display);
 
-    // CR 707.9a + CR 702: "except it has [keyword]" — grant additional keywords
-    // on top of the copied characteristics. Twinflame's haste copies are the
-    // canonical case. Idempotent under repeats.
-    for kw in &copy.extra_keywords {
-        let already_live = object.keywords.contains(kw); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
-        if !already_live {
-            object.keywords.push(kw.clone());
-        }
-        if !object.base_keywords.contains(kw) {
-            object.base_keywords.push(kw.clone());
-        }
-    }
+    grant_copy_extra_keywords(object, &copy.extra_keywords);
 
     match modifications {
         // CR 707.2: the copiable values are the whole body.
@@ -2180,10 +2221,71 @@ pub(crate) fn materialize_token_copy_body(
         ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { .. } => {}
     }
 
+    // CR 707.8a: a token copy of a double-faced object is a double-faced token, up
+    // on the face its source showed, with the copy's exceptions on both faces
+    // (CR 707.9a/b/d). The non-liminal seam folds its deferred stamps onto the
+    // stored face itself, right after this call.
+    if let Some(faces) = &copy.double_faced {
+        // CR 707.8a + CR 722.2b + CR 709.5b: the copied values' prepare spell or Room half is
+        // kept beside the other face, which takes `back_face`.
+        object.double_faced_token_alternative =
+            crate::game::printed_cards::stored_alternative_of_values(&values);
+        let (stamped, all_creature_types): (&[ContinuousModification], &[String]) =
+            match modifications {
+                ResolvedCopyBodyModifications::Folded {
+                    modifications,
+                    all_creature_types,
+                } => (modifications.as_slice(), all_creature_types.as_slice()),
+                ResolvedCopyBodyModifications::NoExceptions
+                | ResolvedCopyBodyModifications::DeferredToUnjournaledSeam { .. } => (&[], &[]),
+            };
+        object.back_face = Some(super::token_copy::fold_copy_exceptions_into_face(
+            &faces.hidden,
+            &copy.additional_modifications,
+            &copy.extra_keywords,
+            stamped,
+            all_creature_types,
+        ));
+        match faces.up {
+            // CR 712.8d: the front face is up.
+            CopiedFaceUp::Front => {}
+            // CR 712.8e: a transformed permanent's back face is up.
+            CopiedFaceUp::TransformedBack => object.transformed = true,
+            // CR 712.8f: a modal double-faced permanent's back face is up. CR 707.8a:
+            // also when the copied values are a Room's; `room::live_face_door` then
+            // reads the halves from the slot above, not from this orientation.
+            CopiedFaceUp::ModalBack => object.modal_back_face = true,
+        }
+    }
+
     // CR 400.7 + CR 302.6: Single authority for ETB state. Haste granted via
     // `extra_keywords` is folded in at query time by `has_summoning_sickness`.
-    object.reset_for_battlefield_entry(turn_number, entry_timestamp);
+    // CR 707.2 + CR 709.5 + CR 707.9a: the copiable values assign the doors; an
+    // exception the copy gained stays outside both.
+    object.reset_for_battlefield_entry_with_room_text(
+        turn_number,
+        entry_timestamp,
+        crate::game::game_object::RoomDoorAssignment::CopiableValues,
+    );
     object.tapped = tapped;
+}
+
+/// CR 707.9a + CR 702: "except it has [keyword]" — grants a copy's additional
+/// keywords on top of the copied characteristics, live and base. Twinflame's
+/// haste copies are the canonical case. Idempotent under repeats. The copy
+/// materializer applies it to the token, and
+/// `token_copy::fold_copy_exceptions_into_face` to a double-faced copy's stored
+/// face (CR 707.8a), so the grant has one authority.
+pub(crate) fn grant_copy_extra_keywords(object: &mut GameObject, keywords: &[Keyword]) {
+    for kw in keywords {
+        let already_live = object.keywords.contains(kw); // allow-raw-authority: structural live keyword insertion de-dupe, not an effective keyword query
+        if !already_live {
+            object.keywords.push(kw.clone());
+        }
+        if !object.base_keywords.contains(kw) {
+            object.base_keywords.push(kw.clone());
+        }
+    }
 }
 
 pub(crate) fn reserve_liminal_token_object(
@@ -2762,7 +2864,9 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
         // parked CR 303.4f authority.
         TokenEntryMode::Forced => {}
         TokenEntryMode::Standard => {
-            match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
+            match crate::game::zone_pipeline::apply_entering_aura_hosts(
+                state, entry_ref, hosts, events,
+            ) {
                 // `NoLegalHost` is unreachable here: the empty-`legal_targets` arm above
                 // returned for every entrant, card-backed included.
                 crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
@@ -2962,10 +3066,10 @@ pub(crate) fn finalize_committed_liminal_token_entry_from_action(
     if let Some(host) = attach_to {
         match host {
             AttachTarget::Object(id) => {
-                super::attach::attach_to(state, object_id, id);
+                super::attach::attach_to_with_events(state, object_id, id, events);
             }
             AttachTarget::Player(pid) => {
-                super::attach::attach_to_player(state, object_id, pid);
+                super::attach::attach_to_player_with_events(state, object_id, pid, events);
             }
         };
     }
@@ -4439,6 +4543,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::OriginalSource => AttachHostAuthority::NoHost,
@@ -5682,13 +5787,14 @@ mod tests {
     use crate::game::engine::apply_as_current;
     use crate::game::printed_cards::intrinsic_copiable_values;
     use crate::game::zones::create_object;
-    use crate::types::ability::TriggerDefinition;
+    use crate::types::ability::{StaticCondition, TriggerDefinition};
     use crate::types::actions::GameAction;
     use crate::types::card_type::CardType;
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::mana::ManaType;
     use crate::types::player::PlayerId;
+    use crate::types::proposed_event::TokenCharacteristics;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
     use std::sync::Arc;
@@ -8001,6 +8107,8 @@ mod tests {
                 additional_modifications: Vec::new(),
                 tapped: false,
                 enters_attacking: false,
+                // Single-faced fixture values: no other face to carry.
+                double_faced: None,
                 attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: voice,
@@ -9201,6 +9309,147 @@ mod tests {
         );
     }
 
+    /// Builds a `CreateToken` event for a one-off Curse Aura token named for
+    /// `host`, carrying `statics` as its creating effect's static abilities.
+    fn curse_aura_token_event(
+        statics: Vec<StaticDefinition>,
+        host: TokenHostRequest,
+    ) -> ProposedEvent {
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Probe Curse".to_string(),
+                power: Some(0),
+                toughness: Some(0),
+                loyalty: None,
+                core_types: vec![CoreType::Enchantment],
+                subtypes: vec!["Aura".to_string(), "Curse".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![],
+            },
+            script_name: "Probe Curse".to_string(),
+            static_abilities: statics,
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
+            sacrifice_at: None,
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+            attach_to: host,
+        };
+        ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            copy: None,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
+            count: 1,
+            applied: HashSet::new(),
+            appended: Vec::new(),
+        }
+    }
+
+    fn enchant_grant_static(filter: TargetFilter) -> StaticDefinition {
+        StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(filter),
+            }])
+    }
+
+    /// CR 111.3 + CR 702.5a + CR 303.4: "The token has enchant player" is part of
+    /// the entrant's characteristics from creation, so a Curse token created
+    /// attached to a player is judged — and attached — against that restriction
+    /// before any layer pass has run.
+    #[test]
+    fn aura_token_with_intrinsic_enchant_player_attaches_to_player_host() {
+        let mut state = GameState::new_two_player(42);
+        let event = curse_aura_token_event(
+            vec![enchant_grant_static(TargetFilter::Player)],
+            TokenHostRequest::Bound(AttachTarget::Player(PlayerId(1))),
+        );
+
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let id = *state
+            .last_created_token_ids
+            .first()
+            .expect("a legal player-enchanting Aura token must be created");
+        let obj = &state.objects[&id];
+        assert!(
+            obj.base_keywords
+                .contains(&Keyword::Enchant(TargetFilter::Player)),
+            "the intrinsic Enchant must be a base characteristic of the entrant"
+        );
+        assert_eq!(obj.attached_to, Some(AttachTarget::Player(PlayerId(1))));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::Attached {
+                attachment_id,
+                target: TargetRef::Player(PlayerId(1)),
+            } if *attachment_id == id
+        )));
+    }
+
+    /// CR 303.4i + CR 702.5a: an Aura token with no enchant restriction has no
+    /// stated player host, and one whose restriction the player fails cannot
+    /// legally enchant that player — either way the token is not created.
+    #[test]
+    fn aura_token_without_a_matching_enchant_restriction_is_not_created_for_a_player_host() {
+        for statics in [
+            Vec::new(),
+            vec![enchant_grant_static(TargetFilter::Typed(
+                TypedFilter::creature(),
+            ))],
+        ] {
+            let mut state = GameState::new_two_player(42);
+            let event = curse_aura_token_event(
+                statics,
+                TokenHostRequest::Bound(AttachTarget::Player(PlayerId(1))),
+            );
+
+            let mut events = vec![];
+            apply_create_token_after_replacement(&mut state, event, &mut events);
+
+            assert!(
+                state.last_created_token_ids.is_empty(),
+                "the Aura token must not be created"
+            );
+            assert!(
+                !state.objects.values().any(|obj| obj.is_token),
+                "and nothing may be left behind"
+            );
+            assert!(
+                !events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::TokenCreated { .. } | GameEvent::Attached { .. }
+                )),
+                "and nothing may be observed"
+            );
+        }
+    }
+
+    /// CR 111.3: only an UNCONDITIONAL self-grant is intrinsic; a conditional or
+    /// other-object grant stays in the layer path and is not materialized.
+    #[test]
+    fn intrinsic_enchant_extraction_is_limited_to_unconditional_self_grants() {
+        let unconditional = enchant_grant_static(TargetFilter::Player);
+        let conditional = enchant_grant_static(TargetFilter::Player)
+            .condition(StaticCondition::IsPresent { filter: None });
+        let other_object = enchant_grant_static(TargetFilter::Player)
+            .affected(TargetFilter::Typed(TypedFilter::creature()));
+
+        assert_eq!(
+            intrinsic_enchant_keywords_from_token_statics(&[
+                unconditional,
+                conditional,
+                other_object,
+            ]),
+            vec![Keyword::Enchant(TargetFilter::Player)]
+        );
+    }
+
     #[test]
     fn apply_create_token_does_not_materialize_conditional_grant_ability() {
         use crate::parser::oracle::try_parse_equip_lowered;
@@ -9855,6 +10104,8 @@ mod tests {
                     controller: PlayerId(0),
                     // Liminal resume carries values only; empty mods are stamp-proof.
                     donor: None,
+                    // Single-faced fixture values: no other face to carry.
+                    double_faced: None,
                 })),
                 spec_resume: None,
                 enter_tapped: EtbTapState::Unspecified,

@@ -967,8 +967,8 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
     }
 }
 
-/// Mutable counterpart of [`mass_population_target`]. Kept adjacent so the two
-/// variant lists are read and edited together.
+/// Mutable counterpart of `phase_ast::types::ability::mass_population_target`;
+/// the two variant lists must stay identical.
 pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut TargetFilter> {
     match effect {
         Effect::ChangeZoneAll { target, .. }
@@ -980,6 +980,11 @@ pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut Tar
         | Effect::PumpAll { target, .. }
         | Effect::PutCounterAll { target, .. }
         | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        | Effect::SetTapState {
             scope: EffectScope::All,
             target,
             ..
@@ -1839,6 +1844,15 @@ pub struct SpellContext {
     /// `delayed_trigger::resolve`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outer_declared_players: Vec<(ChosenGroupId, PlayerId)>,
+    /// CR 608.2b + CR 603.7c: the referents of this delayed ability's creation snapshot
+    /// (`ResolvedAbility::targets`) that the creating chain announced only in target slots
+    /// that were illegal (or unjudged) as it resolved, each by the incarnation it had at
+    /// creation. An illegal target "fails to determine any such information". `targets`
+    /// keeps these entries, so positional `ParentTargetSlot` readers keep their numbering.
+    /// Stamped only by `delayed_trigger::resolve`; read by
+    /// `filter::combat_relation_subject_refs` (`AnaphoricTarget`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub creation_illegal_referents: Vec<ObjectIncarnationRef>,
     /// Digital-only Alchemy (no CR entry): the noted number this boon
     /// grant captured. Each "note ..." + "you get a one-time boon with
     /// [... the noted number ...]" resolution snapshots the noting
@@ -1907,8 +1921,11 @@ pub struct SpellContext {
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.
+    /// Boxed: the result carries a full LKI snapshot, is populated only for that
+    /// one hand-off, and the resolver keeps many `SpellContext`s live per chain
+    /// frame, so inline it widened every recursive frame by its size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct_discard_result: Option<DiscardedCardResult>,
+    pub direct_discard_result: Option<Box<DiscardedCardResult>>,
     /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
     /// immediate "for each" child. The child uses this snapshot as its
     /// iteration universe instead of an unqualified battlefield census.
@@ -2096,6 +2113,31 @@ pub struct SpellContext {
     /// batch-run context equality is unaffected. Not redacted from viewer states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ability_provenance: Option<AbilityProvenance>,
+    /// CR 608.2c + CR 608.2d: players this ability's own `Choose(Player |
+    /// Opponent)` instructions have chosen earlier in this resolution — the
+    /// reference set a `DistinctFromPriorChoices` choice excludes. Travels with
+    /// the chain, its parked continuations and its parked repeat template.
+    /// Distinct from `ResolvedAbility::chosen_players`, the per-Choose anaphor
+    /// binding. Never fed by another object's choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_player_choices: Vec<PlayerId>,
+    /// CR 608.2c + CR 608.2d: the per-object player assignment this ability
+    /// has made while resolving — for each member of a population its
+    /// repetition iterated, the player its own choice chose for that member
+    /// ("for each of those permanents, choose …", read later as "the
+    /// permanent for which they were chosen"). Owned by the resolving ability;
+    /// written only by `ResolvedAbility::record_prior_player_choice`; travels
+    /// with the chain, its parked continuations and its parked repeat
+    /// template; never fed by another object's choice. Additive to
+    /// `prior_player_choices`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_player_assignment: Vec<ObjectPlayerAssignment>,
+    /// CR 608.2c + CR 608.2d: the member of the per-object repetition whose
+    /// player prompt this holder's answer settles. Written only by
+    /// `ResolvedAbility::bind_pending_choice_member`; consumed by
+    /// `ResolvedAbility::record_prior_player_choice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_choice_member: Option<ObjectId>,
     /// CR 603.2b + CR 102.1: the turn player a phase trigger bound its chain's `scoped_player` to
     /// ("that player" anaphors to the player whose phase it is). Stamped only by
     /// `ResolvedAbility::set_phase_turn_player_recursive`; cleared by every other binding
@@ -2106,7 +2148,51 @@ pub struct SpellContext {
     pub phase_turn_player: Option<crate::types::player::PlayerId>,
 }
 
+/// CR 608.2c + CR 608.2d: one entry of a per-object player assignment — the
+/// player this ability chose, while resolving, for one member of the
+/// population its repetition iterated ("for each of those permanents,
+/// choose …", read later as "the permanent for which they were chosen").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectPlayerAssignment {
+    pub object: ObjectId,
+    pub player: PlayerId,
+}
+
 impl SpellContext {
+    /// CR 608.2c + CR 608.2d: ordered, idempotent union of `other`'s player
+    /// choice records — the reference set and the per-object assignment —
+    /// into this context. The single place that lists the record fields, so
+    /// no carry site handles one record alone. A pending member binding is
+    /// not a record and is never carried by a union.
+    pub fn union_player_choice_records(&mut self, other: &SpellContext) {
+        for player in &other.prior_player_choices {
+            if !self.prior_player_choices.contains(player) {
+                self.prior_player_choices.push(*player);
+            }
+        }
+        for entry in &other.object_player_assignment {
+            if !self.object_player_assignment.contains(entry) {
+                self.object_player_assignment.push(*entry);
+            }
+        }
+    }
+
+    /// Whether this context carries either player choice record or a pending
+    /// member binding.
+    pub fn has_player_choice_records(&self) -> bool {
+        !self.prior_player_choices.is_empty()
+            || !self.object_player_assignment.is_empty()
+            || self.pending_choice_member.is_some()
+    }
+
+    /// CR 608.2c: empty both player choice records and the pending member
+    /// binding.
+    pub fn clear_player_choice_records(&mut self) {
+        self.prior_player_choices.clear();
+        self.object_player_assignment.clear();
+        self.pending_choice_member = None;
+    }
+
     pub fn record_additional_cost_payment(&mut self, origin: AdditionalCostOrigin, count: u32) {
         self.record_additional_cost_instance_payment(origin, 0, count);
     }
@@ -4360,6 +4446,20 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 610.3a + CR 610.3b: every "until" event latched on this ability or any sub/else branch,
+    /// in first-latched order — the read mirror of [`Self::record_duration_event_recursive`].
+    pub(crate) fn latched_duration_events(&self) -> Vec<DurationEvent> {
+        let mut latched = self.context.duration_events.clone();
+        for (_, child) in self.child_links() {
+            for event in child.latched_duration_events() {
+                if !latched.contains(&event) {
+                    latched.push(event);
+                }
+            }
+        }
+        latched
+    }
+
     /// Clears the latched "until" events on this ability and every sub/else
     /// branch, mirroring [`Self::record_duration_event_recursive`].
     pub(crate) fn clear_duration_events_recursive(&mut self) {
@@ -4867,6 +4967,27 @@ impl ResolvedAbility {
         }
     }
 
+    /// [`Self::clear_source_provenance_for_loop_recursive`] for a chain that
+    /// still needs one fact of a departed source: `carry` maps each node's own
+    /// source context (read before it is cleared) to the identity-free context
+    /// that node keeps instead of `None`.
+    pub(crate) fn clear_source_provenance_for_loop_carrying_source(
+        &mut self,
+        carrier_source: ObjectId,
+        carry: &impl Fn(&TriggerSourceContext) -> Option<TriggerSourceContext>,
+    ) {
+        let carried = self.trigger_source.as_ref().and_then(carry);
+        let kept = (self.source_id == carrier_source || self.source_id == ObjectId(0))
+            .then_some(self.source_incarnation)
+            .flatten();
+        self.clear_source_provenance();
+        self.source_incarnation = kept;
+        self.trigger_source = carried;
+        for (_, child) in self.child_links_mut() {
+            child.clear_source_provenance_for_loop_carrying_source(carrier_source, carry);
+        }
+    }
+
     /// CR 400.7: every incarnation this chain captured for an object, as
     /// `(object, incarnation)`, for loop normalization to rank with the other
     /// carriers:
@@ -4874,6 +4995,8 @@ impl ResolvedAbility {
     /// - the keyed delayed-referent pins (CR 603.7c) and the positional
     ///   announcement pins (CR 601.2c);
     /// - the bound force-block attacker (CR 509.1c) and the granting object;
+    /// - the creation-time unavailable referents (CR 608.2b), which retain
+    ///   exact identity alongside the delayed snapshot's keyed pins;
     /// - the boon and exile-until batches, and the objects a forwarding
     ///   instruction produced or selected (CR 608.2c);
     /// - the Attach bindings: attachments, host and candidates (CR 701.3a);
@@ -4928,6 +5051,7 @@ impl ResolvedAbility {
             .chain(self.target_pins.iter_mut().flatten())
             .chain(self.force_block_attacker.iter_mut())
             .chain(self.context.granting_object.iter_mut())
+            .chain(self.context.creation_illegal_referents.iter_mut())
             .chain(self.context.boon_trigger_batch_objects.iter_mut())
             .chain(self.context.exile_until_batch.iter_mut())
             .chain(
@@ -6014,7 +6138,7 @@ impl ResolvedAbility {
     /// explicitly cleared so this one contingent fact cannot leak past its
     /// immediate consumer.
     pub fn set_direct_discard_result_for_immediate_node(&mut self, result: DiscardedCardResult) {
-        self.context.direct_discard_result = Some(result);
+        self.context.direct_discard_result = Some(Box::new(result));
         for (_, child) in self.child_links_mut() {
             child.clear_direct_discard_result_recursive();
         }
@@ -6259,6 +6383,83 @@ impl ResolvedAbility {
         for (_, child) in self.child_links_mut() {
             child.set_chosen_players_recursive(players);
         }
+    }
+
+    /// CR 608.2c + CR 608.2d: record a player this ability's own `Choose`
+    /// instruction just chose into its reference set and, when the answer
+    /// settles a per-object repetition (a member is bound on this holder),
+    /// into its object→player assignment — on this node and every child, so a
+    /// later `DistinctFromPriorChoices` choice anywhere in the rest of the
+    /// resolution excludes it and a later reader of the assignment finds it.
+    /// Consumes that binding.
+    pub fn record_prior_player_choice(&mut self, player: PlayerId) {
+        let mut answer = SpellContext {
+            prior_player_choices: vec![player],
+            ..SpellContext::default()
+        };
+        let member = self.context.pending_choice_member;
+        if let Some(object) = member {
+            answer
+                .object_player_assignment
+                .push(ObjectPlayerAssignment { object, player });
+        }
+        self.absorb_player_choice_records(&answer);
+        if member.is_some() {
+            self.clear_pending_choice_member_recursive();
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: ordered union of `from`'s player choice records
+    /// (reference set and per-object assignment) into this node and every
+    /// child (idempotent).
+    pub fn absorb_player_choice_records(&mut self, from: &SpellContext) {
+        self.context.union_player_choice_records(from);
+        for (_, child) in self.child_links_mut() {
+            child.absorb_player_choice_records(from);
+        }
+    }
+
+    /// Whether any node of this ability tree carries a player choice record
+    /// or a pending member binding.
+    pub fn has_player_choice_records_recursive(&self) -> bool {
+        self.context.has_player_choice_records()
+            || self
+                .child_links()
+                .any(|(_, child)| child.has_player_choice_records_recursive())
+    }
+
+    /// CR 608.2c: empty both player choice records and the pending member
+    /// binding on this node and every child — a new top-level resolution
+    /// starts with no prior choices, no assignment and no pending member of
+    /// its own.
+    pub fn clear_player_choice_records_recursive(&mut self) {
+        self.context.clear_player_choice_records();
+        for (_, child) in self.child_links_mut() {
+            child.clear_player_choice_records_recursive();
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: bind the member of a per-object repetition whose
+    /// player prompt this holder's answer settles. The single write of the
+    /// binding; set on the holder's root, which the recording authority reads.
+    pub fn bind_pending_choice_member(&mut self, member: ObjectId) {
+        self.context.pending_choice_member = Some(member);
+    }
+
+    fn clear_pending_choice_member_recursive(&mut self) {
+        self.context.pending_choice_member = None;
+        for (_, child) in self.child_links_mut() {
+            child.clear_pending_choice_member_recursive();
+        }
+    }
+
+    /// Whether `other` is part of the same resolving ability: every node,
+    /// parked continuation and repeat template of one resolving ability
+    /// carries its `source_id` and `ability_index`
+    /// (`apply_parent_chain_context` propagates the index), while a nested
+    /// replacement chain carries its own object's `source_id`.
+    pub fn shares_resolution_owner(&self, other: &ResolvedAbility) -> bool {
+        self.source_id == other.source_id && self.ability_index == other.ability_index
     }
 
     pub fn set_context_recursive(&mut self, context: SpellContext) {
@@ -6506,6 +6707,263 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<SpellContext>(wire).expect("attachment bindings round-trip"),
             populated
+        );
+    }
+
+    /// A2.5: the ability-owned player-choice reference set is an additive,
+    /// default-skipped field — a populated set round-trips, an empty one is
+    /// not serialized, and a payload without the key reads as empty.
+    #[test]
+    fn spell_context_prior_player_choices_round_trip_and_default_skip() {
+        let populated = SpellContext {
+            prior_player_choices: vec![PlayerId(2)],
+            ..SpellContext::default()
+        };
+        let wire = serde_json::to_value(&populated).expect("context serializes");
+        assert_eq!(wire["prior_player_choices"], serde_json::json!([2]));
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(wire).expect("context deserializes"),
+            populated
+        );
+
+        let absent = serde_json::to_value(SpellContext::default()).expect("context serializes");
+        assert!(absent.get("prior_player_choices").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(absent)
+                .expect("a payload without the key deserializes")
+                .prior_player_choices,
+            Vec::<PlayerId>::new()
+        );
+    }
+
+    /// V3a.6u (A3.10): the per-object assignment and the pending member
+    /// binding are additive, default-skipped fields — populated, both
+    /// round-trip under their own keys; at their defaults neither key is
+    /// serialized; a payload without them reads as empty / `None`.
+    #[test]
+    fn spell_context_object_player_assignment_round_trip_and_default_skip() {
+        let populated = SpellContext {
+            object_player_assignment: vec![ObjectPlayerAssignment {
+                object: ObjectId(7),
+                player: PlayerId(2),
+            }],
+            pending_choice_member: Some(ObjectId(7)),
+            ..SpellContext::default()
+        };
+        let wire = serde_json::to_value(&populated).expect("context serializes");
+        assert_eq!(
+            wire["object_player_assignment"],
+            serde_json::json!([{ "object": 7, "player": 2 }])
+        );
+        assert_eq!(wire["pending_choice_member"], serde_json::json!(7));
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(wire).expect("context deserializes"),
+            populated
+        );
+
+        let absent = serde_json::to_value(SpellContext::default()).expect("context serializes");
+        assert!(absent.get("object_player_assignment").is_none());
+        assert!(absent.get("pending_choice_member").is_none());
+        let restored = serde_json::from_value::<SpellContext>(absent)
+            .expect("a payload without the keys deserializes");
+        assert!(restored.object_player_assignment.is_empty());
+        assert_eq!(restored.pending_choice_member, None);
+    }
+
+    /// V3b.8 (A3.14): `TargetFilter::ChoiceAssignment` is an additive variant
+    /// of the internally tagged enum — each projection round-trips under its
+    /// own `side`, a `GiveControl` carrying both round-trips equal, and an
+    /// existing variant's JSON still reads as before.
+    #[test]
+    fn choice_assignment_serde_round_trip() {
+        for (side, name) in [
+            (ChoiceAssignmentSide::Objects, "Objects"),
+            (ChoiceAssignmentSide::PlayerForObject, "PlayerForObject"),
+        ] {
+            let filter = TargetFilter::ChoiceAssignment { side };
+            let wire = serde_json::to_value(&filter).expect("filter serializes");
+            assert_eq!(
+                wire,
+                serde_json::json!({ "type": "ChoiceAssignment", "side": name })
+            );
+            assert_eq!(
+                serde_json::from_value::<TargetFilter>(wire).expect("filter deserializes"),
+                filter
+            );
+        }
+
+        let handoff = Effect::GiveControl {
+            target: TargetFilter::ChoiceAssignment {
+                side: ChoiceAssignmentSide::Objects,
+            },
+            recipient: TargetFilter::ChoiceAssignment {
+                side: ChoiceAssignmentSide::PlayerForObject,
+            },
+        };
+        let wire = serde_json::to_value(&handoff).expect("effect serializes");
+        assert_eq!(
+            serde_json::from_value::<Effect>(wire).expect("effect deserializes"),
+            handoff
+        );
+
+        assert_eq!(
+            serde_json::from_str::<TargetFilter>(r#"{"type":"TrackedSet","id":3}"#)
+                .expect("an existing variant still deserializes"),
+            TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(3)
+            }
+        );
+    }
+
+    /// V3a.10 (CR 608.2c + CR 608.2d): the recording authority and the carry
+    /// primitives cover both records and the binding. An answer given while a
+    /// member is bound joins the reference set and the assignment on every
+    /// node and consumes the binding everywhere; without a binding only the
+    /// reference set grows.
+    #[test]
+    fn player_choice_records_authority_and_carry_primitives() {
+        let node = || {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let entry = |object: u64, player: u8| ObjectPlayerAssignment {
+            object: ObjectId(object),
+            player: PlayerId(player),
+        };
+        let mut tree = node().sub_ability(node());
+        tree.else_ability = Some(Box::new(node()));
+        let nodes = |tree: &ResolvedAbility| -> Vec<SpellContext> {
+            vec![
+                tree.context.clone(),
+                tree.sub_ability.as_ref().expect("sub").context.clone(),
+                tree.else_ability.as_ref().expect("else").context.clone(),
+            ]
+        };
+
+        // Without a binding: only the reference set grows.
+        tree.record_prior_player_choice(PlayerId(1));
+        for context in nodes(&tree) {
+            assert_eq!(context.prior_player_choices, [PlayerId(1)]);
+            assert!(context.object_player_assignment.is_empty());
+        }
+
+        // With a binding on the root: the entry lands on every node and the
+        // binding is consumed everywhere.
+        tree.bind_pending_choice_member(ObjectId(7));
+        assert!(tree.has_player_choice_records_recursive());
+        tree.record_prior_player_choice(PlayerId(2));
+        for context in nodes(&tree) {
+            assert_eq!(context.prior_player_choices, [PlayerId(1), PlayerId(2)]);
+            assert_eq!(context.object_player_assignment, [entry(7, 2)]);
+            assert_eq!(context.pending_choice_member, None);
+        }
+        // Idempotent: the same answer again adds nothing.
+        tree.record_prior_player_choice(PlayerId(2));
+        for context in nodes(&tree) {
+            assert_eq!(context.prior_player_choices, [PlayerId(1), PlayerId(2)]);
+            assert_eq!(context.object_player_assignment, [entry(7, 2)]);
+        }
+
+        // The absorb unions both records into every node, in order.
+        let from = SpellContext {
+            prior_player_choices: vec![PlayerId(2), PlayerId(3)],
+            object_player_assignment: vec![entry(7, 2), entry(8, 3)],
+            ..SpellContext::default()
+        };
+        tree.absorb_player_choice_records(&from);
+        for context in nodes(&tree) {
+            assert_eq!(
+                context.prior_player_choices,
+                [PlayerId(1), PlayerId(2), PlayerId(3)]
+            );
+            assert_eq!(context.object_player_assignment, [entry(7, 2), entry(8, 3)]);
+        }
+
+        // has_/clear_ cover each record and the binding on their own.
+        let mut lone = node().sub_ability(node());
+        assert!(!lone.has_player_choice_records_recursive());
+        lone.sub_ability
+            .as_mut()
+            .expect("sub")
+            .context
+            .object_player_assignment = vec![entry(9, 1)];
+        assert!(lone.has_player_choice_records_recursive());
+        lone.clear_player_choice_records_recursive();
+        assert!(!lone.has_player_choice_records_recursive());
+        lone.bind_pending_choice_member(ObjectId(9));
+        assert!(lone.has_player_choice_records_recursive());
+        lone.clear_player_choice_records_recursive();
+        assert_eq!(lone.context.pending_choice_member, None);
+        tree.clear_player_choice_records_recursive();
+        for context in nodes(&tree) {
+            assert!(!context.has_player_choice_records());
+        }
+    }
+
+    #[test]
+    fn spell_context_creation_illegal_referents_defaults_omits_empty_and_round_trips() {
+        for fixture in [
+            serde_json::json!({}),
+            serde_json::json!({"creation_illegal_referents": []}),
+        ] {
+            let context: SpellContext =
+                serde_json::from_value(fixture).expect("absent/empty record");
+            assert_eq!(
+                context.creation_illegal_referents,
+                Vec::<ObjectIncarnationRef>::new()
+            );
+            assert!(serde_json::to_value(&context)
+                .unwrap()
+                .get("creation_illegal_referents")
+                .is_none());
+        }
+        assert!(serde_json::to_value(SpellContext::default())
+            .unwrap()
+            .get("creation_illegal_referents")
+            .is_none());
+        let fixture = serde_json::json!({"creation_illegal_referents": [{"object_id": 11, "incarnation": 7}]});
+        let populated: SpellContext = serde_json::from_value(fixture).expect("populated record");
+        let pin = ObjectIncarnationRef::of(ObjectId(11), 7);
+        assert_eq!(populated.creation_illegal_referents, vec![pin]);
+        let encoded = serde_json::to_value(&populated).unwrap();
+        assert_eq!(
+            encoded["creation_illegal_referents"],
+            serde_json::json!([{"object_id": 11, "incarnation": 7}])
+        );
+        let decoded: SpellContext = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, populated);
+        assert_eq!(decoded.creation_illegal_referents, vec![pin]);
+    }
+
+    #[test]
+    fn creation_illegal_referents_participate_in_loop_pin_visitation() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(900),
+            crate::types::player::PlayerId(0),
+        );
+        ability.context.creation_illegal_referents =
+            vec![ObjectIncarnationRef::of(ObjectId(11), 7)];
+        let mut visited = Vec::new();
+        ability.for_each_loop_pin_mut(ObjectId(900), &mut |id, epoch| {
+            visited.push((id, *epoch));
+            *epoch = 3;
+        });
+        assert_eq!(visited, vec![(ObjectId(11), 7)]);
+        assert_eq!(
+            ability.context.creation_illegal_referents,
+            vec![ObjectIncarnationRef::of(ObjectId(11), 3)]
         );
     }
 

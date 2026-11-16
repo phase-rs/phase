@@ -2776,7 +2776,7 @@ fn a_kicked_spell_with_a_later_target_chosen_together_targets_both() {
         .expect("the spell is castable");
     loop {
         let action = match &runner.state().waiting_for {
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::TargetSelection { .. } => GameAction::SelectTargets {
                 targets: vec![TargetRef::Object(bear), TargetRef::Player(P1)],
             },

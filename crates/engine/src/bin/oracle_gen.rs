@@ -1,15 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process;
 use std::thread;
 
 use serde::{Deserialize, Serialize};
 
+use engine::database::card_data_provenance::CardDataProvenance;
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
 use engine::database::mtgjson::{
-    load_atomic_cards, load_card_types, AtomicCard, Ruling, SetCard, SetFile,
+    load_atomic_cards_from_bytes, load_card_types, AtomicCard, AtomicCardsFile, Ruling, SetCard,
+    SetFile,
 };
 use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::set_catalog::load_set_catalog;
@@ -17,7 +19,7 @@ use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout,
     prepare_oracle_parser_input, LayoutKind,
 };
-use engine::database::{set_gating, BracketLists, BracketSignals, CardDatabase};
+use engine::database::{set_gating, BracketCardClass, BracketLists, BracketSignals, CardDatabase};
 use engine::game::coverage::{
     audit_semantic, card_face_has_unimplemented_parts, format_semantic_audit_markdown,
 };
@@ -376,6 +378,62 @@ fn write_trace_report_atomic(path: &Path, report: &ParserTraceReport) -> io::Res
     result
 }
 
+/// Make a path absolute without requiring the final destination to exist.
+fn absolute_path(path: &Path) -> io::Result<PathBuf> {
+    Ok(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    })
+}
+
+/// Normalize a path lexically for the fallback case where its parent does not
+/// exist yet. Existing parents are canonicalized separately so symlink and
+/// `..` resolution follows the filesystem rather than string spelling.
+fn absolute_lexical_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = absolute_path(path)?;
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+/// Resolve the filesystem destination represented by a path, including
+/// existing symlinks in the final path or its parent directories. If the final
+/// destination does not exist yet, canonicalize the existing parent and retain
+/// the final filename so normal new-file exports remain supported.
+fn destination_identity(path: &Path) -> io::Result<PathBuf> {
+    let absolute = absolute_path(path)?;
+    match std::fs::canonicalize(&absolute) {
+        Ok(canonical) => Ok(canonical),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = absolute.parent().unwrap_or_else(|| Path::new("."));
+            let file_name = absolute.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "output path has no file name")
+            })?;
+            match std::fs::canonicalize(parent) {
+                Ok(canonical_parent) => Ok(canonical_parent.join(file_name)),
+                Err(parent_error) if parent_error.kind() == io::ErrorKind::NotFound => {
+                    absolute_lexical_path(&absolute)
+                }
+                Err(parent_error) => Err(parent_error),
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn output_paths_share_destination(left: &Path, right: &Path) -> io::Result<bool> {
+    Ok(destination_identity(left)? == destination_identity(right)?)
+}
+
 fn is_clean_signals(sig: &BracketSignals) -> bool {
     sig.is_clean()
 }
@@ -561,8 +619,62 @@ fn bracket_signals_for_face(
     source: &AtomicCard,
 ) -> BracketSignals {
     let mut signals = lists.signals_for(&face.name);
-    signals.game_changer = source.is_game_changer;
+    // The curated Game Changers list is authoritative when present. A union
+    // with the bundled MTGJSON snapshot could add names but could never express
+    // a later WotC removal.
+    if lists.has(BracketCardClass::GameChangers) {
+        // Game Changers classify cards, not faces. MTGJSON repeats the flag on
+        // both faces of a modal double-faced card, while WotC prints its front
+        // face name. Use that card-level identity so either exported face gets
+        // the same curated signal.
+        let card_name = source
+            .name
+            .split_once(" // ")
+            .map_or(source.name.as_str(), |(front, _)| front);
+        signals.game_changer = lists.signals_for(card_name).game_changer;
+    } else {
+        signals.game_changer = source.is_game_changer;
+    }
     signals
+}
+
+fn report_game_changer_drift(lists: &BracketLists, atomic: &AtomicCardsFile) {
+    let Some(curated) = lists.get(BracketCardClass::GameChangers) else {
+        return;
+    };
+
+    let mtgjson_names: BTreeSet<String> = atomic
+        .data
+        .iter()
+        .filter(|(_, faces)| faces.iter().any(|face| face.is_game_changer))
+        .map(|(name, _)| name.to_lowercase())
+        .collect();
+    let flagged_faces = atomic
+        .data
+        .values()
+        .flat_map(|faces| faces.iter())
+        .filter(|face| face.is_game_changer)
+        .count();
+    let curated_only: Vec<&str> = curated
+        .names
+        .difference(&mtgjson_names)
+        .map(String::as_str)
+        .collect();
+    let mtgjson_only: Vec<&str> = mtgjson_names
+        .difference(&curated.names)
+        .map(String::as_str)
+        .collect();
+
+    eprintln!(
+        "Game Changers drift: curated={} cards; MTGJSON={} cards/{} flagged faces; curated-only={} {:?}; MTGJSON-only={} {:?}",
+        curated.names.len(),
+        mtgjson_names.len(),
+        flagged_faces,
+        curated_only.len(),
+        curated_only,
+        mtgjson_only.len(),
+        mtgjson_only,
+    );
 }
 
 /// Insert a card face under its short-name key, resolving collisions when
@@ -1269,6 +1381,7 @@ fn main() {
     let mut mtgjson_override: Option<PathBuf> = None;
     let mut names_out: Option<PathBuf> = None;
     let mut output: Option<PathBuf> = None;
+    let mut provenance_out: Option<PathBuf> = None;
     let mut sidecar_dir: Option<PathBuf> = None;
     let mut stats = false;
     let mut write_subtypes = false;
@@ -1302,6 +1415,14 @@ fn main() {
                     process::exit(1);
                 }
                 output = Some(PathBuf::from(&args[i]));
+            }
+            "--provenance-out" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --provenance-out requires a path argument");
+                    process::exit(1);
+                }
+                provenance_out = Some(PathBuf::from(&args[i]));
             }
             "--sidecar-dir" => {
                 i += 1;
@@ -1356,10 +1477,13 @@ fn main() {
             Some(d) => d.join("mtgjson/AtomicCards.json"),
             None => {
                 eprintln!(
-                    "Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats] [--output <path>]"
+                    "Usage: oracle-gen <data-dir> [--mtgjson <path>] [--stats] [--output <path>] [--provenance-out <path>]"
                 );
                 eprintln!("  Parses Oracle text from MTGJSON and outputs card-data export JSON");
                 eprintln!("  --output <path>  Write the export to a file instead of stdout");
+                eprintln!(
+                    "  --provenance-out <path>  Write the exact source/output hashes for the export"
+                );
                 eprintln!(
                     "  --write-subtypes Regenerate the committed creature-subtype vocabulary\n\
                      \x20                 (crates/phase-ast/data/oracle-subtypes.json). Requires\n\
@@ -1387,7 +1511,13 @@ fn main() {
         process::exit(1);
     }
 
-    let atomic = match load_atomic_cards(&mtgjson_path) {
+    let source_corpus_bytes = std::fs::read(&mtgjson_path).unwrap_or_else(|error| {
+        eprintln!("Error reading {}: {error}", mtgjson_path.display());
+        process::exit(1);
+    });
+    let source_corpus_sha256 = sha256_bytes(&source_corpus_bytes);
+
+    let atomic = match load_atomic_cards_from_bytes(&source_corpus_bytes) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("Error loading MTGJSON: {e}");
@@ -1441,9 +1571,8 @@ fn main() {
         .map(|d| load_set_catalog(d))
         .unwrap_or_default();
 
-    // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
-    // directly from MTGJSON `isGameChanger`; this file covers policy axes that
-    // MTGJSON does not expose.
+    // Load curated bracket lists for signal stamping. A present Game Changers
+    // list is authoritative; MTGJSON is its fallback when that list is absent.
     let bracket_lists_path = data_dir
         .as_ref()
         .map(|d| d.join("bracket_lists.json"))
@@ -1451,10 +1580,10 @@ fn main() {
     let bracket_lists = if bracket_lists_path.exists() {
         BracketLists::from_json_path(&bracket_lists_path).unwrap_or_else(|e| {
             eprintln!(
-                "warning: failed to load {}: {e}; non-MTGJSON bracket signals will be all-false",
+                "error: failed to load {}: {e}",
                 bracket_lists_path.display()
             );
-            BracketLists::default()
+            process::exit(1)
         })
     } else {
         eprintln!(
@@ -1581,6 +1710,7 @@ fn main() {
             );
         }
     }
+    report_game_changer_drift(&bracket_lists, &atomic);
 
     // Release-gate (hybrid): keep cards available ONLY through gated sets in
     // card-data so they stay browsable, but mark them Banned in every format so
@@ -1630,14 +1760,27 @@ fn main() {
         );
     }
 
-    let json = serde_json::to_string(&face_index).expect("Failed to serialize card data");
+    let card_data_bytes = serde_json::to_vec(&face_index).expect("Failed to serialize card data");
+    if let (Some(output), Some(provenance_out)) = (&output, &provenance_out) {
+        match output_paths_share_destination(output, provenance_out) {
+            Ok(true) => {
+                eprintln!("Error: --output and --provenance-out must be different paths");
+                process::exit(2);
+            }
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("Error checking --output/--provenance-out paths: {error}");
+                process::exit(2);
+            }
+        }
+    }
     if let (Some(trace), Some(manifest)) = (&trace_args, trace_manifest) {
         if output.as_ref() == Some(&trace.output) {
             eprintln!("Error: --output and --parser-trace-out must be different paths");
             process::exit(2);
         }
         let report =
-            build_trace_report(&face_index, manifest, json.as_bytes()).unwrap_or_else(|error| {
+            build_trace_report(&face_index, manifest, &card_data_bytes).unwrap_or_else(|error| {
                 eprintln!("Error building parser trace report: {error}");
                 process::exit(2);
             });
@@ -1647,10 +1790,30 @@ fn main() {
         });
     }
     if let Some(ref out_path) = output {
-        std::fs::write(out_path, &json)
+        std::fs::write(out_path, &card_data_bytes)
             .unwrap_or_else(|e| panic!("Failed to write {}: {e}", out_path.display()));
     } else {
-        println!("{json}");
+        io::stdout()
+            .write_all(&card_data_bytes)
+            .unwrap_or_else(|e| panic!("Failed to write card data to stdout: {e}"));
+    }
+
+    let provenance_path = match provenance_out {
+        Some(path) => Some(path),
+        None if output.is_none() => data_dir
+            .as_ref()
+            .map(|dir| dir.join("card-data.provenance.json")),
+        None => None,
+    };
+    if let Some(path) = provenance_path {
+        let provenance = CardDataProvenance {
+            source_corpus_sha256,
+            card_data_sha256: sha256_bytes(&card_data_bytes),
+        };
+        provenance.write_atomic(&path).unwrap_or_else(|error| {
+            eprintln!("Error writing {}: {error}", path.display());
+            process::exit(1);
+        });
     }
 
     // Emit per-locale content-i18n sidecars (card-data.<code>.json) into the
@@ -2275,6 +2438,67 @@ mod tests {
         assert_eq!(locale_code("Polish"), None);
         assert_eq!(locale_code("Russian"), None);
         assert_eq!(locale_code("Korean"), None);
+    }
+
+    #[test]
+    fn curated_game_changers_override_the_mtgjson_flag() {
+        let lists = BracketLists::from_pairs(
+            "test",
+            &[(BracketCardClass::GameChangers, &["Curated Card"])],
+        );
+
+        let curated_face = CardFace {
+            name: "Curated Card".into(),
+            ..Default::default()
+        };
+        let curated_source = atomic_single("Curated Card", None);
+        assert!(
+            bracket_signals_for_face(&lists, &curated_face, &curated_source).game_changer,
+            "curated membership must add a signal absent from MTGJSON"
+        );
+
+        let mtgjson_face = CardFace {
+            name: "MTGJSON-only Card".into(),
+            ..Default::default()
+        };
+        let mut mtgjson_source = atomic_single("MTGJSON-only Card", None);
+        mtgjson_source.is_game_changer = true;
+        assert!(
+            !bracket_signals_for_face(&lists, &mtgjson_face, &mtgjson_source).game_changer,
+            "curated absence must express a removal from the MTGJSON snapshot"
+        );
+    }
+
+    #[test]
+    fn mtgjson_flag_is_the_fallback_when_no_curated_list() {
+        let face = CardFace {
+            name: "MTGJSON Game Changer".into(),
+            ..Default::default()
+        };
+        let mut source = atomic_single("MTGJSON Game Changer", None);
+        source.is_game_changer = true;
+        assert!(bracket_signals_for_face(&BracketLists::default(), &face, &source).game_changer);
+    }
+
+    #[test]
+    fn curated_game_changer_applies_to_both_faces_of_an_mdfc() {
+        let lists = BracketLists::from_pairs(
+            "test",
+            &[(BracketCardClass::GameChangers, &["Tergrid, God of Fright"])],
+        );
+        let mut source = atomic_single("Tergrid, God of Fright // Tergrid's Lantern", None);
+        source.is_game_changer = true;
+
+        for name in ["Tergrid, God of Fright", "Tergrid's Lantern"] {
+            let face = CardFace {
+                name: name.into(),
+                ..Default::default()
+            };
+            assert!(
+                bracket_signals_for_face(&lists, &face, &source).game_changer,
+                "card-level curated membership must apply when the deck names {name}"
+            );
+        }
     }
 
     #[test]

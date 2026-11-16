@@ -24206,7 +24206,10 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
 
     let attack_target_scopes = [
         AttackTargetFilter::Player,
-        AttackTargetFilter::Planeswalker,
+        AttackTargetFilter::Planeswalker { subtype: None },
+        AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
+        },
         AttackTargetFilter::PlayerOrPlaneswalker,
         AttackTargetFilter::Battle,
         AttackTargetFilter::Owner,
@@ -24220,7 +24223,7 @@ fn attack_anaphor_rebind_gate_covers_only_player_yielding_attack_scopes() {
             AttackTargetFilter::Player
             | AttackTargetFilter::PlayerOrPlaneswalker
             | AttackTargetFilter::Monarch => true,
-            AttackTargetFilter::Planeswalker
+            AttackTargetFilter::Planeswalker { .. }
             | AttackTargetFilter::Battle
             | AttackTargetFilter::Owner
             | AttackTargetFilter::OwnerOrPlaneswalker
@@ -33238,9 +33241,9 @@ fn render_net_reaches_every_nested_description_carrier() {
     parsed
         .abilities
         .push(carrier(Effect::CreateDrawReplacement {
-            replacement_effect: Box::new(Effect::unimplemented(
-                "probe",
-                planted("create_draw_replacement"),
+            replacement_effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("probe", planted("create_draw_replacement")),
             )),
         }));
     tags.push("create_draw_replacement");

@@ -398,6 +398,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::CardCopyCreated { .. }
         | GameEvent::ObjectConjured { .. } => LogImportance::Essential,
         GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::AbilityActivated { .. }
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::KeywordAbilityActivated { .. }
@@ -470,9 +471,10 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::ResolutionHalted { .. }
         | GameEvent::ObjectIntensified { .. }
         | GameEvent::Evolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         | GameEvent::ContinuousEffectEnded { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
@@ -570,7 +572,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::KeywordAbilityActivated { .. }
         | GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
@@ -606,6 +608,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::Mutated { .. }
         | GameEvent::Augmented { .. }
@@ -646,6 +649,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::CounterRemoved { .. }
         | GameEvent::ControllerChanged { .. }
         | GameEvent::EffectResolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::BecomesTarget { .. }
@@ -951,6 +955,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::PriorityPassed { .. } => LogCategory::Turn,
 
         GameEvent::SpellCast { .. }
@@ -966,7 +971,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CreatureExerted { .. }
         | GameEvent::CreatureEnlisted { .. }
@@ -1047,6 +1052,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::CardCopyCreated { .. } => LogCategory::Token,
 
         GameEvent::EffectResolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         // CR 116.2c: a special action that ends a continuous effect is an
         // effect-level state change, grouped with the other effect events.
@@ -1137,6 +1143,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         ],
 
         GameEvent::PhaseChanged { phase } => {
+            vec![text(phase_label(*phase))]
+        }
+        // CR 805.4d: a fanned occurrence logs its phase like the production
+        // event; the bound player is firing context, not log content.
+        GameEvent::PhaseChangedForPlayer { phase, .. } => {
             vec![text(phase_label(*phase))]
         }
 
@@ -1309,6 +1320,21 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" counters "),
             card_seg(state, *object_id),
         ],
+
+        GameEvent::Attached {
+            attachment_id,
+            target,
+        } => {
+            let mut segments = vec![
+                card_seg(state, *attachment_id),
+                text(" becomes attached to "),
+            ];
+            match target {
+                TargetRef::Object(object_id) => segments.push(card_seg(state, *object_id)),
+                TargetRef::Player(player_id) => segments.push(player_seg(state, *player_id)),
+            }
+            segments
+        }
 
         GameEvent::Unattached {
             attachment_id,
@@ -1590,7 +1616,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         }
 
         // CR 509.1h + CR 509.3c: an effect first made the attacker become blocked.
-        GameEvent::AttackerBecameBlockedByEffect { attacker } => {
+        GameEvent::AttackerBecameBlocked { attacker, .. } => {
             vec![card_seg(state, *attacker), text(" becomes blocked")]
         }
 
@@ -1831,7 +1857,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             num(*level as i32),
         ],
 
-        GameEvent::DayNightChanged { new_state } => {
+        GameEvent::DayNightChanged { new_state, .. } => {
             vec![text("Day/Night changed to "), text(new_state)]
         }
 
@@ -3372,6 +3398,7 @@ mod tests {
             },
             GameEvent::DayNightChanged {
                 new_state: "Day".to_string(),
+                previous: None,
             },
             GameEvent::TokenCreated {
                 object_id: ObjectId(1),

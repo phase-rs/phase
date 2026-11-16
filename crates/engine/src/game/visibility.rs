@@ -1312,6 +1312,7 @@ fn redact_activation_records(filtered: &mut GameState) {
             PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => clear(pending_cast),
                 CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::Resolution { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => {}
             },
             PendingCostMoveResume::LoyaltyActivation { resolved, .. } => {
@@ -1591,6 +1592,13 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // ID of a card still in a hand (a hidden zone), and Library of Leng can
     // send it to another hidden zone. Server-only for every viewer.
     filtered.pending_single_discard = None;
+    // CR 101.4 + CR 101.4a: the picks earlier players have already made for a
+    // simultaneous instruction stay unrevealed until it is delivered, so no
+    // viewer — a later chooser above all — receives them. The projected
+    // prompt is the complete viewer-facing surface.
+    if let Some(choice) = filtered.pending_player_scope_choice.as_mut() {
+        choice.selections.clear();
+    }
     // CR 401.4 + CR 608.2c: Queued owner batches retain exact hidden-card
     // identities and origins for later private choices, and the orders owners
     // have already chosen (CR 401.4: the order isn't revealed). The public
@@ -2126,6 +2134,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // state. The client needs only the exact public prompt projection, never its
     // LKI/links/cost facts, so strip the private context before serialization.
     if let WaitingFor::NamedChoice {
+        decision_subject_id,
         player,
         choice_type,
         options,
@@ -2139,6 +2148,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             source.context = None;
         }
         filtered.waiting_for = WaitingFor::NamedChoice {
+            // CR 608.2c + CR 608.2d: the object a per-object choice is for is public
+            // (display-only); every viewer sees which permanent the prompt assigns.
+            decision_subject_id: *decision_subject_id,
             player: *player,
             choice_type: choice_type.clone(),
             options: options.clone(),
@@ -3412,6 +3424,14 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 }
             }
         }
+        // CR 400.2: library and hand are hidden zones. The estimate is computed from the
+        // seat's complete submitted deck, so it reveals that deck's strength to anyone but
+        // its owner. Only the owner's projection keeps it; the declared `bracket_tier` is
+        // the owner's own public statement and stays for every viewer. AI sessions and
+        // saved games read the unfiltered state, so they keep the estimate.
+        if Some(pool.player) != viewer {
+            pool.estimated_bracket_tier = None;
+        }
     }
 
     // CR 702.139a: A companion is outside the game and stays private until
@@ -4212,6 +4232,10 @@ fn redact_printed_identity(obj: &mut crate::game::game_object::GameObject) {
     obj.spellbook.clear();
     obj.parse_warnings.clear();
     obj.back_face = None;
+    // Redacted with `back_face`. Only a double-faced copy token carries it. Such a token can be in a
+    // hidden zone only between a zone change and the state-based action that removes it (CR 111.7),
+    // and it can't be turned face down (CR 712.16); the redaction covers that window.
+    obj.double_faced_token_alternative = None;
     // CR 400.2: a hidden card's token-ness identifies its pile position
     // (Horde libraries mix tokens and cards), so it redacts like every other
     // printed characteristic — mirroring `redact_zone_change_record`'s
@@ -4346,7 +4370,7 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `CollectEvidenceChoice` and `ChooseManaColor`, `ManaChoiceContext::ResolvingEffect`,
 /// `CollectEvidenceResume::Effect`,
 /// and the roots `pending_player_scope_sacrifice_choice`,
-/// `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
+/// `pending_player_scope_choice`, `pending_player_scope_unless_payment`, `pending_scoped_library_search`,
 /// `pending_library_search_delivery`, `epic_effects` and the prevention riders of
 /// `replacement_continuations`, which every shield's `runtime_execute` names
 /// (`redact_waiting_for_payment`, `redact_paused_ability_payment`). Applied
@@ -4696,6 +4720,8 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
             CollectEvidenceResume::Effect { pending_ability } => {
                 redact_ability_payment(pending_ability, hidden_ids);
             }
+            // Carries only the source id: no ability payment to redact.
+            CollectEvidenceResume::Resolution { .. } => {}
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => redact_pending_mana_ability_payment(pending_mana_ability, hidden_ids),
@@ -4713,7 +4739,7 @@ fn redact_waiting_for_payment(waiting_for: &mut WaitingFor, hidden_ids: &HashSet
 }
 
 /// CR 601.2h + CR 113.7a + CR 400.2: the root-held paused abilities every viewer receives
-/// (a paused cast, a player-scope sacrifice or unless-payment, a scoped library search and
+/// (a paused cast, a player-scope sacrifice, return or unless-payment, a scoped library search and
 /// its delivery, an Epic spell copy, and a resolution-installed prevention rider,
 /// CR 615.5). Only hidden-source payment entries are blanked and hidden linked-exile
 /// members' mana values zeroed, except that a `replacement_continuations` entry no shield
@@ -4723,6 +4749,9 @@ fn redact_paused_ability_payment(state: &mut GameState, hidden_ids: &HashSet<Obj
         redact_pending_cast_payment(pending, hidden_ids);
     }
     if let Some(choice) = state.pending_player_scope_sacrifice_choice.as_mut() {
+        redact_ability_payment(&mut choice.ability, hidden_ids);
+    }
+    if let Some(choice) = state.pending_player_scope_choice.as_mut() {
         redact_ability_payment(&mut choice.ability, hidden_ids);
     }
     if let Some(pending) = state.pending_player_scope_unless_payment.as_deref_mut() {
@@ -5088,6 +5117,7 @@ fn redact_counter_added_record(record: &mut crate::types::game_state::CounterAdd
     let crate::types::game_state::CounterAddedRecord {
         actor: _,
         object_id: _,
+        incarnation: _,
         counter_type: _,
         count: _,
         name,
@@ -5159,6 +5189,8 @@ fn redact_spell_cast_record(record: &mut crate::types::game_state::SpellCastReco
 
 /// The entry ledger's id is a non-optional key, so the record keeps its id and controller
 /// (the count is preserved) and loses every characteristic that identifies the card.
+/// Status is not a characteristic (CR 110.5a), and a permanent's face-up/face-down
+/// status is public (CR 110.5), so the redacted record keeps its face state.
 fn redact_battlefield_entry_record(record: &mut crate::types::game_state::BattlefieldEntryRecord) {
     let crate::types::game_state::BattlefieldEntryRecord {
         object_id: _,
@@ -5169,6 +5201,9 @@ fn redact_battlefield_entry_record(record: &mut crate::types::game_state::Battle
         colors,
         keywords,
         controller: _,
+        // CR 110.5: status is public and is not a characteristic, so redaction
+        // preserves it.
+        face_state: _,
     } = record;
     *name = HIDDEN_CARD_NAME.to_string();
     core_types.clear();
@@ -5638,9 +5673,10 @@ mod tests {
         LinkedExileSnapshot, ManaAbilityCostCursor, ManaAbilityCostResolutionMode,
         ManaAbilityResume, ManaSpentSourceSnapshot, MayTriggerAutoChoiceKey, MayTriggerOrigin,
         PendingBeginGameAbility, PendingCast, PendingCostMoveCompletion, PendingCostMoveResume,
-        PendingManaAbility, PendingSacrificeCostCompletion, PendingScopedLibrarySearch,
-        PendingSearchFoundBatch, PendingTriggerOrder, PreparedScopedLibrarySearchChoice,
-        SpellCastRecord, StackEntry, TargetEffectDetail, TriggerOrderGroup,
+        PendingManaAbility, PendingPlayerScopeChoice, PendingSacrificeCostCompletion,
+        PendingScopedLibrarySearch, PendingSearchFoundBatch, PendingTriggerOrder,
+        PreparedScopedLibrarySearchChoice, SpellCastRecord, StackEntry, TargetEffectDetail,
+        TriggerOrderGroup,
     };
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, ReplacementContinuationId};
     use crate::types::mana::ManaCost;
@@ -5856,6 +5892,7 @@ mod tests {
                 colors: Vec::new(),
                 keywords: Vec::new(),
                 controller: owner,
+                face_state: crate::types::game_state::FaceState::FaceDown,
             });
         state
             .sacrificed_permanents_this_turn
@@ -5900,6 +5937,7 @@ mod tests {
         let counter_record = |object_id: ObjectId, name: &str| CounterAddedRecord {
             actor: owner,
             object_id,
+            incarnation: Some(0),
             counter_type: CounterType::Plus1Plus1,
             count: 1,
             name: name.to_string(),
@@ -5976,6 +6014,11 @@ mod tests {
         assert!(opponent.battlefield_entries_this_turn[0]
             .core_types
             .is_empty());
+        assert_eq!(
+            opponent.battlefield_entries_this_turn[0].face_state,
+            crate::types::game_state::FaceState::FaceDown,
+            "CR 110.5: face-up/face-down status is public and survives redaction"
+        );
         assert_eq!(opponent.sacrificed_permanents_this_turn.len(), 1);
         assert_eq!(
             opponent.sacrificed_permanents_this_turn[0].name,
@@ -7830,6 +7873,18 @@ mod tests {
                 }),
             ),
             (
+                "pending_player_scope_choice",
+                "/pending_player_scope_choice/".to_string(),
+                2,
+                Box::new(|state: &mut GameState| {
+                    state.pending_player_scope_choice = Some(PendingPlayerScopeChoice {
+                        ability: effect(),
+                        remaining_players: Vec::new(),
+                        selections: Vec::new(),
+                    });
+                }),
+            ),
+            (
                 "pending_player_scope_unless_payment",
                 "/pending_player_scope_unless_payment/".to_string(),
                 2,
@@ -8560,6 +8615,7 @@ mod tests {
             options: vec!["Anchor".to_string()],
         };
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: choice_type.clone(),
@@ -8573,6 +8629,7 @@ mod tests {
         assert!(matches!(
             source_less_view.waiting_for,
             WaitingFor::NamedChoice {
+                decision_subject_id: _,
                 free_entry: _,
                 player: PlayerId(0),
                 ref choice_type,
@@ -8601,6 +8658,7 @@ mod tests {
         );
         let expected_prompt = source.prompt.clone();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type,
@@ -12714,6 +12772,7 @@ mod tests {
         // P0 has already answered; P1 is the pending chooser.
         state.players[0].chosen_attributes = vec![ChosenAttribute::Number(4)];
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::NumberRange {
@@ -13250,6 +13309,7 @@ mod tests {
                 prevention_tally: Vec::new(),
                 lives_before: vec![20, 20],
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                replacement: None,
                 phase_c_remnant: None,
             }));
 
