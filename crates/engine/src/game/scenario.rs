@@ -1767,6 +1767,14 @@ impl GameRunner {
     /// Bounded loop: a turn has 12 phases/steps (CR 500.1), so a generous cap
     /// guards against an unexpectedly stuck transition rather than spinning.
     pub fn advance_to_phase(&mut self, phase: Phase) {
+        let _ = self.advance_to_phase_collecting_events(phase);
+    }
+
+    /// Advance the same production turn structure as [`Self::advance_to_phase`]
+    /// while retaining events emitted by automatic phase actions and public
+    /// priority passes. This is useful when a test's claim depends on those
+    /// events; it deliberately shares the single advancement loop.
+    pub fn advance_to_phase_collecting_events(&mut self, phase: Phase) -> Vec<GameEvent> {
         let mut events = Vec::new();
         let mut waiting = crate::game::turns::auto_advance(&mut self.state, &mut events);
         for _ in 0..32 {
@@ -1779,10 +1787,15 @@ impl GameRunner {
             let r1 = apply_as_current(&mut self.state, GameAction::PassPriority);
             let r2 = apply_as_current(&mut self.state, GameAction::PassPriority);
             match (r1, r2) {
-                (Ok(_), Ok(result)) => waiting = result.waiting_for,
+                (Ok(first), Ok(result)) => {
+                    events.extend(first.events);
+                    events.extend(result.events);
+                    waiting = result.waiting_for;
+                }
                 _ => break,
             }
         }
+        events
     }
 
     /// Advance to the declare-attackers step (CR 508). The engine surfaces
@@ -2811,17 +2824,23 @@ impl<'a> SpellCast<'a> {
                 // CR 601.2b: optional additional costs are chosen during
                 // announcement, before the spell is committed to the stack.
                 WaitingFor::OptionalCostChoice { .. } => {
-                    let pay = match optional {
-                        OptionalPolicy::Accept => true,
-                        OptionalPolicy::Decline => false,
+                    let index = match optional {
+                        OptionalPolicy::Accept => 0,
+                        OptionalPolicy::Decline => 1,
                         OptionalPolicy::Stop => {
                             panic!("OptionalPolicy::Stop is only valid after spell commitment")
                         }
                     };
-                    act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                    act_collect(
+                        runner,
+                        GameAction::DecideOptionalCost { index },
+                        &mut events,
+                    )?;
                 }
-                // CR 702.174a: after promising Gift with ≥2 opponents, pick a recipient.
-                // Sole-opponent games auto-latch and never raise this prompt.
+                // Cast-time opponent choice (Gift recipient, CR 702.174a, or
+                // effect-cost player, CR 601.2h) — the driver picks the first
+                // candidate; tests that must observe the pick drive it manually.
+                // A sole candidate auto-binds and never raises this prompt.
                 WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                     let opponent = candidates.first().copied().unwrap_or_else(|| {
                         panic!("ChooseGiftRecipient raised with empty candidates")
@@ -3920,13 +3939,20 @@ fn drive_resolution(
             }
             // CR 608.2d: leave resolution-time choices to the declared policy.
             WaitingFor::OptionalCostChoice { .. } => {
-                let pay = match policy.optional {
-                    OptionalPolicy::Accept => true,
-                    OptionalPolicy::Decline => false,
+                let index = match policy.optional {
+                    OptionalPolicy::Accept => 0,
+                    OptionalPolicy::Decline => 1,
                     OptionalPolicy::Stop => break,
                 };
-                act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                act_collect(
+                    runner,
+                    GameAction::DecideOptionalCost { index },
+                    &mut events,
+                )?;
             }
+            // Cast-time opponent choice (Gift recipient, CR 702.174a, or effect-cost
+            // player, CR 601.2h) — the driver picks the first candidate; tests that
+            // must observe the pick drive it manually.
             WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                 let opponent = candidates
                     .first()
@@ -5632,12 +5658,12 @@ mod tests {
         );
     }
 
-    /// CR 608.2d + CR 701.21a: choosing to perform an impossible optional
-    /// sacrifice is not "a player does". If the current promptee controls no
-    /// legal permanent, the APNAP offer must continue to the next player rather
-    /// than treating the empty selection as an accepted sacrifice.
+    /// CR 608.2d + CR 701.21a: a player who controls no land can't sacrifice one,
+    /// so they can't choose "any player may sacrifice a land of their choice" and
+    /// aren't offered it. The offer goes to the player who can, and no reward
+    /// is drawn before anyone sacrifices.
     #[test]
-    fn any_player_may_impossible_sacrifice_accept_continues_offer() {
+    fn any_player_may_sacrifice_is_not_offered_to_a_player_without_a_land() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let _p1_land = scenario.add_basic_land(P1, ManaColor::White);
@@ -5653,17 +5679,6 @@ mod tests {
         scenario.with_library_top(P0, &["Reward Card"]);
         let mut runner = scenario.build();
 
-        let wf = runner.cast(spell).resolve().final_waiting_for().clone();
-        match wf {
-            WaitingFor::OpponentMayChoice {
-                player, remaining, ..
-            } => {
-                assert_eq!(player, P0, "controller is still offered first");
-                assert_eq!(remaining, vec![P1], "opponent remains queued");
-            }
-            other => panic!("expected first OpponentMayChoice, got {other:?}"),
-        }
-
         let hand_before = runner
             .state
             .players
@@ -5672,18 +5687,18 @@ mod tests {
             .unwrap()
             .hand
             .len();
-        runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("empty sacrifice accept should advance to next player");
-
-        match &runner.state.waiting_for {
-            WaitingFor::OpponentMayChoice { player, .. } => {
+        let wf = runner.cast(spell).resolve().final_waiting_for().clone();
+        match wf {
+            WaitingFor::OpponentMayChoice {
+                player, remaining, ..
+            } => {
                 assert_eq!(
-                    *player, P1,
-                    "empty accept must not end the offer or fire the if-a-player-does rider"
+                    player, P1,
+                    "CR 608.2d: the controller controls no land, so the first offer is the opponent's"
                 );
+                assert!(remaining.is_empty(), "no other seat is queued");
             }
-            other => panic!("expected opponent offer after impossible accept, got {other:?}"),
+            other => panic!("expected the opponent's OpponentMayChoice, got {other:?}"),
         }
         let hand_after = runner
             .state
@@ -5694,8 +5709,9 @@ mod tests {
             .hand
             .len();
         assert_eq!(
-            hand_after, hand_before,
-            "no card should be drawn because no sacrifice happened"
+            hand_after,
+            hand_before - 1,
+            "only the cast spell left the hand; no card is drawn because no sacrifice happened"
         );
     }
 
@@ -5744,11 +5760,11 @@ mod tests {
         }
     }
 
-    /// CR 101.4 + CR 608.2d: an impossible exact-three acceptance is skipped
-    /// without recording acceptance, and the APNAP offer advances to the next
-    /// player whose selection is feasible.
+    /// CR 101.4 + CR 608.2d: a player without three cards in their graveyard
+    /// can't make the exact selection, so they can't choose the option and are
+    /// never offered it; the player who can is the first and only seat offered.
     #[test]
-    fn carrion_wurm_impossible_first_accept_advances_to_feasible_player() {
+    fn carrion_wurm_is_offered_only_to_the_player_who_can_exile_three() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let wurm = scenario
@@ -5766,24 +5782,22 @@ mod tests {
         let mut runner = scenario.build();
 
         attack_until_optional_prompt(&mut runner, wurm);
-        runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("infeasible first acceptance advances");
-        assert!(matches!(
-            &runner.state().waiting_for,
-            WaitingFor::OpponentMayChoice { player: P1, .. }
-        ));
-        assert!(!runner.state().player_actions_this_way.contains(&(
-            P0,
-            crate::types::events::PlayerActionKind::AcceptedOptionalEffect
-        )));
-        assert!(p0_cards
-            .iter()
-            .all(|card| runner.state().objects[card].zone == Zone::Graveyard));
+        match &runner.state().waiting_for {
+            WaitingFor::OpponentMayChoice {
+                player, remaining, ..
+            } => {
+                assert_eq!(
+                    *player, P1,
+                    "CR 608.2d: the controller can't exile three, so the first offer is P1's"
+                );
+                assert!(remaining.is_empty(), "no other seat is queued");
+            }
+            other => panic!("expected P1's OpponentMayChoice, got {other:?}"),
+        }
 
         runner
             .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("feasible second acceptance opens exact choice");
+            .expect("the feasible acceptance opens the exact choice");
         match &runner.state().waiting_for {
             WaitingFor::EffectZoneChoice {
                 player,
@@ -5817,6 +5831,13 @@ mod tests {
             .iter()
             .all(|card| runner.state().objects[card].zone == Zone::Exile));
         assert!(runner.state().objects[&wurm].assigns_no_combat_damage);
+        assert!(p0_cards
+            .iter()
+            .all(|card| runner.state().objects[card].zone == Zone::Graveyard));
+        assert!(!runner.state().player_actions_this_way.contains(&(
+            P0,
+            crate::types::events::PlayerActionKind::AcceptedOptionalEffect
+        )));
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
@@ -5858,11 +5879,11 @@ mod tests {
         ));
     }
 
-    /// CR 608.2d: when every player lacks three eligible cards, exhausting the
-    /// APNAP offers with impossible acceptances is equivalent to no player
-    /// performing the instruction.
+    /// CR 608.2d: when every player lacks three eligible cards, no player can
+    /// choose the option, so no one is offered it and no player performs the
+    /// instruction: the rider stays closed.
     #[test]
-    fn carrion_wurm_all_infeasible_acceptances_leave_rider_false() {
+    fn carrion_wurm_with_no_player_able_to_exile_three_offers_no_one() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let wurm = scenario
@@ -5872,23 +5893,32 @@ mod tests {
         scenario.add_spell_to_graveyard(P1, "P1 Only Card", true);
         let mut runner = scenario.build();
 
-        attack_until_optional_prompt(&mut runner, wurm);
-        runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("controller cannot make exact selection");
+        runner.advance_to_combat();
         assert!(matches!(
             runner.state().waiting_for,
-            WaitingFor::OpponentMayChoice { player: P1, .. }
+            WaitingFor::DeclareAttackers { .. }
         ));
         runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("last player also cannot make the exact selection");
+            .declare_attackers(&[(wurm, AttackTarget::Player(P1))])
+            .expect("declare Carrion attacker");
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == wurm),
+            "the Wurm's attack trigger is on the stack"
+        );
+        // An `OpponentMayChoice` would stop the drive here: nothing answers it.
+        runner.advance_until_stack_empty();
 
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "CR 608.2d: no player can exile three, so no one is offered; got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
         assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ));
         assert!(runner.state().active_ability_continuation().is_none());
     }
 

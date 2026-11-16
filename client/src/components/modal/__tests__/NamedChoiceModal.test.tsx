@@ -2,12 +2,24 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WaitingFor } from "../../../adapter/types.ts";
+import { useGameStore } from "../../../stores/gameStore.ts";
+import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
+import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
 import { NamedChoiceModal, SecretAgendaModal } from "../NamedChoiceModal.tsx";
 
 const dispatchMock = vi.fn();
 
 vi.mock("../../../services/cardNames.ts", () => ({
   getCardNames: () => Promise.resolve(["Grizzly Bears", "Runeclaw Bear"]),
+}));
+
+vi.mock("../../../hooks/useCardImage.ts", () => ({
+  useCardImage: vi.fn(() => ({
+    src: null,
+    isLoading: false,
+    isRotated: false,
+    isFlip: false,
+  })),
 }));
 
 vi.mock("../../../hooks/useGameDispatch.ts", () => ({
@@ -41,6 +53,42 @@ describe("NamedChoiceModal", () => {
       type: "ChooseOption",
       data: { choice: "Blue" },
     });
+  });
+
+  // CR 608.2c + CR 608.2d: Dack Fayden's "for each of those permanents, choose
+  // a different opponent" publishes the permanent each prompt assigns, and the
+  // prompt shows it through the shared card display.
+  it("shows the engine-published permanent a per-object player choice is for", () => {
+    const bears = gameObjectFactory.creature(2, 2).named("Grizzly Bears").withId(44).build();
+    const dreadmaw = gameObjectFactory.creature(6, 6).named("Colossal Dreadmaw").withId(45).build();
+    useGameStore.setState({
+      gameState: gameStateFactory.build({ objects: { [bears.id]: bears, [dreadmaw.id]: dreadmaw } }),
+    });
+    const data: NamedChoiceData = {
+      player: 0,
+      decision_subject_id: dreadmaw.id,
+      choice_type: { Opponent: { restriction: null, distinctness: "DistinctFromPriorChoices" } },
+      options: ["1", "2"],
+    };
+
+    render(<NamedChoiceModal data={data} />);
+
+    expect(screen.getByRole("img", { name: "Colossal Dreadmaw" })).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Grizzly Bears" })).not.toBeInTheDocument();
+  });
+
+  it("shows no subject card when the prompt publishes none", () => {
+    const bears = gameObjectFactory.creature(2, 2).named("Grizzly Bears").withId(44).build();
+    useGameStore.setState({ gameState: gameStateFactory.build({ objects: { [bears.id]: bears } }) });
+    const data: NamedChoiceData = {
+      player: 0,
+      choice_type: { Opponent: { restriction: null, distinctness: "Independent" } },
+      options: ["1", "2"],
+    };
+
+    render(<NamedChoiceModal data={data} />);
+
+    expect(screen.queryByTestId("named-choice-subject")).not.toBeInTheDocument();
   });
 
   // CR 201.4: a closed card-name domain (Garth One-Eye) publishes its legal

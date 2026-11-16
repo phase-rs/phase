@@ -1,4 +1,5 @@
 use crate::game::filter;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::evaluate_condition;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
@@ -269,6 +270,17 @@ fn evaluate_static_condition_for_ability(
     }
 }
 
+/// CR 611.2c: a resolved "can't be the target of ..." grant is a rule effect read
+/// straight off its transient effect, not an ability on the recipient.
+fn is_cant_be_targeted_rule_effect(modification: &ContinuousModification) -> bool {
+    matches!(
+        modification,
+        ContinuousModification::AddStaticMode {
+            mode: crate::types::statics::StaticMode::CantBeTargeted { .. },
+        }
+    )
+}
+
 /// CR 116.2c: single install point for this module. Threads the (optional)
 /// pay-to-end permission into the state-level construction authority so the
 /// field rides INSIDE the journaled `ResolvedContinuousEffectCommand` rather
@@ -305,6 +317,20 @@ fn install_transient(
                 .map(|occurrence| occurrence.caster),
         );
     }
+    // CR 400.7 + CR 611.2c: a targeted "can't be the target" rule effect applies to
+    // the recipient as it was when the effect resolved; a blinked or otherwise
+    // re-created object is a new object it no longer reaches.
+    let affected_recipient = match &affected {
+        TargetFilter::SpecificObject { id }
+            if modifications.iter().any(is_cant_be_targeted_rule_effect) =>
+        {
+            state
+                .objects
+                .get(id)
+                .map(crate::types::identifiers::ObjectIncarnationRef::from_object)
+        }
+        _ => None,
+    };
     state.add_transient_continuous_effect_inner(
         ability.source_id,
         ability.controller,
@@ -316,6 +342,7 @@ fn install_transient(
         // CR 201.5a: a granted ability's effect names the object that granted it.
         TransientContinuousEffectBindings {
             granting_object: ability.context.granting_object,
+            affected_recipient,
             ..TransientContinuousEffectBindings::default()
         },
         // CR 113.7a: an event deadline is bound to the creating ability's own
@@ -513,6 +540,34 @@ fn bind_transient_effect(
         }
     }
 
+    // CR 611.2c + CR 613.11 + CR 109.5: A duration-bound "creatures you control
+    // can't be the targets of spells or abilities your opponents control this
+    // turn" (Veilstone Amulet) is a rule-changing effect, so it "can affect
+    // objects that weren't affected when that continuous effect began" — a
+    // creature that enters after it resolves is protected too. Keep the affected
+    // filter INTACT on one TCE rather than freezing it to a resolution-time
+    // `SpecificObject` set; the targeting gate reads the TCE directly
+    // (`static_abilities::transient_cant_be_targeted_prohibits`) and `layers.rs`
+    // never grafts it onto an object. A targeted grant (Vines of Vastwood) falls
+    // through to the chosen-target arms, which bind the recipient's incarnation
+    // (see `install_transient`).
+    if modifications.iter().any(is_cant_be_targeted_rule_effect) {
+        if let Some(affected) = static_def.affected.clone() {
+            if !generic_effect_affected_uses_inherited_targets(&affected) {
+                install_transient(
+                    state,
+                    end_permission,
+                    ability,
+                    duration.clone(),
+                    affected,
+                    modifications,
+                    static_def.condition.clone(),
+                );
+                return;
+            }
+        }
+    }
+
     // CR 608.2c (issue #323 class): SelfRef is the printed-name anaphor and
     // always refers to the source object regardless of `ability.targets`.
     // Short-circuit BEFORE the chosen-targets branch so chained Effect
@@ -596,12 +651,10 @@ fn bind_transient_effect(
     if matches!(target_filter, Some(TargetFilter::TriggeringSource))
         || (affected_is_triggering_source && ability.targets.is_empty())
     {
-        if let Some(TargetRef::Object(obj_id)) =
-            crate::game::targeting::resolve_event_context_target(
-                state,
-                &TargetFilter::TriggeringSource,
-                ability.source_id,
-            )
+        // CR 400.7 + CR 608.2k: a grant mutates its referent, so it binds only
+        // the incarnation the trigger event recorded (the shared authority).
+        if let Some(obj_id) =
+            crate::game::targeting::triggering_source_mutation_referent(state, ability.source_id)
         {
             install_transient(
                 state,
@@ -1014,6 +1067,7 @@ fn binds_as_player(filter: &TargetFilter) -> bool {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -1590,7 +1644,7 @@ fn defended_scope_uses_source_controller_anchor(
 
     match filter {
         AttackTargetFilter::Player
-        | AttackTargetFilter::Planeswalker
+        | AttackTargetFilter::Planeswalker { .. }
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::Battle
         | AttackTargetFilter::PlayerOrPermanents => true,
@@ -1619,7 +1673,28 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
     use crate::types::keywords::{Keyword, ProtectionTarget};
     use crate::types::player::PlayerId;
+    use crate::types::triggers::AttackTargetFilter;
     use crate::types::zones::Zone;
+
+    /// CR 508.1c: the subtype-defended scope is controller-anchored
+    /// (the matcher compares against `source_controller`), not
+    /// owner-anchored like `Owner`.
+    #[test]
+    fn subtype_planeswalkers_scope_uses_source_controller_anchor() {
+        assert!(
+            defended_scope_uses_source_controller_anchor(&AttackTargetFilter::Planeswalker {
+                subtype: Some("Jace".to_string())
+            }),
+            "Planeswalker {{ subtype: Some }} compares against source_controller"
+        );
+        // Reach-guards: the anchor classifier still separates the two families.
+        assert!(defended_scope_uses_source_controller_anchor(
+            &AttackTargetFilter::Planeswalker { subtype: None }
+        ));
+        assert!(!defended_scope_uses_source_controller_anchor(
+            &AttackTargetFilter::Owner
+        ));
+    }
 
     /// CR 702.16k + CR 608.2c + CR 608.2h: "you gain protection from that
     /// player" is fixed to the declared player target when the effect is

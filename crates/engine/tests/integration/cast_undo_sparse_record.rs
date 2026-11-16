@@ -300,7 +300,9 @@ fn announce_triumph(board: &mut TriumphBoard, pay_discard: bool) -> CastUndoReco
 
     act_counted(
         &mut board.runner,
-        GameAction::DecideOptionalCost { pay: pay_discard },
+        GameAction::DecideOptionalCost {
+            index: if pay_discard { 0 } else { 1 },
+        },
     )
 }
 
@@ -617,7 +619,7 @@ fn an_alternative_cost_election_records_like_the_complete_record_and_cancel_refu
     ));
     assert_not_recorded(delta, "CastSpell");
 
-    let delta = act_counted(&mut runner, GameAction::DecideOptionalCost { pay: true });
+    let delta = act_counted(&mut runner, GameAction::DecideOptionalCost { index: 0 });
     assert_recorded(delta, "the alternative-cost election");
     assert_eq!(runner.life(P0), 19);
     assert!(matches!(

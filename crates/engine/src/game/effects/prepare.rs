@@ -498,6 +498,12 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // permanent, not to a new object built from its card.
     copy.reset_for_battlefield_exit();
 
+    // CR 707.2 + CR 722.3c: a Prepare copy acquires the prepare spell's
+    // characteristics, not the donor's live resolution effects. Face writers
+    // preserve those effects for same-object changes, so clear them here at the
+    // distinct-object construction boundary before installing the copied face.
+    copy.replacement_definitions.clear();
+
     // CR 707.2 + CR 110.5: status (tapped, flipped, face down, phased out),
     // counters and stickers are not copied.
     copy.tapped = false;
@@ -548,6 +554,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.layer1_name_origin = None;
     copy.copied_room_halves = None;
     copy.copied_prepare_face = None;
+    copy.double_faced_token_alternative = None;
     copy.base_name_origin = None;
 
     // CR 707.2: the choices made while casting are copied only from an object
@@ -1447,6 +1454,10 @@ mod tests {
         obj.prepared_copy_source = Some(ObjectId(80));
         obj.loyalty_activations_this_turn = 1;
         obj.extra_loyalty_activations_this_turn = 2;
+        obj.double_faced_token_alternative = Some(crate::game::game_object::BackFaceData {
+            name: "Jump".to_string(),
+            ..Default::default()
+        });
 
         strip_non_copiable_state(&mut obj);
 
@@ -1487,6 +1498,7 @@ mod tests {
         assert_eq!(obj.prepared_copy_source, None);
         assert_eq!(obj.loyalty_activations_this_turn, 0);
         assert_eq!(obj.extra_loyalty_activations_this_turn, 0);
+        assert_eq!(obj.double_faced_token_alternative, None);
     }
 
     #[test]

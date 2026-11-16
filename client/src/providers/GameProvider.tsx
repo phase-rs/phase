@@ -27,10 +27,16 @@ import {
   isRandomDeckSelection,
   loadActiveDeck,
   loadActiveDeckBracket,
+  loadActiveDeckComboDeclaration,
 } from "../constants/storage";
-import type { CommanderBracket } from "../types/bracket";
+import type { ComboDeclaration, CommanderBracket } from "../types/bracket";
 import { bracketToEngineTier, type CommanderBracketTier } from "../types/bracketEstimate";
-import { buildLegalAiDeckCatalog } from "../services/aiDeckCatalog";
+import {
+  buildLegalAiDeckCatalog,
+  candidateDeclarations,
+  candidateSeatDeck,
+  type SeatDeclarations,
+} from "../services/aiDeckCatalog";
 import { pickRandomDeckCandidate } from "../services/randomDeckSelection";
 import { withCatalogSavedNames } from "../services/randomPoolSelection";
 import { cedhSeatProblem, pickAiSeatDecks, resolveRandomDrawPool } from "../services/aiRandomPool";
@@ -365,7 +371,10 @@ function playerNamesRecordToMap(playerNames: Record<number, string>): Map<number
 }
 
 type ExpandedDeckWithTier = SubmittedDeck<ExpandedDeck> & {
-  bracket_tier: CommanderBracketTier;
+  /** The owner's declared bracket; `null` is undeclared (the engine plays the estimate). */
+  bracket_tier: CommanderBracketTier | null;
+  /** The deck owner's two-card-combo answer; omitted means unanswered (the engine's default). */
+  combo_declaration?: ComboDeclaration;
 };
 type DeckListPayload = {
   player: ExpandedDeckWithTier;
@@ -484,7 +493,7 @@ const NATIVE_ENGINE_SERVER_URL = "native-engine";
 const EMPTY_PARSED_DECK: ParsedDeck = { main: [], sideboard: [] };
 
 function emptySeat(): ExpandedDeckWithTier {
-  return { ...emptySeatDeck(), bracket_tier: "core" };
+  return { ...emptySeatDeck(), bracket_tier: null };
 }
 
 function buildPlayerOnlyDeckList(player: ExpandedDeckWithTier): DeckListPayload {
@@ -500,6 +509,7 @@ export async function buildLocalAiDeckList(
   formatConfig: FormatConfig | undefined,
   selectedMatchType: MatchType | undefined,
   playerBracket: CommanderBracket | null,
+  comboDeclaration: ComboDeclaration,
   pileSource: PileSource,
   seats: readonly LocalAiSeatPlan[],
 ): Promise<DeckListPayload> {
@@ -512,7 +522,7 @@ export async function buildLocalAiDeckList(
     if (!pile) throw new Error(t("multiplayer:page.couldNotLoadDeck"));
     const aiDifficulties = seats.map((seat) => seat.difficulty);
     return {
-      player: { ...pile, bracket_tier: "core" },
+      player: { ...pile, bracket_tier: null },
       opponent: emptySeat(),
       ai_decks: Array.from({ length: opponentCount - 1 }, emptySeat),
       ai_difficulties: aiDifficulties,
@@ -538,7 +548,7 @@ export async function buildLocalAiDeckList(
       signature_spell: [],
       companion: [],
       sticker_sheets: [],
-      bracket_tier: "core",
+      bracket_tier: null,
     });
     // One catalog fetch serves the human Random fallback AND the AI survivor
     // seats: no format tag (the pool is unrestricted), but the picked
@@ -550,7 +560,10 @@ export async function buildLocalAiDeckList(
       selectedChallengeDeck: formatConfig.horde_ruleset?.challenge_deck ?? null,
     });
     let hordePlayerDeck = deck;
-    let hordePlayerBracket = playerBracket ?? null;
+    let hordePlayerDeclarations: SeatDeclarations = {
+      bracket_tier: bracketToEngineTier(playerBracket),
+      combo_declaration: comboDeclaration,
+    };
     if (!hordePlayerDeck) {
       // Human chose "Random Deck": pick from the unfiltered catalog rather
       // than the Horde-tagged one (which is empty).
@@ -559,7 +572,7 @@ export async function buildLocalAiDeckList(
         throw new Error(t("gameProvider.noLegalAiDecks.generic"));
       }
       hordePlayerDeck = pick.deck;
-      hordePlayerBracket = pick.bracket;
+      hordePlayerDeclarations = candidateDeclarations(pick);
     }
     // Seat map: player = seat 0 (human survivor), opponent = seat 1 (Horde
     // primary — the init path remaps archenemy_player onto the first AI seat),
@@ -582,10 +595,7 @@ export async function buildLocalAiDeckList(
         throw new Error(t("gameProvider.noLegalAiDecks.generic"));
       }
       takenDeckIds.add(pick.id);
-      aiDecks.push({
-        ...expandParsedDeck(pick.deck),
-        bracket_tier: bracketToEngineTier(pick.bracket),
-      });
+      aiDecks.push(candidateSeatDeck(pick, expandParsedDeck(pick.deck)));
     }
     const aiDifficulties = Array.from({ length: opponentCount }, (_, i) =>
       effectiveAiDifficulty(aiSeats[i]?.difficulty ?? "Medium", cedhMode),
@@ -593,7 +603,7 @@ export async function buildLocalAiDeckList(
     return {
       player: {
         ...expandParsedDeck(hordePlayerDeck),
-        bracket_tier: bracketToEngineTier(hordePlayerBracket),
+        ...hordePlayerDeclarations,
       },
       opponent: emptySeat(),
       ai_decks: aiDecks,
@@ -656,9 +666,15 @@ export async function buildLocalAiDeckList(
   }
 
   const excludeIds = new Set<string>();
-  let playerDeck = deck;
-  let resolvedPlayerBracket = playerBracket;
-  if (!playerDeck) {
+  let playerDeck: ParsedDeck;
+  let playerDeclarations: SeatDeclarations;
+  if (deck) {
+    playerDeck = deck;
+    playerDeclarations = {
+      bracket_tier: bracketToEngineTier(playerBracket),
+      combo_declaration: comboDeclaration,
+    };
+  } else {
     // A deferred human Random pick draws from the shared bracket-then-curation
     // layering, so it lands in the same bracket(s) as the AI seats (falling
     // back the same way when the selection matches nothing).
@@ -679,7 +695,7 @@ export async function buildLocalAiDeckList(
       );
     }
     playerDeck = playerPick.deck;
-    resolvedPlayerBracket = playerPick.bracket;
+    playerDeclarations = candidateDeclarations(playerPick);
     excludeIds.add(playerPick.id);
   }
 
@@ -696,18 +712,17 @@ export async function buildLocalAiDeckList(
   });
 
   const snapshot = captureSubmissionArtPreferences();
-  const [playerExpanded, ...aiExpanded] = await Promise.all(
+  const [playerSubmitted, ...aiSubmitted] = await Promise.all(
     [playerDeck, ...picks.map((candidate) => candidate.deck)].map((candidate) => submitParsedDeck(candidate, snapshot)),
   );
-  const playerTier = bracketToEngineTier(resolvedPlayerBracket);
   // Build ai_difficulties in the same order as the AI seats: opponent first,
   // then any additional ai_decks. Seat 0 maps to the opponent, seats 1+ map
   // to ai_decks. The plan's difficulties are already cEDH-mapped.
   const aiDifficulties = seats.map((seat) => seat.difficulty);
   return {
-    player: { ...playerExpanded, bracket_tier: playerTier },
-    opponent: { ...aiExpanded[0], bracket_tier: bracketToEngineTier(picks[0].bracket) },
-    ai_decks: aiExpanded.slice(1).map((deck, index) => ({ ...deck, bracket_tier: bracketToEngineTier(picks[index + 1].bracket) })),
+    player: { ...playerSubmitted, ...playerDeclarations },
+    opponent: candidateSeatDeck(picks[0], aiSubmitted[0]),
+    ai_decks: aiSubmitted.slice(1).map((submitted, index) => candidateSeatDeck(picks[index + 1], submitted)),
     ai_difficulties: aiDifficulties,
   };
 }
@@ -1017,6 +1032,7 @@ export function GameProvider({
       const parsedDeck = suppliedFormat ? null : loadActiveDeck();
       // Keep the active deck's bracket bound to the same pre-preparation selection.
       const playerBracket = suppliedFormat ? null : loadActiveDeckBracket();
+      const playerComboDeclaration = suppliedFormat ? undefined : loadActiveDeckComboDeclaration();
 
       const wireP2PEvents = (adapter: P2PHostAdapter | P2PGuestAdapter) => {
         // Host-only: proactively request notification permission while the
@@ -1239,7 +1255,8 @@ export function GameProvider({
               }
               deckList = buildPlayerOnlyDeckList({
                 ...prepared,
-                bracket_tier: suppliedFormat ? "core" : bracketToEngineTier(playerBracket),
+                bracket_tier: bracketToEngineTier(playerBracket),
+                combo_declaration: playerComboDeclaration,
               });
             }
 
@@ -1386,6 +1403,7 @@ export function GameProvider({
               : {
                   ...await submitParsedDeck(parsedDeck ?? EMPTY_PARSED_DECK),
                   bracket_tier: bracketToEngineTier(playerBracket),
+                  combo_declaration: playerComboDeclaration,
                 };
             signal.throwIfAborted();
             const deckList = buildPlayerOnlyDeckList(player);
@@ -1568,7 +1586,11 @@ export function GameProvider({
         const parsedDeck = !reconnectSession && wsMode === "join" && !suppliedJoin ? loadActiveDeck() : null;
         const playerBracket = parsedDeck ? loadActiveDeckBracket() : null;
         const deck = parsedDeck
-          ? { ...await submitParsedDeck(parsedDeck), bracket_tier: bracketToEngineTier(playerBracket) }
+          ? {
+              ...await submitParsedDeck(parsedDeck),
+              bracket_tier: bracketToEngineTier(playerBracket),
+              combo_declaration: loadActiveDeckComboDeclaration(),
+            }
           : emptySeatDeck();
         if (cancelled) return;
 
@@ -1987,6 +2009,7 @@ export function GameProvider({
               formatConfig,
               matchConfig?.match_type,
               loadActiveDeckBracket(),
+              loadActiveDeckComboDeclaration(),
               pileSourceFromParam(pile),
               resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
             );
@@ -2059,6 +2082,7 @@ export function GameProvider({
           formatConfig,
           matchConfig?.match_type,
           loadActiveDeckBracket(),
+          loadActiveDeckComboDeclaration(),
           pileSourceFromParam(pile),
           resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
         );
@@ -2185,6 +2209,7 @@ export function GameProvider({
                 formatConfig,
                 matchConfig?.match_type,
                 loadActiveDeckBracket(),
+                loadActiveDeckComboDeclaration(),
                 pileSourceFromParam(pile),
                 resolveLocalAiSeatPlan(gameId, playerCount ?? 2),
               );

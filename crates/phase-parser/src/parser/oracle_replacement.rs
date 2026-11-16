@@ -7,7 +7,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{
-    all_consuming, cond, eof, map_opt, map_parser, not, opt, peek, recognize, rest, value,
+    all_consuming, cond, eof, map_opt, map_parser, not, opt, peek, recognize, rest, value, verify,
 };
 use nom::multi::{many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -19,9 +19,9 @@ use super::oracle_effect::lower::{
     apply_where_x_quantity_expression, parse_where_x_quantity_core, WhereXBinding,
 };
 use super::oracle_effect::{
-    excise_selection_qualifier, parse_effect_chain, parse_effect_chain_with_context_and_provenance,
-    parse_effect_clause, parse_named_choice_object, try_parse_named_choice,
-    try_parse_named_choice_conjunction,
+    excise_selection_qualifier, lower_ability_ir, parse_ability_ir, parse_effect_chain,
+    parse_effect_chain_with_context_and_provenance, parse_effect_clause, parse_named_choice_object,
+    try_parse_named_choice, try_parse_named_choice_conjunction, ChainLoweringMode,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::OracleNodeIr;
@@ -722,6 +722,12 @@ fn parse_replacement_line_inner(
         && nom_primitives::scan_contains(&lower, "instead")
     {
         if let Some(def) = parse_damage_modification_replacement(&norm_lower, &text) {
+            return Some(def);
+        }
+        // CR 614.1a + CR 614.6: "If <source> would deal [noncombat] damage to
+        // <recipient>, put that many <counter> counters on that <noun> instead"
+        // (Soul-Scar Mage) — the damage event is replaced by a counter placement.
+        if let Some(def) = parse_damage_to_counters_substitution(&norm_lower, &text) {
             return Some(def);
         }
         // Exotic pattern (coin-flip, redirection, etc.) — keep as no-op stub
@@ -5145,12 +5151,81 @@ fn enters_with_counters_outcome(
     {
         return Err(EntersWithDecline::FailsClosed(EntersWithGap::Clause));
     }
-    if let Some(combined) =
-        parse_enters_base_plus_additional_for_each(after_counter, &counter_type, &count_expr)
+    let tail_text = clause_before_where_x(after_counter);
+    match parse_enters_per_each_tail(tail_text, &counter_type) {
+        Some(tail) => {
+            // CR 107.3 + CR 122.6 + CR 614.1c: the "equal to" override below
+            // replaces the count wholesale, and the "where X is" binding only
+            // reaches the X leaves of the amount, not the per-each composition
+            // built here. Composed with a per-each tail either could drop or
+            // misbind it, so decline the whole replacement instead.
+            if enters_counter_amount_override_present(work_text) {
+                return Err(EntersWithDecline::NotThisShape);
+            }
+            count_expr = match (tail, count_expr) {
+                (EntersPerEachTail::ForEach(terms), QuantityExpr::Fixed { value: leading }) => {
+                    terms
+                        .total(u32::try_from(leading).map_err(|_| EntersWithDecline::NotThisShape)?)
+                }
+                // CR 614.1c: "<amount> counters on it for each <filter>" places
+                // the leading amount once per object, so the total is the
+                // product of the amount and a game-state count. `QuantityExpr`
+                // has no product of two dynamic quantities (`Multiply` scales by
+                // a constant `factor`), so a dynamic amount ("X", "twice X",
+                // "that many") has no faithful encoding. Decline the WHOLE
+                // replacement here, before any count is published: the line
+                // surfaces as an unsupported gap, never as a supported count
+                // that drops the amount (X=3 over two other red and one other
+                // green creature is 3×2+1=7, never 2+1).
+                (EntersPerEachTail::ForEach(_), _) => return Err(EntersWithDecline::NotThisShape),
+                // CR 614.1c: under "plus an additional … for each" the leading
+                // amount is an addend placed once, so a dynamic base still
+                // composes faithfully as a sum.
+                (
+                    EntersPerEachTail::BasePlusAdditional {
+                        multiplier,
+                        per_each,
+                    },
+                    base,
+                ) => base_plus_additional_total(base, multiplier, per_each),
+            };
+        }
+        // CR 614.1c: the replacement places exactly the counters it names. No
+        // tail parser read the clause, yet its sentence still carries a
+        // per-each connective ("for each" / "plus") — after a recipient this
+        // grammar does not know ("on that creature", "on it, plus …"), after a
+        // conjoined counter list ("X +1/+1 counters and a charge counter on it
+        // for each …"), or before an unreadable operand. Publishing a dynamic
+        // amount there would silently drop the per-each factor or bonus — and,
+        // the amount being a quantity reference itself, the `DynamicQty`
+        // swallow detector cannot see that drop. Decline the whole replacement.
+        // A fixed amount keeps its count, and the `DynamicQty` swallow detector
+        // surfaces the unread tail. For a counter list only the text after the
+        // list is scanned: an element's own count arithmetic ("and X plus one
+        // charge counters") is read by the list, not a per-each connective.
+        None if enters_counter_amount_is_dynamic(&count_expr, counter_entries.as_deref())
+            && enters_counter_sentence_has_per_each_connective(
+                list_rest.map_or(tail_text, clause_before_where_x),
+            ) =>
+        {
+            return Err(EntersWithDecline::NotThisShape);
+        }
+        None => {}
+    }
+    // CR 107.3 + CR 122.6 + CR 614.1c: the "equal to" / "where X is" overrides
+    // below rewrite only the single-counter `count_expr`; a conjoined counter
+    // list publishes its own entries, so a dynamic entry would keep its own
+    // count and the override's quantity would be silently dropped. (An entry
+    // that prints X beside a where-X definition already failed closed above;
+    // this covers the "equal to" override and any other dynamic entry.) The
+    // list has no per-entry binding for the override, so decline the whole
+    // replacement. A fixed-only list is unaffected.
+    if counter_entries
+        .as_deref()
+        .is_some_and(counter_entries_have_dynamic_count)
+        && enters_counter_amount_override_present(work_text)
     {
-        count_expr = combined;
-    } else if let Some(for_each_count) = parse_enters_counter_for_each_suffix(after_counter) {
-        count_expr = multiply_counter_count_by_for_each(count_expr, for_each_count);
+        return Err(EntersWithDecline::NotThisShape);
     }
     // CR 122.6: For "a number of counters equal to [quantity]" and the
     // sibling shorthand "counters on it equal to [quantity]", parse the
@@ -6060,20 +6135,6 @@ fn parse_enters_counter_type_noun(input: &str) -> OracleResult<'_, CounterType> 
     terminated(nom_primitives::parse_counter_type_typed, tag(" counter")).parse(input)
 }
 
-fn multiply_counter_count_by_for_each(
-    count_expr: QuantityExpr,
-    for_each_count: QuantityExpr,
-) -> QuantityExpr {
-    match count_expr {
-        QuantityExpr::Fixed { value: 1 } => for_each_count,
-        QuantityExpr::Fixed { value } => QuantityExpr::Multiply {
-            factor: value,
-            inner: Box::new(for_each_count),
-        },
-        _ => for_each_count,
-    }
-}
-
 /// CR 614.1c: reads only a trailing `if <condition>` inside the payload sentence
 /// (the first sentence unit after `with `). A gate printed before the payload
 /// ("If you do, it enters with …", or a sentence-initial "If …, it enters with …"
@@ -6252,82 +6313,302 @@ fn parse_enters_counter_rounding_postmodifier(after_counter: &str) -> Option<Rou
     Some(rounding)
 }
 
-fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityExpr> {
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s"))
-        .parse(after_counter)
-        .ok()?;
+/// The per-each scaling of an enters-with counter clause: the leading
+/// "for each <filter>" count, plus one term per further conjunct
+/// "and <N> <kind> counter[s] on <pronoun> for each <filter>" (Ulasht, the
+/// Hate Seed). `extra` is empty for the single-clause form.
+struct EntersForEachTerms {
+    first: QuantityExpr,
+    extra: Vec<QuantityExpr>,
+}
+
+/// The connective that opens an enters-with per-each tail after its recipient.
+#[derive(Clone, Copy)]
+enum EntersPerEachConnective {
+    /// "… on <pronoun> for each <filter>": the leading amount is placed once per
+    /// object.
+    ForEach,
+    /// "… on <pronoun> plus <an|M> additional …": the leading amount is a base,
+    /// followed by a per-object bonus.
+    Plus,
+}
+
+/// The per-each connective word: "for each " or "plus ". Shared by the
+/// structural head below and by the sentence scan that guards a dynamic amount.
+fn parse_enters_per_each_connective(input: &str) -> OracleResult<'_, EntersPerEachConnective> {
+    alt((
+        value(EntersPerEachConnective::ForEach, tag("for each ")),
+        value(EntersPerEachConnective::Plus, tag("plus ")),
+    ))
+    .parse(input)
+}
+
+/// CR 614.1c + CR 614.12: The structural head of an enters-with per-each tail,
+/// read from the slice after a "<type> counter" token — the optional plural
+/// "s", " on <pronoun> ", then the per-each connective — independently of
+/// whether the rest of the tail parses. Every per-each tail parser (the
+/// leading clause, a further "and …" conjunct, the "plus an additional" bonus)
+/// consumes it, so they cannot drift on the head.
+fn parse_enters_per_each_head(after_counter: &str) -> OracleResult<'_, EntersPerEachConnective> {
+    let (rest, _) = opt(tag("s")).parse(after_counter)?;
     // CR 614.1c + CR 614.12: "[this permanent] enters with … counter on <pronoun>"
     // is a replacement effect placing counters on the entering permanent(s). The
     // self-referential recipient (it/them/him/her — Batroc the Leaper uses "him")
-    // precedes the per-each scaling clause identically for every pronoun in the
-    // set. Routed through `nom_primitives::parse_object_recipient_pronoun` (the
-    // single authority for the recipient-pronoun set) so it cannot drift.
+    // precedes the per-each clause identically for every pronoun in the set.
+    // Routed through `nom_primitives::parse_object_recipient_pronoun` (the single
+    // authority for the recipient-pronoun set) so it cannot drift.
     let (rest, _) = (
-        tag::<_, _, OracleError<'_>>(" on "),
+        tag(" on "),
         nom_primitives::parse_object_recipient_pronoun,
-        tag(" for each "),
+        tag(" "),
     )
-        .parse(rest)
-        .ok()?;
+        .parse(rest)?;
+    parse_enters_per_each_connective(rest)
+}
+
+/// The per-each head ([`parse_enters_per_each_head`]) opening "for each".
+fn parse_enters_for_each_head(after_counter: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        verify(parse_enters_per_each_head, |connective| {
+            matches!(connective, EntersPerEachConnective::ForEach)
+        }),
+    )
+    .parse(after_counter)
+}
+
+/// The per-each head ([`parse_enters_per_each_head`]) opening "plus".
+fn parse_enters_plus_head(after_counter: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        verify(parse_enters_per_each_head, |connective| {
+            matches!(connective, EntersPerEachConnective::Plus)
+        }),
+    )
+    .parse(after_counter)
+}
+
+/// Whether an enters-with clause places any dynamic number of counters: its
+/// leading amount, or any element of a conjoined counter list.
+fn enters_counter_amount_is_dynamic(
+    count_expr: &QuantityExpr,
+    counter_entries: Option<&[(CounterType, QuantityExpr)]>,
+) -> bool {
+    !matches!(count_expr, QuantityExpr::Fixed { .. })
+        || counter_entries.is_some_and(counter_entries_have_dynamic_count)
+}
+
+/// Whether any element of a conjoined counter list places a dynamic number of
+/// counters.
+fn counter_entries_have_dynamic_count(entries: &[(CounterType, QuantityExpr)]) -> bool {
+    entries
+        .iter()
+        .any(|(_, count)| !matches!(count, QuantityExpr::Fixed { .. }))
+}
+
+/// Whether the clause carries an amount override — an "equal to <quantity>"
+/// count or a ", where X is <quantity>" definition — that
+/// `parse_enters_with_counters` applies to the single-counter count wholesale.
+fn enters_counter_amount_override_present(work_text: &str) -> bool {
+    nom_primitives::split_once_on(work_text, "equal to ").is_ok()
+        || nom_primitives::split_once_on(work_text, ", where x is ").is_ok()
+}
+
+/// Whether the rest of the counter clause's sentence carries a per-each
+/// connective ("for each" / "plus") at any word boundary. `after_counter` is
+/// the slice after the clause's counters — its first "<type> counter" token,
+/// or the end of a conjoined counter list — with any ", where X is …"
+/// definition already cut; the scan stops at the first sentence end, so a
+/// later sentence's "for each" never counts. An "equal to <quantity>" count is
+/// the count itself, read wholesale by `parse_enters_counter_equal_to_quantity`
+/// (CR 122.6), so the scan also stops there: its arithmetic ("equal to one plus
+/// the number of other creatures you control" — Boss's Chauffeur) is the
+/// quantity, not a per-each connective.
+fn enters_counter_sentence_has_per_each_connective(after_counter: &str) -> bool {
+    let sentence = nom_primitives::split_once_on(after_counter, ".")
+        .map_or(after_counter, |(_, (before, _))| before);
+    let sentence = nom_primitives::split_once_on(sentence, "equal to ")
+        .map_or(sentence, |(_, (before, _))| before);
+    nom_primitives::scan_at_word_boundaries(sentence, parse_enters_per_each_connective).is_some()
+}
+
+/// CR 614.1c + CR 614.12: Parse the "[s] on <pronoun> for each <filter>[ and
+/// <N> <kind> counter[s] on <pronoun> for each <filter>]…" tail of an
+/// enters-with clause (the slice after its "<type> counter" token). Every
+/// conjunct must name `base_type` — a conjunct placing a different kind of
+/// counter is a separate placement this count cannot express, so this parser
+/// returns `None`. `parse_enters_with_counters` then declines the whole
+/// replacement when the leading amount is dynamic; a fixed leading amount keeps
+/// its count, and the `DynamicQty` swallow detector surfaces the unread tail.
+fn parse_enters_counter_for_each_suffix(
+    after_counter: &str,
+    base_type: &CounterType,
+) -> Option<EntersForEachTerms> {
+    let (rest, ()) = parse_enters_for_each_head(after_counter).ok()?;
     if let Ok((rest, qty)) = parse_for_each_convoked_creature_clause(rest) {
         if rest.trim().is_empty() {
-            return Some(qty);
+            return Some(EntersForEachTerms {
+                first: qty,
+                extra: Vec::new(),
+            });
         }
     }
-    let clause = match nom_primitives::split_once_on(rest, ".") {
+    let (first, extra) = parse_enters_for_each_conjuncts(rest, base_type)?;
+    Some(EntersForEachTerms { first, extra })
+}
+
+/// Split a "for each" clause list at its first
+/// "and <N> <kind> counter[s] on <pronoun> for each " conjunct and parse each
+/// clause, recursing over the remaining conjuncts. Returns the first clause's
+/// count and the further conjuncts' counts (each scaled by its own N).
+fn parse_enters_for_each_conjuncts(
+    text: &str,
+    base_type: &CounterType,
+) -> Option<(QuantityExpr, Vec<QuantityExpr>)> {
+    let Some((before, (count, kind), after)) =
+        nom_primitives::scan_preceded(text, parse_enters_counter_conjunct)
+    else {
+        return Some((parse_enters_for_each_clause(text)?, Vec::new()));
+    };
+    if &kind != base_type {
+        return None;
+    }
+    let first = parse_enters_for_each_clause(before)?;
+    let (next, mut extra) = parse_enters_for_each_conjuncts(after, base_type)?;
+    extra.insert(0, next.scaled_by(count));
+    Some((first, extra))
+}
+
+/// "and <N> <kind> counter[s] on <pronoun> for each " — the head of a further
+/// per-each conjunct. Yields the conjunct's count and counter kind.
+fn parse_enters_counter_conjunct(input: &str) -> OracleResult<'_, (u32, CounterType)> {
+    let (rest, _) = tag("and ").parse(input)?;
+    let (rest, count) = alt((
+        value(1, alt((tag("a "), tag("an ")))),
+        terminated(nom_primitives::parse_number, tag(" ")),
+    ))
+    .parse(rest)?;
+    let (rest, kind) = nom_primitives::parse_counter_type_typed(rest)?;
+    let (rest, _) = (tag(" counter"), parse_enters_for_each_head).parse(rest)?;
+    Ok((rest, (count, kind)))
+}
+
+/// One "for each <filter>" clause of an enters-with tail, with a sentence-final
+/// period trimmed.
+fn parse_enters_for_each_clause(text: &str) -> Option<QuantityExpr> {
+    let clause = match nom_primitives::split_once_on(text, ".") {
         Ok((_, (before_period, after_period))) if after_period.trim().is_empty() => {
             before_period.trim()
         }
-        _ => rest.trim(),
+        _ => text.trim(),
     };
     super::oracle_quantity::parse_for_each_clause_expr(clause)
 }
 
-/// Parse the "<type> counter[s] on it/them plus an additional <M> <type>
-/// counter[s] on it/them for each <filter>" enters-with pattern into the total
-/// count expression (base + M × per-each dynamic count).
+/// The per-each tail of an enters-with counter clause, read independently of
+/// the clause's leading amount. `parse_enters_with_counters` combines the two,
+/// declining a dynamic amount wherever it would be a factor.
+enum EntersPerEachTail {
+    /// "… counter[s] on <pronoun> for each <filter>[ and <N> <kind> counter[s]
+    /// on <pronoun> for each <filter>]…": the leading amount is the number of
+    /// counters per object of the first clause.
+    ForEach(EntersForEachTerms),
+    /// "… counter[s] on <pronoun> plus <an|M> additional <kind> counter[s] on
+    /// <pronoun> for each <filter>": the leading amount is a base placed once,
+    /// plus `multiplier` counters per object.
+    BasePlusAdditional {
+        multiplier: u32,
+        per_each: QuantityExpr,
+    },
+}
+
+impl EntersForEachTerms {
+    /// CR 614.1c: the total counters placed for a fixed number of counters per
+    /// object of the first clause — `leading × first + Σ conjuncts`. The
+    /// replacement places the counters each 'for each' conjunct names, so an
+    /// object matching both is counted by both (Ulasht ruling).
+    fn total(self, leading: u32) -> QuantityExpr {
+        let first = self.first.scaled_by(leading);
+        if self.extra.is_empty() {
+            first
+        } else {
+            QuantityExpr::Sum {
+                exprs: std::iter::once(first).chain(self.extra).collect(),
+            }
+        }
+    }
+}
+
+/// CR 614.1c: `base + multiplier × per_each` for the "plus an additional … for
+/// each" tail. A fixed base folds into an `Offset`; a dynamic base (an addend,
+/// never a factor) is summed.
+fn base_plus_additional_total(
+    base: QuantityExpr,
+    multiplier: u32,
+    per_each: QuantityExpr,
+) -> QuantityExpr {
+    let inner = per_each.scaled_by(multiplier);
+    match base {
+        QuantityExpr::Fixed { value: 0 } => inner,
+        QuantityExpr::Fixed { value: offset } => QuantityExpr::Offset {
+            inner: Box::new(inner),
+            offset,
+        },
+        base => QuantityExpr::Sum {
+            exprs: vec![base, inner],
+        },
+    }
+}
+
+/// CR 614.1c: Read the per-each tail following the FIRST "<type> counter" token
+/// of an enters-with clause, in either shape. `None` means the clause has no
+/// per-each tail this grammar reads.
+fn parse_enters_per_each_tail(
+    after_counter: &str,
+    counter_type: &CounterType,
+) -> Option<EntersPerEachTail> {
+    parse_enters_base_plus_additional_for_each(after_counter, counter_type)
+        .map(
+            |(multiplier, per_each)| EntersPerEachTail::BasePlusAdditional {
+                multiplier,
+                per_each,
+            },
+        )
+        .or_else(|| {
+            parse_enters_counter_for_each_suffix(after_counter, counter_type)
+                .map(EntersPerEachTail::ForEach)
+        })
+}
+
+/// Parse the "<type> counter[s] on <recipient pronoun> plus <an additional |
+/// M additional> <type> counter[s] on <recipient pronoun> for each <filter>"
+/// enters-with tail into its per-each multiplier M and per-each dynamic count;
+/// the base is the clause's leading amount, composed by
+/// [`base_plus_additional_total`].
 ///
-/// CR 122.1 + CR 614.1c: an "enters with N counters plus an additional counter
-/// for each <filter>" replacement places a fixed base plus a per-object bonus.
+/// CR 614.1c: an "enters with N counters plus an additional counter for each
+/// <filter>" replacement places a base plus a per-object bonus.
 /// CR 107.1: only integer amounts — the total resolves as `base + M * count`.
 ///
 /// `after_counter` is the slice immediately after the FIRST "<type> counter"
 /// token (same contract as [`parse_enters_counter_for_each_suffix`], which the
 /// tail is delegated to so " counter" is consumed exactly once). Parameterized
-/// over the base N (`base_count_expr`), the per-each multiplier M, and the
-/// `for each` filter. The additional counter type must equal the base type;
-/// otherwise the two clauses name different counters and this pattern does not
-/// apply (caller falls back). Returns `None` (not this pattern) when any token
-/// fails to match, so a non-matching input leaves the caller's existing
-/// single-suffix path intact.
+/// over the per-each multiplier M and the `for each` filter; the base is
+/// supplied by the caller. The additional counter type must equal the base
+/// type; otherwise the two clauses name different counters and this pattern
+/// does not apply. Returns `None` (not this pattern) when any token fails to
+/// match, so a non-matching input leaves the single-suffix shape to be tried.
 fn parse_enters_base_plus_additional_for_each(
     after_counter: &str,
     base_counter_type: &CounterType,
-    base_count_expr: &QuantityExpr,
-) -> Option<QuantityExpr> {
-    // The base only composes as a fixed integer offset; a dynamic base does not
-    // occur in this "base plus additional per-each" class.
-    let QuantityExpr::Fixed { value: base } = base_count_expr else {
-        return None;
-    };
-
+) -> Option<(u32, QuantityExpr)> {
     // Consume the optional plural "s" of the base counter word, then the base
-    // recipient (any pronoun in `nom_primitives::parse_object_recipient_pronoun`)
-    // and the " plus " bridge to the additional clause.
-    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("s"))
-        .parse(after_counter)
-        .ok()?;
-    let (rest, _) = (
-        tag::<_, _, OracleError<'_>>(" on "),
-        nom_primitives::parse_object_recipient_pronoun,
-        tag(" plus "),
-    )
-        .parse(rest)
-        .ok()?;
+    // recipient and the " plus " bridge to the additional clause.
+    let (rest, ()) = parse_enters_plus_head(after_counter).ok()?;
 
     // Per-each multiplier M: "an additional" (M = 1) or "<N> additional" (M > 1).
     let (rest, multiplier) = alt((
-        value(1u32, tag::<_, _, OracleError<'_>>("an additional ")),
+        value(1, tag::<_, _, OracleError<'_>>("an additional ")),
         terminated(nom_primitives::parse_number, tag(" additional ")),
     ))
     .parse(rest)
@@ -6337,35 +6618,22 @@ fn parse_enters_base_plus_additional_for_each(
     // describe different counters and this composition does not apply.
     let (rest, additional_type) = nom_primitives::parse_counter_type_typed(rest).ok()?;
     let (after_additional_counter, _) =
-        alt((tag::<_, _, OracleError<'_>>(" counters"), tag(" counter")))
-            .parse(rest)
-            .ok()?;
+        tag::<_, _, OracleError<'_>>(" counter").parse(rest).ok()?;
     if &additional_type != base_counter_type {
         return None;
     }
 
-    // Delegate the " counter[s] on it/them for each <filter>" tail to the
-    // existing suffix parser — it consumes the plural "s" and the connective,
-    // then parses the for-each filter into the per-each dynamic count.
-    let per_each = parse_enters_counter_for_each_suffix(after_additional_counter)?;
-
-    let inner = if multiplier == 1 {
-        per_each
-    } else {
-        QuantityExpr::Multiply {
-            factor: multiplier as i32,
-            inner: Box::new(per_each),
-        }
-    };
-
-    Some(if *base == 0 {
-        inner
-    } else {
-        QuantityExpr::Offset {
-            inner: Box::new(inner),
-            offset: *base,
-        }
-    })
+    // Delegate the "[s] on <recipient pronoun> for each <filter>" tail to the
+    // existing suffix parser — its shared head consumes the plural "s", the
+    // recipient, and the connective, then it parses the for-each filter into
+    // the per-each dynamic count.
+    let per_each =
+        parse_enters_counter_for_each_suffix(after_additional_counter, &additional_type)?;
+    // A further conjunct would place counters this offset form cannot express.
+    if !per_each.extra.is_empty() {
+        return None;
+    }
+    Some((multiplier, per_each.first))
 }
 
 fn parse_for_each_convoked_creature_clause(
@@ -6406,8 +6674,9 @@ fn strip_additional_counter_qualifier(input: &str) -> &str {
         .map_or(input, |(rest, _)| rest)
 }
 
-/// Read a conjoined "enters with" counter list, returning its entries and the text
-/// left AFTER the list's `" on it"` terminator.
+/// Parse a conjoined "enters with" counter list ("two +1/+1 counters and a
+/// lifelink counter on it") into its `(counter_type, count)` entries — at least
+/// two — and the text left AFTER the list's `" on it"` terminator.
 ///
 /// The remainder is what lets a caller tell a complete clause from one that
 /// still has a printed instruction attached — "…counter and deathtouch counter
@@ -7123,8 +7392,9 @@ fn parse_whenever_you_cast_enters_with(
             // rider this route cannot compose stays an honest gap. (The
             // dynamic-X arm already fails closed via `?`.)
             let fixed = QuantityExpr::Fixed { value: n as i32 };
-            if let Some(population) = parse_enters_counter_for_each_suffix(after_counter) {
-                multiply_counter_count_by_for_each(fixed, population)
+            if let Some(terms) = parse_enters_counter_for_each_suffix(after_counter, &counter_type)
+            {
+                terms.total(n)
             } else if counter_list_remainder_is_exhausted(rest) {
                 fixed
             } else {
@@ -9159,6 +9429,216 @@ fn parse_damage_modification_replacement(
     Some(def)
 }
 
+/// CR 614.1a + CR 614.6 + CR 122.1: Parse a damage-to-counters SUBSTITUTION —
+///
+///   "If a source you control would deal noncombat damage to a creature an
+///    opponent controls, put that many -1/-1 counters on that creature
+///    instead."  (Soul-Scar Mage)
+///   "If ~ would deal combat damage to a player, instead put that many +1/+1
+///    counters on ~ and that player mills that many cards."  (Szadek, Lord of
+///    Secrets)
+///   "If a Zombie you control would deal combat damage to a player, instead
+///    that player mills that many cards."  (Undead Alchemist)
+///
+/// This is a replacement, not a prevention (CR 615): the damage event is
+/// replaced by the substitute event(s) (CR 614.6 — the replaced event never
+/// happens), so the shield is unaffected by "damage can't be prevented"
+/// (CR 615.12 suppresses prevention only) and emits no `DamagePrevented`.
+///
+/// Grammar (positional nom spine, no scanning):
+///   `"if " <source subject> " would deal " ["noncombat " | "combat "]
+///    "damage " <recipient> ", " ( <substitute> " instead"
+///                               | "instead " <substitute> )`
+///
+/// * the source subject reuses `parse_damage_source_filter` (the same authority
+///   the damage-modification sibling uses — "a source you control" →
+///   `Typed { controller: You }`, "~" → `SelfRef`);
+/// * a player recipient ("to a player", "to an opponent", "to you") is the
+///   shared `parse_damage_target_phrase` grammar → `damage_target_filter`;
+///   otherwise "to <type phrase>" becomes `valid_card` (a typed `TargetFilter`,
+///   evaluated against the damage event's recipient object — a player
+///   recipient never matches a typed object filter);
+/// * the substitute is lowered by the ordinary effect-chain parser; "that
+///   many" is the replaced event's amount (`EventContextAmount`), and the
+///   "that <noun>" / "that player" anaphors are rewritten to the replaced
+///   event's recipient (`PostReplacementDamageTarget`). Every link of the
+///   chain must be a counter placement or a mill sized by that amount (see
+///   `is_damage_substitute_link`).
+///
+/// Returns `None` (fall through to the stub) for any other shape, so the
+/// substitution never claims an unrelated "instead" clause.
+fn parse_damage_to_counters_substitution(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    type E<'a> = OracleError<'a>;
+    let (after_verb, _) = (
+        tag::<_, _, E<'_>>("if "),
+        take_until(" would deal "),
+        tag(" would deal "),
+    )
+        .parse(norm_lower)
+        .ok()?;
+    // CR 120.2a: optional combat scope, positionally before the damage noun.
+    let (after_noun, combat_scope) = terminated(
+        opt(alt((
+            value(
+                CombatDamageScope::NoncombatOnly,
+                tag::<_, _, E<'_>>("noncombat "),
+            ),
+            value(CombatDamageScope::CombatOnly, tag("combat ")),
+        ))),
+        tag("damage "),
+    )
+    .parse(after_verb)
+    .ok()?;
+    let (substitute_text, recipient_text) = terminated(take_until::<_, _, E<'_>>(", "), tag(", "))
+        .parse(after_noun)
+        .ok()?;
+    // CR 614.1a: "instead" may trail the substitute ("put … instead") or lead
+    // it ("instead put …"); both mark the same replacement.
+    let (_, effect_text) = alt((
+        preceded(tag::<_, _, E<'_>>("instead "), rest),
+        terminated(
+            take_until(" instead"),
+            (tag(" instead"), opt(char('.')), multispace0, eof),
+        ),
+    ))
+    .parse(substitute_text)
+    .ok()?;
+
+    // CR 614.1a: the replaced recipient — a player scope, or a typed object scope.
+    let recipient_text = recipient_text.trim();
+    let player_recipient = all_consuming(parse_damage_target_phrase)
+        .parse(recipient_text)
+        .ok()
+        .and_then(|(_, filter)| {
+            matches!(filter, DamageTargetFilter::Player { .. }).then_some(filter)
+        });
+    let object_recipient = if player_recipient.is_some() {
+        None
+    } else {
+        let (type_phrase, _) = tag::<_, _, E<'_>>("to ").parse(recipient_text).ok()?;
+        let (recipient, rest) = parse_type_phrase_folding(type_phrase.trim());
+        if !rest.trim().is_empty() || matches!(recipient, TargetFilter::Any) {
+            return None;
+        }
+        Some(recipient)
+    };
+
+    // CR 614.1a: an unscoped substitution would replace every damage event in
+    // the game — fail closed when the source subject is not recognized.
+    let source_filter = parse_damage_source_filter(norm_lower)?;
+
+    let effect_text = effect_text.trim().trim_end_matches('.');
+    // CR 614.1a + CR 608.2c: a bare object pronoun in the substitute ("put that
+    // many -1/-1 counters on it instead") refers back to an object of the
+    // replaced event, never by default to the replacement's own source. With an
+    // object recipient the antecedent is that recipient. With a player
+    // recipient the only object antecedent is the damage source: the
+    // replacement's own source when the subject is "~", otherwise the event's
+    // damage source, which no supported substitute link accepts, so the line
+    // fails closed below.
+    let pronoun_antecedent = if object_recipient.is_some() {
+        TargetFilter::PostReplacementDamageTarget
+    } else if matches!(source_filter, TargetFilter::SelfRef) {
+        TargetFilter::SelfRef
+    } else {
+        TargetFilter::PostReplacementDamageSource
+    };
+    let mut substitute_ctx = ParseContext {
+        object_pronoun_ref: Some(pronoun_antecedent),
+        in_replacement: true,
+        ..ParseContext::default()
+    };
+    let mut execute = lower_ability_ir(&parse_ability_ir(
+        effect_text,
+        AbilityKind::Spell,
+        ChainLoweringMode::Standalone,
+        &mut substitute_ctx,
+    ));
+    // CR 608.2c: "that <noun>" lowers to `ParentTarget`; in a passive
+    // replacement it names the replaced event's damage recipient.
+    rewrite_parent_target_to_post_replacement_damage_target(&mut execute);
+    if player_recipient.is_some() {
+        // CR 608.2c: "that player" (the damaged player) names the replaced
+        // event's player recipient.
+        rewrite_replacement_event_recipient_to_post_replacement_target(&mut execute);
+    }
+    if !damage_substitute_chain_is_supported(&execute, player_recipient.is_some()) {
+        return None;
+    }
+
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .damage_source_filter(source_filter)
+        .execute(execute)
+        .description(original_text.to_string());
+    if let Some(recipient) = object_recipient {
+        def = def.valid_card(recipient);
+    }
+    if let Some(recipient) = player_recipient {
+        def = def.damage_target_filter(recipient);
+    }
+    if let Some(cs) = combat_scope {
+        def = def.combat_scope(cs);
+    }
+    Some(def)
+}
+
+/// CR 614.1a + CR 614.6: True iff every link of a damage substitute chain is a
+/// supported substitute event sized by the replaced damage ("that many" →
+/// `EventContextAmount`):
+/// * `PutCounter` on the replaced event's object recipient
+///   (`PostReplacementDamageTarget`, object recipients only) or on the
+///   replacement's own source (`SelfRef`);
+/// * `Mill` by the replaced event's player recipient
+///   (`PostReplacementDamageTarget`, player recipients only).
+///
+/// Any other link (an unrecognized anaphor, a fixed count, `Unimplemented`)
+/// rejects the whole line so it stays on the honest no-op stub.
+fn damage_substitute_chain_is_supported(def: &AbilityDefinition, player_recipient: bool) -> bool {
+    let that_many = |count: &QuantityExpr| {
+        matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }
+        )
+    };
+    let link_ok = match &*def.effect {
+        Effect::PutCounter { count, target, .. } => {
+            that_many(count)
+                && match target {
+                    TargetFilter::SelfRef => true,
+                    TargetFilter::PostReplacementDamageTarget => !player_recipient,
+                    _ => false,
+                }
+        }
+        Effect::Mill {
+            count,
+            target,
+            destination: Zone::Graveyard,
+            position: LibraryPosition::Top,
+        } => {
+            that_many(count)
+                && player_recipient
+                && matches!(target, TargetFilter::PostReplacementDamageTarget)
+        }
+        _ => false,
+    };
+    // CR 614.6: the substitute is the modified event that happens instead; an
+    // optional link ("you may put …") would let the replaced event vanish with
+    // nothing in its place, which this mandatory definition cannot express.
+    link_ok
+        && !def.optional
+        && def.else_ability.is_none()
+        && def.condition.is_none()
+        && def
+            .sub_ability
+            .as_deref()
+            .is_none_or(|sub| damage_substitute_chain_is_supported(sub, player_recipient))
+}
+
 /// CR 614.1: Parse static damage modification abilities without "instead" keyword.
 /// Handles patterns like "Double all damage that [subject] would deal" (Collective Inferno).
 /// Uses quantifier parser ("double all damage") instead of anaphor parser ("double that damage").
@@ -9720,21 +10200,22 @@ fn parse_oneshot_target_source_prevent(norm_lower: &str, ctx: &ParseContext) -> 
 }
 
 /// CR 614.11 + CR 614.6 + CR 514.2: Parse a one-shot delayed DRAW replacement —
-/// "the next time you would draw a card this turn, [effect] instead" (Words of
-/// Worship: "you gain 5 life"; Words of Wilding: "create a 2/2 green Bear
-/// creature token"). Mirrors `parse_oneshot_damage_replacement` for the Draw
-/// event class, lowering to `Effect::CreateDrawReplacement { replacement_effect }`.
+/// "the next time you would draw a card this turn, [effect] instead" (the Words
+/// cycle: Worship "you gain 5 life"; Wilding "create a 2/2 green Bear creature
+/// token"; War "~ deals 2 damage to any target"; Wind "each player returns a
+/// permanent they control to its owner's hand"; Waste "each opponent discards a
+/// card"). Mirrors `parse_oneshot_damage_replacement` for the Draw event class,
+/// lowering to `Effect::CreateDrawReplacement { replacement_effect }`.
 ///
 /// The detector IS the parser: the branch is gated by the `tag("the next time ")`
 /// prefix combinator + a `peek` for "would draw"; it returns `None` on any
 /// mismatch so it never shadows other "the next time" effects.
 ///
-/// SCOPE: the substitute payload is parsed by the generic `parse_effect`, which
-/// does NOT honor a player-scoped subject ("each player", "each opponent", "that
-/// player"). Words of Wind ("each player returns a permanent...") and Words of
-/// Waste ("each opponent discards...") would mis-lower to a `Controller`-scoped
-/// effect, so those subject-scoped payloads are REJECTED here (return `None`) to
-/// stay an honest Unimplemented gap rather than a silently-wrong parse.
+/// The substitute payload is parsed by the full effect-chain parser
+/// (`parse_effect_chain`), NOT the single-clause `parse_effect`, so a
+/// player-scoped subject ("each player …", "each opponent …") lowers onto the
+/// payload definition's `player_scope` exactly as it does for a standalone
+/// sentence (Curfew, Liliana's Specter).
 pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect> {
     // CR 614.1a: "the next time ... would draw ... this turn ... instead".
     let (after_prefix, _) = preceded(
@@ -9762,31 +10243,47 @@ pub(crate) fn parse_oneshot_draw_replacement(norm_lower: &str) -> Option<Effect>
     }
     .trim();
 
-    let payload = crate::parser::oracle_effect::parse_effect(payload_text);
-    // Honest-gap guard 1: an Unimplemented payload is not a clean replacement.
-    if matches!(payload, Effect::Unimplemented { .. }) {
+    let payload = parse_effect_chain(payload_text, AbilityKind::Spell);
+    // Honest-gap guard: a payload with an Unimplemented anywhere in its chain
+    // is not a clean replacement — leave the whole line an honest gap.
+    if super::oracle::has_unimplemented(&payload) {
         return None;
     }
-    // Honest-gap guard 2: player-scoped subjects ("each player", "each
-    // opponent", "that player", "target player/opponent") are NOT honored by
-    // bare `parse_effect` (it would emit a Controller-scoped effect, dropping
-    // the scope). Reject so Words of Wind/Waste stay honest Unimplemented gaps
-    // rather than silently-wrong parses. This is a leaf reject-check on the
-    // already-split payload, not dispatch.
-    if payload_text.starts_with("each ") // allow-noncombinator: leaf reject-guard on split payload
-        || payload_text.starts_with("target player") // allow-noncombinator
-        || payload_text.starts_with("target opponent") // allow-noncombinator
-        || payload_text.starts_with("that player") // allow-noncombinator
-        || payload_text.starts_with("each opponent") // allow-noncombinator
-        || payload_text.starts_with("each player")
-    // allow-noncombinator
-    {
+    // Honest-gap guard: CR 115.1c + CR 602.2b — the creating ability announces
+    // exactly the substitute HEAD's single target slot (see
+    // `extract_target_filter_from_effect`). A multi-target head or a
+    // targeted later clause would be announced without its slots and resolve
+    // with no target, so leave such a payload an honest gap.
+    if !draw_replacement_payload_targets_fit_head_slot(&payload) {
         return None;
     }
 
     Some(Effect::CreateDrawReplacement {
         replacement_effect: Box::new(payload),
     })
+}
+
+/// CR 115.1c + CR 602.2b: whether every target a draw-replacement substitute
+/// names can be announced through the single slot its head surfaces — no
+/// multi-target head, and no target in any other instruction the substitute
+/// follows during its own resolution (a later `sub_ability`/`else_ability`
+/// clause, a mode, or a selectable `ChooseOneOf` branch, which exposes no slot
+/// of its own). The walk stops at the CR 603.3 boundary
+/// (`ResolutionScope::OwnResolutionOnly`): a payload merely registered to
+/// resolve later is announced when that ability is created, not here.
+fn draw_replacement_payload_targets_fit_head_slot(payload: &AbilityDefinition) -> bool {
+    use crate::types::ability::extract_target_filter_from_effect;
+    use crate::types::ability_visit::{visit_ability_def_scoped, ResolutionScope};
+
+    let mut targeted_instructions = 0usize;
+    let _ = visit_ability_def_scoped(payload, ResolutionScope::OwnResolutionOnly, &mut |effect| {
+        if extract_target_filter_from_effect(effect).is_some() {
+            targeted_instructions += 1;
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    let head_slots = usize::from(extract_target_filter_from_effect(&payload.effect).is_some());
+    payload.multi_target.is_none() && targeted_instructions == head_slots
 }
 
 fn parse_entering_copy_subject(input: &str) -> OracleResult<'_, TargetFilter> {
@@ -17265,8 +17762,14 @@ mod tests {
         let matching = super::parse_enters_base_plus_additional_for_each(
             " on it plus an additional +1/+1 counter on it for each artifact you control.",
             &CounterType::Plus1Plus1,
-            &QuantityExpr::Fixed { value: 1 },
-        );
+        )
+        .map(|(multiplier, per_each)| {
+            super::base_plus_additional_total(
+                QuantityExpr::Fixed { value: 1 },
+                multiplier,
+                per_each,
+            )
+        });
         assert!(
             matches!(matching, Some(QuantityExpr::Offset { offset: 1, .. })),
             "matching counter types compose to Offset, got {matching:?}"
@@ -17275,12 +17778,106 @@ mod tests {
         let mismatched = super::parse_enters_base_plus_additional_for_each(
             " on it plus an additional stun counter on it for each artifact you control.",
             &CounterType::Plus1Plus1,
-            &QuantityExpr::Fixed { value: 1 },
-        );
+        )
+        .map(|(multiplier, per_each)| {
+            super::base_plus_additional_total(
+                QuantityExpr::Fixed { value: 1 },
+                multiplier,
+                per_each,
+            )
+        });
         assert_eq!(
             mismatched, None,
             "a mismatched additional counter type must not compose"
         );
+    }
+
+    /// A further "and … for each" conjunct after the additional per-each
+    /// clause places counters the base-plus-offset form cannot express, so the
+    /// combinator declines rather than dropping the second conjunct.
+    #[test]
+    fn enters_base_plus_additional_declines_a_further_conjunct() {
+        let conjoined = super::parse_enters_base_plus_additional_for_each(
+            " on it plus an additional +1/+1 counter on it for each artifact you control \
+             and a +1/+1 counter on it for each enchantment you control.",
+            &CounterType::Plus1Plus1,
+        )
+        .map(|(multiplier, per_each)| {
+            super::base_plus_additional_total(
+                QuantityExpr::Fixed { value: 1 },
+                multiplier,
+                per_each,
+            )
+        });
+        assert_eq!(
+            conjoined, None,
+            "a second per-each conjunct must not be silently dropped"
+        );
+    }
+
+    /// CR 614.1c: Ulasht, the Hate Seed — two conjoined "for each"
+    /// placements of the same counter kind sum; a creature that is both red and
+    /// green is counted by both conjuncts (Ulasht ruling).
+    #[test]
+    fn enters_with_conjoined_for_each_counters_sum() {
+        let def = parse_replacement_line(
+            "Ulasht enters with a +1/+1 counter on it for each other red creature you control \
+             and a +1/+1 counter on it for each other green creature you control.",
+            "Ulasht, the Hate Seed",
+        )
+        .expect("conjoined per-each enters-with must parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = &*def.execute.as_deref().unwrap().effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert_eq!(target, &TargetFilter::SelfRef);
+        let red = crate::parser::oracle_quantity::parse_for_each_clause_expr(
+            "other red creature you control",
+        )
+        .expect("red clause parses");
+        let green = crate::parser::oracle_quantity::parse_for_each_clause_expr(
+            "other green creature you control",
+        )
+        .expect("green clause parses");
+        assert!(matches!(
+            red,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. }
+            }
+        ));
+        assert_eq!(
+            count,
+            &QuantityExpr::Sum {
+                exprs: vec![red, green],
+            }
+        );
+    }
+
+    /// A conjunct placing a different counter kind is a separate placement the
+    /// count cannot express: the tail declines and the base count stays.
+    #[test]
+    fn enters_with_mixed_kind_conjunct_declines_the_for_each_tail() {
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it for each other red creature you \
+             control and a -1/-1 counter on it for each other green creature you control.",
+            "Mixed Hellion",
+        )
+        .expect("enters-with still parses to a replacement");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = &*def.execute.as_deref().unwrap().effect
+        else {
+            panic!("expected PutCounter");
+        };
+        assert_eq!(counter_type, &CounterType::Plus1Plus1);
+        assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
     }
 
     /// Reach-guard: a pure per-each enters-with (Aeve — no "plus an additional")
@@ -19555,6 +20152,238 @@ mod tests {
             "a non-adjacent 'of that damage' phrase must not satisfy the anchored \
              'prevent N of that damage' grammar, got {def:?}"
         );
+    }
+
+    /// CR 614.1a + CR 614.6: Soul-Scar Mage — "If a source you control would
+    /// deal noncombat damage to a creature an opponent controls, put that many
+    /// -1/-1 counters on that creature instead." A damage-to-counters
+    /// SUBSTITUTION (not a CR 615 prevention): source scope `controller: You`,
+    /// recipient `valid_card` = creature an opponent controls, noncombat only,
+    /// and an `execute` that puts `EventContextAmount` -1/-1 counters on the
+    /// replaced event's recipient. No prevention shield, no amount modification.
+    #[test]
+    fn soul_scar_mage_damage_to_minus_counters_substitution() {
+        let def = parse_replacement_line(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on that creature instead.",
+            "Soul-Scar Mage",
+        )
+        .expect("Soul-Scar Mage should parse as a damage replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::NoncombatOnly));
+        assert!(matches!(def.shield_kind, ShieldKind::None));
+        assert!(def.damage_modification.is_none());
+        assert!(def.damage_target_filter.is_none());
+
+        match def.damage_source_filter.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected typed source filter (you control), got {other:?}"),
+        }
+        match def.valid_card.as_ref() {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("expected creature-an-opponent-controls recipient, got {other:?}"),
+        }
+
+        let execute = def.execute.as_ref().expect("substitute effect present");
+        assert!(execute.sub_ability.is_none());
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Minus1Minus1);
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    }
+                );
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+    }
+
+    /// CR 614.1a + CR 614.6: Szadek, Lord of Secrets — "If Szadek would deal
+    /// combat damage to a player, instead put that many +1/+1 counters on
+    /// Szadek and that player mills that many cards." A leading-"instead"
+    /// damage SUBSTITUTION with a compound substitute: source `SelfRef`,
+    /// recipient = any player (`damage_target_filter`, no `valid_card`), combat
+    /// only, and an `execute` chain PutCounter(+1/+1 × that many, on Szadek) →
+    /// Mill(that many, by the damaged player).
+    #[test]
+    fn szadek_combat_damage_to_counters_and_mill_substitution() {
+        let def = parse_replacement_line(
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on Szadek and that player mills that many cards.",
+            "Szadek, Lord of Secrets",
+        )
+        .expect("Szadek should parse as a damage replacement");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
+        assert!(matches!(def.shield_kind, ShieldKind::None));
+        assert!(def.damage_modification.is_none());
+        assert!(def.valid_card.is_none());
+        assert_eq!(def.damage_source_filter, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.damage_target_filter,
+            Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Any,
+            })
+        );
+
+        let that_many = QuantityExpr::Ref {
+            qty: QuantityRef::EventContextAmount,
+        };
+        let execute = def.execute.as_ref().expect("substitute effect present");
+        match &*execute.effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(*counter_type, CounterType::Plus1Plus1);
+                assert_eq!(*target, TargetFilter::SelfRef);
+                assert_eq!(*count, that_many);
+            }
+            other => panic!("expected Effect::PutCounter, got {other:?}"),
+        }
+        let mill = execute
+            .sub_ability
+            .as_deref()
+            .expect("mill continuation present");
+        assert!(mill.sub_ability.is_none());
+        match &*mill.effect {
+            Effect::Mill {
+                count,
+                target,
+                destination,
+                position,
+            } => {
+                assert_eq!(*count, that_many);
+                assert_eq!(*target, TargetFilter::PostReplacementDamageTarget);
+                assert_eq!(*destination, Zone::Graveyard);
+                assert_eq!(*position, LibraryPosition::Top);
+            }
+            other => panic!("expected Effect::Mill, got {other:?}"),
+        }
+    }
+
+    /// The card name the damage-substitution probes below are parsed under, so
+    /// their "Szadek" subject normalizes to `~`.
+    const SUBSTITUTION_PROBE: &str = "Szadek, Lord of Secrets";
+
+    /// The substitute's first link, for the damage-substitution tests below.
+    fn damage_substitute_counter_target(text: &str) -> Option<TargetFilter> {
+        let def = parse_replacement_line(text, SUBSTITUTION_PROBE)?;
+        match &*def.execute?.effect {
+            Effect::PutCounter { target, .. } => Some(target.clone()),
+            _ => None,
+        }
+    }
+
+    /// CR 614.1a + CR 608.2c: a bare "it" in a damage substitute names an
+    /// object of the replaced event, never by default the replacement's own
+    /// source. With an object recipient it is the damaged object — the same
+    /// binding "that creature" receives — so the counters land on the
+    /// creature that would have been dealt damage.
+    #[test]
+    fn damage_substitute_bare_pronoun_binds_the_object_recipient() {
+        // SHAPE: Soul-Scar Mage supplies the printed "that creature" control;
+        // replacing that anaphor with "it" is a synthetic grammar mutation,
+        // not a printed card or an additional runtime-support claim.
+        let by_pronoun = damage_substitute_counter_target(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on it instead.",
+        );
+        let by_anaphor = damage_substitute_counter_target(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on that creature instead.",
+        );
+        assert_eq!(by_pronoun, Some(TargetFilter::PostReplacementDamageTarget));
+        assert_eq!(by_pronoun, by_anaphor);
+    }
+
+    /// CR 614.1a + CR 608.2c: with a player recipient the only object
+    /// antecedent of a bare "it" is the damage source. Under a "~" subject that
+    /// is the replacement's own source (the same tree as "on ~"); under any
+    /// other subject it is the event's damage source, which no supported
+    /// substitute link accepts, so the line stays on the honest stub instead of
+    /// putting the counters on the replacement's source.
+    #[test]
+    fn damage_substitute_bare_pronoun_with_player_recipient_binds_the_source() {
+        // SHAPE: synthetic pronoun mutations of Szadek, Lord of Secrets and
+        // Undead Alchemist. Szadek's printed self-name becomes "it"; the Zombie
+        // damage subject from Undead Alchemist is paired with an invented
+        // counter substitute to require fail-closed handling of that binding.
+        assert_eq!(
+            damage_substitute_counter_target(
+                "If Szadek would deal combat damage to a player, instead put that many \
+                 +1/+1 counters on it and that player mills that many cards.",
+            ),
+            Some(TargetFilter::SelfRef),
+        );
+        assert_eq!(
+            damage_substitute_counter_target(
+                "If a Zombie you control would deal combat damage to a player, instead \
+                 put that many +1/+1 counters on it.",
+            ),
+            None,
+            "the dealing Zombie is not a supported substitute recipient: fail closed"
+        );
+    }
+
+    /// CR 614.1a + CR 614.6: every shape the substitution cannot express stays
+    /// on the unclaimed stub (no `execute`), next to a supported positive
+    /// control so the negatives are not vacuous.
+    #[test]
+    fn damage_substitute_rejects_unsupported_links() {
+        // SHAPE: printed Soul-Scar Mage/Szadek controls precede deliberately
+        // unprinted mutations (fixed count, controller mill, player counters,
+        // optional substitution and discard tail). They discriminate the
+        // parser's supported-link boundary, not real-card gameplay failures.
+        assert!(damage_substitute_counter_target(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on that creature instead.",
+        )
+        .is_some());
+        assert!(damage_substitute_counter_target(
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on Szadek and that player mills that many cards.",
+        )
+        .is_some());
+        for text in [
+            // A fixed count is not the replaced amount.
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put two -1/-1 counters on that creature instead.",
+            // A creature recipient cannot mill.
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, that creature's controller mills that many cards instead.",
+            // A player recipient cannot receive counters as "that player".
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on that player.",
+            // An optional substitute could leave nothing in the event's place.
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, you may put that many -1/-1 counters on that creature \
+             instead.",
+            // An unsupported second link.
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on Szadek and that player discards that many cards.",
+        ] {
+            let def = parse_replacement_line(text, SUBSTITUTION_PROBE);
+            assert!(
+                def.as_ref().is_none_or(|def| def.execute.is_none()),
+                "{text:?} must not claim a substitution, got {def:?}"
+            );
+        }
     }
 
     /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to
@@ -35378,7 +36207,7 @@ mod snapshot_tests {
         match effect {
             Effect::CreateDrawReplacement { replacement_effect } => {
                 assert!(
-                    matches!(*replacement_effect, Effect::GainLife { .. }),
+                    matches!(*replacement_effect.effect, Effect::GainLife { .. }),
                     "payload must be GainLife, got {replacement_effect:?}"
                 );
             }
@@ -35410,7 +36239,7 @@ mod snapshot_tests {
         match effect {
             Effect::CreateDrawReplacement { replacement_effect } => {
                 assert!(
-                    matches!(*replacement_effect, Effect::Token { .. }),
+                    matches!(*replacement_effect.effect, Effect::Token { .. }),
                     "payload must be a Token, got {replacement_effect:?}"
                 );
             }
@@ -35419,25 +36248,121 @@ mod snapshot_tests {
     }
 
     #[test]
-    fn oneshot_draw_replacement_rejects_player_scoped_payload() {
-        // GUARD: Words of Wind ("each player returns a permanent...") and Words
-        // of Waste ("each opponent discards...") have player-scoped payloads
-        // that bare `parse_effect` mis-scopes — they must stay HONEST
-        // Unimplemented gaps (return None), NOT silently-wrong CreateDrawReplacement.
-        assert!(
-            parse_oneshot_draw_replacement(
-                "the next time you would draw a card this turn, each player returns a permanent they control to its owner's hand instead"
-            )
-            .is_none(),
-            "Words of Wind (each-player payload) must remain an honest gap"
+    fn oneshot_draw_replacement_carries_player_scoped_payload() {
+        // CR 614.6: Words of Wind ("each player returns a permanent...") and
+        // Words of Waste ("each opponent discards...") lower their subject onto
+        // the payload's `player_scope`, exactly like a standalone sentence.
+        let scope_of = |text: &str| match parse_oneshot_draw_replacement(text) {
+            Some(Effect::CreateDrawReplacement { replacement_effect }) => {
+                (replacement_effect.player_scope, *replacement_effect.effect)
+            }
+            other => panic!("expected CreateDrawReplacement for {text:?}, got {other:?}"),
+        };
+
+        let (wind_scope, wind_effect) = scope_of(
+            "the next time you would draw a card this turn, each player returns a permanent they control to its owner's hand instead",
         );
+        assert_eq!(wind_scope, Some(PlayerFilter::All));
         assert!(
-            parse_oneshot_draw_replacement(
-                "the next time you would draw a card this turn, each opponent discards a card instead"
-            )
-            .is_none(),
-            "Words of Waste (each-opponent payload) must remain an honest gap"
+            matches!(wind_effect, Effect::Bounce { .. }),
+            "Words of Wind payload must be a bounce, got {wind_effect:?}"
         );
+
+        let (waste_scope, waste_effect) = scope_of(
+            "the next time you would draw a card this turn, each opponent discards a card instead",
+        );
+        assert_eq!(waste_scope, Some(PlayerFilter::Opponent));
+        assert!(
+            matches!(waste_effect, Effect::Discard { .. }),
+            "Words of Waste payload must be a discard, got {waste_effect:?}"
+        );
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_rejects_targets_outside_head_slot() {
+        // Synthetic texts: no printed card has either shape. The nearest printed
+        // card is Words of War ("~ deals 2 damage to any target instead"); the
+        // riders only exercise the head-slot guard.
+        // Reach-guard: the same shape with an untargeted rider parses.
+        assert!(parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, ~ deals 2 damage to any target and you gain 2 life instead",
+        )
+        .is_some());
+        // A targeted later clause has no announced slot — stays an honest gap.
+        assert!(parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, you gain 2 life and ~ deals 2 damage to any target instead",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn draw_replacement_head_slot_guard_traverses_choose_one_of_branches() {
+        // Synthetic shape: no printed card is a modal draw replacement. A
+        // `ChooseOneOf` head surfaces no target slot, so a target-bearing branch
+        // could not be announced (CR 115.1c + CR 602.2b).
+        let damage = |kind| {
+            AbilityDefinition::new(
+                kind,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Any,
+                    damage_source: None,
+                    excess: None,
+                },
+            )
+        };
+        let gain = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        let choose = |branches| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChooseOneOf {
+                    chooser: PlayerFilter::Controller,
+                    branches,
+                    kind: ChooseOneOfKind::Ordinary,
+                },
+            )
+        };
+        assert!(
+            !draw_replacement_payload_targets_fit_head_slot(&choose(vec![
+                gain.clone(),
+                damage(AbilityKind::Spell),
+            ])),
+            "a target-bearing ChooseOneOf branch has no announced slot"
+        );
+        // Reach-guard: untargeted branches, and a plain targeted head, still fit.
+        assert!(draw_replacement_payload_targets_fit_head_slot(&choose(
+            vec![gain.clone(), gain]
+        )));
+        assert!(draw_replacement_payload_targets_fit_head_slot(&damage(
+            AbilityKind::Spell
+        )));
+    }
+
+    #[test]
+    fn oneshot_draw_replacement_war_payload_targets_any() {
+        // Words of War: "~ deals 2 damage to any target" keeps its any-target
+        // filter on the payload head (CR 115.4), chosen at activation.
+        match parse_oneshot_draw_replacement(
+            "the next time you would draw a card this turn, ~ deals 2 damage to any target instead",
+        ) {
+            Some(Effect::CreateDrawReplacement { replacement_effect }) => assert!(
+                matches!(
+                    *replacement_effect.effect,
+                    Effect::DealDamage {
+                        target: TargetFilter::Any,
+                        ..
+                    }
+                ),
+                "payload must be DealDamage to any target, got {replacement_effect:?}"
+            ),
+            other => panic!("expected CreateDrawReplacement, got {other:?}"),
+        }
     }
 
     #[test]

@@ -256,7 +256,7 @@ fn bolas_citadel_march_of_reckless_joy_pitch_leaves_x_zero() {
     loop {
         let action = match &runner.state().waiting_for {
             WaitingFor::Priority { .. } => break,
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::PayCost {
                 kind: PayCostKind::ExileFromZone { .. },
                 choices,

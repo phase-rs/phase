@@ -798,7 +798,12 @@ fn build_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPayload, S
         },
         ..Default::default()
     };
-    Ok(resolve_deck_list(db, &deck_list))
+    // Duel decks carry no commander, so the estimator returns None on this path regardless of the table.
+    Ok(resolve_deck_list(
+        db,
+        &engine::database::ComboTable::default(),
+        &deck_list,
+    ))
 }
 
 fn failed_result(spec: &MatchupSpec, reason: &str) -> MatchupResult {
