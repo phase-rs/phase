@@ -24,6 +24,7 @@ pub mod inbound_guard;
 pub mod lobby;
 pub mod protocol;
 pub mod reservation_auth;
+pub mod snapshot_codec;
 pub mod tournament;
 pub mod validation;
 

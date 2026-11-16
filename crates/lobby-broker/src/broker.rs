@@ -26,6 +26,7 @@ use crate::reservation_auth::{
     consume_owned_reservation, release_owned_reservation, ReservationConsume, ReservationRelease,
     NOT_OWNED_RESERVATION,
 };
+use crate::snapshot_codec::encoded_len;
 use crate::tournament::{
     BracketShape, CreateTournamentRequest, CredentialVerdict, MatchArity, PairingId, PodOutcome,
     ScoringPolicy, TournamentExpiryEvent, TournamentManager, TournamentMeta, TournamentRole,
@@ -70,7 +71,7 @@ pub const MAX_TOURNAMENT_ENTRIES: usize =
 /// (`ctx.storage.put(SNAPSHOT_KEY, broker.snapshot())`, where `SNAPSHOT_KEY` is
 /// [`SNAPSHOT_STORAGE_KEY`] and
 /// [`WasmBroker::snapshot`](../../../lobby-worker/broker-wasm) is
-/// `serde_json::to_string(&broker)`). Cloudflare's SQLite-backed Durable Objects
+/// [`Broker::snapshot_json`]). Cloudflare's SQLite-backed Durable Objects
 /// document that a write's *key and value combined cannot exceed 8 MB* (the same
 /// 8 MB is the maximum row/string/BLOB size) — so a snapshot that crosses it
 /// fails the `put` and the broker silently stops persisting, losing every later
@@ -1814,10 +1815,18 @@ impl Broker {
         Ok(player.player_key.clone())
     }
 
+    /// The complete persisted snapshot: the whole broker as the ASCII-only JSON
+    /// the Durable Object stores ([`crate::snapshot_codec`]). The one producer of
+    /// the stored text, so the bytes [`Self::snapshot_encoded_bytes`] measures
+    /// are exactly the bytes written. Infallible for the broker's types.
+    pub fn snapshot_json(&self) -> String {
+        crate::snapshot_codec::to_ascii_json_string(self).expect("broker state always serializes")
+    }
+
     /// The exact byte length of the complete persisted snapshot — the whole
-    /// broker encoded with the same `serde_json` codec the Durable Object stores
-    /// it under (`WasmBroker::snapshot` is `to_string`; `to_vec` yields the same
-    /// UTF-8 bytes). This is the quantity Cloudflare's 8 MB key+value ceiling
+    /// broker encoded as [`Self::snapshot_json`] writes it (ASCII-only, so its
+    /// UTF-8 length is also its JS string length and, as a one-byte V8 string,
+    /// its stored size). This is the quantity Cloudflare's 8 MB key+value ceiling
     /// applies to, so it is measured directly rather than approximated from any
     /// per-field budget. A hypothetical serialization failure yields
     /// [`usize::MAX`], so the admission check refuses rather than under-counts.
@@ -2261,12 +2270,6 @@ pub fn server_hello(
 
 fn error(message: &str) -> Outbound {
     Outbound::ToSelf(LobbyServerMessage::error(message))
-}
-
-/// Exact `serde_json` byte length of `value`; [`usize::MAX`] if it cannot be
-/// encoded, so every capacity check refuses rather than under-counts.
-fn encoded_len<T: Serialize + ?Sized>(value: &T) -> usize {
-    serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
 }
 
 /// The part of one event's guarantee its record has not yet used: the unused
@@ -7563,7 +7566,7 @@ mod tests {
         const _: () = assert!(MAX_EVENT_DECK_ENCODED_BYTES > 8 * BIG);
 
         fn serialized(broker: &Broker) -> String {
-            serde_json::to_string(broker).expect("broker serializes")
+            broker.snapshot_json()
         }
 
         /// Bytes the snapshot may still grow by before a growth write is refused.
@@ -8106,6 +8109,26 @@ mod tests {
             (restored, victim)
         }
 
+        /// A submission whose every card name is non-ASCII (`Ā`: 2 UTF-8 bytes, 6
+        /// as the stored `\u0100` escape), ~`chars` stored bytes in all. It is
+        /// the input whose UTF-8 length understates what storage writes.
+        fn submit_frame_unicode(
+            code: &str,
+            token: &str,
+            chars: usize,
+            request: u64,
+        ) -> LobbyClientMessage {
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: code.to_string(),
+                player_token: token.to_string(),
+                deck: DeckData {
+                    main_deck: vec!["\u{0100}".repeat(50); chars / 300],
+                    ..Default::default()
+                },
+                request_id: Some(TournamentRequestId(request)),
+            }
+        }
+
         fn submit_frame(code: &str, token: &str, chars: usize, request: u64) -> LobbyClientMessage {
             LobbyClientMessage::SubmitTournamentDeck {
                 code: code.to_string(),
@@ -8169,6 +8192,80 @@ mod tests {
                 8_000_000,
                 "key and value together fill exactly the decimal 8 MB"
             );
+            assert_physical_boundary(submit_frame);
+        }
+
+        /// The same exact boundary for a submission whose card names are
+        /// non-ASCII, measured as the stored ASCII-only escape form: UTF-8 length
+        /// would admit it up to three times too large. The stored text is also
+        /// pure ASCII, so its string length equals the measured bytes and V8 keeps
+        /// it as a one-byte string (no two-bytes-per-unit expansion).
+        #[test]
+        fn the_physical_ceiling_bounds_unicode_input_in_its_stored_form() {
+            assert_physical_boundary(submit_frame_unicode);
+
+            let env = FakeEnv::new();
+            let (mut broker, victim) = restored_near_the_physical_ceiling(&env, 20_000);
+            let mut alice = ConnState::default();
+            let token = join_tournament(&mut alice, &mut broker, &env, &victim, "a", "Alice");
+            let out = broker.handle(
+                &mut alice,
+                submit_frame_unicode(&victim, &token, 9_000, 7),
+                &env,
+            );
+            ack_of(&out);
+            let stored = broker.snapshot_json();
+            assert!(stored.is_ascii(), "the stored text is ASCII-only");
+            assert!(stored.contains(r"\u0100"));
+            assert_eq!(
+                stored.len(),
+                broker.snapshot_encoded_bytes(),
+                "the bytes measured are exactly the bytes stored"
+            );
+            // Accepted Unicode input persists and restores.
+            let restored: Broker = serde_json::from_str(&stored).expect("snapshot restores");
+            // Map iteration order is not stable across restores, so compare as values.
+            assert_eq!(
+                serde_json::to_value(&restored).expect("value"),
+                serde_json::to_value(&broker).expect("value"),
+                "restore is lossless"
+            );
+            assert_eq!(restored.snapshot_encoded_bytes(), stored.len());
+            let deck = restored
+                .tournaments()
+                .get(&victim)
+                .and_then(|t| t.players.iter().find_map(|p| p.deck.as_ref()))
+                .expect("the submitted deck survives the round trip");
+            assert!(deck.main_deck.iter().all(|c| c == &"\u{0100}".repeat(50)));
+        }
+
+        /// A snapshot written before the ASCII-only codec holds raw UTF-8 (the old
+        /// `serde_json::to_string`); it must still restore, and the next write
+        /// re-emits it ASCII-only.
+        #[test]
+        fn a_legacy_raw_utf8_snapshot_still_restores() {
+            let env = FakeEnv::new();
+            let mut broker = Broker::new();
+            let mut organizer = ConnState::default();
+            let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+            broker
+                .tournaments_mut()
+                .fixture_meta_mut(&code)
+                .expect("event")
+                .name = "Ā \u{1F409} 日本".to_string();
+            let legacy = serde_json::to_string(&broker).expect("legacy encoding");
+            assert!(!legacy.is_ascii(), "the legacy form holds raw non-ASCII");
+            let restored: Broker = serde_json::from_str(&legacy).expect("legacy restores");
+            assert_eq!(
+                restored.tournaments().get(&code).expect("event").name,
+                "Ā \u{1F409} 日本"
+            );
+            assert!(restored.snapshot_json().is_ascii());
+        }
+
+        fn assert_physical_boundary(
+            submit_frame: fn(&str, &str, usize, u64) -> LobbyClientMessage,
+        ) {
             let env = FakeEnv::new();
             let (mut broker, victim) = restored_near_the_physical_ceiling(&env, 20_000);
             let mut alice = ConnState::default();

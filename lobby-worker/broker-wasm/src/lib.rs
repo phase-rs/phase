@@ -212,9 +212,12 @@ impl WasmBroker {
         }
     }
 
-    /// Serialize the whole broker for DO storage. Infallible for our types.
+    /// Serialize the whole broker for DO storage as ASCII-only JSON, the exact
+    /// text the broker's capacity accounting measures (a string with any
+    /// character above U+00FF is stored by V8 at two bytes per code unit, so
+    /// the broker never emits one). Infallible for our types.
     pub fn snapshot(&self) -> String {
-        serde_json::to_string(&self.inner).expect("broker state always serializes")
+        self.inner.snapshot_json()
     }
 
     /// `true` when the broker holds nothing in any durable registry. Lets the
@@ -682,6 +685,53 @@ mod tests {
             "the persisted clock is the refreshed one, so the listing survives: {reaped}"
         );
         assert_eq!(restored.active_games(), 1);
+    }
+
+    /// The text the shell hands `storage.put()` is ASCII-only, so V8 stores it as
+    /// a one-byte string and its length is the stored size the broker measured;
+    /// a non-ASCII event name persists as escapes and restores, and a snapshot
+    /// stored before this encoding (raw UTF-8) still restores.
+    #[test]
+    fn the_stored_snapshot_is_ascii_restores_and_accepts_the_legacy_form() {
+        let mut b = WasmBroker::new();
+        let msg = match create_tournament_msg() {
+            LobbyClientMessage::CreateTournament {
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+                plus_rounds,
+                format,
+                match_type,
+                ..
+            } => LobbyClientMessage::CreateTournament {
+                name: "\u{0100}ther \u{1F409} \u{65E5}\u{672C}".into(),
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+                plus_rounds,
+                format,
+                match_type,
+            },
+            other => panic!("unexpected {other:?}"),
+        };
+        let frame = serde_json::to_string(&msg).expect("frame encodes");
+        let (_, dirty) = call(&mut b, "{}", &frame, 1_000_000.0);
+        assert!(dirty, "reach guard: the create wrote state");
+
+        let stored = b.snapshot();
+        assert!(stored.is_ascii(), "the stored text is ASCII-only");
+        assert!(stored.contains(r"\u0100ther"), "escaped, not raw: {stored}");
+        let restored = WasmBroker::from_snapshot(&stored);
+        assert!(!restored.is_empty(), "the escaped snapshot restores");
+        assert_eq!(restored.snapshot().len(), stored.len());
+
+        let legacy = serde_json::to_string(&b.inner).expect("legacy encoding");
+        assert!(!legacy.is_ascii(), "reach guard: the legacy form is raw");
+        let from_legacy = WasmBroker::from_snapshot(&legacy);
+        assert!(!from_legacy.is_empty(), "a legacy snapshot still restores");
+        assert_eq!(from_legacy.snapshot(), stored, "and re-emits ASCII-only");
     }
 
     /// `/games` serves this listing, so it must hold the listed rooms only: a

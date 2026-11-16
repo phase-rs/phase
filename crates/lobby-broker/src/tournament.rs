@@ -2225,7 +2225,7 @@ const ABSENT_DECK_FIELD_ENCODED_BYTES: usize = "null".len();
 
 /// The exact byte cost `deck` adds to the persisted broker snapshot: its
 /// `serde_json` encoding, the same codec the lobby Durable Object snapshots the
-/// whole broker with (`serde_json::to_string(&broker)` in `broker-wasm`). Charging
+/// whole broker with ([`Broker::snapshot_json`](crate::Broker::snapshot_json), the ASCII-only codec in [`crate::snapshot_codec`]). Charging
 /// the encoded form — not a hand-picked subset of fields — counts every persisted
 /// field (the `printings` sidecar included, which a name-list sum omits entirely),
 /// JSON string escaping and per-entry / collection overhead, and stays correct
@@ -2233,7 +2233,7 @@ const ABSENT_DECK_FIELD_ENCODED_BYTES: usize = "null".len();
 /// hypothetical failure charges `usize::MAX`, so the budget check refuses rather
 /// than under-counts.
 fn deck_encoded_bytes(deck: &DeckData) -> usize {
-    serde_json::to_vec(deck).map_or(usize::MAX, |bytes| bytes.len())
+    crate::snapshot_codec::encoded_len(deck)
 }
 
 /// The pure registry of tournaments, mirroring
