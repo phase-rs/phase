@@ -15,7 +15,9 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::Effect;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{
+    GameState, PersistedGameState, PersistedRestoreFinalization, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -333,4 +335,86 @@ fn that_turns_end_step_without_a_granted_turn_is_not_rewritten_to_the_extra_turn
         "no delayed trigger may be guessed for \"that turn\""
     );
     assert_eq!(unsupported_that_turn, 1);
+}
+
+/// Round-trips `state` through the persistence boundary (the trusted capture
+/// and the raw form), the way a saved game is resumed.
+fn save_and_restore(state: &GameState, trusted: bool) -> GameState {
+    let persisted = if trusted {
+        PersistedGameState::capture(state.clone())
+    } else {
+        PersistedGameState::Raw(Box::new(state.clone()))
+    };
+    serde_json::from_value::<PersistedGameState>(
+        serde_json::to_value(&persisted).expect("the state serializes"),
+    )
+    .expect("the save decodes")
+    .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+    .expect("the save restores")
+    .finalize_after_rehydration(|_| Ok(()))
+    .expect("the save rehydrates")
+}
+
+/// CR 500.7 + CR 603.7a: a game saved with Final Fortune's turn still queued
+/// resumes with the loss bound to that same turn. A grant made after the
+/// restore is minted a fresh identity (the allocator is persisted), so it does
+/// not take over the bound turn's loss: both later grants are taken first
+/// (LIFO) and survive their end steps.
+#[test]
+fn restored_game_keeps_the_loss_on_its_queued_turn_and_mints_fresh_ids() {
+    for trusted in [false, true] {
+        let mut scenario = GameScenario::new_n_player(2, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        library(&mut scenario);
+        let ff = scenario
+            .add_spell_to_hand_from_oracle(P0, "Final Fortune", true, FINAL_FORTUNE)
+            .id();
+        let warp_a = scenario
+            .add_spell_to_hand_from_oracle(P0, "Time Warp", true, TIME_WARP)
+            .id();
+        let warp_b = scenario
+            .add_spell_to_hand_from_oracle(P0, "Time Warp", true, TIME_WARP)
+            .id();
+        scenario.with_mana_pool(P0, floating_mana(8, ManaType::Red));
+        let mut runner = scenario.build();
+        let cast_turn = runner.state().turn_number;
+        runner.cast(ff).resolve();
+        runner.cast(warp_a).target_player(P0).resolve();
+
+        let mut runner = GameRunner::from_state(save_and_restore(runner.state(), trusted));
+        runner.cast(warp_b).target_player(P0).resolve();
+        let ids: Vec<_> = runner.state().extra_turns.iter().map(|t| t.id).collect();
+        assert_eq!(ids.len(), 3);
+        assert!(
+            ids.iter().collect::<std::collections::HashSet<_>>().len() == 3,
+            "every granted turn has a distinct identity after the restore: {ids:?}"
+        );
+
+        pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn + 1);
+        assert_still_in_game(&runner, "after the first later grant's turn");
+        pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn + 2);
+        assert_still_in_game(&runner, "after the second later grant's turn");
+        pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn + 3);
+        assert_caster_lost(&runner);
+    }
+}
+
+/// CR 500.7 + CR 603.7a: a game saved while the granted turn is in progress
+/// resumes with that turn still identified, so its loss fires at its end step.
+#[test]
+fn restored_mid_turn_game_still_loses_at_the_granted_turns_end_step() {
+    for trusted in [false, true] {
+        let (mut runner, cast_turn) = cast_final_fortune(P0);
+        pass_priority_until(&mut runner, |r| in_turn_after_its_end_step(r, cast_turn));
+        assert!(
+            serde_json::to_value(runner.state()).expect("serializes")["current_extra_turn"]
+                .is_number(),
+            "reach: the granted turn is in progress"
+        );
+
+        let mut runner = GameRunner::from_state(save_and_restore(runner.state(), trusted));
+        assert_still_in_game(&runner, "after the restore");
+        pass_priority_until(&mut runner, |r| r.state().turn_number > cast_turn + 1);
+        assert_caster_lost(&runner);
+    }
 }

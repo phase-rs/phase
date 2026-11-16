@@ -2945,6 +2945,85 @@ mod tests {
         );
     }
 
+    /// "Take N extra turns after this one. At the beginning of that turn's end
+    /// step, draw a card" as the parser chains Final Fortune's two sentences.
+    fn grant_then_that_turns_end_step(count: i32, controller: PlayerId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::ExtraTurn {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: count },
+            },
+            vec![],
+            ObjectId(100),
+            controller,
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtBeginningOfGrantedTurn {
+                    phase: Phase::End,
+                    turn: None,
+                },
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(100),
+            controller,
+        ))
+    }
+
+    /// CR 603.7a + CR 500.7: "that turn" binds to the id of the single turn the
+    /// preceding instruction granted; with no turn granted (a count of zero,
+    /// CR 107.1b) it names nothing and no delayed trigger is created; two turns
+    /// granted are not a reading of the singular anaphor either.
+    ///
+    /// DISCRIMINATION: bind to `first()` or leave `None` and install, and the
+    /// zero and two cases install a trigger.
+    #[test]
+    fn that_turn_binds_only_to_exactly_one_granted_turn() {
+        let mut state = precombat_main();
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(
+            &mut state,
+            &grant_then_that_turns_end_step(1, PlayerId(0)),
+            &mut events,
+            0,
+        )
+        .expect("the chain resolves");
+        assert_eq!(state.extra_turns.len(), 1, "reach: one turn was granted");
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::AtBeginningOfGrantedTurn {
+                phase: Phase::End,
+                turn: Some(state.extra_turns[0].id),
+            }
+        );
+
+        for count in [0, 2] {
+            let mut state = precombat_main();
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(
+                &mut state,
+                &grant_then_that_turns_end_step(count, PlayerId(0)),
+                &mut events,
+                0,
+            )
+            .expect("the chain resolves");
+            assert_eq!(state.extra_turns.len(), count as usize, "reach: {count}");
+            assert!(
+                state.delayed_triggers.is_empty(),
+                "{count} granted turns leave no single antecedent"
+            );
+            assert!(resolved_create_delayed(&events));
+        }
+    }
+
     /// R-U7b. CR 603.7a: when the preceding instruction added no phase, "that
     /// combat" names nothing and no delayed trigger is created. Three ways to add
     /// nothing, each a production refusal in `additional_phase::resolve`, plus
