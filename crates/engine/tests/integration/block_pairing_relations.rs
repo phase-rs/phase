@@ -10,8 +10,9 @@
 //! `DeclareBlockers` / `PassPriority` / `CastSpell` / `ActivateAbility` actions.
 
 use engine::game::combat::AttackTarget;
+use engine::game::engine::EngineError;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -854,6 +855,29 @@ fn cromat_on_library_still_destroys_its_blocker() {
     assert_zone(&runner, &[h], Zone::Battlefield, "never targeted");
 }
 
+/// Reach guard for the #10948 tests: the printed activated ability must have
+/// parsed into a damage effect. Without it a negative activation assertion can
+/// pass on an unrelated parse failure rather than on target legality.
+fn assert_armasaur_deals_damage(runner: &GameRunner, armasaur: ObjectId) {
+    let object = &runner.state().objects[&armasaur];
+    let ability = object
+        .abilities
+        .first()
+        .unwrap_or_else(|| panic!("Steadfast Armasaur has a parsed activated ability"));
+    let mut cursor = Some(ability);
+    let mut effects = Vec::new();
+    while let Some(link) = cursor {
+        effects.push(&link.effect);
+        cursor = link.sub_ability.as_deref();
+    }
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect.as_ref(), Effect::DealDamage { .. })),
+        "Steadfast Armasaur's ability must deal damage, got {effects:#?}"
+    );
+}
+
 /// Steadfast Armasaur (#10948): "target creature blocking or blocked by it"
 /// restricts the damage recipient to its block partner. With a blocker and an
 /// unrelated bystander on the board, the activation targets only the blocker
@@ -869,6 +893,7 @@ fn steadfast_armasaur_damages_only_its_blocker() {
     let blocker = scenario.add_creature(P1, "Blocker", 1, 5).id();
     let bystander = scenario.add_creature(P1, "Bystander", 1, 5).id();
     let mut runner = scenario.build();
+    assert_armasaur_deals_damage(&runner, armasaur);
 
     attack_and_block(&mut runner, &[armasaur], &[(blocker, armasaur)]);
     seed(&mut runner, P0, &[ManaType::Colorless, ManaType::White]);
@@ -902,6 +927,7 @@ fn steadfast_armasaur_cannot_target_unrelated_creatures() {
         .id();
     let bystander = scenario.add_creature(P1, "Bystander", 1, 5).id();
     let mut runner = scenario.build();
+    assert_armasaur_deals_damage(&runner, armasaur);
 
     seed(&mut runner, P0, &[ManaType::Colorless, ManaType::White]);
     let result = runner.act(GameAction::ActivateAbility {
@@ -910,9 +936,19 @@ fn steadfast_armasaur_cannot_target_unrelated_creatures() {
         payment_mode: CastPaymentMode::Auto,
     });
     assert!(
-        result.is_err(),
-        "no blocking/blocked creature means no legal target: {:?}",
+        matches!(
+            result,
+            Err(EngineError::ActionNotAllowed(ref message))
+                if message == "No legal targets available"
+        ),
+        "no blocking/blocked creature means no legal target, got {:?} (waiting: {:?})",
+        result.map(|_| ()),
         runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        0,
+        "reach guard: the rejected activation never reached the stack"
     );
     assert_eq!(runner.state().objects[&bystander].damage_marked, 0);
 }
