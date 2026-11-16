@@ -1351,9 +1351,10 @@ fn worldsouls_rage_resolves_hand_graveyard_both_and_neither_land_matrix() {
         id
     }
 
-    // CR 402.3: the observer's whole prompt envelope must be identical across
-    // hidden-eligibility cases. `source_id` differs because each case builds a
-    // fresh object graph, so normalize that one coordinate before comparing.
+    // CR 402.3: when a choice exists, the observer's whole prompt envelope
+    // must be identical across the cases that open it. `source_id` differs
+    // because each case builds a fresh object graph, so normalize that one
+    // coordinate before comparing.
     let mut normalized_observer_prompt: Option<WaitingFor> = None;
     for (has_hand_land, has_graveyard_land) in
         [(true, false), (false, true), (true, true), (false, false)]
@@ -1541,12 +1542,14 @@ fn worldsouls_rage_resolves_hand_graveyard_both_and_neither_land_matrix() {
 
         assert_eq!(state.players[1].life, 18, "Rage must deal its X damage");
         assert!(state.stack.is_empty(), "Rage should fully resolve");
-        // A mixed hand/graveyard scope keeps the prompt present even with no
-        // eligible cards, so the opponent's observable sequence cannot reveal
-        // whether the hidden hand contained a match.
-        assert!(
+        assert_eq!(
             saw_choice,
-            "the mixed scope must prompt even with no candidates"
+            !expected.is_empty(),
+            "the zone choice opens exactly when at least one land is eligible"
+        );
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "Rage must finish at Priority after its land choice or empty population"
         );
         for id in expected {
             assert_eq!(state.objects[&id].zone, Zone::Battlefield);

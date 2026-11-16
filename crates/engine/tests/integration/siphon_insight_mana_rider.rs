@@ -54,6 +54,10 @@ them face down and put the other on the bottom of that library. You may play the
 long as it remains exiled, and you may spend mana as though it were mana of any color to cast that \
 spell.";
 
+const MATTER_RESHAPER_ORACLE: &str = "({C} represents colorless mana.)\n\
+When this creature dies, reveal the top card of your library. You may put that card onto the battlefield \
+if it's a permanent card with mana value 3 or less. Otherwise, put that card into your hand.";
+
 const COURT_OF_LOCTHWAIN: &str = "When this enchantment enters, you become the monarch.\n\
 At the beginning of your upkeep, exile the top card of target opponent's library. You may play that \
 card for as long as it remains exiled, and mana of any type can be spent to cast it. If you're the \
@@ -500,18 +504,19 @@ fn court_of_locthwains_exiled_card_is_free_for_the_monarch() {
     court_of_locthwain(true);
 }
 
-/// Exile a `{C}` sorcery from P1's library with `grant` and try to cast it from
-/// two Swamps (plus a Wastes played from hand when `wastes`). `orrery` adds
+/// Exile a `{C}` spell from P1's library with `grant` and try to cast it from
+/// Swamps (plus a Wastes played from hand when `wastes`). `orrery` adds
 /// Chromatic Orrery — a board-wide ANY-COLOR static that must not mask the
-/// any-type concession elected with the grant. `vizier` makes the exiled card a
-/// creature and adds Vizier of the Menagerie's static any-type concession for
-/// creature spells, which must combine with the grant's own. Returns whether
-/// it was cast.
+/// any-type concession elected with the grant. `creature` makes the exiled
+/// spell a real Matter Reshaper; `vizier_controller` adds Vizier's
+/// creature-spell static under that player's control. Returns whether P0 can
+/// cast it.
 fn colorless_requirement_case(
     grant: &str,
     wastes: bool,
     orrery: bool,
-    vizier: bool,
+    creature: bool,
+    vizier_controller: Option<engine::types::player::PlayerId>,
     mode: CastPaymentMode,
 ) -> bool {
     let (grant_text, expected) = match grant {
@@ -528,29 +533,42 @@ fn colorless_requirement_case(
     // Evelyn exiles the top card of EACH library.
     scenario.add_card_to_library_top(P0, "Own Top");
     let colorless = {
-        let mut b = scenario.add_spell_to_library_top(P1, "Colorless Sorcery", false);
+        let name = if creature {
+            "Matter Reshaper"
+        } else {
+            "Colorless Sorcery"
+        };
+        let mut b = scenario.add_spell_to_library_top(P1, name, false);
         b.with_mana_cost(ManaCost::Cost {
             shards: vec![ManaCostShard::Colorless],
-            generic: 0,
+            generic: if creature { 2 } else { 0 },
         });
-        if vizier {
+        if creature {
+            b.from_oracle_text(MATTER_RESHAPER_ORACLE);
             b.as_creature();
         }
         b.id()
     };
-    if vizier {
-        scenario.add_creature_from_oracle(P0, "Vizier of the Menagerie", 3, 4, VIZIER_CONCESSION);
+    if let Some(controller) = vizier_controller {
+        scenario.add_creature_from_oracle(
+            controller,
+            "Vizier of the Menagerie",
+            3,
+            4,
+            VIZIER_CONCESSION,
+        );
     }
-    let mut lands = vec![
-        scenario.add_basic_land(P0, ManaColor::Black),
-        scenario.add_basic_land(P0, ManaColor::Black),
-    ];
+    let land_count = if creature { 3 } else { 2 };
+    let mut lands: Vec<_> = (0..land_count)
+        .map(|_| scenario.add_basic_land(P0, ManaColor::Black))
+        .collect();
     let wastes = wastes.then(|| {
         scenario
             .add_land_to_hand(P0, "Wastes")
             .from_oracle_text("{T}: Add {C}.")
             .id()
     });
+    let expected_mana_amount = if creature { 3 } else { 1 };
     if orrery {
         scenario.add_artifact_from_oracle(
             P0,
@@ -594,8 +612,9 @@ fn colorless_requirement_case(
         payment_mode: mode,
     });
     if mode == CastPaymentMode::Manual && cast.is_ok() {
-        // Pin one black mana to the sole {C} pip: the pin gate and the
-        // client's remaining-cost view read the same typed permission.
+        // Pin one black mana to the {C} pip: the pin gate and the client's
+        // remaining-cost view read the same typed permission. Matter Reshaper's
+        // two generic mana remain payable from the other Swamps.
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::ManaPayment { .. }
@@ -617,7 +636,11 @@ fn colorless_requirement_case(
             .expect("black mana may be pinned to {C} under any type");
         assert_eq!(
             derive_views(runner.state(), Some(P0)).pending_payment_remaining,
-            Some(ManaCost::NoCost),
+            Some(if creature {
+                ManaCost::generic(2)
+            } else {
+                ManaCost::NoCost
+            }),
             "the pinned black mana covers the {{C}} pip"
         );
         runner
@@ -635,18 +658,24 @@ fn colorless_requirement_case(
         return false;
     }
     let object = &runner.state().objects[&colorless];
-    assert_eq!(object.mana_spent_to_cast_amount, 1, "one mana paid {{C}}");
+    assert_eq!(
+        object.mana_spent_to_cast_amount, expected_mana_amount,
+        "the Swamps paid the {C} pip and any generic cost"
+    );
     // CR 609.4b: the concession never changes what mana was actually spent.
-    let black = u32::from(wastes.is_none());
+    let black = expected_mana_amount - u32::from(wastes.is_some());
     assert_eq!(object.colors_spent_to_cast.black, black);
     let tapped: Vec<_> = lands
         .iter()
         .filter(|land| runner.state().objects[land].tapped)
         .copied()
         .collect();
-    assert_eq!(tapped.len(), 1, "exactly one land paid {{C}}");
+    assert_eq!(tapped.len(), expected_mana_amount as usize);
     if let Some(wastes) = wastes {
-        assert_eq!(tapped, vec![wastes], "the real colorless mana paid {{C}}");
+        assert!(
+            tapped.contains(&wastes),
+            "the real colorless mana paid {{C}}"
+        );
     }
     true
 }
@@ -660,7 +689,7 @@ fn any_type_rider_pays_a_colorless_requirement_with_colored_mana() {
     for mode in [CastPaymentMode::Auto, CastPaymentMode::Manual] {
         for orrery in [false, true] {
             assert!(
-                colorless_requirement_case("Bloodsoaked Insight", false, orrery, false, mode),
+                colorless_requirement_case("Bloodsoaked Insight", false, orrery, false, None, mode,),
                 "{mode:?}, Orrery={orrery}: the {{C}} card is cast with a Swamp"
             );
         }
@@ -678,12 +707,19 @@ fn any_color_rider_still_needs_real_colorless_mana() {
     for grant in ["Siphon Insight", "Evelyn, the Covetous"] {
         for orrery in [false, true] {
             assert!(
-                !colorless_requirement_case(grant, false, orrery, false, CastPaymentMode::Auto),
+                !colorless_requirement_case(
+                    grant,
+                    false,
+                    orrery,
+                    false,
+                    None,
+                    CastPaymentMode::Auto,
+                ),
                 "{grant}, Orrery={orrery}: Swamps alone must not pay {{C}} under any color"
             );
         }
         assert!(
-            colorless_requirement_case(grant, true, false, false, CastPaymentMode::Auto),
+            colorless_requirement_case(grant, true, false, false, None, CastPaymentMode::Auto,),
             "{grant}: with a Wastes, the {{C}} card is cast"
         );
     }
@@ -768,13 +804,24 @@ fn vizier_static_any_type_pays_a_colorless_creature_spell() {
 /// cast is refused — `any_color_rider_still_needs_real_colorless_mana`.)
 #[test]
 fn a_static_any_type_concession_combines_with_an_any_color_grant() {
-    assert!(colorless_requirement_case(
-        "Siphon Insight",
-        false,
-        false,
-        true,
-        CastPaymentMode::Auto
-    ));
+    for mode in [CastPaymentMode::Auto, CastPaymentMode::Manual] {
+        assert!(colorless_requirement_case(
+            "Siphon Insight",
+            false,
+            false,
+            true,
+            Some(P0),
+            mode
+        ));
+        assert!(
+            !colorless_requirement_case("Siphon Insight", false, false, true, None, mode),
+            "without Vizier, Siphon's any-color permission cannot pay a creature's {{C}}"
+        );
+        assert!(
+            !colorless_requirement_case("Siphon Insight", false, false, true, Some(P1), mode),
+            "P1's Vizier cannot grant P0's spell an any-type concession"
+        );
+    }
 }
 
 /// North Star's line: a one-spell, mana-cost-only concession.

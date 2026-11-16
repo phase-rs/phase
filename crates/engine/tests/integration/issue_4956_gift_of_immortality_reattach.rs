@@ -986,27 +986,105 @@ fn next_of_kin_offers_command_zone_and_moves_the_chosen_creature() {
     );
 }
 
-/// A private-scope singleton still opens the card-choice prompt: otherwise the
-/// prompt's presence would reveal whether a hidden hand card matched. The scan
-/// set, not the first entry alone, makes the command-zone candidate eligible.
+/// CR 400.6 + CR 608.2c: Next of Kin's selected-object origin controls the
+/// proposed zone-change event for a singleton from either named zone. The
+/// replacement is a supplementary synthetic seam fixture, not a printed card
+/// or support claim; Next of Kin supplies the real production move.
 #[test]
-fn next_of_kin_single_command_zone_candidate_still_prompts() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
+fn next_of_kin_singleton_uses_the_selected_origin_for_replacement() {
+    for (origin, name, expected_life) in [
+        (Zone::Hand, "Grizzly Bears", 21),
+        (Zone::Command, "Elite Vanguard", 20),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
 
-    let host = scenario
+        let host = scenario
+            .add_creature(P0, "Hill Giant", 3, 3)
+            .with_mana_cost(generic_cost(3))
+            .id();
+        let chosen = scenario
+            .add_creature_to_hand(P0, name, 2, 2)
+            .with_mana_cost(generic_cost(1))
+            .id();
+        if origin == Zone::Command {
+            scenario.with_commander(chosen);
+        }
+        scenario
+            .add_creature(P0, "Hand-Entry Watcher", 1, 1)
+            .with_replacement_definition(hand_entry_life_replacement());
+        let aura = scenario
+            .add_creature(P0, "Next of Kin", 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Aura"])
+            .from_oracle_text(NEXT_OF_KIN_ORACLE)
+            .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )))
+            .id();
+
+        let mut runner = scenario.build();
+        assert_eq!(runner.state().objects[&chosen].zone, origin);
+        attach_to(runner.state_mut(), aura, host);
+
+        let mut events = Vec::new();
+        engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
+        process_triggers(runner.state_mut(), &events);
+        let mut observations = DrainObservations::default();
+        let consumed_choice =
+            drain_priority_preferring_observed(&mut runner, &[], &mut observations);
+
+        assert!(
+            observations.saw_optional,
+            "Next of Kin's printed \"you may\" must reach the optional prompt"
+        );
+        assert!(
+            !consumed_choice && observations.zone_choices.is_empty(),
+            "one mandatory candidate must auto-resolve without a card-choice prompt"
+        );
+        assert_eq!(
+            runner.state().objects[&chosen].zone,
+            Zone::Battlefield,
+            "Next of Kin must put the singleton from {origin:?}"
+        );
+        assert_eq!(
+            runner.state().players[0].life,
+            expected_life,
+            "the Hand-origin replacement fires only for the Hand case"
+        );
+        assert_eq!(
+            runner.state().delayed_triggers.len(),
+            1,
+            "putting the chosen creature installs Next of Kin's delayed reattach"
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+
+        runner.advance_to_end_step();
+        advance_through_delayed_end(&mut runner);
+
+        assert_eq!(
+            runner.state().objects[&aura].attached_to,
+            Some(AttachTarget::Object(chosen)),
+            "the delayed Attach must bind the creature put from {origin:?}"
+        );
+    }
+}
+
+/// CR 608.2c: empty populations complete, a singleton resolves immediately,
+/// and multiple candidates open a real card choice through the public action.
+#[test]
+fn next_of_kin_empty_singleton_and_multiple_candidates_schedule_correctly() {
+    let mut empty_scenario = GameScenario::new();
+    empty_scenario.at_phase(Phase::PreCombatMain);
+    let empty_host = empty_scenario
         .add_creature(P0, "Hill Giant", 3, 3)
         .with_mana_cost(generic_cost(3))
         .id();
-    let command = scenario
-        .add_creature_to_hand(P0, "Elite Vanguard", 2, 1)
-        .with_mana_cost(generic_cost(1))
-        .id();
-    scenario.with_commander(command);
-    scenario
-        .add_creature(P0, "Hand-Entry Watcher", 1, 1)
-        .with_replacement_definition(hand_entry_life_replacement());
-    let aura = scenario
+    let empty_aura = empty_scenario
         .add_creature(P0, "Next of Kin", 0, 0)
         .as_enchantment()
         .with_subtypes(vec!["Aura"])
@@ -1015,204 +1093,260 @@ fn next_of_kin_single_command_zone_candidate_still_prompts() {
             TypedFilter::creature(),
         )))
         .id();
-
-    let mut runner = scenario.build();
-    attach_to(runner.state_mut(), aura, host);
-
-    let mut events = Vec::new();
-    engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
-    process_triggers(runner.state_mut(), &events);
-    let mut observations = DrainObservations::default();
-    let consumed_choice = drain_priority_preferring_observed(&mut runner, &[], &mut observations);
-
-    assert!(
-        observations.saw_optional,
-        "the printed \"you may\" must still reach an OptionalEffectChoice prompt"
+    let mut empty_runner = empty_scenario.build();
+    attach_to(empty_runner.state_mut(), empty_aura, empty_host);
+    let mut death_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        empty_runner.state_mut(),
+        empty_host,
+        Zone::Graveyard,
+        &mut death_events,
     );
-    assert!(
-        consumed_choice,
-        "a private-scope singleton must still open the card-choice prompt"
+    process_triggers(empty_runner.state_mut(), &death_events);
+    let mut empty_observations = DrainObservations::default();
+    let empty_consumed =
+        drain_priority_preferring_observed(&mut empty_runner, &[], &mut empty_observations);
+    assert!(empty_observations.saw_optional, "the dies trigger resolved");
+    assert!(!empty_consumed && empty_observations.zone_choices.is_empty());
+    assert!(matches!(
+        empty_runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(empty_runner.state().stack.is_empty());
+    assert!(empty_runner.state().delayed_triggers.is_empty());
+    assert_eq!(
+        empty_runner.state().objects[&empty_aura].zone,
+        Zone::Graveyard
+    );
+
+    let mut single_scenario = GameScenario::new();
+    single_scenario.at_phase(Phase::PreCombatMain);
+    let single_host = single_scenario
+        .add_creature(P0, "Hill Giant", 3, 3)
+        .with_mana_cost(generic_cost(3))
+        .id();
+    let single_candidate = single_scenario
+        .add_creature_to_hand(P0, "Hand Bear", 2, 2)
+        .with_mana_cost(generic_cost(1))
+        .id();
+    let single_aura = single_scenario
+        .add_creature(P0, "Next of Kin", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(NEXT_OF_KIN_ORACLE)
+        .with_keyword(Keyword::Enchant(TargetFilter::Typed(
+            TypedFilter::creature(),
+        )))
+        .id();
+    let mut single_runner = single_scenario.build();
+    attach_to(single_runner.state_mut(), single_aura, single_host);
+    let mut single_death_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        single_runner.state_mut(),
+        single_host,
+        Zone::Graveyard,
+        &mut single_death_events,
+    );
+    process_triggers(single_runner.state_mut(), &single_death_events);
+    let mut single_observations = DrainObservations::default();
+    let single_consumed =
+        drain_priority_preferring_observed(&mut single_runner, &[], &mut single_observations);
+    assert!(single_observations.saw_optional);
+    assert!(!single_consumed && single_observations.zone_choices.is_empty());
+    assert_eq!(
+        single_runner.state().objects[&single_candidate].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(single_runner.state().delayed_triggers.len(), 1);
+    assert!(matches!(
+        single_runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(single_runner.state().stack.is_empty());
+    single_runner.advance_to_end_step();
+    advance_through_delayed_end(&mut single_runner);
+    assert_eq!(
+        single_runner.state().objects[&single_aura].attached_to,
+        Some(AttachTarget::Object(single_candidate))
+    );
+
+    let mut multiple_runner = open_next_of_kin_choice(1, 1, 1);
+    let WaitingFor::EffectZoneChoice { cards, .. } = &multiple_runner.state().waiting_for else {
+        panic!("multiple eligible creatures must reach the card-choice prompt");
+    };
+    assert_eq!(
+        cards.len(),
+        2,
+        "one Hand and one Command creature are eligible"
+    );
+    let command = cards
+        .iter()
+        .copied()
+        .find(|id| multiple_runner.state().objects[id].zone == Zone::Command)
+        .expect("the command-zone creature is offered");
+    let hand = cards
+        .iter()
+        .copied()
+        .find(|id| multiple_runner.state().objects[id].zone == Zone::Hand)
+        .expect("the hand creature is offered");
+    let multiple_aura = multiple_runner
+        .state()
+        .objects
+        .values()
+        .find(|object| object.name == "Next of Kin")
+        .map(|object| object.id)
+        .expect("the printed Aura is staged");
+    multiple_runner
+        .act(GameAction::SelectCards { cards: vec![hand] })
+        .expect("the chooser may select the legal hand candidate");
+    multiple_runner.advance_until_stack_empty();
+    assert!(matches!(
+        multiple_runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(multiple_runner.state().stack.is_empty());
+    assert_eq!(
+        multiple_runner.state().objects[&hand].zone,
+        Zone::Battlefield
     );
     assert_eq!(
-        observations.zone_choices,
-        vec![vec![command]],
-        "the prompt must offer exactly the command-zone candidate"
+        multiple_runner.state().objects[&command].zone,
+        Zone::Command
     );
+    assert_eq!(multiple_runner.state().delayed_triggers.len(), 1);
+
+    multiple_runner.advance_to_end_step();
+    advance_through_delayed_end(&mut multiple_runner);
     assert_eq!(
-        runner.state().objects[&command].zone,
+        multiple_runner.state().objects[&multiple_aura].attached_to,
+        Some(AttachTarget::Object(hand))
+    );
+}
+
+/// CR 402.3 + CR 608.2c: an empty Stormkeld population completes without a
+/// card prompt; a nonempty optional population still opens a redacted prompt
+/// and can be declined through the public action.
+#[test]
+fn stormkeld_empty_population_finishes_and_nonempty_may_be_declined() {
+    let mut empty_scenario = GameScenario::new();
+    empty_scenario.at_phase(Phase::PreCombatMain);
+    empty_scenario.add_land_to_hand(P0, "Hand Land");
+    let curator = empty_scenario
+        .add_creature_to_hand_from_oracle(P0, "Stormkeld Curator", 6, 6, STORMKELD_CURATOR_ORACLE)
+        .id();
+    let mut empty_runner = empty_scenario.build();
+    let mut enter_events = Vec::new();
+    engine::game::zones::move_to_zone(
+        empty_runner.state_mut(),
+        curator,
         Zone::Battlefield,
-        "the lone command-zone candidate must move from Command, not the first scan zone"
+        &mut enter_events,
     );
-    assert_eq!(
-        runner.state().players[0].life,
-        20,
-        "a Command-origin entry must not match the hand-origin replacement; \
-         the proposed event origin is the chosen object's zone"
-    );
+    process_triggers(empty_runner.state_mut(), &enter_events);
 
-    runner.advance_to_end_step();
-    advance_through_delayed_end(&mut runner);
-
-    assert_eq!(
-        runner.state().objects[&aura].attached_to,
-        Some(AttachTarget::Object(command)),
-        "the delayed Attach must bind the lone command-zone creature"
-    );
-}
-
-/// CR 402.3: with one public commander and equal-sized hands, zero vs one
-/// matching hand cards must produce the same observable choice prompt. The
-/// private scope forces the singleton prompt, and the opponent envelope
-/// (cards + bounds) is identical; both choices settle the commander the same.
-#[test]
-fn next_of_kin_singleton_prompt_presence_does_not_leak_hand_match() {
-    let zero_eligible = open_next_of_kin_choice(0, 2, 1);
-    let one_eligible = open_next_of_kin_choice(1, 1, 1);
-
-    let mut chooser_lengths = Vec::new();
-    for runner in [&zero_eligible, &one_eligible] {
-        let WaitingFor::EffectZoneChoice {
-            cards,
-            count,
-            min_count,
-            ..
-        } = &runner.state().waiting_for
-        else {
-            panic!("a private-scope singleton must still open the choice prompt");
-        };
-        chooser_lengths.push(cards.len());
-        assert!(
-            cards
-                .iter()
-                .all(|id| *id != engine::types::identifiers::ObjectId(0)),
-            "chooser must see exact ids"
-        );
-        assert!(*count > 0, "chooser keeps its real bounds");
-        let _ = min_count;
-
-        let opponent = filter_state_for_viewer(runner.state(), P1);
-        let WaitingFor::EffectZoneChoice {
-            cards: opponent_cards,
-            count: opponent_count,
-            min_count: opponent_min_count,
-            ..
-        } = &opponent.waiting_for
-        else {
-            panic!("opponent must still see the redacted envelope");
-        };
-        assert!(
-            opponent_cards.is_empty(),
-            "opponent cards must not reveal the hidden match; got {opponent_cards:?}"
-        );
-        assert_eq!(
-            (*opponent_count, *opponent_min_count),
-            (0, 0),
-            "opponent bounds must not reveal the hidden match"
-        );
-    }
-    assert_eq!(
-        chooser_lengths,
-        vec![1, 2],
-        "chooser sees the commander alone vs commander plus the hidden match"
-    );
-
-    for mut runner in [zero_eligible, one_eligible] {
-        let command = runner
-            .state()
-            .objects
-            .iter()
-            .find_map(|(id, object)| (object.zone == Zone::Command).then_some(*id))
-            .expect("the staged commander exists");
-        runner
-            .act(GameAction::SelectCards {
-                cards: vec![command],
-            })
-            .expect("choose the commander");
-        runner.advance_until_stack_empty();
-        assert_eq!(
-            runner.state().objects[&command].zone,
-            Zone::Battlefield,
-            "both prompt paths must settle the commander onto the battlefield"
-        );
-    }
-}
-
-/// CR 402.3 + CR 107.1c: with no public Aura, zero vs one hidden Aura must
-/// still present the same observable prompt. The chooser selects none in both,
-/// so the public result is identical and the opponent envelope is identical.
-#[test]
-fn stormkeld_zero_public_matches_keeps_the_same_observer_sequence() {
-    let zero_eligible = open_stormkeld_choice(0, 2, 0);
-    let one_eligible = open_stormkeld_choice(1, 1, 0);
-
-    for runner in [&zero_eligible, &one_eligible] {
-        let WaitingFor::EffectZoneChoice {
-            cards,
-            count,
-            min_count,
-            up_to,
-            ..
-        } = &runner.state().waiting_for
-        else {
-            panic!("a mixed private scope must prompt even with zero public matches");
-        };
-        assert!(*up_to && *min_count == 0, "the chooser may select none");
-        assert!(
-            cards.len() <= 1,
-            "the chooser sees the hidden eligibility privately; got {cards:?}"
-        );
-        if cards.is_empty() {
-            assert_eq!(*count, 0);
+    let mut saw_optional = false;
+    for _ in 0..64 {
+        match empty_runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if empty_runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => empty_runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority to resolve Stormkeld Curator"),
+            WaitingFor::OptionalEffectChoice { .. } => {
+                saw_optional = true;
+                empty_runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept Stormkeld Curator's printed may ability");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                engine::game::triggers::drain_order_triggers_with_identity(
+                    empty_runner.state_mut(),
+                );
+            }
+            WaitingFor::EffectZoneChoice { .. } => {
+                panic!("an empty population must not open a card-choice prompt");
+            }
+            other => panic!("unexpected empty Stormkeld boundary: {other:?}"),
         }
+    }
+    assert!(
+        saw_optional,
+        "the Stormkeld ETB trigger reached its may prompt"
+    );
+    assert!(matches!(
+        empty_runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(empty_runner.state().stack.is_empty());
+    assert_eq!(
+        empty_runner.state().objects[&curator].zone,
+        Zone::Battlefield
+    );
+    assert!(!empty_runner.state().objects.values().any(|object| {
+        object.zone == Zone::Battlefield
+            && object
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Aura")
+    }));
 
-        let opponent = filter_state_for_viewer(runner.state(), P1);
-        let WaitingFor::EffectZoneChoice {
-            cards: opponent_cards,
-            count: opponent_count,
-            min_count: opponent_min_count,
-            up_to: opponent_up_to,
+    let mut runner = open_stormkeld_choice(1, 1, 0);
+    let WaitingFor::EffectZoneChoice {
+        cards,
+        count,
+        min_count,
+        up_to,
+        privacy_zones: Some(privacy),
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!("a nonempty optional Aura population must open a card choice");
+    };
+    assert_eq!(cards.len(), 1, "the hand Aura is a legal candidate");
+    assert_eq!((*count, *min_count, *up_to), (1, 0, true));
+    assert!(privacy.contains(&Zone::Hand) && privacy.contains(&Zone::Graveyard));
+
+    let opponent = filter_state_for_viewer(runner.state(), P1);
+    let WaitingFor::EffectZoneChoice {
+        cards: opponent_cards,
+        count: opponent_count,
+        min_count: opponent_min_count,
+        up_to: opponent_up_to,
+        ..
+    } = &opponent.waiting_for
+    else {
+        panic!("the observer must retain the normalized choice envelope");
+    };
+    assert!(opponent_cards.is_empty());
+    assert_eq!(
+        (*opponent_count, *opponent_min_count, *opponent_up_to),
+        (0, 0, true)
+    );
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![] })
+        .expect("the chooser may decline the optional population");
+    runner.advance_until_stack_empty();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
+    assert!(!matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice {
+            privacy_zones: Some(_),
             ..
-        } = &opponent.waiting_for
-        else {
-            panic!("opponent must still see the prompt envelope");
-        };
-        assert!(opponent_cards.is_empty());
-        assert_eq!(
-            (*opponent_count, *opponent_min_count, *opponent_up_to),
-            (0, 0, true),
-            "the observer envelope must be normalized even with no public matches"
-        );
-    }
-
-    for mut runner in [zero_eligible, one_eligible] {
-        runner
-            .act(GameAction::SelectCards { cards: vec![] })
-            .expect("the chooser may select none");
-        runner.advance_until_stack_empty();
-        assert!(
-            !matches!(
-                &runner.state().waiting_for,
-                WaitingFor::EffectZoneChoice {
-                    privacy_zones: Some(_),
-                    ..
-                }
-            ),
-            "an empty answer must retire the prompt's carried scope"
-        );
-        assert!(
-            !runner
-                .state()
-                .objects
-                .values()
-                .any(|object| object.zone == Zone::Battlefield
-                    && object
-                        .card_types
-                        .subtypes
-                        .iter()
-                        .any(|subtype| subtype == "Aura")),
-            "selecting none must not put a hidden Aura onto the battlefield"
-        );
-    }
+        }
+    ));
+    assert!(!runner.state().objects.values().any(|object| {
+        object.zone == Zone::Battlefield
+            && object
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Aura")
+    }));
 }
 
 /// Invalid-zone control: a lesser-mana-value creature that is only in exile is
@@ -1255,14 +1389,14 @@ fn next_of_kin_ignores_a_creature_outside_hand_and_command() {
         "the dies trigger must reach its \"you may\" prompt before the no-legal-card assertion"
     );
     assert!(
-        consumed_choice,
-        "a mixed private scope must keep the prompt present even with no legal card"
+        !consumed_choice && observations.zone_choices.is_empty(),
+        "an empty legal population completes without a card-choice prompt"
     );
-    assert_eq!(
-        observations.zone_choices,
-        vec![Vec::new()],
-        "the empty prompt must offer no candidates"
-    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().stack.is_empty());
     assert_eq!(
         runner.state().objects[&exiled].zone,
         Zone::Exile,

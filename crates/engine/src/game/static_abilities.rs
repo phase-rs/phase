@@ -1376,8 +1376,7 @@ pub fn player_mana_spend_permission_for_spell_object(
         if obj.controller != player_id {
             continue;
         }
-        let ctx = FilterContext::from_source_with_controller(obj.id, player_id);
-        if matches_target_filter(state, spell_id, filter, &ctx) {
+        if super::casting::spell_matches_cost_filter(state, player_id, spell_id, filter, obj.id) {
             granted = Some(granted.map_or(concession, |g| g.union(concession)));
         }
     }

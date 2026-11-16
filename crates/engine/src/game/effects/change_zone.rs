@@ -1671,32 +1671,18 @@ pub fn resolve(
             exile_tracked_set_library_only,
         );
         let scan_zone = scan_zones[0];
-        // CR 402.3: a MIXED private/public scope must not auto-resolve a
-        // singleton or skip an empty population, because the presence/absence
-        // of the prompt would reveal whether a hidden hand card matched. A pure
-        // private or pure public scope keeps its historical auto-resolution.
-        let has_private_zone = scan_zones.iter().any(|zone| !zone.is_public());
-        let has_public_zone = scan_zones.iter().any(|zone| zone.is_public());
-        let mixed_private_scope = has_private_zone && has_public_zone;
         // CR 701.24d-e: retain an explicitly designated typed player even when
         // the source zone supplies zero eligible cards.
         publish_finalized_owner_library_subjects(state, ability, &[]);
 
-        let (choice_count, min_count, choice_up_to) = if eligible.is_empty() && mixed_private_scope
-        {
-            // Keep the observable prompt present even with zero eligible
-            // cards; the chooser can submit an empty selection.
-            (0, 0, true)
-        } else {
-            resolution_choice_cardinality(state, ability, eligible.len(), up_to)
-        };
+        let (choice_count, min_count, choice_up_to) =
+            resolution_choice_cardinality(state, ability, eligible.len(), up_to);
 
         // CR 115.6 + CR 107.3: an exact-X zone choice with X = 0 affects no
         // cards and must complete without surfacing a one-card choice (Shigeki,
         // Jukai Visionary channel). Zero is a successful resolution, including
-        // when the source zone is empty — except for a mixed private scope,
-        // where an empty prompt must remain observable.
-        if choice_count == 0 && !mixed_private_scope {
+        // when the source zone is empty.
+        if choice_count == 0 {
             state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
@@ -1706,7 +1692,7 @@ pub fn resolve(
             return Ok(completed_result(0));
         }
 
-        if eligible.is_empty() && !mixed_private_scope {
+        if eligible.is_empty() {
             if !up_to {
                 state.cost_payment_failed_flag = true;
             }
@@ -1728,6 +1714,9 @@ pub fn resolve(
                 .draw(RandomDraw::Outcome)
                 .random_range(0..eligible.len());
             let chosen = eligible[index];
+            // CR 400.6 + CR 608.2c: a zone-union choice moves from the
+            // selected object's zone, not the prompt's default scan zone.
+            let chosen_origin = state.objects[&chosen].zone;
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             // CR 508.4 + CR 614.12a: the seat frame's boundary is captured before
             // this entry's Devour snapshot, so a seat frame parked for it lies
@@ -1744,7 +1733,7 @@ pub fn resolve(
             match crate::game::zone_pipeline::execute_zone_move_with_controller(
                 state,
                 chosen,
-                scan_zone,
+                chosen_origin,
                 dest_zone,
                 ability.source_id,
                 ability.duration.as_ref(),
@@ -1817,8 +1806,11 @@ pub fn resolve(
             )));
         }
 
-        if eligible.len() == 1 && !choice_up_to && choice_count == 1 && !mixed_private_scope {
+        if eligible.len() == 1 && !choice_up_to && choice_count == 1 {
             let chosen = eligible[0];
+            // CR 400.6 + CR 608.2c: the singleton can occupy any member
+            // zone of the selection filter's union.
+            let chosen_origin = state.objects[&chosen].zone;
             publish_finalized_owner_library_subjects(state, ability, &[chosen]);
             // CR 508.4 + CR 614.12a: the seat frame's boundary is captured before
             // this entry's Devour snapshot, so a seat frame parked for it lies
@@ -1835,7 +1827,7 @@ pub fn resolve(
             match crate::game::zone_pipeline::execute_zone_move_with_controller(
                 state,
                 chosen,
-                scan_zone,
+                chosen_origin,
                 dest_zone,
                 ability.source_id,
                 ability.duration.as_ref(),
