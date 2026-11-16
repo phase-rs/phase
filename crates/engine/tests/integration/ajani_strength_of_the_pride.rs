@@ -15,7 +15,7 @@
 //!   controller controls (CR 119.3).
 //!
 //! CR numbers verified against docs/MagicCompRules.txt (pinned edition
-//! September 25, 2026): 111.3, 119.3, 603.2, 606.3, 608.2c.
+//! September 25, 2026): 107.3a, 111.3, 119.3, 120.3a, 603.2, 606.3, 608.2c.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
@@ -25,7 +25,7 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -85,6 +85,39 @@ fn pridemate(runner: &GameRunner, player: PlayerId) -> Option<ObjectId> {
                 && object.name == "Ajani's Pridemate"
         })
         .map(|(id, _)| *id)
+}
+
+/// Verbatim Oracle text of Stream of Life (`{X}{G}` sorcery, Scryfall 9ED
+/// #272): the printed gain witness for the Row 2 legs.
+const STREAM_OF_LIFE_ORACLE: &str = "Target player gains X life.";
+
+/// Verbatim Oracle text of Lightning Bolt (`{R}` instant): the printed
+/// pure-loss witness — damage with no life-gain half.
+const LIGHTNING_BOLT_ORACLE: &str = "Lightning Bolt deals 3 damage to any target.";
+
+fn stream_of_life(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Stream of Life", false, STREAM_OF_LIFE_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Green],
+            generic: 0,
+        })
+        .id()
+}
+
+fn lightning_bolt(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT_ORACLE)
+        .id()
+}
+
+/// Fund P0's pool directly (mana sourcing is covered elsewhere); each cast
+/// below still travels the full announce/pay/target pipeline.
+fn add_mana(runner: &mut GameRunner, color: ManaType, count: usize) {
+    for _ in 0..count {
+        let unit = ManaUnit::new(color, ObjectId(0), false, vec![]);
+        runner.state_mut().players[0].mana_pool.add(unit);
+    }
 }
 
 // ─── Parse reach-guard: the full Oracle lowers with no honest gaps ───────────
@@ -175,18 +208,18 @@ fn granted_trigger_puts_one_counter_per_controller_gain() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let ajani = ajani(&mut scenario, 5);
-    let gain_one = scenario
-        .add_spell_to_hand_from_oracle(P0, "Gain One", false, "You gain 1 life.")
-        .id();
-    let gain_two = scenario
-        .add_spell_to_hand_from_oracle(P0, "Gain Two", false, "You gain 2 life.")
-        .id();
+    let stream_one = stream_of_life(&mut scenario);
+    let stream_two = stream_of_life(&mut scenario);
     let mut runner = scenario.build();
+    // X=1 costs {1}{G}, X=2 costs {2}{G}; spent mana stays spent across
+    // the two casts in this turn.
+    add_mana(&mut runner, ManaType::Green, 5);
     let minus_two = loyalty_index(&runner, ajani, -2);
     runner.activate(ajani, minus_two).resolve();
     let token = pridemate(&runner, P0).expect("row 1 proves the token exists");
 
-    let outcome = runner.cast(gain_one).resolve();
+    // CR 107.3a: X is announced as part of the cast; the text's X uses it.
+    let outcome = runner.cast(stream_one).x(1).target_player(P0).resolve();
     outcome.assert_life_delta(P0, 1);
     assert_eq!(
         outcome.counters(token, CounterType::Plus1Plus1),
@@ -194,7 +227,7 @@ fn granted_trigger_puts_one_counter_per_controller_gain() {
         "first gain puts one counter on the token (fails if the granted trigger never registered/fired)"
     );
 
-    let outcome = runner.cast(gain_two).resolve();
+    let outcome = runner.cast(stream_two).x(2).target_player(P0).resolve();
     outcome.assert_life_delta(P0, 2);
     assert_eq!(
         outcome.counters(token, CounterType::Plus1Plus1),
@@ -203,40 +236,54 @@ fn granted_trigger_puts_one_counter_per_controller_gain() {
     );
 }
 
-/// Hostile rows: another player's gain and a loss leave the token untouched.
+/// Same-test guard plus hostile rows: a controller gain first proves the
+/// granted trigger is live (removing the grant fails there), then an
+/// opponent's gain and a controller loss each leave that counter unchanged.
 #[test]
 fn granted_trigger_ignores_opponent_gain_and_life_loss() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let ajani = ajani(&mut scenario, 5);
-    let foe_gain = scenario
-        .add_spell_to_hand_from_oracle(P0, "Foe Gain", false, "Target player gains 3 life.")
-        .id();
-    let lose_one = scenario
-        .add_spell_to_hand_from_oracle(P0, "Lose One", false, "You lose 1 life.")
-        .id();
+    let stream_self = stream_of_life(&mut scenario);
+    let stream_foe = stream_of_life(&mut scenario);
+    let bolt = lightning_bolt(&mut scenario);
     let mut runner = scenario.build();
+    // X=1 costs {1}{G}, X=3 costs {3}{G}; the Bolt is cast free.
+    add_mana(&mut runner, ManaType::Green, 6);
     let minus_two = loyalty_index(&runner, ajani, -2);
     runner.activate(ajani, minus_two).resolve();
     let token = pridemate(&runner, P0).expect("row 1 proves the token exists");
 
+    // Positive reach-guard: the controller's gain adds a counter, so the
+    // trigger wiring is live before the negative legs run.
+    let outcome = runner.cast(stream_self).x(1).target_player(P0).resolve();
+    outcome.assert_life_delta(P0, 1);
+    assert_eq!(
+        outcome.counters(token, CounterType::Plus1Plus1),
+        1,
+        "controller gain proves the granted trigger fired (fails if the grant never installed)"
+    );
+
     // An opponent's gain is a real life-gain event for someone else: life
     // moves (reach-guard) but the "you" binding excludes it.
-    let outcome = runner.cast(foe_gain).target_player(P1).resolve();
+    let outcome = runner.cast(stream_foe).x(3).target_player(P1).resolve();
     outcome.assert_life_delta(P1, 3);
     assert_eq!(
         outcome.counters(token, CounterType::Plus1Plus1),
-        0,
+        1,
         "an opponent's gain must not trigger the token"
     );
 
-    // A loss is a LifeChanged event with non-positive amount: life moves
-    // (reach-guard) but `match_life_gained` declines it.
-    let outcome = runner.cast(lose_one).resolve();
-    outcome.assert_life_delta(P0, -1);
+    // Controller life loss via damage (CR 120.3a: damage to a player causes
+    // that much life loss): life moves (reach-guard) but
+    // `match_life_gained` declines the non-positive amount. A damage spell
+    // witnesses the loss rather than Soul Feast, whose unconditional "you
+    // gain 4 life" half would fire the very trigger this leg excludes.
+    let outcome = runner.cast(bolt).target_player(P0).resolve();
+    outcome.assert_life_delta(P0, -3);
     assert_eq!(
         outcome.counters(token, CounterType::Plus1Plus1),
-        0,
+        1,
         "losing life must not trigger the token"
     );
 }
@@ -248,10 +295,9 @@ fn two_pridemates_each_track_their_own_counters() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let ajani = ajani(&mut scenario, 5);
-    let gain_one = scenario
-        .add_spell_to_hand_from_oracle(P0, "Gain One", false, "You gain 1 life.")
-        .id();
+    let stream = stream_of_life(&mut scenario);
     let mut runner = scenario.build();
+    add_mana(&mut runner, ManaType::Green, 2);
     let minus_two = loyalty_index(&runner, ajani, -2);
     runner.activate(ajani, minus_two).resolve();
     let first = pridemate(&runner, P0).expect("first [-2] creates a token");
@@ -287,7 +333,7 @@ fn two_pridemates_each_track_their_own_counters() {
         "the first token survives the second creation"
     );
 
-    let outcome = runner.cast(gain_one).resolve();
+    let outcome = runner.cast(stream).x(1).target_player(P0).resolve();
     outcome.assert_life_delta(P0, 1);
     for token in &both {
         assert_eq!(
