@@ -55,13 +55,13 @@ export function OptionalCostModalContent({
           title: t("optionalCost.gift.title"),
           options: [
             {
-              id: "pay" as const,
+              id: "0" as const,
               label: t("optionalCost.gift.pay", {
                 gift: giftKindLabel(gift_kind, t),
               }),
             },
             {
-              id: "decline" as const,
+              id: "1" as const,
               label: t("optionalCost.gift.decline"),
             },
           ],
@@ -75,9 +75,14 @@ export function OptionalCostModalContent({
     <ChoiceModal
       title={title}
       options={options}
-      onChoose={(id) =>
-        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
-      }
+      onChoose={(id) => {
+        const index = parseInt(id, 10);
+        if (Number.isNaN(index)) {
+          console.error("Invalid option ID for DecideOptionalCost:", id);
+          return;
+        }
+        dispatch({ type: "DecideOptionalCost", data: { index } });
+      }}
       onClose={isMandatoryChoice ? undefined : () => dispatch({ type: "CancelCast" })}
     />
   );

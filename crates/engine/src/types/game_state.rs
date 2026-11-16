@@ -1070,8 +1070,18 @@ pub struct TriggerSourceContext {
     /// object's mana symbols answers from this capture.
     #[serde(default)]
     pub mana_cost: ManaCost,
+    /// The raw face-swap record (`GameObject::transformed`), restored by
+    /// `overlay_source_projection`; see `transformed_permanent`.
     #[serde(default)]
     pub transformed: bool,
+    /// CR 701.27g: whether the observed object was a "transformed permanent" (a double-faced
+    /// permanent with its back face up), latched from `transform::is_transformed_permanent` at the
+    /// observation. `transformed` beside it is the raw face-swap record that
+    /// `GameObject::overlay_source_projection` restores; latched rules readers read this answer.
+    /// Like the predicate it reads the face only; the zone scope (CR 701.27g "on the battlefield")
+    /// is the reader's, through `identity.expected_zone`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub transformed_permanent: bool,
     #[serde(default)]
     pub is_renowned: bool,
     #[serde(default)]
@@ -1182,6 +1192,9 @@ impl std::fmt::Debug for TriggerSourceContext {
             .field("transformed", &self.transformed)
             .field("is_renowned", &self.is_renowned)
             .field("is_saddled", &self.is_saddled);
+        if self.transformed_permanent {
+            debug.field("transformed_permanent", &self.transformed_permanent);
+        }
         if self.echo_due {
             debug.field("echo_due", &self.echo_due);
         }
@@ -1642,8 +1655,10 @@ impl<'context, 'state> TriggerSourceRead<'context, 'state> {
 
     pub fn transformed(self) -> bool {
         match self {
-            Self::ExactLive(object) => object.transformed,
-            Self::Latched(context) => context.transformed,
+            // CR 701.27g: a live source answers through the one "transformed permanent"
+            // authority; a latched source reads the answer latched at its observation.
+            Self::ExactLive(object) => crate::game::transform::is_transformed_permanent(object),
+            Self::Latched(context) => context.transformed_permanent,
         }
     }
 
@@ -2859,6 +2874,47 @@ pub struct BattlefieldEntryRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<Keyword>,
     pub controller: PlayerId,
+    /// CR 708.2: The object's face state at entry time (morph, disguise, manifest,
+    /// cloak). Enables data-driven ETB condition queries like "if a face-down creature
+    /// entered the battlefield under your control this turn" (Tunnel Tipster). The
+    /// entry-time face state is captured before any turn-face-up replacement effects
+    /// apply. Serialized as a boolean for backward compatibility: `false` = FaceUp,
+    /// `true` = FaceDown.
+    #[serde(default)]
+    pub face_state: FaceState,
+}
+
+/// CR 110.5 + CR 708.2: Face state of a permanent at battlefield entry time.
+/// CR 110.5 places "face up/face down" in the status category; status is not a
+/// characteristic (CR 110.5a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FaceState {
+    #[default]
+    FaceUp,
+    FaceDown,
+}
+
+impl Serialize for FaceState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bool(matches!(self, FaceState::FaceDown))
+    }
+}
+
+impl<'de> Deserialize<'de> for FaceState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let b = bool::deserialize(deserializer)?;
+        Ok(if b {
+            FaceState::FaceDown
+        } else {
+            FaceState::FaceUp
+        })
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -2874,6 +2930,7 @@ impl Clone for BattlefieldEntryRecord {
             colors,
             keywords,
             controller,
+            face_state,
         } = self;
         Self {
             object_id: *object_id,
@@ -2884,6 +2941,7 @@ impl Clone for BattlefieldEntryRecord {
             colors: colors.clone(),
             keywords: keywords.clone(),
             controller: *controller,
+            face_state: *face_state,
         }
     }
 }
@@ -20521,6 +20579,42 @@ pub struct PendingAttackExert {
     pub permission: TriggerDefinitionRef,
 }
 
+/// CR 703.3 + CR 703.4: where a step's beginning processing that paused on a choice inside one of its
+/// turn-based actions resumes. The answer's priority boundary re-enters the step
+/// (`turns::resume_deferred_step_triggers`); the step's beginning triggers are already held and are not
+/// collected again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepEntryResume {
+    /// CR 703.4e + CR 703.4f + CR 904.9: the archenemy's scheme action, its "as you set this scheme in
+    /// motion" choices included (Bow to My Command), is done; the precombat main phase resumes at its lore
+    /// counters.
+    AfterSchemeAction,
+}
+
+/// CR 502.1 + CR 502.2 + CR 502.3: how far the untap step had run when one of its CR 502.3
+/// determinations (`WaitingFor::UntapChoice`, `WaitingFor::ChooseUntapSubset`) was raised.
+/// Serialized unconditionally (no `skip_serializing_if`) by every writer, so its absence on
+/// the wire is a fact about the writer, as with `AbilityOnsetRecord`: a build that offered
+/// the determinations before phasing and the day/night check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UntapStepProgress {
+    /// Phasing (CR 502.1) and the day/night check (CR 502.2) had not run when the
+    /// determination was offered. Only a game saved by an earlier build carries it; its answer
+    /// restarts the step from its first action (`engine::untap_completion_waiting_for`).
+    BeforeTurnBasedActions,
+    /// CR 502.1 and CR 502.2 ran exactly once before the determination
+    /// (`turns::begin_untap_step`); its answer resumes at the untap.
+    AfterTurnBasedActions,
+}
+
+impl UntapStepProgress {
+    /// Serde default for a prompt saved without the field. Every deployed build that wrote
+    /// one raised it before the untap step's turn-based actions.
+    fn absent_on_wire() -> Self {
+        Self::BeforeTurnBasedActions
+    }
+}
+
 /// CR 601.2 + CR 115.10a: Why the caster is choosing an opponent mid-cast in
 /// `WaitingFor::ChooseGiftRecipient`. The choice is a CHOICE, not a target; the
 /// purpose decides how `handle_choose_gift_recipient` consumes the answer.
@@ -20827,6 +20921,9 @@ pub enum WaitingFor {
         candidates: Vec<ObjectId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         chosen_not_to_untap: Vec<ObjectId>,
+        /// Where the untap step stood when this prompt was raised; the answer resumes there.
+        #[serde(default = "UntapStepProgress::absent_on_wire")]
+        progress: UntapStepProgress,
     },
     /// CR 502.3: "the active player determines which permanents they control
     /// will untap." When a `StaticMode::MaxUntapPerType` cap (Smoke /
@@ -20849,6 +20946,9 @@ pub enum WaitingFor {
         group: Vec<ObjectId>,
         /// CR 502.3 cap: the player may untap at most this many of `group`.
         max: usize,
+        /// Where the untap step stood when this prompt was raised; the answer resumes there.
+        #[serde(default = "UntapStepProgress::absent_on_wire")]
+        progress: UntapStepProgress,
     },
     /// CR 508.1g + CR 701.43d: As attackers are declared, the active player may
     /// pay the optional "exert this creature as it attacks" cost on each
@@ -28034,6 +28134,20 @@ declare_game_state! {
     /// Used by werewolf "if no/two or more spells were cast last turn" conditions.
     #[serde(default)]
     pub spells_cast_last_turn: Option<u8>,
+    /// CR 502.2 + CR 502.2a + CR 731.2: the most spells any one active player of the previous
+    /// turn cast during it: the active player alone, or each member of the active team when the
+    /// game uses shared team turns (CR 805.4a). CR 731.2a's "no player ... cast a spell" is a
+    /// maximum of 0, and CR 731.2b's "any player ... cast two or more" is a maximum of at least 2.
+    /// Written as each turn ends (`day_night::record_previous_turn`, from
+    /// `turns::start_next_turn`) and read by the untap step's day/night check
+    /// (`day_night::check_day_night_transition`). `None` until a turn has ended. The alias reads
+    /// saves from this change's earlier revisions, which recorded the active player alone.
+    #[serde(
+        default,
+        alias = "spells_cast_by_previous_active_player",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub most_spells_cast_by_one_previous_active_player: Option<u32>,
 
     /// Objects whose casting/activation was cancelled this priority window.
     /// Prevents the AI from looping cast→cancel→recast on the same spell or ability.
@@ -30036,8 +30150,16 @@ declare_game_state! {
     /// deferred `enter_phase`). Cleared when `handle_replacement_choice`
     /// resumes `auto_advance` after the drain completes so beginning-of-step
     /// triggers (CR 513.1 + CR 603.3b) still fire.
+    /// Also set, with `step_entry_resume`, when the precombat main phase pauses on the
+    /// scheme action's "as" choice; the answer's boundary resumes the arm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deferred_step_trigger_resume: Option<Phase>,
+
+    /// CR 703.3 + CR 703.4e: the point a paused step entry resumes from, set with
+    /// `deferred_step_trigger_resume` by the precombat main phase when the scheme action's "as" choice
+    /// prompts. Taken by the re-entered arm; cleared by every new step entry (`turns::finish_enter_phase`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_entry_resume: Option<StepEntryResume>,
 
     /// CR 805.4b: queue of players who still owe their turn-based draw-step
     /// draw THIS step. Seeded by `turns::enter_phase`'s `Phase::Draw` arm on
@@ -36732,7 +36854,9 @@ impl GameState {
                 is_commander: object.is_commander,
                 tapped: object.tapped,
                 face_down: object.face_down,
-                transformed: object.transformed,
+                // CR 701.27g: whether the subject was a transformed permanent when observed
+                // (`transform::is_transformed_permanent`).
+                transformed: crate::game::transform::is_transformed_permanent(object),
                 is_suspected: object.is_suspected,
                 is_renowned: object.is_renowned,
                 is_saddled: object.is_saddled,
@@ -36863,7 +36987,8 @@ impl GameState {
                 is_commander: false,
                 tapped: lki.tapped,
                 face_down: context.is_some_and(|context| context.face_down),
-                transformed: context.is_some_and(|context| context.transformed),
+                // CR 701.27g + CR 400.7: the departed incarnation's latched answer.
+                transformed: context.is_some_and(|context| context.transformed_permanent),
                 is_suspected: lki.is_suspected,
                 is_renowned: context.is_some_and(|context| context.is_renowned),
                 is_saddled: context.is_some_and(|context| context.is_saddled),
@@ -38746,6 +38871,7 @@ impl GameState {
             day_night: None,
             spells_cast_this_turn: 0,
             spells_cast_last_turn: None,
+            most_spells_cast_by_one_previous_active_player: None,
             pending_trigger: None,
             pending_trigger_firing: None,
             pending_trigger_event_batch: Vec::new(),
@@ -38970,6 +39096,7 @@ impl GameState {
             pending_step_end_mana_handlers: Vec::new(),
             pending_phase_transition_progress: None,
             deferred_step_trigger_resume: None,
+            step_entry_resume: None,
             pending_team_draw_step: Vec::new(),
             pending_untap_declines: Vec::new(),
             current_trigger_event: None,
@@ -41168,6 +41295,7 @@ impl GameState {
                 face_down: _,
                 mana_cost: _,
                 transformed: _,
+                transformed_permanent: _,
                 is_renowned: _,
                 is_saddled: _,
                 echo_due: _,
@@ -42585,6 +42713,7 @@ impl GameState {
             attribution: _,
             remote_type_layer_recipients: _,
             day_night: _,
+            most_spells_cast_by_one_previous_active_player: _,
             spells_cast_this_turn: _,
             spells_cast_last_turn: _,
             cancelled_casts: _,
@@ -42775,6 +42904,7 @@ impl GameState {
             pending_step_end_mana_handlers: _,
             pending_phase_transition_progress: _,
             deferred_step_trigger_resume: _,
+            step_entry_resume: _,
             pending_team_draw_step: _,
             pending_untap_declines: _,
             current_trigger_match_count: _,
@@ -44440,6 +44570,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         day_night: _,
         spells_cast_this_turn: _,
         spells_cast_last_turn: _,
+        most_spells_cast_by_one_previous_active_player: _,
         cancelled_casts: _,
         pending_activations: _,
         pending_trigger: _,
@@ -44673,6 +44804,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         pending_step_end_mana_handlers: _,
         pending_phase_transition_progress: _,
         deferred_step_trigger_resume: _,
+        step_entry_resume: _,
         pending_team_draw_step: _,
         pending_untap_declines: _,
         current_trigger_event: _,
@@ -45152,6 +45284,8 @@ impl PartialEq for GameState {
             && self.day_night == other.day_night
             && self.spells_cast_this_turn == other.spells_cast_this_turn
             && self.spells_cast_last_turn == other.spells_cast_last_turn
+            && self.most_spells_cast_by_one_previous_active_player
+                == other.most_spells_cast_by_one_previous_active_player
             && self.pending_trigger == other.pending_trigger
             && self.pending_trigger_firing == other.pending_trigger_firing
             && self.pending_trigger_entry == other.pending_trigger_entry
@@ -45887,6 +46021,7 @@ mod forced_cascade_window_tests {
                     player: PlayerId(0),
                     candidates: vec![ObjectId(6)],
                     chosen_not_to_untap: Vec::new(),
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
             ),
             (
@@ -45895,6 +46030,7 @@ mod forced_cascade_window_tests {
                     player: PlayerId(0),
                     group: vec![ObjectId(6), ObjectId(7)],
                     max: 1,
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
             ),
             (
@@ -47063,6 +47199,7 @@ mod tests {
             source_id: object_id,
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         });
         check(
             |attack_destination| CopyTokenEntryTail {
@@ -47379,6 +47516,8 @@ mod tests {
                         controller: PlayerId(0),
                         // Test batch: no donor in scope (no dynamic P/T mods).
                         donor: None,
+                        // Single-faced fixture values: no other face to carry.
+                        double_faced: None,
                     }),
                 }]),
                 effect_kind: EffectKind::CopyTokenOf,
@@ -65702,6 +65841,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
     fn day_night_changed_event_roundtrips() {
         let event = GameEvent::DayNightChanged {
             new_state: "Night".to_string(),
+            previous: None,
         };
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: GameEvent = serde_json::from_str(&serialized).unwrap();
@@ -66288,11 +66428,47 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             player: PlayerId(0),
             group: vec![ObjectId(2), ObjectId(3), ObjectId(4)],
             max: 1,
+            progress: UntapStepProgress::AfterTurnBasedActions,
         };
         let json = serde_json::to_string(&wf).unwrap();
         let deserialized: WaitingFor = serde_json::from_str(&json).unwrap();
         assert_eq!(wf, deserialized);
         assert!(json.contains("\"ChooseUntapSubset\""));
+    }
+
+    /// CR 502.1 + CR 502.3: a current untap prompt writes its progress, and one saved
+    /// without it decodes as raised before the untap step's turn-based actions.
+    #[test]
+    fn unmarked_untap_prompts_decode_as_raised_before_the_turn_based_actions() {
+        for current in [
+            WaitingFor::UntapChoice {
+                player: PlayerId(1),
+                candidates: vec![ObjectId(7)],
+                chosen_not_to_untap: vec![ObjectId(8)],
+                progress: UntapStepProgress::AfterTurnBasedActions,
+            },
+            WaitingFor::ChooseUntapSubset {
+                player: PlayerId(1),
+                group: vec![ObjectId(2), ObjectId(3)],
+                max: 1,
+                progress: UntapStepProgress::AfterTurnBasedActions,
+            },
+        ] {
+            let mut value = serde_json::to_value(&current).unwrap();
+            assert_eq!(value["data"]["progress"], "AfterTurnBasedActions");
+            assert_eq!(
+                serde_json::from_value::<WaitingFor>(value.clone()).unwrap(),
+                current
+            );
+            value["data"].as_object_mut().unwrap().remove("progress");
+            let unmarked = serde_json::from_value::<WaitingFor>(value).unwrap();
+            let progress = match unmarked {
+                WaitingFor::UntapChoice { progress, .. }
+                | WaitingFor::ChooseUntapSubset { progress, .. } => progress,
+                other => panic!("decoded {other:?}"),
+            };
+            assert_eq!(progress, UntapStepProgress::BeforeTurnBasedActions);
+        }
     }
 
     // ---------------------------------------------------------------------

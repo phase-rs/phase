@@ -52,8 +52,12 @@ struct DefilerPaymentWitness {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OptionalAdditionalCostBranch {
     OptionalAccepted,
-    ChoicePreferred,
-    ChoiceFallback,
+    /// CR 601.2b: the selected option index of an `AdditionalCost::Choice`
+    /// prompt. The index, not a preferred/fallback label, identifies the
+    /// branch: a Choice may present any number of alternatives.
+    Choice {
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,40 +137,51 @@ fn is_complete_generated_candidate(state: &GameState, candidate: &CandidateActio
             })
 }
 
+/// CR 119.4 + CR 118.11: whether paying `cost` is a direct life payment whose
+/// actual, post-replacement loss this preview judges.
+///
+/// This is the single authority for which additional-cost branches arm a
+/// receipt root. The casting pipeline consults it too: a `Choice` branch it
+/// names is always decided through the `OptionalCostChoice` prompt and never
+/// committed automatically, because an effect may change how much life the
+/// payment actually costs and only an answered prompt reaches this preview.
+pub(crate) fn is_receipt_rooted_life_cost(cost: &AbilityCost) -> bool {
+    matches!(cost, AbilityCost::PayLife { .. })
+}
+
 fn selected_optional_life_branch(
     cost: &AdditionalCost,
-    pay: bool,
+    index: usize,
 ) -> Option<(OptionalAdditionalCostBranch, AbilityCost)> {
-    match (cost, pay) {
-        (
-            AdditionalCost::Optional {
-                cost: AbilityCost::PayLife { .. },
-                ..
-            },
-            true,
-        ) => Some((
-            OptionalAdditionalCostBranch::OptionalAccepted,
-            match cost {
-                AdditionalCost::Optional { cost, .. } => cost.clone(),
-                AdditionalCost::Kicker { .. }
-                | AdditionalCost::Choice(_, _)
-                | AdditionalCost::Required(_) => unreachable!("matched Optional above"),
-            },
-        )),
-        (AdditionalCost::Choice(preferred @ AbilityCost::PayLife { .. }, _), true) => Some((
-            OptionalAdditionalCostBranch::ChoicePreferred,
-            preferred.clone(),
-        )),
-        (AdditionalCost::Choice(_, fallback @ AbilityCost::PayLife { .. }), false) => Some((
-            OptionalAdditionalCostBranch::ChoiceFallback,
-            fallback.clone(),
-        )),
-        (AdditionalCost::Optional { .. }, false)
-        | (AdditionalCost::Optional { .. }, true)
-        | (AdditionalCost::Choice(_, _), true)
-        | (AdditionalCost::Choice(_, _), false)
-        | (AdditionalCost::Kicker { .. }, true | false)
-        | (AdditionalCost::Required(_), true | false) => None,
+    match cost {
+        // Only accepting (index 0) pays the optional cost; index 1 declines and
+        // pays nothing.
+        AdditionalCost::Optional {
+            cost: materialized, ..
+        } => (index == 0 && is_receipt_rooted_life_cost(materialized)).then(|| {
+            (
+                OptionalAdditionalCostBranch::OptionalAccepted,
+                materialized.clone(),
+            )
+        }),
+        AdditionalCost::Kicker { .. } | AdditionalCost::Required(_) => None,
+        // CR 601.2b: the selected option *is* the branch. Reading the option
+        // list (rather than searching every alternative for a life cost) is
+        // what lets any index count — Dusk Mangler's index 2 pay-life option is
+        // a direct life cost, while its index 0/1 alternatives are not.
+        AdditionalCost::Choice(_) => {
+            match crate::game::casting_costs::optional_cost_options(cost).get(index)? {
+                crate::game::casting_costs::OptionalCostOption::Pay(materialized)
+                    if is_receipt_rooted_life_cost(materialized) =>
+                {
+                    Some((
+                        OptionalAdditionalCostBranch::Choice { index },
+                        materialized.clone(),
+                    ))
+                }
+                _ => None,
+            }
+        }
     }
 }
 
@@ -182,7 +197,7 @@ fn optional_additional_cost_path(pending: &PendingCast) -> OptionalAdditionalCos
             repeatability: *repeatability,
         },
         Some(AdditionalCost::Kicker { .. })
-        | Some(AdditionalCost::Choice(_, _))
+        | Some(AdditionalCost::Choice(_))
         | Some(AdditionalCost::Required(_))
         | None => OptionalAdditionalCostPath::Direct,
     }
@@ -224,7 +239,7 @@ fn extract_life_cost_root(
                 pending_cast,
                 ..
             },
-            GameAction::DecideOptionalCost { pay: true },
+            GameAction::DecideOptionalCost { index: 0 },
         ) if *player == semantic_owner => Some(ArmedLifeCostRoot::DefilerPayment(Box::new(
             DefilerPaymentWitness {
                 player: *player,
@@ -243,9 +258,9 @@ fn extract_life_cost_root(
                 gift_kind,
                 pending_cast,
             },
-            GameAction::DecideOptionalCost { pay },
+            GameAction::DecideOptionalCost { index },
         ) if *player == semantic_owner => {
-            let (branch, materialized_cost) = selected_optional_life_branch(cost, *pay)?;
+            let (branch, materialized_cost) = selected_optional_life_branch(cost, *index)?;
             let path = optional_additional_cost_path(pending_cast);
             Some(ArmedLifeCostRoot::OptionalAdditionalCost(Box::new(
                 OptionalAdditionalCostWitness {
@@ -442,7 +457,7 @@ pub(crate) fn begin_defiler_payment_attempt(
             && *waiting_life_cost == life_cost
             && waiting_reduction == mana_reduction
             && waiting_pending.as_ref() == pending_cast
-            && witness.candidate.action == GameAction::DecideOptionalCost { pay: true }
+            && witness.candidate.action == GameAction::DecideOptionalCost { index: 0 }
             && witness.candidate.metadata.semantic_owner == Some(player)
             && witness.candidate.metadata.actor
                 == Some(authorized_submitter_for_player(state, player))
@@ -466,7 +481,7 @@ pub(crate) fn begin_optional_additional_cost_attempt(
     player: PlayerId,
     pending_before: &PendingCast,
     additional_cost: &AdditionalCost,
-    pay: bool,
+    index: usize,
     materialized_cost: &AbilityCost,
     pending_after: &PendingCast,
 ) {
@@ -482,14 +497,14 @@ pub(crate) fn begin_optional_additional_cost_attempt(
                 pending_cast: waiting_pending,
             },
         ) => {
-            let selected = selected_optional_life_branch(additional_cost, pay);
+            let selected = selected_optional_life_branch(additional_cost, index);
             let matches_selected = selected.is_some_and(|(branch, cost)| {
                 branch == witness.branch
                     && cost == witness.materialized_cost
                     && &cost == materialized_cost
             });
             let matches_prompt = witness.player == player
-                && witness.candidate.action == GameAction::DecideOptionalCost { pay }
+                && witness.candidate.action == GameAction::DecideOptionalCost { index }
                 && witness.candidate.metadata.semantic_owner == Some(player)
                 && witness.candidate.metadata.actor
                     == Some(authorized_submitter_for_player(state, player))
@@ -527,7 +542,7 @@ pub(crate) fn begin_optional_additional_cost_attempt(
                                 repeatability: AdditionalCostRepeatability::Once,
                                 ..
                             }
-                            | AdditionalCost::Choice(_, _)
+                            | AdditionalCost::Choice(_)
                             | AdditionalCost::Kicker { .. }
                             | AdditionalCost::Required(_) => {
                                 pending_after.additional_cost_queue
@@ -632,7 +647,7 @@ mod tests {
                 ManaCost::zero(),
             ),
             candidate: CandidateAction {
-                action: GameAction::DecideOptionalCost { pay: true },
+                action: GameAction::DecideOptionalCost { index: 0 },
                 metadata: ActionMetadata::for_actor(Some(player), TacticalClass::Selection),
             },
         }))
@@ -685,7 +700,7 @@ mod tests {
                     cost: life.clone(),
                     repeatability: AdditionalCostRepeatability::Once,
                 },
-                true,
+                0,
             ),
             Some((
                 OptionalAdditionalCostBranch::OptionalAccepted,
@@ -697,26 +712,29 @@ mod tests {
                 cost: life.clone(),
                 repeatability: AdditionalCostRepeatability::Once,
             },
-            false,
+            1,
         )
         .is_none());
         assert!(matches!(
-            selected_optional_life_branch(&AdditionalCost::Choice(life, mana), true),
+            selected_optional_life_branch(
+                &AdditionalCost::Choice(vec![mana.clone(), life.clone(), mana.clone()]),
+                1
+            ),
             Some((
-                OptionalAdditionalCostBranch::ChoicePreferred,
+                OptionalAdditionalCostBranch::Choice { index: 1 },
                 AbilityCost::PayLife { .. }
             ))
         ));
+        // Index 0 of the same prompt is a mana cost, not a life cost.
         assert!(selected_optional_life_branch(
-            &AdditionalCost::Choice(
-                AbilityCost::Mana {
-                    cost: ManaCost::zero(),
-                },
-                AbilityCost::Mana {
-                    cost: ManaCost::zero(),
-                },
-            ),
-            false,
+            &AdditionalCost::Choice(vec![mana.clone(), life.clone(), mana.clone()]),
+            0,
+        )
+        .is_none());
+        // An out-of-domain index has no branch at all.
+        assert!(selected_optional_life_branch(
+            &AdditionalCost::Choice(vec![life.clone(), mana.clone()]),
+            2,
         )
         .is_none());
     }
@@ -761,7 +779,7 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     candidate.action,
-                    GameAction::DecideOptionalCost { pay: true }
+                    GameAction::DecideOptionalCost { index: 0 }
                 )
             })
             .expect("the optional-life prompt must emit its accepted decision");
@@ -777,7 +795,7 @@ mod tests {
             player,
             &pending_before,
             &additional_cost,
-            true,
+            0,
             &life_cost,
             &pending_after,
         );
@@ -909,7 +927,7 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     candidate.action,
-                    GameAction::DecideOptionalCost { pay: true }
+                    GameAction::DecideOptionalCost { index: 0 }
                 )
             })
             .expect("the generated candidate set must contain the accepted Defiler decision");

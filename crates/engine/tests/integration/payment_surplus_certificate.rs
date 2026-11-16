@@ -519,7 +519,7 @@ fn cast_to_payment(runner: &mut GameRunner, spell: ObjectId, answers: Answers) {
                 cards: answers.cost_objects.clone(),
             },
             // CR 601.2b: decline every optional additional cost (kicker).
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: false },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 1 },
             other => panic!("unexpected prompt before payment: {other:?}"),
         };
         act(runner, action);
@@ -1133,7 +1133,7 @@ fn cast_during_resolution_has_no_priority_window() {
             target: Some(TargetRef::Object(bears)),
         },
     );
-    act(&mut runner, GameAction::DecideOptionalCost { pay: true });
+    act(&mut runner, GameAction::DecideOptionalCost { index: 0 });
     produce(&mut runner, &[(island, None)]);
     act(&mut runner, ogre_activation(ogre));
     assert_eq!(

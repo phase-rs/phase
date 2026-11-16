@@ -151,9 +151,13 @@ fn finish_cast(runner: &mut GameRunner, pay_alternative: Option<bool>) {
             WaitingFor::OptionalCostChoice { .. } => {
                 offered = true;
                 GameAction::DecideOptionalCost {
-                    pay: pay_alternative.expect(
+                    index: if pay_alternative.expect(
                         "CR 118.9a: this cast must not be offered the printed alternative cost",
-                    ),
+                    ) {
+                        0
+                    } else {
+                        1
+                    },
                 }
             }
             other => engine::ai_support::legal_actions(runner.state())

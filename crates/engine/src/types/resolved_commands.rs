@@ -159,7 +159,8 @@ pub struct ResolvedObjectCounterCommand {
 
 /// One exact CR 701.27a transform of a double-faced permanent.
 ///
-/// CR 613.7g: a permanent that transforms receives a NEW timestamp, which
+/// CR 613.7g + CR 730.2i: a double-faced permanent that transforms receives a new timestamp,
+/// and a merged permanent keeps its own; `resulting_timestamp` is the settled one, which
 /// orders it against continuous effects in the layer system. Replay installs
 /// the exact recorded timestamp instead of re-drawing one from
 /// `GameState::next_timestamp` — mirroring the zone-change family's

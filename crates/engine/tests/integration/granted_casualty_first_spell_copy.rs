@@ -58,7 +58,9 @@ fn cast_first_instant(sacrifice: bool) -> (GameRunner, ObjectId) {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: sacrifice })
+        .act(GameAction::DecideOptionalCost {
+            index: if sacrifice { 0 } else { 1 },
+        })
         .expect("decide casualty");
     if sacrifice {
         runner
@@ -160,7 +162,9 @@ fn cast_replicated_instant_with_silverquill(sacrifice: bool) -> usize {
                     sacrifice
                 };
                 runner
-                    .act(GameAction::DecideOptionalCost { pay })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    })
                     .expect("decide a cost");
             }
             WaitingFor::PayCost { .. } => {
@@ -252,7 +256,9 @@ fn cast_targeted_instant(casualty: Casualty, sacrifice: bool) -> usize {
                 prompts.push(origin);
                 let pay = origin == AdditionalCostOrigin::Casualty && sacrifice;
                 runner
-                    .act(GameAction::DecideOptionalCost { pay })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    })
                     .expect("decide a cost");
             }
             WaitingFor::PayCost { .. } => {
@@ -437,7 +443,7 @@ fn cast_with_casualty_sources(
                 chosen = sacrifice(&board, instance);
                 runner
                     .act(GameAction::DecideOptionalCost {
-                        pay: chosen.is_some(),
+                        index: if chosen.is_some() { 0 } else { 1 },
                     })
                     .expect("decide casualty");
             }
@@ -571,7 +577,9 @@ fn cast_fling_from_hand(sacrifice: bool) -> (usize, Zone, Zone, i32) {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: sacrifice })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if sacrifice { 0 } else { 1 },
+                    })
                     .expect("decide casualty");
             }
             WaitingFor::PayCost { choices, .. } => {
@@ -664,7 +672,9 @@ fn cast_beside_declined_casualty(
                 };
                 prompts.push(prompt);
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: answer })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if answer { 0 } else { 1 },
+                    })
                     .expect("decide a cost");
             }
             WaitingFor::PayCost { .. } => {

@@ -2291,7 +2291,7 @@ fn owner_not_controller_governs_target_and_return_result() {
         WaitingFor::OptionalCostChoice { .. }
     ) {
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("declining kicker reaches target announcement");
     }
     let WaitingFor::TargetSelection {

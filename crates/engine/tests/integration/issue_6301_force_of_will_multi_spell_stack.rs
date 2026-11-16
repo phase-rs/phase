@@ -229,7 +229,7 @@ fn force_of_will_target_prompt_offers_both_stack_spells() {
             WaitingFor::AlternativeCastChoice { .. } => GameAction::ChooseAlternativeCast {
                 choice: AlternativeCastDecision::Alternative,
             },
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::TargetSelection { selection, .. } => {
                 offered_targets = Some(selection.current_legal_targets.clone());
                 GameAction::ChooseTarget {
