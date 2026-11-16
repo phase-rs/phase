@@ -568,6 +568,25 @@ fn settle_replacement_after_departure_inner(
     if !pending.parks_delivery(&interrupted.boundary) {
         return Ok(DepartureSettlement::NotSettled);
     }
+    // CR 510.2 + CR 616.1f: a combat-damage leg's choice belongs to its parked
+    // simultaneous batch, whose own reconciliation re-proposes the leg against
+    // the live game (a recipient that left, a replacement whose owner left), so
+    // a departure does not settle it here.
+    if super::combat_damage::parked_combat_damage_awaits_replacement_choice(state) {
+        // CR 800.4a + CR 616.1f: the choice is not abandoned with its chooser:
+        // the damaged permanent may survive the departure (a Control Magic host
+        // returns to its owner), so the event is lifted back into the parked
+        // batch and re-proposed to whoever now owes it.
+        let chooser_left = interrupted
+            .actor
+            .is_some_and(|actor| interrupted.leaving.contains(&actor));
+        if !chooser_left || super::replacement::lift_departed_combat_leg_choice(state) {
+            return Ok(DepartureSettlement::NotSettled);
+        }
+    }
+    let Some(pending) = state.pending_replacement.as_ref() else {
+        return Ok(DepartureSettlement::NotSettled);
+    };
     // CR 400.7: being represented in the object map is not survival of the
     // interrupted incarnation. Do not apply its event to a later incarnation.
     let survives = interrupted
@@ -592,13 +611,6 @@ fn settle_replacement_after_departure_inner(
             state,
             &interrupted.leaving,
         ) {
-            return Ok(DepartureSettlement::NotSettled);
-        }
-        // CR 800.4a + CR 616.1f: a combat-damage leg's choice is not abandoned
-        // with its chooser: the damaged permanent may survive the departure (a
-        // Control Magic host returns to its owner), so the event is lifted back
-        // into the parked batch and re-proposed to whoever now owes it.
-        if super::replacement::lift_departed_combat_leg_choice(state) {
             return Ok(DepartureSettlement::NotSettled);
         }
         state.pending_replacement = None;
