@@ -10,9 +10,10 @@
 //! [`surplus_mana_activation`] certifies that an activation offered at a spell's
 //! `ManaPayment` step is such a surplus: passing already finalizes the payment,
 //! the same activation stays available at the caster's next priority, it queues
-//! no non-mana trigger, and the one unit of mana it adds can't change what the
+//! no non-mana trigger, the one unit of mana it adds can't change what the
 //! finished cast records (CR 601.2h payment stamps: amount, colors, source
-//! characteristics) under any spend the caster could direct. Every step is
+//! characteristics) under any spend the caster could direct, and the finished
+//! cast triggers the same abilities either way (CR 601.2i). Every step is
 //! answered by the engine's own reducer and payment authorities; a step it can't
 //! certify refuses with its reason, so consumers fail closed.
 //!
@@ -41,9 +42,11 @@ use crate::game::mana_payment::{
     has_unspent_mana_continuous_effects, shard_to_mana_type, ShardRequirement,
 };
 use crate::game::mana_sources::activatable_mana_actions_for_player;
-use crate::game::triggers::simulated_action_would_queue_non_mana_trigger;
+use crate::game::triggers::{
+    simulated_action_would_queue_non_mana_trigger, DeferredTrigger, PendingTrigger,
+};
 use crate::types::actions::GameAction;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaCost, ManaPipId, ManaSupertype, ManaType, ManaUnit};
 use crate::types::player::PlayerId;
@@ -96,6 +99,9 @@ pub enum SurplusNotCertified {
     /// The default finisher, after the activation, fails or records different
     /// payment stamps than it does without it.
     FinisherDiverges,
+    /// CR 601.2i: the two finishers leave different abilities triggered by
+    /// the cast — the activation changed what the spell is as it becomes cast.
+    CastTriggersDiverge,
 }
 
 /// Reducer work spent by the certificate, for bound tests.
@@ -476,11 +482,52 @@ fn certify_prepared(
         with.objects.get(&spell_id),
     ) {
         (Some(without_spell), Some(with_spell))
-            if without_spell.cast_payment_stamps_equivalent(with_spell) =>
-        {
-            Ok(())
+            if without_spell.cast_payment_stamps_equivalent(with_spell) => {}
+        _ => return Err(Refused::FinisherDiverges),
+    }
+    // CR 601.2i: abilities that trigger on the cast trigger as it finishes,
+    // reading the spell as it is then (CR 604.3: a characteristic-defining
+    // ability such as Scourge of the Skyclaves's can read the life the
+    // activation paid). Deferring the activation can't recreate those, so both
+    // finishers must leave the same ones.
+    if CastTimeTriggers::observe(state, &prepared.without, spell_id)
+        != CastTimeTriggers::observe(state, &with, spell_id)
+    {
+        return Err(Refused::CastTriggersDiverge);
+    }
+    Ok(())
+}
+
+/// What a finisher left of the abilities that triggered as the spell became
+/// cast, read from the reducer's own output: the entries it put on the stack
+/// above `decision`'s (identity, controller and resolved ability with its
+/// trigger event, but not the freshly allocated stack id), the triggers still
+/// deferred or pending, and the decision it then waits on.
+#[derive(PartialEq)]
+struct CastTimeTriggers<'a> {
+    stacked: Vec<(ObjectId, PlayerId, &'a StackEntryKind)>,
+    deferred: &'a [DeferredTrigger],
+    pending: Option<&'a PendingTrigger>,
+    waiting_for: &'a WaitingFor,
+}
+
+impl<'a> CastTimeTriggers<'a> {
+    fn observe(decision: &GameState, finished: &'a GameState, spell_id: ObjectId) -> Self {
+        let before: Vec<ObjectId> = decision.stack.iter().map(|entry| entry.id).collect();
+        Self {
+            stacked: finished
+                .stack
+                .iter()
+                .filter(|entry| entry.id != spell_id && !before.contains(&entry.id))
+                .map(|entry| (entry.source_id, entry.controller, &entry.kind))
+                .collect(),
+            deferred: finished
+                .deferred_triggers
+                .get(decision.deferred_triggers.len()..)
+                .unwrap_or_default(),
+            pending: finished.pending_trigger.as_deref(),
+            waiting_for: &finished.waiting_for,
         }
-        _ => Err(Refused::FinisherDiverges),
     }
 }
 

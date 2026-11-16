@@ -517,6 +517,8 @@ fn cast_to_payment(runner: &mut GameRunner, spell: ObjectId, answers: Answers) {
             WaitingFor::PayCost { .. } => GameAction::SelectCards {
                 cards: answers.cost_objects.clone(),
             },
+            // CR 601.2b: decline every optional additional cost (kicker).
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: false },
             other => panic!("unexpected prompt before payment: {other:?}"),
         };
         act(runner, action);
@@ -1802,4 +1804,111 @@ fn refractor_ability_index_kept_by_the_finisher_is_surplus() {
         ),
         Surplus
     );
+}
+
+/// A cast trigger gated on its controller's life (CR 603.4 intervening "if"),
+/// checked as the spell becomes cast (CR 601.2i). Not a printed card: no
+/// printed cast trigger reads life directly, and the printed witness for this
+/// class — Scourge of the Skyclaves's life-reading power (CR 604.3) feeding
+/// Sarkhan's Unsealing — doesn't reach here, because the layer pass doesn't
+/// re-derive power for a spell on the stack (`layers.rs`, the stack-object
+/// reset maintains only keywords and controller).
+const LIFE_GATED_CAST_TRIGGER: &str =
+    "Whenever you cast a creature spell, if you have 13 or less life, draw a card.";
+const WALKING_CORPSE: &str = "";
+
+/// P0 at `life`, with Treasonous Ogre, a Swamp and the life-gated cast
+/// trigger, announces Walking Corpse ({1}{B}); the Swamp's {B} and one Ogre
+/// {R} pay it.
+fn life_gated_board(life: i32) -> (GameRunner, ObjectId, ObjectId) {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_life(P0, life);
+    sc.with_library_top(P0, &LIBRARY);
+    let swamp = sc.add_basic_land(P0, ManaColor::Black);
+    let ogre = add_ogre(&mut sc, P0);
+    let watcher = sc
+        .add_enchantment_from_oracle(P0, "Life-Gated Watcher", LIFE_GATED_CAST_TRIGGER)
+        .id();
+    let corpse = sc
+        .add_creature_to_hand_from_oracle(P0, "Walking Corpse", 2, 2, WALKING_CORPSE)
+        .with_mana_cost(cost(vec![ManaCostShard::Black], 1))
+        .id();
+    let mut runner = sc.build();
+    cast_to_payment(&mut runner, corpse, Answers::default());
+    produce(&mut runner, &[(swamp, None)]);
+    act(&mut runner, ogre_activation(ogre));
+    assert_payment_step(runner.state());
+    (runner, ogre, watcher)
+}
+
+/// The abilities `source` put on the stack.
+fn triggers_from(state: &GameState, source: ObjectId) -> usize {
+    state
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == source)
+        .count()
+}
+
+/// The two finishers of `board`: without and with one more Ogre activation.
+fn finishers(runner: &GameRunner, ogre: ObjectId) -> (GameState, GameState) {
+    let without = finalizes_in_one_step(runner.state(), &GameAction::PassPriority)
+        .expect("reach: a pass finalizes the cast");
+    let mut activated = GameRunner::from_state(runner.state().clone());
+    act(&mut activated, ogre_activation(ogre));
+    let with = finalizes_in_one_step(activated.state(), &GameAction::PassPriority)
+        .expect("reach: a pass after the activation finalizes the cast");
+    (without, with)
+}
+
+/// F1 (#10928 review): from 18 life, the Swamp and one Ogre activation leave
+/// P0 at 15, above the trigger's 13; another activation leaves 12, so the cast
+/// trigger fires only after it (CR 601.2i). Both finishers record equal
+/// payment stamps — only the cast triggers tell them apart — and deferring the
+/// activation past the cast can't recreate the trigger.
+#[test]
+fn life_payment_that_changes_a_cast_trigger_is_not_certified() {
+    let (runner, ogre, watcher) = life_gated_board(18);
+    let (without, with) = finishers(&runner, ogre);
+    let spell = runner.state().pending_cast.as_ref().unwrap().object_id;
+    assert_eq!(
+        without.waiting_for,
+        WaitingFor::Priority { player: P0 },
+        "reach: the payer holds priority after the pass"
+    );
+    assert_eq!(
+        (
+            triggers_from(&without, watcher),
+            triggers_from(&with, watcher)
+        ),
+        (0, 1),
+        "reach: the cast triggers only after the extra activation"
+    );
+    assert!(
+        without.objects[&spell].cast_payment_stamps_equivalent(&with.objects[&spell]),
+        "reach: both finishers record the same payment stamps"
+    );
+    assert_eq!(
+        certificate(&runner, &ogre_activation(ogre)),
+        NotCertified(SurplusNotCertified::CastTriggersDiverge)
+    );
+}
+
+/// F1 control: from 15 life the trigger fires at 12 without the activation and
+/// at 9 with it — the same ability, the same trigger event — so the extra
+/// activation is a surplus.
+#[test]
+fn life_payment_that_keeps_the_cast_triggers_is_surplus() {
+    let (runner, ogre, watcher) = life_gated_board(15);
+    let (without, with) = finishers(&runner, ogre);
+    assert_eq!(
+        (
+            triggers_from(&without, watcher),
+            triggers_from(&with, watcher)
+        ),
+        (1, 1),
+        "reach: the cast triggers in both finishers"
+    );
+    assert_eq!(certificate(&runner, &ogre_activation(ogre)), Surplus);
 }

@@ -75,7 +75,8 @@
 //! shape the law above covers — so the arm `Reject`s, and only when the engine
 //! certifies the activation as surplus (`ai_support::surplus_mana_activation`:
 //! the pass finalizes, the payer then has priority and can still activate it,
-//! and the new unit can't change anything the cast records under any spend).
+//! the new unit can't change anything the cast records under any spend, and the
+//! cast triggers the same abilities either way).
 //! Sources whose activation opens a choice (Blood Celebrant's colour, Ashnod's
 //! Altar's sacrifice), multi-mana and rider-bearing units, ability payments
 //! (CR 602.2b), and any spend permission (CR 609.4b) are not certified and stay
@@ -3860,6 +3861,103 @@ mod tests {
             .map(|(_, score)| *score)
             .expect("reach: the Ogre activation is scored");
         assert_eq!(ogre, f64::NEG_INFINITY);
+    }
+
+    /// The F1 board (#10928 review), through production actions: P0 at `life`
+    /// with Treasonous Ogre, a Swamp and a cast trigger gated on 13 or less
+    /// life announces Walking Corpse ({1}{B}); the Swamp and one Ogre
+    /// activation pay it. Returns the state and the Ogre activation.
+    fn life_gated_payment_decision(life: i32) -> (GameState, GameAction) {
+        use engine::game::mana_sources::activatable_mana_actions_for_player;
+        use engine::game::scenario::GameScenario;
+        use engine::types::game_state::CastPaymentMode;
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        sc.with_life(AI, life);
+        sc.with_library_top(AI, &["Card A", "Card B", "Card C"]);
+        let swamp = sc.add_basic_land(AI, ManaColor::Black);
+        let ogre = sc
+            .add_creature(AI, "Treasonous Ogre", 2, 3)
+            .from_oracle_text_with_keywords(&["Dethrone"], TREASONOUS_OGRE)
+            .id();
+        sc.add_enchantment_from_oracle(
+            AI,
+            "Life-Gated Watcher",
+            "Whenever you cast a creature spell, if you have 13 or less life, draw a card.",
+        );
+        let corpse = sc
+            .add_creature_to_hand_from_oracle(AI, "Walking Corpse", 2, 2, "")
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 1,
+            })
+            .id();
+        let mut state = sc.build().state().clone();
+        let card_id = state.objects[&corpse].card_id;
+        engine::game::engine::apply_as_current_for_simulation(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: corpse,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Manual,
+            },
+        )
+        .expect("the cast reaches its payment step");
+        let tap_swamp = activatable_mana_actions_for_player(&state, AI)
+            .into_iter()
+            .find(|action| {
+                matches!(action, GameAction::TapLandForMana { selection } if selection.source.object_id == swamp)
+            })
+            .expect("the Swamp taps for {B}");
+        let ogre_activation = GameAction::ActivateAbility {
+            source_id: ogre,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        };
+        for action in [tap_swamp, ogre_activation.clone()] {
+            engine::game::engine::apply_as_current_for_simulation(&mut state, action)
+                .expect("payment step action");
+        }
+        assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+        (state, ogre_activation)
+    }
+
+    /// The Ogre activation's root score on `state` at Easy.
+    fn root_ogre_score(state: &GameState, ogre_activation: &GameAction) -> f64 {
+        use crate::config::{create_config, AiDifficulty, Platform};
+        crate::search::score_candidates(
+            state,
+            AI,
+            &create_config(AiDifficulty::Easy, Platform::Native),
+        )
+        .into_iter()
+        .find(|(action, _)| action == ogre_activation)
+        .map(|(_, score)| score)
+        .expect("reach: the Ogre activation is scored")
+    }
+
+    /// F1 (#10928 review): when the extra activation's life payment changes
+    /// which cast triggers fire (15 → 12 life crosses the trigger's 13), the
+    /// engine refuses the certificate and root scoring keeps the activation
+    /// finite. Control: from 15 life the trigger fires either way, and the
+    /// activation is rejected.
+    #[test]
+    fn root_scoring_keeps_an_activation_that_changes_a_cast_trigger() {
+        let (state, ogre_activation) = life_gated_payment_decision(18);
+        assert_eq!(
+            engine::ai_support::surplus_mana_activation(&state, &ogre_activation),
+            engine::ai_support::SurplusManaActivation::NotCertified(
+                engine::ai_support::SurplusNotCertified::CastTriggersDiverge
+            ),
+            "reach: the engine refuses on the cast-trigger comparison"
+        );
+        assert!(root_ogre_score(&state, &ogre_activation).is_finite());
+
+        let (state, ogre_activation) = life_gated_payment_decision(15);
+        assert_eq!(root_ogre_score(&state, &ogre_activation), f64::NEG_INFINITY);
     }
 
     /// The arm prepares the certificate's decision-level work once per
