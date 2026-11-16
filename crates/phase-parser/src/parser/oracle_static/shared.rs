@@ -11,6 +11,9 @@ use nom::character::complete::anychar;
 use nom::combinator::{map_opt, not, success, value};
 use nom::multi::many1;
 
+use crate::parser::oracle_nom::error::oracle_err;
+use crate::types::card_type::PLANESWALKER_SUBTYPES;
+
 /// Whose spells and abilities a "can be the target of spells and abilities …
 /// as though it didn't have <quality>" clause opens its subject to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -901,7 +904,11 @@ impl GrantedCastKeywordKind {
 /// pass binds each one once the affected set is known. Binding is **per
 /// quantity**, keyed on the scope the parser recorded for that individual
 /// counter read, so a static that reads counters on `~` AND on its recipient
-/// keeps both referents: the explicit `Source` read is never touched.
+/// keeps both referents: the explicit `Source` read is never touched. The
+/// counter-kind census of a pronoun ("for each kind of counter on it") reaches
+/// this pass as a `SelfRef` placeholder — from the anthem / continuous route's
+/// deferred entry, or from a combat tax on the source permanent itself — and is
+/// bound by the same pass (see `bind_anaphoric_counter_ref`).
 ///
 /// This is the quantity-axis twin of `StaticCondition::RecipientHasCounters`
 /// (the recipient analog of `HasCounters` on the condition axis) — the two
@@ -967,11 +974,37 @@ fn bind_anaphoric_counters_in_condition(cond: &mut StaticCondition, bound: Objec
 
 /// CR 608.2k: The leaf binder — retargets a deferred counter anaphor and leaves
 /// every other `QuantityRef` and every already-bound scope untouched.
+///
+/// Two pronoun forms reach it. The counter COUNT ("for each +1/+1 counter on
+/// it") parks the pronoun on `ObjectScope::Anaphoric`. The counter-KIND census
+/// ("for each kind of counter on it/them") arrives as `SelfRef`: the
+/// placeholder the anthem / continuous route's deferred entry
+/// (`oracle_quantity::parse_for_each_clause_deferred`) emits for a pronoun of
+/// either number, or a combat tax's census, which `parse_combat_tax_body` reads
+/// only for a tax on the source permanent itself (so it stays `SelfRef`). Every
+/// other entry declines the pronoun census, and an explicit "~" is declined by
+/// every census entry.
+///
+/// CR 611.3a + CR 613.4c: a self-scoped static keeps `SelfRef` (the pronoun
+/// names the source). In a per-recipient static the pronoun names each affected
+/// object, so the census is rebound to the identity filter that follows the
+/// recipient (`FilterProp::Another` is recipient-relative while a recipient is
+/// bound, `game::filter`). The rebound filter is no longer `SelfRef`, so a second
+/// lowering pass leaves it untouched.
 fn bind_anaphoric_counter_ref(qty: &mut QuantityRef, bound: ObjectScope) {
-    if let QuantityRef::CountersOn { scope, .. } = qty {
-        if *scope == ObjectScope::Anaphoric {
+    match qty {
+        QuantityRef::CountersOn { scope, .. } if *scope == ObjectScope::Anaphoric => {
             *scope = bound;
         }
+        QuantityRef::DistinctCounterKindsAmong { filter }
+            if bound == ObjectScope::Recipient && matches!(filter, TargetFilter::SelfRef) =>
+        {
+            *filter =
+                TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::Another),
+                }]));
+        }
+        _ => {}
     }
 }
 
@@ -1056,15 +1089,14 @@ fn continuous_modification_dynamic_quantity_mut(
 
 /// CR 608.2k: Bind every **deferred** counter anaphor in a dynamic magnitude to
 /// `bound`. Mirrors `rebind_anaphoric_object_scope` (`oracle_effect/mod.rs`),
-/// the effect-side authority for the same pronoun, and touches only
-/// `ObjectScope::Anaphoric` — an explicit `Source` (`~`) or `Target` ("that
-/// creature") counter read in the same expression keeps its own referent.
+/// the effect-side authority for the same pronoun, and touches only the pronoun
+/// forms `bind_anaphoric_counter_ref` names — an explicit `Source` (`~`) or
+/// `Target` ("that creature") counter read in the same expression keeps its own
+/// referent.
 fn bind_anaphoric_counters(expr: &mut QuantityExpr, bound: ObjectScope) {
     match expr {
-        QuantityExpr::Ref {
-            qty: QuantityRef::CountersOn { scope, .. },
-        } if *scope == ObjectScope::Anaphoric => *scope = bound,
-        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::Ref { qty } => bind_anaphoric_counter_ref(qty, bound),
+        QuantityExpr::Fixed { .. } => {}
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -1412,6 +1444,7 @@ fn prop_zone_truth(prop: &FilterProp, zone: Zone) -> SourceZoneTruth {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -1496,6 +1529,7 @@ fn filter_zone_truth(filter: &TargetFilter, zone: Zone) -> SourceZoneTruth {
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -7018,6 +7052,53 @@ pub(crate) fn parse_rule_static_tail_predicates(
     }
 }
 
+/// CR 205.3j + CR 508.1c: " [<Subtype>]s you control" defended scope ("can't
+/// attack Jaces you control"). A manual arm, not `value()`: the subtype is
+/// dynamic. Calls the plain-`fn` `parse_subtype` (plural-aware, so "Jaces"
+/// yields `("Jace", 5)` whole and no extra `"s"` literal follows), then requires
+/// `" you control"`, and gates the candidate through `PLANESWALKER_SUBTYPES` —
+/// a non-planeswalker subtype fails closed, preserving honest-red coverage.
+fn parse_subtype_planeswalkers_you_control_nom(
+    input: &str,
+) -> OracleResult<'_, crate::types::triggers::AttackTargetFilter> {
+    let (input, _) = tag(" ").parse(input)?;
+    let (subtype, consumed) = parse_subtype(input).ok_or_else(|| oracle_err(input))?;
+    let (input, _) = tag(" you control").parse(&input[consumed..])?;
+    if !PLANESWALKER_SUBTYPES.contains(&subtype.as_str()) {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        input,
+        crate::types::triggers::AttackTargetFilter::Planeswalker {
+            subtype: Some(subtype),
+        },
+    ))
+}
+
+/// Mixed-case sibling of [`parse_subtype_planeswalkers_you_control_nom`] for
+/// `parse_combat_tax_body`, which runs on original-case text (mana-symbol
+/// case-sensitivity). Structural tags are `tag_no_case`; `parse_subtype`
+/// returns the canonical subtype regardless of input case, so the yielded
+/// filter is identical to the lowercase path's. Same
+/// `PLANESWALKER_SUBTYPES` gate: a non-planeswalker subtype fails closed.
+pub(crate) fn parse_subtype_planeswalkers_you_control_mixed_case_nom(
+    input: &str,
+) -> OracleResult<'_, crate::types::triggers::AttackTargetFilter> {
+    let (input, _) = tag_no_case::<_, _, OracleError<'_>>(" ").parse(input)?;
+    let (subtype, consumed) = parse_subtype(input).ok_or_else(|| oracle_err(input))?;
+    let (input, _) =
+        tag_no_case::<_, _, OracleError<'_>>(" you control").parse(&input[consumed..])?;
+    if !PLANESWALKER_SUBTYPES.contains(&subtype.as_str()) {
+        return Err(oracle_err(input));
+    }
+    Ok((
+        input,
+        crate::types::triggers::AttackTargetFilter::Planeswalker {
+            subtype: Some(subtype),
+        },
+    ))
+}
+
 /// Optional attack-target scope after "can't attack" (CR 508.1b + CR 508.1c).
 pub(crate) fn parse_cant_attack_defended_scope_nom(
     input: &str,
@@ -7036,9 +7117,13 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
             tag(" you or planeswalkers you control"),
         ),
         value(
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             tag(" planeswalkers you control"),
         ),
+        // CR 205.3j: subtype-defended scope sits after the generic planeswalker
+        // arm and before bare " you" — longest-first, since nom `alt` is
+        // leftmost-match.
+        (|input| parse_subtype_planeswalkers_you_control_nom(input)),
         value(AttackTargetFilter::Player, tag(" you")),
     )))
     .parse(input)

@@ -168,6 +168,7 @@ pub fn gate_candidates(
             candidate,
             payment_successor: None,
             payment_step: None,
+            payment_trace: None,
         })
         .collect();
     gate_prepared_candidates(state, decision, prepared, ai_player, config, context)

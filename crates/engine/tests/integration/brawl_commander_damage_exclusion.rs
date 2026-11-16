@@ -220,7 +220,8 @@ fn with_header_threshold(log: &ReplayLog, threshold: serde_json::Value) -> Strin
 
 fn load_replay(json: &str, db: Option<&Arc<CardDatabase>>) -> Result<ReplayPlayer, String> {
     let log: ReplayLog = serde_json::from_str(json).map_err(|err| err.to_string())?;
-    ReplayPlayer::load(log, db).map_err(|err| format!("{err:?}"))
+    ReplayPlayer::load(log, db, &engine::database::ComboTable::default())
+        .map_err(|err| format!("{err:?}"))
 }
 
 #[test]
@@ -389,7 +390,9 @@ fn record_legacy_game(
     assert!(validate_seat(db, &commanderless, &format).is_err());
 
     let header = replay_header(format, Some(decks));
-    let mut live = reconstruct_initial_state(&header, Some(db)).unwrap();
+    let mut live =
+        reconstruct_initial_state(&header, Some(db), &engine::database::ComboTable::default())
+            .unwrap();
     let mut log = ReplayLog::new(header);
     while !matches!(live.waiting_for, WaitingFor::GameOver { .. }) {
         assert!(log.actions.len() < 3000, "the recorded game must end");

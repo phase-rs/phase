@@ -7,7 +7,7 @@ use engine::ai_support::{
     activates_mana_ability, build_decision_context, classify_payment_continuation,
     witness_payment_continuations, AiDecisionContext, CandidateAction,
     PaymentContinuationBatchStatus, PaymentContinuationState, PaymentContinuationStep,
-    TacticalClass,
+    TacticalClass, WitnessedStepTrace,
 };
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
@@ -149,6 +149,9 @@ pub(crate) struct PreparedCandidate {
     pub payment_successor: Option<GameState>,
     /// Whether the witnessed edge finalizes the payment root in its own step.
     pub payment_step: Option<PaymentContinuationStep>,
+    /// The witnessed edge's own reducer step (its events and the deferred-trigger
+    /// queue length before it), so a consumer can read the step it already ran.
+    pub payment_trace: Option<WitnessedStepTrace>,
 }
 
 /// Fail closed for affiliated payment states before ranking or width limits.
@@ -169,6 +172,7 @@ pub(crate) fn prepare_payment_candidates(
                 candidate,
                 payment_successor: None,
                 payment_step: None,
+                payment_trace: None,
             })
             .collect(),
         PaymentContinuationState::UnsupportedAffiliated(_) => Vec::new(),
@@ -189,6 +193,7 @@ pub(crate) fn prepare_payment_candidates(
                             candidate,
                             payment_successor: Some(accepted.state),
                             payment_step: Some(accepted.step),
+                            payment_trace: Some(accepted.trace),
                         })
                     })
                     .collect(),
@@ -204,6 +209,7 @@ pub(crate) fn prepare_payment_candidates(
                                     candidate,
                                     payment_successor: Some(accepted.state),
                                     payment_step: Some(accepted.step),
+                                    payment_trace: Some(accepted.trace),
                                 })
                             })
                             .collect()
@@ -218,6 +224,7 @@ pub(crate) fn prepare_payment_candidates(
                                         candidate,
                                         payment_successor: None,
                                         payment_step: None,
+                                        payment_trace: None,
                                     },
                                 )
                             })
@@ -2452,6 +2459,7 @@ where
                 candidate,
                 payment_successor: None,
                 payment_step: None,
+                payment_trace: None,
             }),
         |candidate| scorer(candidate),
         limit,
@@ -2689,6 +2697,7 @@ pub(crate) mod tests {
             &config.weights,
             &config.archetype_multipliers,
             PlayerId(0),
+            engine::game::bracket_estimate::EffectiveBracketTier::default(),
         );
         ctx_threat.opponent_threat = Some(ThreatProfile {
             probabilities: ThreatProbabilities {
@@ -2737,6 +2746,7 @@ pub(crate) mod tests {
             &config.weights,
             &config.archetype_multipliers,
             PlayerId(0),
+            engine::game::bracket_estimate::EffectiveBracketTier::default(),
         );
         let services_none = PlannerServices::new(PlayerId(0), &config, policies, ctx_none);
         let weights_none = services_none.context.adjusted_weights.for_turn(turn);

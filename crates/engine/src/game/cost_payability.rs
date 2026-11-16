@@ -87,6 +87,7 @@ pub(crate) fn target_filter_has_x_mana_value_constraint(filter: &TargetFilter) -
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -289,6 +290,7 @@ pub(crate) fn relax_x_mana_value_constraint(filter: &TargetFilter) -> TargetFilt
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -2084,20 +2086,14 @@ fn has_enough_tap_creatures(
     filter: &TargetFilter,
     exclude_source: bool,
 ) -> bool {
-    // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
-    // activated ability).
-    let ctx = FilterContext::from_source_with_controller(source, player)
-        .with_granting_object(granting_object);
-    let eligible = state.battlefield.iter().copied().filter(|&id| {
-        #[cfg(feature = "test-support")]
-        crate::game::perf_counters::record_tap_creature_cost_visit();
-        if exclude_source && id == source {
-            return false;
-        }
-        state.objects.get(&id).is_some_and(|o| {
-            o.controller == player && !o.tapped && matches_target_filter(state, id, filter, &ctx)
-        })
-    });
+    let eligible = tap_creature_candidates(
+        state,
+        player,
+        source,
+        granting_object,
+        filter,
+        exclude_source,
+    );
     match requirement {
         // CR 107.3a + CR 601.2b: X in a "Tap X untapped [type] you control" cost
         // is chosen during announcement, and X=0 is always legal (mirrors the
@@ -2126,6 +2122,100 @@ fn has_enough_tap_creatures(
             comparator.evaluate(total_positive_power, *value)
         }
     }
+}
+
+/// CR 601.2b: the untapped, filter-matching permanents `player` controls that a
+/// `TapCreatures` cost can tap. "You" in a cost is the cost's payer (CR 109.5).
+fn tap_creature_candidates<'a>(
+    state: &'a GameState,
+    player: PlayerId,
+    source: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    filter: &'a TargetFilter,
+    exclude_source: bool,
+) -> impl Iterator<Item = ObjectId> + 'a {
+    let ctx = FilterContext::from_source_with_controller(source, player)
+        .with_granting_object(granting_object);
+    state.battlefield.iter().copied().filter(move |&id| {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_tap_creature_cost_visit();
+        if exclude_source && id == source {
+            return false;
+        }
+        state.objects.get(&id).is_some_and(|o| {
+            o.controller == player && !o.tapped && matches_target_filter(state, id, filter, &ctx)
+        })
+    })
+}
+
+/// CR 118.3 + CR 601.2h: one battlefield-object leg of a spell's cost whose
+/// objects must stay available beside the mana payment: exactly `count` of
+/// `candidates`, held for the leg's `use_`.
+#[derive(Debug, Clone)]
+pub(super) struct ReservableLeg {
+    pub(super) reserved_use: super::casting::ReservedUse,
+    pub(super) count: usize,
+    pub(super) candidates: Vec<ObjectId>,
+}
+
+/// CR 118.3 + CR 601.2h: the legs of a spell's cost `legs` that hold
+/// battlefield objects beside its mana: a counted `TapCreatures` leg (the
+/// objects must stay untapped, CR 118.3), and each counted sacrifice, exile or
+/// return leg over battlefield objects (CR 601.2g: they may be tapped for mana
+/// first, but must still be there). Hand and graveyard legs can't make mana; a
+/// leg whose count the joint model doesn't represent isn't reserved.
+pub(super) fn reservable_battlefield_legs(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    legs: &[AbilityCost],
+) -> Vec<ReservableLeg> {
+    let mut reservable = Vec::new();
+    for leg in legs {
+        if let AbilityCost::TapCreatures {
+            requirement: TapCreaturesRequirement::Count { count },
+            filter,
+        } = leg
+        {
+            if *count != u32::MAX {
+                reservable.push(ReservableLeg {
+                    reserved_use: super::casting::ReservedUse::Untapped,
+                    count: *count as usize,
+                    candidates: tap_creature_candidates(state, player, source, None, filter, false)
+                        .collect(),
+                });
+            }
+            continue;
+        }
+        let mut object_legs = Vec::new();
+        collect_object_cost_legs(
+            state,
+            player,
+            source,
+            None,
+            leg,
+            CostSourceRole::SpellBeingCast,
+            &mut object_legs,
+        );
+        for object_leg in object_legs {
+            let ObjectLegDemand::Exactly(count) = object_leg.demand else {
+                continue;
+            };
+            let candidates: Vec<ObjectId> = object_leg
+                .candidates
+                .into_iter()
+                .filter(|id| state.battlefield.contains(id))
+                .collect();
+            if !candidates.is_empty() {
+                reservable.push(ReservableLeg {
+                    reserved_use: super::casting::ReservedUse::Present,
+                    count,
+                    candidates,
+                });
+            }
+        }
+    }
+    reservable
 }
 
 /// CR 117.1 + CR 118.3: Infer the source zone for a non-self
