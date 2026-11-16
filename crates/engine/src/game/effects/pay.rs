@@ -4200,6 +4200,34 @@ mod tests {
         );
     }
 
+    /// F1 gate exclusion (CR 608.2d + CR 118.5): a *scaled* optional mana
+    /// payment is never feasibility-gated, even with nothing payable — times=0
+    /// pays {0} trivially, so the offer is always possible and must surface.
+    /// Leyline Tyrant shape (base {R}, scale X) with an empty pool and no
+    /// permanents but the source. Paired negative: the unfunded extort row in
+    /// `super::tests` proves the same gate *does* suppress unscaled fixed-mana
+    /// offers, so only the `scale: None` guard flips this assertion.
+    #[test]
+    fn scaled_optional_pay_cost_is_never_feasibility_gated() {
+        use crate::game::effects::resolve_ability_chain;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_leyline_tyrant(&mut state);
+        assert!(
+            state.players[0].mana_pool.is_empty(),
+            "reach-guard: the payer has no mana at all"
+        );
+        let mut pay = scaled_pay(source_id, red_unit(), variable_x());
+        pay.optional = true;
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay, &mut events, 0).unwrap();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }),
+            "an unfunded pay-any-amount offer must still surface, got {:?}",
+            state.waiting_for
+        );
+    }
+
     /// CR 107.3a + CR 107.3f: Elenda and Azor's `{X}{W}{U}{B}` still opens the
     /// X prompt with `ConcretizeX` and still demands the colored pips on submit.
     #[test]

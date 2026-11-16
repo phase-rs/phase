@@ -878,7 +878,8 @@ fn player_matches_filter_as(
         // reason as the arm above — the fallback below is fail-OPEN, and
         // without them a dead slot would match every player (PR #8881).
         TargetFilter::SpecificPlayer { id } => *id == player_id,
-        TargetFilter::None => false,
+        // CR 603.2e + CR 201.5: An object-source SelfRef can never match a player.
+        TargetFilter::SelfRef | TargetFilter::None => false,
         // The binder leaves those leaves under the boolean shape the condition
         // was written in (`Not { slot }`, `Or { slot, slot }`, `And { … }`), so
         // the shape has to be evaluated here rather than fall through to the
@@ -990,7 +991,7 @@ pub(super) fn target_filter_matches_object(
         TargetFilter::Opponent => false,
         // CR 109.5: OriginalController is a player reference, not an object.
         TargetFilter::OriginalController => false,
-        TargetFilter::ScopedPlayer => false,
+        TargetFilter::ScopedPlayer | TargetFilter::ChoiceAssignment { .. } => false,
         // SpecificPlayer scopes to a player, not an object — never matches an object.
         TargetFilter::SpecificPlayer { .. } => false,
         // CR 607 (by analogy): PlayerWhoChoseLabel scopes to players, not objects.
@@ -1257,6 +1258,7 @@ fn count_matching_trigger_event_subjects(
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCopied { .. }
         | GameEvent::XValueChosen { .. }
@@ -1291,6 +1293,7 @@ fn count_matching_trigger_event_subjects(
         | GameEvent::ObjectConjured { .. }
         | GameEvent::CardCopyCreated { .. }
         | GameEvent::EffectResolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         // CR 116.2c: carries a group key and a player, no object subject to
         // count for a "one or more <FILTER> …" trigger filter.
@@ -2597,7 +2600,7 @@ pub(super) fn attack_target_type_matches(
             crate::types::triggers::AttackTargetFilter::Player,
             crate::game::combat::AttackTarget::Player(_)
         ) | (
-            crate::types::triggers::AttackTargetFilter::Planeswalker,
+            crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None },
             crate::game::combat::AttackTarget::Planeswalker(_)
         ) | (
             crate::types::triggers::AttackTargetFilter::PlayerOrPlaneswalker,
@@ -3420,16 +3423,20 @@ pub(super) fn match_phase(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::PhaseChanged { phase } = event {
-        let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
-            phase == trigger_phase
-        } else {
-            true
-        };
-        phase_matches && valid_player_matches(trigger, state, state.active_player, source_context)
+    // CR 805.4d: a fanned occurrence admits exactly like the production event
+    // (active-player-based); its bound player is binding context, not an
+    // admission criterion.
+    let phase = match event {
+        GameEvent::PhaseChanged { phase } => phase,
+        GameEvent::PhaseChangedForPlayer { phase, .. } => phase,
+        _ => return false,
+    };
+    let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
+        phase == trigger_phase
     } else {
-        false
-    }
+        true
+    };
+    phase_matches && valid_player_matches(trigger, state, state.active_player, source_context)
 }
 
 // CR 603.4: Match when the trigger's source becomes the target of a spell or ability.
@@ -3823,7 +3830,7 @@ pub(super) fn match_exiled(
     }
 }
 
-/// CR 701.3a: Attached triggers compare the object that became attached
+/// CR 701.3a + CR 603.2e: Attached triggers compare the object that became attached
 /// (`valid_card`) with the host it is attached to (`valid_target`).
 pub(super) fn match_attached(
     event: &GameEvent,
@@ -3832,61 +3839,25 @@ pub(super) fn match_attached(
     state: &GameState,
 ) -> bool {
     let source_id = source_event_subject_id(source_context);
-    match event {
-        GameEvent::EffectResolved {
-            kind: EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip,
-            source_id: eventsource_id,
-            ..
-        } => {
-            let attachment_id = if matches!(
-                event,
-                GameEvent::EffectResolved {
-                    kind: EffectKind::AttachAll,
-                    ..
-                }
-            ) {
-                source_id
-            } else {
-                *eventsource_id
-            };
-
-            if attachment_id != source_id
-                && !matches!(trigger.valid_target, Some(TargetFilter::SelfRef))
-            {
-                return false;
-            }
-
-            valid_card_matches(trigger, state, attachment_id, source_context)
-                && attached_host_matches(trigger, state, attachment_id, source_context)
-        }
-        _ => false,
-    }
-}
-
-fn attached_host_matches(
-    trigger: &TriggerDefinition,
-    state: &GameState,
-    attachment_id: ObjectId,
-    source_context: &TriggerSourceContext,
-) -> bool {
-    let Some(host) = state
-        .objects
-        .get(&attachment_id)
-        .and_then(|obj| obj.attached_to)
+    let GameEvent::Attached {
+        attachment_id,
+        target,
+    } = event
     else {
         return false;
     };
-    let Some(filter) = trigger.valid_target.as_ref() else {
-        return true;
-    };
-    match host {
-        crate::game::game_object::AttachTarget::Object(object_id) => {
-            target_filter_matches_object(state, object_id, filter, source_context)
-        }
-        crate::game::game_object::AttachTarget::Player(player_id) => {
-            player_matches_filter(filter, state, player_id, source_context)
-        }
+    let attachment_id = *attachment_id;
+
+    if attachment_id != source_id && !matches!(trigger.valid_target, Some(TargetFilter::SelfRef)) {
+        return false;
     }
+
+    valid_card_matches(trigger, state, attachment_id, source_context)
+        && trigger
+            .valid_target
+            .as_ref()
+            .map(|filter| target_ref_matches_filter(target, filter, state, source_context))
+            .unwrap_or(true)
 }
 
 fn target_ref_matches_filter(
@@ -3900,6 +3871,11 @@ fn target_ref_matches_filter(
             target_filter_matches_object(state, *object_id, filter, source_context)
         }
         TargetRef::Player(player_id) => {
+            // CR 603.2e + CR 201.5: An object-source SelfRef ("this creature", "this permanent")
+            // requires an object host and can never match a player host.
+            if matches!(filter, TargetFilter::SelfRef) {
+                return false;
+            }
             player_matches_filter(filter, state, *player_id, source_context)
         }
     }
@@ -7662,10 +7638,9 @@ mod tests {
         let mut trigger = make_trigger(TriggerMode::Attached);
         trigger.valid_card = Some(TargetFilter::SelfRef);
         trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Equip,
-            source_id: equipment,
-            subject: None,
+        let event = GameEvent::Attached {
+            attachment_id: equipment,
+            target: TargetRef::Object(creature),
         };
 
         assert!(match_attached(
@@ -7705,10 +7680,9 @@ mod tests {
         let mut trigger = make_trigger(TriggerMode::Attached);
         trigger.valid_card = Some(TargetFilter::SelfRef);
         trigger.valid_target = Some(TargetFilter::Typed(TypedFilter::creature()));
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Equip,
-            source_id: equipment,
-            subject: None,
+        let event = GameEvent::Attached {
+            attachment_id: equipment,
+            target: TargetRef::Object(land),
         };
 
         assert!(!match_attached(
@@ -7753,10 +7727,9 @@ mod tests {
         state.objects.get_mut(&equipment).unwrap().attached_to = Some(creature.into());
 
         let trigger = make_trigger(TriggerMode::Attached);
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Equip,
-            source_id: other_equipment,
-            subject: None,
+        let event = GameEvent::Attached {
+            attachment_id: other_equipment,
+            target: TargetRef::Object(creature),
         };
 
         assert!(!match_attached(
@@ -7768,7 +7741,7 @@ mod tests {
     }
 
     /// CR 701.3a Pattern 2: "Whenever an Aura becomes attached to ~" fires when
-    /// an Aura (eventsource_id) attaches to the trigger source (source_id).
+    /// an Aura (attachment_id) attaches to the trigger source (source_id).
     /// Cards: Bramble Elemental, Brood Keeper.
     #[test]
     fn attached_pattern2_fires_when_aura_attaches_to_host() {
@@ -7804,11 +7777,10 @@ mod tests {
         ));
         trigger.valid_target = Some(TargetFilter::SelfRef);
 
-        // Event: Attach resolved with the Aura as source
-        let event = GameEvent::EffectResolved {
-            kind: EffectKind::Attach,
-            source_id: aura,
-            subject: None,
+        // Event: Attached event with the Aura as attachment and host as target
+        let event = GameEvent::Attached {
+            attachment_id: aura,
+            target: TargetRef::Object(host),
         };
         assert!(
             match_attached(
@@ -7829,9 +7801,13 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.get_mut(&aura).unwrap().attached_to = Some(other_host.into());
+        let event_other = GameEvent::Attached {
+            attachment_id: aura,
+            target: TargetRef::Object(other_host),
+        };
         assert!(
             !match_attached(
-                &event,
+                &event_other,
                 &trigger,
                 &test_trigger_source_context(&state, host),
                 &state
@@ -19945,5 +19921,62 @@ mod tests {
             !reanimation_matches(FormatConfig::standard(), p0, p1, None),
             "Standard has no shared pile"
         );
+    }
+
+    /// Row 10a — the subtype-defended restriction scope never appears in an
+    /// "attacked:" trigger position, so the pure type matcher rejects it for
+    /// every attack target. The `matches!` has no wildcard, which compiles
+    /// silently on a widened arm — this pin is the revert-fail mechanism
+    /// (widening the arm to `{ .. }` is the revert).
+    #[test]
+    fn subtype_defended_scope_never_matches_attack_trigger_position() {
+        use crate::types::triggers::AttackTargetFilter;
+        let subtype = AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
+        };
+        for target in [
+            crate::game::combat::AttackTarget::Player(PlayerId(0)),
+            crate::game::combat::AttackTarget::Planeswalker(ObjectId(7)),
+            crate::game::combat::AttackTarget::Battle(ObjectId(9)),
+        ] {
+            assert!(
+                !attack_target_type_matches(target, &subtype),
+                "restriction-only subtype scope must not match an attack-trigger position"
+            );
+        }
+        // Paired positive: the pinned value is the real production shape,
+        // and the unparameterized arm still matches its own position.
+        assert!(
+            attack_target_type_matches(
+                crate::game::combat::AttackTarget::Planeswalker(ObjectId(7)),
+                &AttackTargetFilter::Planeswalker { subtype: None },
+            ),
+            "reach-guard: the unparameterized Planeswalker arm still matches"
+        );
+    }
+
+    /// Row 10d — the restriction-only subtype scope never binds an attacked
+    /// player for "whenever you attack a player" triggers. `matches!` on
+    /// `Some(Player | Monarch)` is false by default for every other variant.
+    #[test]
+    fn subtype_defended_scope_never_binds_attacked_player() {
+        use crate::types::triggers::AttackTargetFilter;
+        let mut trigger = make_trigger(TriggerMode::Attacks);
+        trigger.attack_target_filter = Some(AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
+        });
+        assert!(
+            !you_attack_binds_attacked_player(&trigger),
+            "a restriction-only scope binds no attacked player"
+        );
+        // Paired positives: the player-typed slots still bind.
+        for filter in [AttackTargetFilter::Player, AttackTargetFilter::Monarch] {
+            let mut sibling = make_trigger(TriggerMode::Attacks);
+            sibling.attack_target_filter = Some(filter);
+            assert!(
+                you_attack_binds_attacked_player(&sibling),
+                "reach-guard: player-typed attack slots still bind"
+            );
+        }
     }
 }
