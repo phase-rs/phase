@@ -24015,6 +24015,22 @@ impl Drop for HeadPaymentLatch<'_> {
 /// iteratively. The `depth == 0` prelude (state-clearing, the resolution
 /// counter, the BeginGame/Mulligan guards) runs once in `resolve_ability_chain`
 /// and is intentionally NOT repeated per iteration.
+/// A copy of `ability` carrying `rebind`'s edit, boxed. `resolve_chain_body`
+/// rebinds its ability at many independent points; each copy built inline
+/// would be a `ResolvedAbility`-sized slot in that function's frame, which every
+/// nested chain step repeats (a debug build reserves every slot of a function
+/// whether or not its branch runs). Building the copy here keeps it out of
+/// that frame, leaving a pointer behind.
+#[inline(never)]
+fn rebound_ability(
+    ability: &ResolvedAbility,
+    rebind: impl FnOnce(&mut ResolvedAbility),
+) -> Box<ResolvedAbility> {
+    let mut owned = ability.clone();
+    rebind(&mut owned);
+    Box::new(owned)
+}
+
 fn resolve_chain_body(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -24390,7 +24406,6 @@ fn resolve_chain_body(
     // Song's Diary's `CastFromZone { target: ParentTarget }`). No interactive
     // `WaitingFor::NamedChoice` / `ChooseFromZoneChoice` is raised. This mirrors
     // the resolution-point handling of `TargetSelectionMode::Random` for targets.
-    let random_choice_owned;
     let random_is_choose = matches!(
         &ability.effect,
         Effect::Choose { selection, .. }
@@ -24400,18 +24415,17 @@ fn resolve_chain_body(
         &ability.effect,
         Effect::ChooseFromZone { selection, .. } if selection.is_random()
     );
-    let (ability, random_choice_resolved) = if random_is_choose || random_is_choose_from_zone {
-        let mut owned = ability.clone();
-        if random_is_choose {
-            choose::resolve_random_in_chain(state, &mut owned, events);
-        } else {
-            choose_from_zone::resolve_random_in_chain(state, &mut owned, events);
-        }
-        random_choice_owned = owned;
-        (&random_choice_owned, true)
-    } else {
-        (ability, false)
-    };
+    let random_choice_owned = (random_is_choose || random_is_choose_from_zone).then(|| {
+        rebound_ability(ability, |owned| {
+            if random_is_choose {
+                choose::resolve_random_in_chain(state, owned, events);
+            } else {
+                choose_from_zone::resolve_random_in_chain(state, owned, events);
+            }
+        })
+    });
+    let random_choice_resolved = random_choice_owned.is_some();
+    let ability = random_choice_owned.as_deref().unwrap_or(ability);
 
     if effect_depends_on_missing_chosen_player(ability) {
         state.cost_payment_failed_flag = true;
@@ -26511,26 +26525,21 @@ fn resolve_chain_body(
             }
         }
     }
-    let linked_batch_owned;
-    let ability = if linked_batch.is_empty() || ability.sub_ability.is_none() {
-        ability
-    } else {
-        let mut owned = ability.clone();
-        if let Some(sub) = owned.sub_ability.as_mut() {
-            bind_resolution_exile_batch_paths(sub, &linked_batch);
-        }
-        linked_batch_owned = owned;
-        &linked_batch_owned
-    };
-    let result_context_owned;
-    let ability = if let Some(result) = immediate_effect_result {
-        let mut owned = ability.clone();
-        owned.context.prior_effect_result = Some(result);
-        result_context_owned = owned;
-        &result_context_owned
-    } else {
-        ability
-    };
+    let linked_batch_owned =
+        (!linked_batch.is_empty() && ability.sub_ability.is_some()).then(|| {
+            rebound_ability(ability, |owned| {
+                if let Some(sub) = owned.sub_ability.as_mut() {
+                    bind_resolution_exile_batch_paths(sub, &linked_batch);
+                }
+            })
+        });
+    let ability = linked_batch_owned.as_deref().unwrap_or(ability);
+    let result_context_owned = immediate_effect_result.map(|result| {
+        rebound_ability(ability, |owned| {
+            owned.context.prior_effect_result = Some(result);
+        })
+    });
+    let ability = result_context_owned.as_deref().unwrap_or(ability);
     // CR 701.9a + CR 608.2c + CR 400.7: Capture the result from the active,
     // operation-owned discard frame. Unlike an event-slice or global ledger,
     // the frame remains exact through replacement redirection and cannot be
@@ -26614,25 +26623,22 @@ fn resolve_chain_body(
     //     The stamp is in any case largely redundant with
     //     `apply_parent_chain_context`, which re-clones the parent's whole
     //     context onto each child at every hand-off.
-    let performed_outcome_owned;
-    let ability = if let Some(performed) = payment_choice
+    let performed_outcome_owned = payment_choice
         .map(|choice| choice == AutoMayChoice::Accept)
         .or_else(|| resolver_performed_outcome(ability, &events[events_before..]))
-    {
-        let mut owned = ability.clone();
-        if payment_choice.is_some() {
-            // CR 118.12 + CR 118.12a: Counter delivery is not payment, and
-            // declining payment cannot undo Flash's preceding optional put.
-            // Publish only after this root's incoming gate and effect.
-            owned.context.optional_effect_performed = performed;
-        } else {
-            owned.set_optional_effect_performed_recursive(performed);
-        }
-        performed_outcome_owned = owned;
-        &performed_outcome_owned
-    } else {
-        ability
-    };
+        .map(|performed| {
+            rebound_ability(ability, |owned| {
+                if payment_choice.is_some() {
+                    // CR 118.12 + CR 118.12a: Counter delivery is not payment, and
+                    // declining payment cannot undo Flash's preceding optional put.
+                    // Publish only after this root's incoming gate and effect.
+                    owned.context.optional_effect_performed = performed;
+                } else {
+                    owned.set_optional_effect_performed_recursive(performed);
+                }
+            })
+        });
+    let ability = performed_outcome_owned.as_deref().unwrap_or(ability);
 
     // CR 608.2c: Record the objects affected by this effect as a tracked set so
     // downstream sub-abilities can resolve "this way" references (pronouns,
@@ -26799,15 +26805,13 @@ fn resolve_chain_body(
     // written, so no later resolution can observe it.
     let bounded_move_refused =
         bounded_move_calls > 0 && bounded_move_refusals == bounded_move_calls;
-    let bounded_refusal_owned;
-    let ability = if bounded_move_refused && ability.context.optional_effect_performed {
-        let mut owned = ability.clone();
-        owned.context.optional_effect_performed = false;
-        bounded_refusal_owned = owned;
-        &bounded_refusal_owned
-    } else {
-        ability
-    };
+    let bounded_refusal_owned = (bounded_move_refused && ability.context.optional_effect_performed)
+        .then(|| {
+            rebound_ability(ability, |owned| {
+                owned.context.optional_effect_performed = false;
+            })
+        });
+    let ability = bounded_refusal_owned.as_deref().unwrap_or(ability);
 
     // CR 608.2c: "[Mandatory action]. If you do, [rider]." — seed the
     // performed-flag for a mandatory parent whose action just occurred.
@@ -26834,8 +26838,7 @@ fn resolve_chain_body(
     // there is a harmless no-op: a `CurrentScopeSucceeded` rider resolves against
     // `!cost_payment_failed_flag` (not this flag), and that guard already requires
     // `!cost_payment_failed_flag` — the same condition gating this seed.
-    let mandatory_rider_owned;
-    let ability = if payment_choice.is_none()
+    let mandatory_rider_owned = if payment_choice.is_none()
         && !ability.optional
         && !ability.context.optional_effect_performed
         && !compound_run_unperformed(ability)
@@ -26850,10 +26853,9 @@ fn resolve_chain_body(
                     .as_ref()
                     .is_some_and(condition_depends_on_effect_performed)
         }) {
-        let mut owned = ability.clone();
-        owned.context.optional_effect_performed = true;
-        mandatory_rider_owned = owned;
-        &mandatory_rider_owned
+        Some(rebound_ability(ability, |owned| {
+            owned.context.optional_effect_performed = true;
+        }))
     // CR 118.12: a member that did nothing fails its compound; a suspended one has not resolved.
     } else if !ability.optional
         && !ability.context.optional_effect_performed
@@ -26864,37 +26866,32 @@ fn resolve_chain_body(
             sub.sub_link == SubAbilityLink::ContinuationStep && sub.condition.is_none()
         })
     {
-        let mut owned = ability.clone();
-        owned.context.unperformed_compound_instruction = Some(EffectKind::from(&ability.effect));
-        mandatory_rider_owned = owned;
-        &mandatory_rider_owned
+        Some(rebound_ability(ability, |owned| {
+            owned.context.unperformed_compound_instruction =
+                Some(EffectKind::from(&ability.effect));
+        }))
     } else {
-        ability
+        None
     };
-    let amassed_army_owned;
-    let ability = if let Some(snapshot) = &amassed_army_object {
-        let mut owned = ability.clone();
-        owned.set_amassed_army_object_recursive(snapshot.clone());
-        amassed_army_owned = owned;
-        &amassed_army_owned
-    } else {
-        ability
-    };
+    let ability = mandatory_rider_owned.as_deref().unwrap_or(ability);
+    let amassed_army_owned = amassed_army_object.as_ref().map(|snapshot| {
+        rebound_ability(ability, |owned| {
+            owned.set_amassed_army_object_recursive(snapshot.clone());
+        })
+    });
+    let ability = amassed_army_owned.as_deref().unwrap_or(ability);
     // CR 608.2c + CR 400.7j: Stamp the earlier-instruction referent onto the
     // ability carrier before walking the sub-chain — mirrors `amassed_army`
     // so Demonstrative / CostPaidObject quantities on a SequentialSibling
     // (Consuming Vapors: "You gain life equal to that creature's toughness")
     // resolve against the sacrificed object even when a later hand-off path
     // forgets the explicit `apply_parent_chain_context` argument (issue #5925).
-    let effect_context_owned;
-    let ability = if let Some(snapshot) = &effect_context_object {
-        let mut owned = ability.clone();
-        owned.set_effect_context_object_recursive(snapshot.clone());
-        effect_context_owned = owned;
-        &effect_context_owned
-    } else {
-        ability
-    };
+    let effect_context_owned = effect_context_object.as_ref().map(|snapshot| {
+        rebound_ability(ability, |owned| {
+            owned.set_effect_context_object_recursive(snapshot.clone());
+        })
+    });
+    let ability = effect_context_owned.as_deref().unwrap_or(ability);
     let announced_owned;
     let ability = match &announced_object {
         Some(snapshot) if ability.sub_ability.is_some() => {
@@ -26909,22 +26906,19 @@ fn resolve_chain_body(
     // now, on the continuation itself, so an instruction that resolves in between
     // — a replacement's own child chain, with its own reveal and any pause —
     // cannot change which cards the placement moves.
-    let revealed_pile_owned;
-    let ability = if matches!(
+    let revealed_pile_owned = (matches!(
         &ability.effect,
         Effect::RevealUntil {
             matched_disposition: RevealUntilDisposition::RevealOnly,
             ..
         }
-    ) && ability.sub_ability.is_some()
-    {
-        let mut owned = ability.clone();
-        bind_revealed_pile_placement(&mut owned, &state.last_revealed_ids);
-        revealed_pile_owned = owned;
-        &revealed_pile_owned
-    } else {
-        ability
-    };
+    ) && ability.sub_ability.is_some())
+    .then(|| {
+        rebound_ability(ability, |owned| {
+            bind_revealed_pile_placement(owned, &state.last_revealed_ids);
+        })
+    });
+    let ability = revealed_pile_owned.as_deref().unwrap_or(ability);
 
     // CR 104.1 + CR 608.2c: the instruction that just resolved recorded the
     // game's end (an effect-based win, or a loss that left one player/team).
