@@ -4605,6 +4605,10 @@ pub(crate) fn deliver_replaced_zone_change(
                 enter_as_copy.as_deref(),
                 events,
             );
+            // The face-down profile (morph/manifest/disguise/cloak) may have changed
+            // the object's characteristics (e.g., a manifested land becomes a creature).
+            // Update the battlefield entry record to reflect the entry-time state.
+            crate::game::restrictions::update_battlefield_entry_record_for_object(state, object_id);
         }
         // CR 614.1c + CR 611.2a + CR 616.1: install every "and with …" entry
         // grant the applied replacements folded onto this event, in
