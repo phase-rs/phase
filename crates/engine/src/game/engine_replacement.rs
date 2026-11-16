@@ -1,3 +1,4 @@
+use crate::types::game_state::EntryEventReplay;
 use std::collections::HashSet;
 
 use crate::ai_support::copy_target_mana_value_ceiling;
@@ -26,6 +27,7 @@ use crate::types::resolution::ChildStackDepth;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def_with_targets;
+use super::casting_costs::AnsweredLifeGain;
 use super::effects;
 use super::effects::deal_damage::{apply_damage_after_replacement, DamageContext};
 use super::effects::destroy::apply_destroy_after_replacement;
@@ -260,6 +262,11 @@ pub(super) fn handle_replacement_choice(
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
     let WaitingFor::Priority { player } = waiting_for else {
+        state.waiting_for = waiting_for.clone();
+        // CR 603.6a + CR 616.1f: this answer's battlefield entries leave with its
+        // buffer. Hand them to the entry gate: an entrant whose instruction is
+        // still suspended is held for the scan that follows its last co-entrant.
+        super::triggers::park_entry_observer_triggers_if_paused(state, events, action_event_start);
         return Ok(waiting_for);
     };
     // CR 800.4j: the handler hands a settled choice back to the active player's
@@ -459,6 +466,17 @@ fn handle_replacement_choice_inner(
         .as_ref()
         .map(|pending| pending.unrepresentable_life_change)
         .unwrap_or_default();
+    // CR 101.4 + CR 616.1: the recipient whose life gain this answer settles.
+    // The Prevented arm stages a substitute for a life-gain cost that is
+    // mid-staging on this recipient, and its payload no longer names them.
+    let parked_life_gain_recipient =
+        state
+            .pending_replacement
+            .as_ref()
+            .and_then(|pending| match pending.proposed {
+                ProposedEvent::LifeGain { player_id, .. } => Some(player_id),
+                _ => None,
+            });
     // CR 701.21a + CR 614.1: An inner graveyard move can have parked after a
     // sacrifice was accepted. The resumed payload is only a ZoneChange, so
     // capture the enclosing sacrifice before `continue_replacement` consumes
@@ -1054,19 +1072,32 @@ fn handle_replacement_choice_inner(
                 // parked record's policy decides an unrepresentable final edit:
                 // `Reject` fails the answer (the boundary restores the record and
                 // its prompt), `IgnoreImpossible` skips the change and resumes.
-                gain @ ProposedEvent::LifeGain { .. } => {
+                gain @ ProposedEvent::LifeGain {
+                    player_id, amount, ..
+                } => {
                     // A settle that parks a prompt (the Horde loss redirect's
                     // mill choice; gain itself never pauses) early-returns the
                     // parked prompt like the Mill arm above, so the
                     // unconditional `waiting_for = Priority` reset below does
                     // not clobber it.
-                    match settle_life_gain_after_choice(state, gain, parked_life_policy, events) {
-                        Ok(_) => {}
-                        Err(LifeChangeError::Deferred(_)) => {
-                            return Ok(state.waiting_for.clone());
-                        }
-                        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
-                            return Err(unrepresentable.into());
+                    // CR 101.4: a life-gain cost's recipient answering mid-staging
+                    // joins the batch applied together instead of applying alone.
+                    if super::casting_costs::stage_answered_life_gain_cost(
+                        state,
+                        player_id,
+                        AnsweredLifeGain::Gained(amount),
+                    ) {
+                        // Staged; the cost resumes and settles the batch.
+                    } else {
+                        match settle_life_gain_after_choice(state, gain, parked_life_policy, events)
+                        {
+                            Ok(_) => {}
+                            Err(LifeChangeError::Deferred(_)) => {
+                                return Ok(state.waiting_for.clone());
+                            }
+                            Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+                                return Err(unrepresentable.into());
+                            }
                         }
                     }
                 }
@@ -1931,6 +1962,24 @@ fn handle_replacement_choice_inner(
             {
                 return Ok(state.waiting_for.clone());
             }
+            // CR 101.4 + CR 614.6: the answer replaced a life-gain cost
+            // recipient's gain outright while the cost is mid-staging. Its
+            // substitute joins the cost's staged batch rather than running now,
+            // so the recipients still owed read the life totals from before the
+            // instruction; the cost then resumes, stages them and settles all.
+            if parked_life_gain_recipient.is_some_and(|recipient| {
+                super::casting_costs::stage_answered_life_gain_cost(
+                    state,
+                    recipient,
+                    AnsweredLifeGain::Substituted,
+                )
+            }) {
+                state.waiting_for = WaitingFor::Priority {
+                    player: state.active_player,
+                };
+                super::engine::resume_pending_continuation_if_priority(state, events)?;
+                return Ok(state.waiting_for.clone());
+            }
             if let Some(loser) = pending_phase_drain_life_loser {
                 // CR 614.1a: the chosen replacement prevented the loss outright,
                 // so no life left this player and nothing may narrate one.
@@ -2721,7 +2770,8 @@ fn handle_persist_chosen_attribute_choice(
             .get(&source_id)
             .is_some_and(|aura| aura.attached_to.is_none())
     {
-        match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+        match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id, events)
+        {
             // CR 303.4g does NOT apply on this route: `NoLegalHost` here means the
             // entrant already ENTERED the battlefield as a non-Aura and only became
             // an Aura when its `BecomeCopy` replacement realized post-entry. There is
@@ -2996,18 +3046,25 @@ fn handle_copy_token_source_choice(
     Ok(state.waiting_for.clone())
 }
 
+/// CR 707.5 + CR 603.6a: the copy-choice answer, plus the same entry park as
+/// [`handle_replacement_choice`]. Answering can publish the entrant and then
+/// stop on a co-entrant's prompt; that entry leaves with this answer's buffer.
 pub(super) fn handle_copy_target_choice(
     state: &mut GameState,
     waiting_for: WaitingFor,
     target: Option<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    let action_event_start = events.len();
     let waiting_for = apply_copy_target_choice(state, waiting_for, target, events)?;
     state.waiting_for = waiting_for;
     // CR 117.2e + CR 608.2c: every successful copy answer shares this boundary.
     // A settled liminal batch can expose an enclosing copy owner or replacement
     // drain; finish that resolution before priority, preserving any new prompt.
     super::engine::resume_pending_continuation_if_priority(state, events)?;
+    if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        super::triggers::park_entry_observer_triggers_if_paused(state, events, action_event_start);
+    }
     Ok(state.waiting_for.clone())
 }
 
@@ -3169,7 +3226,7 @@ fn apply_copy_target_choice(
                 source_id,
                 events,
                 post_actions,
-                false,
+                EntryEventReplay::AlreadyDelivered,
                 CopyEntryCounters::ReplacementsOnly,
             )? {
                 if state.active_counter_additions().is_none() {
@@ -3346,7 +3403,7 @@ fn apply_copy_target_choice(
             source_id,
             events,
             counter_pause_post_actions,
-            true,
+            EntryEventReplay::Required,
             CopyEntryCounters::Merged {
                 exceptions: held_exceptions,
             },
@@ -3472,7 +3529,7 @@ fn apply_copy_target_choice(
         source_id,
         events,
         Vec::new(),
-        true,
+        EntryEventReplay::Required,
         CopyEntryCounters::Merged {
             exceptions: held_exceptions,
         },
@@ -3515,7 +3572,7 @@ fn finish_copy_target_choice_entry(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
-    replay_entry_events: bool,
+    replay_entry_events: EntryEventReplay,
     entry_counters: CopyEntryCounters<'_>,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // Force a full layer pass after the copy chain so the realized
@@ -3595,7 +3652,7 @@ fn finish_copy_target_choice_entry_counters(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     mut counter_pause_post_actions: Vec<PendingCounterPostAction>,
-    replay_entry_events: bool,
+    replay_entry_events: EntryEventReplay,
     entry_counters: CopyEntryCounters<'_>,
     resume_stage: crate::types::game_state::CopyEntryResumeStage,
 ) -> Result<Option<WaitingFor>, EngineError> {
@@ -3729,7 +3786,7 @@ pub(crate) fn resume_copy_target_choice_entry(
                 entrant.object_id,
                 events,
                 Vec::new(),
-                true,
+                EntryEventReplay::Required,
                 resume_stage,
             )?
         }
@@ -3834,7 +3891,7 @@ fn finish_copy_target_choice_entry_after_counters(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
     counter_pause_post_actions: Vec<PendingCounterPostAction>,
-    replay_entry_events: bool,
+    replay_entry_events: EntryEventReplay,
     resume_stage: crate::types::game_state::CopyEntryResumeStage,
 ) -> Result<Option<WaitingFor>, EngineError> {
     // CR 614.12 + CR 707.9: Surface any mandatory "as this enters, choose ..."
@@ -3894,7 +3951,7 @@ fn finish_copy_target_choice_entry_after_counters(
     // battlefield — concede / error / chained-replacement paths can leave a
     // stale event in the vec, and we discard rather than fire a phantom entry
     // trigger.
-    if replay_entry_events {
+    if replay_entry_events == EntryEventReplay::Required {
         let delivery_start = events.len();
         if let Some(waiting_for) = replay_deferred_entry_events(state, source_id, events)? {
             state.capture_paused_zone_change_delivery_for_member(
@@ -3923,7 +3980,8 @@ fn finish_copy_target_choice_entry_after_counters(
     // CR 702.49c: a ninjutsu entry that deferred `BatchCompletion::NinjutsuPlacement`
     // while paused on `CopyTargetChoice` must run combat placement after the copy
     // resolves (mirrors the `ReturnAsAuraTarget` batch drain in engine.rs).
-    if replay_entry_events && state.active_batch_delivery().is_some() {
+    if replay_entry_events == EntryEventReplay::Required && state.active_batch_delivery().is_some()
+    {
         crate::game::zone_pipeline::drain_pending_batch_deliveries(state, events);
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Ok(Some(state.waiting_for.clone()));
@@ -3954,7 +4012,7 @@ fn finish_copy_target_choice_entry_after_counters(
     // a multi-host Aura with a token continuation), but "no card does this today"
     // is not a property the engine should depend on.
     let child_stack_start = state.resolution_stack.capture_child_boundary();
-    match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+    match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id, events) {
         // CR 303.4g does NOT apply on this route: this entrant already ENTERED the
         // battlefield as a non-Aura (Copy Enchantment enters as a plain enchantment)
         // and only became an Aura when `BecomeCopy` realized post-entry. It cannot be
@@ -4769,11 +4827,8 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
                 if *object_id == source_id
         ) || matches!(
             event,
-            GameEvent::EffectResolved {
-                kind: EffectKind::Attach,
-                source_id: attach_source_id,
-                ..
-            } if *attach_source_id == source_id
+            GameEvent::Attached { attachment_id, .. }
+                if *attachment_id == source_id
         ) {
             state.deferred_entry_events.push(event.clone());
         }
@@ -4848,34 +4903,30 @@ pub(crate) fn apply_pending_spell_resolution(
         .unwrap_or(false);
     if is_aura {
         if let Some(target) = ctx.spell_targets.first() {
-            // CR 608.3c / CR 603.2e: an Aura spell becoming attached on this
-            // resume path is an effect resolution, so emit `EffectResolved
-            // { Attach }` (Bramble Elemental) -- but only when the attachment
-            // actually moved: a same-host re-attach is a CR 701.3b no-op and
-            // must not re-trigger "becomes attached".
-            let attached = match target {
+            // CR 608.3c + CR 603.2e: an Aura spell becoming attached on this
+            // resume path publishes `GameEvent::Attached` (the single "becomes
+            // attached" trigger authority) only on an actual host transition;
+            // a same-host re-attach is a CR 701.3b no-op.
+            match target {
                 crate::types::ability::TargetRef::Object(target_id)
                     if state.battlefield.contains(target_id) =>
                 {
-                    effects::attach::attach_to_reporting_change(state, ctx.object_id, *target_id)
+                    effects::attach::attach_to_with_events(
+                        state,
+                        ctx.object_id,
+                        *target_id,
+                        events,
+                    );
                 }
-                crate::types::ability::TargetRef::Object(_) => false,
+                crate::types::ability::TargetRef::Object(_) => {}
                 crate::types::ability::TargetRef::Player(player_id) => {
-                    effects::attach::attach_to_player_reporting_change(
+                    effects::attach::attach_to_player_with_events(
                         state,
                         ctx.object_id,
                         *player_id,
-                    )
+                        events,
+                    );
                 }
-            };
-            if attached {
-                events.push(GameEvent::EffectResolved {
-                    kind: EffectKind::Attach,
-                    source_id: ctx.object_id,
-                    subject: state
-                        .capture_event_object_snapshot(ctx.object_id)
-                        .map(Box::new),
-                });
             }
         }
     }
@@ -9441,7 +9492,7 @@ mod tests {
             entering_aura,
             &mut events,
             vec![continuation],
-            false,
+            EntryEventReplay::AlreadyDelivered,
             CopyEntryCounters::ReplacementsOnly,
         )
         .expect("the host pause is not an error");
@@ -10573,7 +10624,10 @@ mod tests {
                 serde_json::Value::Array(items) => {
                     items.iter_mut().for_each(|v| walk(v, removed, edits))
                 }
-                _ => {}
+                serde_json::Value::Null
+                | serde_json::Value::Bool(_)
+                | serde_json::Value::Number(_)
+                | serde_json::Value::String(_) => {}
             }
         }
         let mut value =

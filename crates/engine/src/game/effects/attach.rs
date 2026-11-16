@@ -514,16 +514,7 @@ pub(crate) fn deliver_attach(
     source_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    let host_of = |state: &GameState| state.objects.get(&attachment_id)?.attached_to;
-    let already_on_host = host_of(state) == Some(AttachTarget::Object(target_id));
-    if let Some(old_target) = attach_to(state, attachment_id, target_id) {
-        events.push(GameEvent::Unattached {
-            attachment_id,
-            old_target,
-        });
-    }
-    // CR 701.3b: a refused or same-host attach did nothing, so it carries no subject.
-    let attached = !already_on_host && host_of(state) == Some(AttachTarget::Object(target_id));
+    let attached = attach_to_with_events(state, attachment_id, target_id, events);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Attach,
@@ -555,8 +546,6 @@ pub fn resolve_unattach_all(
         _ => (&TargetFilter::Any, &TargetFilter::Any),
     };
 
-    let target_ids = resolved_object_ids_for_filter(state, ability, target_filter);
-
     let ctx = FilterContext::from_ability(ability);
     // CR 608.2c + CR 701.3d: A context-ref attachment anaphor ("unattach it" →
     // `ParentTarget`/`ParentTargetSlot`) designates the snapshot object recorded
@@ -571,13 +560,12 @@ pub fn resolve_unattach_all(
         TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
     )
     .then(|| {
-        // CR 400.7 + CR 603.7c: substitution only. Population inside the class
-        // is 0 (zero `UnattachAll` nodes), and the one card that reaches this
-        // (`stolen uniform`) is denied a pin by
-        // `condition_names_referent_zone_change`, so `live_object_targets` is
-        // the identity here today. Applied for uniformity and defence in depth;
-        // deliberately NO early return, since a population of 0 admits no
-        // non-vacuous test.
+        // CR 400.7 + CR 603.7c: a pinned referent that has changed zones is a
+        // new object and is dropped here. Unexpected Request's delayed "unattach
+        // it" pins the Equipment its Attach attached, so an Equipment that left
+        // and returned is not unattached; Stolen Uniform is denied a pin by
+        // `condition_names_referent_zone_change`, so this is the identity for
+        // it. Deliberately NO early return: an empty pool unattaches nothing.
         //
         // Slot carve-out DOES apply: `attachment_filter` may be
         // `ParentTargetSlot`, and `effect_object_targets` indexes it
@@ -592,6 +580,23 @@ pub fn resolve_unattach_all(
             };
         super::effect_object_targets(attachment_filter, pool)
     });
+    let target_ids = match (&explicit_attachment_ids, target_filter) {
+        // CR 701.3d: "unattach it" names the attachment and no host, so it is
+        // unattached from whatever it is attached to now.
+        (Some(ids), TargetFilter::Any) => {
+            let mut hosts: Vec<ObjectId> = Vec::new();
+            for host in ids
+                .iter()
+                .filter_map(|&id| attachment_current_host(state, id))
+            {
+                if !hosts.contains(&host) {
+                    hosts.push(host);
+                }
+            }
+            hosts
+        }
+        _ => resolved_object_ids_for_filter(state, ability, target_filter),
+    };
     for target_id in target_ids {
         let attachments = state
             .objects
@@ -622,6 +627,33 @@ pub fn resolve_unattach_all(
     });
 
     Ok(())
+}
+
+/// CR 608.2c + CR 701.3b: The result of an Attach instruction — each object it
+/// actually attached, at the incarnation it had when it became attached. A
+/// refused or same-host attach did nothing and carries no subject, so it is
+/// not part of the result. A later "unattach it" names exactly these objects.
+pub(crate) fn attach_result_from_events(
+    events: &[GameEvent],
+) -> crate::types::ability::ForwardedResultContext {
+    let attached: Vec<ObjectIncarnationRef> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::EffectResolved {
+                kind: EffectKind::Attach,
+                subject: Some(subject),
+                ..
+            } => Some(subject.identity),
+            _ => None,
+        })
+        .collect();
+    crate::types::ability::ForwardedResultContext {
+        targets: attached
+            .iter()
+            .map(|pin| TargetRef::Object(pin.object_id))
+            .collect(),
+        object_incarnations: attached,
+    }
 }
 
 pub(crate) fn target_ref_from_attach_target(target: AttachTarget) -> TargetRef {
@@ -1391,6 +1423,12 @@ pub(crate) fn resolve_selected_attachment_choice(
     // A host answer must re-enter the prompt phase to choose from the
     // forwarded Equipment set. An already-bound Equipment answer instead
     // executes directly, avoiding a recursive replay of its own prompt.
+    //
+    // The owning child is the active top here; its depth anchors where the
+    // answer's outcome is published, whatever the attach then raises above it.
+    // The depth is call-local: it is spent below, in this same synchronous
+    // call, and must never be stored or carried across a pause.
+    let child_boundary = state.resolution_stack.capture_child_boundary();
     let outcome = if selecting_host {
         resolve_with_prompt(state, &operation, events)?
     } else {
@@ -1398,33 +1436,85 @@ pub(crate) fn resolve_selected_attachment_choice(
     };
 
     match outcome {
-        AttachResolutionOutcome::Paused => Ok(false),
+        AttachResolutionOutcome::Paused => {
+            // CR 701.3a + CR 608.2c: the selected attachment's printed
+            // attach-time choice ("as this becomes attached, choose …",
+            // Sanctuary Blade) pauses AFTER the attach, and that pause retires
+            // with its post-replacement pair without returning here. The later
+            // instructions wait for that choice, but what this answer did is
+            // already settled, so publish it now. A pause before any attach
+            // (a host answer re-parking for the Equipment answer) publishes
+            // nothing; its own completion does. Known limit: a CR 616.1
+            // ordering pause between several Attached replacements resumes
+            // through `deliver_attach`, not here, so its outcome is never
+            // published and an "If you do" rider reads not-performed. Every
+            // printed Attached replacement is self-referential, so no printed
+            // board reaches it.
+            if attach_happened(&events[events_before..]) {
+                publish_selected_attach_outcome(
+                    state,
+                    child_boundary,
+                    &operation,
+                    &events[events_before..],
+                );
+            }
+            Ok(false)
+        }
         AttachResolutionOutcome::Completed => {
+            publish_selected_attach_outcome(
+                state,
+                child_boundary,
+                &operation,
+                &events[events_before..],
+            );
             let _ = state
                 .take_active_attachment_choice_continuation()
                 .expect("completed attach choice must retain its active child")
                 .expect("completed attach choice must own its active child");
-            // CR 608.2c: the tail parked under this choice reads whether this answer attached.
-            let performed = !super::compound_run_unperformed(&operation)
-                && super::mandatory_parent_effect_performed(
-                    &operation.effect,
-                    &events[events_before..],
-                );
-            if let Some(tail) = state
-                .active_ability_continuation_frame_mut()
-                .map(|frame| frame.pending.chain.as_mut())
-                .filter(|tail| {
-                    tail.sub_link == crate::types::ability::SubAbilityLink::SequentialSibling
-                        && tail
-                            .condition
-                            .as_ref()
-                            .is_some_and(super::condition_depends_on_effect_performed)
-                })
-            {
-                tail.set_optional_effect_performed_recursive(performed);
-            }
             Ok(true)
         }
+    }
+}
+
+/// CR 701.3b: only an attach that took effect carries a subject.
+fn attach_happened(events: &[GameEvent]) -> bool {
+    !attach_result_from_events(events).targets.is_empty()
+}
+
+/// CR 608.2c: hand a selected Attach answer's outcome to the instructions
+/// parked after it — whether it attached (an "If you do" rider) and, for a
+/// forwarding Attach, which objects it attached (a later "unattach it"). The
+/// owner of those instructions is the continuation directly beneath the
+/// Attach-choice child captured at `child_boundary`, so this must run while
+/// that child is still on the stack. Any other frame shape publishes nothing.
+fn publish_selected_attach_outcome(
+    state: &mut GameState,
+    child_boundary: ChildStackDepth,
+    operation: &ResolvedAbility,
+    events: &[GameEvent],
+) {
+    let performed = !super::compound_run_unperformed(operation)
+        && super::mandatory_parent_effect_performed(&operation.effect, events);
+    let forwarded = operation
+        .forward_result
+        .then(|| attach_result_from_events(events));
+    let Some(tail) = state
+        .resolution_stack
+        .ability_continuation_outside_attachment_choice_child_mut(child_boundary)
+        .map(|frame| frame.pending.chain.as_mut())
+    else {
+        return;
+    };
+    if let Some(forwarded) = forwarded {
+        tail.context.forwarded_result_context = Some(Box::new(forwarded));
+    }
+    if tail.sub_link == crate::types::ability::SubAbilityLink::SequentialSibling
+        && tail
+            .condition
+            .as_ref()
+            .is_some_and(super::condition_depends_on_effect_performed)
+    {
+        tail.set_optional_effect_performed_recursive(performed);
     }
 }
 
@@ -1942,43 +2032,63 @@ pub(crate) fn can_attach_to_player_with_authority(
     }
 }
 
-/// CR 701.3b: [`attach_to`] that reports whether the attachment actually moved
-/// onto `target_id`. Same-host re-attaches (a no-op under CR 701.3b) and
-/// rejected attaches return `false`, so "becomes attached" events (CR 603.2e)
-/// are emitted only for a genuine transition.
-pub(crate) fn attach_to_reporting_change(
-    state: &mut GameState,
-    attachment_id: ObjectId,
-    target_id: ObjectId,
-) -> bool {
-    let host = Some(AttachTarget::Object(target_id));
-    let host_of = |state: &GameState| {
-        state
-            .objects
-            .get(&attachment_id)
-            .and_then(|o| o.attached_to)
-    };
-    let was_attached = host_of(state) == host;
-    attach_to(state, attachment_id, target_id);
-    !was_attached && host_of(state) == host
-}
-
-/// Player-host sibling of [`attach_to_reporting_change`].
-pub(crate) fn attach_to_player_reporting_change(
-    state: &mut GameState,
+/// CR 702.5a + CR 303.4: does the attachment's own enchant restriction admit
+/// `target_player`, per the supplied authority?
+///
+/// An Aura that enchants a player must carry an `Enchant` restriction, and the
+/// player must satisfy every one it carries (CR 702.5c); one that carries none
+/// has no stated player
+/// restriction and so cannot be attached to a player at all. The restriction is
+/// read from the authority's keywords, so a token's intrinsic `Enchant` has to
+/// be part of its materialized characteristics (see
+/// `token::intrinsic_enchant_keywords_from_token_statics`) before this is asked.
+fn enchant_restriction_admits_player(
+    state: &GameState,
     attachment_id: ObjectId,
     target_player: PlayerId,
+    authority: AttachmentAuthority<'_>,
 ) -> bool {
-    let host = Some(AttachTarget::Player(target_player));
-    let host_of = |state: &GameState| {
-        state
-            .objects
-            .get(&attachment_id)
-            .and_then(|o| o.attached_to)
+    let attachment = match authority {
+        AttachmentAuthority::Stored => state.objects.get(&attachment_id),
+        AttachmentAuthority::Projected(projection) => Some(projection),
     };
-    let was_attached = host_of(state) == host;
-    attach_to_player(state, attachment_id, target_player);
-    !was_attached && host_of(state) == host
+    let Some(attachment) = attachment else {
+        return true;
+    };
+    // CR 702.5c: every enchant instance applies; with none, the Aura states no
+    // player restriction and cannot enchant a player at all.
+    let mut restrictions = crate::game::keywords::enchant_restrictions(attachment).peekable();
+    if restrictions.peek().is_none() {
+        return false;
+    }
+    restrictions.all(|enchant_filter| {
+        crate::game::filter::player_matches_target_filter_in_state(
+            state,
+            enchant_filter,
+            target_player,
+            Some(attachment.controller),
+            Some(attachment_id),
+        )
+    })
+}
+
+/// CR 303.4 + CR 303.4i + CR 702.5a + CR 702.16c: may the attachment, per the
+/// supplied authority, legally enchant `target_player`?
+///
+/// The single legality authority for a player host: an Aura (CR 303.4), a live
+/// host (CR 303.4c) not protected from it (CR 702.16c), and one its enchant
+/// restriction admits (CR 702.5a). Both the CR 303.4i entry decision for an
+/// Aura token and the attachment action ask exactly this, so the two can never
+/// disagree about one host.
+pub(crate) fn can_enchant_player_with_authority(
+    state: &GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    authority: AttachmentAuthority<'_>,
+) -> bool {
+    authority_is_aura(state, attachment_id, authority)
+        && can_attach_to_player_with_authority(state, attachment_id, target_player, authority)
+        && enchant_restriction_admits_player(state, attachment_id, target_player, authority)
 }
 
 /// CR 701.3c: Attaching to a different object gives the attachment a new timestamp.
@@ -1990,6 +2100,153 @@ pub fn attach_to(
     target_id: ObjectId,
 ) -> Option<TargetRef> {
     attach_to_with_authority(state, attachment_id, target_id, AttachmentAuthority::Stored)
+}
+
+/// CR 701.3a + CR 701.3b + CR 603.2e: Attach `attachment_id` to `target_id` judged against `authority`,
+/// recording `GameEvent::Unattached` (if moving from a prior host) and `GameEvent::Attached` into `events`.
+/// Returns `true` only on a successful transition to a new host (a same-host re-attach or illegal attach does nothing).
+pub(crate) fn attach_to_with_authority_and_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+    authority: AttachmentAuthority<'_>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let attachment_object = state.objects.get(&attachment_id);
+    let prior_host = attachment_object
+        .and_then(|obj| obj.attached_to)
+        .map(target_ref_from_attach_target);
+    // CR 701.3b: Attaching to the object or player it is already attached to does nothing.
+    if prior_host == Some(TargetRef::Object(target_id)) {
+        return false;
+    }
+    if !can_attach_to_object_with_authority(state, attachment_id, target_id, authority) {
+        return false;
+    }
+    match authority {
+        AttachmentAuthority::Stored => {
+            if !crate::game::sba::is_valid_attachment_target(state, attachment_id, target_id) {
+                return false;
+            }
+        }
+        AttachmentAuthority::Projected(projection) => {
+            // CR 702.5c: the host must match every enchant instance.
+            let ctx =
+                FilterContext::from_source_with_controller(attachment_id, projection.controller);
+            if !crate::game::keywords::enchant_restrictions(projection)
+                .all(|enchant_filter| matches_target_filter(state, target_id, enchant_filter, &ctx))
+            {
+                return false;
+            }
+        }
+    }
+    let old_target = attach_to_with_authority(state, attachment_id, target_id, authority);
+    if let Some(old_target) = old_target {
+        events.push(GameEvent::Unattached {
+            attachment_id,
+            old_target,
+        });
+    }
+    events.push(GameEvent::Attached {
+        attachment_id,
+        target: TargetRef::Object(target_id),
+    });
+    true
+}
+
+/// CR 701.3a + CR 701.3b + CR 603.2e: Attach `attachment_id` to `target_player` judged against `authority`,
+/// recording `GameEvent::Unattached` (if moving from a prior host) and `GameEvent::Attached` into `events`.
+/// Returns `true` only on a successful transition to a new host (a same-player re-attach or illegal attach does nothing).
+pub(crate) fn attach_to_player_with_authority_and_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    authority: AttachmentAuthority<'_>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    let attachment_object = state.objects.get(&attachment_id);
+    let prior_host = attachment_object
+        .and_then(|obj| obj.attached_to)
+        .map(target_ref_from_attach_target);
+    // CR 701.3b: Attaching to the object or player it is already attached to does nothing.
+    if prior_host == Some(TargetRef::Player(target_player)) {
+        return false;
+    }
+    if !can_enchant_player_with_authority(state, attachment_id, target_player, authority) {
+        return false;
+    }
+    let old_target =
+        attach_to_player_with_authority(state, attachment_id, target_player, authority);
+    if let Some(old_target) = old_target {
+        events.push(GameEvent::Unattached {
+            attachment_id,
+            old_target,
+        });
+    }
+    events.push(GameEvent::Attached {
+        attachment_id,
+        target: TargetRef::Player(target_player),
+    });
+    true
+}
+
+/// CR 701.3a + CR 701.3b + CR 603.2e: Attach `attachment_id` to `target` (object or player) judged against `authority`,
+/// recording `GameEvent::Unattached` and `GameEvent::Attached` into `events`.
+pub(crate) fn attach_target_with_authority_and_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target: &TargetRef,
+    authority: AttachmentAuthority<'_>,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    match target {
+        TargetRef::Object(target_id) => {
+            attach_to_with_authority_and_events(state, attachment_id, *target_id, authority, events)
+        }
+        TargetRef::Player(target_player) => attach_to_player_with_authority_and_events(
+            state,
+            attachment_id,
+            *target_player,
+            authority,
+            events,
+        ),
+    }
+}
+
+/// CR 701.3a + CR 603.2e: Attach `attachment_id` to `target_id` and record
+/// `GameEvent::Attached` (and `GameEvent::Unattached` if moving from a prior host)
+/// into `events`. Returns `true` if the object became attached to the new target.
+pub fn attach_to_with_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    attach_to_with_authority_and_events(
+        state,
+        attachment_id,
+        target_id,
+        AttachmentAuthority::Stored,
+        events,
+    )
+}
+
+/// CR 701.3a + CR 603.2e: Attach `attachment_id` to `target_player` and record
+/// `GameEvent::Attached` (and `GameEvent::Unattached` if moving from a prior host)
+/// into `events`. Returns `true` if the object became attached to the player.
+pub fn attach_to_player_with_events(
+    state: &mut GameState,
+    attachment_id: ObjectId,
+    target_player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    attach_to_player_with_authority_and_events(
+        state,
+        attachment_id,
+        target_player,
+        AttachmentAuthority::Stored,
+        events,
+    )
 }
 
 /// CR 614.12 + CR 701.3a: [`attach_to`] whose CR 701.3b legality gate reads the

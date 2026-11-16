@@ -1,0 +1,20 @@
+[package]
+name = "combo-table-gen"
+version.workspace = true
+license.workspace = true
+edition = "2021"
+
+[[bin]]
+name = "combo-table-gen"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+engine = { path = "../engine", package = "phase-engine" }
+flate2 = "1"
+regex = "1"
+serde = { workspace = true }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"

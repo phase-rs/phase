@@ -1092,7 +1092,8 @@ face = [
   { key = "heat stroke", class = "dropped_qualifier", clauses = ["At end of combat, destroy each creature that blocked or was blocked this turn."] },
   { key = "hedonist's trove", class = "dropped_qualifier", clauses = ["When this enchantment enters, exile target opponent's graveyard.", "You may play lands from among cards exiled with this enchantment.", "You can't cast more than one spell this way each turn."] },
   { key = "hedron alignment", class = "condition_wrong", clauses = ["At the beginning of your upkeep, you may reveal your hand.", "If you do, you win the game if you own a card named Hedron Alignment in exile, in your hand, in your graveyard, and on the battlefield."] },
-  { key = "hedron blade", class = "dropped_qualifier", clauses = ["Whenever equipped creature becomes blocked by one or more colorless creatures, it gains deathtouch until end of turn."] },
+  # CR 509.3e + CR 509.3f: the blocker-count threshold parses and fires when blockers are declared, but a blocker-filtered threshold deliberately does not fire when an effect adds the first matching blocker (the declaration-only fence), so this trigger stays unsupported.
+  { key = "hedron blade", class = "trigger_wrong", clauses = ["Whenever equipped creature becomes blocked by one or more colorless creatures, it gains deathtouch until end of turn."] },
   { key = "hedron-field purists", class = "condition_wrong", clauses = ["LEVEL 1-4\n1/4\nIf a source would deal damage to you or a creature you control, prevent 1 of that damage.", "LEVEL 5+\n2/5\nIf a source would deal damage to you or a creature you control, prevent 2 of that damage."] },
   { key = "heed the mists", class = "wrong_object", clauses = ["Mill a card, then draw cards equal to the milled card's mana value."] },
   { key = "hellion crucible", class = "cost_wrong", clauses = ["{1}{R}, {T}, Remove two pressure counters from this land and sacrifice it: Create a 4/4 red Hellion creature token with haste."] },
@@ -1989,7 +1990,6 @@ face = [
   { key = "rakshasa vizier", class = "dropped_qualifier", clauses = ["Whenever one or more cards are put into exile from your graveyard, put that many +1/+1 counters on this creature."] },
   { key = "ral and the implicit maze", class = "missing_effect", clauses = ["III — Create a Spellgorger Weird token."] },
   { key = "ral's dispersal", class = "condition_wrong", clauses = ["If you search your library this way, shuffle."] },
-  { key = "ral, crackling wit", class = "wrong_zone", clauses = ["You get an emblem with \"Instant and sorcery spells you cast have storm.\""] },
   { key = "rampaging raptor", class = "dropped_qualifier", clauses = ["Whenever this creature deals combat damage to an opponent, it deals that much damage to target planeswalker that player controls or battle that player protects."] },
   { key = "rampant rejuvenator", class = "missing_effect", clauses = ["When this creature dies, search your library for up to X basic land cards, where X is this creature's power, put them onto the battlefield, then shuffle."] },
   { key = "ranger squadron", class = "extra_effect", clauses = ["Flying, double team"] },

@@ -27292,15 +27292,95 @@ fn effect_emblem_tamiyo_field_researcher_hand_free_cast() {
     }
 }
 
+/// CR 114.4 + CR 113.6b: every static ability of a parsed emblem declares the
+/// command zone as its zone of function, whatever its mode and however many
+/// statics the body defines. Ral, Crackling Wit's −10 body is a `CastWithKeyword`
+/// grant whose static-line parse declares `[Battlefield]` for a permanent; on
+/// the emblem the command zone replaces it. Kaito, Bane of Nightmares (+1,
+/// `Continuous`) and Gideon of the Trials (0, `CantLoseTheGame` +
+/// `CantWinTheGame`) cover the other modes and a multi-static body.
+#[test]
+fn effect_emblem_statics_declare_command_zone() {
+    // Ral, Crackling Wit −10 (verbatim emblem clause).
+    let e =
+        parse_effect("You get an emblem with \"Instant and sorcery spells you cast have storm.\"");
+    match e {
+        Effect::CreateEmblem { statics, triggers } => {
+            assert!(triggers.is_empty(), "static-only emblem, got {triggers:?}");
+            assert_eq!(statics.len(), 1);
+            assert_eq!(
+                statics[0].mode,
+                StaticMode::CastWithKeyword {
+                    keyword: Keyword::Storm
+                }
+            );
+            // CR 114.4: the emblem static functions from the command zone only.
+            assert_eq!(statics[0].active_zones, vec![Zone::Command]);
+        }
+        other => panic!("expected CreateEmblem, got {other:?}"),
+    }
+
+    // Sibling: the same grant printed on a permanent (Prismari, the
+    // Inspiration, reminder text omitted) keeps its battlefield zone of
+    // function (CR 113.6); only the emblem owner restamps it.
+    let on_permanent = crate::parser::oracle_static::parse_static_line(
+        "Instant and sorcery spells you cast have storm.",
+    )
+    .expect("Prismari's storm grant must parse as a static");
+    assert_eq!(
+        on_permanent.mode,
+        StaticMode::CastWithKeyword {
+            keyword: Keyword::Storm
+        }
+    );
+    assert_eq!(on_permanent.active_zones, vec![Zone::Battlefield]);
+
+    // Kaito, Bane of Nightmares +1 (verbatim).
+    let e = parse_effect("You get an emblem with \"Ninjas you control get +1/+1.\"");
+    match e {
+        Effect::CreateEmblem { statics, .. } => {
+            assert_eq!(statics.len(), 1);
+            assert_eq!(statics[0].mode, StaticMode::Continuous);
+            // CR 114.4: the emblem static functions from the command zone.
+            assert_eq!(statics[0].active_zones, vec![Zone::Command]);
+        }
+        other => panic!("expected CreateEmblem, got {other:?}"),
+    }
+
+    // Gideon of the Trials 0 (verbatim): one body, two statics.
+    let e = parse_effect(
+        "You get an emblem with \"As long as you control a Gideon planeswalker, you can't lose the game and your opponents can't win the game.\"",
+    );
+    match e {
+        Effect::CreateEmblem { statics, triggers } => {
+            assert!(triggers.is_empty(), "static-only emblem, got {triggers:?}");
+            let modes: Vec<&StaticMode> = statics.iter().map(|s| &s.mode).collect();
+            assert_eq!(
+                modes,
+                vec![&StaticMode::CantLoseTheGame, &StaticMode::CantWinTheGame],
+                "Gideon's emblem carries both outcome-lock statics"
+            );
+            // CR 114.4: every emblem static functions from the command zone.
+            for static_def in &statics {
+                assert_eq!(static_def.active_zones, vec![Zone::Command]);
+            }
+        }
+        other => panic!("expected CreateEmblem, got {other:?}"),
+    }
+}
+
 #[test]
 fn effect_you_have_no_max_hand_size_for_rest_of_game() {
-    // CR 402.2 + CR 114.1: Spell effect "you have no maximum hand size for the rest
-    // of the game" creates an emblem with NoMaximumHandSize.
+    // CR 611.2 + CR 402.2: the spell effect "you have no maximum hand size for the rest
+    // of the game" is a continuous effect that changes a rule of the game; the engine carries
+    // it on an emblem whose NoMaximumHandSize static functions from the command zone (CR 114.4).
     let e = parse_effect("You have no maximum hand size for the rest of the game.");
     match e {
         Effect::CreateEmblem { statics, .. } => {
             assert_eq!(statics.len(), 1);
             assert_eq!(statics[0].mode, StaticMode::NoMaximumHandSize);
+            // CR 114.4: the emblem static functions from the command zone.
+            assert_eq!(statics[0].active_zones, vec![Zone::Command]);
         }
         other => panic!("expected CreateEmblem, got {:?}", other),
     }
@@ -67620,6 +67700,120 @@ fn stolen_uniform_lose_control_delayed_trigger_shape() {
     }
 }
 
+/// CR 701.3d + CR 603.7 + CR 608.2c: Unexpected Request's "You may attach an
+/// Equipment you control to that creature. If you do, unattach it at the
+/// beginning of the next end step." The delayed body unattaches the attachment
+/// anaphor with no host named, and the Attach forwards what it attached so that
+/// anaphor names the Equipment rather than the creature the spell targeted.
+#[test]
+fn unexpected_request_delayed_unattach_names_the_attached_equipment() {
+    let parsed = parse_oracle_text(
+        "Gain control of target creature until end of turn. Untap that creature. It gains \
+         haste until end of turn. You may attach an Equipment you control to that creature. \
+         If you do, unattach it at the beginning of the next end step.",
+        "Unexpected Request",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Unexpected Request lowers to a spell ability chain");
+    assert!(
+        !tree_has_unimplemented(ability),
+        "Unexpected Request must have zero Unimplemented nodes; got {ability:#?}"
+    );
+
+    let mut node = ability;
+    while !matches!(&*node.effect, Effect::Attach { .. }) {
+        node = node
+            .sub_ability
+            .as_deref()
+            .expect("the chain reaches the Attach instruction");
+    }
+    assert!(
+        node.optional,
+        "reach: the Attach is the optional \"you may\" instruction"
+    );
+    assert!(
+        node.forward_result,
+        "the Attach must forward the object it attached to the unattach anaphor"
+    );
+    let delayed = node
+        .sub_ability
+        .as_deref()
+        .expect("the If-you-do rider follows the Attach");
+    assert!(
+        matches!(
+            delayed.condition,
+            Some(AbilityCondition::EffectOutcome {
+                signal: EffectOutcomeSignal::OptionalEffectPerformed,
+            })
+        ),
+        "the rider is gated by \"If you do\", got {:?}",
+        delayed.condition
+    );
+    let Effect::CreateDelayedTrigger {
+        condition, effect, ..
+    } = &*delayed.effect
+    else {
+        panic!(
+            "rider must be CreateDelayedTrigger, got {:?}",
+            delayed.effect
+        );
+    };
+    assert_eq!(
+        *condition,
+        DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+        "at the beginning of the next end step"
+    );
+    assert_eq!(
+        *effect.effect,
+        Effect::UnattachAll {
+            attachment: TargetFilter::ParentTarget,
+            target: TargetFilter::Any,
+        },
+        "\"unattach it\": the anaphor is the attachment and no host is named"
+    );
+}
+
+/// CR 701.3d: "unattach" with an operand the resolver cannot bind ("unattach ~",
+/// "unattach enchanted Equipment") stays unimplemented; only a parent anaphor is
+/// admitted by the singular unattach arm.
+#[test]
+fn unattach_non_anaphor_operands_stay_unimplemented() {
+    let elbrus = parse_oracle_text(
+        "Equipped creature gets +1/+0.\nWhen equipped creature deals combat damage to a \
+         player, unattach Elbrus, then transform it.\nEquip {1}",
+        "Elbrus, the Binding Blade",
+        &["Equip".to_string()],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    let carry_away = parse_oracle_text(
+        "Enchant Equipment\nWhen this Aura enters, unattach enchanted Equipment.\nYou \
+         control enchanted Equipment.",
+        "Carry Away",
+        &["Enchant".to_string()],
+        &["Enchantment".to_string()],
+        &["Aura".to_string()],
+    );
+    for (name, parsed, fragment) in [
+        ("Elbrus, the Binding Blade", elbrus, "unattach ~"),
+        ("Carry Away", carry_away, "unattach enchanted Equipment"),
+    ] {
+        let dbg = format!("{parsed:#?}");
+        assert!(
+            dbg.contains("Unimplemented")
+                && dbg.contains(&format!("\"{fragment}\""))
+                && !dbg.contains("UnattachAll"),
+            "{name}: a non-anaphor unattach operand must stay unimplemented as \
+             {fragment:?}. Parse:\n{dbg}"
+        );
+    }
+}
+
 /// C2 (honest Ogre pin — measured limitation, NOT a false unlock): Ogre
 /// Geargrabber's identical-shape last sentence STAYS `Effect::Unimplemented`.
 /// Ogre is single-target ("gain control of target Equipment"), so the dual-target
@@ -71928,6 +72122,7 @@ fn prop_has_chosen_color(p: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -76904,13 +77099,20 @@ fn counter_gate_rebind_preserves_wrappers_and_non_placeholder_counts() {
 fn counter_gate_rebind_reaches_create_draw_replacement() {
     let gate_qty = gate_qty_fixture();
     let mut effect = Effect::CreateDrawReplacement {
-        replacement_effect: Box::new(event_context_put_counter(TargetFilter::Any)),
+        replacement_effect: Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            event_context_put_counter(TargetFilter::Any),
+        )),
     };
     rebind_event_context_amount_counts(&mut effect, &gate_qty);
     let Effect::CreateDrawReplacement { replacement_effect } = &effect else {
         unreachable!()
     };
-    assert_put_counter_rebound(replacement_effect, &gate_qty, "CreateDrawReplacement");
+    assert_put_counter_rebound(
+        &replacement_effect.effect,
+        &gate_qty,
+        "CreateDrawReplacement",
+    );
 }
 
 #[test]
@@ -101977,6 +102179,29 @@ fn fused_subject_look_exile_preserves_or_rejects_the_complete_instruction() {
     );
 }
 
+/// CR 115.1 + CR 611.2c: a duration-scoped targeting prohibition naming a source
+/// kind or quality (Display of Dominance: "blue or black spells your opponents
+/// control") cannot be expressed by `CantBeTargeted { who }`, so the effect pipeline
+/// fails closed with an honest `Unimplemented` rather than a blanket restriction.
+#[test]
+fn source_qualified_cant_be_targeted_effect_fails_closed() {
+    for text in [
+        "Permanents you control can't be the targets of blue or black spells your opponents control this turn.",
+        "Target creature can't be the target of spells this turn.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            ability_chain_has_unimplemented(&def),
+            "{text}: expected an honest Unimplemented, got {def:?}"
+        );
+        let rendered = format!("{def:?}");
+        assert!(
+            !rendered.contains("CantBeTargeted"),
+            "{text}: must not carry a blanket CantBeTargeted, got {rendered}"
+        );
+    }
+}
+
 /// CR 601.2c: a printed target whose filter binds a prior target is enumerated
 /// against the first object slot declared before it. SYNTHETIC texts (the printed
 /// filter-class analogue is Daring Thief, "target permanent an opponent controls
@@ -102022,6 +102247,18 @@ fn bare_choose_read_by_a_first_slot_filter_past_another_target_keeps_stack_timin
     }
 }
 
+/// CR 611.2c + CR 109.5: the unqualified opponents-only effect grant (Vines of
+/// Vastwood, Veilstone Amulet) still lowers to `CantBeTargeted { Opponents }`.
+#[test]
+fn unqualified_opponents_cant_be_targeted_effect_is_supported() {
+    let text = "Target creature can't be the target of spells or abilities your opponents control this turn.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(!ability_chain_has_unimplemented(&def), "{text}: {def:?}");
+    assert!(
+        format!("{def:?}").contains("CantBeTargeted"),
+        "{text}: expected CantBeTargeted, got {def:?}"
+    );
+}
 /// CR 115.1c + CR 115.1d: an exact count before "other target" ("Untap two
 /// other target creatures") declares exactly two targets, and "other" stays on
 /// the target filter. Printed lines of Fleet Captain Christopher Pike, Ioreth

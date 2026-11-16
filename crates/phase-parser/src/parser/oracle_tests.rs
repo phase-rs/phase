@@ -10120,6 +10120,115 @@ fn spell_casting_option_parses_ravenous_trap_alternative_cost() {
     );
 }
 
+// CR 118.9: Invigorate prints the swapped clause order "rather than pay this spell's
+// mana cost, you may [cost]". Verbatim Oracle text (local Scryfall-derived dataset).
+// The life gain is the alternative COST, never part of the spell's effect.
+#[test]
+fn spell_casting_option_parses_invigorate_swapped_order_alternative_cost() {
+    const PUMP_LINE: &str = "Target creature gets +4/+4 until end of turn.";
+    let r = parse(
+        "If you control a Forest, rather than pay this spell's mana cost, you may have an opponent gain 3 life.\nTarget creature gets +4/+4 until end of turn.",
+        "Invigorate",
+        &[],
+        &["Instant"],
+        &[],
+    );
+    // Positive reach-guard for the negatives below: the first line became the option.
+    assert_eq!(
+        r.casting_options.len(),
+        1,
+        "warnings: {:?}",
+        r.parse_warnings
+    );
+    assert_eq!(
+        r.casting_options[0].kind,
+        crate::types::ability::SpellCastingOptionKind::AlternativeCost
+    );
+    assert!(r.casting_options[0].condition.is_some());
+    assert_eq!(
+        r.casting_options[0].cost,
+        Some(AbilityCost::EffectCost {
+            effect: Box::new(Effect::GainLife {
+                amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
+                player: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default()
+                        .controller(crate::types::ability::ControllerRef::Opponent)
+                ),
+            }),
+        })
+    );
+
+    // The spell ability is only the pump.
+    assert_eq!(r.abilities.len(), 1);
+    assert_eq!(
+        r.abilities[0].effect,
+        parse_effect_chain(PUMP_LINE, crate::types::ability::AbilityKind::Spell).effect
+    );
+    const PAY_PHRASE: &str = "rather than pay this spell's mana cost";
+    let mut link = Some(&r.abilities[0]);
+    while let Some(def) = link {
+        assert!(
+            !matches!(*def.effect, Effect::GainLife { .. }),
+            "life gain must not leak into the spell effect: {:?}",
+            r.abilities[0]
+        );
+        assert!(
+            !def.effect
+                .unimplemented_description()
+                .is_some_and(|d| d.to_lowercase().contains(PAY_PHRASE)),
+            "alt-cost must not leak as an unimplemented gap: {:?}",
+            r.abilities[0]
+        );
+        link = def.sub_ability.as_deref();
+    }
+}
+
+// CR 118.9 + CR 119.3: Reverent Silence prints the same swapped clause order with an
+// "each other player" recipient. The life gain is the alternative COST, recognized
+// by the cost payer's recipient view; the spell ability is only the destroy.
+#[test]
+fn spell_casting_option_parses_reverent_silence_each_other_player_alternative_cost() {
+    let r = parse(
+        "If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 6 life.
+Destroy all enchantments.",
+        "Reverent Silence",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert_eq!(
+        r.casting_options.len(),
+        1,
+        "warnings: {:?}",
+        r.parse_warnings
+    );
+    let cost = r.casting_options[0]
+        .cost
+        .as_ref()
+        .expect("alternative cost");
+    match cost.player_recipient_cost() {
+        Some(crate::types::ability::PlayerRecipientCost::GainLife {
+            amount, selection, ..
+        }) => {
+            assert_eq!(
+                amount,
+                &crate::types::ability::QuantityExpr::Fixed { value: 6 }
+            );
+            assert_eq!(
+                selection,
+                crate::types::ability::CostRecipientSelection::Each
+            );
+        }
+        None => panic!("expected a recipient life-gain cost, got {cost:?}"),
+    }
+    assert_eq!(r.abilities.len(), 1);
+    assert!(
+        matches!(*r.abilities[0].effect, Effect::DestroyAll { .. }),
+        "{:?}",
+        r.abilities[0].effect
+    );
+}
+
 #[test]
 fn spell_casting_option_parses_composite_alternative_cost() {
     let r = parse(
@@ -33129,9 +33238,9 @@ fn render_net_reaches_every_nested_description_carrier() {
     parsed
         .abilities
         .push(carrier(Effect::CreateDrawReplacement {
-            replacement_effect: Box::new(Effect::unimplemented(
-                "probe",
-                planted("create_draw_replacement"),
+            replacement_effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::unimplemented("probe", planted("create_draw_replacement")),
             )),
         }));
     tags.push("create_draw_replacement");
@@ -35526,6 +35635,97 @@ fn lich_as_enters_life_loss_parses_as_moved_self_replacement() {
         .statics
         .iter()
         .any(|def| matches!(def.mode, StaticMode::CantLoseTheGame)));
+}
+
+#[test]
+fn metalworker_reveal_any_number_and_add_mana() {
+    let oracle = "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.";
+    let parsed = parse_oracle_text(
+        oracle,
+        "Metalworker",
+        &[],
+        &["Artifact".into(), "Creature".into()],
+        &[],
+    );
+    assert_eq!(parsed.abilities.len(), 1, "{:?}", parsed.abilities);
+    let ability = &parsed.abilities[0];
+    assert_eq!(ability.cost, Some(AbilityCost::Tap));
+    assert!(
+        matches!(
+            ability.effect.as_ref(),
+            Effect::RevealHand {
+                target: TargetFilter::Controller,
+                card_filter: TargetFilter::Typed(ref tf),
+                cardinality: crate::types::ability::ObjectSelectionCardinality::AnyNumber,
+                choice_optional: false,
+                ..
+            } if tf.type_filters.contains(&TypeFilter::Artifact)
+        ),
+        "expected an any-number artifact RevealHand, got {:?}",
+        ability.effect
+    );
+    let sub = ability
+        .sub_ability
+        .as_deref()
+        .expect("has sub_ability for mana addition");
+    assert!(
+        matches!(
+            sub.effect.as_ref(),
+            Effect::Mana {
+                produced: ManaProduction::Colorless {
+                    count: QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: ref inner_expr,
+                    }
+                },
+                ..
+            } if matches!(**inner_expr, QuantityExpr::Ref { qty: QuantityRef::FilteredTrackedSetSize { .. } })
+        ),
+        "expected Effect::Mana producing {{C}}{{C}} for each revealed card, got {:?}",
+        sub.effect
+    );
+}
+
+/// CR 107.1c + CR 701.20a: an any-number hand reveal whose card type phrase the
+/// parser cannot read must surface as an unimplemented gap, never as an
+/// any-number `RevealHand` with an empty filter (a reveal that can select
+/// nothing, reported as supported). Sacellum Godspeaker and Rosheen, Roaring
+/// Prophet — verified Oracle text (Scryfall).
+#[test]
+fn unreadable_any_number_reveal_filter_is_an_unimplemented_gap() {
+    for (name, oracle, types) in [
+        (
+            "Sacellum Godspeaker",
+            "{T}: Reveal any number of creature cards with power 5 or greater from your hand. Add {G} for each card revealed this way.",
+            vec!["Creature".to_string()],
+        ),
+        (
+            "Rosheen, Roaring Prophet",
+            "{T}: Reveal any number of cards with {X} in their mana cost in your hand. Add {C}{C} for each card revealed this way. Spend this mana only on costs that contain {X}.",
+            vec!["Legendary".to_string(), "Creature".to_string()],
+        ),
+    ] {
+        let parsed = parse_oracle_text(oracle, name, &[], &types, &[]);
+        assert!(
+            parsed
+                .abilities
+                .iter()
+                .any(crate::parser::oracle::has_unimplemented),
+            "{name}: the unreadable reveal filter must be an unimplemented gap, got {:?}",
+            parsed.abilities
+        );
+        assert!(
+            !parsed.abilities.iter().any(|ability| matches!(
+                ability.effect.as_ref(),
+                Effect::RevealHand {
+                    card_filter: TargetFilter::None,
+                    ..
+                }
+            )),
+            "{name}: no filterless RevealHand may survive, got {:?}",
+            parsed.abilities
+        );
+    }
 }
 
 /// CR 201.5a: the two-layer IR facade lowers a refused quoted granter name to the same

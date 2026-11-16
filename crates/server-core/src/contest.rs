@@ -1721,6 +1721,84 @@ mod tests {
         );
     }
 
+    /// CR 704.3 + CR 704.5a: the server host publishes a contest step with its
+    /// stepped state as both of `resolve_log_entries`' states. A settle that
+    /// ends the game still logs that game's end in that game.
+    #[test]
+    fn a_contest_settle_that_ends_a_game_logs_its_end_in_that_game() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::format::FormatConfig;
+        use engine::types::log::LogSegment;
+        use engine::types::match_config::{MatchConfig, MatchPhase, MatchType};
+        use std::time::Duration;
+
+        const EYE_TO_EYE: &str =
+            "You and target creature's controller have a staring contest. If you win, destroy that creature.";
+        const PLATINUM_ANGEL: &str =
+            "Flying\nYou can't lose the game and your opponents can't win the game.";
+
+        let mut mgr = session_with_contest(fast_policy());
+        let session = only_session(&mut mgr);
+
+        // Platinum Angel keeps P1 in the game at 0 life until Eye to Eye
+        // destroys it, in game 1 of a best-of-three.
+        let mut scenario = GameScenario::new_with_format(FormatConfig::freeform(), 2, 42);
+        scenario.at_phase(Phase::PreCombatMain).with_life(P1, 0);
+        let angel = scenario
+            .add_creature_from_oracle(P1, "Platinum Angel", 4, 4, PLATINUM_ANGEL)
+            .as_artifact_creature()
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Eye to Eye", true, EYE_TO_EYE)
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().set_match_config(MatchConfig {
+            match_type: MatchType::Bo3,
+            ..MatchConfig::default()
+        });
+        crate::session::bind_fresh_interaction_session(runner.state_mut(), &session.game_code);
+        runner.cast(spell).target_objects(&[angel]).resolve();
+        session.state = runner.state().clone();
+        let WaitingFor::PhysicalContest { contest, .. } = &session.state.waiting_for else {
+            panic!(
+                "the cast parks the game on its staring contest: {:?}",
+                session.state.waiting_for
+            );
+        };
+        let contest = contest.id;
+
+        // Under `fast_policy` GO is at or before `now`, so P1's deadline,
+        // GO + 400 ms, has passed by `now` + 450 ms, while P0's click extends
+        // P0's to `now` + 600 ms.
+        let now = start_active_contest(session);
+        assert_eq!(
+            session.handle_contest_click_at(HOST, contest, 1, now + Duration::from_millis(200)),
+            ContestClickReceipt::Counted
+        );
+        session.tick_contest_at(now + Duration::from_millis(450));
+        let drain = session.drain_contest_outbox();
+
+        assert_eq!(session.state.match_phase, MatchPhase::BetweenGames);
+        assert_eq!(session.state.game_number, 2);
+        let entries: Vec<_> = drain
+            .transitions
+            .iter()
+            .flat_map(|transition| &transition.log_entries)
+            .collect();
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.segments.iter().any(|segment| {
+                    matches!(segment, LogSegment::Text(text) if text.starts_with("Game over"))
+                })),
+            "the settle ended game 1: {entries:?}"
+        );
+        assert!(
+            entries.iter().all(|entry| entry.game_number == 1),
+            "game 1's end is logged in game 1: {entries:?}"
+        );
+    }
+
     #[test]
     fn the_clock_is_monotonic() {
         let c = ContestClock::new();
