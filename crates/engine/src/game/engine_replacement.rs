@@ -6172,6 +6172,7 @@ fn ability_definition_uses_post_replacement_event_target(ability: &AbilityDefini
             | TargetFilter::SelfRef
             | TargetFilter::GrantingObject { .. }
             | TargetFilter::SourceOrPaired
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::Typed(..)
             | TargetFilter::StackAbility { .. }
             | TargetFilter::StackSpell

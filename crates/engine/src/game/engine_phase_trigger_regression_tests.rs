@@ -2022,6 +2022,7 @@ fn card_name_choice_validates_against_all_card_names() {
     let mut state = GameState::new_two_player(42);
     state.all_card_names = vec!["Lightning Bolt".to_string(), "Counterspell".to_string()].into();
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::card_name(),
@@ -2041,6 +2042,7 @@ fn card_name_choice_validates_against_all_card_names() {
 
     // Reset state for invalid test
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::card_name(),
@@ -2064,6 +2066,7 @@ fn card_name_choice_is_case_insensitive() {
     let mut state = GameState::new_two_player(42);
     state.all_card_names = vec!["Lightning Bolt".to_string()].into();
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: PlayerId(0),
         choice_type: crate::types::ability::ChoiceType::card_name(),
@@ -3578,6 +3581,7 @@ fn choose_option_with_exact_source_stores_chosen_attribute() {
 
     // Set up an exact-object prompt (simulating a persist=true Choose).
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: PlayerId(0),
         choice_type: ChoiceType::color(),
@@ -3692,6 +3696,7 @@ fn restricted_color_choice_rejects_excluded_color() {
 
     let mut state = GameState::new_two_player(42);
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: PlayerId(0),
         choice_type: ChoiceType::color_excluding(vec![ManaColor::White]),
