@@ -22278,6 +22278,52 @@ fn compound_tap_and_put_counter_binds_parent_target_under_typed_trigger_subject(
     }
 }
 
+/// CR 509.1g + CR 608.2i: the typed-referent continuation pin never reaches a
+/// block-history clause. "it" in "all creatures it blocked this turn" names this
+/// same instruction's target, not an earlier instruction's, so the clause
+/// declines and the continuation fails closed under a typed trigger subject
+/// exactly as it does without one (where the post-parse anaphor rewrite, not
+/// the pin, handles the continuation). Reverting the history-clause guard on
+/// the pin in `try_split_targeted_compound` binds the clause instead and the
+/// typed-subject row's sub becomes a `DestroyAll`.
+#[test]
+fn compound_typed_referent_pin_does_not_bind_block_history_clause() {
+    for subject in [
+        None,
+        Some(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        )),
+    ] {
+        let clause = parse_effect_clause(
+            "destroy target creature and all creatures it blocked this turn",
+            &mut ParseContext {
+                subject: subject.clone(),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "reach guard: the primary destroys the announced target under subject {subject:?}, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::Unimplemented { name, .. } if name == "block_history_partner"
+            ),
+            "the history continuation must fail closed under subject {subject:?}, got {:?}",
+            sub.effect
+        );
+    }
+}
+
 #[test]
 fn compound_exile_own_and_control_not_split() {
     let clause = parse_effect_clause(
