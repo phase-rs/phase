@@ -26,6 +26,7 @@ Each entry MUST include:
 
 ### `LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`
 
+- **Grep token:** `LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`
 - **Covers:** the unit `TriggerCause::ControlledCreatureDealtDamage` (Wayta,
   Trainer Prodigy's doubler cause) written before the "creature you control"
   doubler causes were parameterized into `TriggerCause::ControlledCreature {
@@ -37,7 +38,7 @@ Each entry MUST include:
 - **Removal trigger:** the tripwire fails to compile once the workspace
   version exceeds 0.140.x. Remove the legacy arm (or the whole
   `TriggerCauseWire` mirror and `#[serde(from)]`) and the tripwire.
-- **Source:** `crates/phase-ast/src/types/statics.rs`
+- **Source:** `crates/phase-ast/src/types/statics.rs:870`
   (`_LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`).
 
 ## Removed shims

@@ -3973,7 +3973,7 @@ pub(crate) fn parse_static_line_inner(
             }
         } else if nom_primitives::scan_contains(
             tp.lower,
-            "dealing combat damage to a player causes",
+            "a creature you control dealing combat damage to a player causes",
         ) {
             // CR 603.2d + CR 510.2: "a creature you control dealing combat
             // damage to a player causes" (Felix Five-Boots).

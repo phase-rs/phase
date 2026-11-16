@@ -17,6 +17,7 @@
 //! Signals: a creature's power counts its resolved pump/counter instances;
 //! Witherbloom Apprentice's life gain counts its resolved Magecraft instances.
 
+use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
@@ -49,6 +50,10 @@ const DESOLATION_TWIN: &str =
     "When you cast this spell, create a 10/10 colorless Eldrazi creature token.";
 const FELIX_FIVE_BOOTS: &str = "If a creature you control dealing combat damage to a player causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
 const MURDER: &str = "Destroy target creature.";
+const SCROLL_THIEF: &str = "Whenever this creature deals combat damage to a player, draw a card.";
+const PROFESSIONAL_FACE_BREAKER: &str = "Menace
+Whenever one or more creatures you control deal combat damage to a player, create a Treasure token.
+Sacrifice a Treasure: Exile the top card of your library. You may play that card this turn.";
 
 fn scenario() -> GameScenario {
     let mut s = GameScenario::new();
@@ -479,12 +484,7 @@ fn the_fish_brewer_does_not_double_its_own_enters_trigger() {
 #[test]
 fn felix_five_boots_does_not_double_its_own_ward() {
     let mut s = scenario();
-    let felix = s
-        .add_creature_from_oracle(P1, "Felix Five-Boots", 5, 4, FELIX_FIVE_BOOTS)
-        .with_subtypes(vec!["Ooze", "Rogue"])
-        .with_keyword(Keyword::Menace)
-        .with_keyword(Keyword::Ward(WardCost::Mana(ManaCost::generic(2))))
-        .id();
+    let felix = add_felix(&mut s, P1);
     let murder = s
         .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
         .id();
@@ -501,4 +501,101 @@ fn felix_five_boots_does_not_double_its_own_ward() {
         .count();
 
     assert_eq!(ward_triggers, 1, "Felix's ward triggers once");
+}
+
+fn add_felix(s: &mut GameScenario, player: engine::types::player::PlayerId) -> ObjectId {
+    s.add_creature_from_oracle(player, "Felix Five-Boots", 5, 4, FELIX_FIVE_BOOTS)
+        .with_subtypes(vec!["Ooze", "Rogue"])
+        .with_keyword(Keyword::Menace)
+        .with_keyword(Keyword::Ward(WardCost::Mana(ManaCost::generic(2))))
+        .id()
+}
+
+/// Attack P1 with `attackers` unblocked and resolve combat and every trigger.
+fn attack_unblocked(runner: &mut GameRunner, attackers: &[ObjectId]) {
+    runner.advance_to_combat();
+    let attacks: Vec<_> = attackers
+        .iter()
+        .map(|id| (*id, AttackTarget::Player(P1)))
+        .collect();
+    runner
+        .declare_attackers(&attacks)
+        .expect("attackers declared");
+    for _ in 0..64 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner.declare_blockers(&[]).expect("no blocks");
+            }
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::Priority { .. }
+                if runner.state().stack.is_empty()
+                    && runner.state().phase == Phase::PostCombatMain =>
+            {
+                return;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    panic!("combat did not settle");
+}
+
+fn hand_size(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .players
+        .iter()
+        .find(|p| p.id == P0)
+        .unwrap()
+        .hand
+        .len()
+}
+
+/// CR 603.2d + CR 510.2: a creature you control dealing combat damage to a
+/// player is Felix's cause, so Scroll Thief's own combat-damage trigger
+/// triggers twice: two cards. Revert-to-red: a Felix arm that never matches
+/// the per-source combat `DamageDealt` leaves one card.
+#[test]
+fn felix_five_boots_doubles_a_per_creature_combat_damage_trigger() {
+    let mut s = scenario();
+    add_felix(&mut s, P0);
+    let thief = s
+        .add_creature_from_oracle(P0, "Scroll Thief", 1, 3, SCROLL_THIEF)
+        .with_subtypes(vec!["Merfolk", "Rogue"])
+        .id();
+    let mut runner = s.build();
+    let before = hand_size(&runner);
+
+    attack_unblocked(&mut runner, &[thief]);
+
+    assert_eq!(hand_size(&runner) - before, 2);
+}
+
+/// CR 603.2d + CR 510.2: the "one or more creatures you control deal combat
+/// damage to a player" batch trigger is also caused by a creature you control
+/// dealing combat damage, so Professional Face-Breaker's trigger triggers
+/// twice: two Treasures. Revert-to-red: a Felix arm that never matches the
+/// step's `CombatDamageDealtToPlayer` batch leaves one Treasure.
+#[test]
+fn felix_five_boots_doubles_a_one_or_more_combat_damage_trigger() {
+    let mut s = scenario();
+    let felix = add_felix(&mut s, P0);
+    s.add_creature(P0, "Professional Face-Breaker", 2, 3)
+        .with_subtypes(vec!["Human", "Warrior"])
+        .from_oracle_text_with_keywords(&["Menace"], PROFESSIONAL_FACE_BREAKER);
+    let mut runner = s.build();
+
+    attack_unblocked(&mut runner, &[felix]);
+
+    let treasures = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].name == "Treasure")
+        .count();
+    assert_eq!(treasures, 2);
 }

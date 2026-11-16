@@ -799,9 +799,6 @@ enum TriggerCauseWire {
     ControlledCreature {
         event: ControlledCreatureEvent,
     },
-    /// LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: the pre-2026-Q4
-    /// shape of `ControlledCreature { event: DealtDamage }`.
-    ControlledCreatureDealtDamage,
     ControllerCastOrCopiedSpell {
         #[serde(default)]
         core_types: Vec<super::card_type::CoreType>,
@@ -815,6 +812,9 @@ enum TriggerCauseWire {
         #[serde(default)]
         qualifiers: Vec<ZoneChangeQualifier>,
     },
+    /// LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: the pre-2026-Q4
+    /// shape of `ControlledCreature { event: DealtDamage }`.
+    ControlledCreatureDealtDamage,
 }
 
 impl From<TriggerCauseWire> for TriggerCause {
@@ -866,13 +866,13 @@ const fn parse_legacy_version_component(text: &str) -> u32 {
 
 /// Tripwire: fails to compile once the workspace ships past 0.140.x, the
 /// removal point for the legacy `ControlledCreatureDealtDamage` shape.
-#[allow(dead_code, clippy::absurd_extreme_comparisons)]
+#[allow(dead_code)]
 const _LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: () = {
     const MAJOR: u32 = parse_legacy_version_component(env!("CARGO_PKG_VERSION_MAJOR"));
     const MINOR: u32 = parse_legacy_version_component(env!("CARGO_PKG_VERSION_MINOR"));
     assert!(
         !(MAJOR > 0 || MINOR > 140),
-        "LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: remove TriggerCauseWire's          ControlledCreatureDealtDamage arm (or the whole TriggerCauseWire mirror and          `#[serde(from)]` on TriggerCause) and this tripwire. See docs/LEGACY-COMPAT.md."
+        "LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: remove the legacy arm of TriggerCauseWire and this tripwire; see docs/LEGACY-COMPAT.md."
     );
 };
 
