@@ -68,6 +68,11 @@ const RISKY_MOVE: &str = "At the beginning of each player's upkeep, that player 
     this enchantment.\nWhen you gain control of this enchantment from another player, choose a \
     creature you control and an opponent. Flip a coin. If you lose the flip, that opponent gains \
     control of that creature.";
+const OPALESCENCE: &str = "Each other non-Aura enchantment is a creature in addition to its other \
+    types and has base power and base toughness each equal to its mana value.";
+const VEDALKEN_SHACKLES: &str = "You may choose not to untap this artifact during your untap \
+    step.\n{2}, {T}: Gain control of target creature with power less than or equal to the number \
+    of Islands you control for as long as this artifact remains tapped.";
 
 const LIBRARY: [&str; 12] = [
     "Lib 1", "Lib 2", "Lib 3", "Lib 4", "Lib 5", "Lib 6", "Lib 7", "Lib 8", "Lib 9", "Lib 10",
@@ -242,6 +247,23 @@ fn settle(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
     drive_until(runner, events, "an empty stack", |state| {
         state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. })
     });
+}
+
+/// Like [`settle`], answering Risky Move's choices: the chooser's only creature
+/// (a single candidate is chosen for them) and their only opponent.
+fn settle_answering_risky_move(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
+    for _ in 0..40 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::NamedChoice { player, .. } => GameAction::ChooseOption {
+                choice: PlayerId(1 - player.0).0.to_string(),
+            },
+            other => panic!("unexpected prompt while resolving Risky Move: {other:?}"),
+        };
+        act(runner, action, events);
+    }
+    panic!("Risky Move's trigger never finished");
 }
 
 /// JSON save and load of the whole authoritative state.
@@ -916,6 +938,122 @@ fn austere_command_returns_kharn_between_its_two_destroys() {
         "P1 lost control: draws two"
     );
     assert_eq!(library_size(&runner, P0), p0_lib);
+}
+
+/// Matt's F1 witness (CR 603.10 + CR 113.7a): P1's Vedalken Shackles holds P0's
+/// animated Risky Move. P0's Austere Command destroys all artifacts, then all
+/// enchantments. Destroying the Shackles ends its duration, so Risky Move
+/// returns to P0 while it is still on the battlefield; the next mode destroys
+/// it before the change is published. Risky Move existed immediately after it
+/// returned, so P0's gain trigger triggered then, and it survives its source's
+/// destruction: exactly one P0 trigger, which resolves.
+#[test]
+fn shackles_destroyed_before_risky_move_still_fires_its_gain_trigger_for_p0() {
+    let mut scenario = kharn_board(2);
+    scenario
+        .add_enchantment_from_oracle(P0, "Opalescence", OPALESCENCE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+            generic: 2,
+        });
+    let risky = scenario
+        .add_enchantment_from_oracle(P0, "Risky Move", RISKY_MOVE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red; 3],
+            generic: 3,
+        })
+        .id();
+    let bear = scenario.add_vanilla(P0, 2, 2);
+    let shackles = scenario
+        .add_artifact_from_oracle(P1, "Vedalken Shackles", VEDALKEN_SHACKLES)
+        .id();
+    for _ in 0..6 {
+        scenario.add_basic_land(P1, engine::types::mana::ManaColor::Blue);
+    }
+    scenario.with_mana_pool(
+        P1,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let command = add_free_spell(
+        &mut scenario,
+        P0,
+        "Austere Command",
+        CoreType::Sorcery,
+        AUSTERE_COMMAND,
+    );
+    let mut runner = scenario.build();
+    // The scenario places objects directly; settle the board they form once.
+    engine::game::layers::evaluate_layers(runner.state_mut());
+    assert_eq!(
+        runner.state().objects[&risky].power,
+        Some(6),
+        "REACH: Opalescence animates Risky Move as a 6/6"
+    );
+
+    give_priority(&mut runner, P1);
+    let seed = seed_for_flip(true);
+    let state = runner.state_mut();
+    state.rng_seed = seed;
+    state.rng_word_pos = 0;
+    state.rng = GameRng::seed_from_u64(seed);
+    let mut events = Vec::new();
+    let outcome = runner.activate(shackles, 0).target_object(risky).resolve();
+    events.extend(outcome.events().iter().cloned());
+    settle_answering_risky_move(&mut runner, &mut events);
+    assert_eq!(
+        controller(&runner, risky),
+        P1,
+        "REACH: the Shackles took Risky Move"
+    );
+    assert!(runner.state().objects[&shackles].tapped, "REACH");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::CoinFlipped { player_id, won: true } if *player_id == P1
+        )),
+        "REACH: P1's gain trigger resolved as a win"
+    );
+
+    give_priority(&mut runner, P0);
+    let mut events = Vec::new();
+    runner.cast(command).modes(&[0, 1]).commit();
+    drive_until(
+        &mut runner,
+        &mut events,
+        "Austere Command resolved",
+        |state| state.stack.iter().all(|entry| entry.source_id != command),
+    );
+    let state = runner.state();
+    assert_eq!(state.objects[&shackles].zone, Zone::Graveyard, "REACH");
+    assert_eq!(state.objects[&risky].zone, Zone::Graveyard, "REACH");
+    assert_eq!(changes_of(&events, risky), vec![(P1, P0)]);
+    let gain_triggers: Vec<_> = state
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == risky)
+        .map(|entry| entry.controller)
+        .collect();
+    assert_eq!(gain_triggers, vec![P0], "exactly one P0 gain trigger");
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+
+    let seed = seed_for_flip(false);
+    let state = runner.state_mut();
+    state.rng_seed = seed;
+    state.rng_word_pos = 0;
+    state.rng = GameRng::seed_from_u64(seed);
+    let mut events = Vec::new();
+    settle_answering_risky_move(&mut runner, &mut events);
+    let flips: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::CoinFlipped { player_id, won } => Some((*player_id, *won)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flips, vec![(P0, false)], "P0 flipped once and lost");
+    assert_eq!(controller(&runner, bear), P1, "P1 gained P0's creature");
 }
 
 /// Negative control (CR 400.7): Khârn destroyed while Control Magic still

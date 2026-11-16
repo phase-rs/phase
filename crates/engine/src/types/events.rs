@@ -438,6 +438,17 @@ pub struct ControlChangeObservation {
     /// against a doubler the instruction itself moved or removed.
     #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
     pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
+    /// CR 603.10 + CR 113.7a: for a change a full layer evaluation derived,
+    /// every functioning gain-side control-change watcher ("when you gain
+    /// control of ~"), with its controller, immediately AFTER the change. A
+    /// derived change is published at the next drain, after later instructions
+    /// of the same resolution may have moved its watcher (CR 608.2c), so its
+    /// gain-side triggers are collected from this latch and never from a later
+    /// board. `None` (an instruction-published change, or a payload saved
+    /// before this field): the gain side is an ordinary trigger, collected from
+    /// the board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_watchers: Option<std::sync::Arc<Vec<TriggerSourceContext>>>,
 }
 
 /// CR 603.2d: one functioning "triggers an additional time" static ability
@@ -494,6 +505,7 @@ impl ControlChangeInstructionCapture {
                 subject: subject.clone(),
                 watchers: self.watchers.clone(),
                 doublers: self.doublers.clone(),
+                gain_watchers: None,
             })
     }
 }

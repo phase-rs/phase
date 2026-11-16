@@ -283,6 +283,76 @@ impl<'de, K: Ord + Deserialize<'de>, V: Deserialize<'de>> Deserialize<'de> for L
     }
 }
 
+/// [`LazyBoxedMap`]'s list counterpart, for action-scoped working memory that
+/// is empty at every action boundary: `None` while empty, collapsed back to
+/// `None` whenever it empties, so it costs one pointer on `GameState`'s stack
+/// frame and an empty clone allocates nothing.
+// The box is the point (the `game_state_size` budget).
+#[allow(clippy::box_collection)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct LazyBoxedVec<T>(Option<Box<Vec<T>>>);
+
+impl<T> Default for LazyBoxedVec<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T> LazyBoxedVec<T> {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.as_slice().iter()
+    }
+
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        match self.0.as_deref_mut() {
+            Some(list) => list.iter_mut(),
+            None => [].iter_mut(),
+        }
+    }
+
+    pub fn push(&mut self, value: T) {
+        self.0.get_or_insert_with(Box::default).push(value);
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        let list = self.0.as_mut().expect("remove from an empty LazyBoxedVec");
+        let removed = list.remove(index);
+        if list.is_empty() {
+            self.0 = None;
+        }
+        removed
+    }
+
+    pub fn swap_remove(&mut self, index: usize) -> T {
+        let list = self
+            .0
+            .as_mut()
+            .expect("swap_remove from an empty LazyBoxedVec");
+        let removed = list.swap_remove(index);
+        if list.is_empty() {
+            self.0 = None;
+        }
+        removed
+    }
+
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    /// Empties the list, returning what it held.
+    pub fn take(&mut self) -> Vec<T> {
+        self.0.take().map_or_else(Vec::new, |list| *list)
+    }
+}
+
 fn nonzero_delta_magnitude(delta: i32) -> Result<u32, ResolvedPlayerEditReplayInvariantError> {
     (delta != 0)
         .then_some(delta.unsigned_abs())
@@ -28509,17 +28579,18 @@ declare_game_state! {
     /// (`layers::publish_layer_control_changes`). Working memory: drained at
     /// the action-return boundary (`engine::finalize_action_rules_state`) and
     /// empty there, so it is neither serialized nor compared, and a position
-    /// holding an entry is not loop-comparable (`is_loop_comparable`).
+    /// holding an entry is not loop-comparable (`is_loop_comparable`). Lazily
+    /// boxed: empty at every boundary (`game_state_size.rs`).
     #[serde(skip)]
-    pub layer_control_changes: Vec<crate::types::events::QueuedControlChange>,
+    pub layer_control_changes: LazyBoxedVec<crate::types::events::QueuedControlChange>,
     /// CR 613.1b: control changes an instruction has published ahead of the
     /// layer pass that realizes them, as (exact incarnation, new controller).
     /// The next full pass's controller diff consumes a matching entry instead
     /// of queueing the change a second time, and clears the rest. Working
     /// memory: every writer installs a control effect, which marks the layers
-    /// Full, so the boundary flush always clears it.
+    /// Full, so the boundary flush always clears it. Lazily boxed, as above.
     #[serde(skip)]
-    pub announced_control_changes: Vec<(ObjectIncarnationRef, PlayerId)>,
+    pub announced_control_changes: LazyBoxedVec<(ObjectIncarnationRef, PlayerId)>,
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the most recent
     /// `Effect::ChangeZoneAll` resolution. Read by `QuantityRef::ExiledFromHandThisResolution`
     /// for "draws a card for each card exiled from their hand this way" patterns
@@ -36906,8 +36977,8 @@ impl GameState {
             next_control_change_capture_id: 0,
             control_change_observations: LazyBoxedMap::default(),
             next_control_change_observation_id: 0,
-            layer_control_changes: Vec::new(),
-            announced_control_changes: Vec::new(),
+            layer_control_changes: LazyBoxedVec::default(),
+            announced_control_changes: LazyBoxedVec::default(),
             exiled_from_hand_this_resolution: 0,
             monarch: None,
             city_blessing: HashSet::new(),

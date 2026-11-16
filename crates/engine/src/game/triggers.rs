@@ -2971,25 +2971,81 @@ fn trigger_source_context_for_event(
     trigger_source_context_for_latch(state, source)
 }
 
-/// CR 603.10 + CR 603.10d: latch every functioning look-back control-change
-/// watcher (a lose-side `ChangesController` trigger source; the gain side is
-/// an ordinary trigger, checked after the event), with its controller and
-/// trigger entries, immediately before a control-change instruction. The source contexts come from the same
-/// `trigger_source_context_for_latch` authority the zone-change group latch
-/// uses. CR 702.26b: phased-out permanents don't trigger; CR 113.6: printed
-/// control-change triggers function on the battlefield.
-pub(crate) fn latch_control_change_watchers(state: &GameState) -> Vec<TriggerSourceContext> {
+/// CR 603.10 + CR 603.10d: latch every functioning control-change watcher of
+/// `side`, with its controller and trigger entries. The lose side looks back in
+/// time and is latched immediately before a control-change instruction; the
+/// gain side is latched immediately after a change a full layer evaluation
+/// derived (`layers::queue_derived_control_changes`). The source contexts come
+/// from the same `trigger_source_context_for_latch` authority the zone-change
+/// group latch uses. CR 702.26b: phased-out permanents don't trigger; CR
+/// 113.6: printed control-change triggers function on the battlefield.
+pub(crate) fn latch_control_change_watchers(
+    state: &GameState,
+    side: crate::types::triggers::ControlChangeSide,
+) -> Vec<TriggerSourceContext> {
     trigger_source_ids_for_zone(state, Zone::Battlefield)
         .into_iter()
         .filter_map(|source_id| state.objects.get(&source_id))
         .filter(|source| {
             super::functioning_abilities::active_trigger_definitions(state, source).any(|active| {
-                is_look_back_control_change(&active.definition.mode)
+                is_control_change_side(&active.definition.mode, side)
                     && trigger_definition_functions_in_zone(active.definition, Zone::Battlefield)
             })
         })
         .map(|source| trigger_source_context_for_latch(state, source))
         .collect()
+}
+
+fn is_control_change_side(
+    mode: &TriggerMode,
+    side: crate::types::triggers::ControlChangeSide,
+) -> bool {
+    matches!(mode, TriggerMode::ChangesController { side: mode_side } if *mode_side == side)
+}
+
+/// CR 603.10 + CR 603.10d: the latch that collects `mode` for `event`, by side.
+/// The lose side always comes from the watchers latched before the change. The
+/// gain side comes from the watchers latched after it when the event's
+/// observation carries that latch (a layer-derived change); otherwise it is an
+/// ordinary trigger, collected from the board (`None`).
+fn latched_control_change_side(
+    state: &GameState,
+    event: &GameEvent,
+    mode: &TriggerMode,
+) -> Option<crate::types::triggers::ControlChangeSide> {
+    use crate::types::triggers::ControlChangeSide;
+    let TriggerMode::ChangesController { side } = mode else {
+        return None;
+    };
+    match side {
+        ControlChangeSide::Loses => Some(ControlChangeSide::Loses),
+        ControlChangeSide::Gains => matches!(
+            event,
+            GameEvent::ControllerChanged { evidence, .. }
+                if state
+                    .control_change_observation(*evidence)
+                    .is_some_and(|observation| observation.gain_watchers.is_some())
+        )
+        .then_some(ControlChangeSide::Gains),
+    }
+}
+
+/// CR 603.10: whether a battlefield object carries a gain-side control-change
+/// trigger ("when you gain control of ~"), so a full layer evaluation captures
+/// the evidence its derived changes latch their gain watchers on.
+pub(crate) fn gain_control_change_listener_exists(state: &GameState) -> bool {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .any(|obj| {
+            obj.trigger_definitions.iter_all().any(|entry| {
+                is_control_change_side(
+                    &entry.definition.mode,
+                    crate::types::triggers::ControlChangeSide::Gains,
+                )
+            })
+        })
 }
 
 /// CR 603.10d: "when you lose control of ?" / "an opponent gains control of ?
@@ -3315,16 +3371,19 @@ enum TriggerSourceVisit {
     /// loop of `collect_pending_triggers` (and its debug shadow scan) computes it; every other
     /// observer path passes `ImmediatelyBefore`.
     Observer { exists_from: TriggerObservationTime },
-    /// CR 603.10 + CR 603.10d: a look-back control-change watcher, latched
-    /// immediately before the event's instruction and carried on the event.
-    /// The only visit that admits a printed `ChangesController` definition, and
-    /// it admits nothing else.
-    ControlChangeWatcher,
+    /// CR 603.10 + CR 603.10d: a control-change watcher latched for its event
+    /// and carried on the event's observation: the lose side immediately
+    /// before the change, the gain side immediately after a layer-derived one.
+    /// The only visit that admits a `ChangesController` definition its event
+    /// latched (`latched_control_change_side`), and it admits nothing else.
+    ControlChangeWatcher {
+        side: crate::types::triggers::ControlChangeSide,
+    },
 }
 
 impl LogicalZoneTriggerCollection<'_> {
     fn admits_source_visit(self, visit: TriggerSourceVisit, source: ObjectIncarnationRef) -> bool {
-        if matches!(visit, TriggerSourceVisit::ControlChangeWatcher) {
+        if matches!(visit, TriggerSourceVisit::ControlChangeWatcher { .. }) {
             // Already the immediately-before authority for its event.
             return true;
         }
@@ -3348,9 +3407,8 @@ impl LogicalZoneTriggerCollection<'_> {
             }
             Self::Settlement(_) => match visit {
                 TriggerSourceVisit::Observer { .. } => true,
-                TriggerSourceVisit::EventSubject | TriggerSourceVisit::ControlChangeWatcher => {
-                    false
-                }
+                TriggerSourceVisit::EventSubject
+                | TriggerSourceVisit::ControlChangeWatcher { .. } => false,
             },
         }
     }
@@ -3814,11 +3872,14 @@ fn collect_matching_triggers_inner(
         // controller, as of immediately before the change, so it is collected
         // only from the watcher latched then (`ControlChangeWatcher`), never
         // from a live, cached or post-event view; and that visit collects
-        // nothing else. The gain side (CR 603.10) is collected by the ordinary
-        // visits, from the board after the event.
-        if is_look_back_control_change(&trig_def.mode)
-            != matches!(visit, TriggerSourceVisit::ControlChangeWatcher)
-        {
+        // nothing else. CR 603.10 + CR 113.7a: the gain side of a layer-derived
+        // change likewise comes only from the watchers latched immediately
+        // after it; any other gain side is collected by the ordinary visits.
+        let latched_visit = match visit {
+            TriggerSourceVisit::ControlChangeWatcher { side } => Some(side),
+            TriggerSourceVisit::EventSubject | TriggerSourceVisit::Observer { .. } => None,
+        };
+        if latched_control_change_side(state, event, &trig_def.mode) != latched_visit {
             continue;
         }
         // CR 603.6a + CR 603.10 + CR 603.10a: an observer that exists only immediately after the
@@ -7838,20 +7899,35 @@ fn collect_pending_triggers_with_collection(
             }
         }
 
-        // CR 603.10 + CR 603.10d: look-back control-change triggers. Their
-        // existence, their controller (CR 603.3a) and the subject's appearance
-        // are those immediately before the change, which the event carries: the
-        // watcher latch and subject snapshot its instruction captured before
-        // its first mutation. Collected only here (the live, cached and LKI
-        // passes above skip `ChangesController`), so a watcher that has since
-        // changed control, lost its abilities or left the battlefield still
-        // triggers exactly as it would have then. `Unrecorded` evidence (a
-        // legacy payload) latches no watcher, so nothing is collected.
+        // CR 603.10 + CR 603.10d: control-change triggers collected from their
+        // event's latches. The lose side's existence, its controller (CR
+        // 603.3a) and the subject's appearance are those immediately before the
+        // change: the watcher latch and subject snapshot its instruction
+        // captured before its first mutation. The gain side of a layer-derived
+        // change is the watchers immediately after it (CR 603.10), latched by
+        // the pass that derived it (CR 113.7a: a trigger outlives its source).
+        // Collected only here (the live, cached and LKI passes above skip a
+        // latched side), so a watcher that has since changed control, lost its
+        // abilities or left the battlefield still triggers exactly as it would
+        // have then. `Unrecorded` evidence (a legacy payload) latches no
+        // watcher, so nothing is collected.
         if let GameEvent::ControllerChanged { evidence, .. } = event {
-            if let Some(watchers) = state
+            let latches = state
                 .control_change_observation(*evidence)
-                .map(|observation| observation.watchers.clone())
-            {
+                .map(|observation| {
+                    use crate::types::triggers::ControlChangeSide;
+                    [
+                        Some((ControlChangeSide::Loses, observation.watchers.clone())),
+                        observation
+                            .gain_watchers
+                            .clone()
+                            .map(|watchers| (ControlChangeSide::Gains, watchers)),
+                    ]
+                })
+                .into_iter()
+                .flatten()
+                .flatten();
+            for (side, watchers) in latches {
                 for source_context in watchers.iter() {
                     let source_id = source_context.identity.reference.object_id;
                     let matched_triggers = collect_matching_triggers_from_context(
@@ -7864,7 +7940,7 @@ fn collect_pending_triggers_with_collection(
                         &mut registered_this_event,
                         &active_suppress_triggers,
                         collection,
-                        TriggerSourceVisit::ControlChangeWatcher,
+                        TriggerSourceVisit::ControlChangeWatcher { side },
                     );
                     for matched in matched_triggers {
                         if !session.record_match(state, &matched, event) {

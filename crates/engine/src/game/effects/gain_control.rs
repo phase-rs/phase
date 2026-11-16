@@ -28,7 +28,10 @@ pub(crate) fn capture_control_change_instruction(
     population: impl IntoIterator<Item = ObjectId>,
 ) -> Arc<ControlChangeInstructionCapture> {
     Arc::new(ControlChangeInstructionCapture {
-        watchers: Arc::new(crate::game::triggers::latch_control_change_watchers(state)),
+        watchers: Arc::new(crate::game::triggers::latch_control_change_watchers(
+            state,
+            crate::types::triggers::ControlChangeSide::Loses,
+        )),
         doublers: Arc::new(crate::game::triggers::active_trigger_doublers(state)),
         subjects: population
             .into_iter()

@@ -3782,11 +3782,13 @@ fn evaluate_all_layers(state: &mut GameState, retirement_owner: StateDurationRet
         .collect();
     // CR 603.10d: the immediately-before authority of every control change this
     // pass derives is the board as it stands now, the last settled one. It is
-    // captured only when a look-back control-change trigger could read it;
+    // captured only when a control-change trigger could read it (CR 603.10: a
+    // gain-side one reads the observation its watchers are latched on);
     // otherwise a derived change carries `Unrecorded` evidence, which nothing
     // would read.
     let control_capture = (!prev_controllers.is_empty()
-        && super::triggers::look_back_control_change_listener_exists(state))
+        && (super::triggers::look_back_control_change_listener_exists(state)
+            || super::triggers::gain_control_change_listener_exists(state)))
     .then(|| {
         super::effects::gain_control::capture_control_change_instruction(
             state,
@@ -4468,11 +4470,18 @@ fn finish_layer_evaluation(
 /// the board before this pass (`capture`), so a look-back trigger reads that
 /// board. Without a capture, or once the subject is a new object (CR 400.7),
 /// the event carries `Unrecorded` evidence.
+///
+/// CR 603.10 + CR 113.7a: the observation also latches the gain-side watchers
+/// on the board this pass settled, immediately after the change. The change is
+/// published at a later drain, after which its watcher (the changed permanent
+/// itself, for "when you gain control of ~") may already have left; its
+/// trigger is collected from this latch, not from that later board.
 fn queue_derived_control_changes(
     state: &mut GameState,
     derived: &[(ObjectId, PlayerId, PlayerId)],
     capture: Option<&crate::types::events::ControlChangeInstructionCapture>,
 ) {
+    let mut gain_watchers = None;
     for &(object_id, old_controller, new_controller) in derived {
         let Some(subject) = state
             .objects
@@ -4493,7 +4502,16 @@ fn queue_derived_control_changes(
             .and_then(|capture| capture.observation_for(object_id))
             .filter(|observation| observation.subject.identity == subject)
         {
-            Some(observation) => state.record_control_change_observation(observation),
+            Some(mut observation) => {
+                observation.gain_watchers =
+                    Some(Arc::clone(gain_watchers.get_or_insert_with(|| {
+                        Arc::new(super::triggers::latch_control_change_watchers(
+                            state,
+                            crate::types::triggers::ControlChangeSide::Gains,
+                        ))
+                    })));
+                state.record_control_change_observation(observation)
+            }
             None => crate::types::events::ControlChangeEvidence::Unrecorded,
         };
         state
@@ -4520,7 +4538,7 @@ pub(crate) fn publish_layer_control_changes(
     events: &mut Vec<crate::types::events::GameEvent>,
 ) -> usize {
     flush_layers(state);
-    let queued = std::mem::take(&mut state.layer_control_changes);
+    let queued = state.layer_control_changes.take();
     let published = queued.len();
     events.extend(queued.into_iter().map(|queued| queued.event));
     published
