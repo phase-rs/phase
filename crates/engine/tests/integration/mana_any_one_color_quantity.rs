@@ -4,7 +4,7 @@
 
 use engine::ai_support::{legal_actions, legal_actions_full};
 use engine::game::casting::activated_ability_definitions;
-use engine::game::game_object::AttachTarget;
+use engine::game::game_object::{AttachTarget, ObjectIncarnationRefExt};
 use engine::game::layers::evaluate_layers;
 use engine::game::mana_payment::{
     can_pay_for_spell, compute_phyrexian_shards, pay_cost_with_demand_and_choices, pay_from_pool,
@@ -7114,15 +7114,15 @@ fn live_guidance_finish(s: GameScenario, ids: LiveGuidanceSources) -> GameRunner
             .count(),
         1
     );
-    assert!(!r.state().objects[&ids.nexus].statics.is_empty());
+    assert!(!r.state().objects[&ids.nexus].static_definitions.is_empty());
     for id in [ids.land, ids.nexus, ids.thrull] {
         assert!(r.state().objects[&id]
             .abilities
             .iter()
             .all(|a| !matches!(&*a.effect, Effect::Unimplemented { .. })));
     }
-    assert_eq!(r.state().objects[&ids.aura].triggers.len(), 1);
-    let trigger = &r.state().objects[&ids.aura].triggers[0].definition;
+    assert_eq!(r.state().objects[&ids.aura].trigger_definitions.len(), 1);
+    let trigger = &r.state().objects[&ids.aura].trigger_definitions[0].definition;
     assert!(matches!(
         trigger.execute.as_deref().map(|a| &*a.effect),
         Some(Effect::Mana { .. })
@@ -7143,7 +7143,7 @@ fn live_guidance_finish(s: GameScenario, ids: LiveGuidanceSources) -> GameRunner
                 &r.state().objects[&ids.aura]
             )
         && row.taps_for_mana_overrides[0].0.occurrence
-            == r.state().objects[&ids.aura].triggers[0].occurrence
+            == r.state().objects[&ids.aura].trigger_definitions[0].occurrence
         && row.taps_for_mana_overrides[0].1
             == engine::types::game_state::ProductionOverride::SingleColor(ManaType::Green)));
     assert!(activatable_mana_options(r.state(), ids.thrull, P0)
@@ -7178,7 +7178,7 @@ fn live_guidance_findbroker_board(
         .iter()
         .any(|row| row.mana_type == ManaType::Blue && !row.taps_for_mana_overrides.is_empty()));
     assert!(matches!(
-        r.state().objects[&findbroker].triggers[0]
+        r.state().objects[&findbroker].trigger_definitions[0]
             .definition
             .execute
             .as_deref()
@@ -7605,7 +7605,7 @@ fn live_guidance_shared_vernal_bloom_settles_once_per_completed_forest() {
         );
         assert_eq!(
             definition.occurrence,
-            r.state().objects[&bloom].triggers[0].occurrence
+            r.state().objects[&bloom].trigger_definitions[0].occurrence
         );
         assert_eq!(
             *output,
@@ -7615,7 +7615,7 @@ fn live_guidance_shared_vernal_bloom_settles_once_per_completed_forest() {
     }
     assert!(selected.windows(2).all(|pair| pair[0] == pair[1]));
     assert!(matches!(
-        r.state().objects[&bloom].triggers[0]
+        r.state().objects[&bloom].trigger_definitions[0]
             .definition
             .execute
             .as_deref()
