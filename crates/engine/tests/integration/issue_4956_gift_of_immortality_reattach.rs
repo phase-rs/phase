@@ -1248,9 +1248,11 @@ fn stormkeld_empty_population_finishes_and_nonempty_may_be_declined() {
     for _ in 0..64 {
         match empty_runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if empty_runner.state().stack.is_empty() => break,
-            WaitingFor::Priority { .. } => empty_runner
-                .act(GameAction::PassPriority)
-                .expect("pass priority to resolve Stormkeld Curator"),
+            WaitingFor::Priority { .. } => {
+                empty_runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority to resolve Stormkeld Curator");
+            }
             WaitingFor::OptionalEffectChoice { .. } => {
                 saw_optional = true;
                 empty_runner
