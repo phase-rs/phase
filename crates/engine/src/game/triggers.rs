@@ -671,6 +671,14 @@ struct TriggerCollectionSession {
     /// CR 614.12a + CR 603.2: only an explicitly collected payment slice
     /// observes the board before this entrant's simultaneous entry group.
     payment_entrant: Option<ObjectId>,
+    /// CR 502.3 + CR 502.4: pre-advance untap-seam mode. When set,
+    /// `record_match` admits only candidates whose definition carries an
+    /// untap-step window, returning `false` for every other candidate BEFORE
+    /// the admission check and its ledger/journal writes. Dropped contexts
+    /// stay re-admittable at the post-advance scan exactly as if this
+    /// collection never ran; windowed contexts keep today's exact
+    /// admit+record behavior. Off for every other caller.
+    untap_step_window_only: bool,
 }
 
 impl TriggerCollectionSession {
@@ -681,6 +689,7 @@ impl TriggerCollectionSession {
             admitted_matches: 0,
             bulk_member_sources: None,
             payment_entrant: None,
+            untap_step_window_only: false,
         }
     }
 
@@ -695,6 +704,7 @@ impl TriggerCollectionSession {
             admitted_matches: 0,
             bulk_member_sources: None,
             payment_entrant: None,
+            untap_step_window_only: false,
         }
     }
 
@@ -725,6 +735,20 @@ impl TriggerCollectionSession {
         matched: &MatchedTrigger,
         event: &GameEvent,
     ) -> bool {
+        // CR 502.3 + CR 502.4: the pre-advance untap seam drops every
+        // unwindowed candidate, so classify window-ness BEFORE admission. A
+        // skipped candidate records no ledger edit and journals no operation,
+        // keeping admit-and-record atomic: the post-advance scan re-admits it
+        // exactly as if this collection never ran (issue #10940).
+        if self.untap_step_window_only
+            && !trigger_ability_carries_untap_step_window(
+                state,
+                matched.pending.ability.trigger_definition_ref.as_ref(),
+                matched.pending.source_id,
+            )
+        {
+            return false;
+        }
         if !matched_trigger_constraint_allows_admission(state, matched, event) {
             return false;
         }
@@ -9991,33 +10015,61 @@ pub(crate) fn collect_untap_step_windowed_triggers_into_deferred(
     if untaps.is_empty() {
         return;
     }
-    let pending = collect_pending_triggers(state, &untaps);
+    // CR 603.2: `record_match` already admitted only windowed candidates,
+    // so no dropped context leaves a ledger edit for the post-advance scan
+    // to trip over (admit-and-record stays atomic). The structural filter
+    // below re-states the keep/drop contract as a safety net.
+    let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
+    session.untap_step_window_only = true;
+    let pending = collect_pending_triggers_with_collection(
+        state,
+        &untaps,
+        LogicalZoneTriggerCollection::Ordinary,
+        &mut session,
+    );
     let windowed: Vec<PendingTriggerContext> = pending
         .into_iter()
         .filter(|context| {
-            let Some(definition_ref) = context.pending.ability.trigger_definition_ref.as_ref()
-            else {
-                return false;
-            };
-            let Some(source) = state.objects.get(&context.pending.source_id) else {
-                return false;
-            };
-            // The stacked `pending.condition` has the `EventTime` wrapper
-            // stripped (`stack_condition_for_trigger`), so resolve the live
-            // definition through the occurrence ref and read its full
-            // condition instead.
-            super::functioning_abilities::active_trigger_definitions(state, source)
-                .find(|active| active.definition_ref == *definition_ref)
-                .is_some_and(|active| {
-                    active
-                        .definition
-                        .condition
-                        .as_ref()
-                        .is_some_and(condition_carries_untap_step_window)
-                })
+            trigger_ability_carries_untap_step_window(
+                state,
+                context.pending.ability.trigger_definition_ref.as_ref(),
+                context.pending.source_id,
+            )
         })
         .collect();
     state.deferred_triggers.extend(windowed);
+}
+
+/// CR 502.3 + CR 502.4: structural window test shared by the pre-advance
+/// seam's admission gate (`record_match` under `untap_step_window_only`)
+/// and its post-collection filter. True when the stacked ability's
+/// occurrence ref resolves to a live definition whose condition tree
+/// carries an untap-step window. Both call sites read the same stacked
+/// `trigger_definition_ref`, so the gate and the filter can never disagree.
+fn trigger_ability_carries_untap_step_window(
+    state: &GameState,
+    definition_ref: Option<&TriggerDefinitionRef>,
+    source_id: ObjectId,
+) -> bool {
+    let Some(definition_ref) = definition_ref else {
+        return false;
+    };
+    let Some(source) = state.objects.get(&source_id) else {
+        return false;
+    };
+    // The stacked `pending.condition` has the `EventTime` wrapper
+    // stripped (`stack_condition_for_trigger`), so resolve the live
+    // definition through the occurrence ref and read its full
+    // condition instead.
+    super::functioning_abilities::active_trigger_definitions(state, source)
+        .find(|active| active.definition_ref == *definition_ref)
+        .is_some_and(|active| {
+            active
+                .definition
+                .condition
+                .as_ref()
+                .is_some_and(condition_carries_untap_step_window)
+        })
 }
 
 /// Structural window test for

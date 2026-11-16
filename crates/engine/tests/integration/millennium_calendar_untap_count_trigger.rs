@@ -34,7 +34,7 @@ use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, StaticDefinition,
-    TargetFilter, TriggerDefinition, TypedFilter,
+    TargetFilter, TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -829,6 +829,128 @@ fn unwindowed_singular_untap_trigger_fires_exactly_once() {
         1,
         "one permanent untapped in an untap step must fire an unwindowed \
          singular Untaps trigger exactly once"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "completion: the stack must be empty after the trigger resolves"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completion: the game must rest at priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Ledger-atomicity pin (issue #10940 finding): a ledger-backed-constrained
+/// (`OncePerTurn { Triggering }`), UNWINDOWED, singular `Untaps` trigger
+/// fires EXACTLY ONCE when two permanents untap during the untap step.
+///
+/// Pre-fix the pre-advance seam admitted+recorded the dropped contexts, so
+/// the post-advance upkeep scan refused to re-admit them and the trigger
+/// fired zero times. Post-fix the seam classifies window-ness before
+/// recording, the ledger stays clean, and the upkeep scan admits the first
+/// untap (spending the limit) while the second untap finds it spent: exactly
+/// one firing for two untaps (0 = the finding, 2 = double-fire).
+///
+/// Fixture honesty: no printed card exhibits constrained+unwindowed+Untaps.
+/// Measured over the 7407-card `integration_cards.json.gz` fixture, exactly
+/// five cards parse to `TriggerMode::Untaps` — Arbiter of the Ideal, Daring
+/// Thief, Felhide Spiritbinder, Fishing Pole, Ghostly Pilferer — all singular
+/// "becomes untapped" subjects, all `constraint: null`, all `condition:
+/// null`. The nearest printed card is Ghostly Pilferer ("Whenever Ghostly
+/// Pilferer becomes untapped, you may pay {2}. If you do, draw a card."): the
+/// same singular unwindowed Untaps shape, but unconstrained and optional. The
+/// `OncePerTurn` limit below is therefore installed synthetically — the
+/// narrowest permitted construction (`push_printed_trigger`, as the sibling
+/// row does) — while the test drives the REAL pipeline (scenario → untap
+/// step → upkeep priority drain → resolution) and asserts exactly one firing.
+/// Needs-assessment: needed — yes; sole guard of the ledger-atomicity finding
+/// (the finding's Closes-when).
+///
+/// Reach guard: the installed definition is singular unbatched `Untaps` with
+/// no condition and an `OncePerTurn { Triggering }` limit.
+#[test]
+fn unwindowed_once_per_turn_untap_trigger_fires_exactly_once_for_two_untaps() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..3 {
+        scenario.add_card_to_library_top(P0, "Island");
+        scenario.add_card_to_library_top(P1, "Island");
+    }
+    let source = scenario.add_creature(P0, "Ledger Witness", 2, 2).id();
+    let lands = [
+        scenario.add_basic_land(P0, ManaColor::White),
+        scenario.add_basic_land(P0, ManaColor::Blue),
+    ];
+    let mut runner = scenario.build();
+    for land in lands {
+        runner.state_mut().objects.get_mut(&land).unwrap().tapped = true;
+    }
+    let mut definition = TriggerDefinition::new(TriggerMode::Untaps)
+        .valid_card(TargetFilter::Typed(
+            TypedFilter::permanent().controller(ControllerRef::You),
+        ))
+        .execute(AbilityDefinition::new(
+            AbilityKind::Database,
+            Effect::PutCounter {
+                target: TargetFilter::SelfRef,
+                counter_type: CounterType::Time,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        ));
+    definition.constraint = Some(TriggerConstraint::OncePerTurn {
+        spent_by: TriggerLimitSpend::Triggering,
+    });
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .expect("fixture source")
+        .push_printed_trigger(definition);
+
+    assert!(
+        runner.state().objects[&source]
+            .trigger_definitions
+            .iter_unchecked()
+            .any(|t| t.definition.mode == TriggerMode::Untaps
+                && !t.definition.batched
+                && t.definition.condition.is_none()
+                && matches!(
+                    t.definition.constraint,
+                    Some(TriggerConstraint::OncePerTurn {
+                        spent_by: TriggerLimitSpend::Triggering
+                    })
+                )),
+        "reach guard: the fixture must be singular unbatched Untaps with no window and a Triggering-spent OncePerTurn limit"
+    );
+
+    // Drive through P1's turn into P0's next upkeep; P0's untap step runs on
+    // the way and untaps both tapped lands.
+    let turn = runner.state().turn_number;
+    let steps = drive_until(&mut runner, |state| {
+        state.turn_number == turn + 2 && state.phase == Phase::Upkeep
+    });
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "reach guard: the drive must land in P0's next upkeep"
+    );
+    assert!(
+        steps.contains(&Phase::Untap),
+        "reach guard: an untap step must have run: {steps:?}"
+    );
+    for land in lands {
+        assert!(
+            !runner.state().objects[&land].tapped,
+            "reach guard: CR 502.3 must have untapped both tapped lands"
+        );
+    }
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        time_counters(&runner, source),
+        1,
+        "two permanents untapped in an untap step must fire a OncePerTurn unwindowed Untaps trigger exactly once"
     );
     assert!(
         runner.state().stack.is_empty(),
