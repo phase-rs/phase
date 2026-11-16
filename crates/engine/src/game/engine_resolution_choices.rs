@@ -4197,6 +4197,10 @@ pub(super) fn handle_resolution_choice(
                                         controller: player,
                                         // Source-less growth mint from a fodder profile; empty mods are stamp-proof.
                                         donor: None,
+                                        // CR 732.2a + CR 707.8a: `derived_fodder_class` admits no class with a
+                                        // member that is double-faced by `transform::stored_double_face`, so no
+                                        // minted member has an other face for CR 707.8a to carry.
+                                        double_faced: None,
                                     }),
                                 };
                                 crate::game::effects::token_copy::drive_copy_token_batches(
@@ -9442,7 +9446,8 @@ pub(super) fn handle_resolution_choice(
             match crate::game::zone_pipeline::move_objects_simultaneously(state, reqs, events) {
                 crate::game::zone_pipeline::BatchMoveResult::Done => {
                     ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
-                        player: state.active_player,
+                        // CR 704.3 + CR 800.4j: the check that raised this choice can also have removed the active player.
+                        player: super::engine::living_priority_seat(state),
                     })
                 }
                 crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
@@ -9522,7 +9527,8 @@ pub(super) fn handle_resolution_choice(
                 match crate::game::zone_pipeline::move_object(state, request, events) {
                     crate::game::zone_pipeline::ZoneMoveResult::Done => {
                         ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
-                            player: state.active_player,
+                            // CR 903.9a + CR 704.3 + CR 800.4j: the check that raised this choice can also have removed the active player.
+                            player: super::engine::living_priority_seat(state),
                         })
                     }
                     crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
@@ -9533,7 +9539,7 @@ pub(super) fn handle_resolution_choice(
             } else {
                 state.commander_declined_zone_return.insert(commander_id);
                 ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
-                    player: state.active_player,
+                    player: super::engine::living_priority_seat(state),
                 })
             }
         }
@@ -9560,7 +9566,8 @@ pub(super) fn handle_resolution_choice(
                     .push(ChosenAttribute::Player(protector));
             }
             ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
-                player: state.active_player,
+                // CR 704.5x + CR 704.3 + CR 800.4j: the check that raised this choice can also have removed the active player.
+                player: super::engine::living_priority_seat(state),
             })
         }
         // CR 101.4 + CR 701.21a: Player selected one permanent per type category.
