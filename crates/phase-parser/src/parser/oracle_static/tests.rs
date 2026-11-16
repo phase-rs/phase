@@ -11449,17 +11449,26 @@ fn land_cards_exiled_grant_declines_mis_scoped_sets() {
 
 /// CR 613.1f + CR 201.2: "all activated abilities of creatures you control that
 /// don't have the same name as it/~" (Marvin, Murderous Mimic) — battlefield
-/// creatures you control, excluding ones sharing the recipient's name.
+/// creatures you control, excluding ones sharing the recipient's name. The
+/// expected vec pins BOTH conjuncts: dropping the name exclusion (Marvin
+/// gains same-named abilities) or the zone pin (hand creatures donate) flips
+/// this test.
 #[test]
 fn parse_continuous_modifications_grants_creatures_you_control_not_same_name() {
     use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
+    use crate::types::zones::Zone;
     let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
         source: TargetFilter::Typed(
             TypedFilter::creature()
                 .controller(ControllerRef::You)
-                .properties(vec![FilterProp::Not {
-                    prop: Box::new(FilterProp::SameName),
-                }]),
+                .properties(vec![
+                    FilterProp::Not {
+                        prop: Box::new(FilterProp::SameName),
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
+                    },
+                ]),
         ),
         cap: None,
         kind: None,
@@ -11478,11 +11487,15 @@ fn parse_continuous_modifications_grants_creatures_you_control_not_same_name() {
 }
 
 /// CR 613.1f: "each other creature with a +1/+1 counter on it" (Experiment Kraj)
-/// — all creatures with at least one +1/+1 counter, excluding self.
+/// — battlefield creatures with at least one +1/+1 counter, excluding self.
+/// The expected vec pins BOTH conjuncts: dropping the counter requirement
+/// (Kraj gains counterless creatures) or the zone pin (graveyard cards with
+/// counters donate) flips this test.
 #[test]
 fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
     use crate::types::ability::{Comparator, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
     use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::zones::Zone;
     let expected = ContinuousModification::GrantAllActivatedAbilitiesOf {
         source: TargetFilter::And {
             filters: vec![
@@ -11491,6 +11504,9 @@ fn parse_grant_all_activated_abilities_each_other_creature_with_counter() {
                         counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                         comparator: Comparator::GE,
                         count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Battlefield,
                     },
                 ])),
                 TargetFilter::Not {
@@ -27564,6 +27580,94 @@ fn compound_cost_tax_line_splits_into_cast_and_ability_statics() {
     );
 }
 
+/// CR 604.1 + CR 611.3a + CR 601.2f: a continuous grant conjoined with an
+/// activated-ability cost modifier (Nahiri, Storm of Stone) splits into a
+/// `Continuous` grant and a `ReduceAbilityCost`, both under the leading
+/// `DuringYourTurn` condition. The single-return path read the cost conjunct as
+/// a keyword and granted creatures a phantom `Equip {0}`.
+#[test]
+fn compound_grant_and_ability_cost_line_splits_into_grant_and_cost_statics() {
+    let defs = parse_static_line_multi(
+        "During your turn, creatures you control have first strike and equip abilities you activate cost {1} less to activate.",
+    );
+    assert_eq!(defs.len(), 2, "grant + cost statics, got {defs:?}");
+    let grant = &defs[0];
+    assert_eq!(grant.mode, StaticMode::Continuous);
+    assert_eq!(
+        grant.modifications,
+        vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::FirstStrike
+        }],
+        "the grant half carries only first strike",
+    );
+    assert_eq!(grant.condition, Some(StaticCondition::DuringYourTurn));
+    assert_eq!(
+        defs[1].mode,
+        StaticMode::ReduceAbilityCost {
+            mode: CostModifyMode::Reduce,
+            keyword: "equip".to_string(),
+            amount: 1,
+            minimum_mana: None,
+            dynamic_count: None,
+            exemption: ActivationExemption::None,
+            activator: Some(PlayerFilter::Controller),
+            targets: None,
+            frequency: None,
+        }
+    );
+    assert_eq!(
+        defs[1].condition,
+        Some(StaticCondition::DuringYourTurn),
+        "the leading condition must propagate to the cost half",
+    );
+}
+
+/// The split is at the LAST conjunction, so a multi-keyword grant keeps its whole
+/// keyword list. Synthetic: no printed card has a multi-keyword grant before the
+/// cost conjunct; Nahiri, Storm of Stone (single-keyword grant) is the nearest
+/// printed card.
+#[test]
+fn compound_grant_and_ability_cost_line_keeps_multi_keyword_grant() {
+    let defs = parse_static_line_multi(
+        "Creatures you control have flying and first strike and equip abilities you activate cost {1} less to activate.",
+    );
+    assert_eq!(defs.len(), 2, "grant + cost statics, got {defs:?}");
+    assert_eq!(
+        defs[0].modifications,
+        vec![
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::Flying
+            },
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::FirstStrike
+            },
+        ]
+    );
+    assert!(matches!(
+        &defs[1].mode,
+        StaticMode::ReduceAbilityCost { keyword, amount: 1, .. } if keyword == "equip"
+    ));
+}
+
+/// Fail closed: once the grant-and-cost conjunct is recognized, a cost clause
+/// with text after "to activate" (which the cost parser would drop) or an
+/// untypeable cost half yields no statics rather than a grant with the conjunct lost.
+/// Synthetic: no printed card has either shape; Nahiri, Storm of Stone is the
+/// nearest printed card.
+#[test]
+fn compound_grant_and_ability_cost_line_fails_closed_on_untyped_half() {
+    for line in [
+        "During your turn, creatures you control have first strike and equip abilities you activate cost {1} less to activate while you're attacking.",
+        "During your turn, creatures you control have first strike and equip abilities you activate cost {1} more to activate.",
+    ] {
+        assert_eq!(
+            parse_static_line_multi(line),
+            Vec::new(),
+            "must fail closed: {line}"
+        );
+    }
+}
+
 #[test]
 fn static_possessive_equip_ability_cost_reduction_self_ref() {
     // Firion, Wild Rose Warrior's granted equip-cost reduction leaf:
@@ -28026,9 +28130,9 @@ fn static_peri_brown_first_historic_spell_each_turn_has_convoke() {
 
 #[test]
 fn static_twelfth_doctor_first_spell_from_nonhand_each_turn_has_demonstrate() {
-    // CR 601.2a + CR 702.144a: The Twelfth Doctor — cast-origin "from anywhere
-    // other than your hand" lowers to InAnyZone over the cast-capable non-hand
-    // zones; gated to the first such spell each turn.
+    // CR 601.2a + CR 702.144a + CR 400.11: The Twelfth Doctor — cast-origin "from
+    // anywhere other than your hand" lowers to the negation of InZone(Hand) (so a cast
+    // from outside the game qualifies); gated to the first such spell each turn.
     let def = parse_static_line(
         "The first spell you cast from anywhere other than your hand each turn has demonstrate.",
     )
@@ -28039,16 +28143,16 @@ fn static_twelfth_doctor_first_spell_from_nonhand_each_turn_has_demonstrate() {
             keyword: Keyword::Demonstrate,
         }
     );
-    let expected_zones = crate::parser::oracle_target::cast_capable_zones_except(Zone::Hand);
+    let expected_prop = FilterProp::Not {
+        prop: Box::new(FilterProp::InZone { zone: Zone::Hand }),
+    };
     let Some(TargetFilter::Typed(tf)) = &def.affected else {
         panic!("expected Typed affected, got {:?}", def.affected);
     };
     assert_eq!(tf.controller, Some(ControllerRef::You));
     assert!(
-        tf.properties.contains(&FilterProp::InAnyZone {
-            zones: expected_zones.clone(),
-        }),
-        "expected InAnyZone({expected_zones:?}), got {:?}",
+        tf.properties.contains(&expected_prop),
+        "expected {expected_prop:?}, got {:?}",
         tf.properties
     );
     assert_first_spell_gate(

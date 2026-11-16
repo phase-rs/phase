@@ -8,24 +8,25 @@ use crate::types::ability::{
     AbilityKind, AdditionalCost, AdditionalCostInstance, AdditionalCostOrigin, AggregateFunction,
     BeholdCostAction, CastTimingPermission, Comparator, CostMoveOutcome, CostPaidObjectRecord,
     CostPaidObjectSnapshot, CounterCostSelection, Duration, Effect, KickerVariant,
-    NotedManaPayment, ObjectProperty, QuantityExpr, QuantityRef, ReplacementDefinition,
-    ResolutionCastCleanup, ResolvedAbility, SacrificeCost, SacrificeRequirement,
-    SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement, StaticCondition,
-    TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
-    EXILE_COST_X,
+    NotedManaPayment, ObjectProperty, PlayerRecipientCost, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ResolutionCastCleanup, ResolvedAbility, SacrificeCost,
+    SacrificeRequirement, SpellCastingOptionKind, SpellContext, SpellStackToGraveyardReplacement,
+    StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
+    TypedFilter, EXILE_COST_X,
 };
 use crate::types::card_type::CoreType;
 use crate::types::casting_costs::{CostReductionElection, CostReductionEntry, ReductionProvenance};
 use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
-    ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence, CastPaymentMode,
-    CastTimingRoute, CastingPermissionIndex, CastingVariant, ConvokeMode, CostResume,
-    CounterCostChoice, CounterRemoveChoice, DeferredHandDiscardCost, DeferredSpellSacrifice,
-    DistributionUnit, FinalizePrePaymentChecks, GameState, ManaAbilityCostParent,
-    ManaAbilityResume, PausedCounterCostRemoval, PayCostKind, PendingCast,
-    PendingCostMoveCompletion, PendingCostMoveResume, PendingCounterRemoval,
-    PendingDiscardForCostResume, PendingSacrificeCostCompletion, PrepaidSpellFinalization,
-    SpellCostSource, StackEntry, StackEntryKind, StackPaidSnapshot, WaitingFor,
+    ActivationResidual, ActivationTargetSelection, AssistState, CastOccurrence,
+    CastOpponentChoicePurpose, CastPaymentMode, CastTimingRoute, CastingPermissionIndex,
+    CastingVariant, ConvokeMode, CostResume, CounterCostChoice, CounterRemoveChoice,
+    DeferredHandDiscardCost, DeferredLifeGainCost, DeferredSpellSacrifice, DistributionUnit,
+    FinalizePrePaymentChecks, GameState, ManaAbilityCostParent, ManaAbilityResume,
+    PausedCounterCostRemoval, PayCostKind, PendingCast, PendingCostMoveCompletion,
+    PendingCostMoveResume, PendingCounterRemoval, PendingDiscardForCostResume,
+    PendingSacrificeCostCompletion, PrepaidSpellFinalization, SpellCostSource, StackEntry,
+    StackEntryKind, StackPaidSnapshot, StagedLifeGains, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
@@ -55,7 +56,8 @@ use super::ability_utils::{
     begin_target_selection_for_ability, build_target_slots, build_target_slots_labelled,
     declared_targets_in_chain, random_select_targets_for_ability, target_constraints_from_modal,
 };
-use super::life_costs::PayLifeCostResult;
+use super::effects::life::StagedLifeGainOutcome;
+use super::life_costs::{LifeGainCostRecipients, PayLifeCostResult};
 
 const TERMINAL_CAST_CANCELLATION_ERROR: &str = "__terminal_cast_cancellation__";
 /// CR 601.6: terminal sentinel for a fully announced spell that a casting
@@ -1201,29 +1203,230 @@ fn continue_after_gift_promised(
             player,
             candidates: opponents,
             gift_kind,
+            purpose: CastOpponentChoicePurpose::Gift,
             pending_cast: Box::new(pending),
         })
     }
 }
 
-/// CR 702.174a: Apply the chosen Gift recipient and resume deferred casting.
+/// CR 601.2 + CR 115.10a: Apply the caster's chosen opponent for the prompt's
+/// `purpose` and resume deferred casting: CR 702.174a latches the Gift recipient;
+/// CR 601.2h + CR 118.3 binds the recipient of a life-gain cost being paid at the
+/// payment commit, which then resumes and pays it.
 pub(crate) fn handle_choose_gift_recipient(
     state: &mut GameState,
     player: PlayerId,
     pending: PendingCast,
     opponent: PlayerId,
     candidates: &[PlayerId],
+    purpose: &CastOpponentChoicePurpose,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if !candidates.contains(&opponent) {
         return Err(EngineError::InvalidAction(
-            "Gift recipient must be one of the offered opponents".to_string(),
+            "Recipient must be one of the offered opponents".to_string(),
         ));
     }
     let mut pending = pending;
-    pending.ability.context.gift_recipient = Some(opponent);
-    stamp_pending_ability_context_recursive(&mut pending);
-    finish_pending_cost_or_cast(state, player, pending, events)
+    match purpose {
+        CastOpponentChoicePurpose::Gift => {
+            pending.ability.context.gift_recipient = Some(opponent);
+            stamp_pending_ability_context_recursive(&mut pending);
+            finish_pending_cost_or_cast(state, player, pending, events)
+        }
+        CastOpponentChoicePurpose::EffectCost { cost } => {
+            let Some(PlayerRecipientCost::GainLife {
+                amount,
+                recipient,
+                selection,
+            }) = cost.player_recipient_cost()
+            else {
+                return Err(EngineError::InvalidAction(
+                    "Recipient choice carried a cost with no chosen-player instruction".to_string(),
+                ));
+            };
+            // CR 104.3a + CR 118.3 + CR 601.2h: an offered opponent may have left
+            // while this prompt was pending; only a live, payable recipient can bind.
+            let eligible = match super::life_costs::life_gain_cost_recipients(
+                state,
+                player,
+                pending.object_id,
+                recipient,
+                selection,
+            ) {
+                LifeGainCostRecipients::Unpayable => false,
+                LifeGainCostRecipients::Choose(recipients)
+                | LifeGainCostRecipients::All(recipients) => recipients.contains(&opponent),
+            };
+            if !eligible {
+                return Err(EngineError::InvalidAction(
+                    "Recipient is no longer eligible for this life-gain cost".to_string(),
+                ));
+            }
+            let finalization = pending.prepaid_finalization.take().ok_or_else(|| {
+                EngineError::InvalidAction(
+                    "A life-gain cost recipient is chosen only at the payment commit".to_string(),
+                )
+            })?;
+            let amount =
+                super::quantity::resolve_quantity_with_targets(state, amount, &pending.ability)
+                    .max(0) as u32;
+            pending.deferred_life_gain_cost = Some(DeferredLifeGainCost::Owed {
+                recipients: vec![opponent],
+                amount,
+                staged: StagedLifeGains::default(),
+                paused_on: None,
+            });
+            pay_deferred_life_gain_cost_at_commit(state, player, pending, *finalization, events)
+        }
+    }
+}
+
+/// CR 601.2g + CR 601.2h + CR 118.3 + CR 119.3: Pay a life-gain cost owed by other
+/// players at the spell's payment commit, after its mana abilities, then finish the
+/// cast from what the commit decided (`finalization`).
+///
+/// The recipients are determined now (CR 119.7 reads the "can't gain life" locks
+/// as the cost is paid): no legal payment rejects the cast (CR 601.2h: unpayable
+/// costs can't be paid; CR 733.1 reverses it), several choosable opponents ask the
+/// payer (CR 115.10a), and the recipients' gains are then staged through the
+/// replacement pipeline in APNAP order and applied together (CR 101.4). A gain
+/// that pauses for a CR 616.1 replacement choice parks the cast on the
+/// `DeferredLifeCostResume` carrier with the unstaged recipients still owed and
+/// the staged gains kept; [`stage_answered_life_gain_cost`] stages the answer.
+fn pay_deferred_life_gain_cost_at_commit(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    finalization: PrepaidSpellFinalization,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let (mut recipients, amount, mut staged) = match pending.deferred_life_gain_cost.take() {
+        None => {
+            return resume_prepaid_spell_finalization(
+                state,
+                player,
+                pending,
+                finalization.phyrexian_choices.as_deref(),
+                finalization.pre_payment_checks.map(|checks| *checks),
+                events,
+            );
+        }
+        Some(DeferredLifeGainCost::Owed {
+            recipients,
+            amount,
+            staged,
+            ..
+        }) => (recipients, amount, staged),
+        Some(DeferredLifeGainCost::Unpaid { cost }) => {
+            let Some(PlayerRecipientCost::GainLife {
+                amount,
+                recipient,
+                selection,
+            }) = cost.player_recipient_cost()
+            else {
+                return Err(EngineError::InvalidAction(
+                    "Deferred life-gain cost has no recipient instruction".to_string(),
+                ));
+            };
+            let amount =
+                super::quantity::resolve_quantity_with_targets(state, amount, &pending.ability)
+                    .max(0) as u32;
+            match super::life_costs::life_gain_cost_recipients(
+                state,
+                player,
+                pending.object_id,
+                recipient,
+                selection,
+            ) {
+                LifeGainCostRecipients::Unpayable => {
+                    return Err(EngineError::ActionNotAllowed(
+                        "No player can gain life to pay this cost".to_string(),
+                    ));
+                }
+                LifeGainCostRecipients::Choose(candidates) => {
+                    pending.prepaid_finalization = Some(Box::new(finalization));
+                    return Ok(WaitingFor::ChooseGiftRecipient {
+                        player,
+                        candidates,
+                        gift_kind: None,
+                        purpose: CastOpponentChoicePurpose::EffectCost { cost },
+                        pending_cast: Box::new(pending),
+                    });
+                }
+                // CR 101.4: simultaneous gains are staged in APNAP order.
+                LifeGainCostRecipients::All(recipients) => (
+                    super::effects::life::order_life_gain_recipients(state, &recipients),
+                    amount,
+                    StagedLifeGains::default(),
+                ),
+            }
+        }
+    };
+    // CR 101.4 + CR 119.3 + CR 616.1: stage every recipient's gain through the
+    // replacement pipeline before any is applied, then apply them together.
+    let resume_at_resolution_depth = state.resolution_stack.len();
+    let mut paused_on = None;
+    let paused = match super::effects::life::stage_life_gains(
+        state,
+        &mut recipients,
+        amount,
+        &mut staged,
+        &mut paused_on,
+        events,
+    ) {
+        StagedLifeGainOutcome::Staged => {
+            // CR 614.6: a substitute that pauses for input leaves the outcomes
+            // still owed in `staged`; the carrier resumes them once it drains.
+            let settled =
+                super::effects::life::settle_staged_life_gains(state, &mut staged, events);
+            if settled.is_err() {
+                if !staged.is_empty() {
+                    pending.deferred_life_gain_cost = Some(DeferredLifeGainCost::Owed {
+                        recipients: Vec::new(),
+                        amount,
+                        staged,
+                        paused_on: None,
+                    });
+                }
+                true
+            } else {
+                false
+            }
+        }
+        StagedLifeGainOutcome::Deferred => {
+            // CR 616.1: the recipient (not the payer) may own the pending prompt;
+            // the carrier resumes the payer's commit afterwards (see
+            // `DeferredLifeCostResume` docs), which stages the recipients still
+            // owed and applies the batch.
+            pending.deferred_life_gain_cost = Some(DeferredLifeGainCost::Owed {
+                recipients,
+                amount,
+                staged,
+                paused_on,
+            });
+            true
+        }
+    };
+    if paused {
+        pending.prepaid_finalization = Some(Box::new(finalization));
+        state.pending_deferred_life_cost_resume =
+            Some(crate::types::game_state::DeferredLifeCostResume::Cast {
+                player,
+                pending: Some(Box::new(pending)),
+                remaining_life_payments: Vec::new(),
+                resume_at_resolution_depth,
+            });
+        return Ok(state.waiting_for.clone());
+    }
+    resume_prepaid_spell_finalization(
+        state,
+        player,
+        pending,
+        finalization.phyrexian_choices.as_deref(),
+        finalization.pre_payment_checks.map(|checks| *checks),
+        events,
+    )
 }
 
 pub(crate) fn payable_spell_alternative_cost(
@@ -1666,7 +1869,7 @@ fn spell_alternative_cost_is_payable(
     let committed_life = committed_life_of(state, player, object_id, legs.iter().map(Some));
     if !legs
         .iter()
-        .all(|leg| leg.is_payable_for_spell(state, player, object_id))
+        .all(|leg| alternative_leg_is_payable(state, player, object_id, leg))
         || !super::cost_payability::object_cost_legs_jointly_payable(
             state,
             player,
@@ -1922,6 +2125,43 @@ pub fn oracle_alternative_reservation_verdict(
         &pricing,
         &object_legs,
     ))
+}
+
+/// CR 118.9 + CR 601.2g + CR 119.7: whether one non-mana leg of an alternative
+/// cost can be paid. A life-gain cost is settled at payment, after the
+/// mana-ability window, so a cast whose total cost includes mana keeps it on
+/// offer while a "can't gain life" lock blocks it now: a mana ability may
+/// remove the lock first (Ashnod's Altar sacrificing Archfiend of Despair).
+/// Without a mana payment there is no window and the current locks decide.
+fn alternative_leg_is_payable(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    leg: &AbilityCost,
+) -> bool {
+    leg.is_payable_for_spell(state, player, object_id)
+        || matches!(
+            leg.player_recipient_cost(),
+            Some(PlayerRecipientCost::GainLife { recipient, selection, .. })
+                if super::life_costs::life_gain_cost_has_unlocked_reach(
+                    state, player, object_id, recipient, selection,
+                ) && alternative_cost_total_includes_mana(state, player, object_id)
+        )
+}
+
+/// CR 601.2f + CR 601.2g: whether a spell cast for an alternative cost with no
+/// mana component still owes mana in its total cost (a cost increase such as
+/// Sphere of Resistance's, or commander tax, net of reductions), and therefore
+/// has a mana-ability window before its costs are paid.
+fn alternative_cost_total_includes_mana(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+) -> bool {
+    super::casting::apply_cost_modifiers_to_base(state, player, object_id, ManaCost::NoCost)
+        // CR 107.4d + CR 118.5 + CR 601.2g: a total reduced to {0} is acknowledged, not
+        // paid with mana, so it opens no mana-ability window.
+        .is_some_and(|total| total.mana_value() > 0)
 }
 
 pub(crate) fn eligible_behold_choices(
@@ -2596,9 +2836,49 @@ pub(crate) fn finish_pending_cost_or_cast(
         state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, None, events);
     }
+    // CR 601.2g + CR 601.2h: a deferred commit-time cost needs the payment commit,
+    // which only the payment step reaches.
     if pending.deferred_hand_discard_cost.is_some() {
         state.pending_cast = Some(Box::new(pending));
         return enter_payment_step(state, player, None, events);
+    }
+    // CR 118.9d + CR 601.2f: a life-gain alternative cost goes through the same total-cost
+    // lock as every other alternative cost, so the increases and reductions that
+    // affect the spell apply to its zero-mana base before anything is paid.
+    if pending.deferred_life_gain_cost.is_some() {
+        match lock_in_total_cost_for_pending(
+            state,
+            player,
+            &pending,
+            &pending.accepted_cost_reductions,
+            pending.cost_reduction_election.as_ref(),
+        ) {
+            super::casting::CostLockOutcome::Locked(locked) => pending.cost = locked,
+            super::casting::CostLockOutcome::Election {
+                reductions,
+                hybrid_symbols,
+                outcomes,
+            } => {
+                return Ok(WaitingFor::OrderCostReductions {
+                    player,
+                    reductions,
+                    hybrid_symbols,
+                    outcomes,
+                    pending_cast: Box::new(pending),
+                });
+            }
+        }
+        // CR 601.2g: the mana-ability window exists only when the total cost includes a
+        // mana payment. A locked {0} (CR 107.4d + CR 118.5) or no mana component
+        // leaves nothing to pay, so no window opens and the life is paid at the
+        // commit (CR 601.2h).
+        let owes_mana = pending.cost.mana_value() > 0;
+        state.pending_cast = Some(Box::new(pending));
+        return if owes_mana {
+            enter_payment_step(state, player, None, events)
+        } else {
+            finalize_automatic_mana_payment(state, player, events)
+        };
     }
     // CR 601.2f: carry this cast's declared additional mana costs and any
     // reduction the caster already accepted into the lock seam — the seam
@@ -3182,6 +3462,89 @@ fn settled_public_discard_referent(
                 .is_some_and(|obj| obj.zone.is_public())
         })
         .cloned()
+}
+
+/// What a life-gain cost recipient's answered CR 616.1 replacement choice left of
+/// their gain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnsweredLifeGain {
+    /// The gain survived replacement with this final amount.
+    Gained(u32),
+    /// CR 614.6: a cross-event substitute (Tainted Remedy) replaced the gain
+    /// outright; its continuation is waiting on the replacement drain.
+    Substituted,
+}
+
+/// The staged batch and paused recipient of a life-gain cost being paid, if a
+/// cast is parked mid-staging.
+fn owed_life_gain_cost_mut(
+    state: &mut GameState,
+) -> Option<(&mut StagedLifeGains, &mut Option<PlayerId>)> {
+    let Some(crate::types::game_state::DeferredLifeCostResume::Cast {
+        pending: Some(pending),
+        ..
+    }) = state.pending_deferred_life_cost_resume.as_mut()
+    else {
+        return None;
+    };
+    let Some(DeferredLifeGainCost::Owed {
+        staged, paused_on, ..
+    }) = pending.deferred_life_gain_cost.as_mut()
+    else {
+        return None;
+    };
+    Some((staged, paused_on))
+}
+
+/// CR 101.4 + CR 616.1: a replacement-ordering answer settled the gain of a
+/// life-gain cost's recipient while the cost is mid-staging. Record the outcome
+/// in the cost's staged batch instead of applying it, so the remaining
+/// recipients' replacements still read the life totals from before the
+/// instruction and every outcome is applied together. A substituted gain's
+/// continuation is taken off the replacement drain here, before the generic
+/// resume can run it (CR 614.6). Returns `false` when no such cost is waiting
+/// on `recipient` and the caller settles the outcome itself.
+pub(crate) fn stage_answered_life_gain_cost(
+    state: &mut GameState,
+    recipient: PlayerId,
+    answer: AnsweredLifeGain,
+) -> bool {
+    match owed_life_gain_cost_mut(state) {
+        Some((_, paused_on)) if *paused_on == Some(recipient) => *paused_on = None,
+        _ => return false,
+    }
+    let substitute = match answer {
+        AnsweredLifeGain::Gained(_) => None,
+        AnsweredLifeGain::Substituted => super::effects::life::take_life_gain_substitute(state),
+    };
+    let (staged, _) =
+        owed_life_gain_cost_mut(state).expect("the paused life-gain cost was found above");
+    match answer {
+        AnsweredLifeGain::Gained(amount) => staged.gains.push((recipient, amount)),
+        AnsweredLifeGain::Substituted => staged.substitutes.extend(substitute),
+    }
+    true
+}
+
+/// CR 601.2h + CR 616.1: resume a cast parked by a replacement choice during its
+/// payment. A pause at the payment commit (a life-gain cost's recipient) finishes
+/// the cast from what that commit decided; otherwise the automatic finalizer
+/// completes the already-paid mana root.
+pub(crate) fn resume_cast_after_deferred_life_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    match pending.prepaid_finalization.take() {
+        Some(finalization) => {
+            pay_deferred_life_gain_cost_at_commit(state, player, pending, *finalization, events)
+        }
+        None => {
+            state.pending_cast = Some(Box::new(pending));
+            finalize_automatic_mana_payment(state, player, events)
+        }
+    }
 }
 
 /// CR 601.2h: a discard paid at a spell's payment commit finishes the cast from what
@@ -6952,6 +7315,7 @@ pub(crate) fn handle_behold_for_cost(
     } else if !revealed_ids.is_empty() {
         events.push(GameEvent::CardsRevealed {
             player,
+            occurrences: state.disclosed_occurrences(&revealed_ids),
             card_ids: revealed_ids,
             card_names: revealed_names,
         });
@@ -8531,6 +8895,7 @@ fn surface_next_interactive_activation_cost_leg(
                 ));
             events.push(GameEvent::CardsRevealed {
                 player,
+                occurrences: state.disclosed_occurrences(&[source_id]),
                 card_ids: vec![source_id],
                 card_names: vec![obj.name.clone()],
             });
@@ -11692,7 +12057,11 @@ pub(crate) fn handle_order_cost_reductions(
     // CR 601.2f: a cast whose Emerge or Offering sacrifice was chosen before a
     // deferred target declaration resumes through the payment step that makes
     // that sacrifice, and the lock there honours this election.
-    if !pending.deferred_sacrificed_permanents.is_empty() {
+    // CR 118.9d: a cast carrying a deferred life-gain alternative cost resumes the
+    // same way, so its life instruction survives the election.
+    if !pending.deferred_sacrificed_permanents.is_empty()
+        || pending.deferred_life_gain_cost.is_some()
+    {
         let mut pending = pending;
         pending.cost_reduction_election = Some(election);
         return finish_pending_cost_or_cast(state, player, pending, events);
@@ -11885,6 +12254,24 @@ fn pay_additional_cost_with_source(
                 source: cost_source,
             },
         });
+    }
+
+    // CR 118.9 + CR 601.2g + CR 601.2h + CR 118.3: a cost that has other players
+    // gain life (Invigorate: "have an opponent gain 3 life"; Reverent Silence: "have
+    // each other player gain 6 life") is paid with the rest of the total cost, after
+    // the mana-ability window: carry it to the payment commit, which determines its
+    // recipients (CR 119.7, CR 115.10a) and pays it.
+    if cost.player_recipient_cost().is_some() {
+        if pending.deferred_life_gain_cost.is_some() {
+            return Err(EngineError::ActionNotAllowed(
+                "Multiple life-gain costs are unsupported".to_string(),
+            ));
+        }
+        let mut pending = pending;
+        pending.deferred_life_gain_cost = Some(DeferredLifeGainCost::Unpaid {
+            cost: Box::new(cost),
+        });
+        return finish_pending_cost_or_cast(state, player, pending, events);
     }
 
     match cost {
@@ -12546,6 +12933,7 @@ fn pay_additional_cost_with_source(
                     );
                     events.push(GameEvent::CardsRevealed {
                         player,
+                        occurrences: state.disclosed_occurrences(&[pending.object_id]),
                         card_ids: vec![pending.object_id],
                         card_names: vec![obj.name.clone()],
                     });
@@ -12623,8 +13011,20 @@ fn pay_additional_cost_with_source(
                 "Cost not implemented: {description}"
             )));
         }
+        // CR 601.2h: unpayable costs can't be paid. A life-gain effect-cost the
+        // recipient view does not recognize has no payer; refuse it rather than
+        // cast the spell without the gain. Recognized shapes were deferred above.
+        AbilityCost::EffectCost { effect }
+            if matches!(effect.as_ref(), Effect::GainLife { .. }) =>
+        {
+            return Err(EngineError::ActionNotAllowed(
+                "This life-gain cost shape is not supported".to_string(),
+            ));
+        }
         _ => {
-            // Other cost types (Exile, etc.) — not yet interactive
+            // Other cost types (Exile, etc.) — not yet interactive. The remaining
+            // `EffectCost` shapes (Land Grant's `RevealHand`) also reach this arm as
+            // a known no-op.
         }
     }
 
@@ -12698,6 +13098,7 @@ pub(crate) fn handle_reveal_for_cost(
 
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: state.disclosed_occurrences(chosen),
         card_ids: chosen.to_vec(),
         card_names: revealed_names,
     });
@@ -14081,6 +14482,9 @@ pub(super) fn pay_and_push_adventure(
     // `enter_payment_step` diverts to `ChooseXValue` when the cost has an unchosen X,
     // per CR 601.2f (X chosen before mana is paid).
     let has_x = cost_has_x(cost);
+    // CR 601.2h + CR 118.5: a {0} cost leaves no mana to pay, so it opens no manual
+    // window (an alternative {0} such as Warped Space's completes the cast). A cast
+    // with a deferred commit-time cost opens its window through `enter_payment_step`.
     let manual_payment = payment_mode == CastPaymentMode::Manual && cost.mana_value() > 0;
     let auto_payment_needs_input = payment_mode == CastPaymentMode::Auto
         && cost.mana_value() > 0
@@ -14639,6 +15043,30 @@ fn finalize_cast_with_phyrexian_choices_inner(
             None,
             events,
         );
+    }
+
+    // CR 601.2g + CR 601.2h: a life-gain cost owed by other players waited for the
+    // mana abilities; pay it now, then re-enter this commit from what it decided.
+    if let Some(mut pending) = deferred_life_resume_pending
+        .filter(|pending| pending.deferred_life_gain_cost.is_some())
+        .cloned()
+    {
+        pending.cost = ManaCost::NoCost;
+        pending.prepaid_actual_mana_spent = Some(
+            prepaid_actual_mana_spent
+                .unwrap_or_else(|| recorded_mana_spent_to_cast(state, object_id)),
+        );
+        let finalization = PrepaidSpellFinalization {
+            phyrexian_choices: phyrexian_choices.map(<[_]>::to_vec),
+            pre_payment_checks: Some(Box::new(FinalizePrePaymentChecks {
+                early_waiting_for: None,
+                cascade_cast_transformed,
+                resolution_success_waiting_for,
+                cast_this_way_etb_counter,
+                cast_this_way_enters_mods,
+            })),
+        };
+        return pay_deferred_life_gain_cost_at_commit(state, player, pending, finalization, events);
     }
 
     // CR 601.2h + CR 702.66a: the delve exile is part of the same total-cost payment.
@@ -17956,7 +18384,13 @@ pub(super) fn max_x_value_excluding(
         .iter()
         .filter(|id| !excluded_sources.contains(id))
         .map(|&id| {
-            let mana = mana_sources::x_ceiling_mana_capacity(state, id, player, spell_ctx.as_ref());
+            let mana = mana_sources::x_ceiling_mana_capacity(
+                state,
+                id,
+                player,
+                spell_ctx.as_ref(),
+                object_id,
+            );
             let tap = pred
                 .filter(|p| state.objects.get(&id).is_some_and(|o| p(o, player)))
                 .map_or(0, |_| 1);
@@ -19036,6 +19470,7 @@ fn finalize_mana_payment_with_resume(
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
             pending_resumed.delved_cards = pending.delved_cards.clone();
+            pending_resumed.deferred_life_gain_cost = pending.deferred_life_gain_cost.clone();
 
             // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
             // interactive distribution. Remainder is intentionally lost per Oracle text.
@@ -19489,6 +19924,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
             pending_resumed.delved_cards = pending.delved_cards.clone();
+            pending_resumed.deferred_life_gain_cost = pending.deferred_life_gain_cost.clone();
 
             if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
                 let num = targets.len() as u32;
@@ -21477,6 +21913,7 @@ mod tests {
             activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: Some(0),
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -27991,6 +28428,7 @@ mod tests {
             activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -28140,6 +28578,7 @@ mod tests {
             activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -28258,6 +28697,7 @@ mod tests {
             activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -28366,6 +28806,7 @@ mod tests {
             activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -28507,6 +28948,7 @@ mod tests {
             activation_cost_paused_on_draw: false,
             deferred_hand_discard_cost: None,
             prepaid_finalization: None,
+            deferred_life_gain_cost: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),

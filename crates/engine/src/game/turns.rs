@@ -1904,6 +1904,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 603.2h: "that turn" — indicated actions reset each turn.
     state.trigger_indicated_actions_this_turn.clear();
     state.activated_abilities_this_turn.clear();
+    // CR 400.7: departed per-turn tallies reset with their live twin; the
+    // departed per-game table persists like its live counterpart.
+    state.departed_activated_abilities_this_turn.clear();
     // CR 602.5b: "Activate only once each turn" crew restriction resets each turn.
     state.crew_activated_this_turn.clear();
     // CR 702.122a: the resolved-crew marker (the AI crew-repeat guard's
@@ -2028,6 +2031,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.zone_changes_this_turn.clear();
     // CR 603.10: keyed by the ledger index cleared above.
     state.battlefield_entry_observations.clear();
+    state.instruction_boundary_marks.clear();
     state.batched_zone_change_trigger_fired.clear();
     state.battlefield_entries_this_turn.clear();
     // CR 514.2 + CR 400.7: the cleanup step is where "this turn" state ends, which is the authority

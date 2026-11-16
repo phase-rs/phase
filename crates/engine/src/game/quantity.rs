@@ -1129,6 +1129,9 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // quantity — cannot make a definition cast-unstable.
+        grant_chain: _,
     } = definition;
 
     declares_return_result.is_none()
@@ -1264,6 +1267,9 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // quantity payload.
+        grant_chain: _,
     } = definition
     else {
         return false;
@@ -5099,7 +5105,20 @@ fn resolve_ref(
                 &filter_ctx,
                 source_id,
             )
-            .len(),
+            .into_iter()
+            // CR 614.1c + CR 614.12 + CR 608.2h: an entry-counter
+            // quantity reads the population before entry, even when a copy
+            // answer has physically placed the projected entrant on the
+            // battlefield. Keep its characteristics available to source and
+            // chosen-attribute reads; exclude only its population membership.
+            .filter(|id| {
+                Some(*id) != ctx.entering
+                    || state
+                        .objects
+                        .get(id)
+                        .is_none_or(|obj| obj.zone != Zone::Battlefield)
+            })
+            .count(),
         ),
         // CR 201.2 + CR 603.4: Count of objects matching `filter`,
         // deduplicated by the listed `qualities`. Each object contributes a
@@ -19717,6 +19736,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -19733,6 +19753,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -19845,6 +19866,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }
         }

@@ -47,7 +47,7 @@ use crate::types::statics::{
     ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, PermissionCastLimit,
     ProhibitionScope, StaticMode, StaticModeKind,
 };
-use crate::types::zones::{ExileCostSourceZone, Zone};
+use crate::types::zones::{CastProvenance, ExileCostSourceZone, Zone};
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -2792,6 +2792,26 @@ pub(super) fn spell_cast_origin_zone(
         .unwrap_or(spell_obj.zone)
 }
 
+/// CR 601.2a + CR 707.13 + CR 400.11: the single authority for WHERE a spell is cast
+/// from as a typed [`CastProvenance`] — a zone, or outside the game. A copy created
+/// outside the game (Garth One-Eye) is staged in a zone, but "outside the game is not
+/// a zone", so it is cast from no zone: it is `OutsideGame`, never `Zone(staging)`.
+/// `None` means the spell is unknown to the game state, which satisfies no zone-gated
+/// restriction in either polarity. Mana-spend metadata ([`build_spell_meta`]) reads
+/// its origin only through here; the filter/trigger paths read the same fact from
+/// `GameObject::created_outside_game` via `SpellCastRecord::from_outside_game`.
+pub(crate) fn spell_cast_provenance(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<CastProvenance> {
+    let obj = state.objects.get(&object_id)?;
+    Some(if obj.created_outside_game {
+        CastProvenance::OutsideGame
+    } else {
+        CastProvenance::Zone(spell_cast_origin_zone(state, obj))
+    })
+}
+
 /// CR 118.9a + CR 601.2b: a spell may elect its printed alternative cost only
 /// when the exact exile authority elected for this cast leaves its mana cost
 /// available. A plain impulse grant supplies zone permission (CR 601.3) without
@@ -3623,7 +3643,7 @@ pub(super) fn build_spell_meta(
         types: object_type_names(obj),
         subtypes: obj.card_types.subtypes.clone(),
         keyword_kinds: effective_spell_keyword_kinds(state, caster, object_id),
-        cast_from_zone: Some(pending_cast_origin_zone_for(state, object_id).unwrap_or(obj.zone)),
+        cast_origin: spell_cast_provenance(state, object_id),
         // CR 202.3d + CR 702.102b: a FUSED split spell's mana value / color count
         // are the COMBINED values of both halves; a non-fused split cast and every
         // single-face spell use the object's own (chosen-half) cost. `spell_*` key
@@ -24720,7 +24740,13 @@ fn manual_mana_payment_route(
         .iter()
         .filter(|id| Some(**id) != excluded)
         .map(|&id| {
-            super::mana_sources::feasible_mana_capacity(state, id, player, spell_ctx.as_ref())
+            super::mana_sources::feasible_mana_capacity_for_cast(
+                state,
+                id,
+                player,
+                spell_ctx.as_ref(),
+                source_id,
+            )
         })
         .sum::<u32>()
         .saturating_sub(shard_charge);
@@ -32530,10 +32556,44 @@ pub(crate) fn record_activated_ability_placed(
     };
     let announced_zone = record.source_zone;
     let activation_cost = record.activation_cost.clone();
-    restrictions::record_ability_activation(state, source_id, ability_index, Some(record));
+    // CR 602.2a + CR 602.5b: the announced activation consumes its own key,
+    // read off the placed entry's ability — never re-derived from
+    // `(source_id, ability_index)`. Re-deriving post-payment would mis-record
+    // whenever a cost moved the source or its slot: granted cycling
+    // (hand-gated) after a discard-self cost, granted graveyard-activated
+    // abilities after a self-exile cost, or a vanished object. The slot the
+    // announcement bound (`activation_ability_definition`) is not guaranteed
+    // to resolve now (cycling's card is in the graveyard, scavenge's in
+    // exile); the record carries what the announcement captured. When
+    // announcement never ran (no record), the existing ActivationReversed
+    // fail-closed fires before this is reached — and a missing key on a
+    // recorded activation skips the ledger row exactly like today's
+    // missing-entry semantics.
+    if let Some(key) = state.stack.back().and_then(|entry| match &entry.kind {
+        StackEntryKind::ActivatedAbility { ability, .. } => {
+            ability.announced_usage_key.as_deref().cloned()
+        }
+        _ => None,
+    }) {
+        restrictions::record_ability_activation(state, key, Some(record));
+    }
     // CR 117.1b: Priority permits unbounded activation. `pending_activations`
     // is a per-priority-window AI-guard — see `GameState::pending_activations`.
-    state.pending_activations.push((source_id, ability_index));
+    // CR 602.2a: the pending entry is the announcement-bound usage key read
+    // off the placed entry — never re-derived from `(source_id,
+    // ability_index)`. Post-payment re-derivation would mis-record whenever a
+    // cost moved the source or its slot (the same staleness the ledger block
+    // avoids above), and an index-keyed entry goes stale when a later layer
+    // recompute shifts indices. A missing key skips the guard exactly like
+    // the missing-entry ledger semantics above.
+    if let Some(key) = state.stack.back().and_then(|entry| match &entry.kind {
+        StackEntryKind::ActivatedAbility { ability, .. } => {
+            ability.announced_usage_key.as_deref().cloned()
+        }
+        _ => None,
+    }) {
+        state.pending_activations.push(key);
+    }
     super::casting_targets::emit_ability_activated(
         state,
         player,
@@ -32617,6 +32677,19 @@ pub(crate) fn record_activation_announcement(
                 .get(&source_id)
                 .map(|source| source.incarnation),
         );
+    }
+    // CR 602.2a + CR 602.5c: capture the activation's own usage key at this
+    // same announcement — before any cost is paid. The resolved definition
+    // (cost-concretized for Brawl-style placeholders) is live here; a cost
+    // that moves the source (discard-self cycling, self-exile scavenge) can
+    // make the slot unresolvable by placement time. An existing capture is
+    // never overwritten: the earliest announcement wins.
+    if ability.announced_usage_key.is_none() {
+        if let Some(definition) = activation_ability_definition(state, source_id, ability_index) {
+            ability.announced_usage_key = Some(Box::new(
+                super::restrictions::ability_usage_key_for_definition(source_id, &definition),
+            ));
+        }
     }
 }
 

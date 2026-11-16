@@ -944,7 +944,10 @@ fn installed_coin_replacements_round_trip_and_execute_the_selected_bound_branch(
             };
             let install = match family {
                 ReplacementEvent::Draw => Effect::CreateDrawReplacement {
-                    replacement_effect: Box::new(substitute),
+                    replacement_effect: Box::new(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        substitute,
+                    )),
                 },
                 ReplacementEvent::Planeswalk => Effect::CreatePlaneswalkReplacement {
                     replacement_effect: Box::new(substitute),
@@ -7973,7 +7976,7 @@ fn choose_then_flip_outcome_reads_the_named_card() {
     // Synthetic: a card name answered through the interactive continuation
     // (CR 608.2d) reaches the bound coin outcome that reads it (CR 608.2c).
     let case = ChooseThenFlip {
-        choice_type: ChoiceType::CardName,
+        choice_type: ChoiceType::card_name(),
         persist: false,
         counted: TargetFilter::And {
             filters: vec![

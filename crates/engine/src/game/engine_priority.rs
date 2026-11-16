@@ -382,6 +382,11 @@ fn run_post_action_pipeline_core(
         if skip_trigger_scan {
             filtered_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
             delayed_trigger_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
+        } else {
+            // CR 603.6a + CR 611.3c: entries of an entering instruction that is
+            // still suspended wait for it; entries held from earlier answers of
+            // one that has completed join this scan ahead of this action's own.
+            filtered_events = triggers::settle_entry_batch_scan(state, filtered_events);
         }
         // CR 603.3b: If the resolution step that just ran paused for a player
         // resolution-choice (Scry/Surveil/Dig/Search/...), the triggered

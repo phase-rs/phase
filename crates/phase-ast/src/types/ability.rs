@@ -252,7 +252,64 @@ pub enum ZoneChoiceGatherRole {
 /// fewer eligible objects exist and is therefore suitable for optional actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjectSelectionCardinality {
-    Exactly { count: u32 },
+    Exactly {
+        count: u32,
+    },
+    /// CR 107.1c: "any number" — the player may choose any positive number of
+    /// the eligible objects, or zero.
+    AnyNumber,
+}
+
+impl ObjectSelectionCardinality {
+    /// A post-reveal choice of one card uses the printed instruction's
+    /// cardinality and is made during resolution (CR 608.2d).
+    pub const SINGLE: Self = Self::Exactly { count: 1 };
+
+    /// Serde default for fields whose historical shape was a single pick.
+    pub fn single() -> Self {
+        Self::SINGLE
+    }
+
+    /// Serde skip predicate pairing [`Self::single`]: the historical default
+    /// is omitted so pre-existing serialized data keeps its exact shape.
+    pub fn is_single(&self) -> bool {
+        *self == Self::SINGLE
+    }
+
+    /// CR 608.2d: whether a submitted selection of `chosen` objects satisfies
+    /// this cardinality.
+    pub fn admits(&self, chosen: usize) -> bool {
+        match self {
+            Self::Exactly { count } => usize::try_from(*count).is_ok_and(|count| chosen == count),
+            Self::AnyNumber => true,
+        }
+    }
+
+    /// CR 608.2d + CR 107.1c: whether `eligible` objects admit at least two
+    /// distinct legal selections. An exact count `k` has `C(eligible, k)`
+    /// selections (two or more exactly when `0 < k < eligible`); "any number"
+    /// always has the empty selection plus one per non-empty subset, so a
+    /// single eligible object already offers two answers (none, or it).
+    pub fn has_multiple_selections(&self, eligible: usize) -> bool {
+        match self {
+            Self::Exactly { count } => {
+                usize::try_from(*count).is_ok_and(|count| 0 < count && count < eligible)
+            }
+            Self::AnyNumber => eligible >= 1,
+        }
+    }
+
+    /// CR 608.2d: the selection that is the only legal answer — every eligible
+    /// object when an exact count equals the number eligible. "Any number" is
+    /// never forced: the empty selection is always legal (CR 107.1c).
+    pub fn forces_all_eligible(&self, eligible: usize) -> bool {
+        match self {
+            Self::Exactly { count } => {
+                eligible > 0 && usize::try_from(*count).is_ok_and(|count| count == eligible)
+            }
+            Self::AnyNumber => false,
+        }
+    }
 }
 
 /// CR 608.2d + CR 101.2: Additional eligibility required before an object may
@@ -1206,6 +1263,23 @@ pub enum NumberDistinctness {
     DistinctFromSourceHistory,
 }
 
+/// CR 608.2d: whether a "choose a card name" instruction must exclude names
+/// already committed on this source ("...that hasn't been chosen" — a name
+/// chosen before is no longer a legal option), or repeats are legal.
+/// Parse-detected; static; serialized only when non-default so the existing
+/// `CardName` card-data stays byte-stable. Mirrors `NumberDistinctness`'s axis on
+/// the sibling `NumberRange` choice — the same Oracle cue on a different domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum NameDistinctness {
+    /// The default for the entire existing `CardName` pool — repeats allowed.
+    /// Pithing Needle may name the same card on a second copy of itself.
+    #[default]
+    Repeatable,
+    /// Each commit must differ from every prior `ChosenAttribute::CardName` on
+    /// the source (Garth One-Eye: "a card name that hasn't been chosen").
+    DistinctFromSourceHistory,
+}
+
 /// CR 608.2c: whether a "choose a player"/"choose an opponent" instruction
 /// must exclude players already chosen earlier in the SAME resolution, or is
 /// an independent pick that may repeat an earlier choice. Parse-detected;
@@ -1255,7 +1329,21 @@ pub enum ChoiceType {
     CardType {
         options: Vec<CoreType>,
     },
-    CardName,
+    /// CR 201.4: A choice of a card name. `options`, when EMPTY, is the open
+    /// form — any name in the Oracle card reference is nameable (Pithing Needle,
+    /// Meddling Mage), so the engine enumerates nothing and the client supplies
+    /// the domain from its own card database (see `compute_options`). Non-empty
+    /// options are an explicit Oracle-listed closed domain in printed order
+    /// (Garth One-Eye's "from among Disenchant, Braingeyser, Terror, Shivan
+    /// Dragon, Regrowth, and Black Lotus"), which the engine DOES enumerate and
+    /// enforce — a closed domain that still accepted an arbitrary name would not
+    /// be a domain.
+    CardName {
+        options: Vec<String>,
+        /// CR 608.2d: distinctness requirement, parse-detected from "that hasn't
+        /// been chosen". Default `Repeatable` for every pre-existing card.
+        distinctness: NameDistinctness,
+    },
     /// "Choose a number between X and Y" — generates string options "0", "1", ..., "Y".
     /// CR 107.1a/b + CR 608.2d: choose a number from `min` up to `max`.
     ///
@@ -1438,6 +1526,24 @@ impl ChoiceType {
         Self::CardType { options }
     }
 
+    /// The open "choose a card name" prompt (CR 201.4) — any card name in the
+    /// Oracle card reference, with the domain supplied by the client.
+    pub fn card_name() -> Self {
+        Self::CardName {
+            options: Vec::new(),
+            distinctness: NameDistinctness::Repeatable,
+        }
+    }
+
+    /// Card-name choice restricted to an explicit Oracle-listed closed domain,
+    /// in printed order, with its distinctness requirement (CR 608.2d).
+    pub fn card_name_from(options: Vec<String>, distinctness: NameDistinctness) -> Self {
+        Self::CardName {
+            options,
+            distinctness,
+        }
+    }
+
     /// The authoritative legal domain for a `CardType` prompt. Empty options
     /// are the generic engine policy; non-empty options are already exact.
     pub fn legal_card_type_options(options: &[CoreType]) -> Vec<CoreType> {
@@ -1501,7 +1607,10 @@ impl ChoiceType {
     /// dependent instruction ("discards a card with that name") reads it from
     /// the resolution's owned source context rather than the source's history.
     pub fn needs_choice_source_context(&self) -> bool {
-        matches!(self, Self::CardPredicateGuess { .. } | Self::CardName)
+        matches!(
+            self,
+            Self::CardPredicateGuess { .. } | Self::CardName { .. }
+        )
     }
 
     pub fn card_predicate_labels(options: &[CardPredicateChoice]) -> Vec<String> {
@@ -1529,8 +1638,14 @@ impl ChoiceType {
     pub fn options_supplied_by_player(&self) -> bool {
         matches!(
             self,
-            Self::CardName
-                | Self::Word
+            // CR 201.4: only the OPEN card-name prompt has no enumerable domain.
+            // A closed Oracle-listed one (Garth One-Eye) is enumerated by the
+            // engine, so an empty list there IS the impossible choice CR 609.3
+            // turns into a no-op.
+            Self::CardName { options, .. } if options.is_empty()
+        ) || matches!(
+            self,
+            Self::Word
                 | Self::Artist
                 // CR 107.1a/b: an unbounded number choice cannot be enumerated,
                 // so the player supplies the value. Bounded ranges keep their
@@ -1645,7 +1760,32 @@ impl Serialize for ChoiceType {
                     variant.end()
                 }
             }
-            Self::CardName => serializer.serialize_unit_variant("ChoiceType", 5, "CardName"),
+            // Serialize the open, default-distinctness form as the legacy unit
+            // variant "CardName" so existing Pithing Needle/Meddling Mage
+            // card-data JSON stays byte-stable; only emit the struct form when a
+            // closed domain and/or a non-default `distinctness` is present.
+            Self::CardName {
+                options,
+                distinctness,
+            } => {
+                let non_default_distinctness = *distinctness != NameDistinctness::Repeatable;
+                if options.is_empty() && !non_default_distinctness {
+                    serializer.serialize_unit_variant("ChoiceType", 5, "CardName")
+                } else {
+                    let field_count = 1 + usize::from(non_default_distinctness);
+                    let mut variant = serializer.serialize_struct_variant(
+                        "ChoiceType",
+                        5,
+                        "CardName",
+                        field_count,
+                    )?;
+                    variant.serialize_field("options", options)?;
+                    if non_default_distinctness {
+                        variant.serialize_field("distinctness", distinctness)?;
+                    }
+                    variant.end()
+                }
+            }
             Self::NumberRange {
                 min,
                 max,
@@ -1805,6 +1945,12 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 #[serde(default)]
                 excluded: Vec<CoreType>,
             },
+            CardName {
+                #[serde(default)]
+                options: Vec<String>,
+                #[serde(default)]
+                distinctness: NameDistinctness,
+            },
             NumberRange {
                 min: u32,
                 /// CR 107.1a/b: absent = no maximum. A bounded range keeps
@@ -1858,7 +2004,7 @@ impl<'de> Deserialize<'de> for ChoiceType {
                 "OddOrEven" => Ok(Self::OddOrEven),
                 "BasicLandType" => Ok(Self::BasicLandType),
                 "CardType" => Ok(Self::card_type()),
-                "CardName" => Ok(Self::CardName),
+                "CardName" => Ok(Self::card_name()),
                 "LandType" => Ok(Self::LandType),
                 "Opponent" => Ok(Self::opponent()),
                 "Player" => Ok(Self::player()),
@@ -1885,6 +2031,10 @@ impl<'de> Deserialize<'de> for ChoiceType {
             },
             ChoiceTypeRepr::Data(data) => match data {
                 ChoiceTypeData::CreatureType { options } => Ok(Self::CreatureType { options }),
+                ChoiceTypeData::CardName {
+                    options,
+                    distinctness,
+                } => Ok(Self::card_name_from(options, distinctness)),
                 ChoiceTypeData::Color { excluded } => Ok(Self::Color { excluded }),
                 ChoiceTypeData::CardType { options, excluded } => {
                     if !options.is_empty() && !excluded.is_empty() {
@@ -3147,7 +3297,7 @@ impl ChoiceValue {
                     .then_some(Self::CardType(core_type))
             }
             ChoiceType::OddOrEven => value.parse::<Parity>().ok().map(Self::OddOrEven),
-            ChoiceType::CardName => Some(Self::CardName(value.to_string())),
+            ChoiceType::CardName { .. } => Some(Self::CardName(value.to_string())),
             ChoiceType::NumberRange { .. } => value.parse::<u32>().ok().map(Self::Number),
             ChoiceType::Labeled { .. } => Some(Self::Label(value.to_string())),
             ChoiceType::CardPredicate { options } | ChoiceType::CardPredicateGuess { options } => {
@@ -6688,6 +6838,27 @@ where
         return Ok(exile.then_some(SpellStackToGraveyardReplacement::Exile));
     }
     serde_json::from_value(raw).map_err(serde::de::Error::custom)
+}
+
+/// Reads the former bare draw-replacement effect and the current full definition.
+/// Serialization continues to emit only the full definition. The effect's `type`
+/// tag selects the legacy decoder, even when that effect has `kind`/`effect` fields.
+fn deserialize_draw_replacement_effect_compat<'de, D>(
+    d: D,
+) -> Result<Box<AbilityDefinition>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(d)?;
+    if raw.get("type").is_some() {
+        serde_json::from_value::<Effect>(raw)
+            .map(|effect| Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)))
+            .map_err(serde::de::Error::custom)
+    } else {
+        serde_json::from_value::<AbilityDefinition>(raw)
+            .map(Box::new)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// Controller reference for filter matching.
@@ -11555,6 +11726,7 @@ pub fn instruction_object_reach(effect: &Effect) -> InstructionObjectReach<'_> {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -16350,6 +16522,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -16658,6 +16831,7 @@ pub fn indicated_action_commit(effect: &Effect) -> IndicatedActionCommit {
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -19365,6 +19539,35 @@ impl<'de> serde::Deserialize<'de> for SacrificeCost {
     }
 }
 
+/// CR 118.3 + CR 115.10a: typed view of an effect-as-cost whose instruction acts on
+/// a player the payer chooses during payment. Single recognizer
+/// ([`AbilityCost::player_recipient_cost`]); consumers match exhaustively.
+///
+/// A borrowed, unserialized projection over `AbilityCost::EffectCost` — not a new
+/// cost variant, so ability scanners and the wire format are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayerRecipientCost<'a> {
+    /// CR 119.3: "have an opponent gain N life" (Invigorate) or "have each other
+    /// player gain N life" (Reverent Silence, Skyshroud Cutter).
+    GainLife {
+        amount: &'a QuantityExpr,
+        recipient: &'a TargetFilter,
+        selection: CostRecipientSelection,
+    },
+}
+
+/// CR 118.3 + CR 115.10a: how many of the players matching a recipient
+/// effect-cost's filter the instruction reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostRecipientSelection {
+    /// "have an opponent ...": the payer chooses one matching player while paying
+    /// (CR 115.10a: a choice, not a target).
+    ChosenOne,
+    /// "have each other player ...": every matching player. CR 601.2h: partial
+    /// payments are not allowed, so every one of them must be able to perform it.
+    Each,
+}
+
 /// Cost to activate an ability.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -20388,6 +20591,12 @@ impl AbilityCost {
     /// resolution-time payment gate so supported cards never install a trigger
     /// whose cost will later be rejected.
     ///
+    /// The recipient effect-cost shape ([`Self::player_recipient_cost`], e.g.
+    /// "have an opponent gain 3 life") is deliberately excluded: the activation,
+    /// resolution and unless payers have no recipient-choice surface, so they keep
+    /// refusing it. Only the spell payer
+    /// (`casting_costs::pay_additional_cost_with_source`) performs it.
+    ///
     /// CR 118.1 + CR 121.1: the deterministic effect-as-cost forms are source
     /// counters, fixed mana, and a draw by the cost's context-ref player (the
     /// controller, or the original controller for "has you draw a card").
@@ -20437,6 +20646,42 @@ impl AbilityCost {
             }
             leaf => leaf.supports_effect_cost_payment(),
         }
+    }
+
+    /// CR 118.3 + CR 115.10a: Single recognizer for an effect-as-cost whose
+    /// instruction acts on a player the payer chooses during payment. Consumers
+    /// (payability, the spell payer) match the returned view exhaustively, so a
+    /// new recipient shape is a compile error at each of them.
+    pub fn player_recipient_cost(&self) -> Option<PlayerRecipientCost<'_>> {
+        let AbilityCost::EffectCost { effect } = self else {
+            return None;
+        };
+        let Effect::GainLife {
+            amount,
+            player: recipient,
+        } = effect.as_ref()
+        else {
+            return None;
+        };
+        let selection = match recipient {
+            // "an opponent": one opponent, chosen by the payer.
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                properties,
+            }) if type_filters.is_empty() && properties.is_empty() => {
+                CostRecipientSelection::ChosenOne
+            }
+            // "each <players>": every player the predicate names ("each other
+            // player" = `AllExcept { exclude: Controller }`).
+            TargetFilter::PlayerMatching { .. } => CostRecipientSelection::Each,
+            _ => return None,
+        };
+        Some(PlayerRecipientCost::GainLife {
+            amount,
+            recipient,
+            selection,
+        })
     }
 
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.
@@ -24484,6 +24729,18 @@ pub enum Effect {
         /// looked at (private to the ability controller).
         #[serde(default = "default_reveal_public")]
         reveal: bool,
+        /// CR 608.2d: how many `card_filter` cards the choosing player selects.
+        /// `Exactly { count: 1 }` (the default) is the historical post-reveal
+        /// choice of one card from the revealed/looked-at hand. CR 107.1c +
+        /// CR 701.20a: `AnyNumber` ("reveal any number of artifact cards in your
+        /// hand" — Metalworker) makes the selection itself the reveal: only the
+        /// chosen cards are revealed, and zero is a legal choice. Orthogonal to
+        /// `selection` (chosen vs. random) and to `choice_optional` (a "may").
+        #[serde(
+            default = "ObjectSelectionCardinality::single",
+            skip_serializing_if = "ObjectSelectionCardinality::is_single"
+        )]
+        cardinality: ObjectSelectionCardinality,
     },
     /// CR 701.20a: "You may reveal a [FILTER] card from your hand" — optional self-reveal
     /// from the controller's own hand. Distinct from `RevealHand` (target player, used for
@@ -25291,11 +25548,20 @@ pub enum Effect {
     },
     /// CR 614.1a + CR 614.6 + CR 514.2 + CR 121.1: install a one-shot, this-turn
     /// "the next time you would draw a card this turn, [effect] instead" draw
-    /// replacement (Words of Worship/Wilding). Mirrors CreateDamageReplacement for
-    /// the Draw event class; the substitute is a heterogeneous Effect resolved via
-    /// the post-replacement continuation. RUNTIME: create_draw_replacement::resolve.
+    /// replacement (the Words cycle). Mirrors CreateDamageReplacement for the
+    /// Draw event class; the substitute is resolved via the post-replacement
+    /// continuation. RUNTIME: create_draw_replacement::resolve.
+    ///
+    /// The substitute is a full `AbilityDefinition` (mirroring
+    /// `CreateDelayedTrigger::effect`) so it carries a player iteration scope
+    /// ("each player returns…" — Words of Wind; "each opponent discards…" —
+    /// Words of Waste) and sub-ability chains. CR 115.1c + CR 602.2b: a
+    /// "target" in the substitute's head effect (Words of War's "any target")
+    /// is chosen as the creating ability is activated and carried into the
+    /// installed shield.
     CreateDrawReplacement {
-        replacement_effect: Box<Effect>,
+        #[serde(deserialize_with = "deserialize_draw_replacement_effect_compat")]
+        replacement_effect: Box<AbilityDefinition>,
     },
     /// CR 614.1a + CR 611.2 + CR 901.9c: Install a floating "if a player would
     /// planeswalk as a result of rolling the planar die, [replacement_effect]
@@ -26554,6 +26820,31 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library_players: Option<PlayerFilter>,
     },
+    /// CR 707.13: Create a copy of a card defined by NAME rather than by an object
+    /// to be copied (Garth One-Eye). The copy's characteristics come from the
+    /// Oracle card reference — here `state.card_face_registry` — because the
+    /// named card need not exist in any zone, deck or graveyard.
+    ///
+    /// Distinct from `CastCopyOfCard` (and every other copy producer) on the axis
+    /// that matters: those copy an OBJECT in the game and read its copiable
+    /// values. `Conjure` is the wrong home too: that is a digital-only keyword
+    /// action whose product is a real card, and this product is a COPY, which
+    /// CR 704.5e removes from any zone but the stack and the battlefield.
+    ///
+    /// The created objects are published to `state.last_created_token_ids`, the
+    /// same-chain "it" referent every object producer uses, so a following
+    /// "you may cast the copy" binds to them via `TargetFilter::LastCreated`.
+    CreateCardCopyByName {
+        /// `None` = the name chosen on this source (CR 201.4; the
+        /// `ChosenAttribute::CardName` a preceding `Effect::Choose` committed) —
+        /// "the card with the chosen name". `Some(name)` is a literal printed
+        /// name, for a future "create a copy of a card named X".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// How many copies to create. Defaults to one.
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+    },
     /// Digital-only Alchemy keyword action (no CR entry): "perpetually" applies a
     /// modification to the matched cards that persists for the rest of the game
     /// and follows each card across all zones — a permanent edit to the card,
@@ -26863,8 +27154,9 @@ pub fn reveal_hand_parks_card_choice(card_filter: &TargetFilter, choice_optional
 pub fn effect_parks_reveal_card_choice(effect: &Effect) -> bool {
     matches!(
         effect,
-        Effect::RevealHand { card_filter, choice_optional, .. }
-            if reveal_hand_parks_card_choice(card_filter, *choice_optional)
+        Effect::RevealHand { card_filter, choice_optional, cardinality, .. }
+            if *cardinality == ObjectSelectionCardinality::AnyNumber
+                || reveal_hand_parks_card_choice(card_filter, *choice_optional)
     )
 }
 
@@ -27031,6 +27323,15 @@ pub fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
 }
 
 pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
+    // CR 115.1c + CR 602.2b: a one-shot draw replacement's substitute that uses
+    // "target" (Words of War: "deals 2 damage to any target instead") makes the
+    // creating ability targeted — the target is chosen as that ability is
+    // activated and carried into the shield — so its slot is the substitute
+    // head's slot. Unlike `CreateDelayedTrigger`, no later stack object exists
+    // to choose it: a replacement effect never uses the stack (CR 614.1).
+    if let Effect::CreateDrawReplacement { replacement_effect } = effect {
+        return extract_target_filter_from_effect(&replacement_effect.effect);
+    }
     // CR 701.21a: Sacrifice does not target — the controller chooses permanents
     // at resolution time via EffectZoneChoice. Returning a filter here would
     // cause collect_target_slots to create target selection slots, routing
@@ -28948,6 +29249,7 @@ pub enum NestedDefinitionEdge {
     ExileTopCardContestWinner,
     RevealFromHandOnDecline,
     CreateDelayedTriggerEffect,
+    CreateDrawReplacementEffect,
     CreateBoonTrigger,
     RollDieResult,
     FlipCoinsWin,
@@ -31209,6 +31511,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -31461,6 +31764,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -32043,6 +32347,7 @@ impl Effect {
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
@@ -32077,8 +32382,11 @@ impl Effect {
             // snapshot its handle names, not in a top-level `target` field.
             | Effect::EpicCopy { .. }
             | Effect::CreateDamageReplacement { .. }
-            // CR 614.11: CreateDrawReplacement is non-targeted — "you would
-            // draw" scopes via the shield's source-player default, no slot.
+            // The resolver scopes "you would draw" with source_controller and
+            // valid_player: You, so the carrier itself names no target. A
+            // "target" in its substitute (Words of War) is surfaced by
+            // `extract_target_filter_from_effect`'s delegation to the
+            // substitute head (CR 115.1c).
             | Effect::CreateDrawReplacement { .. }
             // CR 614.1a: CreatePlaneswalkReplacement is non-targeted — "a player
             // would planeswalk" scopes via the shield's player scope, no slot.
@@ -32529,6 +32837,7 @@ impl Effect {
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
             | Effect::ChooseOneOf { .. }
@@ -32867,6 +33176,10 @@ impl Effect {
             // rather than cited.
             Effect::Conjure { destination, .. }
             | Effect::DraftFromSpellbook { destination, .. } => *destination == Zone::Library,
+
+            // CR 707.13: a copy defined by name comes from the Oracle card
+            // reference, never from or into a library.
+            Effect::CreateCardCopyByName { .. } => false,
 
             // ---------- Reasoned FALSE: library-adjacent but not a move ----------
 
@@ -33281,6 +33594,7 @@ impl Effect {
             // conjures the drafted card) assign the referent to the card they
             // just made, including after a paused draft choice resumes.
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::DraftFromSpellbook { .. }
             // CR 707.2: token copies made by a batch or per-player resolver,
             // which republish every token they created.
@@ -33609,8 +33923,7 @@ macro_rules! define_effect_quantity_walk {
     /// `Dig::keep_count_expr`, `PutSticker::max_ticket_cost`, dynamic
     /// `PtValue::Quantity` power/toughness, and `ChangeZone`'s
     /// (conditional) entry counters — and recurses through variants that
-    /// embed another `Effect` (`CreateDrawReplacement`,
-    /// `CreatePlaneswalkReplacement`).
+    /// embed another `Effect` (`CreatePlaneswalkReplacement`).
     ///
     /// Nested domain types that carry their own quantities are walked
     /// through composed exhaustive sub-visitors (each a no-wildcard match on
@@ -33886,11 +34199,6 @@ macro_rules! define_effect_quantity_walk {
                     f(q);
                 }
             }
-            Effect::CreateDrawReplacement {
-                replacement_effect, ..
-            } => {
-                replacement_effect.$name(f);
-            }
             Effect::CreatePlaneswalkReplacement {
                 replacement_effect, ..
             } => {
@@ -33952,6 +34260,9 @@ macro_rules! define_effect_quantity_walk {
             // Each conjured card's count — and the optional dynamic library
             // slot — resolve during conjure resolution
             // (`game/effects/conjure.rs`).
+            // CR 707.13: the copy count resolves during resolution
+            // (`game/effects/create_card_copy_by_name.rs`).
+            Effect::CreateCardCopyByName { count, .. } => f(count),
             Effect::Conjure {
                 cards,
                 library_position,
@@ -34178,6 +34489,9 @@ macro_rules! define_effect_quantity_walk {
             | Effect::BecomeSaddled { .. }
             | Effect::SetClassLevel { .. }
             | Effect::CreateDelayedTrigger { .. }
+            // CR 614.6: the substitute is a nested `AbilityDefinition`,
+            // evaluated when the shield applies, not in this resolution.
+            | Effect::CreateDrawReplacement { .. }
             | Effect::AddTargetReplacement { .. }
             | Effect::AddRestriction { .. }
             | Effect::ReduceNextSpellCost { .. }
@@ -34350,6 +34664,12 @@ impl Effect {
             Effect::CreateDelayedTrigger { effect, .. } => {
                 f(NestedDefinitionEdge::CreateDelayedTriggerEffect, effect)
             }
+            // CR 614.6: the substitute a one-shot draw replacement performs
+            // in place of the replaced draw.
+            Effect::CreateDrawReplacement { replacement_effect } => f(
+                NestedDefinitionEdge::CreateDrawReplacementEffect,
+                replacement_effect,
+            ),
             // Digital-only Alchemy (no CR entry): the boon's granted trigger
             // body. Visited so guard resolution, description rendering, and
             // unimplemented detection see through the boon wrapper exactly as
@@ -34517,7 +34837,6 @@ impl Effect {
             | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
             | Effect::PreventDamage { .. }
             | Effect::CreateDamageReplacement { .. }
-            | Effect::CreateDrawReplacement { .. }
             | Effect::CreatePlaneswalkReplacement { .. }
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
@@ -34612,6 +34931,7 @@ impl Effect {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -34648,6 +34968,8 @@ impl Effect {
             | Effect::Dig { count, .. }
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
+            // CR 707.13: how many copies of the named card to create.
+            | Effect::CreateCardCopyByName { count, .. }
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
@@ -34920,6 +35242,8 @@ impl Effect {
             | Effect::Dig { count, .. }
             | Effect::Surveil { count, .. }
             | Effect::CopyTokenOf { count, .. }
+            // CR 707.13: how many copies of the named card to create.
+            | Effect::CreateCardCopyByName { count, .. }
             | Effect::CreateTokenCopyFromPool { count, .. }
             | Effect::PutCounter { count, .. }
             | Effect::PutCounterAll { count, .. }
@@ -35429,6 +35753,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::BecomeBlocked { .. } => "BecomeBlocked",
         Effect::Conjure { .. } => "Conjure",
+        Effect::CreateCardCopyByName { .. } => "CreateCardCopyByName",
         Effect::Intensify { .. } => "Intensify",
         Effect::ApplyPerpetual { .. } => "ApplyPerpetual",
         Effect::DraftFromSpellbook { .. } => "DraftFromSpellbook",
@@ -35687,6 +36012,7 @@ pub enum EffectKind {
     RemoveFromCombat,
     BecomeBlocked,
     Conjure,
+    CreateCardCopyByName,
     Intensify,
     ApplyPerpetual,
     DraftFromSpellbook,
@@ -35983,6 +36309,7 @@ impl From<&Effect> for EffectKind {
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::BecomeBlocked { .. } => EffectKind::BecomeBlocked,
             Effect::Conjure { .. } => EffectKind::Conjure,
+            Effect::CreateCardCopyByName { .. } => EffectKind::CreateCardCopyByName,
             Effect::Intensify { .. } => EffectKind::Intensify,
             Effect::ApplyPerpetual { .. } => EffectKind::ApplyPerpetual,
             Effect::DraftFromSpellbook { .. } => EffectKind::DraftFromSpellbook,
@@ -36664,6 +36991,13 @@ pub struct AbilityDefinition {
     pub face_down_in_exile: ExileConcealment,
     /// CR 201.5a: granter stamp; `stamp_granter` decides which nodes carry it.
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 113.2c + CR 602.5c: re-donation lineage, oldest-first; empty for
+    /// direct/printed abilities. A grant that overwrites an existing
+    /// `granting_object` stamp pushes the overwritten stamp here so a
+    /// re-donated copy stays distinct from a directly granted one.
+    /// Serialized through `AbilityDefinitionRepr` (empty chains omitted)
+    /// and backfilled by `AbilityDefinitionDe` (missing chains default).
+    pub grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 /// CR 605.1a + CR 608.2c: does any effect this ability executes during its OWN
@@ -36717,7 +37051,42 @@ pub(crate) fn cost_moves_card_to_or_from_library(ability_def: &AbilityDefinition
     .is_break()
 }
 
-/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the root effect adds
+/// CR 605.1a + CR 605.3b + CR 608.2c: the leading instructions of an activated
+/// mana ability whose mana production follows other instructions, split from the
+/// production node. Returns the `Effect::Mana` node, only when every preceding link is unconditional, non-targeting
+/// (CR 115.6) and resolves without a player decision (a counter or life-total
+/// change), so the immediate resolver can run the whole chain in written order
+/// before producing mana. Empowered Autogenerator ("Put a charge counter on this
+/// artifact. Add X mana of any one color, where X is the number of charge
+/// counters on this artifact.") is the canonical shape.
+pub fn inline_mana_preamble(ability_def: &AbilityDefinition) -> Option<&AbilityDefinition> {
+    let mut node = ability_def;
+    let mut preceding = false;
+    loop {
+        if matches!(node.effect.as_ref(), Effect::Mana { .. }) {
+            return preceding.then_some(node);
+        }
+        let choice_free = matches!(
+            node.effect.as_ref(),
+            Effect::PutCounter { .. }
+                | Effect::RemoveCounter { .. }
+                | Effect::GainLife { .. }
+                | Effect::LoseLife { .. }
+        );
+        if !choice_free
+            || node.condition.is_some()
+            || node.optional
+            || node.multi_target.is_some()
+            || extract_target_filter_from_effect(&node.effect).is_some()
+        {
+            return None;
+        }
+        node = node.sub_ability.as_deref()?;
+        preceding = true;
+    }
+}
+
+/// CR 605.1a, criteria (1)-(3) ONLY — no target (CR 115.6), the ability adds
 /// mana (`Effect::Mana`, or a pool doubling per CR 701.10f — see
 /// [`Effect::adds_mana_on_resolution`]), and it's not a loyalty ability
 /// (CR 606.2). Deliberately EXCLUDES the
@@ -36748,23 +37117,61 @@ pub fn produces_mana_on_activation(ability_def: &AbilityDefinition) -> bool {
     // `declared_filters`, not `surfaced_filters`: a context-ref recipient still
     // makes this not-a-mana-ability under today's behavior, and this change
     // must not widen mana-ability status for any shipping card.
+    //
+    // CR 605.1a: "it could add mana to a player's mana pool when it resolves".
+    // The production is the root `Effect::Mana`, or — CR 107.1c + CR 701.20a —
+    // the `Effect::Mana` immediately after a root "reveal any number of
+    // [filter] cards in your hand" (Metalworker, Sacellum Godspeaker), whose
+    // resolution-time selection the immediate resolver pauses for and resumes
+    // into production. An ability whose production follows any other non-Mana
+    // clause (Empowered Autogenerator: "Put a charge counter on this artifact.
+    // Add X mana ...") also meets CR 605.1a. CR 608.2c: its instructions run in
+    // written order, so the immediate resolver performs that leading chain
+    // (`inline_mana_preamble`) before it produces mana.
     let target_attached = match &*ability_def.effect {
         Effect::Mana { target, .. } => target
             .as_ref()
             .and_then(|r| r.declared_filters().next())
-            .map(|(_, filter)| filter),
+            .is_some(),
+        Effect::RevealHand {
+            cardinality: ObjectSelectionCardinality::AnyNumber,
+            ..
+        } => match ability_def.sub_ability.as_deref().map(|sub| &*sub.effect) {
+            Some(Effect::Mana { target, .. }) => {
+                extract_target_filter_from_effect(&ability_def.effect).is_some()
+                    || target
+                        .as_ref()
+                        .and_then(|r| r.declared_filters().next())
+                        .is_some()
+            }
+            _ => return false,
+        },
         // CR 605.1a + CR 701.10f: doubling a pool's mana adds mana; it requires a
         // target only when the shared target-slot authority surfaces one ("you" is a
         // context reference — Doubling Cube).
-        effect if effect.adds_mana_on_resolution() => extract_target_filter_from_effect(effect),
-        _ => return false,
+        effect if effect.adds_mana_on_resolution() => {
+            extract_target_filter_from_effect(effect).is_some()
+        }
+        // CR 605.1a + CR 608.2c: a chain of non-targeting, choice-free instructions
+        // that ends in mana production (Empowered Autogenerator); the leading
+        // links were already checked target-free by `inline_mana_preamble`.
+        _ => match inline_mana_preamble(ability_def) {
+            Some(mana) => match &*mana.effect {
+                Effect::Mana { target, .. } => target
+                    .as_ref()
+                    .and_then(|r| r.declared_filters().next())
+                    .is_some(),
+                _ => return false,
+            },
+            None => return false,
+        },
     };
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
     // Reject both the explicit `multi_target` mechanism and the embedded
     // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
     // card in target opponent's hand" — the spell targets, so it must use the
     // stack and is not a mana ability under CR 605).
-    if ability_def.multi_target.is_some() || target_attached.is_some() {
+    if ability_def.multi_target.is_some() || target_attached {
         return false;
     }
     // CR 605.1a: "...and it's not a loyalty ability." A loyalty ability (CR 606)
@@ -36975,6 +37382,8 @@ struct AbilityDefinitionRepr<'a> {
     face_down_in_exile: ExileConcealment,
     #[serde(skip_serializing_if = "Option::is_none")]
     granting_object: &'a Option<ObjectIncarnationRef>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    grant_chain: &'a Vec<ObjectIncarnationRef>,
 }
 
 impl Serialize for AbilityDefinition {
@@ -37032,6 +37441,7 @@ impl Serialize for AbilityDefinition {
             unlowered_guard,
             face_down_in_exile,
             granting_object,
+            grant_chain,
         } = self;
         let repr = AbilityDefinitionRepr {
             kind,
@@ -37084,6 +37494,7 @@ impl Serialize for AbilityDefinition {
             unlowered_guard,
             face_down_in_exile: *face_down_in_exile,
             granting_object,
+            grant_chain,
         };
         /// Flatten wrapper: the mirror carries the real field set;
         /// `consumes_source` (#506) and `is_mana_ability` (CR 605.1a) are
@@ -37218,6 +37629,8 @@ struct AbilityDefinitionDe {
     face_down_in_exile: ExileConcealment,
     #[serde(default)]
     granting_object: Option<ObjectIncarnationRef>,
+    #[serde(default)]
+    grant_chain: Vec<ObjectIncarnationRef>,
 }
 
 impl<'de> Deserialize<'de> for AbilityDefinition {
@@ -37280,6 +37693,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             unlowered_guard: de.unlowered_guard,
             face_down_in_exile: de.face_down_in_exile,
             granting_object: de.granting_object,
+            grant_chain: de.grant_chain,
         })
     }
 }
@@ -37634,6 +38048,7 @@ impl AbilityDefinition {
             unlowered_guard: None,
             face_down_in_exile: ExileConcealment::Public,
             granting_object: None,
+            grant_chain: Vec::new(),
         }
     }
 
@@ -37923,11 +38338,13 @@ pub enum EffectOutcomeSignal {
 /// CR 602.2a + CR 608.2c: which per-turn tally of a single printed ability
 /// [`AbilityCondition::AbilityUseCountThisTurn`] reads.
 ///
-/// Both tallies are keyed `(source_id, ability_index)` and cleared together at
-/// end-of-turn cleanup; they differ only in which point of an ability's life
-/// increments them. The distinction is rules-visible: an activation that is
-/// countered before it resolves still counts as an activation (CR 602.2a puts
-/// the ability on the stack at announcement) but never counts as a resolution.
+/// The `Resolved` tally is keyed `(source_id, ability_index)` while the
+/// `Activated` tally is keyed by the per-acquisition `AbilityUsageKey`
+/// (CR 602.5c); both clear together at end-of-turn cleanup. They differ only
+/// in which point of an ability's life increments them. The distinction is
+/// rules-visible: an activation that is countered before it resolves still
+/// counts as an activation (CR 602.2a puts the ability on the stack at
+/// announcement) but never counts as a resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AbilityUseTally {
     /// CR 608.2c: times this ability has RESOLVED this turn.
@@ -40535,6 +40952,23 @@ impl OriginConstraint {
             OriginConstraint::Equals(z) => from == &Some(*z),
             OriginConstraint::NotEquals(z) => matches!(from, Some(f) if f != z),
             OriginConstraint::OneOf(zs) => matches!(from, Some(f) if zs.contains(f)),
+        }
+    }
+
+    /// CR 601.2a + CR 400.11: Does a spell cast from `origin` satisfy this
+    /// cast-origin constraint? `origin = None` is a cast from OUTSIDE the game
+    /// (CR 707.13: the copy Garth One-Eye creates), where "outside the game is not
+    /// a zone" (CR 400.11). Unlike [`Self::matches_from`], where `None` is "no
+    /// prior zone" and fails every negative constraint, an outside-the-game cast
+    /// IS a cast from somewhere other than any named zone: it satisfies
+    /// `NotEquals(z)` ("from anywhere other than your hand") for every `z`, and
+    /// fails `Equals` and `OneOf`.
+    pub fn matches_cast_origin(&self, origin: Option<Zone>) -> bool {
+        match self {
+            OriginConstraint::Any => true,
+            OriginConstraint::Equals(z) => origin == Some(*z),
+            OriginConstraint::NotEquals(z) => origin != Some(*z),
+            OriginConstraint::OneOf(zs) => origin.is_some_and(|o| zs.contains(&o)),
         }
     }
 }
@@ -44501,6 +44935,233 @@ mod tests {
             TargetFilter::Typed(TypedFilter::default()),
         ] {
             assert!(!other.names_one_player(), "{other:?}");
+        }
+    }
+
+    fn legacy_worship_draw_replacement() -> serde_json::Value {
+        // Witnessed in integration_cards.json.gz at the original PR base.
+        serde_json::json!({
+            "type": "CreateDrawReplacement",
+            "replacement_effect": { "type": "GainLife", "amount": { "type": "Fixed", "value": 5 } }
+        })
+    }
+
+    fn worship_replacement_definition() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )
+    }
+
+    #[test]
+    fn draw_replacement_reads_legacy_effect_and_emits_full_definition() {
+        let effect: Effect = serde_json::from_value(legacy_worship_draw_replacement())
+            .expect("legacy Worship payload must decode at the Effect boundary");
+        let Effect::CreateDrawReplacement { replacement_effect } = &effect else {
+            panic!("expected a draw replacement");
+        };
+        assert_eq!(**replacement_effect, worship_replacement_definition());
+        assert_eq!(replacement_effect.kind, AbilityKind::Spell);
+        assert_eq!(replacement_effect.player_scope, None);
+        assert!(replacement_effect.sub_ability.is_none());
+        assert!(replacement_effect.else_ability.is_none());
+        let modern = serde_json::to_value(&effect).unwrap();
+        assert_eq!(modern["replacement_effect"]["kind"], "Spell");
+        assert_eq!(modern["replacement_effect"]["effect"]["amount"]["value"], 5);
+        assert!(modern["replacement_effect"].get("type").is_none());
+        assert_eq!(serde_json::from_value::<Effect>(modern).unwrap(), effect);
+    }
+
+    #[test]
+    fn draw_replacement_preserves_current_definition_metadata() {
+        for scope in [PlayerFilter::All, PlayerFilter::Opponent] {
+            let definition = worship_replacement_definition()
+                .player_scope(scope.clone())
+                .condition(AbilityCondition::IsYourTurn)
+                .optional()
+                .optional_targeting()
+                .target_choice_timing(TargetChoiceTiming::Resolution)
+                .target_constraint(TargetSelectionConstraint::DifferentTargetPlayers)
+                .sub_ability(worship_replacement_definition().description("sub".to_string()))
+                .with_else_ability(worship_replacement_definition().description("else".to_string()))
+                .with_modal(
+                    ModalChoice {
+                        min_choices: 1,
+                        max_choices: 1,
+                        mode_count: 1,
+                        mode_descriptions: vec!["mode".to_string()],
+                        ..Default::default()
+                    },
+                    vec![worship_replacement_definition().description("mode".to_string())],
+                );
+            let effect = Effect::CreateDrawReplacement {
+                replacement_effect: Box::new(definition),
+            };
+            let decoded: Effect =
+                serde_json::from_value(serde_json::to_value(&effect).unwrap()).unwrap();
+            let Effect::CreateDrawReplacement { replacement_effect } = &decoded else {
+                panic!("expected a draw replacement");
+            };
+            assert_eq!(replacement_effect.player_scope, Some(scope));
+            assert_eq!(
+                replacement_effect.condition,
+                Some(AbilityCondition::IsYourTurn)
+            );
+            assert!(replacement_effect.optional && replacement_effect.optional_targeting);
+            assert_eq!(
+                replacement_effect.target_choice_timing,
+                TargetChoiceTiming::Resolution
+            );
+            assert_eq!(
+                replacement_effect.target_constraints,
+                vec![TargetSelectionConstraint::DifferentTargetPlayers]
+            );
+            assert_eq!(
+                replacement_effect
+                    .sub_ability
+                    .as_ref()
+                    .unwrap()
+                    .description
+                    .as_deref(),
+                Some("sub")
+            );
+            assert_eq!(
+                replacement_effect
+                    .else_ability
+                    .as_ref()
+                    .unwrap()
+                    .description
+                    .as_deref(),
+                Some("else")
+            );
+            assert_eq!(replacement_effect.modal.as_ref().unwrap().mode_count, 1);
+            assert_eq!(replacement_effect.mode_abilities.len(), 1);
+            assert_eq!(
+                replacement_effect.mode_abilities[0].description.as_deref(),
+                Some("mode")
+            );
+            assert_eq!(
+                decoded, effect,
+                "all current metadata must survive the selected decoder"
+            );
+        }
+    }
+
+    #[test]
+    fn draw_replacement_legacy_decode_recurses_through_definitions_and_tagged_effects() {
+        let mut parent = serde_json::to_value(worship_replacement_definition()).unwrap();
+        let nested =
+            serde_json::json!({"kind": "Spell", "effect": legacy_worship_draw_replacement()});
+        parent["sub_ability"] = nested.clone();
+        parent["else_ability"] = nested.clone();
+        parent["modal"] = serde_json::to_value(ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        parent["mode_abilities"] = serde_json::json!([nested]);
+        let decoded: AbilityDefinition = serde_json::from_value(parent).unwrap();
+        assert!(matches!(*decoded.effect, Effect::GainLife { .. }));
+        assert_eq!(decoded.modal.as_ref().unwrap().mode_count, 1);
+        assert_eq!(decoded.mode_abilities.len(), 1);
+        for child in [
+            decoded.sub_ability.as_deref().unwrap(),
+            decoded.else_ability.as_deref().unwrap(),
+            &decoded.mode_abilities[0],
+        ] {
+            let Effect::CreateDrawReplacement { replacement_effect } = &*child.effect else {
+                panic!("nested definition must reach the draw replacement");
+            };
+            assert_eq!(**replacement_effect, worship_replacement_definition());
+        }
+
+        // CreateDelayedTrigger has its own `effect` field; it is still a legacy Effect.
+        let mut delayed = legacy_worship_draw_replacement();
+        delayed["replacement_effect"] = serde_json::json!({
+            "type": "CreateDelayedTrigger",
+            "condition": (DelayedTriggerCondition::AtNextPhase { phase: Phase::End }),
+            "effect": { "kind": "Spell", "effect": legacy_worship_draw_replacement() }
+        });
+        let effect: Effect = serde_json::from_value(delayed).unwrap();
+        let Effect::CreateDrawReplacement { replacement_effect } = effect else {
+            panic!("expected outer replacement")
+        };
+        assert_eq!(replacement_effect.kind, AbilityKind::Spell);
+        assert_eq!(replacement_effect.player_scope, None);
+        let Effect::CreateDelayedTrigger { effect: child, .. } = *replacement_effect.effect else {
+            panic!("legacy tagged effect must select Effect decoding")
+        };
+        let Effect::CreateDrawReplacement { replacement_effect } = *child.effect else {
+            panic!("expected inner replacement")
+        };
+        assert_eq!(*replacement_effect, worship_replacement_definition());
+    }
+
+    #[test]
+    fn draw_replacement_preserves_defaults_and_propagates_selected_decoder_errors() {
+        let mut defaulted = legacy_worship_draw_replacement();
+        defaulted["replacement_effect"] = serde_json::json!({ "type": "GainLife" });
+        let decoded: Effect = serde_json::from_value(defaulted)
+            .expect("the established missing amount default remains valid");
+        let Effect::CreateDrawReplacement { replacement_effect } = decoded else {
+            panic!("expected draw replacement")
+        };
+        assert!(matches!(
+            *replacement_effect.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller
+            }
+        ));
+
+        let modern = serde_json::to_value(worship_replacement_definition()).unwrap();
+        let legacy = legacy_worship_draw_replacement()["replacement_effect"].clone();
+        let malformed = [
+            (serde_json::Value::Null, modern.clone()),
+            (serde_json::json!({"kind": "Spell"}), modern.clone()),
+            (serde_json::json!({"effect": legacy}), modern.clone()),
+            (
+                serde_json::json!({"kind": "Unknown", "effect": {"type": "GainLife"}}),
+                modern.clone(),
+            ),
+            (
+                serde_json::json!({"kind": "Spell", "effect": {"type": "Unknown"}}),
+                modern,
+            ),
+            (serde_json::json!({"type": "Unknown"}), legacy.clone()),
+            (
+                serde_json::json!({"type": "GainLife", "amount": {"type": "Fixed"}}),
+                legacy,
+            ),
+        ];
+        for (bad, good) in malformed {
+            let mut valid = legacy_worship_draw_replacement();
+            valid["replacement_effect"] = good;
+            assert!(
+                serde_json::from_value::<Effect>(valid.clone()).is_ok(),
+                "same-family positive reaches the field decoder"
+            );
+            let nested_valid = serde_json::json!({"kind": "Spell", "effect": {"type": "GainLife"}, "sub_ability": {"kind": "Spell", "effect": valid}});
+            assert!(
+                serde_json::from_value::<AbilityDefinition>(nested_valid).is_ok(),
+                "same-family positive reaches the nested field decoder"
+            );
+            let mut invalid = legacy_worship_draw_replacement();
+            invalid["replacement_effect"] = bad.clone();
+            assert!(
+                serde_json::from_value::<Effect>(invalid.clone()).is_err(),
+                "selected decoder must reject {bad}"
+            );
+            let nested = serde_json::json!({"kind": "Spell", "effect": {"type": "GainLife"}, "sub_ability": {"kind": "Spell", "effect": invalid}});
+            assert!(
+                serde_json::from_value::<AbilityDefinition>(nested).is_err(),
+                "nested malformed payload must reject its containing definition"
+            );
         }
     }
 
@@ -49792,6 +50453,7 @@ mod tests {
             selection: CardSelectionMode::Chosen,
             choice_optional: false,
             reveal: false,
+            cardinality: ObjectSelectionCardinality::SINGLE,
         };
         let json = serde_json::to_string(&effect).unwrap();
         assert!(
