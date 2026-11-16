@@ -839,8 +839,18 @@ export function additionalCostChoices(
       return {
         title: "Choose additional cost",
         options: [
-          { id: "pay", label: pay ? formatAbilityCost(pay) : "Pay first cost" },
-          { id: "decline", label: decline ? formatAbilityCost(decline) : "Pay second cost" },
+          {
+            id: "pay",
+            label: pay
+              ? formatAbilityCost(pay)
+              : i18n.t("game:resolutionOptionalPayment.cost.choiceFirstCostFallback"),
+          },
+          {
+            id: "decline",
+            label: decline
+              ? formatAbilityCost(decline)
+              : i18n.t("game:resolutionOptionalPayment.cost.choiceSecondCostFallback"),
+          },
         ],
       };
     }

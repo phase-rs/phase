@@ -2498,7 +2498,9 @@
       "exile": "Esilia {{count}} {{cards}} da {{zone}}",
       "haveOpponentGainLife": "Fai guadagnare {{amount}} punti vita a un avversario",
       "haveEachOtherPlayerGainLife": "Fai guadagnare {{amount}} punti vita a ogni altro giocatore",
-      "reveal": "Rivela {{count}} {{cards}} da {{zone}}"
+      "reveal": "Rivela {{count}} {{cards}} da {{zone}}",
+      "choiceFirstCostFallback": "Paga il primo costo",
+      "choiceSecondCostFallback": "Paga il secondo costo"
     }
   },
   "topOrBottom": {

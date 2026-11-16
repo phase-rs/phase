@@ -2468,7 +2468,9 @@
       "zoneExile": "放逐区",
       "zoneGraveyard": "你的坟墓场",
       "zoneHand": "你的手牌",
-      "zoneLibrary": "你的牌库"
+      "zoneLibrary": "你的牌库",
+      "choiceFirstCostFallback": "支付第一个费用",
+      "choiceSecondCostFallback": "支付第二个费用"
     },
     "decline": "拒绝",
     "pay": "支付{{cost}}",

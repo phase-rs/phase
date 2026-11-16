@@ -2498,7 +2498,9 @@
       "exile": "Exilia {{count}} {{cards}} de {{zone}}",
       "haveOpponentGainLife": "Haz que un oponente gane {{amount}} vidas",
       "haveEachOtherPlayerGainLife": "Haz que cada otro jugador gane {{amount}} vidas",
-      "reveal": "Muestra {{count}} {{cards}} de {{zone}}"
+      "reveal": "Muestra {{count}} {{cards}} de {{zone}}",
+      "choiceFirstCostFallback": "Pagar el primer coste",
+      "choiceSecondCostFallback": "Pagar el segundo coste"
     }
   },
   "topOrBottom": {
