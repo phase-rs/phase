@@ -1443,9 +1443,8 @@ fn run_vat(moonlight: bool, model: Option<&str>) -> VatRun {
     VatRun { prompts, runner }
 }
 
-/// F2 (controls). CR 614.12 + CR 616.1c: a Metamorph copy token's own as-enters copy is
-/// offered at the token's liminal entry — the batch-level creation consult no longer
-/// asks the entry question for it — and without Hallowed Moonlight a copy of a
+/// F2 (control). CR 614.12 + CR 616.1c: a Metamorph copy token's own as-enters copy is
+/// offered at the token's liminal entry, and without Hallowed Moonlight a copy of a
 /// noncreature artifact simply enters.
 #[test]
 fn metamorph_copy_token_gets_its_own_copy_choice_and_enters_without_moonlight() {
@@ -1470,11 +1469,6 @@ fn metamorph_copy_token_gets_its_own_copy_choice_and_enters_without_moonlight() 
 #[test]
 fn metamorph_copy_token_copying_a_creature_is_exiled_under_moonlight() {
     let run = run_vat(true, Some("bears"));
-    assert!(
-        run.prompts[0].contains("You may have ~ enter as a copy"),
-        "the entrant's own as-enters copy is offered first, got {:?}",
-        run.prompts
-    );
     assert!(
         battlefield_tokens_named(run.runner.state(), "Grizzly Bears").is_empty()
             && battlefield_tokens_named(run.runner.state(), "Phyrexian Metamorph").is_empty(),
@@ -1573,11 +1567,6 @@ fn divine_visitation_substitute_keeps_a_copy_batchs_tapped_state() {
 #[test]
 fn known_limitation_metamorph_copy_of_noncreature_is_exiled_under_moonlight() {
     let run = run_vat(true, Some("trinket"));
-    assert!(
-        run.prompts[0].contains("You may have ~ enter as a copy"),
-        "the entrant's own copy is offered first, got {:?}",
-        run.prompts
-    );
     assert!(
         battlefield_tokens_named(run.runner.state(), TRINKET).is_empty(),
         "current behaviour: the token is exiled although CR 616.1c/614.12 say it should enter"

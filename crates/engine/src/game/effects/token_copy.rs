@@ -2725,13 +2725,9 @@ fn apply_token_modifications(
 
 /// CR 614.12 + CR 614.1c: whether every token of a copy batch enters through its
 /// own liminal `TokenEntry` — the seam where the entrant's own as-enters
-/// replacements (Phyrexian Metamorph's "enter as a copy") are discovered and
-/// where every other battlefield-entry replacement is consulted for that entrant
-/// (CR 616.1c orders an as-enters copy before them). The single authority both
-/// `apply_copy_token_after_replacement_with_created_ids` (which builds the
-/// liminal entrant) and the batch-level replacement matcher read: a batch that
-/// enters this way is not asked the entry question a second time at its
-/// `CreateToken` proposal, which has no entrant to be a copy yet.
+/// replacements (Phyrexian Metamorph's "enter as a copy") are discovered.
+/// `apply_copy_token_after_replacement_with_created_ids` builds the liminal
+/// entrant exactly when this holds.
 ///
 /// Every copy exception must be stampable before entry (CR 707.9b) and the copy
 /// must enter with no counters (the intrinsic loyalty, its own "enters with"

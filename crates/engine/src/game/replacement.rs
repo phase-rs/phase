@@ -2466,37 +2466,9 @@ fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameSt
         ProposedEvent::CreateToken {
             count,
             redirected_to: None,
-            copy,
-            spec,
             ..
         } if *count > 0
-            // CR 614.12 + CR 616.1c: a copy batch whose entrant carries its own
-            // as-enters copy (Phyrexian Metamorph) and enters through its liminal
-            // `TokenEntry` is asked the entry question there, where that copy is
-            // offered first; at this batch-level proposal no entrant exists yet to
-            // be a copy. Every other copy batch keeps this batch-level consult,
-            // which is what lets a one-shot "one or more ... enter as copies"
-            // (Mystic Reflection) reach the whole batch.
-            && !copy.as_deref().is_some_and(|copy| {
-                copy_entrant_has_own_entry_copy(&copy.values)
-                    && crate::game::effects::token_copy::copy_batch_enters_through_liminal_entry(
-                        &copy.values,
-                        &copy.additional_modifications,
-                        &spec.enter_with_counters,
-                    )
-            })
     )
-}
-
-/// CR 614.12 + CR 616.1c: whether a copied token's own copiable replacements include an
-/// as-enters "enter as a copy of ..." (Phyrexian Metamorph, Clone): the entrant's own
-/// copy candidate, which only exists once the entrant does.
-fn copy_entrant_has_own_entry_copy(values: &crate::types::ability::CopiableValues) -> bool {
-    values.replacement_definitions.iter().any(|def| {
-        def.event == ReplacementEvent::Moved
-            && def.destination_zone == Some(Zone::Battlefield)
-            && def.execute.as_deref().is_some_and(ability_becomes_copy)
-    })
 }
 
 fn change_zone_applier(
