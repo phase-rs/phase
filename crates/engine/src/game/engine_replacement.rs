@@ -4371,6 +4371,7 @@ pub(crate) fn is_entry_event_of(event: &GameEvent, source_id: ObjectId) -> bool 
         | GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCast { .. }
         | GameEvent::Mutated { .. }
@@ -4537,6 +4538,7 @@ fn parked_event_holds(parked: &GameEvent, event: &GameEvent) -> bool {
         | GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCast { .. }
         | GameEvent::Mutated { .. }
@@ -4982,6 +4984,7 @@ fn parked_entry_is_of_incarnation(event: &GameEvent, entrant: ObjectIncarnationR
             | GameEvent::TurnStarted { .. }
             | GameEvent::ExtraTurnCreated { .. }
             | GameEvent::PhaseChanged { .. }
+            | GameEvent::PhaseChangedForPlayer { .. }
             | GameEvent::PriorityPassed { .. }
             | GameEvent::SpellCast { .. }
             | GameEvent::Mutated { .. }
@@ -5463,6 +5466,7 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
             | GameEvent::TurnStarted { .. }
             | GameEvent::ExtraTurnCreated { .. }
             | GameEvent::PhaseChanged { .. }
+            | GameEvent::PhaseChangedForPlayer { .. }
             | GameEvent::PriorityPassed { .. }
             | GameEvent::SpellCast { .. }
             | GameEvent::Mutated { .. }
@@ -5629,6 +5633,7 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
         | GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCast { .. }
         | GameEvent::Mutated { .. }
