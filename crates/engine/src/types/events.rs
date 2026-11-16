@@ -696,6 +696,7 @@ impl EventObjectSnapshot {
             | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
             | TargetFilter::CastingSpell
@@ -1604,6 +1605,12 @@ pub enum GameEvent {
         /// event's triggers are matched. Boxed to keep `GameEvent`'s size down.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject: Option<Box<EventObjectSnapshot>>,
+    },
+    /// CR 701.3a + CR 603.2e: An Aura, Equipment, or Fortification became attached
+    /// to an object or player.
+    Attached {
+        attachment_id: ObjectId,
+        target: TargetRef,
     },
     /// CR 701.3d: An Aura, Equipment, or Fortification became unattached from
     /// the object or player it was attached to.

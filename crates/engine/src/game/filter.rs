@@ -198,6 +198,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -467,6 +468,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -627,6 +629,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -1026,6 +1029,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -2858,6 +2862,7 @@ fn filter_contains_input(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -4355,6 +4360,7 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -6215,6 +6221,7 @@ fn filter_verdict_is_identity_only(filter: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -8108,6 +8115,9 @@ fn filter_inner_for_object(
         | TargetFilter::PostReplacementDamageTargetOwner
         // CR 615: compound damage recipient, lowered to `DamageTargetFilter`
         // before runtime — never object-matched here.
+        // CR 608.2c: resolved only by its effect handler; never matched against
+        // the board.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ControllerAndControlledPermanents { .. } => false,
         // CR 201.2a + CR 602.5: "card with the chosen name" — match against source's
         // ChosenAttribute::CardName. The chosen name comes from a player UI prompt
@@ -8608,6 +8618,9 @@ fn zone_change_filter_inner(
         // CR 201.5a: record matching does not bind the granter, so it fails closed.
         | TargetFilter::GrantingObject { .. }
         | TargetFilter::Owner
+        // CR 608.2c: resolved only by its effect handler; never matched against
+        // the board.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::AffectedObjectOwner => false,
     }
 }
@@ -8923,6 +8936,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -9284,6 +9298,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -13384,6 +13399,7 @@ pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetC
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
