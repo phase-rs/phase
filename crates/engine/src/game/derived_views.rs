@@ -31,8 +31,8 @@ use crate::game::stack::{
 };
 use crate::game::topology::Side;
 use crate::types::ability::{
-    ContinuousModification, Duration, GameRestriction, KeywordAction, ProhibitedActivity,
-    RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
+    AbilityCost, ContinuousModification, Duration, Effect, GameRestriction, KeywordAction,
+    ProhibitedActivity, RestrictionExpiry, RestrictionPlayerScope, TargetFilter, TargetRef,
 };
 use crate::types::attribution::EffectRef;
 use crate::types::card::{PrintedCardRef, TokenImageRef};
@@ -41,7 +41,7 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
 use crate::types::display_only::{CanonicalDigest, DisplayOnly};
 use crate::types::events::GameEvent;
-use crate::types::format::TurnStructure;
+use crate::types::format::{GameFormat, TurnStructure};
 use crate::types::game_state::{
     CastingVariant, CombatDamageSubStep, GameState, PendingManaAbility, StackEntry, StackEntryKind,
     StackPaidSnapshot, SyntheticTriggerProvenance, TriggerSourceRead, WaitingFor,
@@ -492,6 +492,31 @@ pub struct ArchenemyView {
     pub hero_player_ids: Vec<PlayerId>,
 }
 
+/// Engine-authored Horde presentation state: which seats are the Horde, which
+/// are survivors, and which Bosses are currently deployed. The frontend renders
+/// this directly instead of selecting a Boss from command-zone objects or
+/// classifying seats from the raw seat vector.
+///
+/// Every list is the game-state authority's answer, not a client re-derivation:
+/// seats via `horde::horde_seats` (stored designation plus the archenemy
+/// fallback, so a snapshot omitting the seat vector still resolves), survivors
+/// as the remaining `seat_order` seats in seat order, Bosses via
+/// `boss::bosses_in_command_zone` (face-up Boss cards in command-zone order —
+/// the face-down Boss pile is excluded by construction, so no hidden identity
+/// can leak through this view). Bosses have no CR section of their own (the
+/// Turtle Team-Up product booklet is the rules authority); the representative
+/// Boss a seat identity names is `deployed_boss_ids[0]`, the first in
+/// command-zone order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HordeView {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub horde_seat_ids: Vec<PlayerId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hero_player_ids: Vec<PlayerId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deployed_boss_ids: Vec<ObjectId>,
+}
+
 /// Display-only turn-order chip row. `turns_from_now == 0` is the current
 /// turn; `1` is the next actual turn that would begin; larger values count
 /// future turn starts after that. Duplicate players are intentional when an
@@ -645,6 +670,30 @@ pub struct SharedPilesView {
     pub graveyard: Option<PlayerId>,
 }
 
+/// CR 121.1 + CR 702.24a: the resolved draw an unless-payment prompt asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnlessDrawCostView {
+    /// Cards one printed instruction draws (CR 107.1b: a negative count is 0).
+    pub cards: u32,
+    /// Printed instructions the payment performs, each drawing `cards`.
+    pub instructions: u32,
+    /// Whether the payer may still decline.
+    pub stage: UnlessDrawPaymentStage,
+}
+
+/// CR 702.24a: where a draw unless-payment prompt stands. "Either the entire set
+/// of costs is paid, or none of them is paid": once part of a repeated payment
+/// is performed, the prompt only continues it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnlessDrawPaymentStage {
+    /// The payer chooses whether to pay.
+    #[default]
+    Offered,
+    /// The payer chose to pay and part of the payment is performed; the prompt
+    /// continues the instructions still owed and cannot be declined.
+    Continuing,
+}
+
 /// CR 510.1a + CR 702.4b + CR 120.3a/b: display-only projection, at the current
 /// state, of what a creature that may attack would do to a player if it attacks
 /// and is not blocked. Computed before replacement and prevention effects
@@ -696,6 +745,13 @@ pub struct DerivedViews {
     /// seat whose `Player` container stores each shared pile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_piles: Option<SharedPilesView>,
+    /// CR 121.1 + CR 702.24a: the draw an open unless-payment prompt asks the
+    /// payer to perform — the resolved card count of one printed draw
+    /// instruction and how many times it repeats (one per age counter for
+    /// cumulative upkeep). Present only while that prompt is a draw cost, so
+    /// the client renders these numbers instead of decoding the cost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_draw_cost: Option<UnlessDrawCostView>,
     /// The live (post-layer) keyword badges each battlefield permanent should
     /// display. The engine classifies the complete keyword list so the client
     /// can render the compact strip without reinterpreting keyword timing.
@@ -957,6 +1013,13 @@ pub struct DerivedViews {
     /// zone objects or recomputing side membership.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archenemy: Option<ArchenemyView>,
+
+    /// Engine-authored Horde presentation state. The frontend renders this
+    /// directly instead of selecting a deployed Boss from command-zone objects
+    /// or classifying Horde and survivor seats itself. Present in every Horde
+    /// game; the Boss list is empty before the first stage deploys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horde: Option<HordeView>,
 
     /// CR 101.4 + CR 103.1 + CR 500.7 + CR 614.10 + CR 805.4: Compact
     /// multiplayer turn-order slots. Empty for one-on-one games because the
@@ -1741,6 +1804,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         blocker_assignment_pairs: blocker_assignment_pairs(state),
         debug_library_cards: debug_library_cards(state, viewer),
         shared_piles: shared_piles(state),
+        unless_draw_cost: unless_draw_cost(state),
         current_target_kind: current_target_kind(state),
         dungeon_rooms: dungeon_rooms(state),
         poison_loss: poison_loss(state),
@@ -2010,6 +2074,10 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
                 hero_player_ids,
             });
         }
+    }
+
+    if state.format_config.format == GameFormat::Horde {
+        views.horde = Some(horde_view(state));
     }
 
     // CR 104.2b / 119.7 / 119.8 / 118.3 / 101.2 / 702.50b: aggregate
@@ -2372,6 +2440,11 @@ pub fn derive_filtered_views(
 ) -> DerivedViews {
     let mut views = derive_views(filtered_state, viewer);
     views.unique_authorized_submitter = unique_authorized_submitter(authoritative_state);
+    // CR 702.24a: whether the prompt continues a payment already begun is read
+    // from the payment's parked owner, which the viewer projection drops.
+    if let Some(draw) = views.unless_draw_cost.as_mut() {
+        draw.stage = unless_draw_payment_stage(authoritative_state);
+    }
     views.scry_prompt_id = viewer.and_then(|viewer| {
         crate::game::interaction::scry_prompt_id_for_viewer(authoritative_state, viewer)
     });
@@ -2392,6 +2465,28 @@ pub fn derive_filtered_views(
             stack_display_groups_revealing(filtered_state, &views.stack_revealed_cards);
     }
     views
+}
+
+/// Horde seat and Boss identity for the display layer. Seats come from the
+/// single authority (`horde::horde_seats`, stored designation plus the
+/// archenemy fallback); survivors are the remaining `seat_order` seats in seat
+/// order; Bosses are the deployed set (`boss::bosses_in_command_zone`). Valid
+/// on filtered state: seats are public topology and deployed Bosses are
+/// face-up command-zone objects, so viewer redaction preserves everything this
+/// reads.
+fn horde_view(state: &GameState) -> HordeView {
+    let horde_seats = crate::game::horde::horde_seats(state);
+    let hero_player_ids = state
+        .seat_order
+        .iter()
+        .copied()
+        .filter(|id| !horde_seats.contains(id))
+        .collect();
+    HordeView {
+        horde_seat_ids: horde_seats,
+        hero_player_ids,
+        deployed_boss_ids: crate::game::boss::bosses_in_command_zone(state),
+    }
 }
 
 /// CR 702.40a: Storm counts each other spell cast before it this turn. A
@@ -2485,7 +2580,11 @@ fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectI
                 .copied()
                 .filter(|object_id| {
                     state.objects.get(object_id).is_some_and(|object| {
-                        object.owner == player.id
+                        // CR 707.13 + CR 400.11: a copy created outside the game is
+                        // staged in exile only as casting-pipeline bookkeeping; it is
+                        // in no zone, so it is never part of the public exile pile.
+                        !object.is_outside_game()
+                            && object.owner == player.id
                             && (!object.face_down || object.display_visible_to_viewer)
                     })
                 })
@@ -2493,6 +2592,41 @@ fn visible_exile_object_ids(state: &GameState) -> BTreeMap<PlayerId, Vec<ObjectI
             (!object_ids.is_empty()).then_some((player.id, object_ids))
         })
         .collect()
+}
+
+/// CR 121.1 + CR 702.24a: the draw the open unless-payment prompt asks for,
+/// with its count resolved against the pending ability as the payment would
+/// resolve it, and its repetition.
+fn unless_draw_cost(state: &GameState) -> Option<UnlessDrawCostView> {
+    let WaitingFor::UnlessPayment {
+        cost: AbilityCost::EffectCost { effect },
+        pending_effect,
+        repeat,
+        ..
+    } = &state.waiting_for
+    else {
+        return None;
+    };
+    let Effect::Draw { count, .. } = effect.as_ref() else {
+        return None;
+    };
+    let resolved =
+        crate::game::quantity::resolve_quantity_with_targets(state, count, pending_effect);
+    Some(UnlessDrawCostView {
+        cards: u32::try_from(resolved).unwrap_or(0),
+        instructions: repeat.unwrap_or(1),
+        stage: unless_draw_payment_stage(state),
+    })
+}
+
+/// CR 702.24a: the stage of the open draw unless-payment prompt, read from the
+/// rules state that holds the payment's parked owner.
+fn unless_draw_payment_stage(state: &GameState) -> UnlessDrawPaymentStage {
+    if crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+        UnlessDrawPaymentStage::Continuing
+    } else {
+        UnlessDrawPaymentStage::Offered
+    }
 }
 
 fn shared_piles(state: &GameState) -> Option<SharedPilesView> {
@@ -4381,6 +4515,166 @@ mod tests {
 
         let views = derive_views(&state, None);
         assert!(views.dungeon_rooms.is_empty());
+    }
+
+    /// Minimal Horde game with one deployed Boss plus one Boss still waiting
+    /// face down in the Boss pile: the engine-owned seat/Boss identity the
+    /// Horde HUD renders instead of scanning command-zone objects itself.
+    fn setup_horde_game_with_boss() -> (GameState, PlayerId, ObjectId) {
+        use crate::types::format::{ChallengeDeck, FormatConfig};
+
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::TurtleTeamUpHorde.default_ruleset()),
+            3,
+            42,
+        );
+        let horde = state.format_config.archenemy_player().expect("Horde seat");
+        let boss = create_object(
+            &mut state,
+            CardId(9001),
+            horde,
+            "Shredder, Foot Clan Overlord".into(),
+            Zone::Command,
+        );
+        let obj = state.objects.get_mut(&boss).expect("deployed Boss");
+        obj.card_types.core_types.push(CoreType::Boss);
+        obj.face_down = false;
+        let pile_boss = create_object(
+            &mut state,
+            CardId(9002),
+            horde,
+            "Chrome Dome, Cyber-Ninja".into(),
+            Zone::Command,
+        );
+        // The pile birth pattern (`create_boss_deck_card`): born into the
+        // command zone face down, then held in the pile instead of the list.
+        state.command_zone.retain(|id| *id != pile_boss);
+        let pile = state.objects.get_mut(&pile_boss).expect("pile Boss");
+        pile.card_types.core_types.push(CoreType::Boss);
+        pile.face_down = true;
+        state.boss_deck.push_back(pile_boss);
+        (state, horde, boss)
+    }
+
+    /// The Horde view projects the engine's own answers: designated seats,
+    /// survivors in seat order, and the deployed Boss set — while the
+    /// face-down Boss pile stays out of the Boss list.
+    #[test]
+    fn horde_view_projects_seats_and_deployed_boss() {
+        let (state, horde, boss) = setup_horde_game_with_boss();
+        let views = derive_views(&state, None);
+        let horde_view = views.horde.expect("Horde games project a Horde view");
+        assert_eq!(
+            horde_view.horde_seat_ids,
+            vec![horde],
+            "fresh setup designates the archenemy seat"
+        );
+        let expected_heroes: Vec<PlayerId> = state
+            .seat_order
+            .iter()
+            .copied()
+            .filter(|id| *id != horde)
+            .collect();
+        assert_eq!(expected_heroes.len(), 2, "two survivors in a 3-seat game");
+        assert_eq!(
+            horde_view.hero_player_ids, expected_heroes,
+            "survivors are the non-Horde seats in seat order"
+        );
+        assert_eq!(
+            horde_view.deployed_boss_ids,
+            vec![boss],
+            "only the face-up command-zone Boss deploys; the pile Boss is excluded"
+        );
+    }
+
+    /// A compatible snapshot omitting the seat vector still resolves: the
+    /// projection reads the stored designation plus the archenemy fallback,
+    /// never the raw vector alone. Exercised through the delivered viewer
+    /// path (`filter_state_for_viewer` + `derive_filtered_views`), with the
+    /// omission asserted on the filtered state so the fallback conjunct — not
+    /// the stored vec — is what answers.
+    #[test]
+    fn horde_view_resolves_horde_seat_with_omitted_seat_vector() {
+        let (mut state, horde, boss) = setup_horde_game_with_boss();
+        state.horde_seats.clear();
+        let viewer = state
+            .seat_order
+            .iter()
+            .copied()
+            .find(|id| *id != horde)
+            .expect("a survivor viewer");
+        let filtered = crate::game::visibility::filter_state_for_viewer(&state, viewer);
+        assert!(
+            filtered.horde_seats.is_empty(),
+            "precondition: the delivered snapshot omits the seat vector"
+        );
+        assert_eq!(
+            crate::game::topology::archenemy(&filtered),
+            Some(horde),
+            "precondition: the archenemy fallback input survives filtering"
+        );
+        let views = derive_filtered_views(&state, &filtered, Some(viewer));
+        let horde_view = views.horde.expect("Horde games project a Horde view");
+        assert_eq!(
+            horde_view.horde_seat_ids,
+            vec![horde],
+            "omitted vector falls back to the archenemy seat"
+        );
+        assert_eq!(
+            horde_view.deployed_boss_ids,
+            vec![boss],
+            "the public deployed Boss survives viewer filtering"
+        );
+    }
+
+    /// Non-Horde formats project no Horde view at all.
+    #[test]
+    fn horde_view_absent_outside_horde_format() {
+        let state = GameState::new(FormatConfig::standard(), 2, 42);
+        assert!(
+            derive_views(&state, None).horde.is_none(),
+            "no Horde view outside Horde games"
+        );
+    }
+
+    /// Wire shape: the Horde view serializes through `ClientGameStateRef` →
+    /// JSON → `ClientGameState`, and the empty Boss list omits its key.
+    #[test]
+    fn horde_view_round_trip_through_wire() {
+        let (state, horde, boss) = setup_horde_game_with_boss();
+        let json =
+            serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
+        assert!(
+            json.contains("deployed_boss_ids"),
+            "Boss key present when a Boss is deployed"
+        );
+        let round: ClientGameState = serde_json::from_str(&json).expect("deserialize");
+        let horde_view = round.derived.horde.expect("Horde view survives the wire");
+        assert_eq!(horde_view.horde_seat_ids, vec![horde]);
+        assert_eq!(horde_view.deployed_boss_ids, vec![boss]);
+
+        // Pre-deploy: the view is present (seats are known at setup) but the
+        // Boss list is empty, so its key is omitted.
+        let (mut undeployed, undeployed_horde, _) = setup_horde_game_with_boss();
+        undeployed.command_zone.clear();
+        let empty_json = serde_json::to_string(&ClientGameStateRef::wrap(&undeployed, None))
+            .expect("serialize pre-deploy");
+        assert!(
+            empty_json.contains("\"horde\":"),
+            "the view itself is present before the first stage deploys"
+        );
+        assert!(
+            !empty_json.contains("deployed_boss_ids"),
+            "empty Boss list omits its key"
+        );
+        let empty_round: ClientGameState =
+            serde_json::from_str(&empty_json).expect("deserialize pre-deploy");
+        let empty_view = empty_round
+            .derived
+            .horde
+            .expect("pre-deploy view survives the wire");
+        assert_eq!(empty_view.horde_seat_ids, vec![undeployed_horde]);
+        assert!(empty_view.deployed_boss_ids.is_empty());
     }
 
     /// JIT short-circuit: non-Commander formats must return an empty view
@@ -6688,6 +6982,7 @@ mod tests {
                 combat_status: Default::default(),
                 block_pairs: Vec::new(),
                 co_departed: Vec::new(),
+                co_entered: Vec::new(),
                 attached_to: None,
                 entered_incarnation: None,
                 turn_zone_change_index: 0,
@@ -10432,6 +10727,89 @@ mod tests {
         state.library_of_mut(PlayerId(1)).push_back(card);
         assert!(state.players[0].library.contains(&card));
         assert!(state.players[1].library.is_empty());
+    }
+
+    /// CR 121.1 + CR 702.24a: the unless-payment draw view resolves the
+    /// instruction's count against the pending ability (fixed, zero and
+    /// dynamic) and carries the repetition; any other prompt has none.
+    #[test]
+    fn unless_draw_cost_resolves_the_count_and_repetition() {
+        use crate::types::ability::{
+            AbilityCost, Effect, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility,
+        };
+        let mut state = GameState::new_two_player(42);
+        assert_eq!(derive_views(&state, None).unless_draw_cost, None);
+        let draw = |count: QuantityExpr| AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count,
+                target: TargetFilter::Controller,
+            }),
+        };
+        let prompt = |cost: AbilityCost, repeat: Option<u32>| WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost,
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )),
+            trigger_event: None,
+            effect_description: None,
+            remaining: Vec::new(),
+            repeat,
+        };
+        for (count, repeat, expected) in [
+            (QuantityExpr::Fixed { value: 1 }, None, (1, 1)),
+            (QuantityExpr::Fixed { value: 3 }, None, (3, 1)),
+            (QuantityExpr::Fixed { value: 0 }, None, (0, 1)),
+            (QuantityExpr::Fixed { value: -2 }, None, (0, 1)),
+            (QuantityExpr::Fixed { value: 1 }, Some(65), (1, 65)),
+        ] {
+            state.waiting_for = prompt(draw(count), repeat);
+            assert_eq!(
+                derive_views(&state, None).unless_draw_cost,
+                Some(UnlessDrawCostView {
+                    cards: expected.0,
+                    instructions: expected.1,
+                    stage: UnlessDrawPaymentStage::Offered,
+                })
+            );
+        }
+        // A dynamic count is resolved by the engine, here P0's hand size.
+        for _ in 0..4 {
+            create_object(
+                &mut state,
+                CardId(0),
+                PlayerId(0),
+                "Hand Card".to_string(),
+                Zone::Hand,
+            );
+        }
+        state.waiting_for = prompt(
+            draw(QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            }),
+            None,
+        );
+        assert_eq!(
+            derive_views(&state, None).unless_draw_cost,
+            Some(UnlessDrawCostView {
+                cards: 4,
+                instructions: 1,
+                stage: UnlessDrawPaymentStage::Offered,
+            })
+        );
+        // A non-draw unless cost has no draw view.
+        state.waiting_for = prompt(
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            None,
+        );
+        assert_eq!(derive_views(&state, None).unless_draw_cost, None);
     }
 
     #[test]

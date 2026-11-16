@@ -67,6 +67,15 @@ pub struct CardMetadata {
     /// so no `CardFace`/`DeckEntry` construction site needs to change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub off_stack_mana_value_override: Option<u32>,
+    /// CR 709.4b: Each half's own mana cost for a SPLIT card, in face order,
+    /// stamped alongside `off_stack_mana_value_override` by
+    /// `DeckEntry::from_resolved_face`. An effect that refers to the symbols in a
+    /// split card's mana cost sees the separate symbols of every half rather than
+    /// the whole mana cost (Jegantha sees {1} twice in Fire // Ice), and a
+    /// deck-level check has only one `CardFace`. Empty for every non-split card
+    /// (read the face's own `mana_cost`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub off_stack_mana_costs: Vec<crate::types::mana::ManaCost>,
     /// Curated support classification only; never projected onto a game object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmed_misparse: Option<MisparseClass>,
@@ -82,6 +91,7 @@ impl CardMetadata {
             && self.source_printing_ids.is_empty()
             && self.spellbook.is_empty()
             && self.off_stack_mana_value_override.is_none()
+            && self.off_stack_mana_costs.is_empty()
             && self.confirmed_misparse.is_none()
     }
 }

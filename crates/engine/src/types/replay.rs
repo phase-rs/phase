@@ -19,6 +19,8 @@ pub const REPLAY_FORMAT_VERSION: u32 = 4;
 /// start instead of thrown away.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayHeader {
+    /// Decoded with the values its game was recorded under, so reconstruction replays those rules.
+    #[serde(deserialize_with = "FormatConfig::deserialize_recorded")]
     pub format_config: FormatConfig,
     pub match_config: MatchConfig,
     pub player_count: u8,

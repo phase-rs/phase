@@ -498,6 +498,12 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // permanent, not to a new object built from its card.
     copy.reset_for_battlefield_exit();
 
+    // CR 707.2 + CR 722.3c: a Prepare copy acquires the prepare spell's
+    // characteristics, not the donor's live resolution effects. Face writers
+    // preserve those effects for same-object changes, so clear them here at the
+    // distinct-object construction boundary before installing the copied face.
+    copy.replacement_definitions.clear();
+
     // CR 707.2 + CR 110.5: status (tapped, flipped, face down, phased out),
     // counters and stickers are not copied.
     copy.tapped = false;
@@ -542,6 +548,8 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     // re-seed an exile object, so they would otherwise describe the permanent
     // instead of the prepare-face characteristics installed afterwards.
     copy.granted_abilities_from = None;
+    copy.protection_provenance.clear();
+    copy.protection_start_grants.clear();
     copy.layer1_copy_effect = None;
     copy.layer1_name_origin = None;
     copy.copied_room_halves = None;
@@ -561,6 +569,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.cast_cost_paid_object = None;
     copy.fused_split_spell = false;
     copy.cast_occurrence = None;
+    copy.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
 
     // CR 903.3 + CR 903.9a: the commander designation is an attribute of the
     // card itself, not of a copy, so the copy in exile is never a commander

@@ -404,7 +404,12 @@ pub enum ClientMessage {
         match_config: MatchConfig,
         #[serde(default)]
         ai_seats: Vec<AiSeatRequest>,
-        #[serde(default)]
+        /// Decoded as its writer recorded it for the lobby relay; Full mode re-checks it
+        /// strictly (`guard_client_message_before_dispatch`).
+        #[serde(
+            default,
+            deserialize_with = "FormatConfig::deserialize_recorded_option"
+        )]
         format_config: Option<FormatConfig>,
         /// Optional distinct label for this room, separate from the host's
         /// player name. Routed into `LobbyGame.room_name`.
@@ -3307,6 +3312,7 @@ mod tests {
             required_pick_count: 0,
             pick_selection_mode: PickSelectionMode::Direct,
             pool,
+            submitted_companion: None,
             draft_effects: vec![first_pull.clone()],
             pool_groups,
             sealed_packs: Some(vec![vec![first_pull], vec![second_pull]]),

@@ -1,19 +1,19 @@
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till, take_till1};
+use nom::bytes::complete::{tag, take_till, take_till1, take_while1};
 use nom::character::complete::{multispace0, one_of, satisfy, space1};
 use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
-use nom::multi::many0;
+use nom::multi::{many0, many_till};
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, AttachmentReferent, CardTypeSetSource, ChoiceType,
-    CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator, ControllerRef,
-    CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp, NameStickerSet,
-    ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter, PlayerRelation,
-    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
-    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
-    TypeFilter, TypedFilter,
+    AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
+    ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
+    ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
+    NameStickerSet, ObjectProperty, ObjectScope, Parity, ParitySource, PlayerFilter,
+    PlayerRelation, PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    SeatDirection, SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode,
+    ThisWayCause, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -45,9 +45,9 @@ use super::oracle_util::{
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 use crate::types::text_grammar::{
-    parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_leading_keyword_match,
-    parse_leading_pt_designation, parse_token_suffix, separator_continues_enclosing_list,
-    starts_with_type_phrase_lead, KeywordMatch,
+    parse_color_prefix, parse_color_quality_prefix, parse_core_type, parse_exile_visibility_prefix,
+    parse_leading_keyword_match, parse_leading_pt_designation, parse_token_suffix,
+    separator_continues_enclosing_list, starts_with_type_phrase_lead, KeywordMatch,
 };
 pub(crate) use crate::types::text_grammar::{
     parse_combat_status_prefix, parse_without_keyword_suffix, starts_with_type_word,
@@ -400,6 +400,62 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
         ))
         .parse(input)
     })
+}
+
+#[cfg(test)]
+mod r2_exile_modifier_tests {
+    use super::*;
+
+    #[test]
+    fn face_up_exiled_card_consumes_complete_target_and_retains_remainder() {
+        let (target, rest) = parse_target("target face-up exiled card");
+        assert!(rest.is_empty(), "{rest:?}");
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed card")
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Card));
+        assert!(filter
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }));
+        assert!(filter.properties.contains(&FilterProp::Not {
+            prop: Box::new(FilterProp::FaceDown)
+        }));
+        let (_, rest) = parse_target("target face-up exiled card frobnicate");
+        assert_eq!(rest.trim(), "frobnicate");
+    }
+
+    /// CR 406.3 + CR 108.3: the same modifier run must be reachable from an
+    /// ARTICLE-LED generic phrase. Before the shared `parse_exile_visibility_prefix`
+    /// was admitted by `starts_with_type_phrase_lead`, the indefinite article was
+    /// never stripped, so "a face-up exiled card they own" (Binding Negotiation)
+    /// collapsed to a match-anything filter.
+    #[test]
+    fn article_led_face_up_exiled_card_reaches_exile_modifiers() {
+        let (target, rest) = parse_target("a face-up exiled card they own");
+        assert!(rest.is_empty(), "{rest:?}");
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed card, got {target:?}")
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Card));
+        assert!(
+            filter
+                .properties
+                .contains(&FilterProp::InZone { zone: Zone::Exile }),
+            "{filter:?}"
+        );
+        assert!(
+            filter.properties.contains(&FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown)
+            }),
+            "{filter:?}"
+        );
+        assert!(
+            filter.properties.contains(&FilterProp::Owned {
+                controller: ControllerRef::ScopedPlayer
+            }),
+            "{filter:?}"
+        );
+    }
 }
 
 /// Parse a target description from Oracle text, returning (filter, remaining_text).
@@ -1400,12 +1456,20 @@ pub fn parse_target_with_syntax<'a>(
         // separator compositionally, then delegate the complete object tail to
         // the shared type-phrase grammar so controller/type qualifiers retain
         // their ordinary semantics.
+        // CR 115.1 + CR 608.2c: the player noun is number-agnostic in this
+        // grammar — "target players" / "target opponents" name the same slot
+        // axis as their singular forms, with the clause's `MultiTargetSpec`
+        // carrying the printed count (CR 601.2c, CR 115.1d). The plural legs
+        // are matched FIRST and are word-bounded through `tag` + the caller's
+        // clause boundary check, so the leftover "s" of a half-consumed
+        // singular can no longer be mistaken for the rest of the clause
+        // (Officious Interrogation, Call the Coppercoats).
         if let Ok((after_player, player_filter)) = alt((
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                tag::<_, _, OracleError<'_>>("opponent"),
+                alt((tag::<_, _, OracleError<'_>>("opponents"), tag("opponent"))),
             ),
-            value(TargetFilter::Player, tag("player")),
+            value(TargetFilter::Player, alt((tag("players"), tag("player")))),
         ))
         .parse(after_target)
         {
@@ -3649,6 +3713,16 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
+    // CR 406.3: face-up exiled cards retain both their zone and visibility
+    // restrictions. Compose these adjectives before the ordinary type reader.
+    // `parse_exile_visibility_prefix` is the same authority the article guard
+    // (`starts_with_type_phrase_lead`) uses, so admission and consumption can
+    // never disagree.
+    while let Ok((rest, property)) = parse_exile_visibility_prefix(&lower[pos..]) {
+        properties.push(property);
+        pos = lower.len() - rest.len();
+    }
+
     // Parse the core type, falling back to subtype recognition
     let (card_type, subtype, type_len) = parse_core_type(&lower[pos..]);
     pos += type_len;
@@ -4041,9 +4115,12 @@ fn parse_type_phrase_folding_unbound<'a>(
                     && extra_core_type_filters.is_empty()
                     && neg_type_filters.is_empty()
                 {
-                    if let Some(union) =
-                        parse_color_or_type_union(&properties, &other_filter, after_trimmed)
-                    {
+                    if let Some(union) = parse_color_or_type_union(
+                        &properties,
+                        &property_disjunction_ranges,
+                        &other_filter,
+                        after_trimmed,
+                    ) {
                         return (union, final_rest);
                     }
                 }
@@ -5026,37 +5103,7 @@ fn parse_type_phrase_folding_unbound<'a>(
             .collect::<Vec<_>>()
     };
 
-    let property_branches = if property_disjunction_ranges.is_empty() {
-        vec![properties]
-    } else {
-        let mut disjunctive_indices = vec![false; properties.len()];
-        for (start, len) in &property_disjunction_ranges {
-            for is_disjunctive in disjunctive_indices.iter_mut().skip(*start).take(*len) {
-                *is_disjunctive = true;
-            }
-        }
-        let common_props = properties
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| !disjunctive_indices[*idx])
-            .map(|(_, prop)| prop.clone())
-            .collect::<Vec<_>>();
-        let mut branch_props = vec![common_props];
-        for (start, len) in property_disjunction_ranges {
-            let disjunctive_props = properties[start..start + len].to_vec();
-            branch_props = branch_props
-                .into_iter()
-                .flat_map(|common| {
-                    disjunctive_props.iter().cloned().map(move |prop| {
-                        let mut branch = common.clone();
-                        branch.push(prop);
-                        branch
-                    })
-                })
-                .collect();
-        }
-        branch_props
-    };
+    let property_branches = expand_property_disjunctions(&properties, &property_disjunction_ranges);
 
     let mut filters = Vec::new();
     for type_filters in type_filter_branches {
@@ -5642,51 +5689,199 @@ fn finalize_or_disjunction(combined: TargetFilter, shared_props: &[FilterProp]) 
     distribute_properties_to_or(combined)
 }
 
+/// Expand the recorded property groups that the Oracle grammar joined with
+/// "or". Properties outside a recorded group remain conjunctive.
+fn expand_property_disjunctions(
+    properties: &[FilterProp],
+    ranges: &[(usize, usize)],
+) -> Vec<Vec<FilterProp>> {
+    if ranges.is_empty() {
+        return vec![properties.to_vec()];
+    }
+
+    let mut disjunctive_indices = vec![false; properties.len()];
+    for &(start, len) in ranges {
+        for is_disjunctive in disjunctive_indices.iter_mut().skip(start).take(len) {
+            *is_disjunctive = true;
+        }
+    }
+    let common_props = properties
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !disjunctive_indices[*idx])
+        .map(|(_, prop)| prop.clone())
+        .collect::<Vec<_>>();
+    let mut branches = vec![common_props];
+    for &(start, len) in ranges {
+        let disjunctive_props = &properties[start..start + len];
+        branches = branches
+            .into_iter()
+            .flat_map(|common| {
+                disjunctive_props.iter().cloned().map(move |prop| {
+                    let mut branch = common.clone();
+                    branch.push(prop);
+                    branch
+                })
+            })
+            .collect();
+    }
+    branches
+}
+
 /// CR 105.2 + CR 205.2a: "<color> or <type> <noun>" ("black or artifact
 /// creature") joins two kinds of the same noun: the noun of that color, or the
-/// noun with that type. `left_props` hold the color-only left leg, `right` is
-/// the parsed right leg and `right_text` its lowercase source. Returns `None`
-/// unless the left leg is a color and the right leg leads with a type word.
+/// noun with that type. Color alternatives on the right join the same color
+/// group, while separately colored noun legs remain independent. `left_props`
+/// and `property_disjunction_ranges` retain the left leg's conjunction groups;
+/// `right_text` is the lowercase source of the parsed right phrase. Returns
+/// `None` unless the left leg is a color and the right leg starts with a type
+/// phrase.
 ///
 /// Skips `distribute_core_type_to_or`: backfilling the color-only leg with the
 /// right leg's whole type list would include the type adjective and make the
 /// two legs identical.
 fn parse_color_or_type_union(
     left_props: &[FilterProp],
+    property_disjunction_ranges: &[(usize, usize)],
     right: &TargetFilter,
     right_text: &str,
 ) -> Option<TargetFilter> {
-    if !left_props
+    let left_colors: Vec<ManaColor> = left_props
         .iter()
-        .any(|prop| matches!(prop, FilterProp::HasColor { .. }))
-    {
+        .filter_map(|prop| match prop {
+            FilterProp::HasColor { color } => Some(*color),
+            _ => None,
+        })
+        .collect();
+    if left_colors.is_empty() {
         return None;
     }
-    let TargetFilter::Typed(right_typed) = right else {
-        return None;
-    };
-    let (_, adjective) = nom_target::parse_type_filter_word(right_text).ok()?;
-    let mut noun = right_typed
-        .type_filters
-        .iter()
-        .filter(|type_filter| **type_filter != adjective)
-        .cloned();
-    let left = typed(
-        noun.next().unwrap_or(TypeFilter::Any),
-        None,
-        left_props.to_vec(),
-        noun.collect(),
-    );
-    let shared: Vec<FilterProp> = left_props
-        .iter()
-        .filter(|prop| !is_adjective_prefix_prop(prop))
-        .cloned()
-        .collect();
-    let combined = distribute_controller_to_or(TargetFilter::Or {
-        filters: vec![left, right.clone()],
-    });
-    let combined = distribute_shared_properties(combined, &shared);
-    Some(distribute_properties_to_or(combined))
+    match right {
+        TargetFilter::Typed(right_typed) => {
+            let (_, adjective) = nom_target::parse_type_filter_word(right_text).ok()?;
+            let mut noun = right_typed
+                .type_filters
+                .iter()
+                .filter(|type_filter| **type_filter != adjective)
+                .cloned();
+            let noun_head = noun.next().unwrap_or(TypeFilter::Any);
+            let noun_tail = noun.collect::<Vec<_>>();
+            let mut filters = expand_property_disjunctions(left_props, property_disjunction_ranges)
+                .into_iter()
+                .map(|properties| typed(noun_head.clone(), None, properties, noun_tail.clone()))
+                .collect::<Vec<_>>();
+            filters.push(right.clone());
+            let shared: Vec<FilterProp> = left_props
+                .iter()
+                .filter(|prop| !is_adjective_prefix_prop(prop))
+                .cloned()
+                .collect();
+            let combined = distribute_controller_to_or(TargetFilter::Or { filters });
+            let combined = distribute_shared_properties(combined, &shared);
+            Some(distribute_properties_to_or(combined))
+        }
+        TargetFilter::Or { filters }
+            if left_props
+                .iter()
+                .all(|prop| matches!(prop, FilterProp::HasColor { .. })) =>
+        {
+            let typed_legs = filters
+                .iter()
+                .map(|leg| match leg {
+                    TargetFilter::Typed(typed_leg)
+                        if !typed_leg.type_filters.is_empty()
+                            && !typed_leg.type_filters.contains(&TypeFilter::Any) =>
+                    {
+                        Some(typed_leg)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let first_leg = typed_legs.first()?;
+            let first_leg_colors = first_leg
+                .properties
+                .iter()
+                .filter_map(|prop| match prop {
+                    FilterProp::HasColor { color } => Some(*color),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let mut product = Vec::new();
+            let left_color_options =
+                expand_property_disjunctions(left_props, property_disjunction_ranges)
+                    .into_iter()
+                    .flat_map(|branch| {
+                        branch.into_iter().filter_map(|prop| match prop {
+                            FilterProp::HasColor { color } => Some(color),
+                            _ => None,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+            if first_leg_colors.is_empty() {
+                let adjective_text = parse_color_prefix(right_text)
+                    .map_or(right_text, |(_, consumed)| &right_text[consumed..]);
+                let (_, adjective) = nom_target::parse_type_filter_word(adjective_text).ok()?;
+                let mut noun = first_leg
+                    .type_filters
+                    .iter()
+                    .filter(|type_filter| **type_filter != adjective)
+                    .cloned();
+                let noun_head = noun.next().unwrap_or(TypeFilter::Any);
+                let noun_tail = noun.collect::<Vec<_>>();
+                for color in &left_color_options {
+                    product.push(typed(
+                        noun_head.clone(),
+                        None,
+                        vec![FilterProp::HasColor { color: *color }],
+                        noun_tail.clone(),
+                    ));
+                }
+            }
+
+            let mut shared_colors = left_color_options;
+            for color in &first_leg_colors {
+                if !shared_colors.contains(color) {
+                    shared_colors.push(*color);
+                }
+            }
+            for (index, typed_leg) in typed_legs.into_iter().enumerate() {
+                let leg_colors: Vec<ManaColor> = typed_leg
+                    .properties
+                    .iter()
+                    .filter_map(|prop| match prop {
+                        FilterProp::HasColor { color } => Some(*color),
+                        _ => None,
+                    })
+                    .collect();
+                let common_properties: Vec<FilterProp> = typed_leg
+                    .properties
+                    .iter()
+                    .filter(|prop| !matches!(prop, FilterProp::HasColor { .. }))
+                    .cloned()
+                    .collect();
+                let joins_leading_color_group = if index == 0 {
+                    !first_leg_colors.is_empty()
+                } else {
+                    leg_colors.len() == 1 && first_leg_colors.contains(&leg_colors[0])
+                };
+                if !joins_leading_color_group {
+                    product.push(TargetFilter::Typed(typed_leg.clone()));
+                    continue;
+                }
+                for color in &shared_colors {
+                    let mut colored_leg = typed_leg.clone();
+                    colored_leg.properties = common_properties.clone();
+                    colored_leg
+                        .properties
+                        .push(FilterProp::HasColor { color: *color });
+                    product.push(TargetFilter::Typed(colored_leg));
+                }
+            }
+            (!product.is_empty()).then_some(TargetFilter::Or { filters: product })
+        }
+        _ => None,
+    }
 }
 
 /// CR 609.7 + CR 702.72a: Read a reader's whole "X or Y" qualifier ("red or
@@ -6039,6 +6234,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -6914,10 +7110,14 @@ fn parse_crewed_by_source_suffix(text: &str) -> Option<(FilterProp, usize)> {
 
 /// The subject word of a postnominal combat-relation clause ("creatures it
 /// blocked this turn", "creatures blocked by ~", "creatures blocking or blocked
-/// by target creature"). A parse result, not an engine type: `SelfName` names
-/// the ability's source outright, a bare `Pronoun` names it only when the parse
-/// context supplies that antecedent (`bare_pronoun_names_ability_source`), and
-/// `TargetCreature` names the ability's first object target.
+/// by target creature", "creatures that were blocked by that creature this
+/// combat"). A parse result, not an engine type: `SelfName` names the ability's
+/// source outright, a bare `Pronoun` names the source or, in a history clause,
+/// an earlier instruction's target only when the parse context supplies that
+/// antecedent, `Demonstrative` names an earlier instruction's target the same
+/// way, `OneOfThose` names any of the creature targets an earlier instruction
+/// announced, and `TargetCreature` names the ability's first object target.
+/// `resolve_relation_subject` is the single binding authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CombatRelationSubjectWord {
     /// The bare object pronoun "it".
@@ -6926,17 +7126,36 @@ pub(crate) enum CombatRelationSubjectWord {
     SelfName,
     /// "target creature" — another target of the same ability.
     TargetCreature,
+    /// "that creature" — a demonstrative for an earlier instruction's target.
+    Demonstrative,
+    /// "one of those creatures" — any member of the plural antecedent an earlier
+    /// instruction announced.
+    OneOfThose,
 }
 
 /// The grammatical form of a postnominal current-block-pairing clause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockPairingForm {
     /// CR 509.1g + CR 509.1h: "blocking or blocked by <subject>" — either
-    /// orientation (`CombatRelation::BlockingOrBlockedBy`).
+    /// orientation (`BlockPairDirection::Either`).
     BlockingOrBlockedBy,
     /// CR 509.1g: passive "blocked by <subject>" with no time window — the
-    /// subject is the blocker (`CombatRelation::BlockedBySubject { scope: None }`).
+    /// subject is the blocker (`BlockPairDirection::SubjectIsBlocker`).
     BlockedBy,
+}
+
+impl BlockPairingForm {
+    /// CR 509.1g + CR 509.1h: the current-pairing relation this form denotes.
+    pub(crate) fn relation(self) -> CombatRelation {
+        let direction = match self {
+            BlockPairingForm::BlockingOrBlockedBy => BlockPairDirection::Either,
+            BlockPairingForm::BlockedBy => BlockPairDirection::SubjectIsBlocker,
+        };
+        CombatRelation::BlockPairing {
+            direction,
+            scope: None,
+        }
+    }
 }
 
 /// The subject word naming the ability's own source: the pronoun "it", the
@@ -6996,30 +7215,283 @@ pub(crate) fn parse_block_pairing_clause(
     Ok((rest, (form, subject)))
 }
 
-/// CR 509.1g + CR 608.2i: "[that] <it|~|this creature> blocked this
-/// <combat|turn>" — a look-back relation on the creatures the subject blocked
-/// (Cathedral Membrane, Defiant Vanguard). CR 511.3: "this combat" ends when
-/// the combat phase does; CR 500.8: a turn can add combat phases, so "this
-/// combat" is narrower than "this turn".
-/// Runs on lowercase text and requires the window plus a word boundary, so a
-/// bare "it blocked" (no window) or "this turnip" never parses. Returns the
-/// subject word and the window, leaving the boundary character in the
-/// remainder. Single authority for the clause: the filter suffix, the
-/// duration-ownership guard in `strip_trailing_duration`, and the swallow audit
-/// all delegate here.
-pub(crate) fn parse_source_blocked_history_clause(
-    input: &str,
-) -> OracleResult<'_, (CombatRelationSubjectWord, CombatHistoryScope)> {
-    let (rest, _) = opt(tag("that ")).parse(input)?;
-    let (rest, subject) = parse_source_subject_word(rest)?;
-    let (rest, _) = tag(" blocked ").parse(rest)?;
-    let (rest, scope) = alt((
-        value(CombatHistoryScope::ThisCombat, tag("this combat")),
-        value(CombatHistoryScope::ThisTurn, tag("this turn")),
+/// One block-history clause: who blocked whom, against which partner, in which window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockHistoryClause {
+    pub(crate) direction: BlockPairDirection,
+    pub(crate) partner: HistoryPartner,
+    pub(crate) scope: CombatHistoryScope,
+}
+
+/// The partner a block-history clause names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistoryPartner {
+    /// A subject word the relation can bind ("it", "~", "that creature", "one of
+    /// those creatures").
+    Subject(CombatRelationSubjectWord),
+    /// An indefinite filter phrase ("a Zombie", "a legendary creature"): any creature
+    /// of a kind, not one object. No relation represents it yet, so like `Unbound` it
+    /// fails its instruction closed (Time to Reflect, You Cannot Pass!); it is kept
+    /// distinct because a filter-subject relation could represent it, which an unbound
+    /// partner cannot.
+    Filter,
+    /// Any other phrase no subject word covers ("target Wall", "another creature").
+    Unbound,
+}
+
+/// CR 511.3 + CR 500.8: " this combat" / " this turn", with a word boundary after it.
+/// "This combat" ends when the combat phase does, and a turn can add combat
+/// phases, so "this combat" is narrower than "this turn".
+fn parse_history_window(input: &str) -> OracleResult<'_, CombatHistoryScope> {
+    terminated(
+        preceded(
+            tag(" "),
+            alt((
+                value(CombatHistoryScope::ThisCombat, tag("this combat")),
+                value(CombatHistoryScope::ThisTurn, tag("this turn")),
+            )),
+        ),
+        peek(alt((value((), eof), value((), one_of(" ,."))))),
+    )
+    .parse(input)
+}
+
+fn parse_partner_word(input: &str) -> OracleResult<'_, &str> {
+    take_while1(|c: char| c.is_alphanumeric() || c == '\'' || c == '-').parse(input)
+}
+
+/// The partner and window of a history clause. "or" heads a coordination, not a noun
+/// phrase, so the unary "that blocked or was blocked this turn" (Heat Stroke) names no
+/// partner and is no history clause. An indefinite article heads a filter phrase.
+fn parse_history_partner(input: &str) -> OracleResult<'_, (HistoryPartner, CombatHistoryScope)> {
+    alt((
+        map(
+            (
+                alt((
+                    value(
+                        CombatRelationSubjectWord::Demonstrative,
+                        tag("that creature"),
+                    ),
+                    value(
+                        CombatRelationSubjectWord::OneOfThose,
+                        (tag("one of "), tag("those creatures")),
+                    ),
+                    parse_source_subject_word,
+                )),
+                parse_history_window,
+            ),
+            |(word, scope)| (HistoryPartner::Subject(word), scope),
+        ),
+        map(
+            (
+                alt((
+                    value(HistoryPartner::Filter, alt((tag("a "), tag("an ")))),
+                    success(HistoryPartner::Unbound),
+                )),
+                preceded(
+                    (not(tag("or ")), parse_partner_word),
+                    many_till(preceded(tag(" "), parse_partner_word), parse_history_window),
+                ),
+            ),
+            |(partner, (_, scope))| (partner, scope),
+        ),
     ))
-    .parse(rest)?;
-    let (rest, _) = peek(alt((value((), eof), value((), one_of(" ,."))))).parse(rest)?;
-    Ok((rest, (subject, scope)))
+    .parse(input)
+}
+
+fn parse_blocked_passive_head(input: &str) -> OracleResult<'_, ()> {
+    value((), (alt((tag("were"), tag("was"))), tag(" blocked by "))).parse(input)
+}
+
+/// CR 509.1g + CR 509.4 + CR 608.2i: a look-back relation on the creatures in a recorded
+/// block with a named partner, in every printed form:
+/// "[that] <it|~|this creature> blocked <window>" (Cathedral Membrane, Defiant Vanguard),
+/// "that blocked or <was|were> blocked by <partner> <window>" (Gaze of the Gorgon),
+/// "that <was|were> blocked by <partner> <window>" (Glyph of Doom, Ride Down),
+/// "that blocked <partner> <window>" (Joven's Ferrets).
+/// A unary clause names no partner and does not parse (Sizzling Barrage). Leaves the
+/// boundary character in the remainder. Single authority for the clause: the filter
+/// suffix, the duration guard, the swallow audit and the anaphor text delegate here.
+pub(crate) fn parse_block_history_clause(input: &str) -> OracleResult<'_, BlockHistoryClause> {
+    alt((
+        map(
+            (
+                opt(tag("that ")),
+                parse_source_subject_word,
+                preceded(tag(" blocked"), parse_history_window),
+            ),
+            |(_, word, scope)| BlockHistoryClause {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                partner: HistoryPartner::Subject(word),
+                scope,
+            },
+        ),
+        preceded(
+            tag("that "),
+            alt((
+                map(
+                    preceded(
+                        (tag("blocked or "), parse_blocked_passive_head),
+                        parse_history_partner,
+                    ),
+                    |(partner, scope)| BlockHistoryClause {
+                        direction: BlockPairDirection::Either,
+                        partner,
+                        scope,
+                    },
+                ),
+                map(
+                    preceded(parse_blocked_passive_head, parse_history_partner),
+                    |(partner, scope)| BlockHistoryClause {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        partner,
+                        scope,
+                    },
+                ),
+                map(
+                    preceded(tag("blocked "), parse_history_partner),
+                    |(partner, scope)| BlockHistoryClause {
+                        direction: BlockPairDirection::CandidateIsBlocker,
+                        partner,
+                        scope,
+                    },
+                ),
+            )),
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 608.2c: `lower` without its block-history clauses. Such a clause's partner is part
+/// of a population, so an anaphor inside it never names the instruction's recipient
+/// (Ride Down: "Creatures that were blocked by that creature this combat gain trample").
+pub(crate) fn strip_block_history_clauses(lower: &str) -> String {
+    let mut stripped = String::new();
+    let mut remaining = lower;
+    while let Some((before, _, rest)) =
+        nom_primitives::scan_preceded(remaining, parse_block_history_clause)
+    {
+        stripped.push_str(before);
+        remaining = rest;
+    }
+    stripped.push_str(remaining);
+    stripped
+}
+
+/// CR 608.2c + CR 608.2i: does `lower` hold a block-history clause that `instructions`
+/// don't carry as a restricting `BlockPairing` filter of the clause's own direction and
+/// window, on the subject `bind` resolves its partner word to? Each instruction (one
+/// conjunct's populations) vouches once per distinct relation, and each clause consumes
+/// one, so a represented clause can't vouch for a second clause of the same shape, and
+/// two populations of one instruction can't cover another instruction's dropped clause.
+/// Both ways a parse drops the clause land here: a partner no subject word covers
+/// ("target Wall"; Time to Reflect's filter phrase "a Zombie"), and a recognized "it",
+/// "that creature" or "one of those creatures" whose antecedent `resolve_relation_subject`
+/// rejects ("destroy target creature and all creatures it blocked this turn").
+pub(crate) fn population_drops_block_history_clause(
+    lower: &str,
+    instructions: &[Vec<&TargetFilter>],
+    bind: impl Fn(CombatRelationSubjectWord) -> Option<CombatRelationSubject>,
+) -> bool {
+    let mut available: Vec<BlockHistoryKey> = Vec::new();
+    for populations in instructions {
+        let mut keys: Vec<BlockHistoryKey> = Vec::new();
+        for key in populations
+            .iter()
+            .flat_map(|population| restricting_block_pairings(population))
+        {
+            if !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+        available.extend(keys);
+    }
+    let mut remaining = lower;
+    while let Some((_, clause, rest)) =
+        nom_primitives::scan_preceded(remaining, parse_block_history_clause)
+    {
+        let HistoryPartner::Subject(word) = clause.partner else {
+            return true;
+        };
+        let Some(subject) = bind(word) else {
+            return true;
+        };
+        match available.iter().position(|key| {
+            key.direction == clause.direction && key.scope == clause.scope && key.subject == subject
+        }) {
+            Some(index) => {
+                available.swap_remove(index);
+            }
+            None => return true,
+        }
+        remaining = rest;
+    }
+    false
+}
+
+/// CR 608.2c + CR 115.10a: the subject a history clause naming `word` binds under
+/// `ctx`, as the lowering binds it (`resolve_relation_subject`).
+pub(crate) fn history_clause_subject(
+    word: CombatRelationSubjectWord,
+    ctx: &ParseContext,
+) -> Option<CombatRelationSubject> {
+    resolve_relation_subject(word, CombatClauseKind::History, ctx)
+}
+
+/// One restricting history relation: the direction, window and subject a
+/// `BlockPairing` filter carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockHistoryKey {
+    pub(crate) direction: BlockPairDirection,
+    pub(crate) scope: CombatHistoryScope,
+    pub(crate) subject: CombatRelationSubject,
+}
+
+/// CR 608.2i: the distinct `BlockPairing` history relations that restrict `filter`'s
+/// objects. A relation restricts only as a conjunct: under negation (`Not`) it excludes
+/// objects, and in a disjunction (`AnyOf`, `Or`) another branch can admit an object the
+/// relation doesn't, so neither represents a clause. A conjunction restricts once per
+/// distinct relation, so one population repeating a relation can't vouch for a clause
+/// another population dropped.
+pub(crate) fn restricting_block_pairings(filter: &TargetFilter) -> Vec<BlockHistoryKey> {
+    fn collect(filter: &TargetFilter, keys: &mut Vec<BlockHistoryKey>) {
+        match filter {
+            TargetFilter::Typed(typed) => {
+                for prop in &typed.properties {
+                    if let FilterProp::CombatRelation {
+                        relation:
+                            CombatRelation::BlockPairing {
+                                direction,
+                                scope: Some(scope),
+                            },
+                        subject,
+                    } = prop
+                    {
+                        let key = BlockHistoryKey {
+                            direction: *direction,
+                            scope: *scope,
+                            subject: *subject,
+                        };
+                        if !keys.contains(&key) {
+                            keys.push(key);
+                        }
+                    }
+                }
+            }
+            TargetFilter::And { filters } => {
+                for filter in filters {
+                    collect(filter, keys);
+                }
+            }
+            TargetFilter::TrackedSetFiltered { filter, .. } => collect(filter, keys),
+            // A negation or a disjunction doesn't restrict (above); every other
+            // filter names objects without a history relation of its own.
+            _ => {}
+        }
+    }
+    let mut keys = Vec::new();
+    collect(filter, &mut keys);
+    keys
 }
 
 /// CR 608.2k: whether a bare "it" heading a combat-history relative clause
@@ -7030,10 +7502,9 @@ pub(crate) fn parse_source_blocked_history_clause(
 /// fallback (absent, `Any` or `CostPaidObject` subject) is a default, not
 /// evidence: an anaphoric compound continuation is parsed under a blank
 /// context, where that fallback would bind the source for "destroy target
-/// creature and all creatures it blocked this turn". Every other antecedent
-/// (`TriggeringSource`, `ParentTarget`, …) has no sound `CombatRelationSubject`
-/// — `ParentTarget` there denotes a target announced by the same instruction —
-/// so the clause stays unconsumed and the swallow audit reports it.
+/// creature and all creatures it blocked this turn". It answers for the source
+/// only: `resolve_relation_subject` handles a `ParentTarget` pin first, and any
+/// other antecedent leaves the clause unconsumed for the swallow audit.
 pub(crate) fn bare_pronoun_names_ability_source(ctx: &ParseContext) -> bool {
     match &ctx.object_pronoun_ref {
         Some(pin) => matches!(pin, TargetFilter::SelfRef),
@@ -7041,18 +7512,46 @@ pub(crate) fn bare_pronoun_names_ability_source(ctx: &ParseContext) -> bool {
     }
 }
 
-/// The `CombatRelationSubject` a parsed subject word denotes in `ctx`, or
-/// `None` when it has no sound one: a bare "it" names the ability's source only
-/// when `bare_pronoun_names_ability_source` holds, and the clause is otherwise
-/// left unconsumed for the swallow audit to report.
+/// Which grammar a subject word came from. Only a history clause binds an earlier
+/// instruction's target: no printed pairing clause has that antecedent, and Feint's
+/// "each creature blocking it" stays declined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CombatClauseKind {
+    Pairing,
+    History,
+}
+
+/// The single subject-binding authority. CR 608.2c + CR 115.10a: a pronoun or demonstrative
+/// bound to an earlier instruction's target, or "one of those creatures" bound to the
+/// creature targets an earlier instruction announced, gives `AnaphoricTarget`. A self-reference, or a
+/// pronoun whose antecedent is the source, gives `Source`. Any other antecedent, or none,
+/// has no subject, and the clause stays unconsumed for the swallow audit.
 fn resolve_relation_subject(
     word: CombatRelationSubjectWord,
+    kind: CombatClauseKind,
     ctx: &ParseContext,
 ) -> Option<CombatRelationSubject> {
+    let names_earlier_target = |pin: &Option<TargetFilter>| {
+        kind == CombatClauseKind::History && matches!(pin, Some(TargetFilter::ParentTarget))
+    };
     match word {
         CombatRelationSubjectWord::SelfName => Some(CombatRelationSubject::Source),
+        CombatRelationSubjectWord::Pronoun if names_earlier_target(&ctx.object_pronoun_ref) => {
+            Some(CombatRelationSubject::AnaphoricTarget)
+        }
         CombatRelationSubjectWord::Pronoun => {
             bare_pronoun_names_ability_source(ctx).then_some(CombatRelationSubject::Source)
+        }
+        CombatRelationSubjectWord::Demonstrative => {
+            names_earlier_target(&ctx.demonstrative_object_ref)
+                .then_some(CombatRelationSubject::AnaphoricTarget)
+        }
+        // CR 608.2c + CR 601.2c: "those creatures" names the creatures the earlier
+        // instruction announced as targets when they are the nearest antecedent;
+        // the relation holds for any of them.
+        CombatRelationSubjectWord::OneOfThose => {
+            names_earlier_target(&ctx.plural_demonstrative_object_ref)
+                .then_some(CombatRelationSubject::AnaphoricTarget)
         }
         CombatRelationSubjectWord::TargetCreature => Some(CombatRelationSubject::ParentTarget),
     }
@@ -7061,31 +7560,39 @@ fn resolve_relation_subject(
 /// Postnominal combat-relation suffixes on a type phrase — the single authority
 /// for both relations `FilterProp::CombatRelation` carries:
 ///
-/// * CR 509.1g + CR 608.2i: "<it|~|this creature> blocked this <combat|turn>"
-///   (`parse_source_blocked_history_clause`) — the candidate is a creature the
-///   ability's source blocked within the window, read from the block-history
-///   ledgers (`CombatRelation::BlockedBySubject { scope: Some(_) }`).
+/// * CR 509.1g + CR 608.2i: a block-history clause with a named partner and a
+///   window ("<it|~|this creature> blocked this <combat|turn>", "that blocked
+///   or were blocked by it this turn", "that were blocked by that creature this
+///   combat", "that blocked this creature this turn";
+///   `parse_block_history_clause`) — the candidate was in a recorded block with
+///   the subject within the window, in the clause's own direction, read from the
+///   block-history ledgers (`CombatRelation::BlockPairing` with `scope:
+///   Some(_)`). A clause whose partner no subject word covers is left
+///   unconsumed.
 /// * CR 509.1g + CR 509.1h: "blocking or blocked by <subject>" / "blocked by
 ///   <subject>" (`parse_block_pairing_clause`) — the current block pairing
-///   (`CombatRelation::BlockingOrBlockedBy` /
-///   `CombatRelation::BlockedBySubject { scope: None }`). The subject is either
+///   (`BlockPairingForm::relation`, `scope: None`). The subject is either
 ///   another target ("... by target creature", resolved against the parent
 ///   target) or the ability's own source ("... by ~" / "... by this creature" /
 ///   "... by it" — Cromat, Abu Ja'far, Wall of Nets). The source form mirrors
 ///   the static-subject grammar in `oracle_static::shared`.
 ///
-/// A `SelfName` subject anchors to the source outright; a bare "it" does only
-/// when `bare_pronoun_names_ability_source` holds (`resolve_relation_subject`),
-/// otherwise the clause is left unconsumed for the swallow audit to report.
-/// `game::filter` evaluates both relations and both subjects.
+/// A `SelfName` subject anchors to the source outright; a bare "it" or "that
+/// creature" binds per `resolve_relation_subject`, otherwise the clause is left
+/// unconsumed for the swallow audit to report. `game::filter` evaluates both
+/// relations and every subject.
 fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(FilterProp, usize)> {
-    if let Ok((rest, (word, scope))) =
-        preceded(tag(" "), parse_source_blocked_history_clause).parse(text)
-    {
+    if let Ok((rest, clause)) = preceded(tag(" "), parse_block_history_clause).parse(text) {
+        let HistoryPartner::Subject(word) = clause.partner else {
+            return None;
+        };
         return Some((
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject { scope: Some(scope) },
-                subject: resolve_relation_subject(word, ctx)?,
+                relation: CombatRelation::BlockPairing {
+                    direction: clause.direction,
+                    scope: Some(clause.scope),
+                },
+                subject: resolve_relation_subject(word, CombatClauseKind::History, ctx)?,
             },
             text.len() - rest.len(),
         ));
@@ -7102,7 +7609,7 @@ fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(Filte
     .parse(text)
     {
         return matches!(
-            resolve_relation_subject(word, ctx)?,
+            resolve_relation_subject(word, CombatClauseKind::Pairing, ctx)?,
             CombatRelationSubject::Source
         )
         .then(|| (FilterProp::BlockingSource, text.len() - rest.len()));
@@ -7110,14 +7617,10 @@ fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(Filte
     let (rest, (form, word)) = preceded(tag(" "), parse_block_pairing_clause)
         .parse(text)
         .ok()?;
-    let relation = match form {
-        BlockPairingForm::BlockingOrBlockedBy => CombatRelation::BlockingOrBlockedBy,
-        BlockPairingForm::BlockedBy => CombatRelation::BlockedBySubject { scope: None },
-    };
     Some((
         FilterProp::CombatRelation {
-            relation,
-            subject: resolve_relation_subject(word, ctx)?,
+            relation: form.relation(),
+            subject: resolve_relation_subject(word, CombatClauseKind::Pairing, ctx)?,
         },
         text.len() - rest.len(),
     ))
@@ -9656,6 +10159,7 @@ pub(crate) fn parse_bare_was_dealt_damage_suffix(text: &str) -> Option<(FilterPr
 /// - CR 400.7: "that entered (the battlefield) this turn" → `EnteredThisTurn`
 /// - CR 508.1a: "that attacked this turn" → `AttackedThisTurn`
 /// - CR 509.1a: "that blocked this turn" → `BlockedThisTurn`
+/// - CR 701.14a: "that fought this turn" → `FoughtThisTurn`
 /// - CR 301.5 + CR 303.4: "that are enchanted or equipped" → attachment predicate
 ///
 /// Returns `(properties, bytes_consumed)` or `None` if the text doesn't match.
@@ -9981,6 +10485,8 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             FilterProp::AttackedThisTurn { defender: None },
         ),
         ("blocked this turn", FilterProp::BlockedThisTurn),
+        // CR 701.14a: "that fought this turn" (Boxing Ring).
+        ("fought this turn", FilterProp::FoughtThisTurn),
         // CR 702.171c: "that saddled it [this turn]" — the creature was tapped to
         // pay the source's saddle cost (recorded in the source's `saddled_by`,
         // cleared at end of turn so "this turn" is implicit). "it" refers to the
@@ -10536,6 +11042,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -11424,7 +11931,10 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
 }
 
 /// CR 601.2a: The zones a spell can be cast from, excluding the named allowed
-/// zone. Used for "from anywhere other than <zone>" cast-origin predicates.
+/// zone. Used for the "can't cast spells from anywhere other than <zone>"
+/// PROHIBITION (`CantCastFrom`'s prohibited-zone list). Cast-origin FILTERS ("spell you
+/// cast from anywhere other than your hand") are `Not(InZone(<zone>))` instead, so a
+/// cast from outside the game (CR 707.13 + CR 400.11) satisfies them.
 pub fn cast_capable_zones_except(allowed: Zone) -> Vec<Zone> {
     const CAST_CAPABLE_ZONES: [Zone; 5] = [
         Zone::Hand,
@@ -11686,10 +12196,12 @@ pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleRes
 
 #[cfg(test)]
 mod tests {
+    use super::CombatRelationSubjectWord::{Demonstrative, OneOfThose, Pronoun, SelfName};
     use super::*;
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::AttackerBlockStatus;
+    use crate::types::ability::BlockPairDirection::{CandidateIsBlocker, Either, SubjectIsBlocker};
     use crate::types::ability::{PtStat, PtValueScope};
     use crate::types::counter::CounterType;
     use crate::types::keywords::Keyword;
@@ -12638,7 +13150,10 @@ mod tests {
             filter,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockingOrBlockedBy,
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::Either,
+                        scope: None
+                    },
                     subject: CombatRelationSubject::ParentTarget,
                 }
             ]))
@@ -12660,7 +13175,10 @@ mod tests {
                 filter,
                 TargetFilter::Typed(TypedFilter::creature().properties(vec![
                     FilterProp::CombatRelation {
-                        relation: CombatRelation::BlockingOrBlockedBy,
+                        relation: CombatRelation::BlockPairing {
+                            direction: BlockPairDirection::Either,
+                            scope: None
+                        },
                         subject: CombatRelationSubject::Source,
                     }
                 ])),
@@ -12669,35 +13187,91 @@ mod tests {
         }
     }
 
-    /// CR 509.1g + CR 608.2i: the blocked-history clause combinator over its full
-    /// input range — every subject word × both windows, with and without the
-    /// leading relative "that " — returns the subject word and window and leaves
-    /// the boundary character in the remainder. A missing window, a non-boundary
-    /// continuation, a different verb or voice, a typed subject, and a missing
-    /// subject all decline.
+    /// CR 509.1g + CR 509.4 + CR 608.2i: the block-history clause combinator over
+    /// its full input range — every form × every named partner word × both
+    /// windows × the boundary tails — returns the direction, partner and window
+    /// and leaves the boundary character in the remainder. An indefinite filter
+    /// phrase gives `HistoryPartner::Filter`, and any other partner no subject
+    /// word covers gives `HistoryPartner::Unbound`. A missing window, a non-boundary
+    /// continuation, a unary clause, a different verb or voice, a typed subject,
+    /// and a missing subject all decline.
     #[test]
-    fn source_blocked_history_clause_accepts_subjects_and_windows() {
-        use CombatRelationSubjectWord::{Pronoun, SelfName};
+    fn block_history_clause_accepts_forms_partners_and_windows() {
+        let windows = [
+            ("this combat", CombatHistoryScope::ThisCombat),
+            ("this turn", CombatHistoryScope::ThisTurn),
+        ];
+        let tails = ["", ".", ", then draw a card", " gain flying"];
+        let check = |text: &str, expected: BlockHistoryClause, tail: &str| {
+            let (rest, parsed) = parse_block_history_clause(text)
+                .unwrap_or_else(|e| panic!("{text:?} must parse: {e:?}"));
+            assert_eq!(parsed, expected, "{text:?}");
+            assert_eq!(rest, tail, "{text:?}");
+        };
+
+        // "[that] <it|~|this creature> blocked <window>" (Cathedral Membrane).
         for (subject_text, subject) in [
             ("it", Pronoun),
             ("~", SelfName),
             ("this creature", SelfName),
         ] {
-            for (window_text, scope) in [
-                ("this combat", CombatHistoryScope::ThisCombat),
-                ("this turn", CombatHistoryScope::ThisTurn),
-            ] {
+            for (window_text, scope) in windows {
                 for relative in ["", "that "] {
-                    for tail in ["", ".", ", then draw a card", " gain flying"] {
-                        let text = format!("{relative}{subject_text} blocked {window_text}{tail}");
-                        let (rest, parsed) = parse_source_blocked_history_clause(&text)
-                            .unwrap_or_else(|e| panic!("{text:?} must parse: {e:?}"));
-                        assert_eq!(parsed, (subject, scope), "{text:?}");
-                        assert_eq!(rest, tail, "{text:?}");
+                    for tail in tails {
+                        check(
+                            &format!("{relative}{subject_text} blocked {window_text}{tail}"),
+                            BlockHistoryClause {
+                                direction: SubjectIsBlocker,
+                                partner: HistoryPartner::Subject(subject),
+                                scope,
+                            },
+                            tail,
+                        );
                     }
                 }
             }
         }
+
+        // The relative forms with a partner: two-way, passive, active.
+        let named_partners = [
+            ("it", HistoryPartner::Subject(Pronoun)),
+            ("~", HistoryPartner::Subject(SelfName)),
+            ("this creature", HistoryPartner::Subject(SelfName)),
+            ("that creature", HistoryPartner::Subject(Demonstrative)),
+            ("a zombie", HistoryPartner::Filter),
+            ("a legendary creature", HistoryPartner::Filter),
+            ("an elf", HistoryPartner::Filter),
+            ("another creature", HistoryPartner::Unbound),
+            ("target wall", HistoryPartner::Unbound),
+            (
+                "one of those creatures",
+                HistoryPartner::Subject(OneOfThose),
+            ),
+        ];
+        for (head, direction) in [
+            ("that blocked or was blocked by ", Either),
+            ("that blocked or were blocked by ", Either),
+            ("that was blocked by ", SubjectIsBlocker),
+            ("that were blocked by ", SubjectIsBlocker),
+            ("that blocked ", CandidateIsBlocker),
+        ] {
+            for (partner_text, partner) in named_partners {
+                for (window_text, scope) in windows {
+                    for tail in tails {
+                        check(
+                            &format!("{head}{partner_text} {window_text}{tail}"),
+                            BlockHistoryClause {
+                                direction,
+                                partner,
+                                scope,
+                            },
+                            tail,
+                        );
+                    }
+                }
+            }
+        }
+
         for declined in [
             "it blocked",
             "it blocked this turnip",
@@ -12706,25 +13280,196 @@ mod tests {
             "a creature blocked this turn",
             "item blocked this turn",
             "that blocked this turn",
+            "that blocked or was blocked this turn",
+            "that blocked or were blocked by it this turnip",
+            "was blocked by it this turn",
+            "that were blocked by it",
         ] {
             assert!(
-                parse_source_blocked_history_clause(declined).is_err(),
-                "{declined:?} must not parse as a blocked-history clause"
+                parse_block_history_clause(declined).is_err(),
+                "{declined:?} must not parse as a block-history clause"
             );
         }
+    }
+
+    /// The guard with each population its own instruction and "it" bound to `it`.
+    fn drops_with(
+        lower: &str,
+        instructions: &[Vec<&TargetFilter>],
+        it: CombatRelationSubject,
+    ) -> bool {
+        population_drops_block_history_clause(lower, instructions, |word| match word {
+            CombatRelationSubjectWord::Pronoun => Some(it),
+            CombatRelationSubjectWord::SelfName => Some(CombatRelationSubject::Source),
+            CombatRelationSubjectWord::Demonstrative | CombatRelationSubjectWord::OneOfThose => {
+                Some(CombatRelationSubject::AnaphoricTarget)
+            }
+            CombatRelationSubjectWord::TargetCreature => Some(CombatRelationSubject::ParentTarget),
+        })
+    }
+
+    /// [`drops_with`], each population its own instruction, "it" naming the source.
+    fn drops(lower: &str, populations: &[&TargetFilter]) -> bool {
+        let instructions: Vec<Vec<&TargetFilter>> = populations
+            .iter()
+            .map(|population| vec![*population])
+            .collect();
+        drops_with(lower, &instructions, CombatRelationSubject::Source)
+    }
+
+    /// CR 608.2c: the anaphor text drops every history clause, wherever it sits,
+    /// and keeps the rest; the guard reader flags a clause with an unnamed partner,
+    /// and a named one whose population lacks the clause's own filter.
+    #[test]
+    fn block_history_clause_readers_strip_and_flag_partners() {
+        assert_eq!(
+            strip_block_history_clauses(
+                "creatures that were blocked by that creature this combat gain trample until end of turn."
+            ),
+            "creatures  gain trample until end of turn."
+        );
+        assert_eq!(
+            strip_block_history_clauses("destroy target creature."),
+            "destroy target creature."
+        );
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        let blocked_by_source = blocked_by_source_creatures(CombatHistoryScope::ThisTurn);
+        assert!(drops(
+            "tap each creature that was blocked by one of those creatures this turn",
+            &[&blocked_by_source]
+        ));
+        assert!(drops(
+            "destroy all creatures that were blocked by target wall this turn.",
+            &[&bare]
+        ));
+        // A recognized "it" whose binding was declined leaves the bare population.
+        assert!(drops(
+            "destroy all creatures it blocked this turn.",
+            &[&bare]
+        ));
+        // The filter must match the clause's own direction and window.
+        assert!(drops(
+            "destroy all creatures it blocked this combat.",
+            &[&blocked_by_source]
+        ));
+        assert!(drops(
+            "destroy all creatures that blocked or were blocked by it this turn.",
+            &[&blocked_by_source]
+        ));
+        assert!(!drops(
+            "destroy all creatures it blocked this turn.",
+            &[&blocked_by_source]
+        ));
+        assert!(!drops(
+            "destroy each creature that blocked or was blocked this turn.",
+            &[&bare]
+        ));
+        // Each clause needs its own filter: the first represented clause can't vouch
+        // for a second one of the same shape whose filter was dropped.
+        let two_clauses = "destroy all creatures it blocked this turn, then tap all creatures it blocked this turn.";
+        assert!(!drops(
+            two_clauses,
+            &[&blocked_by_source, &blocked_by_source]
+        ));
+        assert!(drops(two_clauses, &[&blocked_by_source, &bare]));
+        // A negated or disjunctive relation doesn't restrict the population.
+        let relation = || FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope: Some(CombatHistoryScope::ThisTurn),
+            },
+            subject: CombatRelationSubject::Source,
+        };
+        let clause = "destroy all creatures it blocked this turn.";
+        for unrestricted in [
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Not {
+                prop: Box::new(relation()),
+            }])),
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::AnyOf {
+                props: vec![FilterProp::Token, relation()],
+            }])),
+            TargetFilter::Or {
+                filters: vec![bare.clone(), blocked_by_source.clone()],
+            },
+            TargetFilter::Not {
+                filter: Box::new(blocked_by_source.clone()),
+            },
+        ] {
+            assert!(
+                drops(clause, &[&unrestricted]),
+                "{unrestricted:?} doesn't represent the clause"
+            );
+        }
+        assert!(!drops(
+            clause,
+            &[&TargetFilter::And {
+                filters: vec![bare.clone(), blocked_by_source.clone()],
+            }]
+        ));
+        // One population repeating a relation vouches for it once, so it can't
+        // cover the second instruction's clause, whose population dropped it.
+        let repeated =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![relation(), relation()]));
+        assert!(drops(two_clauses, &[&repeated, &bare]));
+        // The relation must be on a subject the clause's partner can bind: "~" is
+        // the source, not an earlier instruction's target.
+        let on_earlier_target = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::AnaphoricTarget,
+            },
+        ]));
+        assert!(drops(
+            "destroy all creatures ~ blocked this turn.",
+            &[&on_earlier_target]
+        ));
+        assert!(!drops(
+            "destroy all creatures ~ blocked this turn.",
+            &[&blocked_by_source]
+        ));
+        // "it" binds the one subject its antecedent resolves to.
+        assert!(drops(clause, &[&on_earlier_target]));
+        assert!(!drops_with(
+            clause,
+            &[vec![&on_earlier_target]],
+            CombatRelationSubject::AnaphoricTarget
+        ));
+        assert!(drops_with(
+            clause,
+            &[vec![&blocked_by_source]],
+            CombatRelationSubject::AnaphoricTarget
+        ));
+        // Two populations of one instruction vouch once: they can't cover the
+        // second instruction's clause, whose population dropped it.
+        assert!(drops_with(
+            two_clauses,
+            &[vec![&blocked_by_source, &blocked_by_source], vec![&bare]],
+            CombatRelationSubject::Source
+        ));
+        assert!(!drops_with(
+            two_clauses,
+            &[vec![&blocked_by_source], vec![&blocked_by_source]],
+            CombatRelationSubject::Source
+        ));
     }
 
     fn blocked_by_source_creatures(scope: CombatHistoryScope) -> TargetFilter {
         TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject { scope: Some(scope) },
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(scope),
+                },
                 subject: CombatRelationSubject::Source,
             }]),
         )
     }
 
     /// CR 509.1g + CR 608.2i: a mass target phrase carrying the clause folds it
-    /// into a `BlockedBySubject` filter anchored on the source, in both windows.
+    /// into a windowed `SubjectIsBlocker` filter anchored on the source, in both windows.
     /// The bare "it" binds with a `SelfRef` subject; the self-name spelling binds
     /// with no context at all.
     #[test]
@@ -12757,10 +13502,11 @@ mod tests {
 
     /// CR 608.2k: a bare "it" heading the clause names the source only on
     /// positive `SelfRef` evidence — a pinned antecedent first, then the trigger
-    /// subject. Every other antecedent (blank context, typed subject,
-    /// `TriggeringSource` / `ParentTarget` pins, including a pin that outranks a
-    /// `SelfRef` subject) leaves the clause unconsumed and the filter bare. The
-    /// self-name spelling needs no evidence, so it binds even under a typed
+    /// subject. A blank context, a typed subject and a `TriggeringSource` pin
+    /// leave the clause unconsumed and the filter bare. A `ParentTarget` pin
+    /// names an earlier instruction's target instead, even over a `SelfRef`
+    /// subject (`history_clause_binds_earlier_target_through_one_authority`).
+    /// The self-name spelling needs no evidence, so it binds even under a typed
     /// subject.
     #[test]
     fn blocked_history_pronoun_binds_source_only_on_self_ref_evidence() {
@@ -12803,14 +13549,6 @@ mod tests {
                     ..Default::default()
                 },
             ),
-            (
-                "ParentTarget pin outranks SelfRef subject",
-                ParseContext {
-                    object_pronoun_ref: Some(TargetFilter::ParentTarget),
-                    subject: Some(TargetFilter::SelfRef),
-                    ..Default::default()
-                },
-            ),
         ] {
             let (filter, rest) = parse_target_with_ctx(TEXT, &mut ctx);
             assert_eq!(rest, " it blocked this turn", "{label}");
@@ -12829,6 +13567,154 @@ mod tests {
             parse_target_with_ctx("creatures ~ blocked this turn", &mut typed_subject);
         assert_eq!(rest, "");
         assert_eq!(filter, expected);
+    }
+
+    /// CR 608.2c + CR 115.10a: `resolve_relation_subject` is the one binding
+    /// authority. In a history clause, "it" under a `ParentTarget` pin and "that
+    /// creature" under a `ParentTarget` demonstrative pin name an earlier
+    /// instruction's target (`AnaphoricTarget`), the pin outranking a `SelfRef`
+    /// subject. A `SelfRef` pin, a `SelfRef` subject and the self-name spelling
+    /// name the source. Every other antecedent leaves the clause unconsumed. A
+    /// pairing clause never binds an earlier target: that row is hand-built,
+    /// because no printed card has it (nearest: Feint's "each creature blocking
+    /// it"), and no printed face discriminates the clause-kind gate.
+    #[test]
+    fn history_clause_binds_earlier_target_through_one_authority() {
+        let history = |direction, scope, subject| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockPairing {
+                        direction,
+                        scope: Some(scope),
+                    },
+                    subject,
+                },
+            ]))
+        };
+        let pronoun_pin = || ParseContext {
+            object_pronoun_ref: Some(TargetFilter::ParentTarget),
+            subject: Some(TargetFilter::SelfRef),
+            ..Default::default()
+        };
+        let demonstrative_pin = || ParseContext {
+            demonstrative_object_ref: Some(TargetFilter::ParentTarget),
+            ..Default::default()
+        };
+
+        for (text, mut ctx, expected) in [
+            (
+                "creatures it blocked this turn",
+                pronoun_pin(),
+                history(
+                    BlockPairDirection::SubjectIsBlocker,
+                    CombatHistoryScope::ThisTurn,
+                    CombatRelationSubject::AnaphoricTarget,
+                ),
+            ),
+            (
+                "creatures that blocked or were blocked by it this turn",
+                pronoun_pin(),
+                history(
+                    BlockPairDirection::Either,
+                    CombatHistoryScope::ThisTurn,
+                    CombatRelationSubject::AnaphoricTarget,
+                ),
+            ),
+            (
+                "creatures that were blocked by that creature this combat",
+                demonstrative_pin(),
+                history(
+                    BlockPairDirection::SubjectIsBlocker,
+                    CombatHistoryScope::ThisCombat,
+                    CombatRelationSubject::AnaphoricTarget,
+                ),
+            ),
+            (
+                "creatures that blocked this creature this turn",
+                ParseContext::default(),
+                history(
+                    BlockPairDirection::CandidateIsBlocker,
+                    CombatHistoryScope::ThisTurn,
+                    CombatRelationSubject::Source,
+                ),
+            ),
+            (
+                "creatures that were blocked by it this turn",
+                ParseContext {
+                    object_pronoun_ref: Some(TargetFilter::SelfRef),
+                    ..Default::default()
+                },
+                history(
+                    BlockPairDirection::SubjectIsBlocker,
+                    CombatHistoryScope::ThisTurn,
+                    CombatRelationSubject::Source,
+                ),
+            ),
+            (
+                "creatures that were blocked by it this turn",
+                ParseContext {
+                    subject: Some(TargetFilter::SelfRef),
+                    ..Default::default()
+                },
+                history(
+                    BlockPairDirection::SubjectIsBlocker,
+                    CombatHistoryScope::ThisTurn,
+                    CombatRelationSubject::Source,
+                ),
+            ),
+        ] {
+            let (filter, rest) = parse_target_with_ctx(text, &mut ctx);
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(filter, expected, "{text}");
+        }
+
+        let unbound_contexts = || {
+            [
+                ("blank context", ParseContext::default()),
+                (
+                    "typed subject",
+                    ParseContext {
+                        subject: Some(TargetFilter::Typed(TypedFilter::creature())),
+                        ..Default::default()
+                    },
+                ),
+                (
+                    "TriggeringSource pin",
+                    ParseContext {
+                        object_pronoun_ref: Some(TargetFilter::TriggeringSource),
+                        demonstrative_object_ref: Some(TargetFilter::TriggeringSource),
+                        ..Default::default()
+                    },
+                ),
+            ]
+        };
+        for clause in [
+            " that were blocked by it this turn",
+            " that were blocked by that creature this turn",
+        ] {
+            for (label, mut ctx) in unbound_contexts() {
+                let text = format!("creatures{clause}");
+                let (filter, rest) = parse_target_with_ctx(&text, &mut ctx);
+                assert_eq!(rest, clause, "{label}: {text}");
+                assert_eq!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    "{label}: {text}"
+                );
+            }
+        }
+
+        // Hand-built: a pairing clause under a `ParentTarget` pin stays unconsumed.
+        for clause in [" blocked by it", " blocking it"] {
+            let text = format!("creatures{clause}");
+            let (filter, rest) = parse_target_with_ctx(&text, &mut pronoun_pin());
+            assert_eq!(rest, clause, "{text}");
+            assert_eq!(
+                filter,
+                TargetFilter::Typed(TypedFilter::creature()),
+                "{text}"
+            );
+        }
     }
 
     /// CR 509.1g + CR 509.1h: the block-pairing clause combinator over its full
@@ -12921,7 +13807,10 @@ mod tests {
         assert_eq!(
             filter,
             pairing_creatures(
-                CombatRelation::BlockingOrBlockedBy,
+                CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None
+                },
                 CombatRelationSubject::Source
             )
         );
@@ -12935,7 +13824,10 @@ mod tests {
             assert_eq!(
                 filter,
                 pairing_creatures(
-                    CombatRelation::BlockedBySubject { scope: None },
+                    CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        scope: None
+                    },
                     CombatRelationSubject::Source
                 ),
                 "{text}"
@@ -12951,7 +13843,10 @@ mod tests {
                     value: Keyword::Flying
                 },
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockedBySubject { scope: None },
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        scope: None
+                    },
                     subject: CombatRelationSubject::Source,
                 },
             ]))
@@ -12994,11 +13889,17 @@ mod tests {
         for (text, relation) in [
             (
                 "creatures blocking or blocked by it",
-                CombatRelation::BlockingOrBlockedBy,
+                CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None,
+                },
             ),
             (
                 "creatures blocked by it",
-                CombatRelation::BlockedBySubject { scope: None },
+                CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: None,
+                },
             ),
         ] {
             let mut pinned = ParseContext {
@@ -25483,8 +26384,10 @@ mod color_or_type_union {
             .collect()
     }
 
-    /// CR 105.2 + CR 205.2a: Soldevi Adnate's "black or artifact creature" is a
-    /// black creature or an artifact creature, never two identical legs.
+    /// CR 105.2 + CR 205.2a: Soldevi Adnate's Oracle text is "{T}, Sacrifice a
+    /// black or artifact creature: Add an amount of {B} equal to the sacrificed
+    /// creature's mana value." Its filter is a black creature or an artifact
+    /// creature, never two identical legs.
     #[test]
     fn color_or_type_noun_reads_both_kinds() {
         let (filter, rest) = parse_type_phrase_folding("black or artifact creature");
@@ -25494,6 +26397,26 @@ mod color_or_type_union {
             vec![
                 (vec![TypeFilter::Creature], vec![ManaColor::Black]),
                 (vec![TypeFilter::Artifact, TypeFilter::Creature], vec![]),
+            ]
+        );
+    }
+
+    /// CR 105.2 + CR 205.2a: Essence Burn's Oracle text is "Essence Burn deals
+    /// 5 damage to target black or green creature or planeswalker. If that
+    /// permanent would die this turn, exile it instead." Its target names
+    /// exactly the four color/type pairs.
+    #[test]
+    fn shared_color_alternatives_cross_with_noun_alternatives() {
+        let phrase = "black or green creature or planeswalker";
+        let (filter, rest) = parse_type_phrase_folding(phrase);
+        assert_eq!(rest, "", "the full grammar phrase must be consumed");
+        assert_eq!(
+            legs(&filter),
+            vec![
+                (vec![TypeFilter::Creature], vec![ManaColor::Black]),
+                (vec![TypeFilter::Creature], vec![ManaColor::Green]),
+                (vec![TypeFilter::Planeswalker], vec![ManaColor::Black]),
+                (vec![TypeFilter::Planeswalker], vec![ManaColor::Green]),
             ]
         );
     }

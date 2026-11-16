@@ -1,15 +1,13 @@
-//! Non-regression for issue #735 (Edit B) — cards whose "if its power is …"
-//! clause has a TARGET or ENTERING-REFERENT subject must KEEP
-//! `ObjectScope::CostPaidObject`. Edit B only flips player/phase-subject
-//! triggers (Amalia, Lily) to `Source`; everything else is unchanged, so "its"
-//! still binds the clause-local object (the entering creature / the target),
-//! not the ability source.
+//! Regression coverage for "if its power is …" clauses whose referent depends
+//! on the instruction: an entering-object trigger uses its event/cost referent,
+//! while a targeted spell checks its announced target.
 //!
 //! Cards covered:
 //!   - Tribute to the World Tree: "Whenever a creature you control enters, draw
 //!     a card if its power is 3 or greater. …" — "its" = the ENTERING creature.
 //!   - Ent's Fury: "Put a +1/+1 counter on target creature you control if its
-//!     power is 4 or greater. …" — "its" = the TARGET creature.
+//!     power is 4 or greater. …" — "its" = the target declared by that
+//!     instruction (CR 115.1).
 //!
 //! CR references (verified against docs/MagicCompRules.txt):
 //!   - CR 608.2h: the power comparison reads the referenced object's current
@@ -124,22 +122,11 @@ fn tribute_entering_power_2_puts_counters_not_draw() {
     );
 }
 
-/// NON-REGRESSION (Ent's Fury): the fix must NOT perturb Ent's Fury's
-/// resolution. Its "if its power is 4 or greater" clause has no trigger subject
-/// (None), so Edit B's `_ => CostPaidObject` fall-through leaves the condition
-/// as `Power{CostPaidObject} GE 4` — exactly the pre-fix parse (locked in the
-/// parser SHAPE test `ents_fury_keeps_cost_paid_object_scope`). This runtime
-/// test proves the spell still resolves cleanly with its behavior unchanged:
-/// the pump sub-ability applies (4/4 → 5/5) and the target survives its own
-/// fight against a 3/3.
-///
-/// Note: `Power{CostPaidObject}` binds the ability's cost/sacrifice referent,
-/// not a spell's target (see `game/quantity.rs` — `CostPaidObject` is
-/// deliberately NOT a "maybe the target" fallback). So the counter clause is
-/// gated on an empty cost referent both before AND after this fix — the point
-/// of this non-regression test is that the fix changes nothing here.
+/// CR 115.1 + CR 608.2c + CR 208.1: Ent's Fury checks the announced creature's
+/// current power before putting on the counter. A qualifying 4/4 becomes a 5/5
+/// from the counter, then a 6/6 from the following pump before it fights.
 #[test]
-fn ents_fury_resolves_unchanged_pump_applies() {
+fn ents_fury_target_at_threshold_gets_counter_before_pump_and_fight() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     // P0's own creature (the counter/pump/fight subject) at power 4.
@@ -163,17 +150,64 @@ fn ents_fury_resolves_unchanged_pump_applies() {
     // opponent (a creature you don't control).
     let outcome = runner.cast(spell).target_objects(&[ally, enemy]).resolve();
 
-    // The pump sub-ability (unconditional +1/+1 until end of turn) applies,
-    // proving Ent's Fury resolved through its chain unchanged by the fix.
+    assert_eq!(
+        outcome.state().objects[&ally]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "the qualifying target receives its +1/+1 counter"
+    );
     assert_eq!(
         outcome.state().objects[&ally].power,
-        Some(5),
-        "Ent's Fury's +1/+1 pump must still apply to the target (4 -> 5)"
+        Some(6),
+        "the counter and following +1/+1 pump make the target 6/6"
     );
-    // The target survives the fight (5/5 after pump vs a 3/3 dealing 3).
     assert_eq!(
         outcome.state().objects[&ally].zone,
         Zone::Battlefield,
-        "the pumped 5/5 target survives fighting a 3/3"
+        "the 6/6 target survives fighting a 3/3"
+    );
+    assert_eq!(
+        outcome.state().objects[&enemy].zone,
+        Zone::Graveyard,
+        "the 6/6 target deals lethal fight damage to the 3/3"
+    );
+}
+
+/// CR 115.1 + CR 608.2c + CR 208.1: The P/T gate reads the target's power
+/// before the same instruction adds a counter, so a 3/3 does not qualify just
+/// because that instruction would raise it to 4/4.
+#[test]
+fn ents_fury_target_below_threshold_does_not_get_counter() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ally = scenario.add_creature(P0, "Small Ally", 3, 3).id();
+    let enemy = scenario.add_creature(P1, "Enemy", 1, 1).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ent's Fury", false, ENTS_FURY_ORACLE)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+
+    let outcome = scenario
+        .build()
+        .cast(spell)
+        .target_objects(&[ally, enemy])
+        .resolve();
+
+    assert_eq!(
+        outcome.state().objects[&ally]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "the target's 3 power is below the printed threshold"
+    );
+    assert_eq!(
+        outcome.state().objects[&ally].power,
+        Some(4),
+        "the unconditional pump still applies after the gated counter is skipped"
     );
 }

@@ -24,6 +24,7 @@
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
+use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
 
 use super::rules::AttackTarget;
@@ -66,6 +67,14 @@ fn terra_combat_damage_optional_pay_prompts_terras_controller() {
     // on the battlefield; not strictly required but mirrors the issue
     // reproducer where P0 is a normal opponent.
     let _temmet = scenario.add_creature(P0, "Vanilla Blocker", 1, 1).id();
+
+    // CR 118.3 + CR 608.2d: fund P1 (the "you" / payer of the {2} offer)
+    // with 2 untapped lands so the fixed-mana feasibility gate keeps the
+    // offer genuine and the routing assertion stays observable. Same
+    // `add_basic_land` fund-payer idiom as the p7 G-rows.
+    for _ in 0..2 {
+        scenario.add_basic_land(P1, ManaColor::Green);
+    }
 
     let mut runner = scenario.build();
 

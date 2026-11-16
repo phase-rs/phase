@@ -2254,6 +2254,7 @@ fn r8_1_return_then_hand_back(scenario: &mut GameScenario, owner: PlayerId) -> O
     let root = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZoneAll {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
             origin: Some(Zone::Graveyard),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter::creature()),

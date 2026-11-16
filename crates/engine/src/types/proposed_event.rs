@@ -2,7 +2,9 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::game::game_object::{AttachTarget, DisplayIdentity};
+use crate::game::game_object::{
+    AttachTarget, DisplayIdentity, GameObject, ObjectIncarnationRefExt,
+};
 
 use super::counter::CounterType;
 
@@ -49,6 +51,35 @@ pub struct BoundSearchFoundDisposition {
     /// independently.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grant: Option<BoundSearchFoundGrant>,
+    /// CR 608.2c: who performs the found card's move. `LibraryPlayer` is the
+    /// searcher, whose own library is searched ("they exile each card they
+    /// find"); `Controller` records no performer. A named `Player` is never
+    /// bound.
+    #[serde(
+        default,
+        skip_serializing_if = "super::ability::LibraryInstructionActor::is_controller"
+    )]
+    pub actor: super::ability::LibraryInstructionActor,
+}
+
+impl BoundSearchFoundDisposition {
+    /// CR 608.2c: the player recorded as having exiled the found
+    /// card, given the event's searcher. Only a move that requests exile
+    /// records a performer. The delivery states that no player's action
+    /// decides ownership (`EntryOwnershipActor::NoPlayer`), so a replacement
+    /// that redirects the requested exile elsewhere (CR 614.6) cannot make the
+    /// searcher the card's receiver or owner.
+    pub fn performer(&self, searcher: PlayerId) -> Option<PlayerId> {
+        use super::ability::LibraryInstructionActor;
+        match &self.actor {
+            LibraryInstructionActor::LibraryPlayer if self.destination == Zone::Exile => {
+                Some(searcher)
+            }
+            LibraryInstructionActor::LibraryPlayer
+            | LibraryInstructionActor::Controller
+            | LibraryInstructionActor::Player { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,6 +454,49 @@ pub enum PlaneswalkCause {
     RulesProcess,
 }
 
+/// The `EntryOwnership::ActorOwns` input of a zone move
+/// (`zone_pipeline::entry_receiver`), recorded apart from the move's performer.
+///
+/// Every current writer records `NoPlayer` or `Player`, so a replacement that
+/// redirects a move (CR 614.6: "A modified event occurs instead") keeps the
+/// input the move was requested with. `Unrecorded` is what a save from before
+/// the field existed decodes to: those writers recorded one player, in
+/// `performed_by`, for both roles, and delivery keeps reading it for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum EntryOwnershipActor {
+    /// The field is absent: a save from a writer that had no separate input.
+    #[default]
+    Unrecorded,
+    /// No player's action decides ownership; the card keeps its owner.
+    NoPlayer,
+    /// This player's action decides ownership.
+    Player(PlayerId),
+}
+
+impl EntryOwnershipActor {
+    /// Serde skip-helper: `Unrecorded` is the absent field.
+    pub fn is_unrecorded(&self) -> bool {
+        matches!(self, Self::Unrecorded)
+    }
+
+    /// The ownership input, given the event's recorded performer for a save
+    /// that predates the separate field.
+    pub fn resolve(self, legacy_performer: Option<PlayerId>) -> Option<PlayerId> {
+        match self {
+            Self::Player(player) => Some(player),
+            Self::NoPlayer => None,
+            Self::Unrecorded => legacy_performer,
+        }
+    }
+}
+
+impl From<Option<PlayerId>> for EntryOwnershipActor {
+    /// A current writer's input: a named player or, explicitly, nobody.
+    fn from(actor: Option<PlayerId>) -> Self {
+        actor.map_or(Self::NoPlayer, Self::Player)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ProposedEvent {
     ZoneChange {
@@ -456,9 +530,15 @@ pub enum ProposedEvent {
         /// order. They ride the event — like counters — so every applicable
         /// same-entry rider survives, and delivery installs them on the new
         /// object after CR 400.7's reset, exactly as the post-entry drain
-        /// would have for a single rider.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        enter_with_grants: Vec<EnterWithGrant>,
+        /// would have for a single rider. `None` when there are none; appended only through
+        /// [`EnterWithGrants::append`], so `Some` is never empty. Boxed like
+        /// `face_down_profile`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "EnterWithGrants::deserialize_nonempty"
+        )]
+        enter_with_grants: Option<Box<EnterWithGrants>>,
         /// Override the controller on ETB. Used by Earthbending return ("under your control")
         /// and other "enters the battlefield under [player]'s control" effects.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -510,12 +590,44 @@ pub enum ProposedEvent {
         /// object ("that player exiles that card" names the drawer; a
         /// controller-worded instruction names the controller). Rides the
         /// event through replacement and CR 616.1 pause/resume so delivery can
-        /// record, per CR 406.6 + CR 400.8, who exiled the new exile object.
+        /// record who exiled the object, including when re-exile creates a new
+        /// object without a zone change (CR 400.8).
         /// `None` for moves no player performs (rules processes, raw movers).
-        /// Under `EntryOwnership::ActorOwns` delivery also reads it as the
-        /// player who becomes the card's owner (`zone_pipeline::entry_receiver`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         performed_by: Option<PlayerId>,
+        /// CR 614.12 + CR 611.2e: the same-resolution with-entry effect
+        /// ([`WithEntryEffect`]), carried through every replacement pass and
+        /// CR 616.1 pause. Boxed like `face_down_profile`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        with_entry_effect: Option<Box<WithEntryEffect>>,
+        /// CR 614.4 + CR 614.12: the other members of this battlefield entry's event
+        /// ([`CoEntrants`]), carried through every replacement pass and CR 616.1 pause.
+        /// `None` when there are none; built only by [`CoEntrants::for_entrant`], so `Some` is
+        /// never empty. Boxed like `face_down_profile`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "CoEntrants::deserialize_nonempty"
+        )]
+        co_entrants: Option<Box<CoEntrants>>,
+        /// The player whose action decides entry ownership under
+        /// `EntryOwnership::ActorOwns` (`zone_pipeline::entry_receiver`), kept
+        /// apart from `performed_by`: an instruction's subject performs the move
+        /// while the instruction's controller (the zone prompt's chooser on the
+        /// interactive route) stays the ownership input.
+        #[serde(default, skip_serializing_if = "EntryOwnershipActor::is_unrecorded")]
+        ownership_actor: EntryOwnershipActor,
+        /// CR 701.24a + CR 730.3: whether this move is the move component of a
+        /// "shuffle [set] into [library]" operation whose chained `Shuffle`
+        /// randomizes the library. Its library position is then transient, so
+        /// a merged permanent's components share it instead of each taking the
+        /// zone default. Rides the event through replacement and CR 616.1
+        /// pause/resume, like `face_down_in_exile`.
+        #[serde(
+            default,
+            skip_serializing_if = "phase_ast::types::ability::LibraryShuffleMode::is_per_object"
+        )]
+        library_shuffle: crate::types::ability::LibraryShuffleMode,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -909,6 +1021,124 @@ impl EntryChoices {
     }
 }
 
+/// CR 611.2e + CR 614.12: the continuous effect that an "is/has" instruction of the
+/// resolution putting this permanent onto the battlefield applies simultaneously with the
+/// entry: that instruction's source and controller, and the modifications it applies to the
+/// entrant in written order, such as types and subtypes, colors, base power/toughness and
+/// abilities (CR 613.1d/e/f, CR 613.4b). Carried on the proposal so every replacement pass and
+/// CR 616.1 pause sees the entrant as it would exist on the battlefield. It is a description
+/// only: the rider instruction installs the real effect when it is followed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WithEntryEffect {
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub modifications: Vec<ContinuousModification>,
+}
+
+/// CR 611.2e + CR 613.1f + CR 614.12: whether a battlefield entrant has its own
+/// abilities as it would exist on the battlefield — a view derived from the carried
+/// [`WithEntryEffect`] by [`EntrantAbilities::of`], never stored. Abilities axis only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntrantAbilities {
+    /// The entrant enters with its own abilities.
+    Retained,
+    /// A same-resolution effect removes all of the entrant's abilities as it
+    /// enters, so none of its own entry abilities apply.
+    RemovedWithEntry,
+}
+
+impl EntrantAbilities {
+    /// CR 613.1f: `RemovedWithEntry` when the carried effect removes all abilities.
+    pub fn of(effect: Option<&WithEntryEffect>) -> Self {
+        match effect {
+            Some(effect)
+                if effect
+                    .modifications
+                    .iter()
+                    .any(|m| matches!(m, ContinuousModification::RemoveAllAbilities)) =>
+            {
+                Self::RemovedWithEntry
+            }
+            Some(_) | None => Self::Retained,
+        }
+    }
+
+    /// Whether the entrant's own abilities exist as it enters.
+    pub fn own_abilities_apply(self) -> bool {
+        match self {
+            EntrantAbilities::Retained => true,
+            EntrantAbilities::RemovedWithEntry => false,
+        }
+    }
+}
+
+/// CR 614.4 + CR 614.12 + CR 400.7: the other members of the battlefield-entry event a
+/// `ProposedEvent::ZoneChange` belongs to, each as the object it was when the event began
+/// (`LogicalZoneChangeGroup::announced_members`). The engine moves an event's members one
+/// at a time, so a member delivered earlier is on the battlefield when a later member is
+/// proposed, yet it did not exist before the event, and a replacement effect must exist
+/// before the event it modifies (Metallic Mimic ruling 2017-02-09: "Creatures of the chosen
+/// type that enter the battlefield at the same time as Metallic Mimic won't enter with an
+/// additional +1/+1 counter."). Never empty: a lone entry, a proposal outside a logical
+/// zone-change group and a `TokenEntry` carry none (`ZoneChange::co_entrants` is `None`).
+/// Known gap: per-player simultaneous puts resolved as separate player-scoped legs are
+/// separate logical groups, so an entrant of an earlier leg is still a replacement source for
+/// a later leg's (Show and Tell, "Each player may put an artifact, creature, enchantment, or
+/// land card from their hand onto the battlefield.": a Containment Priest put by an earlier
+/// player exiles a later player's creature). Closing it needs one group spanning the legs, as
+/// Living Death's per-seat legs already share one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct CoEntrants(Box<[ObjectIncarnationRef]>);
+
+impl CoEntrants {
+    /// The members of `event_members` other than `entrant`; `None` when there are none.
+    pub fn for_entrant(
+        event_members: &[ObjectIncarnationRef],
+        entrant: ObjectId,
+    ) -> Option<Box<Self>> {
+        Self::nonempty(
+            event_members
+                .iter()
+                .filter(|member| member.object_id != entrant)
+                .copied()
+                .collect(),
+        )
+    }
+
+    /// The single constructor: `None` for an empty member set, so a `CoEntrants` is never empty.
+    fn nonempty(members: Box<[ObjectIncarnationRef]>) -> Option<Box<Self>> {
+        (!members.is_empty()).then(|| Box::new(Self(members)))
+    }
+
+    /// Wire reader for `ZoneChange::co_entrants`: an empty list reads as `None`, the same as an
+    /// absent key, so a decoded `Some` is never empty either.
+    fn deserialize_nonempty<'de, D>(deserializer: D) -> Result<Option<Box<Self>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(
+            Option::<Box<[ObjectIncarnationRef]>>::deserialize(deserializer)?
+                .and_then(Self::nonempty),
+        )
+    }
+
+    pub fn as_slice(&self) -> &[ObjectIncarnationRef] {
+        &self.0
+    }
+
+    /// CR 614.4 + CR 400.7: `host` entered the battlefield earlier in this same event. It
+    /// was announced as a member and is now on the battlefield as a new object. A member
+    /// still where it was announced — a later member, or one the move leaves on the
+    /// battlefield — is the object that existed before the event.
+    pub fn entered_earlier(&self, host: &GameObject) -> bool {
+        host.zone == Zone::Battlefield
+            && self.0.iter().any(|member| {
+                member.object_id == host.id && *member != ObjectIncarnationRef::from_object(host)
+            })
+    }
+}
+
 /// CR 614.1c + CR 611.2a: one "and with …" entry grant riding a battlefield
 /// entry (`ZoneChange::enter_with_grants`). The grant is a single stripped
 /// chain link — a `GenericEffect` carrying only `static_abilities` with
@@ -920,6 +1150,45 @@ impl EntryChoices {
 pub struct EnterWithGrant {
     pub grant: crate::types::ability::AbilityDefinition,
     pub controller: PlayerId,
+}
+
+/// CR 614.1c + CR 611.2a + CR 616.1: the entry grants riding one battlefield entry
+/// (`ZoneChange::enter_with_grants`), in application order. Never empty: an entry with no
+/// grant carries `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct EnterWithGrants(Vec<EnterWithGrant>);
+
+impl EnterWithGrants {
+    /// The single authority that adds grants to an entry: appends `grants` in order, creating
+    /// the box on the first one, so `Some` is never empty.
+    pub fn append(
+        slot: &mut Option<Box<EnterWithGrants>>,
+        grants: impl IntoIterator<Item = EnterWithGrant>,
+    ) {
+        let mut grants = grants.into_iter().peekable();
+        if grants.peek().is_some() {
+            slot.get_or_insert_with(|| Box::new(Self(Vec::new())))
+                .0
+                .extend(grants);
+        }
+    }
+
+    /// The carried grants of an entry, in application order (`[]` when it carries none).
+    pub fn of(grants: &Option<Box<EnterWithGrants>>) -> &[EnterWithGrant] {
+        grants.as_deref().map_or(&[], |grants| grants.0.as_slice())
+    }
+
+    /// Wire reader for `ZoneChange::enter_with_grants`: an empty list reads as `None`, the same
+    /// as an absent key, so a decoded `Some` is never empty either.
+    fn deserialize_nonempty<'de, D>(deserializer: D) -> Result<Option<Box<Self>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Option::<Vec<EnterWithGrant>>::deserialize(deserializer)?
+            .filter(|grants| !grants.is_empty())
+            .map(|grants| Box::new(Self(grants))))
+    }
 }
 
 impl ProposedEvent {
@@ -934,7 +1203,7 @@ impl ProposedEvent {
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             enter_with_counters: Vec::new(),
-            enter_with_grants: Vec::new(),
+            enter_with_grants: None,
             controller_override: None,
             enter_transformed: false,
             face_down_profile: None,
@@ -944,6 +1213,10 @@ impl ProposedEvent {
             enter_with_choices: None,
             discard_frame: None,
             performed_by: None,
+            with_entry_effect: None,
+            co_entrants: None,
+            ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             applied: HashSet::new(),
         }
     }
@@ -1026,6 +1299,87 @@ impl ProposedEvent {
             | ProposedEvent::CreateToken { enter_tapped, .. }
             | ProposedEvent::TokenEntry { enter_tapped, .. } => Some(*enter_tapped),
             _ => None,
+        }
+    }
+
+    /// CR 614.12 + CR 611.2e: the with-entry effect a zone change carries. Exhaustive: only a
+    /// `ZoneChange` carries one.
+    pub fn with_entry_effect(&self) -> Option<&WithEntryEffect> {
+        match self {
+            ProposedEvent::ZoneChange {
+                with_entry_effect, ..
+            } => with_entry_effect.as_deref(),
+            ProposedEvent::Damage { .. }
+            | ProposedEvent::Draw { .. }
+            | ProposedEvent::SearchFound { .. }
+            | ProposedEvent::Scry { .. }
+            | ProposedEvent::Mill { .. }
+            | ProposedEvent::CoinFlip { .. }
+            | ProposedEvent::RollDice { .. }
+            | ProposedEvent::Explore { .. }
+            | ProposedEvent::Connive { .. }
+            | ProposedEvent::Proliferate { .. }
+            | ProposedEvent::LifeGain { .. }
+            | ProposedEvent::LifeLoss { .. }
+            | ProposedEvent::AddCounter { .. }
+            | ProposedEvent::RemoveCounter { .. }
+            | ProposedEvent::MoveCounter { .. }
+            | ProposedEvent::CreateToken { .. }
+            | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::Discard { .. }
+            | ProposedEvent::Tap { .. }
+            | ProposedEvent::Untap { .. }
+            | ProposedEvent::TurnFaceUp { .. }
+            | ProposedEvent::Destroy { .. }
+            | ProposedEvent::Sacrifice { .. }
+            | ProposedEvent::BeginTurn { .. }
+            | ProposedEvent::BeginPhase { .. }
+            | ProposedEvent::ProduceMana { .. }
+            | ProposedEvent::EmptyManaPool { .. }
+            | ProposedEvent::Planeswalk { .. }
+            | ProposedEvent::Attach { .. } => None,
+        }
+    }
+
+    /// CR 614.12 + CR 611.2e + CR 613.1f: the derived view of [`Self::with_entry_effect`].
+    pub fn entrant_abilities(&self) -> EntrantAbilities {
+        EntrantAbilities::of(self.with_entry_effect())
+    }
+
+    /// CR 614.4 + CR 614.12: the other members of the entry event a zone change belongs to.
+    /// `Some` only for a `ZoneChange` that is a battlefield entry of a multi-member event.
+    pub fn co_entrants(&self) -> Option<&CoEntrants> {
+        match self {
+            ProposedEvent::ZoneChange { co_entrants, .. } => co_entrants.as_deref(),
+            ProposedEvent::Damage { .. }
+            | ProposedEvent::Draw { .. }
+            | ProposedEvent::SearchFound { .. }
+            | ProposedEvent::Scry { .. }
+            | ProposedEvent::Mill { .. }
+            | ProposedEvent::CoinFlip { .. }
+            | ProposedEvent::RollDice { .. }
+            | ProposedEvent::Explore { .. }
+            | ProposedEvent::Connive { .. }
+            | ProposedEvent::Proliferate { .. }
+            | ProposedEvent::LifeGain { .. }
+            | ProposedEvent::LifeLoss { .. }
+            | ProposedEvent::AddCounter { .. }
+            | ProposedEvent::RemoveCounter { .. }
+            | ProposedEvent::MoveCounter { .. }
+            | ProposedEvent::CreateToken { .. }
+            | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::Discard { .. }
+            | ProposedEvent::Tap { .. }
+            | ProposedEvent::Untap { .. }
+            | ProposedEvent::TurnFaceUp { .. }
+            | ProposedEvent::Destroy { .. }
+            | ProposedEvent::Sacrifice { .. }
+            | ProposedEvent::BeginTurn { .. }
+            | ProposedEvent::BeginPhase { .. }
+            | ProposedEvent::ProduceMana { .. }
+            | ProposedEvent::EmptyManaPool { .. }
+            | ProposedEvent::Planeswalk { .. }
+            | ProposedEvent::Attach { .. } => None,
         }
     }
 
@@ -1980,5 +2334,286 @@ mod tests {
         };
         assert!(applied.contains(&AppliedReplacementKey::floating(2)));
         assert!(!applied.contains(&AppliedReplacementKey::step_end_mana(2)));
+    }
+
+    /// CR 614.12 + CR 611.2e: the zone-change with-entry effect is an optional
+    /// wire field — absent decodes `None`, `None` is omitted, and a carried
+    /// effect round-trips. The derived view reads `RemovedWithEntry` only when
+    /// the carried effect removes all abilities (CR 613.1f), and every other
+    /// proposal carries none.
+    #[test]
+    fn zone_change_with_entry_effect_serde() {
+        let plain = ProposedEvent::zone_change(
+            ObjectId(7),
+            Zone::Graveyard,
+            Zone::Battlefield,
+            Some(ObjectId(3)),
+        );
+        let value = serde_json::to_value(&plain).expect("serializes");
+        assert!(
+            value["ZoneChange"].get("with_entry_effect").is_none(),
+            "None must not be serialized: {value}"
+        );
+        let back: ProposedEvent = serde_json::from_value(value).expect("reads without the key");
+        assert_eq!(back.with_entry_effect(), None);
+        assert_eq!(back.entrant_abilities(), EntrantAbilities::Retained);
+
+        let carrying = |modifications: Vec<ContinuousModification>| {
+            let mut event = plain.clone();
+            let ProposedEvent::ZoneChange {
+                with_entry_effect, ..
+            } = &mut event
+            else {
+                unreachable!("zone_change constructs a ZoneChange");
+            };
+            *with_entry_effect = Some(Box::new(WithEntryEffect {
+                source_id: ObjectId(3),
+                controller: PlayerId(0),
+                modifications,
+            }));
+            event
+        };
+
+        let removed = carrying(vec![
+            ContinuousModification::AddSubtype {
+                subtype: "Skeleton".to_string(),
+            },
+            ContinuousModification::RemoveAllAbilities,
+        ]);
+        let value = serde_json::to_value(&removed).expect("serializes");
+        assert!(
+            value["ZoneChange"].get("with_entry_effect").is_some(),
+            "a carried effect must be serialized: {value}"
+        );
+        let back: ProposedEvent = serde_json::from_value(value).expect("round-trips");
+        assert_eq!(back, removed);
+        assert_eq!(back.with_entry_effect(), removed.with_entry_effect());
+        assert_eq!(back.entrant_abilities(), EntrantAbilities::RemovedWithEntry);
+
+        let retained = carrying(vec![
+            ContinuousModification::AddColor {
+                color: ManaColor::Black,
+            },
+            ContinuousModification::AddSubtype {
+                subtype: "Zombie".to_string(),
+            },
+        ]);
+        let back: ProposedEvent =
+            serde_json::from_value(serde_json::to_value(&retained).expect("serializes"))
+                .expect("round-trips");
+        assert_eq!(back, retained);
+        assert!(back.with_entry_effect().is_some());
+        assert_eq!(back.entrant_abilities(), EntrantAbilities::Retained);
+
+        let begin_turn = ProposedEvent::begin_turn(PlayerId(0), false);
+        assert_eq!(begin_turn.with_entry_effect(), None);
+        assert_eq!(begin_turn.entrant_abilities(), EntrantAbilities::Retained);
+    }
+
+    /// A card in `zone` with `incarnation`, made by the zone primitive on `state`.
+    fn object_in(
+        state: &mut crate::types::game_state::GameState,
+        zone: Zone,
+        incarnation: u64,
+    ) -> ObjectId {
+        let id = crate::game::zones::create_object(
+            state,
+            crate::types::identifiers::CardId(state.next_object_id),
+            PlayerId(0),
+            "Member".to_string(),
+            zone,
+        );
+        state.objects.get_mut(&id).expect("created").incarnation = incarnation;
+        id
+    }
+
+    /// U1 — CR 614.4 + CR 400.7: `entered_earlier` holds exactly for an announced member that
+    /// is now on the battlefield as a new object.
+    #[test]
+    fn co_entrants_entered_earlier_needs_a_changed_battlefield_incarnation() {
+        let mut state = crate::types::game_state::GameState::new_two_player(7);
+        let delivered = object_in(&mut state, Zone::Graveyard, 3);
+        let later = object_in(&mut state, Zone::Graveyard, 5);
+        let exiled = object_in(&mut state, Zone::Graveyard, 2);
+        let left_in_place = object_in(&mut state, Zone::Battlefield, 4);
+        let non_member = object_in(&mut state, Zone::Battlefield, 1);
+        let announced: Vec<ObjectIncarnationRef> = [delivered, later, exiled, left_in_place]
+            .iter()
+            .map(|id| ObjectIncarnationRef::from_object(&state.objects[id]))
+            .collect();
+        let co_entrants =
+            CoEntrants::for_entrant(&announced, ObjectId(9_999)).expect("four members");
+
+        // The earlier member is delivered (a new battlefield object); another is exiled.
+        let moved = state.objects.get_mut(&delivered).expect("member");
+        moved.zone = Zone::Battlefield;
+        moved.incarnation = 4;
+        let moved = state.objects.get_mut(&exiled).expect("member");
+        moved.zone = Zone::Exile;
+        moved.incarnation = 3;
+
+        assert!(co_entrants.entered_earlier(&state.objects[&delivered]));
+        assert!(!co_entrants.entered_earlier(&state.objects[&later]));
+        assert!(!co_entrants.entered_earlier(&state.objects[&exiled]));
+        assert!(!co_entrants.entered_earlier(&state.objects[&left_in_place]));
+        assert!(!co_entrants.entered_earlier(&state.objects[&non_member]));
+    }
+
+    /// U1 — `for_entrant` names every announced member except the entrant itself.
+    #[test]
+    fn co_entrants_for_entrant_omits_the_entrant() {
+        let announced = [
+            ObjectIncarnationRef::of(ObjectId(1), 2),
+            ObjectIncarnationRef::of(ObjectId(3), 4),
+            ObjectIncarnationRef::of(ObjectId(5), 6),
+        ];
+        let co_entrants = CoEntrants::for_entrant(&announced, ObjectId(3)).expect("two others");
+        assert_eq!(
+            co_entrants.as_slice(),
+            &[announced[0], announced[2]],
+            "the entrant is not its own co-entrant"
+        );
+        assert!(
+            CoEntrants::for_entrant(&announced[..1], ObjectId(1)).is_none(),
+            "a lone entrant has no co-entrants"
+        );
+    }
+
+    /// U2 — CR 614.4 + CR 614.12: `co_entrants` is an optional wire field — none is
+    /// omitted, a stamp round-trips, and a proposal without the key or with an empty list
+    /// decodes as none. Only a zone change carries one.
+    #[test]
+    fn zone_change_co_entrants_serde() {
+        let plain = ProposedEvent::zone_change(
+            ObjectId(7),
+            Zone::Graveyard,
+            Zone::Battlefield,
+            Some(ObjectId(3)),
+        );
+        let value = serde_json::to_value(&plain).expect("serializes");
+        assert!(
+            value["ZoneChange"].get("co_entrants").is_none(),
+            "empty must not be serialized: {value}"
+        );
+        let back: ProposedEvent =
+            serde_json::from_value(value.clone()).expect("reads without the key");
+        assert_eq!(back.co_entrants(), None);
+        let mut empty_list = value;
+        empty_list["ZoneChange"]["co_entrants"] = serde_json::json!([]);
+        let back: ProposedEvent = serde_json::from_value(empty_list).expect("reads an empty list");
+        assert_eq!(back, plain, "an empty list reads as no co-entrants");
+
+        let mut stamped = plain.clone();
+        let ProposedEvent::ZoneChange { co_entrants, .. } = &mut stamped else {
+            unreachable!("zone_change constructs a ZoneChange");
+        };
+        *co_entrants = CoEntrants::for_entrant(
+            &[
+                ObjectIncarnationRef::of(ObjectId(7), 1),
+                ObjectIncarnationRef::of(ObjectId(8), 2),
+            ],
+            ObjectId(7),
+        );
+        let value = serde_json::to_value(&stamped).expect("serializes");
+        assert!(
+            value["ZoneChange"].get("co_entrants").is_some(),
+            "a stamp must be serialized: {value}"
+        );
+        let back: ProposedEvent = serde_json::from_value(value).expect("round-trips");
+        assert_eq!(back, stamped);
+        assert_eq!(
+            back.co_entrants().map(CoEntrants::as_slice),
+            Some(&[ObjectIncarnationRef::of(ObjectId(8), 2)][..])
+        );
+
+        assert_eq!(
+            ProposedEvent::begin_turn(PlayerId(0), false).co_entrants(),
+            None
+        );
+    }
+
+    /// CR 614.1c + CR 611.2a: `enter_with_grants` keeps the wire shape of the upstream
+    /// `Vec<EnterWithGrant>` field — omitted when there are none, the same array of grants
+    /// otherwise, and an empty array (or no key) decodes as none. Appending no grant leaves
+    /// none; appending keeps application order.
+    #[test]
+    fn zone_change_enter_with_grants_serde_matches_the_vec_wire_shape() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, Effect};
+        let grant = |controller: u8| EnterWithGrant {
+            grant: AbilityDefinition::new(AbilityKind::Spell, Effect::RingTemptsYou),
+            controller: PlayerId(controller),
+        };
+        let plain = ProposedEvent::zone_change(
+            ObjectId(7),
+            Zone::Graveyard,
+            Zone::Battlefield,
+            Some(ObjectId(3)),
+        );
+        let value = serde_json::to_value(&plain).expect("serializes");
+        assert!(
+            value["ZoneChange"].get("enter_with_grants").is_none(),
+            "none must not be serialized: {value}"
+        );
+        let mut empty_list = value;
+        empty_list["ZoneChange"]["enter_with_grants"] = serde_json::json!([]);
+        let back: ProposedEvent = serde_json::from_value(empty_list).expect("reads an empty list");
+        assert_eq!(back, plain, "an empty list reads as no grants");
+
+        let mut granted = plain.clone();
+        let ProposedEvent::ZoneChange {
+            enter_with_grants, ..
+        } = &mut granted
+        else {
+            unreachable!("zone_change constructs a ZoneChange");
+        };
+        EnterWithGrants::append(enter_with_grants, std::iter::empty());
+        assert!(
+            enter_with_grants.is_none(),
+            "appending no grant leaves none"
+        );
+        EnterWithGrants::append(enter_with_grants, [grant(0)]);
+        EnterWithGrants::append(enter_with_grants, [grant(1)]);
+        assert_eq!(
+            EnterWithGrants::of(enter_with_grants),
+            &[grant(0), grant(1)]
+        );
+
+        let value = serde_json::to_value(&granted).expect("serializes");
+        assert_eq!(
+            value["ZoneChange"]["enter_with_grants"],
+            serde_json::to_value(vec![grant(0), grant(1)]).expect("serializes"),
+            "the same array a Vec<EnterWithGrant> field writes"
+        );
+        let back: ProposedEvent = serde_json::from_value(value).expect("round-trips");
+        assert_eq!(back, granted);
+    }
+    /// CR 608.2c: the searcher is recorded only for the found
+    /// card's exile; any other destination records nobody, so the delivery's
+    /// legacy ownership fallback never reads the searcher.
+    #[test]
+    fn search_found_performer_is_recorded_only_for_an_exile() {
+        use crate::types::ability::LibraryInstructionActor;
+        let disposition = |destination, actor| BoundSearchFoundDisposition {
+            destination,
+            source: crate::types::identifiers::ObjectIncarnationRef::of(
+                crate::types::identifiers::ObjectId(9),
+                0,
+            ),
+            grant: None,
+            actor,
+        };
+        let searcher = PlayerId(1);
+        assert_eq!(
+            disposition(Zone::Exile, LibraryInstructionActor::LibraryPlayer).performer(searcher),
+            Some(searcher)
+        );
+        assert_eq!(
+            disposition(Zone::Hand, LibraryInstructionActor::LibraryPlayer).performer(searcher),
+            None
+        );
+        assert_eq!(
+            disposition(Zone::Exile, LibraryInstructionActor::Controller).performer(searcher),
+            None
+        );
     }
 }

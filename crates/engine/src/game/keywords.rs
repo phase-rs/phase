@@ -69,12 +69,44 @@ pub fn has_keyword(obj: &GameObject, keyword: &Keyword) -> bool {
         .any(|k| std::mem::discriminant(k) == std::mem::discriminant(keyword))
 }
 
+/// CR 702.16: borrowed traversal over an object's protection qualities.
+/// Shared by targeting and attachment legality so both read the same list
+/// without cloning or re-looking-up the host.
+pub(crate) fn protection_qualities(
+    obj: &GameObject,
+) -> impl Iterator<Item = &crate::types::keywords::ProtectionTarget> {
+    obj.keywords.iter().filter_map(|keyword| match keyword {
+        Keyword::Protection(quality) => Some(quality),
+        _ => None,
+    })
+}
+
 /// Object-scoped keyword-kind query — same battlefield-only caveat as
 /// [`has_keyword`]; prefer [`object_has_effective_keyword_kind`] for objects
 /// that can be off-battlefield.
 pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     // allow-raw-authority: this IS the object-scoped authority
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
+}
+
+/// CR 702.5a + CR 702.5c: the object's own enchant restrictions — the filter of
+/// each `Enchant [object or player]` keyword it has. CR 702.5c: with multiple
+/// instances, all of them apply, so a host is legal only when it matches every
+/// filter this yields (empty when the object has no enchant ability).
+///
+/// Object-scoped, with the same battlefield caveat as [`has_keyword`]: it reads
+/// the keywords of the object the caller holds. Attachment legality holds either
+/// a battlefield permanent or a CR 614.12 entry projection whose characteristics
+/// (including a token's intrinsic Enchant, CR 111.3) are already materialized;
+/// both answer from their own keyword list.
+pub(crate) fn enchant_restrictions(
+    obj: &GameObject,
+) -> impl Iterator<Item = &crate::types::ability::TargetFilter> {
+    // allow-raw-authority: this IS the object-scoped Enchant-payload authority
+    obj.keywords.iter().filter_map(|keyword| match keyword {
+        Keyword::Enchant(filter) => Some(filter),
+        _ => None,
+    })
 }
 
 /// Whether generic keyword removal strips this candidate.
@@ -668,21 +700,19 @@ pub fn protection_prevents_from_with_source_name(
     source: Option<&GameObject>,
     source_name: Option<&str>,
 ) -> bool {
-    for kw in &target.keywords {
-        if let Keyword::Protection(ref pt) = kw {
-            match pt {
-                ProtectionTarget::ChosenCardName => {
-                    if target.chosen_card_name().is_some_and(|chosen| {
-                        crate::game::filter::source_has_chosen_name(source, source_name, chosen)
-                    }) {
-                        return true;
-                    }
+    for pt in protection_qualities(target) {
+        match pt {
+            ProtectionTarget::ChosenCardName => {
+                if target.chosen_card_name().is_some_and(|chosen| {
+                    crate::game::filter::source_has_chosen_name(source, source_name, chosen)
+                }) {
+                    return true;
                 }
-                _ => {
-                    if let Some(source_obj) = source {
-                        if source_matches_protection_target(pt, target, source_obj) {
-                            return true;
-                        }
+            }
+            _ => {
+                if let Some(source_obj) = source {
+                    if source_matches_protection_target(pt, target, source_obj) {
+                        return true;
                     }
                 }
             }
@@ -872,14 +902,35 @@ pub fn protection_color_set_members(
                 })
                 .unwrap_or_default()
         }
+        // CR 110.1 + CR 702.26b: only existing, phased-in permanents count.
+        // CR 109.5 + CR 611.3a: "you" and colors are live, not owner/base values.
+        // CR 613.1e + CR 613.1f: layer 5 colors feed the layer 6 grant.
+        ProtectionColorSet::AmongPermanentsYouControl => {
+            crate::game::effects::mana::distinct_colors(
+                state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .filter(|obj| is_controlled_color_contributor(obj, you))
+                    .flat_map(|obj| obj.color.iter()),
+            )
+        }
     }
+}
+
+/// CR 110.1 + CR 702.26b + CR 109.5: whether `obj` is one of the "permanents
+/// you control" whose colors `ProtectionColorSet::AmongPermanentsYouControl`
+/// collects. The member census and the layer pass's entrant-escalation probe
+/// share this predicate.
+pub(crate) fn is_controlled_color_contributor(obj: &GameObject, you: PlayerId) -> bool {
+    obj.is_phased_in_permanent() && obj.controller == you
 }
 
 /// CR 702.16 + CR 702.16i + CR 109.5: Resolve a protection quality granted by a
 /// continuous effect from `source_id` whose "you" is `you` into the concrete
-/// qualities it grants. This is the single authority shared by the layer applier
-/// (which bakes the result into `obj.keywords`) and attachment legality (which
-/// reads grant definitions directly), so the two cannot drift.
+/// qualities it grants. The layer applier bakes the result into `obj.keywords`
+/// and records each instance's provenance; attachment legality reads that
+/// recorded result rather than resolving grant definitions again.
 ///
 /// CR 702.16i: a set quality ("each color that's not in ...") is shorthand for
 /// several separate protection abilities, so the result may hold 0..n entries.
@@ -3074,6 +3125,7 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
                             library_shuffle: Default::default(),
                             origin: Some(Zone::Battlefield),
                             destination: Zone::Exile,

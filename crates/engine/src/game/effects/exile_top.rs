@@ -127,8 +127,10 @@ pub fn resolve(
         // surface an ordering choice mid-loop; park the prompt (mirrors
         // `exile_from_top_until`'s NeedsChoice arm) and return rather than
         // continuing to mutate/classify the remaining cards past a parked prompt.
-        let mut request =
-            ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id).performed_by(actor);
+        let mut request = ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id)
+            .actors(crate::game::zone_pipeline::MoveActors::performer_and_owner(
+                actor,
+            ));
         if track_exiled_by_source {
             request = request.track_exiled_by_source();
         }
@@ -714,6 +716,7 @@ mod tests {
         let recall_inner = crate::types::ability::AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,

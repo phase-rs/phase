@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "pioneer",
   "version": 1,
-  "updated": "2026-11-13T00:00:00Z",
+  "updated": "2026-11-15T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/pioneer",
   "decks": [
     {
@@ -232,7 +232,7 @@
           "name": "Scrapshooter"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Setessan Petitioner"
         },
         {
@@ -240,12 +240,278 @@
           "name": "Tail Swipe"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Unlicensed Hearse"
         },
         {
           "count": 2,
           "name": "Arasta of the Endless Web"
+        },
+        {
+          "count": 2,
+          "name": "The Stone Brain"
+        }
+      ]
+    },
+    {
+      "name": "Mono-Red Prowess",
+      "author": "MTGGoldfish",
+      "colors": [
+        "B",
+        "R"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 2,
+          "name": "Ancestral Anger"
+        },
+        {
+          "count": 2,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 4,
+          "name": "Cacophony Scamp"
+        },
+        {
+          "count": 4,
+          "name": "Callous Sell-Sword"
+        },
+        {
+          "count": 1,
+          "name": "Den of the Bugbear"
+        },
+        {
+          "count": 4,
+          "name": "Emberheart Challenger"
+        },
+        {
+          "count": 2,
+          "name": "Leyline of Resonance"
+        },
+        {
+          "count": 2,
+          "name": "Might of the Meek"
+        },
+        {
+          "count": 2,
+          "name": "Blood Crypt"
+        },
+        {
+          "count": 4,
+          "name": "Monstrous Rage"
+        },
+        {
+          "count": 2,
+          "name": "Ancestral Anger"
+        },
+        {
+          "count": 4,
+          "name": "Slickshot Show-Off"
+        },
+        {
+          "count": 1,
+          "name": "Sokenzan, Crucible of Defiance"
+        },
+        {
+          "count": 4,
+          "name": "Turn Inside Out"
+        },
+        {
+          "count": 4,
+          "name": "Wild Ride"
+        },
+        {
+          "count": 2,
+          "name": "Leyline of Resonance"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 3,
+          "name": "Mountain"
+        },
+        {
+          "count": 1,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        },
+        {
+          "count": 2,
+          "name": "Mountain"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 2,
+          "name": "Dreadmaw's Ire"
+        },
+        {
+          "count": 4,
+          "name": "Redirect Lightning"
+        },
+        {
+          "count": 1,
+          "name": "Screaming Nemesis"
+        },
+        {
+          "count": 4,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 1,
+          "name": "Sunspine Lynx"
+        },
+        {
+          "count": 3,
+          "name": "Sunspine Lynx"
+        }
+      ]
+    },
+    {
+      "name": "Selesnya Company",
+      "author": "MTGGoldfish",
+      "colors": [
+        "W",
+        "G"
+      ],
+      "tags": [
+        "metagame"
+      ],
+      "main": [
+        {
+          "count": 4,
+          "name": "Razorverge Thicket"
+        },
+        {
+          "count": 4,
+          "name": "Elvish Mystic"
+        },
+        {
+          "count": 4,
+          "name": "Llanowar Elves"
+        },
+        {
+          "count": 4,
+          "name": "Collected Company"
+        },
+        {
+          "count": 4,
+          "name": "Enduring Innocence"
+        },
+        {
+          "count": 4,
+          "name": "Temple Garden"
+        },
+        {
+          "count": 2,
+          "name": "Plains"
+        },
+        {
+          "count": 4,
+          "name": "Skyclave Apparition"
+        },
+        {
+          "count": 4,
+          "name": "Badgermole Cub"
+        },
+        {
+          "count": 2,
+          "name": "Abandoned Air Temple"
+        },
+        {
+          "count": 4,
+          "name": "Archon of Emeria"
+        },
+        {
+          "count": 4,
+          "name": "Aven Interrupter"
+        },
+        {
+          "count": 2,
+          "name": "Hushwood Verge"
+        },
+        {
+          "count": 3,
+          "name": "Forest"
+        },
+        {
+          "count": 1,
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 4,
+          "name": "Brushland"
+        },
+        {
+          "count": 1,
+          "name": "Boseiju, Who Endures"
+        },
+        {
+          "count": 2,
+          "name": "Dromoka's Command"
+        },
+        {
+          "count": 2,
+          "name": "Duskwatch Recruiter"
+        },
+        {
+          "count": 1,
+          "name": "Scavenging Ooze"
+        }
+      ],
+      "sideboard": [
+        {
+          "count": 1,
+          "name": "Surrak, Elusive Hunter"
+        },
+        {
+          "count": 3,
+          "name": "Seam Rip"
+        },
+        {
+          "count": 2,
+          "name": "Erode"
+        },
+        {
+          "count": 2,
+          "name": "Knight of Autumn"
+        },
+        {
+          "count": 4,
+          "name": "Solarium Sentry"
+        },
+        {
+          "count": 1,
+          "name": "Scavenging Ooze"
+        },
+        {
+          "count": 1,
+          "name": "Unlicensed Hearse"
+        },
+        {
+          "count": 1,
+          "name": "Extraction Specialist"
         }
       ]
     },
@@ -277,6 +543,10 @@
           "name": "Emberheart Challenger"
         },
         {
+          "count": 1,
+          "name": "Experimental Synthesizer"
+        },
+        {
           "count": 4,
           "name": "Flow State"
         },
@@ -286,15 +556,15 @@
         },
         {
           "count": 4,
+          "name": "Sleight of Hand"
+        },
+        {
+          "count": 4,
           "name": "Shivan Reef"
         },
         {
-          "count": 3,
-          "name": "Pompous Battlemage"
-        },
-        {
-          "count": 2,
-          "name": "Mountain"
+          "count": 4,
+          "name": "Riverpyre Verge"
         },
         {
           "count": 4,
@@ -305,8 +575,12 @@
           "name": "Riverglide Pathway"
         },
         {
-          "count": 4,
-          "name": "Riverpyre Verge"
+          "count": 2,
+          "name": "Pompous Battlemage"
+        },
+        {
+          "count": 1,
+          "name": "Island"
         },
         {
           "count": 4,
@@ -314,15 +588,11 @@
         },
         {
           "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
           "name": "Soul-Scar Mage"
         },
         {
-          "count": 1,
-          "name": "Island"
+          "count": 2,
+          "name": "Mountain"
         },
         {
           "count": 4,
@@ -377,9 +647,10 @@
       ]
     },
     {
-      "name": "Mono-Red Prowess",
+      "name": "Izzet Aggro",
       "author": "MTGGoldfish",
       "colors": [
+        "U",
         "R"
       ],
       "tags": [
@@ -387,24 +658,56 @@
       ],
       "main": [
         {
+          "count": 3,
+          "name": "Shivan Reef"
+        },
+        {
+          "count": 2,
+          "name": "Sleight of Hand"
+        },
+        {
           "count": 4,
-          "name": "Burst Lightning"
+          "name": "Steam Vents"
+        },
+        {
+          "count": 4,
+          "name": "Spirebluff Canal"
+        },
+        {
+          "count": 4,
+          "name": "Monastery Swiftspear"
         },
         {
           "count": 4,
           "name": "Emberheart Challenger"
         },
         {
-          "count": 4,
-          "name": "Kumano Faces Kakkazan"
+          "count": 2,
+          "name": "Reckless Rage"
         },
         {
-          "count": 17,
-          "name": "Mountain"
+          "count": 1,
+          "name": "Riverglide Pathway"
         },
         {
           "count": 4,
+          "name": "Academic Dispute"
+        },
+        {
+          "count": 3,
           "name": "Monstrous Rage"
+        },
+        {
+          "count": 4,
+          "name": "Stormchaser's Talent"
+        },
+        {
+          "count": 2,
+          "name": "Screaming Nemesis"
+        },
+        {
+          "count": 4,
+          "name": "Riverpyre Verge"
         },
         {
           "count": 4,
@@ -412,45 +715,61 @@
         },
         {
           "count": 4,
-          "name": "Monastery Swiftspear"
+          "name": "Heroes' Hangout"
+        },
+        {
+          "count": 3,
+          "name": "Boomerang Basics"
         },
         {
           "count": 1,
-          "name": "Den of the Bugbear"
+          "name": "Island"
         },
         {
-          "count": 4,
-          "name": "Reckless Rage"
+          "count": 3,
+          "name": "Mountain"
         },
         {
-          "count": 1,
-          "name": "Rockface Village"
+          "count": 2,
+          "name": "Sleight of Hand"
         },
         {
-          "count": 4,
-          "name": "Slickshot Show-Off"
-        },
-        {
-          "count": 1,
-          "name": "Sokenzan, Crucible of Defiance"
-        },
-        {
-          "count": 4,
-          "name": "Soul-Scar Mage"
-        },
-        {
-          "count": 4,
-          "name": "Academic Dispute"
+          "count": 2,
+          "name": "Burst Lightning"
         }
       ],
       "sideboard": [
         {
-          "count": 4,
-          "name": "Redcap Melee"
+          "count": 2,
+          "name": "Ral, Crackling Wit"
         },
         {
-          "count": 3,
-          "name": "Weathered Runestone"
+          "count": 1,
+          "name": "Soul-Guide Lantern"
+        },
+        {
+          "count": 2,
+          "name": "Essence Burn"
+        },
+        {
+          "count": 1,
+          "name": "Ghost Vacuum"
+        },
+        {
+          "count": 1,
+          "name": "Spider-Sense"
+        },
+        {
+          "count": 1,
+          "name": "Boomerang Basics"
+        },
+        {
+          "count": 1,
+          "name": "It'll Quench Ya!"
+        },
+        {
+          "count": 2,
+          "name": "Octopus Form"
         },
         {
           "count": 1,
@@ -458,19 +777,11 @@
         },
         {
           "count": 1,
-          "name": "Redirect Lightning"
-        },
-        {
-          "count": 1,
           "name": "Iroh's Demonstration"
         },
         {
-          "count": 1,
-          "name": "Abandon Attachments"
-        },
-        {
-          "count": 4,
-          "name": "Essence Burn"
+          "count": 2,
+          "name": "Spell Pierce"
         }
       ]
     },
@@ -611,284 +922,6 @@
         {
           "count": 2,
           "name": "Haywire Mite"
-        }
-      ]
-    },
-    {
-      "name": "Izzet Aggro",
-      "author": "MTGGoldfish",
-      "colors": [
-        "R",
-        "U"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Academic Dispute"
-        },
-        {
-          "count": 3,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 3,
-          "name": "Burst Lightning"
-        },
-        {
-          "count": 3,
-          "name": "Emberheart Challenger"
-        },
-        {
-          "count": 3,
-          "name": "Heroes' Hangout"
-        },
-        {
-          "count": 3,
-          "name": "Mountain"
-        },
-        {
-          "count": 4,
-          "name": "Monastery Swiftspear"
-        },
-        {
-          "count": 2,
-          "name": "Monstrous Rage"
-        },
-        {
-          "count": 1,
-          "name": "Island"
-        },
-        {
-          "count": 3,
-          "name": "Reckless Rage"
-        },
-        {
-          "count": 1,
-          "name": "Riverglide Pathway"
-        },
-        {
-          "count": 4,
-          "name": "Riverpyre Verge"
-        },
-        {
-          "count": 2,
-          "name": "Screaming Nemesis"
-        },
-        {
-          "count": 1,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 4,
-          "name": "Sleight of Hand"
-        },
-        {
-          "count": 4,
-          "name": "Spirebluff Canal"
-        },
-        {
-          "count": 4,
-          "name": "Steam Vents"
-        },
-        {
-          "count": 4,
-          "name": "Stormchaser's Talent"
-        },
-        {
-          "count": 1,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 1,
-          "name": "Shivan Reef"
-        },
-        {
-          "count": 3,
-          "name": "Pompous Battlemage"
-        },
-        {
-          "count": 2,
-          "name": "Flow State"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Boomerang Basics"
-        },
-        {
-          "count": 2,
-          "name": "Essence Burn"
-        },
-        {
-          "count": 1,
-          "name": "Firebending Lesson"
-        },
-        {
-          "count": 1,
-          "name": "Ghost Vacuum"
-        },
-        {
-          "count": 1,
-          "name": "Iroh's Demonstration"
-        },
-        {
-          "count": 1,
-          "name": "It'll Quench Ya!"
-        },
-        {
-          "count": 1,
-          "name": "Octopus Form"
-        },
-        {
-          "count": 2,
-          "name": "Redcap Melee"
-        },
-        {
-          "count": 1,
-          "name": "Ral, Crackling Wit"
-        },
-        {
-          "count": 2,
-          "name": "Spell Pierce"
-        },
-        {
-          "count": 1,
-          "name": "Soul-Guide Lantern"
-        },
-        {
-          "count": 1,
-          "name": "Ral, Crackling Wit"
-        }
-      ]
-    },
-    {
-      "name": "Selesnya Company",
-      "author": "MTGGoldfish",
-      "colors": [
-        "W",
-        "G"
-      ],
-      "tags": [
-        "metagame"
-      ],
-      "main": [
-        {
-          "count": 4,
-          "name": "Razorverge Thicket"
-        },
-        {
-          "count": 4,
-          "name": "Elvish Mystic"
-        },
-        {
-          "count": 4,
-          "name": "Llanowar Elves"
-        },
-        {
-          "count": 4,
-          "name": "Collected Company"
-        },
-        {
-          "count": 4,
-          "name": "Enduring Innocence"
-        },
-        {
-          "count": 4,
-          "name": "Temple Garden"
-        },
-        {
-          "count": 2,
-          "name": "Plains"
-        },
-        {
-          "count": 4,
-          "name": "Skyclave Apparition"
-        },
-        {
-          "count": 4,
-          "name": "Badgermole Cub"
-        },
-        {
-          "count": 2,
-          "name": "Abandoned Air Temple"
-        },
-        {
-          "count": 4,
-          "name": "Archon of Emeria"
-        },
-        {
-          "count": 4,
-          "name": "Aven Interrupter"
-        },
-        {
-          "count": 2,
-          "name": "Hushwood Verge"
-        },
-        {
-          "count": 3,
-          "name": "Forest"
-        },
-        {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 4,
-          "name": "Brushland"
-        },
-        {
-          "count": 1,
-          "name": "Boseiju, Who Endures"
-        },
-        {
-          "count": 2,
-          "name": "Dromoka's Command"
-        },
-        {
-          "count": 2,
-          "name": "Duskwatch Recruiter"
-        },
-        {
-          "count": 1,
-          "name": "Scavenging Ooze"
-        }
-      ],
-      "sideboard": [
-        {
-          "count": 1,
-          "name": "Surrak, Elusive Hunter"
-        },
-        {
-          "count": 3,
-          "name": "Seam Rip"
-        },
-        {
-          "count": 2,
-          "name": "Erode"
-        },
-        {
-          "count": 2,
-          "name": "Knight of Autumn"
-        },
-        {
-          "count": 4,
-          "name": "Solarium Sentry"
-        },
-        {
-          "count": 1,
-          "name": "Scavenging Ooze"
-        },
-        {
-          "count": 1,
-          "name": "Unlicensed Hearse"
-        },
-        {
-          "count": 1,
-          "name": "Extraction Specialist"
         }
       ]
     },

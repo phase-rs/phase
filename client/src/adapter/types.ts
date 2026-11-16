@@ -1,4 +1,3 @@
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import type {
   InteractionActionId,
   InteractionId,
@@ -539,6 +538,13 @@ export type DeckSizeRule =
   | { type: "Minimum"; data: number }
   | { type: "Exactly"; data: number };
 
+/**
+ * Provenance of `FormatConfig.deck_size`'s magnitude, mirroring the engine's
+ * `DeckSizeOrigin`. `DraftSession` (CR 100.2b: a Cube session configures its
+ * own minimum deck size) is admitted by the engine for Limited only.
+ */
+export type DeckSizeOrigin = "Registry" | "DraftSession";
+
 export interface RangeOfInfluenceConfig {
   default_range: number;
   player_overrides: Record<string, number>;
@@ -564,6 +570,8 @@ export interface FormatConfig {
   min_players: number;
   max_players: number;
   deck_size: DeckSizeRule;
+  /** Absent means `Registry` (the engine skips serializing the default). */
+  deck_size_origin?: DeckSizeOrigin;
   singleton: boolean;
   command_zone: boolean;
   commander_damage_threshold: number | null;
@@ -578,8 +586,8 @@ export interface FormatConfig {
    * `Forbidden` for legacy payloads. */
   sideboard_policy: SideboardPolicy;
   /**
-   * Engine-derived predicate: true when the format uses a commander card
-   * and the commander-damage state-based action (CR 903.10a / CR 704.6c).
+   * Engine-derived predicate: true when the format is a Commander variant
+   * (CR 903), independent of `commander_damage_threshold`.
    * The frontend must consume this directly rather than re-listing
    * commander-style format strings client-side.
    */
@@ -645,8 +653,21 @@ export interface FormatMetadata {
   group: FormatGroup;
   /** Engine-published key of this format's legality table; null when the card data records none. */
   legality_key: string | null;
+  /** Engine-derived: where this format keeps a designated companion (CR 702.139a). */
+  companion_slot: CompanionSlot;
   default_config: FormatConfig;
 }
+
+/**
+ * CR 702.139a: where a format keeps a companion designated before the game,
+ * mirroring the engine's `CompanionSlot`. `LimitedPool` designates one pool
+ * card that stays a sideboard card (CR 100.4b); `CommanderFamily` is a slot
+ * outside the deck; `SideboardOnly` has no slot.
+ */
+export type CompanionSlot =
+  | { type: "SideboardOnly" }
+  | { type: "CommanderFamily" }
+  | { type: "LimitedPool" };
 
 // ── Lobby ────────────────────────────────────────────────────────────────
 
@@ -790,7 +811,9 @@ export interface ReplayPlayerDeckList {
   contraption_deck: string[];
   sticker_sheets: string[];
   signature_spell: string[];
-  bracket_tier: string;
+  /** `null` when the deck declares no bracket. */
+  bracket_tier: string | null;
+  combo_declaration?: import("../types/bracketEstimate").ComboDeclaration;
   /** The owner's explicit printing choices; display-only. Absent when empty. */
   printings?: DeckPrinting[];
 }
@@ -841,7 +864,9 @@ export type OutsideGameChoiceSource =
   | {
       type: "BoosterPack";
       data: { pack_slot: number; origin: PackOrigin; card: CardFacePartial };
-    };
+    }
+  /** CR 702.139a: the player's revealed companion, still outside the game. */
+  | { type: "Companion"; data: { card: CardFacePartial } };
 
 /**
  * Where an opened booster pack came from, for display. Mirrors Rust
@@ -862,7 +887,8 @@ export interface OutsideGameChoiceEntry {
 export type OutsideGameSelection =
   | { type: "Sideboard"; data: { sideboard_index: number } }
   | { type: "FaceUpExile"; data: { object_id: ObjectId } }
-  | { type: "BoosterPack"; data: { pack_slot: number } };
+  | { type: "BoosterPack"; data: { pack_slot: number } }
+  | { type: "Companion" };
 
 export interface OutsideGameCardUse {
   player: PlayerId;
@@ -1434,7 +1460,8 @@ export type UnTellKind =
 export type UnAction =
   | { type: "SetEnabled"; data: { enabled: boolean } }
   | { type: "PerformTell"; data: { tell: UnTell } }
-  | { type: "SayGotcha"; data: { source_id: ObjectId; returns: ObjectId } };
+  | { type: "SayGotcha"; data: { source_id: ObjectId; returns: ObjectId } }
+  | { type: "TouchObject"; data: { target: ObjectIncarnationRef } };
 
 export interface GotchaOffer {
   id: number;
@@ -1458,6 +1485,10 @@ export interface UnActionState {
   enabled_players?: PlayerId[];
   gotcha_offers?: GotchaOffer[];
   menu?: UnTellKind[];
+  /** Objects with a functioning touch ability ("Whenever a player's skin or
+   *  fingernail touches this creature", Vile Bile). The client reports a touch
+   *  (`TouchObject`) when an opted-in player's pointer enters one of them. */
+  touchable?: ObjectIncarnationRef[];
 }
 
 export type UnlessCost =
@@ -1834,6 +1865,10 @@ export type ChooseFromZoneConstraint =
 // Mirrors Rust `SharedQualityRelation` (relation among the chosen cards).
 export type SharedQualityRelation = "Shares" | "DoesNotShare";
 
+// Mirrors Rust `ObjectSelectionCardinality` (CR 608.2d resolution-time choice
+// cardinality). Omitted on the wire when it is the single-card default.
+export type ObjectSelectionCardinality = "AnyNumber" | { Exactly: { count: number } };
+
 export type SearchSelectionConstraint =
   | { type: "None" }
   | { type: "SharesQualities"; qualities: string[]; relation: SharedQualityRelation }
@@ -2031,6 +2066,13 @@ export interface GameObject {
    */
   phase_status?: PhaseStatus;
   is_commander?: boolean;
+  /**
+   * A Horde challenge-deck token (Boss pile, event library, or deployed Boss).
+   * Mirrors `engine::game::game_object::GameObject::is_horde_deck_token`
+   * and is omitted on the wire when false. The Horde HUD uses the deployed Boss
+   * identities in `derived.horde`.
+   */
+  is_horde_deck_token?: boolean;
   /** Oathbreaker RC: this command-zone card is the player's signature spell. */
   signature_spell?: Record<string, never> | null;
   commander_tax?: number;
@@ -2720,6 +2762,15 @@ export type AdditionalCost =
 /** Mirrors Rust AbilityCost serialization (serde tag = "type"). */
 export type SerializedAbilityCost = { type: string; [key: string]: unknown };
 
+/**
+ * CR 601.2 + CR 115.10a: why the caster is choosing an opponent in
+ * `ChooseGiftRecipient` — engine-provided purpose; absent = Gift (serde default).
+ * `EffectCost` carries the spell cost being paid for the chosen opponent.
+ */
+export type CastOpponentChoicePurpose =
+  | { type: "Gift" }
+  | { type: "EffectCost"; cost: SerializedAbilityCost };
+
 export type ResolutionOptionalPaymentChoice =
   | { type: "Decline" }
   | { type: "Pay"; data: { index: number } };
@@ -3093,7 +3144,7 @@ export type WaitingFor =
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "DigRestSplitChoice"; data: { player: PlayerId; library_owner: PlayerId; cards: ObjectId[]; top_count: number; bottom_count: number; scope: DigRestSplitScope; source_id?: ObjectId | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
-  | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
+  | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean; decline_runs_continuation?: boolean; cardinality?: ObjectSelectionCardinality; pending_mana_ability?: unknown } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; allows_partial_find?: boolean; constraint?: SearchSelectionConstraint; ordering_hint?: SearchOrderingHint; split?: SearchDestinationSplit | null } }
   | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
@@ -3102,7 +3153,7 @@ export type WaitingFor =
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore; min_main_deck_size: number; max_sideboard_size: number | null } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "ChooseStartingPlayer"; data: { player: PlayerId; candidates: PlayerId[] } }
-  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" | "PendingEntry" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
+  | { type: "NamedChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" | "PendingEntry" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
@@ -3176,7 +3227,7 @@ export type WaitingFor =
   | { type: "RespondToShortcut"; data: { player: PlayerId; remaining_players?: PlayerId[]; proposal: ShortcutProposal } }
   | { type: "PrecastCopyShortcutOffer"; data: { proposer: PlayerId; epoch: number; route_count: number } }
   | { type: "RespondToPrecastCopyShortcut"; data: { player: PlayerId; epoch: number; breakpoint_ids?: number[]; remaining_players?: PlayerId[] } }
-  | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; remaining?: PlayerId[] } }
+  | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string; remaining?: PlayerId[]; repeat?: number } }
   // CR 118.12a: Disjunctive unless-cost — player picks **which** sub-cost
   // to pay (or declines all). Drives Tergrid's Lantern and the broader
   // "unless they X or Y" punisher class.
@@ -3233,6 +3284,9 @@ export type WaitingFor =
       owner_library?: boolean;
       track_exiled_by_source?: boolean;
       library_position?: LibraryPosition;
+      // CR 608.2c: the player who performs the chosen move (not the chooser).
+      // Omitted for other effect kinds; display-only on the client.
+      performed_by?: PlayerId | null;
     } }
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; slots: RetargetSlotAddress[]; slot_pools: TargetRef[][]; legal_new_targets: TargetRef[]; keep_is_distinct?: boolean[] } }
@@ -3251,7 +3305,7 @@ export type WaitingFor =
   // picks WHICH opponent makes the choice before the zone choice is presented.
   | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" | "SubstituteArranger" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
-  | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
+  | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; purpose?: CastOpponentChoicePurpose; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][]; bottom_cards?: ObjectId[] } }
   // Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest. Nobody submits a
   // GameAction here — the host (server, or the local driver) stamps clicks and ticks the
@@ -3514,6 +3568,12 @@ export type LogSegment =
 
 export interface GameLogEntry {
   seq: number;
+  /**
+   * The game of the match the engine logged this entry in. Absent on the first
+   * game's entries and on entries the client writes itself; the engine reads an
+   * absent one as the first game.
+   */
+  game_number?: number;
   turn: number;
   phase: Phase;
   category: LogCategory;
@@ -4050,10 +4110,12 @@ export type GameEvent =
   // (relative to that player) — there is no engine-named face; the heads/tails
   // depiction is a presentation choice.
   | { type: "CoinFlipped"; data: { player_id: PlayerId; won: boolean } }
-  // Un-card gestures / speech (no CR entry); mirror engine GameEvent::{UnTellPerformed, PhraseSaid, GotchaSaid}.
+  // Un-card gestures / speech / touch (no CR entry); mirror engine
+  // GameEvent::{UnTellPerformed, PhraseSaid, GotchaSaid, ObjectTouched}.
   | { type: "UnTellPerformed"; data: { player: PlayerId; tell: UnTell } }
   | { type: "PhraseSaid"; data: { player: PlayerId; phrase: string } }
   | { type: "GotchaSaid"; data: { player: PlayerId; source: ObjectIdentityBinding; returns: ObjectIdentityBinding } }
+  | { type: "ObjectTouched"; data: { player: PlayerId; object_id: ObjectId } }
   // CR 116.2c: a player took the special action of paying a continuous effect's
   // printed termination cost. `group` is the engine-minted group key;
   // `source_id` is the permanent whose resolution installed the effect.
@@ -4124,6 +4186,19 @@ export interface ArchenemyView {
   scheme_deck_count: number;
   active_scheme_ids?: ObjectId[];
   hero_player_ids?: PlayerId[];
+}
+
+/**
+ * Mirrors `engine::game::derived_views::HordeView`: engine-authored Horde
+ * seat, survivor, and deployed-Boss identity. The HUD renders this directly
+ * instead of selecting a Boss from command-zone objects or classifying seats.
+ * `deployed_boss_ids[0]` is the representative Boss (first in command-zone
+ * order); the face-down Boss pile is never listed. Omitted outside Horde games.
+ */
+export interface HordeView {
+  horde_seat_ids?: PlayerId[];
+  hero_player_ids?: PlayerId[];
+  deployed_boss_ids?: ObjectId[];
 }
 
 /** Mirrors `engine::analysis::resource::ObjectClass` (unit variants → strings). */
@@ -4524,6 +4599,17 @@ export interface SharedPilesView {
  * themselves (CLAUDE.md: engine owns all logic). Mirrors
  * `engine::game::derived_views::DerivedViews`.
  */
+/** Mirrors `engine::game::derived_views::UnlessDrawPaymentStage`. */
+export type UnlessDrawPaymentStage = "Offered" | "Continuing";
+
+/** Mirrors `engine::game::derived_views::UnlessDrawCostView`. */
+export interface UnlessDrawCostView {
+  cards: number;
+  instructions: number;
+  /** "Continuing": part of the payment is performed, so it cannot be declined. */
+  stage: UnlessDrawPaymentStage;
+}
+
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
@@ -4546,6 +4632,11 @@ export interface DerivedViews {
    * per-player.
    */
   shared_piles?: SharedPilesView;
+  /** CR 121.1 + CR 702.24a: the draw an open unless-payment prompt asks for —
+   *  the resolved cards per printed instruction and how many instructions the
+   *  payment performs. Present only for a draw-cost prompt. Mirrors
+   *  `engine::game::derived_views::DerivedViews::unless_draw_cost`. */
+  unless_draw_cost?: UnlessDrawCostView;
   /**
    * Engine-classified live keyword badges for battlefield permanents. The
    * strip renders this map directly rather than deciding which keyword timing
@@ -4704,6 +4795,8 @@ export interface DerivedViews {
   planechase?: PlanechaseView | null;
   /** Engine-authored Archenemy state. */
   archenemy?: ArchenemyView | null;
+  /** Engine-authored Horde seat and deployed-Boss identity. */
+  horde?: HordeView | null;
   /**
    * Engine-authored multiplayer turn-order rows. Duplicate players are
    * intentional when extra turns put the same player in multiple slots.
@@ -4964,6 +5057,13 @@ export interface GameState {
    */
   debug_permitted?: PlayerId[];
   eliminated_players?: PlayerId[];
+  /**
+   * Seats the engine designated as the self-piloting Horde at game setup.
+   * Mirrors `engine::types::game_state::GameState::horde_seats` and is omitted
+   * on the wire outside Horde games. The Horde HUD uses the seat identities in
+   * `derived.horde`, including when the Horde has a life total.
+   */
+  horde_seats?: PlayerId[];
   public_revealed_cards?: ObjectId[];
   dungeon_progress?: Record<string, { current_dungeon: DungeonId | null; current_room: number; completed: DungeonId[] }>;
   initiative?: PlayerId | null;
@@ -5391,7 +5491,6 @@ export const AdapterErrorCode = {
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   DECK_REJECTED: "DECK_REJECTED",
-  BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
   /**
@@ -5782,6 +5881,13 @@ export interface AiLlmProposalResult {
   reasoning?: string | null;
   error?: string;
   /**
+   * The engine's typed refusal (`phase_llm::LlmError`), when it carries one.
+   * `threadUnavailable` means the provider would not continue the seat's
+   * message thread: the engine has dropped it, and the same decision may be
+   * asked once more as a fresh request.
+   */
+  errorKind?: { kind: string };
+  /**
    * Provider-reported token usage (`phase_llm::wire::TokenUsage`), present on
    * success and refusal alike. Diagnostic only.
    */
@@ -5789,6 +5895,7 @@ export interface AiLlmProposalResult {
     inputTokens?: number | null;
     outputTokens?: number | null;
     cachedInputTokens?: number | null;
+    cacheCreationInputTokens?: number | null;
   } | null;
 }
 
@@ -5806,12 +5913,36 @@ export interface LlmDecisionRequestResult {
   reasoning?: string;
   fingerprint?: string;
   optionCount?: number;
-  /** Characters of prompt the request carries (system + user). */
+  /**
+   * Characters of prompt the request carries: system and user for a full
+   * request, the one update message for a message-thread continue.
+   */
   promptChars?: number;
   request?: LlmHttpRequestSpec;
+  /**
+   * The message-thread turn this request is, or `null` for a self-contained
+   * request. Handed back with the reply, so the engine records the reply
+   * against the request that produced it and no other.
+   */
+  threadTurn?: number | null;
   error?: string;
   /** The engine's typed refusal (`phase_llm::LlmError`), when it carries one. */
   errorKind?: { kind: string };
+}
+
+/**
+ * Both platform clocks, read together, to time a seat's message thread by
+ * (`phase_llm::ClockReading`). A thread expires five idle minutes after its
+ * last request, in real time, and neither clock measures that alone:
+ * `Date.now()` counts a sleep, but a clock correction can step it, and
+ * `performance.now()` never steps, but can stop while the machine sleeps. The
+ * engine counts an idle time only where the two agree on it.
+ */
+export interface LlmClockReading {
+  /** `Date.now()`. */
+  wallMs: number;
+  /** `performance.now()`. */
+  monotonicMs: number;
 }
 
 /** Result of submitting an opaque AI proposal to its issuing authority. */
@@ -5907,21 +6038,35 @@ export interface EngineAdapter {
    * Optional capability: an adapter that omits it simply has no LLM seats, and
    * the AI controller uses the heuristic path. `historyJson` is the
    * engine-authored game log the caller has accumulated, handed back for
-   * rendering.
+   * rendering. `settingsRevision` numbers the seat's own provider settings: the
+   * controller advances it at every change the player makes to them, and the
+   * engine keeps a seat's message thread only under the revision it was
+   * opened under. `clock` is both clocks as the request is built; the request
+   * goes out no earlier, and a message thread's idle expiry runs from its last
+   * request.
    */
   buildLlmDecisionRequest?(
     difficulty: string,
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null>;
-  /** Binds an LLM response to an engine-issued proposal, or reports why it could not. */
+  /**
+   * Binds an LLM response to an engine-issued proposal, or reports why it could
+   * not. `threadTurn` is the built request's `threadTurn`. `clock` is both
+   * clocks as the reply arrived: the engine judges a message thread the reply
+   * reports lost by how long it had idled by then.
+   */
   getAiActionProposalFromLlmResponse?(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null>;
   /** The engine-owned LLM provider/model catalog for the settings UI. */
   llmProviderCatalog?(): Promise<unknown>;
@@ -5930,15 +6075,6 @@ export interface EngineAdapter {
   exportPersistenceState?(): Promise<string>;
   dispose(): void;
 
-  /**
-   * Estimates a Commander deck's bracket from card contents. Returns null
-   * when the deck has no commander, is empty, or the adapter doesn't
-   * support local deck analysis (multiplayer adapters throw via
-   * `AdapterError` instead of silently returning null).
-   *
-   * Pure — no game state, no side effects. Safe to call on every deck edit.
-   */
-  estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
 }
 
 /**

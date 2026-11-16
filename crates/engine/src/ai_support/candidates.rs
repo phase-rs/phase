@@ -10,7 +10,8 @@ use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::game::mulligan;
 use crate::types::ability::{
-    ChoiceType, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
+    ChoiceType, CounterCostSelection, ObjectSelectionCardinality, TapCreaturesSelectionMode,
+    TargetRef,
 };
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
@@ -1470,13 +1471,25 @@ pub fn candidate_actions_broad_with_probe(
             player,
             cards,
             optional,
+            cardinality,
             ..
         } => {
-            // CR 701.20a: Normal reveal forces exactly one pick. Optional reveal
-            // (e.g., reveal-lands) additionally permits an empty selection to
-            // signal "I decline to reveal" — the source's decline branch fires.
-            let mut variants = select_cards_variants(*player, cards, Some(1));
-            if *optional {
+            // CR 608.2d: issue the selections the prompt's published cardinality
+            // admits. Normal post-reveal choices take exactly one card; CR 107.1c
+            // "any number" (Metalworker) admits every subset, which the shared
+            // any-size enumerator covers with none, all, and each single card.
+            let mut variants = match cardinality {
+                ObjectSelectionCardinality::Exactly { count } => {
+                    select_cards_variants(*player, cards, Some(*count as usize))
+                }
+                ObjectSelectionCardinality::AnyNumber => {
+                    select_cards_variants(*player, cards, None)
+                }
+            };
+            // CR 701.20a: an optional reveal (e.g., reveal-lands) additionally
+            // permits an empty selection to signal "I decline to reveal" — the
+            // source's decline branch fires.
+            if *optional && !matches!(cardinality, ObjectSelectionCardinality::AnyNumber) {
                 variants.push(candidate(
                     GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
@@ -1610,6 +1623,10 @@ pub fn candidate_actions_broad_with_probe(
                             pack_slot: *pack_slot,
                         });
                     }
+                    // CR 702.139a: the revealed companion is one card.
+                    OutsideGameChoiceSource::Companion { .. } => {
+                        pool.push(OutsideGameSelection::Companion);
+                    }
                 }
             }
             let sizes = if *up_to {
@@ -1726,14 +1743,21 @@ pub fn candidate_actions_broad_with_probe(
             count,
             min_count,
             up_to,
+            mass_library_order,
             ..
         } => {
-            let sizes = if *up_to {
-                (*min_count..=*count).collect()
+            // CR 401.4: an owner-ordering EffectZoneChoice prompt (mass library order)
+            // must enumerate alternate permutations, not only a single combination.
+            if mass_library_order.is_some() {
+                bounded_select_card_permutations(*player, cards)
             } else {
-                vec![*count]
-            };
-            bounded_select_card_candidates(*player, cards, sizes)
+                let sizes = if *up_to {
+                    (*min_count..=*count).collect()
+                } else {
+                    vec![*count]
+                };
+                bounded_select_card_candidates(*player, cards, sizes)
+            }
         }
         WaitingFor::DrawnThisTurnTopdeckChoice {
             player,
@@ -2948,18 +2972,20 @@ pub fn candidate_actions_broad_with_probe(
             .collect(),
         // CR 118.12: "Counter unless pays" — opponent chooses pay or decline.
         WaitingFor::UnlessPayment { player, .. } => {
-            vec![
-                candidate(
-                    GameAction::PayUnlessCost { pay: true },
-                    TacticalClass::Selection,
-                    Some(*player),
-                ),
-                candidate(
+            let mut answers = vec![candidate(
+                GameAction::PayUnlessCost { pay: true },
+                TacticalClass::Selection,
+                Some(*player),
+            )];
+            // CR 702.24a: a repeated payment already begun only continues.
+            if !crate::game::engine_payment_choices::awaits_payment_continuation(state) {
+                answers.push(candidate(
                     GameAction::PayUnlessCost { pay: false },
                     TacticalClass::Selection,
                     Some(*player),
-                ),
-            ]
+                ));
+            }
+            answers
         }
         // CR 118.12a: Disjunctive unless-cost — paying player chooses **which**
         // sub-cost (by index) or declines all. One `ChooseUnlessCostBranch`
@@ -4362,13 +4388,9 @@ fn retarget_proposals(
     };
 
     match scope {
-        // CR 115.7a: "each target can be changed only to another legal target."
-        // One proposal per member of the pool `apply_retarget` validates
-        // against. That pool normally still contains the current target — that
-        // member IS CR 115.7a's "the original target is unchanged" fallback, so
-        // it is offered rather than filtered out. An empty pool yields no
-        // proposals; after Unit 1 `change_targets::resolve` no longer parks that
-        // state.
+        // CR 115.7a: one proposal per pool member; the reducer's shared
+        // changed-occurrence check removes unchanged picks, including for
+        // outer-empty legacy pools. No alternative means no response.
         //
         // KNOWN GAP, carried deliberately. Each proposal is a ONE-element list,
         // because `apply_retarget`'s `Single` arm hard-requires exactly one
@@ -5964,7 +5986,7 @@ fn named_choice_actions(
         }
     }
 
-    if options.is_empty() && matches!(choice_type, ChoiceType::CardName) {
+    if options.is_empty() && matches!(choice_type, ChoiceType::CardName { .. }) {
         return card_name_choice_candidates(state, player, source_display_name)
             .into_iter()
             .map(|choice| {
@@ -6552,6 +6574,8 @@ fn push_object_combo(
     combo: impl IntoIterator<Item = crate::types::identifiers::ObjectId>,
 ) {
     let combo: Vec<_> = combo.into_iter().collect();
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_selection_combinations(1);
     let key: Vec<u64> = combo.iter().map(|id| id.0).collect();
     if seen.insert(key) {
         output.push(combo);
@@ -6649,13 +6673,19 @@ fn bounded_ignore_combinations(ignorable: &[usize], ignore_count: usize) -> Vec<
 }
 
 fn combinations_usize(items: &[usize], k: usize) -> Vec<Vec<usize>> {
+    // Each output combination grows from exactly one base-case vector, so the
+    // base cases record each combination once despite the recursion.
     if k == 0 {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_selection_combinations(1);
         return vec![Vec::new()];
     }
     if items.len() < k {
         return Vec::new();
     }
     if items.len() == k {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_selection_combinations(1);
         return vec![items.to_vec()];
     }
 
@@ -6734,6 +6764,8 @@ fn combinations_generic<T: Clone>(items: &[T], k: usize) -> Vec<Vec<T>> {
     let mut result = Vec::new();
     let mut current = Vec::with_capacity(k);
     recurse(items, k, 0, &mut current, &mut result);
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_selection_combinations(result.len());
     result
 }
 
@@ -8986,9 +9018,10 @@ mod tests {
         names.extend((0..10_000).map(|i| format!("Bulk Card {i}")));
         state.all_card_names = names.into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::card_name(),
             options: Vec::new(),
             source: None,
             persist_player: None,
@@ -9009,9 +9042,10 @@ mod tests {
     fn card_name_prompt(mut state: GameState, names: Vec<String>) -> GameState {
         state.all_card_names = names.into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
-            choice_type: ChoiceType::CardName,
+            choice_type: ChoiceType::card_name(),
             options: Vec::new(),
             source: None,
             persist_player: None,
@@ -9117,6 +9151,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         let cards: Vec<ObjectId> = (1..=20).map(ObjectId).collect();
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards,
             count: 20,
@@ -9134,10 +9169,12 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -9493,7 +9530,11 @@ mod tests {
                 .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
             );
         }
-        state.activated_abilities_this_turn.insert((source, 0), 1);
+        // CR 602.5c: the used-budget entry is keyed by the resolved
+        // acquisition, not the index.
+        let usage = crate::game::restrictions::ability_usage_key(&state, source, 0)
+            .expect("the printed ability resolves");
+        state.activated_abilities_this_turn.insert(usage, 1);
 
         let actions = candidate_actions(&state);
         assert!(!actions.iter().any(|candidate| {
@@ -10639,6 +10680,7 @@ mod tests {
         let mut ability = AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
@@ -10980,6 +11022,81 @@ mod tests {
             clear_markers: Vec::new(),
             emit_reveal_until_resolved: None,
             reveal_until_hit_snapshot: None,
+        };
+
+        let actions = candidate_actions_broad(&state);
+        let permutations: Vec<Vec<ObjectId>> = actions
+            .into_iter()
+            .filter_map(|cand| match cand.action {
+                GameAction::SelectCards { cards } => Some(cards),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(permutations.len(), 2);
+        assert_eq!(permutations[0], vec![a, b]);
+        assert_eq!(permutations[1], vec![b, a]);
+    }
+
+    /// CR 401.4: an owner-ordering EffectZoneChoice prompt (mass library order)
+    /// must enumerate alternate permutations, not only a single combination.
+    #[test]
+    fn mass_library_order_effect_zone_choice_ai_candidates_include_alternate_permutations() {
+        use crate::types::game_state::{MassLibraryOrderBatch, MassLibraryOrderMember};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        let mut state = GameState::new_two_player(42);
+        let a = ObjectId(10);
+        let b = ObjectId(20);
+        let batch = MassLibraryOrderBatch {
+            owner: PlayerId(0),
+            arranger: None,
+            members: vec![
+                MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef {
+                        object_id: a,
+                        incarnation: 0,
+                    },
+                    origin: Zone::Library,
+                },
+                MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef {
+                        object_id: b,
+                        incarnation: 0,
+                    },
+                    origin: Zone::Library,
+                },
+            ],
+        };
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
+            player: PlayerId(0),
+            cards: vec![a, b],
+            count: 2,
+            min_count: 2,
+            up_to: false,
+            source_id: ObjectId(1),
+            effect_kind: crate::types::ability::EffectKind::PutAtLibraryPosition,
+            zone: Zone::Library,
+            destination: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+            face_down_profile: None,
+            with_entry_effect: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            library_position: Some(crate::types::ability::LibraryPosition::Bottom),
+            library_shuffle: Default::default(),
+            mass_library_order: Some(batch),
+            is_cost_payment: false,
+            enters_modified_if: None,
+            duration: None,
         };
 
         let actions = candidate_actions_broad(&state);

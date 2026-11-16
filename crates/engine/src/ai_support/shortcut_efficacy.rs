@@ -501,6 +501,7 @@ fn effect_window_reach(effect: &Effect) -> WindowReach {
         // for the stronger version of the same reason: the seam cannot even name
         // the zone the card comes from.
         Effect::ChangeZone {
+            actor: _,
             origin,
             destination,
             target,
@@ -673,6 +674,9 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // windowed authority — no reach beyond the granted def.
+        grant_chain: _,
     } = def;
 
     let mut acc = effect_window_reach(effect);
@@ -909,6 +913,7 @@ fn library_arrivals_are_inert(
                 // only needs to know that a library card can land on the
                 // battlefield and which filter picks it.
                 Effect::ChangeZone {
+                    actor: _,
                     origin: Some(Zone::Library),
                     destination: Zone::Battlefield,
                     target,
@@ -2292,6 +2297,9 @@ mod tests {
                     // CR 202.3d + CR 709.4b: a split card's combined off-stack mana value,
                     // read by deck-construction checks. A cost, not what resolving does.
                     off_stack_mana_value_override: _,
+                    // CR 709.4b: a split card's per-half mana costs, read by
+                    // deck-construction checks. A cost, not what resolving does.
+                    off_stack_mana_costs: _,
                 },
 
             // ---- NOT RULES-BEARING. One reason each, because an unjustified entry here

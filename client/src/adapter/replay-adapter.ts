@@ -1,4 +1,3 @@
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import type {
   EngineAdapter,
   EngineSnapshot,
@@ -106,9 +105,5 @@ export class ReplayAdapter implements EngineAdapter {
 
   dispose(): void {
     this.client.dispose();
-  }
-
-  async estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    return null;
   }
 }

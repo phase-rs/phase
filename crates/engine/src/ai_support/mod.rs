@@ -330,7 +330,11 @@ pub(crate) fn structurally_valid_named_choice_answer(
     // CR 201.4 + CR 107.1a/b: card names (CR 201.4) and free-entry numbers
     // (CR 107.1a/b) are supplied by the player and validated by rule rather than
     // by option membership, so they stay on the simulation.
-    if matches!(choice_type, ChoiceType::CardName) || choice_type.free_entry().is_some() {
+    // A closed card-name domain (Garth One-Eye) publishes its options and is
+    // validated by membership like any enumerated choice.
+    if matches!(choice_type, ChoiceType::CardName { options, .. } if options.is_empty())
+        || choice_type.free_entry().is_some()
+    {
         return false;
     }
 
@@ -659,6 +663,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             let mut exile_dup = false;
             let mut pack_slots_seen: HashSet<usize> = HashSet::new();
             let mut pack_slot_dup = false;
+            let mut companion_selections = 0usize;
             for selection in selections {
                 match selection {
                     OutsideGameSelection::Sideboard { sideboard_index } => {
@@ -674,8 +679,14 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                             pack_slot_dup = true;
                         }
                     }
+                    OutsideGameSelection::Companion => companion_selections += 1,
                 }
             }
+            let bad_companion = companion_selections > 1
+                || (companion_selections == 1
+                    && !choices.iter().any(|choice| {
+                        matches!(choice.source, OutsideGameChoiceSource::Companion { .. })
+                    }));
             let bad_sideboard = sideboard_counts.iter().any(|(idx, count)| {
                 choices
                     .iter()
@@ -701,7 +712,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                     OutsideGameChoiceSource::BoosterPack { pack_slot: slot, .. } if slot == pack_slot
                 ))
             });
-            !valid_count || exile_dup || pack_slot_dup || bad_sideboard || bad_exile || bad_pack_slot
+            !valid_count
+                || exile_dup
+                || pack_slot_dup
+                || bad_sideboard
+                || bad_exile
+                || bad_pack_slot
+                || bad_companion
         }
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
@@ -823,6 +840,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _,
                 cards,
                 optional,
+                cardinality,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
@@ -831,7 +849,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             if *optional && chosen.is_empty() {
                 false
             } else {
-                selection_mismatch(chosen, cards, Some(1))
+                // CR 608.2d: the published cardinality bounds the selection —
+                // exactly `count` cards, or (CR 107.1c) any subset for "any number".
+                let exact_count = match cardinality {
+                    crate::types::ability::ObjectSelectionCardinality::Exactly { count } => {
+                        Some(*count as usize)
+                    }
+                    crate::types::ability::ObjectSelectionCardinality::AnyNumber => None,
+                };
+                selection_mismatch(chosen, cards, exact_count)
             }
         }
         (
@@ -2379,6 +2405,12 @@ pub fn auto_pass_recommended_for_viewer(
         && auto_pass_recommended(state, actions)
 }
 
+/// CR 702.24a: whether the open unless-payment prompt continues a repeated
+/// payment already begun, so paying is its only answer.
+pub fn unless_payment_only_continues(state: &GameState) -> bool {
+    crate::game::engine_payment_choices::awaits_payment_continuation(state)
+}
+
 /// Returns the legal actions for the current game state.
 ///
 /// Mana actions are omitted from the flat list returned by [`legal_actions`].
@@ -3184,6 +3216,14 @@ pub fn stuck_decision_diagnostic(state: &GameState) -> Option<StuckDecisionDiagn
 
 fn mana_action_player(state: &GameState) -> Option<PlayerId> {
     match &state.waiting_for {
+        // CR 605.3a: an unless payment of draws asks for no mana, at its offer
+        // and at its continuation; `refuse_mana_at_draw_only_payment` refuses
+        // the same actions.
+        WaitingFor::UnlessPayment { .. }
+            if crate::game::engine_payment_choices::unless_prompt_asks_for_no_mana(state) =>
+        {
+            None
+        }
         WaitingFor::Priority { player }
         | WaitingFor::ManaPayment { player, .. }
         | WaitingFor::ManaAbilityManaPayment { player, .. }
@@ -4371,6 +4411,7 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    repeat: None,
                 },
                 false,
             ),
@@ -6532,6 +6573,7 @@ mod tests {
             trigger_event: None,
             effect_description: Some("counter target spell".to_string()),
             remaining: vec![],
+            repeat: None,
         };
 
         // Reach-guard: the waiting state is genuinely non-`Priority`.
@@ -7059,6 +7101,7 @@ mod tests {
         // A "choose a player" prompt (CR 601.2b) with NO offered options — the
         // engine can produce no legal `ChooseOption`, so no submitter can act.
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::Labeled { options: vec![] },

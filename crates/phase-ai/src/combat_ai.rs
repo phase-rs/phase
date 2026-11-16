@@ -2087,6 +2087,12 @@ pub fn choose_attackers(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
         .collect()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test witness: one count per creature (blocker or attacker) the block search evaluates.
+    static BLOCK_SEARCH_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Choose blocker assignments to minimize damage.
 /// Assigns deathtouch creatures to highest-value attackers.
 /// Prefers blocks where the blocker survives.
@@ -2150,7 +2156,11 @@ pub fn choose_blockers_with_profile(
 
     let blocker_values: HashMap<ObjectId, f64> = available_blockers
         .iter()
-        .map(|&id| (id, evaluate_creature(state, id)))
+        .map(|&id| {
+            #[cfg(test)]
+            BLOCK_SEARCH_EVALUATIONS.with(|counter| counter.set(counter.get() + 1));
+            (id, evaluate_creature(state, id))
+        })
         .collect();
     let blocker_value = |id: &ObjectId| -> f64 { blocker_values.get(id).copied().unwrap_or(0.0) };
 
@@ -2184,7 +2194,11 @@ pub fn choose_blockers_with_profile(
     // Sort attackers by value (highest first) to prioritize blocking high-value threats
     let mut sorted_attackers: Vec<(ObjectId, f64)> = attacker_ids
         .iter()
-        .map(|&id| (id, evaluate_creature(state, id)))
+        .map(|&id| {
+            #[cfg(test)]
+            BLOCK_SEARCH_EVALUATIONS.with(|counter| counter.set(counter.get() + 1));
+            (id, evaluate_creature(state, id))
+        })
         .collect();
     sorted_attackers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -7538,11 +7552,11 @@ mod tests {
     // ===== Hopeless-block fast-path (CR 509.1 + CR 704.5a) =====
     //
     // These tests verify `block_is_futile` correctly identifies positions
-    // where no assignment saves the player, AND that pathological boards
-    // (1000+ tokens) complete the blocker decision in bounded time.
+    // where no assignment saves the player, AND that futile boards return
+    // before the per-blocker block search.
 
     #[test]
-    fn futile_one_huge_trampler_vs_thousand_tokens_bails_fast() {
+    fn futile_one_huge_trampler_vs_thousand_tokens_bails_before_block_search() {
         let mut state = setup();
         state.players[1].life = 20;
 
@@ -7566,13 +7580,12 @@ mod tests {
             vec![Keyword::Trample],
         );
 
-        let start = std::time::Instant::now();
+        BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0));
         let blockers = choose_blockers(&state, PlayerId(1), &[trampler]);
-        let elapsed = start.elapsed();
-
-        eprintln!(
-            "[bench] choose_blockers (1000 tokens vs 1200/1200 trampler, life=20): {:?}",
-            elapsed
+        assert_eq!(
+            BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0)),
+            0,
+            "futile board must return before the per-blocker block search"
         );
         // Trample residual = 1200 - 1000 = 200 >= 20 life → futile, must bail.
         assert!(
@@ -7580,16 +7593,10 @@ mod tests {
             "Must bail with empty assignment when trample-residual exceeds life; got {} assignments",
             blockers.len()
         );
-        // Loose ceiling — fast-path should be O(blockers + attackers), not O(blockers^2).
-        assert!(
-            elapsed.as_millis() < 50,
-            "Fast-path must complete in <50ms; took {:?}",
-            elapsed
-        );
     }
 
     #[test]
-    fn futile_thousand_normal_attackers_vs_five_blockers_bails_fast() {
+    fn futile_thousand_normal_attackers_vs_five_blockers_bails_before_block_search() {
         let mut state = setup();
         state.players[1].life = 20;
 
@@ -7618,59 +7625,51 @@ mod tests {
             ));
         }
 
-        let start = std::time::Instant::now();
+        BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0));
         let blockers = choose_blockers(&state, PlayerId(1), &attacker_ids);
-        let elapsed = start.elapsed();
-
-        eprintln!(
-            "[bench] choose_blockers (5 blockers vs 1000 normal attackers, life=20): {:?}",
-            elapsed
+        assert_eq!(
+            BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0)),
+            0,
+            "futile board must return before the per-blocker block search"
         );
         assert!(
             blockers.is_empty(),
             "Must bail when chumping every blocker still leaves lethal residual; got {} assignments",
             blockers.len()
         );
-        assert!(
-            elapsed.as_millis() < 100,
-            "Fast-path must complete in <100ms; took {:?}",
-            elapsed
-        );
     }
 
+    /// CR 702.19b: lethal damage goes to the blocker first, so Wall of Roots
+    /// soaks 5 of Colossal Dreadmaw's 6 and 1 tramples over a life total of 4.
     #[test]
-    fn block_is_futile_does_not_fire_when_chump_saves() {
+    fn stabilize_survivable_trample_block_passes_futility_gate() {
         let mut state = setup();
-        state.players[1].life = 20;
-
-        // 1 trampler 6/6 vs 5 blockers (1/1 each): residual = 6 - 5 = 1 < 20.
-        // Not futile — existing chump-stabilize logic should engage.
-        for i in 0..5 {
-            add_creature(
-                &mut state,
-                PlayerId(1),
-                &format!("Blocker {i}"),
-                1,
-                1,
-                vec![],
-            );
-        }
-        let trampler = add_creature(
+        state.players[1].life = 4;
+        let wall = add_creature(
+            &mut state,
+            PlayerId(1),
+            "Wall of Roots",
+            0,
+            5,
+            vec![Keyword::Defender],
+        );
+        let dreadmaw = add_creature(
             &mut state,
             PlayerId(0),
-            "Modest Trampler",
+            "Colossal Dreadmaw",
             6,
             6,
             vec![Keyword::Trample],
         );
 
-        let blockers = choose_blockers(&state, PlayerId(1), &[trampler]);
-        // Even though objective is PreserveAdvantage here (6 < 20), the block
-        // should not be skipped by the futility fast-path.
-        assert!(
-            !blockers.is_empty() || state.players[1].life > 6,
-            "Non-futile board must not be short-circuited"
+        assert_eq!(
+            determine_block_objective(&state, PlayerId(1), &[dreadmaw], &AiProfile::default()),
+            CombatObjective::Stabilize
         );
+        BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0));
+        let blockers = choose_blockers(&state, PlayerId(1), &[dreadmaw]);
+        assert_eq!(blockers, vec![(wall, dreadmaw)]);
+        assert_eq!(BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0)), 2);
     }
 
     #[test]
@@ -7678,16 +7677,20 @@ mod tests {
         let mut state = setup();
         state.players[1].life = 5;
 
-        // 1 normal 3/3 attacker vs 1 5/5 blocker. life=5, raw incoming=3 → no
-        // Stabilize objective at all, so futility check doesn't even run; the
-        // assertion here documents that and guards against accidental regressions.
+        // life=5 vs 3 incoming is a non-futile Stabilize board, so the block search runs.
         add_creature(&mut state, PlayerId(1), "Wall", 0, 5, vec![]);
         let attacker = add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
 
+        BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0));
         let blockers = choose_blockers(&state, PlayerId(1), &[attacker]);
         assert!(
             !blockers.is_empty(),
             "5/5 wall must block 3/3 bear; got empty assignment"
+        );
+        assert_eq!(
+            BLOCK_SEARCH_EVALUATIONS.with(|c| c.replace(0)),
+            2,
+            "a Stabilize board that is not futile must reach the block search"
         );
     }
 

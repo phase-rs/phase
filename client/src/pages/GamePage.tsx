@@ -43,6 +43,7 @@ import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useResolvedGridRows, useResolvedSplitGridRows } from "../hooks/useResolvedGridRows.ts";
 import { useDebugHandReveal } from "../hooks/useDebugHandReveal";
+import { isValidFinalView } from "../services/fullTerminalResult";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { formatLifeReadout, lifeReadout } from "../hooks/useDisplayedLife.ts";
 import { useLocalizedCardContent } from "../hooks/useLocalizedCardContent.ts";
@@ -182,7 +183,14 @@ import { usePriorityAttentionController } from "../hooks/usePriorityAttention.ts
 import { usePriorityChime } from "../hooks/usePriorityChime.ts";
 import { usePriorityTabTitle } from "../hooks/usePriorityTabTitle.ts";
 import { clearPromptOverlayState } from "../game/sessionCleanup.ts";
-import { clearGame, hasRemoteHumans, loadActiveGame, useGameStore } from "../stores/gameStore.ts";
+import {
+  clearGame,
+  hasRemoteHumans,
+  loadActiveGame,
+  seatSource,
+  useGameStore,
+} from "../stores/gameStore.ts";
+import { PLAYER_ID } from "../constants/game";
 import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import {
@@ -208,6 +216,8 @@ import {
   loyaltyBadge,
   stripCostPrefix,
   stripLoyaltyCostPrefix,
+  unlessDrawCostLabel,
+  unlessPaymentCanBeDeclined,
 } from "../viewmodel/costLabel.ts";
 import { renderDescription } from "../utils/description.ts";
 import { LoyaltyBadge } from "../components/ui/LoyaltyBadge.tsx";
@@ -271,6 +281,16 @@ const TAKEBACK_RESOLUTION_TOAST_KEYS = {
   cancelled: "takebackDialog.cancelledToast",
   withdrawn: "takebackDialog.withdrawnToast",
 } as const satisfies Record<TakebackResolution, ParseKeys<"multiplayer"> | null>;
+
+/** The route's normalized game mode — the census key `seatSource` classifies. */
+type GamePageMode =
+  | "ai"
+  | "online"
+  | "local"
+  | "p2p-host"
+  | "p2p-join"
+  | "draft-match"
+  | "spectate";
 
 export function GamePage() {
   const { t } = useTranslation(["game", "multiplayer"]);
@@ -362,7 +382,7 @@ export function GamePage() {
   );
 
   // Map URL modes to GameProvider modes
-  const mode: "ai" | "online" | "local" | "p2p-host" | "p2p-join" | "draft-match" | "spectate" =
+  const mode: GamePageMode =
     rawMode === "p2p-host"
       ? "p2p-host"
       : rawMode === "p2p-join"
@@ -412,6 +432,18 @@ export function GamePage() {
   const [gameStartedAt, setGameStartedAt] = useState<number | null>(null);
   const [terminalReason, setTerminalReason] = useState<string | null>(null);
   const hasConcededRef = useRef(false);
+  // The id of the game whose terminal result has been displayed. Keyed by game
+  // rather than a bare flag: Rematch navigates to a new game id on this same
+  // mounted page, and a transport failure of that new game must still surface
+  // the Connection Lost banner.
+  const endedGameIdRef = useRef<string | null>(null);
+  const markGameOver = useCallback(() => {
+    endedGameIdRef.current = gameId ?? null;
+  }, [gameId]);
+  const isGameOver = useCallback(
+    () => gameId !== undefined && endedGameIdRef.current === gameId,
+    [gameId],
+  );
   // GH #1507: "request takeback" — the table-wide pending request, if any.
   const [pendingTakeback, setPendingTakeback] = useState<
     { requester: number; requesterName: string; voters: number[] } | null
@@ -489,7 +521,9 @@ export function GamePage() {
         setReconnectState({ status: "idle" });
         break;
       case "reconnectFailed":
-        setReconnectState({ status: "failed" });
+        if (!isGameOver()) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "stateChanged":
         // Record game start time on first state update
@@ -508,6 +542,7 @@ export function GamePage() {
         // Skip if we already navigated away from a self-concede — the server sends
         // both Conceded and GameOver to all players, so this would race with navigate.
         if (hasConcededRef.current) break;
+        markGameOver();
         // Server-initiated game end (concede, disconnect timeout, etc.)
         // Map the server's authoritative winner into the store so GameOverScreen renders.
         clearPromptOverlayState();
@@ -517,11 +552,15 @@ export function GamePage() {
         });
         break;
       case "terminalDelivery":
+        markGameOver();
         clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         setTerminalReason(event.delivery.display.reason);
         useGameStore.setState({
           waitingFor: { type: "GameOver", data: { winner: event.delivery.display.winner } },
+          ...(event.delivery.finalView && isValidFinalView(event.delivery.finalView)
+            ? { gameState: event.delivery.finalView }
+            : {}),
         });
         break;
       case "terminalUnavailable":
@@ -610,7 +649,7 @@ export function GamePage() {
         useMultiplayerStore.getState().showToast(event.message);
         // Native engine sockets emit an error before close; the provider disposes
         // that terminal adapter, so no reconnectFailed event follows.
-        if (!isOnlineMode) {
+        if (!isOnlineMode && !isGameOver()) {
           setReconnectState({ status: "failed" });
         }
         break;
@@ -627,7 +666,7 @@ export function GamePage() {
         });
         break;
     }
-  }, [gameId, navigate, joinCode, serverParam, isOnlineMode, t, handleTakebackEvent]);
+  }, [gameId, navigate, joinCode, serverParam, isOnlineMode, t, handleTakebackEvent, markGameOver, isGameOver]);
 
   const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
     switch (event.type) {
@@ -738,12 +777,15 @@ export function GamePage() {
         );
         break;
       case "reconnectFailed":
-        setReconnectState({ status: "failed" });
+        if (!isGameOver()) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "playerSlotsUpdated":
         useMultiplayerStore.setState({ playerSlots: event.slots });
         break;
       case "gameOver":
+        markGameOver();
         clearPromptOverlayState();
         if (gameId) clearGame(gameId);
         useGameStore.setState({
@@ -751,6 +793,7 @@ export function GamePage() {
         });
         break;
       case "terminalResult":
+        markGameOver();
         clearPromptOverlayState();
         // Display is independent of native guest convergence. The provider /
         // adapter owns deletion after durable cleanup ownership is established.
@@ -777,7 +820,9 @@ export function GamePage() {
         break;
       case "error":
         useMultiplayerStore.getState().showToast(event.message);
-        setReconnectState({ status: "failed" });
+        if (!isGameOver()) {
+          setReconnectState({ status: "failed" });
+        }
         break;
       case "hostingFailed": {
         // Pre-game setup failure — distinct from `error` (catch-all for
@@ -798,7 +843,7 @@ export function GamePage() {
         break;
       }
     }
-  }, [navigate, formatConfig, matchConfig, playerCount, gameId, joinCode, t, handleTakebackEvent]);
+  }, [navigate, formatConfig, matchConfig, playerCount, gameId, joinCode, t, handleTakebackEvent, markGameOver, isGameOver]);
 
   const handleReady = useCallback(() => {
     setWaitingForOpponent(false);
@@ -870,6 +915,7 @@ export function GamePage() {
       <GamePageContent
         gameId={gameId}
         mode={rawMode}
+        seatMode={mode}
         isOnlineMode={isOnlineMode}
         receivesAdapterEvents={routesWsEvents || routesP2PEvents}
         hostGameCode={hostGameCode}
@@ -906,6 +952,8 @@ export function GamePage() {
 interface GamePageContentProps {
   gameId: string;
   mode: string | null;
+  /** The normalized mode, for seat derivation a raw route mode cannot answer. */
+  seatMode: GamePageMode;
   isOnlineMode: boolean;
   /** Whether this page routes its adapter's events to a handler. */
   receivesAdapterEvents: boolean;
@@ -943,6 +991,7 @@ interface GamePageContentProps {
 function GamePageContent({
   gameId,
   mode,
+  seatMode,
   isOnlineMode,
   receivesAdapterEvents,
   hostGameCode,
@@ -990,7 +1039,7 @@ function GamePageContent({
   // committed atomically with the waiting state.
   const engineWaitingFor = useGameStore((s) => s.waitingFor);
   const deckPools = useGameStore((s) => s.gameState?.deck_pools);
-  const stackLength = useGameStore((s) => s.gameState?.stack.length ?? 0);
+  const stackLength = useGameStore((s) => s.gameState?.stack?.length ?? 0);
   const isSandboxGame = useGameStore(
     (s) => s.gameState?.format_config?.allow_debug_actions === true,
   );
@@ -2440,6 +2489,7 @@ function GamePageContent({
             <GameOverScreen
               winner={waitingFor.data.winner}
               mode={mode}
+              seatMode={seatMode}
               isOnlineMode={isOnlineMode}
               gameStartedAt={gameStartedAt}
               terminalReason={terminalReason}
@@ -3076,12 +3126,14 @@ function VictoryParticles() {
 function GameOverScreen({
   winner,
   mode,
+  seatMode,
   isOnlineMode = false,
   gameStartedAt,
   terminalReason,
 }: {
   winner: number | null;
   mode: string | null;
+  seatMode: GamePageMode;
   isOnlineMode?: boolean;
   gameStartedAt?: number | null;
   terminalReason?: string | null;
@@ -3094,15 +3146,29 @@ function GameOverScreen({
   const players = gameState?.players;
   const [buttonsVisible, setButtonsVisible] = useState(false);
 
-  const activePlayerId = useMultiplayerStore((s) => s.activePlayerId) ?? 0;
+  // Which seat this client holds is the mode census's answer, never a default:
+  // a wire-assigned seat is authoritative only once the wire has delivered it.
+  // A legacy online save carries no player id, so a recovered result must not be
+  // labelled from seat 0's perspective while the seat is unknown.
+  const assignedSeat = useMultiplayerStore((s) => s.activePlayerId);
+  const seatOrigin = seatSource(seatMode);
+  const localSeat = seatOrigin === "seat-zero" ? PLAYER_ID : assignedSeat;
+  const seatKnown = localSeat !== null;
+  const activePlayerId = localSeat ?? PLAYER_ID;
 
-  const playerLife = formatLifeReadout(lifeReadout(gameState, activePlayerId));
-  const opponentId = players?.find((p) => p.id !== activePlayerId)?.id;
+  const playerLife = gameState && seatKnown
+    ? formatLifeReadout(lifeReadout(gameState, activePlayerId))
+    : null;
+  const opponentId = seatKnown ? players?.find((p) => p.id !== activePlayerId)?.id : undefined;
   const opponentLife =
-    opponentId === undefined ? "0" : formatLifeReadout(lifeReadout(gameState, opponentId));
+    gameState && seatKnown && opponentId !== undefined
+      ? formatLifeReadout(lifeReadout(gameState, opponentId))
+      : null;
 
-  const isVictory = winner === activePlayerId;
+  const isVictory = seatKnown && winner === activePlayerId;
   const isDraw = winner == null;
+  // A winner with no known seat is neither this client's victory nor its defeat.
+  const outcomeUnknown = winner != null && !seatKnown;
 
   const turnCount = gameState?.turn_number ?? 0;
   const gameDuration = gameStartedAt
@@ -3111,12 +3177,14 @@ function GameOverScreen({
 
   const titleText = isDraw
     ? t("gamePage.gameOver.draw")
-    : isVictory
-      ? t("gamePage.gameOver.victory")
-      : t("gamePage.gameOver.defeat");
-  const titleColor = isDraw ? "#B0B0B0" : isVictory ? "#C9B037" : "#991B1B";
+    : outcomeUnknown
+      ? t("gamePage.gameOver.complete")
+      : isVictory
+        ? t("gamePage.gameOver.victory")
+        : t("gamePage.gameOver.defeat");
+  const titleColor = isDraw || outcomeUnknown ? "#B0B0B0" : isVictory ? "#C9B037" : "#991B1B";
 
-  const glowColor = isDraw
+  const glowColor = isDraw || outcomeUnknown
     ? "rgba(176,176,176,0.5)"
     : isVictory
       ? "rgba(201,176,55,0.8)"
@@ -3124,7 +3192,7 @@ function GameOverScreen({
 
   const textShadow = `0 0 20px ${glowColor}, 0 0 40px ${glowColor.replace(/[\d.]+\)$/, "0.5)")}, 0 0 80px ${glowColor.replace(/[\d.]+\)$/, "0.3)")}`;
 
-  const bgGradient = isDraw
+  const bgGradient = isDraw || outcomeUnknown
     ? "radial-gradient(ellipse at center, rgba(50,50,50,0.6) 0%, rgba(0,0,0,0.95) 70%)"
     : isVictory
       ? "radial-gradient(ellipse at center, rgba(60,50,10,0.6) 0%, rgba(0,0,0,0.95) 70%)"
@@ -3140,17 +3208,17 @@ function GameOverScreen({
   const [runOver, setRunOver] = useState(false);
 
   useEffect(() => {
-    if (!isDraft || !gameId || resultRecorded) return;
+    if (!isDraft || !gameId || resultRecorded || !seatKnown) return;
     const result: DraftMatchResult = isDraw ? "draw" : isVictory ? "win" : "loss";
     useDraftStore.getState().recordMatchResult(gameId, result).then(() => {
       setResultRecorded(true);
       const meta = loadActiveQuickDraft();
       if (meta?.phase === "complete") setRunOver(true);
     });
-  }, [isDraft, gameId, isDraw, isVictory, resultRecorded]);
+  }, [isDraft, gameId, isDraw, isVictory, resultRecorded, seatKnown]);
 
   useEffect(() => {
-    if (!isDraftPodMatch || resultRecorded) return;
+    if (!isDraftPodMatch || resultRecorded || !seatKnown) return;
     void useMultiplayerDraftStore
       .getState()
       .reportActiveMatchGameResult(winner)
@@ -3158,7 +3226,7 @@ function GameOverScreen({
       .catch((err) => {
         console.error("[GameOverScreen] failed to report draft pod match result:", err);
       });
-  }, [isDraftPodMatch, resultRecorded, winner]);
+  }, [isDraftPodMatch, resultRecorded, winner, seatKnown]);
 
   const handleRematch = () => {
     const newId = crypto.randomUUID();
@@ -3235,18 +3303,20 @@ function GameOverScreen({
             transition={{ duration: 0.4 }}
           >
             {terminalReason && <p className="mb-2 text-sm text-slate-300">{terminalReason}</p>}
-            <p className="text-base text-gray-200 sm:text-lg">
-              <Trans
-                i18nKey="gamePage.gameOver.lifeSummary"
-                t={t}
-                values={{ playerLife, opponentLife }}
-                components={{
-                  player: <span className="font-bold text-white" />,
-                  sep: <span className="mx-3 text-gray-500" />,
-                  opponent: <span className="font-bold text-white" />,
-                }}
-              />
-            </p>
+            {gameState && seatKnown && playerLife !== null && opponentLife !== null && (
+              <p className="text-base text-gray-200 sm:text-lg">
+                <Trans
+                  i18nKey="gamePage.gameOver.lifeSummary"
+                  t={t}
+                  values={{ playerLife, opponentLife }}
+                  components={{
+                    player: <span className="font-bold text-white" />,
+                    sep: <span className="mx-3 text-gray-500" />,
+                    opponent: <span className="font-bold text-white" />,
+                  }}
+                />
+              </p>
+            )}
             {(turnCount > 0 || gameDuration !== null) && (
               <p className="mt-2 text-xs text-gray-400 sm:text-sm">
                 {turnCount > 0 && <span>{t("gamePage.gameOver.turns", { count: turnCount })}</span>}
@@ -4021,6 +4091,7 @@ function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const drawCost = useGameStore((s) => s.gameState?.derived?.unless_draw_cost);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
 
@@ -4033,7 +4104,9 @@ function UnlessPaymentPanel() {
     return <SayPhrasePanel phrase={waitingFor.data.cost.phrase} effect={effect} />;
   }
 
-  const costDisplay = formatUnlessCost(waitingFor.data.cost, t);
+  const costDisplay = drawCost
+    ? unlessDrawCostLabel(drawCost)
+    : formatUnlessCost(waitingFor.data.cost, t);
 
   return (
     <AnimatePresence>
@@ -4063,14 +4136,16 @@ function UnlessPaymentPanel() {
                 size="sm"
               />
             </button>
-            <button
-              onClick={() =>
-                dispatch({ type: "PayUnlessCost", data: { pay: false } })
-              }
-              className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
-            >
-              {t("gamePage.unlessPayment.dontPay")}
-            </button>
+            {unlessPaymentCanBeDeclined(drawCost) && (
+              <button
+                onClick={() =>
+                  dispatch({ type: "PayUnlessCost", data: { pay: false } })
+                }
+                className="rounded-lg bg-gray-700 px-4 py-1.5 text-sm font-semibold text-gray-200 transition hover:bg-gray-600"
+              >
+                {t("gamePage.unlessPayment.dontPay")}
+              </button>
+            )}
           </div>
         </div>
       </motion.div>
