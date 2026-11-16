@@ -16941,15 +16941,14 @@ mod tests {
             "the conjure gap must be present as the honest marker — \
              without it the no-comparison assertions pass on a fully parsed card"
         );
-        // allow-noncombinator: test assertion on Debug rendering, not parsing dispatch.
         let debug = format!("{:?}", result.triggers);
-        // allow-noncombinator: test assertion on Debug rendering, not parsing dispatch.
         assert!(
+            // allow-noncombinator: test assertion on Debug rendering, not parsing dispatch.
             !debug.contains("StartingDeckSize"),
             "no latch comparison may bind out of the there-are sentence"
         );
-        // allow-noncombinator: test assertion on Debug rendering, not parsing dispatch.
         assert!(
+            // allow-noncombinator: test assertion on Debug rendering, not parsing dispatch.
             !debug.contains("ZoneCardCount"),
             "no live zone count may bind out of the there-are sentence"
         );
