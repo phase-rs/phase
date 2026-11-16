@@ -11458,33 +11458,19 @@ fn grant_keyword_instance(
     effect: &ActiveContinuousEffect,
     keyword_output_index: usize,
 ) {
-    // Three-way grant policy:
-    // CR 702.164b: summing keywords (Toxic) accumulate even when an
-    // identical instance is already present (granted Toxic 1 on
-    // printed Toxic 1 -> total 2).
-    // CR 613.7: single-authoritative-value keywords (Crew/Saddle/Enchant,
-    // see `overrides_same_kind_on_grant`) replace any earlier same-kind
-    // instance so a "first match" reader never sees a stale value.
-    // All other parameterized keywords keep deduping identical instances
-    // per CR 702.16g (Protection A+B are separate abilities;
-    // Ward/Annihilator each apply independently). `evaluate_layers` resets
+    // Shared grant policy (`Keyword::grant_policy`): Toxic-style keywords
+    // accumulate, Crew/Saddle/Enchant replace earlier same-variant entries, and
+    // every other keyword keeps distinct values while dropping an exact
+    // duplicate. The battlefield keeps the earlier duplicate so first-match
+    // readers of `obj.keywords` are unchanged. `evaluate_layers` resets
     // `obj.keywords = obj.base_keywords.clone()` each pass, so this never
     // accumulates unbounded across re-evaluations.
-    if resolved_keyword.instances_must_coexist() {
-        obj.keywords.push(resolved_keyword.clone());
-    } else if resolved_keyword.overrides_same_kind_on_grant() {
-        // CR 613.7: this grant is a single-authoritative-value keyword — the
-        // most recently applied instance (this one, since modifications are
-        // applied in ascending timestamp order, see `order_by_timestamp`)
-        // replaces any earlier same-discriminant instance (printed or a prior
-        // grant) rather than coexisting with it. Grant replacement remains
-        // variant-scoped; generic removal uses its own family-aware relation.
-        obj.keywords
-            .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(&resolved_keyword));
-        obj.keywords.push(resolved_keyword.clone());
-    } else if !obj.keywords.contains(&resolved_keyword) {
-        obj.keywords.push(resolved_keyword.clone());
-    }
+    super::keywords::grant_keyword_instance_into(
+        &mut obj.keywords,
+        resolved_keyword.clone(),
+        |keyword| keyword,
+        super::keywords::RedundantGrant::KeepEarlier,
+    );
     for (companion_index, trigger) in KeywordTriggerInstaller::triggers_for(&resolved_keyword)
         .into_iter()
         .enumerate()

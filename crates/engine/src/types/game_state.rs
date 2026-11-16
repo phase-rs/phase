@@ -2873,6 +2873,47 @@ pub struct BattlefieldEntryRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub keywords: Vec<Keyword>,
     pub controller: PlayerId,
+    /// CR 708.2: The object's face state at entry time (morph, disguise, manifest,
+    /// cloak). Enables data-driven ETB condition queries like "if a face-down creature
+    /// entered the battlefield under your control this turn" (Tunnel Tipster). The
+    /// entry-time face state is captured before any turn-face-up replacement effects
+    /// apply. Serialized as a boolean for backward compatibility: `false` = FaceUp,
+    /// `true` = FaceDown.
+    #[serde(default)]
+    pub face_state: FaceState,
+}
+
+/// CR 110.5 + CR 708.2: Face state of a permanent at battlefield entry time.
+/// CR 110.5 places "face up/face down" in the status category; status is not a
+/// characteristic (CR 110.5a).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FaceState {
+    #[default]
+    FaceUp,
+    FaceDown,
+}
+
+impl Serialize for FaceState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_bool(matches!(self, FaceState::FaceDown))
+    }
+}
+
+impl<'de> Deserialize<'de> for FaceState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let b = bool::deserialize(deserializer)?;
+        Ok(if b {
+            FaceState::FaceDown
+        } else {
+            FaceState::FaceUp
+        })
+    }
 }
 
 #[cfg(feature = "test-support")]
@@ -2888,6 +2929,7 @@ impl Clone for BattlefieldEntryRecord {
             colors,
             keywords,
             controller,
+            face_state,
         } = self;
         Self {
             object_id: *object_id,
@@ -2898,6 +2940,7 @@ impl Clone for BattlefieldEntryRecord {
             colors: colors.clone(),
             keywords: keywords.clone(),
             controller: *controller,
+            face_state: *face_state,
         }
     }
 }

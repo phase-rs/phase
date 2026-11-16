@@ -196,6 +196,7 @@ mod celestial_kirin_cast_spell_mana_value;
 mod celestial_reunion_behold_choose_type;
 mod cellar_door_bottom_card;
 mod cemetery_prowler_shared_card_types;
+mod census_release_batch_1;
 mod chain_of_smog_copy;
 mod chain_root_target_suspension;
 mod chains_of_mephistopheles_discard_draw_or_mill;
