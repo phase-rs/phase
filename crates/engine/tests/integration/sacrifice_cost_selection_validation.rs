@@ -991,7 +991,7 @@ fn selected_keyword_sacrifice_revalidates_its_current_quality() {
                 .unwrap();
             if kind == "offering" {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .unwrap();
             }
             if kind.starts_with("emerge") {

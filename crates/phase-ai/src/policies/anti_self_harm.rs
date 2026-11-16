@@ -1961,7 +1961,7 @@ mod tests {
         let candidate = engine::ai_support::candidate_actions(&state)
             .into_iter()
             .find(|candidate| {
-                matches!(candidate.action, GameAction::DecideOptionalCost { pay: selected } if selected == pay)
+                matches!(candidate.action, GameAction::DecideOptionalCost { index: selected } if (selected == 0) == pay)
             })
             .expect("the generated candidate set must contain the selected optional-cost action");
         (state, candidate)
@@ -2051,7 +2051,7 @@ mod tests {
         let candidate = engine::ai_support::candidate_actions(&state)
             .into_iter()
             .find(|candidate| {
-                matches!(candidate.action, GameAction::DecideOptionalCost { pay: selected } if selected == pay)
+                matches!(candidate.action, GameAction::DecideOptionalCost { index: selected } if (selected == 0) == pay)
             })
             .expect("the generated candidate set must contain the selected Defiler decision");
         (state, candidate)
@@ -2121,7 +2121,7 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     candidate.action,
-                    GameAction::DecideOptionalCost { pay: true }
+                    GameAction::DecideOptionalCost { index: 0 }
                 )
             })
             .expect("the queued prompt must generate its accept candidate");
@@ -8573,7 +8573,7 @@ mod tests {
             cost: ManaCost::zero(),
         };
         let (mut accepted_state, accepted) =
-            live_additional_cost_candidate(AdditionalCost::Choice(life, mana), true);
+            live_additional_cost_candidate(AdditionalCost::Choice(vec![life, mana]), true);
         assert!(shared_registry_verdicts_for(&accepted_state, &accepted)
             .into_iter()
             .any(|(id, verdict)| {
@@ -8589,14 +8589,14 @@ mod tests {
         assert_eq!(accepted_state.players[0].life, 0);
 
         let (mut fallback_state, fallback) = live_additional_cost_candidate(
-            AdditionalCost::Choice(
+            AdditionalCost::Choice(vec![
                 AbilityCost::PayLife {
                     amount: QuantityExpr::Fixed { value: 2 },
                 },
                 AbilityCost::Mana {
                     cost: ManaCost::zero(),
                 },
-            ),
+            ]),
             false,
         );
         assert!(shared_registry_verdicts_for(&fallback_state, &fallback)
