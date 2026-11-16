@@ -2006,12 +2006,15 @@ fn prowl_damage_ledger_satisfied(state: &GameState, player: PlayerId, object_id:
 /// (`handle_foretell`) and the effect-driven "becomes foretold" grant
 /// (`effects::grant_permission`).
 pub(crate) fn foretell_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
-    crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
-        .into_iter()
-        .find_map(|keyword| match keyword {
-            Keyword::Foretell(cost) => Some(cost),
-            _ => None,
-        })
+    crate::game::off_zone_characteristics::effective_off_zone_keyword(
+        state,
+        object_id,
+        KeywordKind::Foretell,
+    )
+    .and_then(|keyword| match keyword {
+        Keyword::Foretell(cost) => Some(cost),
+        _ => None,
+    })
 }
 
 /// CR 702.143a-b: A player may foretell a card from hand any time they have
