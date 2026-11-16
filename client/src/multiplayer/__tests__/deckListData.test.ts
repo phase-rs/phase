@@ -31,7 +31,11 @@ describe("DECK_LIST_FIELDS", () => {
     // Reach guard: the golden really is the engine's serialized deck.
     expect(echoedKeys).toContain("main_deck");
     expect(echoedKeys).toContain("bracket_tier");
-    expect(echoedKeys.filter((key) => key !== "bracket_tier")).toEqual([...DECK_LIST_FIELDS]);
+    expect(echoedKeys).toContain("combo_declaration");
+    // The owner's declarations ride beside the lists; neither is a list.
+    expect(
+      echoedKeys.filter((key) => key !== "bracket_tier" && key !== "combo_declaration"),
+    ).toEqual([...DECK_LIST_FIELDS]);
   });
 });
 
@@ -40,9 +44,10 @@ describe("deckListIdentityKey", () => {
     expect(deckListIdentityKey(islandDeck)).toBe(deckListIdentityKey(echoes.plain));
   });
 
-  it("ignores object key order and the declared bracket tier", () => {
+  it("ignores object key order and the owner's declarations", () => {
     const reordered: DeckListData = {
       bracket_tier: echoes.plain.bracket_tier,
+      combo_declaration: echoes.plain.combo_declaration,
       signature_spell: echoes.plain.signature_spell,
       sticker_sheets: echoes.plain.sticker_sheets,
       contraption_deck: echoes.plain.contraption_deck,
@@ -56,7 +61,10 @@ describe("deckListIdentityKey", () => {
     };
     expect(Object.keys(reordered)[0]).toBe("bracket_tier");
     expect(deckListIdentityKey(reordered)).toBe(deckListIdentityKey(echoes.plain));
-    expect(echoes.plain.bracket_tier).toBe("core");
+    expect(echoes.plain.bracket_tier).toBeNull();
+    const early = { kind: "intended", window: "early_game" } as const;
+    expect(deckListIdentityKey({ ...echoes.plain, combo_declaration: early }))
+      .toBe(deckListIdentityKey(echoes.plain));
     expect(echoes.declaredTier.bracket_tier).toBe("optimized");
     expect(deckListIdentityKey(echoes.declaredTier)).toBe(deckListIdentityKey(echoes.plain));
   });

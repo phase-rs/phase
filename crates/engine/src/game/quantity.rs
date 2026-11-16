@@ -1680,6 +1680,8 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         gotcha_condition: _,
         expend_threshold: _,
         attack_target_filter: _,
+        // CR 509.3e: a blocker filter, checked like the other matcher filters.
+        blocker_count,
         player_actions: _,
         scry_bottom_count: _,
         damage_amount: _,
@@ -1710,6 +1712,10 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
             .is_none_or(trigger_filter_is_cast_stable_for_pre_cast)
         && valid_source
             .as_ref()
+            .is_none_or(trigger_filter_is_cast_stable_for_pre_cast)
+        && blocker_count
+            .as_ref()
+            .and_then(|threshold| threshold.blocker.as_ref())
             .is_none_or(trigger_filter_is_cast_stable_for_pre_cast)
         && condition
             .as_ref()

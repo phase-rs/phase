@@ -1746,9 +1746,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         }
         Effect::CreateDamageReplacement { .. } => Axes::CONSERVATIVE,
         Effect::CreateDrawReplacement { replacement_effect } => {
-            let mut acc = Axes::NONE;
-            acc = acc.or(scan_effect(replacement_effect, mode));
-            acc
+            ability_definition_axes(replacement_effect, mode)
         }
         Effect::LoseTheGame { target } => {
             let mut acc = Axes::NONE;
@@ -4059,6 +4057,9 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
         valid_subject_player,
         valid_source,
         zone_change_clauses,
+        // CR 509.3e: the blocker-count threshold's blocker filter is an event
+        // matcher like `valid_target` (scanned below); `minimum` is a literal.
+        blocker_count,
 
         // ---- read-free: the Room-half (door) STAMP — a matcher key like the
         //      filters above, at its most inert end. `RoomDoor` is a fieldless two-variant
@@ -4155,6 +4156,11 @@ fn scan_trigger_definition(t: &TriggerDefinition, mode: ScanMode) -> Axes {
     for f in [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()
         .flatten()
+        .chain(
+            blocker_count
+                .as_ref()
+                .and_then(|threshold| threshold.blocker.as_ref()),
+        )
     {
         matcher = matcher.or(scan_target_filter(
             f,
@@ -5113,6 +5119,7 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::InAnyZone { .. }
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::Transformed

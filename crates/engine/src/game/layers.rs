@@ -21,8 +21,8 @@ use crate::game::filter::{
     target_filter_characteristic_reads_at, CharacteristicKinds, FilterContext,
     CHARACTERISTIC_READ_DEPTH, UNPAIRED_READS,
 };
-use crate::game::game_object::DisplaySource;
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::game_object::{DisplaySource, GameObject};
 use crate::game::printed_cards::{
     apply_copiable_values, ensure_keyword_triggers_for_copiable_values, intrinsic_copiable_values,
     is_runtime_host_lifetime_replacement, is_runtime_target_die_exile_replacement,
@@ -2011,124 +2011,175 @@ fn pinned_leaf_truth(
 /// each sub-ability, so `pre_entry`'s derived characteristics are current.
 /// Only `scratch` is written; every write is copy-on-write and made only when a
 /// leaf pins.
+type Rewrites = Vec<(usize, StaticDefinition)>;
+
+/// CR 614.12: only the copy-on-write condition rewrites needed by an entry projection.
+/// Capture before placing a token so an owned pre-entry board can be consumed directly.
+pub(crate) struct EntryPopulationRewrites {
+    object_rewrites: Vec<(ObjectId, Rewrites, Rewrites)>,
+    condition_rewrites: Vec<(usize, StaticCondition)>,
+    modification_rewrites: Vec<(usize, usize, ContinuousModification)>,
+}
+
 pub(crate) fn pin_entry_population_conditions(
     scratch: &mut GameState,
     pre_entry: &GameState,
     origin: Option<Zone>,
 ) {
-    type Rewrites = Vec<(usize, StaticDefinition)>;
+    EntryPopulationRewrites::capture(scratch, pre_entry, origin, None).apply(scratch);
+}
 
-    let pin = EntryPopulationPin {
-        pre_entry,
-        origin,
-        grant_recipients: scratch
-            .battlefield
-            .iter()
-            .filter_map(|&id| scratch.objects.get(&id).map(|obj| (id, obj.controller)))
-            .collect(),
-    };
-
-    let object_rewrites: Vec<(ObjectId, Rewrites, Rewrites)> = scratch
-        .objects
-        .iter()
-        .filter_map(|(&id, obj)| {
-            let holder = PinnedHolder::Carrier {
-                controller: obj.controller,
-                source_id: id,
-            };
-            let base = pin.definitions(&obj.base_static_definitions, holder);
-            let live = pin.definitions(obj.static_definitions.as_slice(), holder);
-            (!base.is_empty() || !live.is_empty()).then_some((id, base, live))
-        })
-        .collect();
-    for (id, base, live) in object_rewrites {
-        let Some(obj) = scratch.objects.get_mut(&id) else {
-            continue;
+impl EntryPopulationRewrites {
+    fn capture(
+        scratch: &GameState,
+        pre_entry: &GameState,
+        origin: Option<Zone>,
+        entrant: Option<&GameObject>,
+    ) -> Self {
+        let pin = EntryPopulationPin {
+            pre_entry,
+            origin,
+            grant_recipients: scratch
+                .battlefield
+                .iter()
+                .copied()
+                .chain(
+                    entrant
+                        .filter(|obj| !scratch.battlefield.contains(&obj.id))
+                        .map(|obj| obj.id),
+                )
+                .filter_map(|id| {
+                    entrant
+                        .filter(|obj| obj.id == id)
+                        .or_else(|| scratch.objects.get(&id))
+                        .map(|obj| (id, obj.controller))
+                })
+                .collect(),
         };
-        if !base.is_empty() {
-            write_pinned_definitions(
-                Arc::make_mut(&mut obj.base_static_definitions).as_mut_slice(),
-                base,
-            );
-        }
-        for (index, rewritten) in live {
-            if let Some(def) = obj.static_definitions.get_mut(index) {
-                *def = rewritten;
+
+        let object_rewrites: Vec<(ObjectId, Rewrites, Rewrites)> = scratch
+            .objects
+            .iter()
+            .filter(|(id, _)| entrant.is_none_or(|obj| obj.id != **id))
+            .map(|(&id, obj)| (id, obj))
+            .chain(entrant.map(|obj| (obj.id, obj)))
+            .filter_map(|(id, obj)| {
+                let holder = PinnedHolder::Carrier {
+                    controller: obj.controller,
+                    source_id: id,
+                };
+                let base = pin.definitions(&obj.base_static_definitions, holder);
+                let live = pin.definitions(obj.static_definitions.as_slice(), holder);
+                (!base.is_empty() || !live.is_empty()).then_some((id, base, live))
+            })
+            .collect();
+        let mut condition_rewrites: Vec<(usize, StaticCondition)> = Vec::new();
+        let mut modification_rewrites: Vec<(usize, usize, ContinuousModification)> = Vec::new();
+        for (tce_index, tce) in scratch.transient_continuous_effects.iter().enumerate() {
+            if let Some(condition) = tce.condition.as_ref().and_then(|condition| {
+                pin.condition(
+                    condition,
+                    PinnedHolder::Carrier {
+                        controller: tce.controller,
+                        source_id: tce.source_id,
+                    },
+                )
+            }) {
+                condition_rewrites.push((tce_index, condition));
             }
+            let copy_recipient = tce
+                .affected_recipient
+                .map(|recipient| recipient.object_id)
+                .or(match &tce.affected {
+                    TargetFilter::SpecificObject { id } => Some(*id),
+                    _ => None,
+                })
+                .and_then(|recipient| {
+                    entrant
+                        .filter(|obj| obj.id == recipient)
+                        .or_else(|| scratch.objects.get(&recipient))
+                        .map(|obj| (recipient, obj.controller))
+                });
+            for (modification_index, modification) in tce.modifications.iter().enumerate() {
+                let rewritten = match modification {
+                    ContinuousModification::CopyValues { values, .. } => {
+                        copy_recipient.and_then(|(recipient, controller)| {
+                            let rewrites = pin.definitions(
+                                &values.static_definitions,
+                                PinnedHolder::Carrier {
+                                    controller,
+                                    source_id: recipient,
+                                },
+                            );
+                            if rewrites.is_empty() {
+                                return None;
+                            }
+                            let mut modification = modification.clone();
+                            if let ContinuousModification::CopyValues { values, .. } =
+                                &mut modification
+                            {
+                                write_pinned_definitions(
+                                    Arc::make_mut(&mut values.static_definitions).as_mut_slice(),
+                                    rewrites,
+                                );
+                            }
+                            Some(modification)
+                        })
+                    }
+                    other => pin.grant(other),
+                };
+                if let Some(rewritten) = rewritten {
+                    modification_rewrites.push((tce_index, modification_index, rewritten));
+                }
+            }
+        }
+        Self {
+            object_rewrites,
+            condition_rewrites,
+            modification_rewrites,
         }
     }
 
-    let mut condition_rewrites: Vec<(usize, StaticCondition)> = Vec::new();
-    let mut modification_rewrites: Vec<(usize, usize, ContinuousModification)> = Vec::new();
-    for (tce_index, tce) in scratch.transient_continuous_effects.iter().enumerate() {
-        if let Some(condition) = tce.condition.as_ref().and_then(|condition| {
-            pin.condition(
-                condition,
-                PinnedHolder::Carrier {
-                    controller: tce.controller,
-                    source_id: tce.source_id,
-                },
-            )
-        }) {
-            condition_rewrites.push((tce_index, condition));
-        }
-        let copy_recipient = tce
-            .affected_recipient
-            .map(|recipient| recipient.object_id)
-            .or(match &tce.affected {
-                TargetFilter::SpecificObject { id } => Some(*id),
-                _ => None,
-            })
-            .and_then(|recipient| {
-                scratch
-                    .objects
-                    .get(&recipient)
-                    .map(|obj| (recipient, obj.controller))
-            });
-        for (modification_index, modification) in tce.modifications.iter().enumerate() {
-            let rewritten = match modification {
-                ContinuousModification::CopyValues { values, .. } => {
-                    copy_recipient.and_then(|(recipient, controller)| {
-                        let rewrites = pin.definitions(
-                            &values.static_definitions,
-                            PinnedHolder::Carrier {
-                                controller,
-                                source_id: recipient,
-                            },
-                        );
-                        if rewrites.is_empty() {
-                            return None;
-                        }
-                        let mut modification = modification.clone();
-                        if let ContinuousModification::CopyValues { values, .. } = &mut modification
-                        {
-                            write_pinned_definitions(
-                                Arc::make_mut(&mut values.static_definitions).as_mut_slice(),
-                                rewrites,
-                            );
-                        }
-                        Some(modification)
-                    })
-                }
-                other => pin.grant(other),
+    pub(crate) fn for_token(pre_entry: &GameState, entrant: &GameObject) -> Self {
+        Self::capture(pre_entry, pre_entry, None, Some(entrant))
+    }
+
+    pub(crate) fn apply(self, scratch: &mut GameState) {
+        let Self {
+            object_rewrites,
+            condition_rewrites,
+            modification_rewrites,
+        } = self;
+        for (id, base, live) in object_rewrites {
+            let Some(obj) = scratch.objects.get_mut(&id) else {
+                continue;
             };
-            if let Some(rewritten) = rewritten {
-                modification_rewrites.push((tce_index, modification_index, rewritten));
+            if !base.is_empty() {
+                write_pinned_definitions(
+                    Arc::make_mut(&mut obj.base_static_definitions).as_mut_slice(),
+                    base,
+                );
+            }
+            for (index, rewritten) in live {
+                if let Some(def) = obj.static_definitions.get_mut(index) {
+                    *def = rewritten;
+                }
             }
         }
-    }
-    for (tce_index, condition) in condition_rewrites {
-        if let Some(tce) = scratch.transient_continuous_effects.get_mut(tce_index) {
-            tce.condition = Some(condition);
+
+        for (tce_index, condition) in condition_rewrites {
+            if let Some(tce) = scratch.transient_continuous_effects.get_mut(tce_index) {
+                tce.condition = Some(condition);
+            }
         }
-    }
-    for (tce_index, modification_index, rewritten) in modification_rewrites {
-        if let Some(modification) = scratch
-            .transient_continuous_effects
-            .get_mut(tce_index)
-            .and_then(|tce| tce.modifications.get_mut(modification_index))
-        {
-            *modification = rewritten;
+        for (tce_index, modification_index, rewritten) in modification_rewrites {
+            if let Some(modification) = scratch
+                .transient_continuous_effects
+                .get_mut(tce_index)
+                .and_then(|tce| tce.modifications.get_mut(modification_index))
+            {
+                *modification = rewritten;
+            }
         }
     }
 }
@@ -5352,6 +5403,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown

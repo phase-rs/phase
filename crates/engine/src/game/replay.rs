@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 
 use thiserror::Error;
 
-use crate::database::CardDatabase;
+use crate::database::{CardDatabase, ComboTable};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
 use crate::types::replay::{
@@ -78,8 +78,9 @@ pub enum ReplayError {
 pub fn reconstruct_initial_state(
     header: &ReplayHeader,
     db: Option<&std::sync::Arc<CardDatabase>>,
+    combos: &ComboTable,
 ) -> Result<GameState, ReplayError> {
-    reconstruct_initial_state_for_version(header, db, REPLAY_FORMAT_VERSION)
+    reconstruct_initial_state_for_version(header, db, combos, REPLAY_FORMAT_VERSION)
 }
 
 /// `reconstruct_initial_state` for a recording made in `format_version`, which
@@ -87,6 +88,7 @@ pub fn reconstruct_initial_state(
 fn reconstruct_initial_state_for_version(
     header: &ReplayHeader,
     db: Option<&std::sync::Arc<CardDatabase>>,
+    combos: &ComboTable,
     format_version: u32,
 ) -> Result<GameState, ReplayError> {
     let mut state = GameState::new(
@@ -117,7 +119,7 @@ fn reconstruct_initial_state_for_version(
 
     match (&header.deck_data, db) {
         (Some(deck_data), Some(db)) => {
-            let payload = resolve_deck_list(db, deck_data);
+            let payload = resolve_deck_list(db, combos, deck_data);
             load_and_hydrate_decks(&mut state, &payload, Some(&**db));
             state.all_card_names = db.card_names().into();
             // CR 707.2 + CR 202.3: a replayed Momir game draws its random
@@ -161,6 +163,7 @@ impl ReplayPlayer {
     pub fn load(
         log: ReplayLog,
         db: Option<&std::sync::Arc<CardDatabase>>,
+        combos: &ComboTable,
     ) -> Result<Self, ReplayError> {
         let version = match log.format_version {
             Some(version @ (2 | 3 | REPLAY_FORMAT_VERSION)) => version,
@@ -168,7 +171,7 @@ impl ReplayPlayer {
             None => return Err(ReplayError::MissingFormatVersion),
         };
         validate_resolve_all_boundaries(&log)?;
-        let initial = reconstruct_initial_state_for_version(&log.header, db, version)?;
+        let initial = reconstruct_initial_state_for_version(&log.header, db, combos, version)?;
         let mut checkpoints = BTreeMap::new();
         checkpoints.insert(0, initial);
         Ok(Self {
@@ -467,7 +470,8 @@ mod tests {
     fn load_rejects_missing_format_version_before_reconstruction() {
         let mut log = ReplayLog::new(two_player_header(1));
         log.format_version = None;
-        let error = ReplayPlayer::load(log, None).expect_err("legacy replay must be rejected");
+        let error = ReplayPlayer::load(log, None, &ComboTable::default())
+            .expect_err("legacy replay must be rejected");
         assert!(matches!(error, ReplayError::MissingFormatVersion));
     }
 
@@ -475,7 +479,8 @@ mod tests {
     fn load_rejects_unknown_format_version_before_reconstruction() {
         let mut log = ReplayLog::new(two_player_header(1));
         log.format_version = Some(REPLAY_FORMAT_VERSION + 1);
-        let error = ReplayPlayer::load(log, None).expect_err("future replay must be rejected");
+        let error = ReplayPlayer::load(log, None, &ComboTable::default())
+            .expect_err("future replay must be rejected");
         assert!(matches!(
             error,
             ReplayError::UnsupportedFormatVersion { version }
@@ -487,14 +492,14 @@ mod tests {
     fn version_two_rejects_resolve_all_boundaries() {
         let mut legacy = ReplayLog::new(two_player_header(2));
         legacy.format_version = Some(2);
-        ReplayPlayer::load(legacy.clone(), None)
+        ReplayPlayer::load(legacy.clone(), None, &ComboTable::default())
             .expect("v2 replay without Resolve All boundaries remains readable");
 
         legacy.resolve_all_boundaries.push(RecordedResolveAll {
             after_action_count: 1,
             requester: PlayerId(0),
         });
-        let error = ReplayPlayer::load(legacy, None)
+        let error = ReplayPlayer::load(legacy, None, &ComboTable::default())
             .expect_err("v2 cannot represent an atomic Resolve All boundary");
         assert!(matches!(
             error,
@@ -540,7 +545,7 @@ mod tests {
     fn load_at_version(header: &ReplayHeader, format_version: u32) -> ReplayPlayer {
         let mut log = ReplayLog::new(header.clone());
         log.format_version = Some(format_version);
-        ReplayPlayer::load(log, None).expect("a supported version loads")
+        ReplayPlayer::load(log, None, &ComboTable::default()).expect("a supported version loads")
     }
 
     /// CR 103.1: a version-4 recording starts at the prompt and replays the
@@ -548,7 +553,7 @@ mod tests {
     #[test]
     fn recorded_choice_replays_from_the_prompt() -> Result<(), ReplayError> {
         let header = contest_header(FormatConfig::standard(), 2, 42);
-        let mut live = reconstruct_initial_state(&header, None)?;
+        let mut live = reconstruct_initial_state(&header, None, &ComboTable::default())?;
         let WaitingFor::ChooseStartingPlayer { player: winner, .. } = live.waiting_for else {
             panic!("a current-format contest header reconstructs to the CR 103.1 choice");
         };
@@ -558,7 +563,7 @@ mod tests {
         let mut log = ReplayLog::new(header);
         log.push_action(winner, answer);
 
-        let mut player = ReplayPlayer::load(log, None)?;
+        let mut player = ReplayPlayer::load(log, None, &ComboTable::default())?;
         assert_eq!(player.len(), 1, "the choice is the one recorded action");
         assert!(matches!(
             player.seek(0)?.waiting_for,
@@ -668,7 +673,7 @@ mod tests {
         ];
 
         for malformed in [zero, past_end, unordered, duplicate] {
-            let error = ReplayPlayer::load(malformed, None)
+            let error = ReplayPlayer::load(malformed, None, &ComboTable::default())
                 .expect_err("v3 boundary anchors must be in-range, unique, and ordered");
             assert!(matches!(error, ReplayError::Desync { .. }));
         }
@@ -680,7 +685,8 @@ mod tests {
         log.push_action(PlayerId(0), GameAction::PassPriority);
         log.push_resolve_all_boundary(PlayerId(0));
 
-        let mut replay = ReplayPlayer::load(log, None).expect("boundary shape is valid");
+        let mut replay =
+            ReplayPlayer::load(log, None, &ComboTable::default()).expect("boundary shape is valid");
         let error = replay
             .seek(1)
             .expect_err("a due Resolve All boundary must not be silently ignored");
@@ -719,7 +725,8 @@ mod tests {
         log.push_action(PlayerId(1), grant);
         log.push_resolve_all_boundary(PlayerId(2));
 
-        let mut replay = ReplayPlayer::load(log, None).expect("boundary shape is valid");
+        let mut replay =
+            ReplayPlayer::load(log, None, &ComboTable::default()).expect("boundary shape is valid");
         replay.checkpoints.insert(0, initial);
         let error = replay
             .seek(2)
@@ -796,7 +803,7 @@ mod tests {
     #[test]
     fn replay_player_reconstructs_every_recorded_index() {
         let header = two_player_header(99);
-        let mut live = reconstruct_initial_state(&header, None)
+        let mut live = reconstruct_initial_state(&header, None, &ComboTable::default())
             .expect("deck_data is None, so reconstruction cannot fail");
 
         let mut log = ReplayLog::new(header);
@@ -821,8 +828,8 @@ mod tests {
         );
         assert_eq!(log.actions.len(), live_snapshots.len() - 1);
 
-        let mut player =
-            ReplayPlayer::load(log, None).expect("deck_data is None, so load cannot fail");
+        let mut player = ReplayPlayer::load(log, None, &ComboTable::default())
+            .expect("deck_data is None, so load cannot fail");
         assert_eq!(player.len(), live_snapshots.len() as u32 - 1);
 
         for (index, expected) in live_snapshots.iter().enumerate() {
@@ -894,7 +901,8 @@ mod tests {
             .expect("the fixture's Resolve All prefix is representable");
         log.push_resolve_all_boundary(PlayerId(0));
 
-        let mut replay = ReplayPlayer::load(log, None).expect("the atomic boundary is replayable");
+        let mut replay = ReplayPlayer::load(log, None, &ComboTable::default())
+            .expect("the atomic boundary is replayable");
         replay.checkpoints.insert(0, initial);
         let replay_len = replay.len();
         let reconstructed = replay
@@ -908,7 +916,7 @@ mod tests {
     #[test]
     fn replay_player_seeks_out_of_order_and_caches_correctly() {
         let header = two_player_header(42);
-        let mut live = reconstruct_initial_state(&header, None)
+        let mut live = reconstruct_initial_state(&header, None, &ComboTable::default())
             .expect("deck_data is None, so reconstruction cannot fail");
         let mut log = ReplayLog::new(header);
 
@@ -922,8 +930,8 @@ mod tests {
         let total = log.actions.len() as u32;
         assert!(total >= 3);
 
-        let mut player =
-            ReplayPlayer::load(log, None).expect("deck_data is None, so load cannot fail");
+        let mut player = ReplayPlayer::load(log, None, &ComboTable::default())
+            .expect("deck_data is None, so load cannot fail");
 
         // Seek forward, then back, then forward again — exercises both the
         // checkpoint-cache hit path and the nearest-checkpoint replay path.
@@ -941,13 +949,13 @@ mod tests {
         let mut header = two_player_header(13);
         header.deck_data = Some(crate::game::deck_loading::DeckList::default());
 
-        let err = reconstruct_initial_state(&header, None)
+        let err = reconstruct_initial_state(&header, None, &ComboTable::default())
             .expect_err("deck_data present with no CardDatabase must error, not silently reconstruct empty libraries");
         assert!(matches!(err, ReplayError::MissingCardDatabase));
 
         // ReplayPlayer::load propagates the same failure.
         let log = ReplayLog::new(header);
-        let load_err = ReplayPlayer::load(log, None)
+        let load_err = ReplayPlayer::load(log, None, &ComboTable::default())
             .expect_err("load must surface the same MissingCardDatabase failure");
         assert!(matches!(load_err, ReplayError::MissingCardDatabase));
     }
@@ -971,7 +979,7 @@ mod tests {
             deck_data: None,
         };
 
-        let state = reconstruct_initial_state(&header, None)
+        let state = reconstruct_initial_state(&header, None, &ComboTable::default())
             .expect("deck_data is None, so reconstruction cannot fail");
 
         // Both seats must be in debug_permitted, mirroring initialize_game.
@@ -990,8 +998,9 @@ mod tests {
 
         // A non-sandbox game must leave debug_permitted empty.
         let non_sandbox_header = two_player_header(7);
-        let non_sandbox = reconstruct_initial_state(&non_sandbox_header, None)
-            .expect("non-sandbox deck_data is None");
+        let non_sandbox =
+            reconstruct_initial_state(&non_sandbox_header, None, &ComboTable::default())
+                .expect("non-sandbox deck_data is None");
         assert!(
             non_sandbox.debug_permitted.is_empty(),
             "non-sandbox reconstruct must leave debug_permitted empty"
@@ -1001,7 +1010,7 @@ mod tests {
         // pre-seeded state must produce the same permission set as the live
         // game — if the set were empty (the pre-fix bug), remove would be a
         // no-op and the reconstructed state would diverge.
-        let mut live = reconstruct_initial_state(&header, None).unwrap();
+        let mut live = reconstruct_initial_state(&header, None, &ComboTable::default()).unwrap();
         let mut log = ReplayLog::new(header.clone());
 
         apply(
@@ -1028,7 +1037,7 @@ mod tests {
         );
 
         // Reconstruct to the same point via replay.
-        let mut player = ReplayPlayer::load(log, None).unwrap();
+        let mut player = ReplayPlayer::load(log, None, &ComboTable::default()).unwrap();
         let replayed = player.seek(1).unwrap();
         assert_eq!(
             replayed.debug_permitted, live.debug_permitted,
@@ -1040,8 +1049,8 @@ mod tests {
     fn replay_player_seek_clamps_to_length_and_handles_empty_log() {
         let header = two_player_header(7);
         let log = ReplayLog::new(header);
-        let mut player =
-            ReplayPlayer::load(log, None).expect("deck_data is None, so load cannot fail");
+        let mut player = ReplayPlayer::load(log, None, &ComboTable::default())
+            .expect("deck_data is None, so load cannot fail");
 
         assert_eq!(player.len(), 0);
         assert!(player.is_empty());
