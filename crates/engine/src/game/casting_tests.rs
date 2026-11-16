@@ -3554,16 +3554,13 @@ fn pending_next_spell_chosen_creature_type_flash_uses_grant_source() {
             source_id: Some(icon_id),
         });
 
-    let goblin_keywords = effective_spell_keywords(&state, PlayerId(0), goblin_spell_id);
     assert!(
-        goblin_keywords.iter().any(|k| matches!(k, Keyword::Flash)),
-        "Goblin spell matching Icon's chosen type must gain flash"
+        spell_has_effective_flash(&state, PlayerId(0), goblin_spell_id, false),
+        "Goblin spell matching Icon's chosen type may be cast as though it had flash"
     );
-
-    let elf_keywords = effective_spell_keywords(&state, PlayerId(0), elf_spell_id);
     assert!(
-        !elf_keywords.iter().any(|k| matches!(k, Keyword::Flash)),
-        "Elf spell not matching Icon's chosen type must not gain flash"
+        !spell_has_effective_flash(&state, PlayerId(0), elf_spell_id, false),
+        "Elf spell not matching Icon's chosen type has no flash permission"
     );
 
     state.pending_next_spell_modifiers.clear();
@@ -3577,11 +3574,8 @@ fn pending_next_spell_chosen_creature_type_flash_uses_grant_source() {
             )),
             source_id: None,
         });
-    let goblin_without_source = effective_spell_keywords(&state, PlayerId(0), goblin_spell_id);
     assert!(
-        !goblin_without_source
-            .iter()
-            .any(|k| matches!(k, Keyword::Flash)),
+        !spell_has_effective_flash(&state, PlayerId(0), goblin_spell_id, false),
         "chosen-type filter without grant source must not match the cast spell"
     );
 }
@@ -4924,6 +4918,7 @@ fn record_one_spell_cast_this_turn(state: &mut GameState, player: PlayerId) {
             cast_variant: CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         }]),
     );
@@ -13072,6 +13067,7 @@ fn self_cost_reduction_applies_from_graveyard() {
                 cast_variant: CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             },
             crate::types::SpellCastRecord {
@@ -13088,6 +13084,7 @@ fn self_cost_reduction_applies_from_graveyard() {
                 cast_variant: CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             },
         ]),
@@ -19404,6 +19401,7 @@ fn gift_recipient_auto_cast_remains_offered_and_reaches_gift_recipient_choice() 
     let WaitingFor::ChooseGiftRecipient {
         pending_cast,
         candidates,
+        purpose,
         ..
     } = &state.waiting_for
     else {
@@ -19411,6 +19409,11 @@ fn gift_recipient_auto_cast_remains_offered_and_reaches_gift_recipient_choice() 
     };
     assert_eq!(pending_cast.object_id, spell);
     assert_eq!(candidates, &vec![PlayerId(1), PlayerId(2)]);
+    // CR 702.174a: the Gift prompt keeps the Gift purpose (the default wire shape).
+    assert_eq!(
+        purpose,
+        &crate::types::game_state::CastOpponentChoicePurpose::Gift
+    );
 }
 
 #[test]
@@ -22593,13 +22596,11 @@ fn activation_restriction_only_once_each_turn_resets_after_source_reenters() {
     zones::move_to_zone(&mut state, source, Zone::Stack, &mut events);
     zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
 
-    assert_eq!(
-        state
-            .activated_abilities_this_turn
-            .get(&(source, 0))
-            .copied(),
-        None
-    );
+    // CR 602.5c: the counter is keyed by the resolved acquisition, derived
+    // the same way at check and record time.
+    let key = restrictions::ability_usage_key(&state, source, 0)
+        .expect("the printed ability resolves after re-entry");
+    assert_eq!(state.activated_abilities_this_turn.get(&key).copied(), None);
     handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events)
         .expect("re-entered permanent is a new object for activation limits");
 }
@@ -22635,13 +22636,11 @@ fn activation_restriction_only_once_resets_after_source_reenters() {
     zones::move_to_zone(&mut state, source, Zone::Stack, &mut events);
     zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
 
-    assert_eq!(
-        state
-            .activated_abilities_this_game
-            .get(&(source, 0))
-            .copied(),
-        None
-    );
+    // CR 602.5c: the counter is keyed by the resolved acquisition, derived
+    // the same way at check and record time.
+    let key = restrictions::ability_usage_key(&state, source, 0)
+        .expect("the printed ability resolves after re-entry");
+    assert_eq!(state.activated_abilities_this_game.get(&key).copied(), None);
     handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events)
         .expect("re-entered permanent is a new object for activation limits");
 }
@@ -23138,11 +23137,11 @@ fn return_to_hand_cost_moves_selected_permanent_before_activation() {
     // valid "target creature". auto_select_targets_for_ability picks the sole
     // legal target and pushes the ability to the stack without a TargetSelection
     // round-trip, which is why activated_abilities_this_turn is already incremented.
+    // CR 602.5c: keyed by the resolved acquisition, not the index.
+    let key = restrictions::ability_usage_key(&state, source, 0)
+        .expect("the Ranger ability resolves after cost payment");
     assert_eq!(
-        state
-            .activated_abilities_this_turn
-            .get(&(source, 0))
-            .copied(),
+        state.activated_abilities_this_turn.get(&key).copied(),
         Some(1)
     );
 }
@@ -23522,11 +23521,11 @@ fn mana_leg_detour_skips_vanilla_mana_tap_cost() {
         state.objects[&source].tapped,
         "the {{T}} leg must tap the source on the direct path"
     );
+    // CR 602.5c: keyed by the resolved acquisition, not the index.
+    let key = restrictions::ability_usage_key(&state, source, 0)
+        .expect("the printed ability resolves on the direct path");
     assert_eq!(
-        state
-            .activated_abilities_this_turn
-            .get(&(source, 0))
-            .copied(),
+        state.activated_abilities_this_turn.get(&key).copied(),
         Some(1),
         "the ability must be pushed on the unchanged direct path"
     );
@@ -31906,6 +31905,7 @@ fn first_qualified_spell_reducer_only_applies_to_first_matching_spell() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         }]),
     );
@@ -32026,6 +32026,7 @@ fn first_x_spell_reducer_uses_x_filter_dynamic_counter_count_and_first_gate() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         }]),
     );
@@ -32106,6 +32107,7 @@ fn opponent_first_noncreature_tax_uses_caster_history() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         }]),
     );
@@ -34212,9 +34214,11 @@ fn escape_phyrexian_cost_deducts_life_after_exile() {
         WaitingFor::PayCost {
             kind: PayCostKind::ExileFromZone { .. },
             choices: cards,
-            resume: CostResume::Spell {
-                spell: pending_cast,
-            },
+            resume:
+                CostResume::SpellCost {
+                    spell: pending_cast,
+                    ..
+                },
             count: 3,
             ..
         } => (cards, pending_cast),
@@ -34230,6 +34234,7 @@ fn escape_phyrexian_cost_deducts_life_after_exile() {
         3,
         &exile_cards,
         &chosen,
+        None,
         &mut events,
     )
     .expect("exile cost payment should succeed");
@@ -46642,6 +46647,7 @@ fn cast_spell_propagates_player_scope_into_resolved_ability() {
                 count: QuantityExpr::Fixed { value: 8 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
         )
         .player_scope(PlayerFilter::Opponent);
@@ -51076,7 +51082,7 @@ mod flash_timing_grant_seam {
     }
 
     fn sorcery_has_flash(state: &GameState, player: PlayerId, sorcery: ObjectId) -> bool {
-        effective_spell_keyword_kinds(state, player, sorcery).contains(&KeywordKind::Flash)
+        spell_has_effective_flash(state, player, sorcery, false)
     }
 
     /// (a) After +1, a sorcery is instant-castable even outside the
@@ -51271,11 +51277,9 @@ mod flash_timing_grant_seam {
     /// must let the controller cast a CREATURE spell at instant speed —
     /// and must NOT grant flash timing to a non-creature spell.
     ///
-    /// CR 601.3b + CR 702.8a: this parses to a battlefield `CastWithKeyword
-    /// { Flash }` static carrying a creature spell filter, read by
-    /// `granted_spell_keywords`. The bug was that the line parsed to the
-    /// dead `CastWithFlash` mode (no filter, never consumed) — so the grant
-    /// silently did nothing.
+    /// CR 601.3b + CR 609.4: this parses to a battlefield `CastWithFlash`
+    /// static carrying a creature spell filter, the timing permission
+    /// `spell_has_effective_flash` reads.
     #[test]
     fn vivien_creature_flash_static_scopes_to_creature_spells() {
         let mut state = setup_game_at_main_phase();
@@ -51321,14 +51325,12 @@ mod flash_timing_grant_seam {
 
         // CR 601.3b: the creature spell gains flash timing via the static.
         assert!(
-            effective_spell_keyword_kinds(&state, PlayerId(0), creature)
-                .contains(&KeywordKind::Flash),
+            spell_has_effective_flash(&state, PlayerId(0), creature, false),
             "creature spell must gain Flash from Vivien's static"
         );
         // The filter scopes to creature spells — the sorcery is unaffected.
         assert!(
-            !effective_spell_keyword_kinds(&state, PlayerId(0), sorcery)
-                .contains(&KeywordKind::Flash),
+            !spell_has_effective_flash(&state, PlayerId(0), sorcery, false),
             "sorcery must NOT gain Flash (static is creature-scoped)"
         );
     }
@@ -53792,6 +53794,7 @@ fn convoke_query_before_record_unaffected_by_snapshot() {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         }]
         .into(),

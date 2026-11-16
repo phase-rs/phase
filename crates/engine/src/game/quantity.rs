@@ -1129,6 +1129,9 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // quantity — cannot make a definition cast-unstable.
+        grant_chain: _,
     } = definition;
 
     declares_return_result.is_none()
@@ -1264,6 +1267,9 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // quantity payload.
+        grant_chain: _,
     } = definition
     else {
         return false;
@@ -5099,7 +5105,20 @@ fn resolve_ref(
                 &filter_ctx,
                 source_id,
             )
-            .len(),
+            .into_iter()
+            // CR 614.1c + CR 614.12 + CR 608.2h: an entry-counter
+            // quantity reads the population before entry, even when a copy
+            // answer has physically placed the projected entrant on the
+            // battlefield. Keep its characteristics available to source and
+            // chosen-attribute reads; exclude only its population membership.
+            .filter(|id| {
+                Some(*id) != ctx.entering
+                    || state
+                        .objects
+                        .get(id)
+                        .is_none_or(|obj| obj.zone != Zone::Battlefield)
+            })
+            .count(),
         ),
         // CR 201.2 + CR 603.4: Count of objects matching `filter`,
         // deduplicated by the listed `qualities`. Each object contributes a
@@ -8601,6 +8620,35 @@ where
             let expects_battlefield = ability.is_none_or(|a| a.trigger_source.is_some());
             if expects_battlefield {
                 read_object_pt_by_id(state, ctx.source, &obj_extract, &lki_extract).unwrap_or(0)
+            } else if let Some(incarnation) = ability
+                .and_then(|a| a.source_incarnation)
+                // CR 400.7 + CR 602.2a: a snapshot at the captured incarnation
+                // proves the source LEFT that incarnation (a departure from the
+                // battlefield, exile or stack). A source that paid its own move
+                // cost has `source_incarnation` stamped AFTER the cost, so it
+                // has no snapshot there and keeps its live read — the Scavenge
+                // shape, a graveyard ability reading the live card.
+                .filter(|incarnation| {
+                    state
+                        .lki_by_incarnation
+                        .get(&ctx.source)
+                        .is_some_and(|history| history.contains_key(incarnation))
+                })
+            {
+                // CR 608.2h: an activated ability's source is read from the
+                // incarnation that activated it. Grenzo, Dungeon Warden's
+                // "power less than or equal to Grenzo's power" is activated on
+                // the battlefield; if Grenzo leaves in response, the moved card
+                // is compared against the power it last had there, not the base
+                // P/T of the graveyard card that now occupies the storage id.
+                read_object_pt_by_id_for_incarnation(
+                    state,
+                    ctx.source,
+                    Some(incarnation),
+                    &obj_extract,
+                    &lki_extract,
+                )
+                .unwrap_or(0)
             } else {
                 state
                     .objects
@@ -19688,6 +19736,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -19704,6 +19753,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -19816,6 +19866,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }
         }

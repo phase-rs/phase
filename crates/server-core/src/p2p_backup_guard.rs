@@ -76,7 +76,27 @@ pub fn guard_p2p_backup(host_peer_id: &str, snapshot_json: &str) -> Result<(), S
 
 /// Keys stripped from a P2P host backup snapshot before SQLite persistence or
 /// HTTP response. These are session credentials, not recoverable draft state.
-const P2P_BACKUP_SECRET_KEYS: &[&str] = &["seatTokens", "kickedTokens", "booster_pack_pool"];
+///
+/// `deckSubmissionReceipts` and `perSeatWorkspaceSnapshots` are deck copies, not
+/// credentials, but they share this list's one rule: nothing a pod guest could
+/// read back may reveal another seat's submitted deck. A receipt's
+/// `payloadFingerprint` is the submitted card-name/count JSON itself (not a
+/// one-way hash), and a workspace snapshot is the seat's main/sideboard
+/// partition and virtual basics. The host's IndexedDB copy keeps both.
+///
+/// `launchDigests` (and the per-command `launchDigest` / `payloadDigest`
+/// removed in `redact_intergame_command_launch_pools`) are unsalted 32-bit
+/// checksums of deck-bearing payloads: a pod member who knows a candidate deck
+/// or sideboard partition can test it against them offline, so a retained
+/// digest is a verification oracle for the contents removed here.
+const P2P_BACKUP_SECRET_KEYS: &[&str] = &[
+    "seatTokens",
+    "kickedTokens",
+    "booster_pack_pool",
+    "deckSubmissionReceipts",
+    "perSeatWorkspaceSnapshots",
+    "launchDigests",
+];
 
 /// Host snapshot field carrying a serialized [`draft_core::types::DraftSession`].
 const DRAFT_SESSION_JSON_KEY: &str = "draftSessionJson";
@@ -98,6 +118,9 @@ const DRAFT_SESSION_JSON_KEY: &str = "draftSessionJson";
 ///     guest in the pod can, so echoing it hands an opponent the answer.
 ///   * `current_pack` — the booster a seat is looking at right now, which in a
 ///     pick-and-pass draft is the pick they are about to make.
+///   * `submitted_decks` — every seat's accepted deck (main, commanders,
+///     companion, printings). Private until the match launches it to the
+///     opponent; the backup row is readable by any pod guest.
 ///   * `booster_pack_pool` — the cube/source card list the pods were built from.
 ///     Folded in from a bespoke `session.remove` that sat beside this loop: it
 ///     made the constant read as four keys to anyone comparing it against the
@@ -113,7 +136,15 @@ const NESTED_DRAFT_SECRET_KEYS: &[&str] = &[
     "pools",
     "current_pack",
     "booster_pack_pool",
+    "submitted_decks",
 ];
+
+/// Launch-descriptor keys that hold a seat's deck (`DraftMatchDeckPayload` for
+/// host/bot launches, `DraftDeckPayload` for a guest launch).
+const LAUNCH_DECK_KEYS: &[&str] = &["deckPayload", "localDeck"];
+
+/// Deck contents carried by a held `SubmitSideboard` intergame command payload.
+const COMMAND_PAYLOAD_DECK_KEYS: &[&str] = &["main", "sideboard"];
 
 /// Remove session credentials from a host backup snapshot JSON blob.
 ///
@@ -143,6 +174,7 @@ fn redact_secret_keys(obj: &mut Map<String, Value>) {
     redact_pool_input_cube_list(obj);
     redact_match_launch_pools(obj);
     redact_intergame_command_launch_pools(obj);
+    redact_bo3_state_decks(obj);
 }
 
 fn redact_nested_draft_session_json(obj: &mut Map<String, Value>) {
@@ -201,8 +233,8 @@ fn redact_pool_input_cube_list(snapshot: &mut Map<String, Value>) {
     data.remove("cube_list_text");
 }
 
-/// Match launches can retain a deck payload for recovery metadata, but that
-/// payload must not turn the unauthenticated backup into a cube-list oracle.
+/// Match launches retain their deck payloads for host recovery, but the public
+/// backup must not turn the unauthenticated row into a deck or cube-list oracle.
 fn redact_match_launch_pools(snapshot: &mut Map<String, Value>) {
     let Some(Value::Array(match_launches)) = snapshot.get_mut("matchLaunches") else {
         return;
@@ -217,16 +249,21 @@ fn redact_match_launch_pools(snapshot: &mut Map<String, Value>) {
         else {
             continue;
         };
-        let Some(deck_payload) = launch.get_mut("deckPayload").and_then(Value::as_object_mut)
-        else {
-            continue;
-        };
-        deck_payload.remove("booster_pack_pool");
+        remove_launch_decks(launch);
     }
 }
 
-/// Held intergame commands retain a launch payload for host recovery. Public
-/// backup storage must project this alias exactly as it projects match launches.
+/// A launch descriptor's decks are another seat's private contents: drop the
+/// whole deck payload (which also carries the booster pool), not only the pool.
+fn remove_launch_decks(launch: &mut Map<String, Value>) {
+    for key in LAUNCH_DECK_KEYS {
+        launch.remove(*key);
+    }
+}
+
+/// Held intergame commands retain a launch payload for host recovery and, for a
+/// sideboard submission, the submitted partition itself. Public backup storage
+/// must project both exactly as it projects match launches.
 fn redact_intergame_command_launch_pools(snapshot: &mut Map<String, Value>) {
     let Some(Value::Array(commands)) = snapshot.get_mut("intergameCommands") else {
         return;
@@ -235,16 +272,32 @@ fn redact_intergame_command_launch_pools(snapshot: &mut Map<String, Value>) {
         let Some(command) = command.as_object_mut() else {
             continue;
         };
-        let Some(launch) = command
+        if let Some(launch) = command
             .get_mut("launchPayload")
             .and_then(Value::as_object_mut)
-        else {
-            continue;
-        };
-        let Some(deck) = launch.get_mut("deckPayload").and_then(Value::as_object_mut) else {
-            continue;
-        };
-        deck.remove("booster_pack_pool");
+        {
+            remove_launch_decks(launch);
+        }
+        if let Some(payload) = command.get_mut("payload").and_then(Value::as_object_mut) {
+            for key in COMMAND_PAYLOAD_DECK_KEYS {
+                payload.remove(*key);
+            }
+        }
+        command.remove("launchDigest");
+        command.remove("payloadDigest");
+    }
+}
+
+/// Bo3 phase data retains each seat's current main/sideboard partition for the
+/// host's timeout default; the public copy keeps the phase, not the decks.
+fn redact_bo3_state_decks(snapshot: &mut Map<String, Value>) {
+    let Some(Value::Array(matches)) = snapshot.get_mut("bo3State") else {
+        return;
+    };
+    for bo3_match in matches {
+        if let Some(bo3_match) = bo3_match.as_object_mut() {
+            bo3_match.remove("decks");
+        }
     }
 }
 

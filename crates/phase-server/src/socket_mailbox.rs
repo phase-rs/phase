@@ -569,6 +569,7 @@ mod tests {
         let log: Vec<_> = (0..events.len() as u32)
             .map(|seq| GameLogEntry {
                 seq,
+                game_number: 1,
                 turn: 1,
                 phase: Phase::PreCombatMain,
                 category: LogCategory::Game,

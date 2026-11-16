@@ -1276,6 +1276,7 @@
       "draw": "DRAW",
       "victory": "VICTORY",
       "defeat": "DEFEAT",
+      "complete": "GAME OVER",
       "lifeSummary": "You: <player>{{playerLife}}</player> <sep>/</sep> Opponent: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turns: {{count}}",
       "duration": "Duration: {{time}}",
@@ -1586,7 +1587,9 @@
       "titleReveal": "Reveal from Hand",
       "titleOpponentHand": "Opponent's Hand",
       "subtitleReveal": "Choose a card to reveal, or decline",
-      "subtitleChoose": "Choose a card"
+      "subtitleRevealAnyNumber": "Choose any number of cards to reveal",
+      "subtitleChoose": "Choose a card",
+      "subtitleChooseCount": "Choose {{count}} cards"
     },
     "search": {
       "title": "Search Library",
@@ -2173,6 +2176,10 @@
     "title": "Choose Gift Recipient",
     "subtitle": "Choose which opponent receives the promised gift."
   },
+  "costRecipient": {
+    "title": "Choose an Opponent",
+    "subtitle": "Choose the opponent for this cost: {{cost}}."
+  },
   "entryController": {
     "title": "Choose Entry Controller",
     "subtitle": "Choose which opponent controls this permanent as it enters."
@@ -2527,6 +2534,8 @@
       "zoneHand": "your hand",
       "discard": "Discard {{count}} {{cards}}",
       "exile": "Exile {{count}} {{cards}} from {{zone}}",
+      "haveOpponentGainLife": "Have an opponent gain {{amount}} life",
+      "haveEachOtherPlayerGainLife": "Have each other player gain {{amount}} life",
       "reveal": "Reveal {{count}} {{cards}} from {{zone}}"
     }
   },
@@ -2692,6 +2701,7 @@
   },
   "outsideGame": {
     "fromExile": "From exile",
+    "fromCompanion": "From companion",
     "fromSideboard": "From sideboard",
     "fromBoosterPack": "From {{setCode}} booster pack",
     "fromCubeBoosterPack": "From a Cube booster pack"

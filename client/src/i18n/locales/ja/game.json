@@ -1276,6 +1276,7 @@
       "draw": "引き分け",
       "victory": "勝利",
       "defeat": "敗北",
+      "complete": "ゲーム終了",
       "lifeSummary": "あなた：<player>{{playerLife}}</player> <sep>/</sep> 対戦相手：<opponent>{{opponentLife}}</opponent>",
       "turns": "ターン数：{{count}}",
       "duration": "対戦時間：{{time}}",
@@ -1586,7 +1587,9 @@
       "titleReveal": "手札から公開",
       "titleOpponentHand": "対戦相手の手札",
       "subtitleReveal": "公開するカードを選択するか、断る",
-      "subtitleChoose": "カードを選択"
+      "subtitleChoose": "カードを選択",
+      "subtitleRevealAnyNumber": "公開するカードを好きな枚数選択",
+      "subtitleChooseCount": "{{count}}枚のカードを選択"
     },
     "search": {
       "title": "ライブラリーを検索",
@@ -2173,6 +2176,10 @@
     "title": "贈り物の受け取り手を選択",
     "subtitle": "約束した贈り物を受け取る対戦相手を選択"
   },
+  "costRecipient": {
+    "title": "対戦相手を選択",
+    "subtitle": "このコストで選ぶ対戦相手を選んでください：{{cost}}"
+  },
   "entryController": {
     "title": "戦場に出る際のコントローラーを選択",
     "subtitle": "このパーマネントが戦場に出る際にコントロールする対戦相手を選択"
@@ -2527,6 +2534,8 @@
       "zoneHand": "あなたの手札",
       "discard": "{{count}}{{cards}}を捨てる",
       "exile": "{{zone}}から{{count}}{{cards}}を追放",
+      "haveOpponentGainLife": "対戦相手1人に{{amount}}点のライフを得させる",
+      "haveEachOtherPlayerGainLife": "他の各プレイヤーに{{amount}}点のライフを得させる",
       "reveal": "{{zone}}から{{count}}{{cards}}を公開する"
     }
   },
@@ -2672,6 +2681,7 @@
   },
   "outsideGame": {
     "fromExile": "追放領域から",
+    "fromCompanion": "相棒から",
     "fromSideboard": "サイドボードから",
     "fromBoosterPack": "{{setCode}}ブースターパックから",
     "fromCubeBoosterPack": "キューブ・ブースターパックから"

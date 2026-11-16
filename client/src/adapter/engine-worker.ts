@@ -9,6 +9,8 @@ import init, {
   take_last_panic_message,
   initialize_game,
   initialize_multiplayer_host_game,
+  initialize_draft_match_game,
+  initialize_draft_match_host_game,
   submit_action,
   drive_contest_js,
   request_takeback_js,
@@ -72,6 +74,7 @@ import {
   type AiActionProposal,
   type GameAction,
   type GameEvent,
+  type LlmClockReading,
 } from "./types";
 import type {
   InteractionPreviewRequest,
@@ -96,6 +99,8 @@ type EngineRequest =
       matchConfig: unknown | null;
       playerCount?: number;
       firstPlayer?: number;
+      /** Present only for an accepted draft's match: selects the draft-match initializer. */
+      draftSessionMinDeckSize?: number;
     }
   | {
       type: "initializeMultiplayerHostGame";
@@ -106,6 +111,7 @@ type EngineRequest =
       matchConfig: unknown | null;
       playerCount?: number;
       firstPlayer?: number;
+      draftSessionMinDeckSize?: number;
     }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
   | {
@@ -146,15 +152,19 @@ type EngineRequest =
       playerId: number;
       endpointJson: string;
       historyJson: string;
+      settingsRevision: number;
+      clock: LlmClockReading;
     }
   | {
       type: "getAiActionProposalFromLlmResponse";
       id: number;
       playerId: number;
       fingerprint: string;
+      threadTurn: number | null;
       provider: string;
       status: number;
       responseBody: string;
+      clock: LlmClockReading;
     }
   | { type: "llmProviderCatalog"; id: number }
   | { type: "restoreState"; id: number; stateJson: string }
@@ -394,14 +404,26 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
           break;
         }
-        const gameResult = initialize_game(
-          msg.deckData ?? null,
-          msg.seed,
-          msg.formatConfig ?? null,
-          msg.matchConfig ?? null,
-          msg.playerCount ?? undefined,
-          msg.firstPlayer ?? undefined,
-        );
+        // The draft session's minimum selects the distinct draft-match
+        // initializer; the generic one takes no minimum at all.
+        const gameResult = msg.draftSessionMinDeckSize === undefined
+          ? initialize_game(
+            msg.deckData ?? null,
+            msg.seed,
+            msg.formatConfig ?? null,
+            msg.matchConfig ?? null,
+            msg.playerCount ?? undefined,
+            msg.firstPlayer ?? undefined,
+          )
+          : initialize_draft_match_game(
+            msg.deckData ?? null,
+            msg.seed,
+            msg.formatConfig ?? null,
+            msg.matchConfig ?? null,
+            msg.playerCount ?? undefined,
+            msg.firstPlayer ?? undefined,
+            msg.draftSessionMinDeckSize,
+          );
         const failure = classifyInitFailure(gameResult);
         if (failure) {
           initFailureError(msg.id, failure);
@@ -425,14 +447,26 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         // The host entry point refuses an engine that already holds a game and
         // claims the multiplayer flag alongside the install — both inside this
         // one synchronous handler, so no other posted message can interleave.
-        const gameResult = initialize_multiplayer_host_game(
-          msg.deckData ?? null,
-          msg.seed,
-          msg.formatConfig ?? null,
-          msg.matchConfig ?? null,
-          msg.playerCount ?? undefined,
-          msg.firstPlayer ?? undefined,
-        );
+        // The draft session's minimum selects the distinct draft-match
+        // initializer; the generic one takes no minimum at all.
+        const gameResult = msg.draftSessionMinDeckSize === undefined
+          ? initialize_multiplayer_host_game(
+            msg.deckData ?? null,
+            msg.seed,
+            msg.formatConfig ?? null,
+            msg.matchConfig ?? null,
+            msg.playerCount ?? undefined,
+            msg.firstPlayer ?? undefined,
+          )
+          : initialize_draft_match_host_game(
+            msg.deckData ?? null,
+            msg.seed,
+            msg.formatConfig ?? null,
+            msg.matchConfig ?? null,
+            msg.playerCount ?? undefined,
+            msg.firstPlayer ?? undefined,
+            msg.draftSessionMinDeckSize,
+          );
         const failure = classifyInitFailure(gameResult);
         if (failure) {
           initFailureError(msg.id, failure);
@@ -708,6 +742,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
             msg.playerId,
             msg.endpointJson,
             msg.historyJson,
+            msg.settingsRevision,
+            msg.clock.wallMs,
+            msg.clock.monotonicMs,
           ) ?? null,
         );
         break;
@@ -719,9 +756,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           getAiActionProposalFromLlmResponse(
             msg.playerId,
             msg.fingerprint,
+            msg.threadTurn,
             msg.provider,
             msg.status,
             msg.responseBody,
+            msg.clock.wallMs,
+            msg.clock.monotonicMs,
           ) ?? null,
         );
         break;

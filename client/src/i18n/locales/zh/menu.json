@@ -26,7 +26,8 @@
   "home": {
     "resume": {
       "title": "继续对局",
-      "description": "从最近保存的对局的当前回合与场面状态继续。"
+      "description": "从最近保存的对局的当前回合与场面状态继续。",
+      "viewResult": "查看结果"
     },
     "setup": {
       "title": "与 AI 对战",

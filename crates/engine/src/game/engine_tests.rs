@@ -83,6 +83,7 @@ fn no_op_stack_entry(id: u64, controller: PlayerId) -> StackEntry {
 fn restored_automation_log_entry(seq: u32) -> GameLogEntry {
     GameLogEntry {
         seq,
+        game_number: 1,
         turn: 1,
         phase: Phase::PreCombatMain,
         category: LogCategory::Stack,
@@ -237,6 +238,7 @@ fn cards_revealed_events_are_remembered_publicly() {
         player: PlayerId(1),
         card_ids: vec![card_id],
         card_names: vec!["Known Card".to_string()],
+        occurrences: state.disclosed_occurrences(&[card_id]),
     }];
     let pre_state = state.clone();
 
@@ -8104,8 +8106,8 @@ fn disciple_of_bolas_uses_sacrificed_creature_power_for_life_and_draw() {
 ///
 /// CR 701.21a: sacrifice moves the chosen permanent to its owner's graveyard.
 /// The `another` qualifier parses to `FilterProp::Another`; the effect resolver
-/// builds its eligible pool via `FilterContext::from_ability` (source excluded
-/// at `filter.rs` `FilterProp::Another => object_id != source.id`).
+/// builds its eligible pool via `FilterContext::from_ability` (no recipient
+/// bound, so `FilterProp::Another` excludes the source).
 ///
 /// COST/EFFECT CLASS REDUNDANCY (fix-constraint #2): the sibling cost path
 /// (`find_eligible_sacrifice_targets` → `FilterContext::from_source`) sets
@@ -9333,6 +9335,7 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
+        deferred_life_gain_cost: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -9784,6 +9787,7 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         activation_cost_paused_on_draw: false,
         deferred_hand_discard_cost: None,
         prepaid_finalization: None,
+        deferred_life_gain_cost: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -13494,4 +13498,134 @@ fn a_finished_match_retires_the_payment_before_the_transition() {
         state.payment_transaction.is_none(),
         "the terminal transition sees no live payment descriptor"
     );
+}
+
+/// Park a copy owner for `source` that already lists `created` and has no
+/// batch left to create.
+fn park_completed_copy_owner(state: &mut GameState, source: ObjectId, created: ObjectId) {
+    state
+        .resolution_stack
+        .push_copy_token(crate::types::game_state::PendingCopyTokenResolution {
+            created_ids: vec![created],
+            remaining: std::collections::VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: source,
+            referent_set: None,
+            offered_batch: crate::types::game_state::OfferedBatchCustody::Settled,
+        });
+}
+
+fn resolution_frame_kinds(state: &GameState) -> Vec<crate::types::resolution::FrameKind> {
+    state
+        .resolution_stack
+        .iter()
+        .map(ResolutionFrame::kind)
+        .collect()
+}
+
+/// The sources of every `EffectResolved{CopyTokenOf}`, in event order.
+fn copy_token_terminals(events: &[GameEvent]) -> Vec<ObjectId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::EffectResolved {
+                kind: EffectKind::CopyTokenOf,
+                source_id,
+                ..
+            } => Some(*source_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn battlefield_object(state: &mut GameState, name: &str) -> ObjectId {
+    create_object(
+        state,
+        CardId(1),
+        PlayerId(0),
+        name.to_string(),
+        Zone::Battlefield,
+    )
+}
+
+/// U-R1 (CR 117.2e + CR 614.6): a retired post-replacement drain exposes the
+/// copy owner whose creation it replaced. That ability is still resolving, so
+/// the common priority boundary completes the owner in the same call.
+#[test]
+fn priority_boundary_completes_a_copy_owner_a_retired_drain_exposes() {
+    use crate::types::resolution::FrameKind;
+
+    let mut state = GameState::new_two_player(42);
+    let src = battlefield_object(&mut state, "Producer");
+    let a = battlefield_object(&mut state, "Token A");
+    park_completed_copy_owner(&mut state, src, a);
+    state
+        .resolution_stack
+        .push_post_replacement(PostReplacementDrainStack::default());
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    assert_eq!(
+        resolution_frame_kinds(&state),
+        vec![FrameKind::CopyToken, FrameKind::PostReplacement],
+        "REACH-GUARD: an exhausted drain over the parked copy owner"
+    );
+
+    let mut events = Vec::new();
+    resume_pending_continuation_if_priority(&mut state, &mut events)
+        .expect("the priority boundary resumes");
+
+    assert!(
+        state.resolution_stack.is_empty(),
+        "the exposed owner completes before priority, frames {:?}",
+        resolution_frame_kinds(&state)
+    );
+    assert_eq!(state.last_created_token_ids, vec![a]);
+    assert_eq!(copy_token_terminals(&events), vec![src]);
+}
+
+/// U-R2 (CR 117.2e + CR 614.6): a copy owner over an exhausted drain over the
+/// outer copy owner unwinds in one boundary call, inner owner first.
+#[test]
+fn priority_boundary_unwinds_a_nested_copy_owner_chain() {
+    use crate::types::resolution::FrameKind;
+
+    let mut state = GameState::new_two_player(42);
+    let src_a = battlefield_object(&mut state, "Outer producer");
+    let a = battlefield_object(&mut state, "Token A");
+    let src_b = battlefield_object(&mut state, "Inner producer");
+    let b = battlefield_object(&mut state, "Token B");
+    park_completed_copy_owner(&mut state, src_a, a);
+    state
+        .resolution_stack
+        .push_post_replacement(PostReplacementDrainStack::default());
+    park_completed_copy_owner(&mut state, src_b, b);
+    state.waiting_for = WaitingFor::Priority {
+        player: PlayerId(0),
+    };
+    assert_eq!(
+        resolution_frame_kinds(&state),
+        vec![
+            FrameKind::CopyToken,
+            FrameKind::PostReplacement,
+            FrameKind::CopyToken
+        ],
+        "REACH-GUARD: inner owner, exhausted drain, outer owner"
+    );
+
+    let mut events = Vec::new();
+    resume_pending_continuation_if_priority(&mut state, &mut events)
+        .expect("the priority boundary resumes");
+
+    assert!(
+        state.resolution_stack.is_empty(),
+        "the whole chain completes before priority, frames {:?}",
+        resolution_frame_kinds(&state)
+    );
+    assert_eq!(
+        copy_token_terminals(&events),
+        vec![src_b, src_a],
+        "the inner owner completes before the outer one"
+    );
+    assert_eq!(state.last_created_token_ids, vec![a]);
 }

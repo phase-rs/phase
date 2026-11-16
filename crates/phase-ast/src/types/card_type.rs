@@ -92,6 +92,11 @@ pub enum CoreType {
     /// put into the Boss graveyard. Not a permanent type, never cast, has no
     /// CR section of its own — the product booklet is the rules authority.
     Event,
+    /// CR 313: Vanguards — nontraditional cards used in the Vanguard casual
+    /// variant that remain in the command zone throughout the game (CR 313.2),
+    /// where their abilities function (CR 313.4). The engine does not run the
+    /// Vanguard variant (CR 902).
+    Vanguard,
 }
 
 impl FromStr for CoreType {
@@ -112,6 +117,7 @@ impl FromStr for CoreType {
             "Dungeon" => Ok(CoreType::Dungeon),
             "Plane" => Ok(CoreType::Plane),
             "Phenomenon" => Ok(CoreType::Phenomenon),
+            "Vanguard" => Ok(CoreType::Vanguard),
             "Scheme" => Ok(CoreType::Scheme),
             "Conspiracy" => Ok(CoreType::Conspiracy),
             "Boss" => Ok(CoreType::Boss),
@@ -137,6 +143,7 @@ impl fmt::Display for CoreType {
             CoreType::Dungeon => write!(f, "Dungeon"),
             CoreType::Plane => write!(f, "Plane"),
             CoreType::Phenomenon => write!(f, "Phenomenon"),
+            CoreType::Vanguard => write!(f, "Vanguard"),
             CoreType::Scheme => write!(f, "Scheme"),
             CoreType::Conspiracy => write!(f, "Conspiracy"),
             CoreType::Boss => write!(f, "Boss"),
@@ -212,6 +219,7 @@ impl CoreType {
             | CoreType::Dungeon
             | CoreType::Plane
             | CoreType::Phenomenon
+            | CoreType::Vanguard
             | CoreType::Scheme
             | CoreType::Conspiracy
             | CoreType::Boss
