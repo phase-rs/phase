@@ -7846,7 +7846,7 @@ mod tests {
                 assert_eq!(state.players[0].life, 1);
                 assert!(state.pending_cast.is_none());
                 assert!(state.active_payment_pins.is_empty());
-                assert!(state.pending_mana_ability.is_none());
+                assert!(!state.waiting_for.is_mana_ability_continuation());
                 assert!(state.pending_deferred_life_cost_resume.is_none());
                 assert!(state.active_casting_permission_index.is_none());
                 assert!(state.active_graveyard_permission_latch.is_none());
