@@ -32,7 +32,10 @@
 
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::AbilityKind;
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, StaticDefinition,
+    TargetFilter, TriggerDefinition, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
@@ -41,6 +44,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
@@ -228,10 +232,15 @@ fn millennium_calendar_win_fires_at_one_thousand_time_counters() {
 /// during your upkeep) puts no counters; paired positive is row 1.
 /// Row 3 — untaps during an opponent's untap step put no counters (your
 /// tapped permanents stay tapped); paired positive is row 1.
+/// Row 3a — P0 permanents untapped during P1's untap step (Seedborn-class
+/// second pass) put no counters; paired positive is row 1.
 /// Row 4 — {2},{T} doubles only your own Calendar's time counters.
 /// Row 5 — 999 counters through priority: no sacrifice, no life change;
 /// paired positive is row 6.
 /// Row 6 — 3-player win: each opponent loses 1,000 life.
+/// Single-fire pin — an unwindowed, unbatched `Untaps` fixture fires exactly
+/// once through a real untap step (sole guard of the unwindowed
+/// exactly-once half).
 fn generic_mana(n: usize) -> Vec<ManaUnit> {
     (0..n)
         .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
@@ -607,6 +616,223 @@ fn millennium_calendar_win_hits_each_opponent_in_three_player() {
     assert!(
         runner.state().stack.is_empty(),
         "completion: the stack must be empty after the win trigger resolves"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completion: the game must rest at priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Row 3a: P0 permanents untapping during P1's untap step (Seedborn-class
+/// second pass) put no time counters on The Millennium Calendar (CR 603.2:
+/// the window names YOUR untap step — `DuringPlayersTurn{Controller}` inside
+/// the `EventTime` window fails while P1 is active. CR 502.3: the Seedborn
+/// second pass untaps P0's permanents during the opponent's untap step).
+///
+/// The Seedborn-class static is installed synthetically (mirroring the
+/// `install_seedborn_static` unit helper in `turns.rs`): Seedborn Muse's
+/// Oracle is documented in `statics.rs` as "Untap all permanents you control
+/// during each other player's untap step."; a parser lowering for that line
+/// exists (`oracle_static::dispatch::parse_untaps_during_each_other_players_untap_step`),
+/// but this row pins the runtime seam rather than the parser leg, so the
+/// static is installed directly for determinism. Coverage honesty: both
+/// Calendar halves still parse from verbatim Oracle; only the
+/// Seedborn-class source is synthetic.
+///
+/// Paired positive: row 1 — the same untap inside your own untap step counts.
+/// Discrimination: reverting `DuringPlayersTurn{Controller}` flips this row
+/// 0 → N (the phase is still `Untap`, so the bare `CurrentPhaseIs` window
+/// would match).
+#[test]
+fn millennium_calendar_ignores_own_permanents_untapped_on_opponent_untap_step() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..3 {
+        scenario.add_card_to_library_top(P0, "Island");
+        scenario.add_card_to_library_top(P1, "Island");
+    }
+    let calendar = scenario
+        .add_artifact_from_oracle(P0, "The Millennium Calendar", MILLENNIUM_CALENDAR)
+        .id();
+    let muse_stand_in = scenario.add_creature(P0, "Seedborn Stand-in", 2, 2).id();
+    let own_lands = [
+        scenario.add_basic_land(P0, ManaColor::White),
+        scenario.add_basic_land(P0, ManaColor::Blue),
+    ];
+    let foe_lands = [
+        scenario.add_basic_land(P1, ManaColor::Red),
+        scenario.add_basic_land(P1, ManaColor::Green),
+    ];
+    let mut runner = scenario.build();
+    for land in own_lands.iter().chain(foe_lands.iter()) {
+        runner.state_mut().objects.get_mut(land).unwrap().tapped = true;
+    }
+    // Seedborn-class static, installed synthetically (see doc comment).
+    {
+        let def = StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent().controller(ControllerRef::You),
+            ));
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&muse_stand_in)
+            .expect("fixture Seedborn stand-in");
+        obj.static_definitions.push(def.clone());
+        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
+    }
+
+    assert!(
+        has_untaps_trigger(&runner, calendar),
+        "reach guard: the Calendar head must parse to TriggerMode::Untaps"
+    );
+
+    // Drive into P1's upkeep; P1's untap step runs on the way.
+    let turn = runner.state().turn_number;
+    let steps = drive_until(&mut runner, |state| {
+        state.turn_number == turn + 1 && state.phase == Phase::Upkeep
+    });
+    assert_eq!(
+        runner.state().active_player,
+        P1,
+        "reach guard: the drive must land in P1's upkeep"
+    );
+    assert!(
+        steps.contains(&Phase::Untap),
+        "reach guard: an untap step must have run: {steps:?}"
+    );
+    for land in foe_lands {
+        assert!(
+            !runner.state().objects[&land].tapped,
+            "reach guard: CR 502.3 must have untapped the active player's lands"
+        );
+    }
+    for land in own_lands {
+        assert!(
+            !runner.state().objects[&land].tapped,
+            "reach guard: the Seedborn second pass must have untapped P0's lands \
+             during P1's untap step"
+        );
+    }
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        time_counters(&runner, calendar),
+        0,
+        "P0 permanents untapping during P1's untap step must put no time \
+         counters on The Millennium Calendar"
+    );
+    assert_eq!(
+        runner.state().objects[&calendar].zone,
+        Zone::Battlefield,
+        "no counters means no win trigger"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "completion: the stack must be empty after the drive"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "completion: the game must rest at priority, got {:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// Single-fire pin: an UNWINDOWED, unbatched `Untaps` trigger fires exactly
+/// once when one permanent untaps in an untap step. This is the sole guard
+/// of the unwindowed exactly-once half: the pre-advance seam must drop the
+/// context (no window to keep it), and the post-advance scan must admit it
+/// exactly once (2 = double-fire, 0 = lost).
+///
+/// Fixture honesty: no corpus card parses to singular `Untaps` with
+/// `batched == false` — `try_parse_untap_trigger` requires the literal "one
+/// or more" quantifier (always `batched = true`), and the only other `Untaps`
+/// arm (`SimpleEvent::BecomesUntapped`) has zero printed triggered shapes
+/// reaching it (the named `becomes untapped` leads sit in activated-ability
+/// lines per the `oracle_trigger.rs` disjunction census; the parser's own
+/// singular test uses a synthetic line). The nearest printed card is The
+/// Ninth Doctor (a "becomes untapped during your untap step" trigger), which
+/// carries a window this pin deliberately omits. So the definition below is
+/// synthetic — but it drives the REAL pipeline (scenario → untap step →
+/// upkeep priority drain → resolution), asserting exactly one firing.
+/// Needs-assessment: needed — yes; sole guard of the unwindowed
+/// exactly-once half.
+///
+/// Reach guard: the installed definition is `Untaps` with `batched == false`
+/// and no condition.
+#[test]
+fn unwindowed_singular_untap_trigger_fires_exactly_once() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..3 {
+        scenario.add_card_to_library_top(P0, "Island");
+        scenario.add_card_to_library_top(P1, "Island");
+    }
+    let source = scenario.add_creature(P0, "Untap Witness", 2, 2).id();
+    let land = scenario.add_basic_land(P0, ManaColor::White);
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&land).unwrap().tapped = true;
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&source)
+        .expect("fixture source")
+        .push_printed_trigger(
+            TriggerDefinition::new(TriggerMode::Untaps)
+                .valid_card(TargetFilter::Typed(
+                    TypedFilter::permanent().controller(ControllerRef::You),
+                ))
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::PutCounter {
+                        target: TargetFilter::SelfRef,
+                        counter_type: CounterType::Time,
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                )),
+        );
+
+    assert!(
+        runner.state().objects[&source]
+            .trigger_definitions
+            .iter_unchecked()
+            .any(|t| t.definition.mode == TriggerMode::Untaps
+                && !t.definition.batched
+                && t.definition.condition.is_none()),
+        "reach guard: the fixture must be singular unbatched Untaps with no window"
+    );
+
+    // Drive through P1's turn into P0's next upkeep; P0's untap step runs on
+    // the way and untaps the one tapped land.
+    let turn = runner.state().turn_number;
+    let steps = drive_until(&mut runner, |state| {
+        state.turn_number == turn + 2 && state.phase == Phase::Upkeep
+    });
+    assert_eq!(
+        runner.state().active_player,
+        P0,
+        "reach guard: the drive must land in P0's next upkeep"
+    );
+    assert!(
+        steps.contains(&Phase::Untap),
+        "reach guard: an untap step must have run: {steps:?}"
+    );
+    assert!(
+        !runner.state().objects[&land].tapped,
+        "reach guard: CR 502.3 must have untapped the tapped land"
+    );
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        time_counters(&runner, source),
+        1,
+        "one permanent untapped in an untap step must fire an unwindowed \
+         singular Untaps trigger exactly once"
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "completion: the stack must be empty after the trigger resolves"
     );
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),

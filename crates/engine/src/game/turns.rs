@@ -2268,7 +2268,25 @@ pub fn begin_untap_or_subset_prompt(
             max,
         }));
     }
+    // CR 502.3: capture the fresh-slice floor before the untap runs; the seam
+    // below collects over `events[untap_start..]` only.
+    let untap_start = events.len();
     execute_untap_with_choices(state, events, &chosen_not_to_untap);
+    // CR 502.3 + CR 502.4: the untap step's turn-based action untaps the
+    // active player's permanents simultaneously, but no player receives
+    // priority during the untap step — abilities that trigger there wait for
+    // the next priority (usually the upkeep). Collect the untap-step-windowed
+    // triggers over this step's fresh `PermanentUntapped` events NOW, while
+    // `state.phase == Untap` still lets their window match; the post-advance
+    // scan re-runs the same matchers at upkeep priority, where the window
+    // reads false, so each windowed trigger is admitted exactly once.
+    // Unwindowed triggers are dropped here and admitted once by that later
+    // scan. Runs exactly once per step: the `ChooseSubset` early return above
+    // performs no untap, and every caller reaches this seam still in `Untap`.
+    super::triggers::collect_untap_step_windowed_triggers_into_deferred(
+        state,
+        &events[untap_start..],
+    );
     // CR 500.5: Untap completion owns one committed phase entry;
     // `advance_phase_once` proceeds past any skipped successor.
     match advance_phase_once(state, events) {

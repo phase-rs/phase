@@ -9965,6 +9965,92 @@ pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[Ga
     state.deferred_triggers.extend(pending);
 }
 
+/// CR 502.3 + CR 502.4: pre-advance collection for untap-step-windowed
+/// triggers. The untap step grants no priority, so a trigger whose event
+/// window is the untap step itself (`EventTime[.., CurrentPhaseIs{[Untap]}]`)
+/// can only match while the step is still in progress: the ordinary
+/// post-advance scan runs with `state.phase == Upkeep`, where that window
+/// reads false. Collect over this step's fresh `PermanentUntapped` events
+/// only, keep the windowed contexts, and park them in
+/// `state.deferred_triggers` for the upkeep-priority drain; drop everything
+/// else — the post-advance scan re-admits the unwindowed triggers exactly
+/// once there, and the windowed ones cannot re-match at upkeep.
+///
+/// Collect-only, mirroring [`collect_triggers_into_deferred`]: extends
+/// `deferred_triggers` (ordinary batch origin) only; never touches
+/// `pending_trigger`, `waiting_for`, or the stack.
+pub(crate) fn collect_untap_step_windowed_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+) {
+    let untaps: Vec<GameEvent> = events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::PermanentUntapped { .. }))
+        .cloned()
+        .collect();
+    if untaps.is_empty() {
+        return;
+    }
+    let pending = collect_pending_triggers(state, &untaps);
+    let windowed: Vec<PendingTriggerContext> = pending
+        .into_iter()
+        .filter(|context| {
+            let Some(definition_ref) = context.pending.ability.trigger_definition_ref.as_ref()
+            else {
+                return false;
+            };
+            let Some(source) = state.objects.get(&context.pending.source_id) else {
+                return false;
+            };
+            // The stacked `pending.condition` has the `EventTime` wrapper
+            // stripped (`stack_condition_for_trigger`), so resolve the live
+            // definition through the occurrence ref and read its full
+            // condition instead.
+            super::functioning_abilities::active_trigger_definitions(state, source)
+                .find(|active| active.definition_ref == *definition_ref)
+                .is_some_and(|active| {
+                    active
+                        .definition
+                        .condition
+                        .as_ref()
+                        .is_some_and(condition_carries_untap_step_window)
+                })
+        })
+        .collect();
+    state.deferred_triggers.extend(windowed);
+}
+
+/// Structural window test for
+/// [`collect_untap_step_windowed_triggers_into_deferred`]: true when the
+/// condition tree carries an untap-step `EventTime` window — an `EventTime`
+/// node whose subtree mentions `CurrentPhaseIs { phases: [Phase::Untap] }`.
+/// A bare phase check outside `EventTime` is not a window, so only
+/// `And`/`Or` are descended at the top level.
+fn condition_carries_untap_step_window(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::EventTime { condition } => condition_mentions_untap_step(condition),
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions.iter().any(condition_carries_untap_step_window)
+        }
+        _ => false,
+    }
+}
+
+/// Subtree walk for [`condition_carries_untap_step_window`]: true when any
+/// node names the untap step as the current phase.
+fn condition_mentions_untap_step(condition: &TriggerCondition) -> bool {
+    match condition {
+        TriggerCondition::CurrentPhaseIs { phases } => matches!(phases.as_slice(), [Phase::Untap]),
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions.iter().any(condition_mentions_untap_step)
+        }
+        TriggerCondition::Not { condition } | TriggerCondition::EventTime { condition } => {
+            condition_mentions_untap_step(condition)
+        }
+        _ => false,
+    }
+}
+
 /// CR 614.12a + CR 603.2: collect only the occurrences emitted by an
 /// as-enters payment before its entry group exists. Ordinary entry events
 /// retain their live-board observers, even while this payment is parked.
@@ -25006,6 +25092,50 @@ pub mod tests {
         assert_eq!(
             stack_condition_for_trigger(&trigger, &or_condition),
             Some(or_condition)
+        );
+    }
+
+    /// Window predicate for the untap-step pre-advance seam
+    /// (`collect_untap_step_windowed_triggers_into_deferred`): the Calendar's
+    /// `EventTime[And[DuringPlayersTurn{Controller}, CurrentPhaseIs{[Untap]}]]`
+    /// window is kept; a bare (non-`EventTime`) phase check, a non-untap
+    /// window, and a windowless condition are dropped.
+    #[test]
+    fn untap_step_window_predicate_keeps_only_untap_step_event_time() {
+        let untap_window = TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::And {
+                conditions: vec![
+                    TriggerCondition::DuringPlayersTurn {
+                        player: PlayerFilter::Controller,
+                    },
+                    TriggerCondition::CurrentPhaseIs {
+                        phases: vec![Phase::Untap],
+                    },
+                ],
+            }),
+        };
+        assert!(
+            condition_carries_untap_step_window(&untap_window),
+            "the untap-step EventTime window must be kept"
+        );
+        assert!(
+            !condition_carries_untap_step_window(&TriggerCondition::CurrentPhaseIs {
+                phases: vec![Phase::Untap],
+            }),
+            "a bare phase check outside EventTime is not a window"
+        );
+        let upkeep_window = TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::CurrentPhaseIs {
+                phases: vec![Phase::Upkeep],
+            }),
+        };
+        assert!(
+            !condition_carries_untap_step_window(&upkeep_window),
+            "a non-untap window must be dropped"
+        );
+        assert!(
+            !condition_carries_untap_step_window(&TriggerCondition::SourceIsTapped),
+            "a windowless condition must be dropped"
         );
     }
 
