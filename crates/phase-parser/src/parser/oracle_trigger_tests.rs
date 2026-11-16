@@ -35409,7 +35409,14 @@ fn trigger_veilstone_amulet_cant_be_targets() {
     );
     assert!(
         matches!(execute.effect.as_ref(), Effect::GenericEffect { .. }),
-        "expected GenericEffect (hexproof grant), got {:?}",
+        "expected GenericEffect (CantBeTargeted grant), got {:?}",
+        execute.effect
+    );
+    // CR 611.2c + CR 109.5: the opponents-scoped prohibition survives as a typed
+    // `CantBeTargeted { Opponents }` rule effect over the live "creatures you control" set.
+    assert!(
+        format!("{:?}", execute.effect).contains("CantBeTargeted"),
+        "expected a CantBeTargeted rule effect, got {:?}",
         execute.effect
     );
 }
@@ -40238,6 +40245,7 @@ fn card_parking_hand_reveal_is_a_chosen_object_boundary_for_the_event_source_lif
         selection: CardSelectionMode::default(),
         choice_optional,
         reveal: true,
+        cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
     };
     assert!(introduces_chosen_object_target(&reveal(
         TargetFilter::Typed(TypedFilter::creature()),

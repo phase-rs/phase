@@ -24,6 +24,18 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
+/// CR 602.5c: the activation counter is keyed by the resolved acquisition
+/// (provenance stamp + rules text + body fingerprint), not the index —
+/// derived through the production constructor so the fingerprint matches.
+fn usage_key(
+    state: &engine::types::game_state::GameState,
+    id: ObjectId,
+    idx: usize,
+) -> engine::types::game_state::AbilityUsageKey {
+    engine::game::restrictions::ability_usage_key(state, id, idx)
+        .expect("the tested slot resolves through the activation lookup")
+}
+
 /// Locate the index of the (only) power-up-tagged ability on `object`.
 fn power_up_index(runner: &GameRunner, object: ObjectId) -> usize {
     runner.state().objects[&object]
@@ -95,7 +107,7 @@ fn power_up_activates_only_once_per_game() {
         runner
             .state()
             .activated_abilities_this_game
-            .get(&(hero, idx))
+            .get(&usage_key(runner.state(), hero, idx))
             .copied(),
         Some(1),
         "the per-game activation counter must record exactly one activation"
@@ -121,7 +133,7 @@ fn power_up_activates_only_once_per_game() {
         runner
             .state()
             .activated_abilities_this_game
-            .get(&(hero, idx))
+            .get(&usage_key(runner.state(), hero, idx))
             .copied(),
         Some(1),
         "the per-game counter must remain 1 after the rejected second activation"

@@ -238,9 +238,10 @@ fn legacy_mass_library_order_prompt_is_current(
 }
 
 /// CR 608.2c: whether a departure settled an open resolution choice (an owner
-/// library arrangement or a player-scope sacrifice) through its handler
-/// (`settle_owner_library_arrangement_after_departure`,
-/// `settle_player_scope_sacrifice_after_departure`).
+/// library arrangement, a player-scope sacrifice or a player-scope return)
+/// through its handler (`settle_owner_library_arrangement_after_departure`,
+/// `settle_player_scope_sacrifice_after_departure`,
+/// `settle_player_scope_choice_after_departure`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DepartureSettlement {
     /// Nothing was settled: no choice was open, its prompt still stands or
@@ -371,6 +372,61 @@ pub(crate) fn settle_player_scope_sacrifice_after_departure(
             // `resume.next_wait` is deliberately not adopted: it is a clone of
             // `state.waiting_for` taken inside the helper, and the boundary and
             // collection above may since have replaced that wait.
+            Ok(DepartureSettlement::Settled)
+        }
+    }
+}
+
+/// CR 800.4a + CR 101.4 + CR 608.2m: after a player leaves, continue an open
+/// player-scope return ("each player returns a permanent they control…") or
+/// discard ("each opponent discards a card") with the players and objects still
+/// in the game: republish the current chooser's prompt, or settle it through
+/// this handler so the collected choices are delivered as one batch. Reports
+/// whether it settled, so a departed controller's spell the settlement
+/// continued is not retired.
+pub(crate) fn settle_player_scope_choice_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<DepartureSettlement, EngineError> {
+    match effects::scoped_discard::reconcile_player_scope_discard(state) {
+        effects::scoped_discard::PlayerScopeDiscardReconciliation::Unchanged
+        | effects::scoped_discard::PlayerScopeDiscardReconciliation::Retired => {}
+        effects::scoped_discard::PlayerScopeDiscardReconciliation::Settle => {
+            // CR 800.4a: the departed chooser's prompt admits only the empty
+            // answer; answering it continues the walk for the players left.
+            let waiting_for = state.waiting_for.clone();
+            let outcome = handle_resolution_choice(
+                state,
+                waiting_for,
+                GameAction::SelectCards { cards: Vec::new() },
+                events,
+            )?;
+            adopt_departure_choice_outcome(state, events, outcome);
+            return Ok(DepartureSettlement::Settled);
+        }
+    }
+    match effects::bounce::reconcile_player_scope_bounce(state) {
+        effects::bounce::PlayerScopeBounceReconciliation::Unchanged
+        | effects::bounce::PlayerScopeBounceReconciliation::Retired => {
+            Ok(DepartureSettlement::NotSettled)
+        }
+        effects::bounce::PlayerScopeBounceReconciliation::Prompted(chooser) => {
+            state.priority_player = chooser;
+            Ok(DepartureSettlement::NotSettled)
+        }
+        effects::bounce::PlayerScopeBounceReconciliation::Settle { chooser, cards } => {
+            // CR 800.4a: priority never names a player who has left the game.
+            if super::players::is_alive(state, chooser) {
+                state.priority_player = chooser;
+            }
+            let waiting_for = state.waiting_for.clone();
+            let outcome = handle_resolution_choice(
+                state,
+                waiting_for,
+                GameAction::SelectCards { cards },
+                events,
+            )?;
+            adopt_departure_choice_outcome(state, events, outcome);
             Ok(DepartureSettlement::Settled)
         }
     }
@@ -1195,7 +1251,7 @@ fn batch_or_drain_observer_triggers(
         // the parked queue for the pipeline's batch — otherwise the last
         // segment's triggers (e.g. the final Syphon Mind opponent discard) never
         // enter `deferred_triggers` and are lost when ordering runs (issue #1793).
-        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
         if announced {
             return Some(ResolutionChoiceOutcome::WaitingFor(
                 state.waiting_for.clone(),
@@ -1207,7 +1263,7 @@ fn batch_or_drain_observer_triggers(
     } else {
         // B2: paused — `run_post_action_pipeline` will not scan this action.
         // Park this move's observer triggers for a later settle.
-        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
         None
     }
 }
@@ -1232,7 +1288,7 @@ pub(crate) fn defer_observer_triggers_for_paused_choice(
             .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
             .collect();
     if !trigger_events.is_empty() {
-        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
     }
 }
 
@@ -1270,7 +1326,7 @@ fn collect_search_observer_triggers(
         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
         .collect();
     if !trigger_events.is_empty() {
-        super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+        super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
     }
     // A search continuation can park another typed resolution frame. Let the
     // shared carrier authority prove that every such frame has drained before
@@ -5566,12 +5622,43 @@ pub(super) fn handle_resolution_choice(
             WaitingFor::RevealChoice {
                 player,
                 cards,
-                filter,
+                filter: _,
                 optional,
                 decline_runs_continuation,
+                cardinality,
+                pending_mana_ability,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
+            // CR 605.3b: a reveal inside an activated mana ability's immediate
+            // resolution (Metalworker) completes that activation.
+            if let Some(pending) = pending_mana_ability {
+                return super::mana_abilities::handle_reveal_choice_for_mana_ability(
+                    state,
+                    *pending,
+                    &cards,
+                    cardinality,
+                    chosen,
+                    events,
+                )
+                .map(ResolutionChoiceOutcome::WaitingFor);
+            }
+            // CR 107.1c + CR 701.20a: "reveal any number of [filter] cards" —
+            // the selection is the reveal. Any subset (including none) is legal;
+            // the chosen cards are revealed and become the tracked set the
+            // continuation counts ("for each card revealed this way").
+            if cardinality == crate::types::ability::ObjectSelectionCardinality::AnyNumber {
+                effects::reveal_hand::validate_reveal_selection(&cards, cardinality, &chosen)?;
+                effects::reveal_hand::reveal_selected_hand_cards(state, player, &chosen, events);
+                effects::publish_tracked_set(state, chosen);
+                set_priority(state, player);
+                super::engine::resume_pending_continuation_if_priority(state, events)
+                    .expect("a settled reveal choice must resume its continuation");
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    state.waiting_for.clone(),
+                ));
+            }
+
             // CR 701.20a: Optional reveal prompts (e.g., reveal-lands like Port Town)
             // accept an empty selection to signal "I decline to reveal." The source
             // replacement's decline ability runs via `pending_continuation`, which the
@@ -5600,30 +5687,9 @@ pub(super) fn handle_resolution_choice(
                     state.waiting_for.clone(),
                 ));
             }
-            if chosen.len() != 1 {
-                return Err(EngineError::InvalidAction(format!(
-                    "Must select exactly 1 card, got {}",
-                    chosen.len()
-                )));
-            }
-            let chosen_id = chosen[0];
-            if !cards.contains(&chosen_id) {
-                return Err(EngineError::InvalidAction(
-                    "Selected card not in revealed hand".to_string(),
-                ));
-            }
-            if !matches!(filter, crate::types::ability::TargetFilter::Any)
-                && !super::filter::matches_target_filter(
-                    state,
-                    chosen_id,
-                    &filter,
-                    &super::filter::FilterContext::from_source(state, chosen_id),
-                )
-            {
-                return Err(EngineError::InvalidAction(
-                    "Selected card does not match the required filter".to_string(),
-                ));
-            }
+            // CR 608.2d: a post-reveal choice takes exactly the published
+            // number of distinct eligible cards (one, historically).
+            effects::reveal_hand::validate_reveal_selection(&cards, cardinality, &chosen)?;
 
             state
                 .resolve_and_apply_information(
@@ -5650,7 +5716,7 @@ pub(super) fn handle_resolution_choice(
                 frame
                     .pending
                     .chain
-                    .set_unpinned_targets(vec![TargetRef::Object(chosen_id)]);
+                    .set_unpinned_targets(chosen.iter().copied().map(TargetRef::Object).collect());
                 if optional {
                     frame.pending.chain.context.optional_effect_performed = true;
                 }
@@ -6760,6 +6826,46 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            // CR 101.4 + CR 101.4a: when several players discard for one
+            // instruction, each chooses (the pick staying in hand, unrevealed)
+            // before any chosen card is discarded. CR 608.2c: only the carrier
+            // of this prompt's own instruction collects the answer.
+            if effects::scoped_discard::carrier_collects_discard(state, source_id) {
+                match effects::scoped_discard::advance_pending_player_scope_discard_choice(
+                    state, player, &chosen, events,
+                )
+                .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+                {
+                    effects::scoped_discard::PendingPlayerScopeDiscardOutcome::WaitingForNextChoice
+                    | effects::scoped_discard::PendingPlayerScopeDiscardOutcome::PausedForReplacement => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    effects::scoped_discard::PendingPlayerScopeDiscardOutcome::Completed {
+                        events_before,
+                        events_after,
+                    } => {
+                        // CR 117.3b: the resolution finished; the active player
+                        // receives priority once the continuation has drained.
+                        set_priority(state, state.active_player);
+                        resume_with_error_propagation(state, events)?;
+                        if let Some(outcome) = batch_or_drain_observer_triggers(
+                            state,
+                            events,
+                            events_before,
+                            events_after,
+                            false,
+                        ) {
+                            return Ok(outcome);
+                        }
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                }
+            }
+
             let chosen_refs = chosen
                 .iter()
                 .filter_map(|id| state.objects.get(id))
@@ -6888,7 +6994,10 @@ pub(super) fn handle_resolution_choice(
                         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
                         .collect();
                 if !trigger_events.is_empty() {
-                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                    super::triggers::collect_action_end_triggers_into_deferred(
+                        state,
+                        &trigger_events,
+                    );
                 }
             }
 
@@ -7012,7 +7121,10 @@ pub(super) fn handle_resolution_choice(
                     .cloned()
                     .collect();
                 if !trigger_events.is_empty() {
-                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                    super::triggers::collect_action_end_triggers_into_deferred(
+                        state,
+                        &trigger_events,
+                    );
                 }
             }
 
@@ -7325,6 +7437,48 @@ pub(super) fn handle_resolution_choice(
                                 state.waiting_for.clone(),
                             ));
                         }
+                    }
+                }
+            }
+
+            if matches!(effect_kind, EffectKind::Bounce)
+                && state
+                    .pending_player_scope_choice
+                    .as_ref()
+                    .is_some_and(|pending| pending.ability.source_id == source_id)
+            {
+                // CR 101.4: collect every player's return choice before the
+                // chosen permanents move as one simultaneous batch. Only the
+                // carrier of this prompt's own instruction collects the answer.
+                match effects::bounce::advance_pending_player_scope_bounce_choice(
+                    state, player, &chosen, events,
+                ) {
+                    effects::bounce::PendingPlayerScopeBounceOutcome::WaitingForNextChoice
+                    | effects::bounce::PendingPlayerScopeBounceOutcome::PausedForReplacement => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    effects::bounce::PendingPlayerScopeBounceOutcome::Completed {
+                        events_before,
+                        events_after,
+                    } => {
+                        // CR 117.3b: the resolution finished; the active player
+                        // receives priority once the continuation has drained.
+                        set_priority(state, state.active_player);
+                        resume_with_error_propagation(state, events)?;
+                        if let Some(outcome) = batch_or_drain_observer_triggers(
+                            state,
+                            events,
+                            events_before,
+                            events_after,
+                            false,
+                        ) {
+                            return Ok(outcome);
+                        }
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
                     }
                 }
             }
@@ -8853,6 +9007,9 @@ pub(super) fn handle_resolution_choice(
                 .filter(|source| {
                     source.is_exact_object_and_resolution()
                         && source.prompt.identity.expected_zone == Zone::Battlefield
+                        // CR 614.12a: a copied choice may still owe entry counters.
+                        // Its witnessed tail owns replay after those settle.
+                        && !effects::counters::copy_entry_completion_is_ready(state)
                         && !state.deferred_entry_events.is_empty()
                 })
                 .map(|source| source.prompt.identity.reference.object_id)
@@ -9479,7 +9636,10 @@ pub(super) fn handle_resolution_choice(
                     .into_iter()
                     .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
                     .collect();
-                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                    super::triggers::collect_action_end_triggers_into_deferred(
+                        state,
+                        &trigger_events,
+                    );
                 }
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
@@ -9599,7 +9759,7 @@ pub(super) fn handle_resolution_choice(
                         .into_iter()
                         .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
                         .collect();
-                super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }
@@ -9689,7 +9849,10 @@ pub(super) fn handle_resolution_choice(
                     .into_iter()
                     .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
                     .collect();
-                    super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                    super::triggers::collect_action_end_triggers_into_deferred(
+                        state,
+                        &trigger_events,
+                    );
                 }
                 ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
             }
@@ -9786,7 +9949,7 @@ pub(super) fn handle_resolution_choice(
                 .into_iter()
                 .filter(|ev| !matches!(ev, GameEvent::PhaseChanged { .. }))
                 .collect();
-                super::triggers::collect_triggers_into_deferred(state, &trigger_events);
+                super::triggers::collect_action_end_triggers_into_deferred(state, &trigger_events);
             }
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
         }

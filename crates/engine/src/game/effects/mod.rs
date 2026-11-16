@@ -236,6 +236,7 @@ pub mod ripple;
 pub mod roll_die;
 pub mod sacrifice;
 pub mod saddle;
+pub mod scoped_discard;
 pub mod scoped_library_search;
 pub mod scry;
 pub mod search_library;
@@ -2027,6 +2028,35 @@ pub(crate) fn sweep_ownerless_post_replacement_strand(state: &mut GameState) {
     }
 }
 
+/// CR 504.1 + CR 805.4b: a draw-step draw whose replacement asked a player to
+/// choose ("each player returns a permanent they control … instead") stays
+/// parked at the front of `pending_team_draw_step` while that choice is open.
+/// When the resumed draw frame completes, that draw is done: settle it and
+/// perform the draw owed by every seat still queued, so a teammate's mandatory
+/// draw is never dropped before the step's priority.
+///
+/// A draw that is still parked, or one that is not the front of the queue (a
+/// replacement-choice resume settles and pops its own), is left alone.
+fn continue_team_draw_step_after_resumed_draw(
+    state: &mut GameState,
+    frame_id: crate::types::game_state::DrawSequenceFrameId,
+    drawer: PlayerId,
+    events: &mut Vec<GameEvent>,
+) {
+    let completed = state
+        .active_draw_sequence()
+        .is_none_or(|frame| frame.frame_id != frame_id);
+    if !completed
+        || !matches!(state.waiting_for, WaitingFor::Priority { .. })
+        || state.pending_team_draw_step.first() != Some(&drawer)
+    {
+        return;
+    }
+    state.pending_team_draw_step.remove(0);
+    // A teammate's own draw that parks sets `state.waiting_for` itself.
+    let _ = crate::game::turns::drain_pending_team_draw_step(state, events);
+}
+
 /// Resume the active typed resolution frame through its runtime stack authority.
 ///
 /// The dispatcher reads only the stack top. The one shipped coupled shape is
@@ -2152,8 +2182,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
                     .and_then(crate::types::game_state::PostReplacementDrainStack::resident)
                     .is_some());
             }
-            if let Some(frame_id) = state.active_draw_sequence().map(|draw| draw.frame_id) {
+            if let Some((frame_id, drawer)) = state
+                .active_draw_sequence()
+                .map(|draw| (draw.frame_id, draw.player))
+            {
                 let _ = draw::resume_draw_sequence(state, frame_id, events);
+                continue_team_draw_step_after_resumed_draw(state, frame_id, drawer, events);
             }
             // CR 614.11a + CR 615.5: the completed child draw promotes its
             // already-parked continuation above the exact paused parent. Drain
@@ -3088,6 +3122,10 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // (DistinctCounterKindsAmong loop) applies to this iteration.
             let member = tracked_members.get(iteration).copied();
             let kind = iterated_counter_kinds.get(iteration).cloned();
+            // Every resumed occurrence follows one that completed.
+            if member.is_none() && kind.is_none() {
+                settle_entries_before_repeat_occurrence(state, events, &ability);
+            }
             let iter_effective: &ResolvedAbility = if member.is_some() || kind.is_some() {
                 iter_ability = (*ability).clone();
                 if let Some(member) = member {
@@ -5223,6 +5261,15 @@ pub(crate) fn apply_parent_chain_context(
     if child.ability_index.is_none() {
         child.ability_index = parent.ability_index;
     }
+    // CR 608.2c: a sub-ability is part of the same printed ability instance
+    // as its parent — the announced usage key is their shared identity, so a
+    // resolution-time tally on a chained sub-node (e.g. a Dragon Whelp rider)
+    // reads the same acquisition budget as the root. Mirrors the index block
+    // above, including its no-clobber guard: an explicitly keyed node keeps
+    // its own.
+    if child.announced_usage_key.is_none() {
+        child.announced_usage_key = parent.announced_usage_key.clone();
+    }
     // CR 608.2c + CR 109.4: Carry the resolution-scoped chosen-players list
     // down the chain so `ControllerRef::ChosenPlayer { index }` and later
     // `Choose(Player)` instructions resolve against players chosen by earlier
@@ -5584,15 +5631,104 @@ fn settle_entries_before_instruction(
     {
         return;
     }
+    settle_entries_at_boundary(
+        state,
+        events,
+        next,
+        completed,
+        crate::game::triggers::CompletedEntryCollection::HeldInstruction,
+    );
+}
+
+/// The instruction boundary proper (everything after B0): `next` begins an instruction, or the
+/// next occurrence of a repeated one, so the entries recorded so far are a completed entry event.
+fn settle_entries_at_boundary(
+    state: &mut GameState,
+    events: &[GameEvent],
+    next: &ResolvedAbility,
+    completed: Option<&ResolvedAbility>,
+    collection: crate::game::triggers::CompletedEntryCollection,
+) {
     // CR 614.12a: an entry may still be in progress while a resolution choice or a parked
     // replacement is pending (G1).
     if waits_for_resolution_choice(&state.waiting_for) || state.pending_replacement.is_some() {
         return;
     }
+    // CR 608.2c + CR 603.6a: every instruction before `next` has completed, so every entry
+    // recorded so far is a completed entry event, whether or not its observation is deferred.
+    // Not while a battlefield entry is still being made: a chain run inside that entry (a copy
+    // or post-replacement rider) has boundaries of its own, and the instruction that put its
+    // earlier co-entrants onto the battlefield has not completed. Nor between the seat legs of
+    // a paused player-scope clause resuming under its scope sidecar
+    // (`resolving_player_scope_tail`): its seats' actions are one simultaneous event
+    // (CR 101.4), completed at its `after_scope` boundary.
+    let completed_through = state.completed_instruction_ledger_len();
+    let mut instruction_completed = false;
+    // CR 101.4: nor before a node an instruction bound to a player. The remaining seats of a
+    // paused player-scope clause resume as such nodes whether or not a sidecar was installed
+    // (a clause with no tail that reads its result has none), and their entries are one
+    // simultaneous event with the seats that already acted.
+    if !crate::game::triggers::battlefield_entry_in_progress(state)
+        && state.resolving_player_scope_tail.is_none()
+        && !bound_to_a_player_by_an_instruction(next)
+    {
+        let ledger_len = state.zone_changes_this_turn.len();
+        if ledger_len > completed_through {
+            state.instruction_boundary_marks.push(ledger_len);
+            instruction_completed = true;
+        }
+    }
     if entry_observation_deferred(state, next, completed) {
         return;
     }
     crate::game::zones::settle_battlefield_entry_observations(state, events);
+    // CR 603.6a + CR 603.6b + CR 611.3c: an entering instruction that was held across answers
+    // has completed and its entrants are observed, so its entry event is matched now, against
+    // the board it left, before `next` can change which permanents observe or suppress it. A
+    // completed performance of a repeated keyword action is matched now even when it was never
+    // held, so the action's scan does not batch it with the next performance (CR 608.2c).
+    if instruction_completed {
+        crate::game::triggers::collect_completed_entry_instruction(
+            state,
+            events,
+            completed_through,
+            collection,
+        );
+    }
+}
+
+/// CR 608.2c + CR 603.6a: a repeated keyword action ("Populate X times", "Investigate twice",
+/// "Incubate 2 twice") is performed that many times in succession, each performance its own
+/// entry event, so the next occurrence is an instruction boundary: the entries of the one before
+/// it are observed and collected before it runs. Every other repeated entering effect is a
+/// quantity expansion of one instruction ("For each nonland card discarded this way, create a
+/// 1/1 red Elemental creature token" is one simultaneous creation) and is not split.
+fn settle_entries_before_repeat_occurrence(
+    state: &mut GameState,
+    events: &[GameEvent],
+    occurrence: &ResolvedAbility,
+) {
+    if matches!(
+        occurrence.effect,
+        // CR 701.36a (populate), CR 701.16a (investigate), CR 701.53a (incubate),
+        // CR 701.62a (manifest dread), CR 701.40a (manifest), CR 701.58a (cloak),
+        // CR 701.47a (amass): each is one action that puts a permanent onto the battlefield.
+        Effect::Populate
+            | Effect::Investigate
+            | Effect::Incubate { .. }
+            | Effect::ManifestDread
+            | Effect::Manifest { .. }
+            | Effect::Cloak { .. }
+            | Effect::Amass { .. }
+    ) {
+        settle_entries_at_boundary(
+            state,
+            events,
+            occurrence,
+            None,
+            crate::game::triggers::CompletedEntryCollection::Occurrence,
+        );
+    }
 }
 
 /// CR 603.6a: is `effect` one of the battlefield-entering instruction kinds that the generated
@@ -6111,8 +6247,11 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
 ///   defer: the boundary before it observes the entrant as it entered.
 /// - **D2 (CR 303.4f, conservative):** `next` is an `Attach` following a forwarded result, or
 ///   following no known completed instruction.
-/// - **D3 (CR 603.6a + CR 101.4):** `next` is a `player_scope` seat leg; the seats may form one
-///   simultaneous entry event.
+/// - **D3 (CR 603.6a + CR 101.4):** `next` is bound to a player by an instruction — a
+///   `player_scope` seat leg; the seats may form one simultaneous entry event. A phase
+///   trigger's binding to its turn player (CR 603.2b + CR 102.1, `SpellContext::phase_turn_player`)
+///   is not a seat leg: the trigger's own instructions complete one after another, so they are
+///   boundaries like a spell's.
 ///
 /// Carriers held only in chain-driver locals are measured over the generated card data, not
 /// walked (every `WithEntry` stamp site lowers to an instruction of a kind that measurement
@@ -6121,20 +6260,21 @@ fn frame_matches(frame: &ResolutionFrame, query: LaterInstructionQuery) -> bool 
 /// D3 (every seat leg carries `scoped_player`); a multi-target-player fan-out's `after_fanout`
 /// tail reaches no entering leg; and no entering `repeat_for` / nested driver carries a later
 /// candidate outside its iterated subtree.
-///
-/// Known gap, older than the onset: a phase trigger ("at the beginning of …", CR 603.2b) has
-/// `scoped_player` stamped on every node of its chain (`set_scoped_player_recursive`), so D3
-/// holds at every boundary of its resolution, optional or not. No entry observation is recorded,
-/// and enter observers read the entrant after the whole resolution, "gains"/"gets" riders
-/// included. An accepted "you may …" instruction is not the cause: the optional-effect choice
-/// handler hands priority back before the chain resumes, so the pending-choice guard does not hold.
+/// CR 101.4 + CR 603.2b: is `node` bound to a player by an instruction (a `player_scope` seat
+/// leg, or a "that player" bound at resolution) rather than by its phase trigger's turn player?
+/// A binding that is the phase's own is no seat leg; the equality guards a node a later binding
+/// rewrote without clearing the phase's.
+pub(crate) fn bound_to_a_player_by_an_instruction(node: &ResolvedAbility) -> bool {
+    node.scoped_player.is_some() && node.scoped_player != node.context.phase_turn_player
+}
+
 fn entry_observation_deferred(
     state: &GameState,
     next: &ResolvedAbility,
     completed: Option<&ResolvedAbility>,
 ) -> bool {
     // D3 — CR 603.6a + CR 101.4.
-    if next.scoped_player.is_some() {
+    if bound_to_a_player_by_an_instruction(next) {
         return true;
     }
     // D2 — CR 303.4f.
@@ -7595,6 +7735,10 @@ fn resolve_optional_effect_decision_step(
                 // silently skip the branch's effect. Strip the consumed gate so the
                 // branch resolves on its own optional decision.
                 strip_consumed_decline_performed_gate(&mut resolved);
+                // CR 608.2c + CR 101.4: the declined instruction is complete, so the entries
+                // held for it (the tokens earlier seats accepted) are one entry event, observed
+                // before the surviving branch runs, as at the boundary of an accepted one.
+                settle_entries_before_instruction(state, events, &resolved, Some(&ability));
                 return resolve_ability_chain_step(state, &resolved, events, depth);
             }
         }
@@ -9251,6 +9395,7 @@ fn instruction_outlives_declined_gate(
         reads_chosen_group,
         declares_return_result,
         reads_return_result,
+        announced_usage_key: _,
         // Printed gates, branches, repetition, choosers and "you may": each reads
         // or asks about what happened earlier in the resolution, so each must be
         // absent. A surviving "you may" instruction is not audited (its pause
@@ -9888,8 +10033,9 @@ fn pt_value_is_fixed(value: &PtValue) -> bool {
 /// own, so it refers to nothing beyond its mode, its modifications and its
 /// `affected` filter, which each caller audits. The one classification of
 /// every field of `StaticDefinition`: a new field is a compile error until it
-/// is classified.
-fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
+/// is classified. `host_zones` are the zones the static's host functions from
+/// by rule, so declaring them states no zone scope of the static's own.
+fn static_binds_nothing(static_ability: &StaticDefinition, host_zones: &[Zone]) -> bool {
     let StaticDefinition {
         // Audited by each caller.
         mode: _,
@@ -9914,7 +10060,7 @@ fn static_binds_nothing(static_ability: &StaticDefinition) -> bool {
         && per_player_condition.is_none()
         && affected_zone.is_none()
         && effect_zone.is_none()
-        && active_zones.is_empty()
+        && active_zones.iter().all(|zone| host_zones.contains(zone))
         && !characteristic_defining
         && attack_defended.is_none()
         && source_controller.is_none()
@@ -9938,7 +10084,7 @@ fn static_grant_referent(static_ability: &StaticDefinition) -> Option<&TargetFil
                 ContinuousModification::AddStaticMode { mode } if static_mode_names_no_referent(mode)
             )
         })
-        && static_binds_nothing(static_ability);
+        && static_binds_nothing(static_ability, &[]);
     if referent_free {
         static_ability.affected.as_ref()
     } else {
@@ -9968,7 +10114,9 @@ fn static_mode_names_no_referent(mode: &StaticMode) -> bool {
 fn emblem_static_names_no_referent(static_ability: &StaticDefinition) -> bool {
     matches!(static_ability.mode, StaticMode::NoMaximumHandSize)
         && static_ability.modifications.is_empty()
-        && static_binds_nothing(static_ability)
+        // CR 114.4: an emblem's statics function in the command zone; declaring it
+        // (parser + grant_emblem) names the emblem's own zone, not a scope.
+        && static_binds_nothing(static_ability, &[Zone::Command])
 }
 
 /// CR 608.2c + CR 400.7: whether the object or player `filter` names exists
@@ -11469,6 +11617,8 @@ fn trigger_matchers_read_filter_population(
         die_sides: _,
         expend_threshold: _,
         attack_target_filter: _,
+        // CR 509.3e: the blocker-count filter is a matcher like `valid_target`.
+        blocker_count,
         player_actions: _,
         scry_bottom_count: _,
         damage_amount: _,
@@ -11488,6 +11638,11 @@ fn trigger_matchers_read_filter_population(
     [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()
         .flatten()
+        .chain(
+            blocker_count
+                .as_ref()
+                .and_then(|threshold| threshold.blocker.as_ref()),
+        )
         .any(has_filter)
         || zone_change_clauses
             .iter()
@@ -12023,7 +12178,7 @@ fn static_mode_reads_filter_population(
         | StaticMode::CantBecomeSuspected
         | StaticMode::MaxAttackersEachCombat { .. }
         | StaticMode::MaxBlockersEachCombat { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantSearchLibrary { .. }
         | StaticMode::RestrictLibrarySearchToTop { .. }
@@ -12825,6 +12980,22 @@ fn target_filter_for_last_revealed_sub(effect: &Effect) -> Option<&TargetFilter>
         | Effect::Reveal { target, .. } => Some(target),
         _ => None,
     }
+}
+
+/// CR 118.12 + CR 701.20e + CR 608.2c: whether `sub` is a resolution-time
+/// payment ("you may pay 2 life") whose immediate continuation acts on the
+/// card the preceding look produced through a bare `ParentTarget` ("If you do,
+/// put it into that player's graveyard"). The payment itself takes no object,
+/// while the look's result is bound directly to the gated consumer.
+fn payment_gates_look_result_consumer(sub: &ResolvedAbility) -> bool {
+    matches!(sub.effect, Effect::PayCost { .. })
+        && sub.sub_ability.as_deref().is_some_and(|consumer| {
+            consumer.targets.is_empty()
+                && matches!(
+                    target_filter_for_last_revealed_sub(&consumer.effect),
+                    Some(TargetFilter::ParentTarget)
+                )
+        })
 }
 
 fn inject_last_revealed_targets(
@@ -13893,6 +14064,7 @@ fn fan_out_head_is_allowlisted(head: &ResolvedAbility) -> bool {
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _, // activation-time provenance
         activation_record: _,  // activation-time provenance
+        announced_usage_key: _,
         control_change_instruction: _, // the carrier this classification stamps
     } = head;
     let Effect::GainControlAll { target } = effect else {
@@ -17765,7 +17937,18 @@ pub(crate) fn publish_fresh_tracked_set(
 /// sees an earlier producer's cards.
 pub(crate) fn publish_reveal_result(state: &mut GameState, ids: Vec<ObjectId>) {
     publish_fresh_tracked_set(state, ids.clone());
+    record_revealed_result(state, ids);
+}
+
+/// CR 608.2c + CR 701.20: the single writer through which a look/reveal
+/// instruction records the cards it looked at or revealed into
+/// `last_revealed_ids`. Counting each publication lets the chain walker tell
+/// the resolving instruction's own result, an empty one included, apart from
+/// an earlier instruction's entry that a producer which found nothing left in
+/// place (`revealed_publications`).
+pub(crate) fn record_revealed_result(state: &mut GameState, ids: Vec<ObjectId>) {
     state.last_revealed_ids = ids;
+    state.revealed_publications += 1;
 }
 
 /// CR 608.2c + CR 608.2d: An immutable capability for one reciprocal producer
@@ -21248,8 +21431,7 @@ fn nested_payload_reads_created_referent(effect: &Effect) -> bool {
     });
     reads
         || match effect {
-            Effect::CreateDrawReplacement { replacement_effect }
-            | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            Effect::CreatePlaneswalkReplacement { replacement_effect } => {
                 effect_reads_created_referent(replacement_effect)
             }
             Effect::AddTargetReplacement { replacement, .. } => {
@@ -24403,6 +24585,37 @@ fn resolve_chain_body(
             return Ok(progress);
         }
 
+        if bounce::should_collect_player_scope_choices(&scoped_template) {
+            progress = bounce::start_player_scope_choices(
+                state,
+                &scoped_template,
+                controller,
+                &matching_players,
+                after_scope,
+                events,
+                depth,
+            )?;
+            return Ok(progress);
+        }
+
+        // CR 101.4: "each opponent discards a card" — every player chooses
+        // before any chosen card leaves a hand. A tail the clause is chained
+        // into reads the per-seat results the generic route publishes, so only
+        // a clause that ends here is collected.
+        if after_scope.is_none()
+            && scoped_discard::should_collect_player_scope_choices(&scoped_template)
+        {
+            progress = scoped_discard::start_player_scope_choices(
+                state,
+                &scoped_template,
+                controller,
+                &matching_players,
+                events,
+                depth,
+            )?;
+            return Ok(progress);
+        }
+
         if scoped_search_delivery_is_safe
             && scoped_library_search::supports_simultaneous_delivery(&scoped_template)
         {
@@ -25708,6 +25921,9 @@ fn resolve_chain_body(
 
     // CR 608.2c: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
+    // CR 608.2c: and the reveal-ledger publication count, so a look/reveal
+    // instruction's own result is told apart from an earlier one's entry.
+    let revealed_publications_before = state.revealed_publications;
     // CR 608.2c: the population the instruction selects, read before it acts,
     // for a following reference to it.
     let selection_before = if resolution_next_needs_tracked_set(state, ability) {
@@ -26020,6 +26236,9 @@ fn resolve_chain_body(
                     );
                     progress = ResolutionProgress::Waiting;
                     break;
+                }
+                if iteration > 0 && !member_driven && !kind_driven {
+                    settle_entries_before_repeat_occurrence(state, events, effective);
                 }
                 // Snapshot per-iteration ability with parent-target rebinding when
                 // applicable. CR 109.5: the rebind is SINGLE-slot — every reachable
@@ -27582,6 +27801,16 @@ fn resolve_chain_body(
                         result,
                     );
                 }
+            } else if ability.forward_result && matches!(ability.effect, Effect::Attach { .. }) {
+                // CR 701.3a + CR 608.2c: the attachment's printed attach-time
+                // choice is followed through the Attached post-effect
+                // continuation, after the attach; later instructions wait for
+                // it, and the attached object is already settled.
+                bind_forwarded_zone_result(
+                    &mut sub_clone,
+                    attach::attach_result_from_events(&events[events_before..]),
+                    Vec::new(),
+                );
             }
             // CR 608.2c + CR 603.7: a selected BounceAll has not finished its
             // zone-change instruction when it opens EffectZoneChoice. Bind its
@@ -28051,7 +28280,25 @@ fn resolve_chain_body(
         // `enter_attached_to` on the zone move. If that move Remained, there is
         // no ZoneChanged event — running Attach would stamp `attached_to` onto
         // an Aura that never left its origin zone.
-        if ability.forward_result
+        if ability.forward_result && matches!(ability.effect, Effect::Attach { .. }) {
+            // CR 608.2c + CR 701.3b: an Attach producer's result is what it
+            // attached. A later "unattach it" names that object, not the host
+            // the earlier instructions targeted, and an attach that did nothing
+            // forwards an empty result rather than falling back to that host.
+            let mut sub_with_context = sub.as_ref().clone();
+            apply_parent_chain_context(
+                &mut sub_with_context,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            bind_forwarded_zone_result(
+                &mut sub_with_context,
+                attach::attach_result_from_events(&events[events_before..]),
+                Vec::new(),
+            );
+            progress = resolve_ability_chain_step(state, &sub_with_context, events, depth + 1)?;
+        } else if ability.forward_result
             && forwarded_objects.is_empty()
             && matches!(
                 ability.effect,
@@ -28162,6 +28409,50 @@ fn resolve_chain_body(
             );
             stamp_parent_target_iteration_members(&mut sub_with_targets);
             progress = resolve_ability_chain_step(state, &sub_with_targets, events, depth + 1)?;
+        } else if sub.targets.is_empty()
+            && effect_writes_last_revealed_ids(&ability.effect)
+            && payment_gates_look_result_consumer(sub)
+        {
+            // CR 701.20e + CR 608.2c + CR 400.7: a resolution-time payment
+            // between a look and the move it gates takes no object of its own,
+            // yet the move's "it" still names the looked-at card (Wand of
+            // Denial: "Look at the top card of target player's library. If it's
+            // a nonland card, you may pay 2 life. If you do, put it into that
+            // player's graveyard."). "It" is exactly what THIS instruction
+            // produced: the ledger only if this step published into it, else
+            // nothing (CR 609.3), never an earlier instruction's entry nor an
+            // object target the instruction merely inherited.
+            let produced: Vec<ObjectId> =
+                if state.revealed_publications != revealed_publications_before {
+                    state.last_revealed_ids.clone()
+                } else {
+                    Vec::new()
+                };
+            let result = ForwardedResultContext::from_object_ids(state, &produced);
+            // CR 118.12 + CR 119.4: the payment's own inputs are untouched. It
+            // inherits exactly the occurrences and pins any other empty child
+            // would, so a cost that reads an inherited target ("life equal to
+            // that creature's mana value") still prices against it. The
+            // produced card is not the payment's binding; it rides separately,
+            // to the gated move alone.
+            let mut payment = sub.as_ref().clone();
+            payment.replace_target_occurrences(inherited_parent_occurrences(ability, sub));
+            apply_parent_chain_context(
+                &mut payment,
+                ability,
+                effect_context_object.as_ref(),
+                state,
+            );
+            // Bind the result onto the gated move itself, pinned to the
+            // incarnations produced, so it rides the payment through its
+            // optional prompt and is never replaced by the payment's inherited
+            // targets at the payment's hand-off. A completed-but-empty
+            // `Some([])` result makes that hand-off prune the move instead.
+            if let Some(consumer) = payment.sub_ability.as_deref_mut() {
+                consumer.context.forwarded_result_context = Some(Box::new(result));
+                bind_forwarded_result_targets_for_legacy_effect(consumer);
+            }
+            progress = resolve_ability_chain_step(state, &payment, events, depth + 1)?;
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
             && matches!(ability.effect, Effect::Draw { .. })
@@ -30594,8 +30885,9 @@ pub(crate) fn evaluate_condition(
         } => state.day_night == Some(DayNight::Night),
         // CR 608.2c: an ordinary resolution-time condition on how many times
         // THIS printed ability has been used this turn, not an intervening-if
-        // condition under CR 603.4. Both tallies are keyed by the same
-        // `(source_id, ability_index)` pair, so one lookup serves both:
+        // condition under CR 603.4. The `Resolved` tally is keyed by the
+        // `(source_id, ability_index)` pair; the `Activated` tally re-derives
+        // the per-acquisition [`AbilityUsageKey`] (CR 602.5c):
         //
         // - `Resolved` ("if this is the [Nth] time this ability has resolved
         //   this turn") reads a counter bumped at the top of
@@ -30618,11 +30910,72 @@ pub(crate) fn evaluate_condition(
             n,
         } => {
             if let Some(idx) = ability.ability_index {
-                let ledger = match tally {
-                    AbilityUseTally::Resolved => &state.ability_resolutions_this_turn,
-                    AbilityUseTally::Activated => &state.activated_abilities_this_turn,
+                let count = match tally {
+                    AbilityUseTally::Resolved => state
+                        .ability_resolutions_this_turn
+                        .get(&(ability.source_id, idx))
+                        .copied()
+                        .unwrap_or(0),
+                    // CR 602.5c + CR 608.2b: the activation budget is per
+                    // acquisition, read off the ANNOUNCED carrier — the live
+                    // board may have moved since (a cost exiled the source,
+                    // Dress Down removed the text) while resolution proceeds
+                    // on the announced identity. Falls back to a live
+                    // re-derivation for carriers that predate announcement
+                    // capture; an unresolvable slot reads a missing entry
+                    // as count 0.
+                    //
+                    // CR 400.7 + CR 608.2h: the announced incarnation selects
+                    // the table. When the source never left, the live journal
+                    // is authoritative (the Dress Down case keeps its live
+                    // entry). When the source left after announcing (a blink
+                    // above the resolving ability), the live journal was
+                    // migrated at the exit boundary and now holds the
+                    // successor's independent history — so the resolving
+                    // ability reads the departed turn tally tagged with its
+                    // announced incarnation, never the live entry. A reader
+                    // with no announcement capture (spell, copy, old save)
+                    // names only the live population. A missing entry reads
+                    // 0 either way.
+                    AbilityUseTally::Activated => {
+                        let key = ability.announced_usage_key.as_deref().cloned().or_else(|| {
+                            crate::game::restrictions::ability_usage_key(
+                                state,
+                                ability.source_id,
+                                idx,
+                            )
+                        });
+                        match key {
+                            None => 0,
+                            Some(key) => match ability.announced_source_incarnation {
+                                None => state
+                                    .activated_abilities_this_turn
+                                    .get(&key)
+                                    .copied()
+                                    .unwrap_or(0),
+                                Some(announced) => {
+                                    let current = state
+                                        .objects
+                                        .get(&ability.source_id)
+                                        .map(|obj| obj.incarnation);
+                                    if current == Some(announced) {
+                                        state
+                                            .activated_abilities_this_turn
+                                            .get(&key)
+                                            .copied()
+                                            .unwrap_or(0)
+                                    } else {
+                                        state
+                                            .departed_activated_abilities_this_turn
+                                            .get(&(key, announced))
+                                            .copied()
+                                            .unwrap_or(0)
+                                    }
+                                }
+                            },
+                        }
+                    }
                 };
-                let count = ledger.get(&(ability.source_id, idx)).copied().unwrap_or(0);
                 comparator.evaluate(
                     crate::game::arithmetic::u32_to_i32_saturating(count),
                     crate::game::arithmetic::u32_to_i32_saturating(*n),
@@ -35642,7 +35995,7 @@ mod tests {
             declined_search_test_search().effect,
             serde_json::from_value(serde_json::json!({"type":"ChooseFromZone", "zone":"Hand"})).unwrap(),
             Effect::RevealTop { player: TargetFilter::ParentTarget, count: 1 },
-            Effect::RevealHand { target: TargetFilter::ParentTarget, card_filter: TargetFilter::Any, count: Some(QuantityExpr::Fixed { value: 1 }), selection: Default::default(), choice_optional: false, reveal: true },
+            Effect::RevealHand { target: TargetFilter::ParentTarget, card_filter: TargetFilter::Any, count: Some(QuantityExpr::Fixed { value: 1 }), selection: Default::default(), choice_optional: false, reveal: true, cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE },
             Effect::ExileFromTopUntil { player: TargetFilter::ParentTarget, until: UntilCondition::NextMatches { filter: TargetFilter::Any, count: QuantityExpr::Fixed { value: 1 } } },
             Effect::Reveal { target: TargetFilter::SpecificObject { id: ObjectId(7) } },
             serde_json::from_value(serde_json::json!({"type":"Token", "name":"Independent token", "power":{"type":"Fixed","value":1}, "toughness":{"type":"Fixed","value":1}})).unwrap(),
@@ -36782,7 +37135,11 @@ mod tests {
         assert!(static_mode_names_no_referent(&StaticMode::MustBeBlocked {
             by: None
         }));
-        assert!(!static_mode_names_no_referent(&StaticMode::CantBeTargeted));
+        assert!(!static_mode_names_no_referent(
+            &StaticMode::CantBeTargeted {
+                who: crate::types::statics::ProhibitionScope::AllPlayers,
+            }
+        ));
     }
 
     /// CR 608.2c + CR 118.12: the declined-"if you do" audit reads each
@@ -46478,32 +46835,28 @@ mod tests {
         );
     }
 
-    /// CR 608.2c: the zero-fill's domain on a PAUSED fan-out. Seat 1 holds two
-    /// cards facing a "discard a card" fan-out, so its iteration stops on a
-    /// `DiscardChoice` it has not answered. Seat 0 completed; seats 1..3 did not.
-    ///
-    /// The bound is `i`, not `i + 1`: publishing the pausing seat as a zero says
-    /// it contributed nothing, when in fact it has not yet been given the chance
-    /// to contribute — a `Min` read taken mid-pause would answer 0 off that.
-    ///
-    /// This pins the domain only. It deliberately does NOT assert that the table
-    /// survives the continuation: each resumed leg replaces it rather than
-    /// extending it, which is pre-existing and documented at the fill site.
+    /// CR 101.4 + CR 101.4a: a scoped discard whose later seat must choose holds
+    /// every earlier seat's discard back. Seat 1 holds two cards facing a
+    /// "discard a card" fan-out, so the walk parks on its `DiscardChoice`; seat 0
+    /// (one card, a forced discard) has not discarded yet, because no card leaves
+    /// a hand until every player has chosen. Nothing is published mid-pause: the
+    /// clause's per-player table is one result, published when it completes.
     #[test]
-    fn paused_fan_out_excludes_the_seat_that_has_not_answered_its_choice() {
+    fn scoped_discard_holds_earlier_seats_back_while_a_later_seat_chooses() {
         let mut state = GameState::new(FormatConfig::standard(), 4, 42);
-        // Seat 0: exactly one card — a forced discard, no choice, completes.
-        // Seat 1: two cards — must choose, so the fan-out pauses here.
+        let mut hands = Vec::new();
         for (seat, cards) in [(0u8, 1u32), (1, 2), (2, 1), (3, 1)] {
+            let mut hand = Vec::new();
             for n in 0..cards {
-                create_object(
+                hand.push(create_object(
                     &mut state,
                     CardId(100 + u64::from(seat) * 10 + u64::from(n)),
                     PlayerId(seat),
                     format!("P{seat} Card {n}"),
                     Zone::Hand,
-                );
+                ));
             }
+            hands.push(hand);
         }
 
         let mut ability = ResolvedAbility::new(
@@ -46526,25 +46879,22 @@ mod tests {
         assert!(
             matches!(
                 state.waiting_for,
-                crate::types::game_state::WaitingFor::DiscardChoice { .. }
+                crate::types::game_state::WaitingFor::DiscardChoice {
+                    player: PlayerId(1),
+                    ..
+                }
             ),
-            "reach guard: the fan-out must actually be paused on seat 1's choice, \
-             got {:?}",
+            "reach guard: the walk must actually be parked on seat 1's choice,              got {:?}",
             state.waiting_for
         );
-
-        let mut rows: Vec<(u8, i32)> = state
-            .last_effect_counts_by_player
-            .iter()
-            .map(|(p, n)| (p.0, *n))
-            .collect();
-        rows.sort();
         assert_eq!(
-            rows,
-            vec![(0, 1)],
-            "only the seat that COMPLETED before the pause belongs to the domain; \
-             the paused seat has not had the chance to contribute and must not be \
-             published as a zero"
+            state.objects[&hands[0][0]].zone,
+            Zone::Hand,
+            "seat 0's forced discard waits for the later seat's choice"
+        );
+        assert!(
+            state.last_effect_counts_by_player.is_empty(),
+            "no per-player table is published while the clause is still collecting"
         );
     }
 
@@ -47025,14 +47375,15 @@ mod tests {
                 stale_fan_out,
             );
 
+            // An `unless_filter` keeps the instruction on the generic per-seat
+            // route (the CR 101.4 collector takes only the bare instruction),
+            // which is the route whose hand-off this predicate guards.
+            let mut clause = scoped_discard_one(clause_source);
+            if let Effect::Discard { unless_filter, .. } = &mut clause.effect {
+                *unless_filter = Some(TargetFilter::Any);
+            }
             let mut events = Vec::new();
-            resolve_ability_chain(
-                &mut state,
-                &scoped_discard_one(clause_source),
-                &mut events,
-                0,
-            )
-            .unwrap();
+            resolve_ability_chain(&mut state, &clause, &mut events, 0).unwrap();
 
             assert!(
                 matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }),
@@ -53088,6 +53439,7 @@ mod tests {
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                     reveal: true,
+                    cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
                 },
                 vec![],
                 ObjectId(1),
@@ -54407,7 +54759,7 @@ mod tests {
             (
                 "CreateDrawReplacement",
                 Effect::CreateDrawReplacement {
-                    replacement_effect: Box::new(placement()),
+                    replacement_effect: payload(),
                 },
             ),
             (
@@ -56475,6 +56827,7 @@ mod tests {
             selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional: false,
             reveal,
+            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
         };
         let mut reveal_pass = ResolvedAbility::new(
             reveal_hand(TargetFilter::None, true),
@@ -56571,6 +56924,7 @@ mod tests {
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                     reveal: true,
+                    cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
                 },
                 vec![],
                 ObjectId(1),
@@ -61103,7 +61457,31 @@ mod tests {
     #[test]
     fn activation_tally_gates_on_the_printed_threshold() {
         let mut state = GameState::new_two_player(42);
-        let source_id = ObjectId(1);
+        // CR 602.5c: the tally reads the per-acquisition usage key, so the
+        // fixture installs the backing printed ability the reader resolves.
+        let source_id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Tally Source".to_string(),
+            Zone::Battlefield,
+        );
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source_id)
+                .expect("just created")
+                .abilities,
+        )
+        .push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        let key = crate::game::restrictions::ability_usage_key(&state, source_id, 0)
+            .expect("the printed ability resolves");
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -61125,7 +61503,7 @@ mod tests {
         for activations in 0..4 {
             state
                 .activated_abilities_this_turn
-                .insert((source_id, 0), activations);
+                .insert(key.clone(), activations);
             assert!(
                 !evaluate_condition(&condition, &state, &ability),
                 "must not fire at {activations} activations — the printed \
@@ -61133,17 +61511,13 @@ mod tests {
             );
         }
 
-        state
-            .activated_abilities_this_turn
-            .insert((source_id, 0), 4);
+        state.activated_abilities_this_turn.insert(key.clone(), 4);
         assert!(
             evaluate_condition(&condition, &state, &ability),
             "must fire once the fourth activation is recorded"
         );
         // "four OR MORE" — the gate stays satisfied past the boundary.
-        state
-            .activated_abilities_this_turn
-            .insert((source_id, 0), 7);
+        state.activated_abilities_this_turn.insert(key, 7);
         assert!(evaluate_condition(&condition, &state, &ability));
     }
 
@@ -61154,7 +61528,29 @@ mod tests {
     #[test]
     fn activation_and_resolution_tallies_read_separate_ledgers() {
         let mut state = GameState::new_two_player(42);
-        let source_id = ObjectId(1);
+        // CR 602.5c: the tally reads the per-acquisition usage key, so the
+        // fixture installs the backing printed ability the reader resolves.
+        let source_id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Tally Source".to_string(),
+            Zone::Battlefield,
+        );
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&source_id)
+                .expect("just created")
+                .abilities,
+        )
+        .push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
         let mut ability = ResolvedAbility::new(
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
@@ -61167,9 +61563,9 @@ mod tests {
         ability.ability_index = Some(0);
 
         // Four activations recorded, none of them resolved.
-        state
-            .activated_abilities_this_turn
-            .insert((source_id, 0), 4);
+        let key = crate::game::restrictions::ability_usage_key(&state, source_id, 0)
+            .expect("the printed ability resolves");
+        state.activated_abilities_this_turn.insert(key, 4);
 
         assert!(
             evaluate_condition(
@@ -67809,6 +68205,60 @@ mod entry_observation_settlement_tests {
             state.battlefield_entry_observations.len(),
             1,
             "G1 positive pair"
+        );
+    }
+
+    /// CR 608.2c + CR 101.4: a boundary marks the instruction on the ledger before a node bound
+    /// to its phase trigger's turn player, but not between the seat legs of a player-scope
+    /// clause still in progress, whose seats' actions are one simultaneous event: neither
+    /// before a seat leg resumed without a sidecar (Grismold, the Dreadsower reaches it; see the
+    /// integration suite) nor under a sidecar. Synthetic: the nodes and the sidecar are built
+    /// by hand.
+    #[test]
+    fn boundary_marks_the_instruction_outside_seat_legs() {
+        let mut seat_scoped = node(put_counter());
+        seat_scoped.scoped_player = Some(PlayerId(0));
+
+        // A node bound to its phase trigger's turn player is an ordinary instruction.
+        let mut phase_bound = node(put_counter());
+        phase_bound.set_phase_turn_player_recursive(PlayerId(0));
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &phase_bound, None);
+        assert_eq!(
+            state.instruction_boundary_marks,
+            vec![state.zone_changes_this_turn.len()],
+            "the completed instruction's entry is below the mark"
+        );
+        // A second boundary with no new ledger row marks nothing.
+        settle_entries_before_instruction(&mut state, &events, &phase_bound, None);
+        assert_eq!(state.instruction_boundary_marks.len(), 1);
+
+        // A seat leg resumed without a sidecar: no observation (D3) and no mark.
+        let mut state = GameState::new_two_player(3);
+        let (_, events) = entered(&mut state, 1);
+        settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
+        assert!(
+            state.battlefield_entry_observations.is_empty(),
+            "reach guard: D3 defers the observation"
+        );
+        assert!(
+            state.instruction_boundary_marks.is_empty(),
+            "the next seat leg is part of the same clause, sidecar or not"
+        );
+
+        let mut state = GameState::new_two_player(3);
+        let (source, events) = entered(&mut state, 1);
+        state.resolving_player_scope_tail = Some(PendingPlayerScopeTail {
+            source_id: source,
+            after_scope: Box::new(node(put_counter())),
+            linked_exile_batch: Vec::new(),
+            created_tokens: None,
+        });
+        settle_entries_before_instruction(&mut state, &events, &seat_scoped, None);
+        assert!(
+            state.instruction_boundary_marks.is_empty(),
+            "the next seat leg is part of the same clause"
         );
     }
 

@@ -622,7 +622,7 @@ fn ready_copy_entry_completion(
         return None;
     }
     match queue.completion.as_ref()?.post_actions.first()? {
-        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => Some(*entrant),
+        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant, .. } => Some(*entrant),
         _ => None,
     }
 }
@@ -795,9 +795,16 @@ pub(crate) fn resume_copy_target_entry_completions(
                     "Copy entry completion lost its counter frame".to_string(),
                 )
             })?;
-        completion.post_actions.remove(0);
+        let PendingCounterPostAction::FinishCopyTargetChoiceEntry { resume_stage, .. } =
+            completion.post_actions.remove(0)
+        else {
+            unreachable!("ready copy-entry head was checked")
+        };
         match crate::game::engine_replacement::resume_copy_target_choice_entry(
-            state, entrant, events,
+            state,
+            entrant,
+            resume_stage,
+            events,
         )? {
             CopyEntryResumption::Paused => {
                 if !completion.is_noop() {
@@ -956,10 +963,10 @@ fn apply_pending_counter_post_action(
             if let Some(host) = attach_to {
                 match host {
                     crate::game::game_object::AttachTarget::Object(id) => {
-                        super::attach::attach_to(state, object_id, id);
+                        super::attach::attach_to_with_events(state, object_id, id, events);
                     }
                     crate::game::game_object::AttachTarget::Player(pid) => {
-                        super::attach::attach_to_player(state, object_id, pid);
+                        super::attach::attach_to_player_with_events(state, object_id, pid, events);
                     }
                 }
             }
@@ -1198,7 +1205,10 @@ fn apply_pending_counter_post_action(
             super::token::record_copy_batch_ledger_on_active_copy_token(state);
             true
         }
-        PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant } => {
+        PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+            entrant,
+            resume_stage,
+        } => {
             // The drain parks this fallible action for the result-aware engine
             // boundary (`resume_copy_target_entry_completions`) and never
             // dispatches it here. Should a caller reach this arm anyway, re-park
@@ -1213,7 +1223,10 @@ fn apply_pending_counter_post_action(
                 PendingEffectResolved::with_post_actions_without_effect(
                     EffectKind::BecomeCopy,
                     entrant.object_id,
-                    vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry { entrant }],
+                    vec![PendingCounterPostAction::FinishCopyTargetChoiceEntry {
+                        entrant,
+                        resume_stage,
+                    }],
                 ),
             );
             false

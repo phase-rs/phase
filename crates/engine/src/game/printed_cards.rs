@@ -547,28 +547,36 @@ pub fn intrinsic_etb_counters(
 pub fn self_etb_counter_replacements(
     replacements: &[ReplacementDefinition],
 ) -> Vec<(CounterType, u32)> {
-    replacements
-        .iter()
-        .filter_map(|repl| {
-            if repl.event != ReplacementEvent::Moved
-                || repl.destination_zone != Some(Zone::Battlefield)
-                || !matches!(repl.mode, ReplacementMode::Mandatory)
-                || repl.condition.is_some()
-                || !matches!(repl.valid_card, Some(TargetFilter::SelfRef))
-            {
-                return None;
-            }
-            let Effect::PutCounter {
-                counter_type,
-                count: QuantityExpr::Fixed { value },
-                target: TargetFilter::SelfRef,
-            } = &*repl.execute.as_ref()?.effect
-            else {
-                return None;
-            };
-            (*value > 0).then(|| (counter_type.clone(), *value as u32))
-        })
+    self_etb_counter_replacement_entries(replacements)
+        .map(|(_, counter_type, count)| (counter_type, count))
         .collect()
+}
+
+/// CR 614.1c: [`self_etb_counter_replacements`] with each entry's own definition, so a
+/// caller can ask whether the entrant still has that ability as it would exist on the
+/// battlefield (CR 614.12) before applying its counters.
+pub fn self_etb_counter_replacement_entries(
+    replacements: &[ReplacementDefinition],
+) -> impl Iterator<Item = (&ReplacementDefinition, CounterType, u32)> {
+    replacements.iter().filter_map(|repl| {
+        if repl.event != ReplacementEvent::Moved
+            || repl.destination_zone != Some(Zone::Battlefield)
+            || !matches!(repl.mode, ReplacementMode::Mandatory)
+            || repl.condition.is_some()
+            || !matches!(repl.valid_card, Some(TargetFilter::SelfRef))
+        {
+            return None;
+        }
+        let Effect::PutCounter {
+            counter_type,
+            count: QuantityExpr::Fixed { value },
+            target: TargetFilter::SelfRef,
+        } = &*repl.execute.as_ref()?.effect
+        else {
+            return None;
+        };
+        (*value > 0).then(|| (repl, counter_type.clone(), *value as u32))
+    })
 }
 
 pub(crate) fn base_trigger_printed_origins(
@@ -5703,21 +5711,24 @@ mod tests {
         };
         face.replacements.push(repl_optional);
 
-        // CR 614.11: CreateDrawReplacement nests its substitute Effect; the
-        // walker must descend into it (Words of Worship/Wilding class).
+        // CR 614.11: CreateDrawReplacement nests its substitute definition;
+        // the walker must descend into it (Words cycle).
         let draw_repl = Effect::CreateDrawReplacement {
-            replacement_effect: Box::new(Effect::Conjure {
-                cards: vec![ConjureCard {
-                    source: ConjureSource::Named {
-                        name: "draw_replacement".to_string(),
-                    },
-                    count: QuantityExpr::Fixed { value: 1 },
-                }],
-                destination: Zone::Hand,
-                tapped: false,
-                library_position: None,
-                library_players: None,
-            }),
+            replacement_effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Conjure {
+                    cards: vec![ConjureCard {
+                        source: ConjureSource::Named {
+                            name: "draw_replacement".to_string(),
+                        },
+                        count: QuantityExpr::Fixed { value: 1 },
+                    }],
+                    destination: Zone::Hand,
+                    tapped: false,
+                    library_position: None,
+                    library_players: None,
+                },
+            )),
         };
         walk_effect(&draw_repl, &mut names);
 
