@@ -824,7 +824,7 @@ fn required_x_cost_keeps_the_elected_flashback() {
     assert_paid(&r, covenant, 2, None);
 }
 
-/// CR 702.33d: a kicker that changes the target is declared before targets.
+/// CR 601.2b: a kicker that changes the target is declared before targets.
 #[test]
 fn target_changing_kicker_keeps_the_elected_flashback() {
     let mut s = GameScenario::new();
@@ -913,7 +913,7 @@ fn mode_choice_keeps_the_elected_flashback() {
 
 const INSCRIPTION_OF_RUIN: &str = "Kicker {2}{B}{B}\nChoose one. If this spell was kicked, choose any number instead.\n• Target opponent discards two cards.\n• Return target creature card with mana value 2 or less from your graveyard to the battlefield.\n• Destroy target creature with mana value 3 or less.";
 
-/// CR 702.33d + CR 700.2: a modal kicker is declared before the modes.
+/// CR 601.2b + CR 700.2: a kicker that widens the modes is declared before them.
 #[test]
 fn modal_kicker_keeps_the_elected_flashback() {
     let mut s = GameScenario::new();

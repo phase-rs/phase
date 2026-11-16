@@ -8973,6 +8973,7 @@ fn prepare_casting_variant(
 /// Prepare one exact menu tuple. A Fuse pair's right-half cast must install the
 /// existing one-time split-face projection before every legality and cost
 /// reader; Fuse itself always remains the left/current combined spell.
+#[allow(clippy::too_many_arguments)]
 fn prepare_casting_variant_on_face(
     state: &GameState,
     player: PlayerId,
