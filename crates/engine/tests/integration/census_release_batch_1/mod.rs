@@ -333,11 +333,13 @@ fn prevent_all_combat_damage_covers_creatures_but_not_noncombat_damage() {
 }
 
 // ---- Shape 6: "deals N damage to target creature. If that creature would die this turn, exile it instead." (Feed the Flames) ----
+// The rider binds to "that creature" only: a bystander that dies later the same turn still goes to the graveyard.
 #[test]
 fn damage_then_exile_instead_of_dying() {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let victim = s.add_creature(P1, "Victim", 2, 2).id();
+    let bystander = s.add_creature(P1, "Bystander", 2, 2).id();
     let spell = s
         .add_spell_to_hand_from_oracle(
             P0,
@@ -345,6 +347,9 @@ fn damage_then_exile_instead_of_dying() {
             true,
             "Feed the Flames deals 5 damage to target creature. If that creature would die this turn, exile it instead.",
         )
+        .id();
+    let shock = s
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
         .id();
     let mut r = s.build();
     r.cast(spell).target_object(victim).resolve();
@@ -357,6 +362,22 @@ fn damage_then_exile_instead_of_dying() {
     assert!(
         r.state().players[1].graveyard.is_empty(),
         "nothing in P1's graveyard"
+    );
+    r.cast(shock).target_object(bystander).resolve();
+    r.advance_until_stack_empty();
+    assert_eq!(
+        r.state().objects[&bystander].zone,
+        Zone::Graveyard,
+        "an unrelated creature that dies the same turn is not exiled"
+    );
+    assert_eq!(
+        r.state().players[1]
+            .graveyard
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![bystander],
+        "only the bystander is in P1's graveyard"
     );
 }
 
