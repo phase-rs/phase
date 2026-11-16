@@ -20342,6 +20342,15 @@ pub enum WaitingFor {
         /// pins that across every prompt the engine raises.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         free_entry: Option<crate::types::ability::FreeEntry>,
+        /// CR 608.2c + CR 608.2d: display-only identity of the object this
+        /// prompt's answer is for, when the instruction repeats once per member of
+        /// a population ("for each of those permanents, choose a different
+        /// opponent"). Latched from the repeat driver's member binding when the
+        /// prompt is raised, so the chooser sees which permanent the answer
+        /// assigns; the answer's recording authority remains the parked holder's
+        /// own binding and `source` is unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_subject_id: Option<ObjectId>,
     },
     /// CR 608.2d + CR 608.2e: a player other than the controller (an opponent /
     /// the defending player) guesses a committed value or proposition during
@@ -38574,6 +38583,7 @@ impl GameState {
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
                 | GameEvent::EffectResolved { .. }
+                | GameEvent::Attached { .. }
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::AttackersDeclared { .. }
@@ -38940,6 +38950,7 @@ impl GameState {
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
                 | GameEvent::EffectResolved { .. }
+                | GameEvent::Attached { .. }
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::AttackersDeclared { .. }
@@ -39117,6 +39128,7 @@ impl GameState {
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
                 | GameEvent::EffectResolved { .. }
+                | GameEvent::Attached { .. }
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::BlockersDeclared { .. }
