@@ -14539,6 +14539,7 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -16348,6 +16349,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // membership already diverges, so the conjunction does.
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         // CR 607.2a: the source's linked-exile population and its ORDER — the
         // same two the quantity axis already declines for
         // (`QuantityRef::CardsExiledBySource`, `CardTypeSetSource::ExiledBySource`).
@@ -48035,6 +48037,7 @@ pub mod tests {
                 triggers: Vec::new(),
             },
             WaitingFor::NamedChoice {
+                decision_subject_id: None,
                 player: PlayerId(0),
                 choice_type: crate::types::ability::ChoiceType::Player {
                     distinctness: Default::default(),

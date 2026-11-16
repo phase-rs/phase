@@ -1297,8 +1297,10 @@ pub enum PlayerChoiceDistinctness {
     #[default]
     Independent,
     /// Ordinal-cued instructions ("choose a second player", "choose a third
-    /// player" — Gluntch, the Bestower) require each successive choice to
-    /// exclude every player already chosen earlier in this resolution.
+    /// player" — Gluntch, the Bestower) or "a different" ("choose a different
+    /// opponent" — Dack Fayden, Helping Hand) require each successive choice to
+    /// exclude every player this ability already chose earlier in this
+    /// resolution (`SpellContext::prior_player_choices`).
     DistinctFromPriorChoices,
 }
 
@@ -1564,6 +1566,16 @@ impl ChoiceType {
         }
     }
 
+    /// "Choose a different opponent" (Dack Fayden, Helping Hand): an opponent
+    /// this ability has not already chosen in this resolution (CR 608.2c +
+    /// CR 608.2d).
+    pub fn opponent_distinct_from_prior() -> Self {
+        Self::Opponent {
+            restriction: None,
+            distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices,
+        }
+    }
+
     /// "Choose an opponent [with the most life ...]" (CR 608.2d).
     pub fn opponent_with_restriction(restriction: PlayerFilter) -> Self {
         Self::Opponent {
@@ -1652,6 +1664,13 @@ impl ChoiceType {
                 // option list and their button-per-value rendering.
                 | Self::NumberRange { max: None, .. }
         )
+    }
+
+    /// CR 608.2d: whether this is a choice whose answer is a player — the one
+    /// authority both answer sites and the repeat driver's per-object gate
+    /// consult before treating an answer as a chosen player.
+    pub fn chooses_player(&self) -> bool {
+        matches!(self, Self::Player { .. } | Self::Opponent { .. })
     }
 
     /// CR 107.1a/b + CR 608.2d: Is `answer` a legal value for this choice when
@@ -8453,6 +8472,20 @@ pub mod source_exclusion_bool_compat {
     }
 }
 
+/// CR 608.2c + CR 608.2d: which projection of the resolving ability's
+/// object→player assignment (`SpellContext::object_player_assignment`) a
+/// `TargetFilter::ChoiceAssignment` reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChoiceAssignmentSide {
+    /// The objects the assignment pairs with a player — "the permanent for
+    /// which they were chosen".
+    Objects,
+    /// The player the assignment pairs with the object the resolving effect is
+    /// acting on — "they [were chosen for it]". Resolved per object by the
+    /// handler that acts on that object (`gain_control::resolve_give`).
+    PlayerForObject,
+}
+
 /// CR 608.2c: Producer-action provenance for a tracked-set member — the keyword
 /// action (or one-shot zone change) that made the object part of a "this way"
 /// set. This is the IDENTITY of a "<verb>ed this way" relationship: it is the
@@ -8846,6 +8879,16 @@ pub enum TargetFilter {
         filter: Box<TargetFilter>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
+    },
+    /// CR 608.2c + CR 608.2d: the resolving ability's own object→player
+    /// assignment, read on `side` ("Each opponent gains control of the permanent
+    /// for which they were chosen"). Resolution-scoped, never a target (CR 115.10a):
+    /// resolved only by `gain_control::resolve_give` (objects through
+    /// `give_control_object_targets`, the per-object player through GiveControl's
+    /// recipient authority); every other consumer declines it (matches nothing,
+    /// claims no target slot).
+    ChoiceAssignment {
+        side: ChoiceAssignmentSide,
     },
     /// CR 607.2a: Cards exiled by a specific source via "exile until ~ leaves" links.
     /// Resolves via relational `state.exile_links` lookup, not intrinsic object properties.
@@ -9378,6 +9421,7 @@ pub fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bo
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -9683,6 +9727,7 @@ pub fn filter_grammar_any(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -10247,6 +10292,7 @@ pub fn rewrite_filter_props<C>(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -11137,6 +11183,7 @@ pub(crate) fn filter_binds_player(
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -12710,6 +12757,7 @@ fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: boo
         | TargetFilter::LastZoneChanged
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -16977,6 +17025,29 @@ impl<'de> serde::Deserialize<'de> for QuantityExpr {
 }
 
 impl QuantityExpr {
+    /// CR 608.2c: whether a `repeat_for` iterates a population an earlier
+    /// instruction published — the chain's tracked set as a whole
+    /// (`TrackedSetSize`), or an object count whose universe is that set ("for
+    /// each of those permanents": [`TargetFilter::reveal_population_on_battlefield`]).
+    ///
+    /// Single authority for "this repetition iterates a published population",
+    /// used by the repeat driver's per-object choice gate and its full-chain
+    /// exclusion, and by the parser's `clause_records_choice_assignment` mirror.
+    pub fn iterates_published_population(&self) -> bool {
+        match self {
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            } => true,
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => matches!(
+                filter,
+                TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+            ),
+            _ => false,
+        }
+    }
+
     /// CR 400.7d + CR 608.2k: True when any leaf `QuantityRef` of this
     /// expression reads the cost-paid object
     /// ([`QuantityRef::references_cost_paid_object`]).
@@ -27302,6 +27373,7 @@ pub fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -29064,6 +29136,7 @@ pub fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -29988,6 +30061,40 @@ pub enum VoteVisibility {
 }
 
 impl TargetFilter {
+    /// CR 608.2c + CR 110.1: the members of a reveal's published set that are
+    /// permanents — "those creature cards" / "those permanents" after "Put those …
+    /// cards onto the battlefield". The reveal publishes every card it revealed
+    /// (CR 701.20a, "revealed this way"); the kept cards are exactly the members on
+    /// the battlefield, since a permanent is a card on the battlefield.
+    ///
+    /// Single constructor shared by the parser's admitted-producer lowering (with
+    /// the `TrackedSetId(0)` sentinel) and the engine's continuation binder (with
+    /// the concrete id of the reveal's own population).
+    pub fn reveal_population_on_battlefield(set: TrackedSetId) -> TargetFilter {
+        TargetFilter::TrackedSetFiltered {
+            id: set,
+            filter: Box::new(TargetFilter::Typed(TypedFilter::default().properties(
+                vec![FilterProp::InZone {
+                    zone: Zone::Battlefield,
+                }],
+            ))),
+            caused_by: None,
+        }
+    }
+
+    /// The recognizer paired with [`Self::reveal_population_on_battlefield`]: the
+    /// set id iff `filter` is exactly that constructor's form for some id.
+    pub fn is_reveal_population_on_battlefield(filter: &TargetFilter) -> Option<TrackedSetId> {
+        match filter {
+            TargetFilter::TrackedSetFiltered { id, .. }
+                if *filter == Self::reveal_population_on_battlefield(*id) =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        }
+    }
+
     /// CR 109.4: the controller relation this filter names, reading the first `Typed`
     /// operand through `And` / `Or` / `Not`.
     pub fn controller_scope(&self) -> Option<ControllerRef> {
@@ -30027,6 +30134,7 @@ impl TargetFilter {
             | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSpellController
@@ -30108,6 +30216,7 @@ impl TargetFilter {
             | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSpellController
@@ -30525,6 +30634,7 @@ impl TargetFilter {
             | TargetFilter::CostPaidObject
             | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSpellController
@@ -30765,6 +30875,10 @@ impl TargetFilter {
                 | TargetFilter::ControllerAndControlledPermanents { .. }
                 | TargetFilter::TrackedSet { .. }
                 | TargetFilter::TrackedSetFiltered { .. }
+                // CR 115.10a + CR 608.2c: the resolving ability's own
+                // object→player assignment is read during resolution, never
+                // declared as a target.
+                | TargetFilter::ChoiceAssignment { .. }
                 // CR 115.10a: a bound object id is affected, never a declared target.
                 | TargetFilter::SpecificObject { .. }
                 // CR 201.5a + CR 115.10a: a granter named by a granted body is affected, never a
