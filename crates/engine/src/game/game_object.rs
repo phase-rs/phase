@@ -4168,6 +4168,29 @@ impl GameObject {
             || !self.mana_spent_source_snapshots.is_empty()
     }
 
+    /// CR 601.2h: Whether `self` and `other` carry payment stamps no reader can
+    /// tell apart — the same fields [`Self::clear_cast_payment_stamps`] resets,
+    /// with the source snapshots compared as a multiset of last-known
+    /// characteristics (two identical sources' mana reads the same).
+    pub fn cast_payment_stamps_equivalent(&self, other: &Self) -> bool {
+        if self.mana_spent_to_cast != other.mana_spent_to_cast
+            || self.colors_spent_to_cast != other.colors_spent_to_cast
+            || self.mana_spent_to_cast_amount != other.mana_spent_to_cast_amount
+            || self.phyrexian_life_paid != other.phyrexian_life_paid
+            || self.mana_spent_source_snapshots.len() != other.mana_spent_source_snapshots.len()
+        {
+            return false;
+        }
+        let mut unmatched: Vec<_> = other.mana_spent_source_snapshots.iter().collect();
+        self.mana_spent_source_snapshots.iter().all(|snapshot| {
+            unmatched
+                .iter()
+                .position(|candidate| candidate.lki == snapshot.lki)
+                .map(|index| unmatched.swap_remove(index))
+                .is_some()
+        })
+    }
+
     /// Check if this object has a specific keyword, using discriminant-based matching.
     pub fn has_keyword(&self, keyword: &Keyword) -> bool {
         super::keywords::has_keyword(self, keyword)
@@ -4955,6 +4978,79 @@ mod tests {
         stamp_cast_payment(&mut obj);
         obj.clear_cast_payment_stamps();
         assert_cast_payment_stamps_default(&obj, "after clear_cast_payment_stamps");
+    }
+
+    /// CR 601.2h: `cast_payment_stamps_equivalent` compares every field the
+    /// clear resets — each one flipped alone breaks equivalence — and reads the
+    /// source snapshots as a multiset of characteristics, so two identical
+    /// sources (different ids) and a reordering compare equal.
+    #[test]
+    fn cast_payment_stamps_equivalent_compares_every_stamp() {
+        let spell = || {
+            GameObject::new(
+                ObjectId(1),
+                CardId(1),
+                PlayerId(0),
+                "Stamped".to_string(),
+                Zone::Stack,
+            )
+        };
+        let source = |id: u64, name: &str| {
+            let object = GameObject::new(
+                ObjectId(id),
+                CardId(id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            crate::types::game_state::ManaSpentSourceSnapshot {
+                source_id: object.id,
+                lki: object.snapshot_for_mana_spent(),
+            }
+        };
+        let mut stamped = spell();
+        stamp_cast_payment(&mut stamped);
+        assert!(stamped.cast_payment_stamps_equivalent(&stamped.clone()));
+        assert!(!stamped.cast_payment_stamps_equivalent(&spell()));
+
+        /// Changes one payment stamp of an already stamped object.
+        type Flip = fn(&mut GameObject);
+        let flips: Vec<(&str, Flip)> = vec![
+            ("mana_spent_to_cast", |obj| obj.mana_spent_to_cast = false),
+            ("colors_spent_to_cast", |obj| {
+                obj.colors_spent_to_cast
+                    .add(crate::types::mana::ManaColor::Green, 1)
+            }),
+            ("mana_spent_to_cast_amount", |obj| {
+                obj.mana_spent_to_cast_amount += 1
+            }),
+            ("phyrexian_life_paid", |obj| obj.phyrexian_life_paid += 1),
+            ("mana_spent_source_snapshots", |obj| {
+                obj.mana_spent_source_snapshots[0].lki.name = "Other Source".to_string()
+            }),
+        ];
+        assert_eq!(flips.len(), 5);
+        for (field, flip) in flips {
+            let mut changed = stamped.clone();
+            flip(&mut changed);
+            assert!(
+                !stamped.cast_payment_stamps_equivalent(&changed),
+                "{field} alone must break equivalence"
+            );
+        }
+
+        let mut by_two_ogres = spell();
+        by_two_ogres.mana_spent_source_snapshots =
+            vec![source(2, "Treasonous Ogre"), source(3, "Island")];
+        let mut by_one_ogre = spell();
+        by_one_ogre.mana_spent_source_snapshots =
+            vec![source(4, "Island"), source(5, "Treasonous Ogre")];
+        assert!(
+            by_two_ogres.cast_payment_stamps_equivalent(&by_one_ogre),
+            "identical sources compare by characteristics, as a multiset"
+        );
+        by_one_ogre.mana_spent_source_snapshots[0] = source(4, "Treasonous Ogre");
+        assert!(!by_two_ogres.cast_payment_stamps_equivalent(&by_one_ogre));
     }
 
     /// CR 108.2 + CR 109.1 + CR 722.3c: `is_card_population_member` excludes
