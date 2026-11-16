@@ -29,7 +29,7 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::KeywordKind;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaRestriction, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -56,8 +56,54 @@ fn pool(s: &mut GameScenario, player: PlayerId, colors: &[ManaType]) {
     s.with_mana_pool(player, units);
 }
 
-fn pool_total(r: &GameRunner, player: PlayerId) -> usize {
-    r.state().players[player.0 as usize].mana_pool.total()
+/// An identifiable spare that can't pay an activated ability (it is
+/// restricted to spells), so it must survive every activation below.
+fn spare() -> ManaUnit {
+    ManaUnit::new(
+        ManaType::Red,
+        SPARE_SOURCE,
+        false,
+        vec![ManaRestriction::OnlyForSpell],
+    )
+}
+
+const SPARE_SOURCE: ObjectId = ObjectId(8_888);
+
+/// P0's pool: `colors` plus the spare.
+fn p0_pool(s: &mut GameScenario, colors: &[ManaType]) {
+    let mut units: Vec<ManaUnit> = colors
+        .iter()
+        .map(|&c| ManaUnit::new(c, ObjectId(9_999), false, vec![]))
+        .collect();
+    units.push(spare());
+    s.with_mana_pool(P0, units);
+}
+
+/// Exactly the mana units that pay `cost`: colorless for the generic part,
+/// the matching color for each colored shard.
+fn exact_units(cost: &ManaCost) -> Vec<ManaType> {
+    let ManaCost::Cost { generic, shards } = cost else {
+        panic!("a fixed mana cost, got {cost:?}");
+    };
+    let mut units = vec![ManaType::Colorless; *generic as usize];
+    units.extend(shards.iter().map(|shard| match shard {
+        ManaCostShard::White => ManaType::White,
+        ManaCostShard::Blue => ManaType::Blue,
+        ManaCostShard::Black => ManaType::Black,
+        ManaCostShard::Red => ManaType::Red,
+        ManaCostShard::Green => ManaType::Green,
+        other => panic!("unexpected shard {other:?}"),
+    }));
+    units
+}
+
+/// P0's pool as (color, source) pairs.
+fn p0_pool_units(r: &GameRunner) -> Vec<(ManaType, ObjectId)> {
+    r.state().players[0]
+        .mana_pool
+        .units()
+        .map(|unit| (unit.color, unit.source_id))
+        .collect()
 }
 
 /// The mana part of an activated ability's cost.
@@ -120,11 +166,30 @@ fn offer_with_cost(r: &GameRunner, source: ObjectId, wanted: &ManaCost) -> usize
         .unwrap_or_else(|| panic!("no offer costing {wanted:?} for {source:?}"))
 }
 
-/// Activates the offer costing `wanted`, resolves the stack, and asserts that
-/// exactly `wanted`'s mana value left P0's pool.
+/// Activates the offer costing `wanted` from a pool holding exactly `wanted`
+/// plus the spare, asserts that payment left only the spare, then resolves.
 fn activate_and_resolve(r: &mut GameRunner, source: ObjectId, wanted: &ManaCost) {
+    activate_exact(r, source, wanted);
+    r.advance_until_stack_empty();
+}
+
+/// Activates the offer costing `wanted` and asserts the pool afterwards holds
+/// only the spare: every unit of `wanted`, and nothing else, was spent.
+fn activate_exact(r: &mut GameRunner, source: ObjectId, wanted: &ManaCost) {
+    let mut before = p0_pool_units(r);
+    let mut expected_before: Vec<(ManaType, ObjectId)> = exact_units(wanted)
+        .into_iter()
+        .map(|c| (c, ObjectId(9_999)))
+        .chain([(ManaType::Red, SPARE_SOURCE)])
+        .collect();
+    before.sort_by_key(|u| format!("{u:?}"));
+    expected_before.sort_by_key(|u| format!("{u:?}"));
+    assert_eq!(
+        before, expected_before,
+        "the board holds exactly {wanted:?} plus the spare"
+    );
+
     let index = offer_with_cost(r, source, wanted);
-    let before = pool_total(r, P0);
     r.act(GameAction::ActivateAbility {
         source_id: source,
         ability_index: index,
@@ -132,11 +197,10 @@ fn activate_and_resolve(r: &mut GameRunner, source: ObjectId, wanted: &ManaCost)
     })
     .expect("the offered activation is legal");
     assert_eq!(
-        before - pool_total(r, P0),
-        wanted.mana_value() as usize,
-        "the activation spends exactly {wanted:?}"
+        p0_pool_units(r),
+        vec![(ManaType::Red, SPARE_SOURCE)],
+        "paying {wanted:?} spends exactly its units and leaves the spare"
     );
-    r.advance_until_stack_empty();
 }
 
 fn assert_settled(r: &GameRunner) {
@@ -180,8 +244,8 @@ fn add_sedris(s: &mut GameScenario) -> ObjectId {
 }
 
 /// Dregscape Sliver (index 0) and/or Sedris (index 1) on the battlefield in
-/// `grantors` order, Muscle Sliver in the graveyard, {B}{B}{B} in P0's pool.
-/// With `murder`, P1 also holds Murder and exactly {1}{B}{B}.
+/// `grantors` order, Muscle Sliver in the graveyard, `p0` plus the spare in
+/// P0's pool. With `murder`, P1 also holds Murder and exactly {1}{B}{B}.
 struct UnearthBoard {
     runner: GameRunner,
     muscle: ObjectId,
@@ -189,7 +253,7 @@ struct UnearthBoard {
     murder: Option<ObjectId>,
 }
 
-fn unearth_board_with(grantors: &[usize], murder: bool) -> UnearthBoard {
+fn unearth_board_with(grantors: &[usize], p0: &[ManaType], murder: bool) -> UnearthBoard {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let mut sedris = None;
@@ -207,7 +271,7 @@ fn unearth_board_with(grantors: &[usize], murder: bool) -> UnearthBoard {
         .with_mana_cost(cost(1, vec![ManaCostShard::Green]))
         .from_oracle_text(MUSCLE_SLIVER)
         .id();
-    pool(&mut s, P0, &[ManaType::Black; 3]);
+    p0_pool(&mut s, p0);
     let murder = murder.then(|| {
         let id = s
             .add_spell_to_hand(P1, "Murder", true)
@@ -225,9 +289,12 @@ fn unearth_board_with(grantors: &[usize], murder: bool) -> UnearthBoard {
     }
 }
 
-fn unearth_board(grantors: &[usize]) -> (GameRunner, ObjectId, Option<ObjectId>) {
-    let b = unearth_board_with(grantors, false);
-    (b.runner, b.muscle, b.sedris)
+/// P0's pool that affords both unearth costs ({2} and {2}{B}).
+const UNEARTH_FUNDS: [ManaType; 3] = [ManaType::Colorless, ManaType::Colorless, ManaType::Black];
+
+fn unearth_board(grantors: &[usize], p0: &[ManaType]) -> (GameRunner, ObjectId) {
+    let b = unearth_board_with(grantors, p0, false);
+    (b.runner, b.muscle)
 }
 
 fn unearth_two() -> ManaCost {
@@ -248,20 +315,21 @@ fn assert_unearthed(r: &GameRunner, card: ObjectId) {
 
 #[test]
 fn each_unearth_grant_alone_offers_its_own_cost() {
-    let (r, muscle, _) = unearth_board(&[0]);
+    let (r, muscle) = unearth_board(&[0], &UNEARTH_FUNDS);
     assert_offered_costs(&r, muscle, &[unearth_two()]);
-    let (r, muscle, _) = unearth_board(&[1]);
+    let (r, muscle) = unearth_board(&[1], &UNEARTH_FUNDS);
     assert_offered_costs(&r, muscle, &[unearth_two_black()]);
 }
 
 /// CR 113.2c: both grants are offered whichever grantor is newer, and each one
-/// is paid and resolves through the production activation path.
+/// is paid exactly and resolves through the production activation path.
 #[test]
 fn dregscape_and_sedris_unearth_grants_are_both_offered_and_each_resolves() {
     for order in BOTH_ORDERS {
+        let (r, muscle) = unearth_board(&order, &UNEARTH_FUNDS);
+        assert_offered_costs(&r, muscle, &[unearth_two(), unearth_two_black()]);
         for wanted in [unearth_two(), unearth_two_black()] {
-            let (mut r, muscle, _) = unearth_board(&order);
-            assert_offered_costs(&r, muscle, &[unearth_two(), unearth_two_black()]);
+            let (mut r, muscle) = unearth_board(&order, &exact_units(&wanted));
             activate_and_resolve(&mut r, muscle, &wanted);
             assert_unearthed(&r, muscle);
             assert_settled(&r);
@@ -279,15 +347,10 @@ fn sedris_unearth_resolves_after_p1_murders_sedris_in_response() {
             muscle,
             sedris,
             murder,
-        } = unearth_board_with(&order, true);
+        } = unearth_board_with(&order, &exact_units(&unearth_two_black()), true);
         let (sedris, murder) = (sedris.unwrap(), murder.unwrap());
-        let index = offer_with_cost(&r, muscle, &unearth_two_black());
-        r.act(GameAction::ActivateAbility {
-            source_id: muscle,
-            ability_index: index,
-            payment_mode: CastPaymentMode::Auto,
-        })
-        .expect("Sedris's unearth is offered");
+        assert_offered_costs(&r, muscle, &[unearth_two(), unearth_two_black()]);
+        activate_exact(&mut r, muscle, &unearth_two_black());
         assert_eq!(r.state().stack.len(), 1, "unearth is on the stack");
 
         r.act(GameAction::PassPriority).expect("P0 passes");
@@ -305,7 +368,8 @@ fn sedris_unearth_resolves_after_p1_murders_sedris_in_response() {
 }
 
 /// With Sedris destroyed before activation, only Dregscape Sliver's unearth
-/// {2} remains, and it resolves.
+/// {2} remains (P0 can still afford {2}{B}, so its absence is the grant
+/// ending), and it resolves.
 #[test]
 fn only_dregscape_unearth_remains_after_p1_murders_sedris() {
     for order in BOTH_ORDERS {
@@ -314,7 +378,7 @@ fn only_dregscape_unearth_remains_after_p1_murders_sedris() {
             muscle,
             sedris,
             murder,
-        } = unearth_board_with(&order, true);
+        } = unearth_board_with(&order, &UNEARTH_FUNDS, true);
         let (sedris, murder) = (sedris.unwrap(), murder.unwrap());
         assert_offered_costs(&r, muscle, &[unearth_two(), unearth_two_black()]);
 
@@ -328,7 +392,26 @@ fn only_dregscape_unearth_remains_after_p1_murders_sedris() {
         );
 
         assert_offered_costs(&r, muscle, &[unearth_two()]);
-        activate_and_resolve(&mut r, muscle, &unearth_two());
+        let index = offer_with_cost(&r, muscle, &unearth_two());
+        r.act(GameAction::ActivateAbility {
+            source_id: muscle,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Dregscape's unearth is offered");
+        // {2} is paid from {C}{C}{B}: the spare survives and exactly one of the
+        // three payable units remains.
+        let after = p0_pool_units(&r);
+        assert!(
+            after.contains(&(ManaType::Red, SPARE_SOURCE)),
+            "the spare survives"
+        );
+        assert_eq!(
+            after.len(),
+            2,
+            "exactly two of {{C}}{{C}}{{B}} were spent, got {after:?}"
+        );
+        r.advance_until_stack_empty();
         assert_unearthed(&r, muscle);
         assert_settled(&r);
     }
@@ -350,8 +433,8 @@ fn cast_murder(r: &mut GameRunner, murder: ObjectId, target: ObjectId) {
 // ---------------------------------------------------------------------------
 
 /// Graywater's Fixer (index 0) and/or Wire Surgeons (index 1) in `grantors`
-/// order, Salvage Slasher in the graveyard, {B}{B}{B} in P0's pool.
-fn encore_board(grantors: &[usize]) -> (GameRunner, ObjectId) {
+/// order, Salvage Slasher in the graveyard, `p0` plus the spare in P0's pool.
+fn encore_board(grantors: &[usize], p0: &[ManaType]) -> (GameRunner, ObjectId) {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     for &g in grantors {
@@ -377,9 +460,12 @@ fn encore_board(grantors: &[usize]) -> (GameRunner, ObjectId) {
         .with_mana_cost(cost(1, vec![ManaCostShard::Black]))
         .from_oracle_text(SALVAGE_SLASHER)
         .id();
-    pool(&mut s, P0, &[ManaType::Black; 3]);
+    p0_pool(&mut s, p0);
     (s.build(), slasher)
 }
+
+/// P0's pool that affords both encore costs ({2} and {1}{B}).
+const ENCORE_FUNDS: [ManaType; 2] = [ManaType::Colorless, ManaType::Black];
 
 /// Graywater's Fixer: encore {X}, X = Salvage Slasher's mana value 2.
 fn encore_mana_value() -> ManaCost {
@@ -393,20 +479,21 @@ fn encore_mana_cost() -> ManaCost {
 
 #[test]
 fn each_encore_grant_alone_offers_its_own_cost() {
-    let (r, slasher) = encore_board(&[0]);
+    let (r, slasher) = encore_board(&[0], &ENCORE_FUNDS);
     assert_offered_costs(&r, slasher, &[encore_mana_value()]);
-    let (r, slasher) = encore_board(&[1]);
+    let (r, slasher) = encore_board(&[1], &ENCORE_FUNDS);
     assert_offered_costs(&r, slasher, &[encore_mana_cost()]);
 }
 
-/// CR 113.2c + CR 702.141a: both encore grants are offered, and each exiles the
-/// card and creates a token copy for the one opponent.
+/// CR 113.2c + CR 702.141a: both encore grants are offered, and each is paid
+/// exactly, exiles the card and creates a token copy for the one opponent.
 #[test]
 fn fixer_and_wire_surgeons_encore_grants_are_both_offered_and_each_resolves() {
     for order in BOTH_ORDERS {
+        let (r, slasher) = encore_board(&order, &ENCORE_FUNDS);
+        assert_offered_costs(&r, slasher, &[encore_mana_value(), encore_mana_cost()]);
         for wanted in [encore_mana_value(), encore_mana_cost()] {
-            let (mut r, slasher) = encore_board(&order);
-            assert_offered_costs(&r, slasher, &[encore_mana_value(), encore_mana_cost()]);
+            let (mut r, slasher) = encore_board(&order, &exact_units(&wanted));
             activate_and_resolve(&mut r, slasher, &wanted);
             assert_eq!(r.state().objects[&slasher].zone, Zone::Exile);
             let tokens = r
@@ -429,9 +516,9 @@ fn fixer_and_wire_surgeons_encore_grants_are_both_offered_and_each_resolves() {
 // ---------------------------------------------------------------------------
 
 /// Jo Grant (index 0) and/or Rhet-Tomb Mystic (index 1) in `grantors` order,
-/// Isamaru in hand, an Island on top of P0's library, {W}{W}{U}{U} in P0's pool.
-/// Returns (runner, Isamaru, the Island).
-fn cycling_board(grantors: &[usize]) -> (GameRunner, ObjectId, ObjectId) {
+/// Isamaru in hand, an Island on top of P0's library, `p0` plus the spare in
+/// P0's pool. Returns (runner, Isamaru, the Island).
+fn cycling_board(grantors: &[usize], p0: &[ManaType]) -> (GameRunner, ObjectId, ObjectId) {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     for &g in grantors {
@@ -458,18 +545,12 @@ fn cycling_board(grantors: &[usize]) -> (GameRunner, ObjectId, ObjectId) {
         .with_mana_cost(cost(0, vec![ManaCostShard::White]))
         .id();
     let island = s.add_card_to_library_top(P0, "Island");
-    pool(
-        &mut s,
-        P0,
-        &[
-            ManaType::White,
-            ManaType::White,
-            ManaType::Blue,
-            ManaType::Blue,
-        ],
-    );
+    p0_pool(&mut s, p0);
     (s.build(), isamaru, island)
 }
+
+/// P0's pool that affords both cycling costs ({2}{W} and {1}{U}).
+const CYCLING_FUNDS: [ManaType; 3] = [ManaType::Colorless, ManaType::White, ManaType::Blue];
 
 fn cycling_jo_grant() -> ManaCost {
     cost(2, vec![ManaCostShard::White])
@@ -481,20 +562,21 @@ fn cycling_rhet_tomb() -> ManaCost {
 
 #[test]
 fn each_cycling_grant_alone_offers_its_own_cost() {
-    let (r, isamaru, _) = cycling_board(&[0]);
+    let (r, isamaru, _) = cycling_board(&[0], &CYCLING_FUNDS);
     assert_offered_costs(&r, isamaru, &[cycling_jo_grant()]);
-    let (r, isamaru, _) = cycling_board(&[1]);
+    let (r, isamaru, _) = cycling_board(&[1], &CYCLING_FUNDS);
     assert_offered_costs(&r, isamaru, &[cycling_rhet_tomb()]);
 }
 
-/// CR 113.2c + CR 702.29a: both cycling grants are offered, and each discards
-/// the card and draws.
+/// CR 113.2c + CR 702.29a: both cycling grants are offered, and each is paid
+/// exactly, discards the card and draws.
 #[test]
 fn jo_grant_and_rhet_tomb_cycling_grants_are_both_offered_and_each_resolves() {
     for order in BOTH_ORDERS {
+        let (r, isamaru, _) = cycling_board(&order, &CYCLING_FUNDS);
+        assert_offered_costs(&r, isamaru, &[cycling_jo_grant(), cycling_rhet_tomb()]);
         for wanted in [cycling_jo_grant(), cycling_rhet_tomb()] {
-            let (mut r, isamaru, island) = cycling_board(&order);
-            assert_offered_costs(&r, isamaru, &[cycling_jo_grant(), cycling_rhet_tomb()]);
+            let (mut r, isamaru, island) = cycling_board(&order, &exact_units(&wanted));
             activate_and_resolve(&mut r, isamaru, &wanted);
             assert_eq!(r.state().objects[&isamaru].zone, Zone::Graveyard);
             assert_eq!(

@@ -1143,9 +1143,10 @@ mod tests {
     }
 
     /// CR 702.164b (issue #955): `upsert_keyword` must PUSH summing keywords
-    /// (Toxic) so the off-zone aggregate reader counts every instance, while
-    /// non-summing keywords keep distinct values and drop only an exact
-    /// duplicate (CR 113.2c). A granted Toxic (which collapses to
+    /// (Toxic) so the off-zone aggregate reader counts every instance. Distinct
+    /// Ward values coexist (CR 113.2c). Exact-value deduplication preserves the
+    /// existing keyword-list representation; it does not determine
+    /// companion-trigger multiplicity. A granted Toxic (which collapses to
     /// `KeywordKind::Unknown`) does NOT clobber an unrelated printed keyword that
     /// happens to share that `Unknown` kind.
     #[test]
@@ -1165,8 +1166,8 @@ mod tests {
             2
         );
 
-        // Non-summing keyword: distinct Wards coexist (CR 113.2c), and an exact
-        // duplicate is kept once.
+        // Distinct Ward values coexist (CR 113.2c). Exact-value deduplication
+        // preserves the existing keyword-list representation.
         let ward = |generic| {
             Keyword::Ward(WardCost::Mana(ManaCost::Cost {
                 generic,
