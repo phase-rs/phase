@@ -67,10 +67,10 @@ mod prelude {
     pub(super) use crate::types::statics::{
         ActivationExemption, AdditionalCostTaxAction, AttackDefenderScope, BlockExceptionKind,
         CastCostMode, CastExtraCost, CastFreeOrigin, CastFrequency, CastingProhibitionCondition,
-        CombatAloneAction, CombatAloneRequirement, CostModifyMode, CostPaymentProhibition,
-        CostReductionReach, CrewAction, CrewContributionKind, ExileCardPool, ExileCastCost,
-        ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool, HandSizeModification,
-        PermissionCastLimit, ProhibitionScope, RequiredDefender, StaticMode,
+        CausingObject, CombatAloneAction, CombatAloneRequirement, CostModifyMode,
+        CostPaymentProhibition, CostReductionReach, CrewAction, CrewContributionKind,
+        ExileCardPool, ExileCastCost, ExileCastGrantee, ExileCastTiming, GraveyardPermissionPool,
+        HandSizeModification, PermissionCastLimit, ProhibitionScope, RequiredDefender, StaticMode,
         SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
     };
     pub(super) use crate::types::zones::Zone;

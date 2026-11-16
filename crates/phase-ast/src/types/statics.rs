@@ -679,6 +679,25 @@ pub enum ZoneChangeQualifier {
     Supertype(super::card_type::Supertype),
 }
 
+/// CR 603.2d: which object a trigger doubler's cause event may be about,
+/// relative to the doubler. "If another permanent entering the battlefield
+/// causes ..." (The Fish Brewer) excludes the doubler's own entering; the
+/// unqualified form ("a permanent entering") includes it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CausingObject {
+    #[default]
+    Any,
+    /// The causing object is not the doubler ("another").
+    OtherThanDoubler,
+}
+
+impl CausingObject {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub fn is_any(value: &Self) -> bool {
+        matches!(value, CausingObject::Any)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TriggerCause {
     /// Unrestricted doubler — matches any trigger cause.
@@ -687,10 +706,13 @@ pub enum TriggerCause {
     /// (Panharmonicon-class). The `core_types` list narrows the entering
     /// permanent's type — for Panharmonicon this is
     /// `[Artifact, Creature]`; for a hypothetical creature-only Panharmonicon
-    /// it would be `[Creature]`.
+    /// it would be `[Creature]`. `entrant` excludes the doubler's own entering
+    /// for "another permanent entering" (The Fish Brewer).
     EntersBattlefield {
         #[serde(default)]
         core_types: Vec<super::card_type::CoreType>,
+        #[serde(default, skip_serializing_if = "CausingObject::is_any")]
+        entrant: CausingObject,
     },
     /// CR 508.1 + CR 308.1: Trigger was caused by a creature attacking
     /// (Isshin-class). Matches `GameEvent::AttackersDeclared` regardless of
@@ -707,6 +729,11 @@ pub enum TriggerCause {
     /// `GameEvent::DamageDealt` whose target is a creature controlled by the
     /// doubler's controller.
     ControlledCreatureDealtDamage,
+    /// CR 603.2d + CR 115.1: Trigger was caused by a creature you control
+    /// becoming the target of a spell or ability (Valiant Emberkin-class).
+    /// Matches `GameEvent::BecomesTarget` whose target is a creature
+    /// controlled by the doubler's controller.
+    ControlledCreatureBecameTarget,
     /// CR 601.2 + CR 707.10: Trigger was caused by the doubler's controller
     /// casting or copying a spell (Veyran, Voice of Duality-class: "If you
     /// casting or copying an instant or sorcery spell causes ..."). Matches
@@ -745,14 +772,25 @@ impl fmt::Display for TriggerCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TriggerCause::Any => write!(f, "Any"),
-            TriggerCause::EntersBattlefield { core_types } => {
+            TriggerCause::EntersBattlefield {
+                core_types,
+                entrant,
+            } => {
                 let names: Vec<String> = core_types.iter().map(|ct| format!("{ct:?}")).collect();
-                write!(f, "EntersBattlefield([{}])", names.join(","))
+                match entrant {
+                    CausingObject::Any => write!(f, "EntersBattlefield([{}])", names.join(",")),
+                    CausingObject::OtherThanDoubler => {
+                        write!(f, "EntersBattlefield(another,[{}])", names.join(","))
+                    }
+                }
             }
             TriggerCause::CreatureAttacking => write!(f, "CreatureAttacking"),
             TriggerCause::CreatureDying => write!(f, "CreatureDying"),
             TriggerCause::ControlledCreatureDealtDamage => {
                 write!(f, "ControlledCreatureDealtDamage")
+            }
+            TriggerCause::ControlledCreatureBecameTarget => {
+                write!(f, "ControlledCreatureBecameTarget")
             }
             TriggerCause::ControllerCastOrCopiedSpell { core_types } => {
                 let names: Vec<String> = core_types.iter().map(|ct| format!("{ct:?}")).collect();
@@ -4011,6 +4049,7 @@ impl FromStr for StaticMode {
                         super::card_type::CoreType::Artifact,
                         super::card_type::CoreType::Creature,
                     ],
+                    entrant: CausingObject::Any,
                 },
             },
             "IgnoreHexproof" => StaticMode::IgnoreHexproof,
@@ -4835,6 +4874,7 @@ mod tests {
             StaticMode::DoubleTriggers {
                 cause: TriggerCause::EntersBattlefield {
                     core_types: vec![CoreType::Artifact, CoreType::Creature],
+                    entrant: CausingObject::Any,
                 },
             }
         );

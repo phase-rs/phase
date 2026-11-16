@@ -1011,6 +1011,7 @@ fn panharmonicon_still_doubles_after_dedup() {
             crate::types::ability::StaticDefinition::new(StaticMode::DoubleTriggers {
                 cause: TriggerCause::EntersBattlefield {
                     core_types: vec![CoreType::Artifact, CoreType::Creature],
+                    entrant: crate::types::statics::CausingObject::Any,
                 },
             })
             .affected(TargetFilter::Typed(
@@ -1369,6 +1370,7 @@ fn panharmonicon_does_not_double_attack_triggers() {
         &mut state,
         TriggerCause::EntersBattlefield {
             core_types: vec![CoreType::Artifact, CoreType::Creature],
+            entrant: crate::types::statics::CausingObject::Any,
         },
     );
 
@@ -1906,6 +1908,7 @@ fn isshin_and_panharmonicon_only_isshin_matches_attack_event() {
         &mut state,
         TriggerCause::EntersBattlefield {
             core_types: vec![CoreType::Artifact, CoreType::Creature],
+            entrant: crate::types::statics::CausingObject::Any,
         },
     );
 

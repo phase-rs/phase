@@ -908,6 +908,50 @@ fn gandalf_the_white_doubler_static() {
     assert_eq!(filter.controller, Some(ControllerRef::You));
 }
 
+/// CR 603.2d + CR 115.1: Valiant Emberkin's cause is a creature you control
+/// becoming the target of a spell or ability, not `Any`.
+#[test]
+fn valiant_emberkin_becomes_target_doubler_cause() {
+    let def = parse_static_line(
+        "If a creature you control becoming the target of a spell or ability causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+    )
+    .expect("expected DoubleTriggers static for Valiant Emberkin");
+    assert_eq!(
+        def.mode,
+        StaticMode::DoubleTriggers {
+            cause: TriggerCause::ControlledCreatureBecameTarget
+        }
+    );
+}
+
+/// CR 603.2d: "another permanent entering" (The Fish Brewer) excludes the
+/// doubler's own entering; "a permanent entering" (Yarok) does not.
+#[test]
+fn another_permanent_entering_doubler_cause_excludes_the_doubler() {
+    for (text, entrant) in [
+        (
+            "If another permanent entering the battlefield causes a triggered ability of a permanent you control to trigger, tap any number of Fish you control. That ability triggers an additional time for each Fish tapped this way.",
+            CausingObject::OtherThanDoubler,
+        ),
+        (
+            "If a permanent entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+            CausingObject::Any,
+        ),
+    ] {
+        let def = parse_static_line(text).expect("expected DoubleTriggers static");
+        assert_eq!(
+            def.mode,
+            StaticMode::DoubleTriggers {
+                cause: TriggerCause::EntersBattlefield {
+                    core_types: vec![],
+                    entrant,
+                }
+            },
+            "{text}"
+        );
+    }
+}
+
 #[test]
 fn hama_pashar_room_ability_doubler_static() {
     let def = parse_static_line("Room abilities of dungeons you own trigger an additional time.")

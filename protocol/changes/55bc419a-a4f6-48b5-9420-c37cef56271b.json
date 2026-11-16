@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "TriggerCause gains ControlledCreatureBecameTarget (Valiant Emberkin, CR 603.2d + CR 115.1) and TriggerCause::EntersBattlefield gains an optional entrant scope (CausingObject::OtherThanDoubler for The Fish Brewer's \"another permanent entering\"); both are serialized in card definitions inside GameState, so an older peer cannot decode the new variant or honor the entrant scope."
+}

@@ -42,7 +42,7 @@ use crate::types::resolved_commands::{
     ResolvedTriggerCollectionReplayInvariantError,
 };
 use crate::types::statics::{
-    StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
+    CausingObject, StaticMode, SuppressedTriggerEvent, TriggerCause, ZoneChangeQualifier,
 };
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
 use crate::types::zones::Zone;
@@ -14523,6 +14523,7 @@ fn doubler_applies(
         &doubler.cause,
         trigger.trigger_event.as_ref(),
         doubler.controller(),
+        doubler.source_id(),
     ) {
         return false;
     }
@@ -14599,6 +14600,7 @@ pub fn trigger_cause_can_match_control_change(cause: &TriggerCause) -> bool {
         | TriggerCause::CreatureAttacking
         | TriggerCause::CreatureDying
         | TriggerCause::ControlledCreatureDealtDamage
+        | TriggerCause::ControlledCreatureBecameTarget
         | TriggerCause::ControllerCastOrCopiedSpell { .. }
         | TriggerCause::RoomEntered
         | TriggerCause::BattlefieldTransition { .. } => false,
@@ -14615,20 +14617,27 @@ pub fn trigger_cause_can_match_control_change(cause: &TriggerCause) -> bool {
 ///   events moving to the battlefield whose object's core types intersect
 ///   the predicate's `core_types`. An empty `core_types` list means "any
 ///   permanent" (reserved for hypothetical cards that don't narrow by type).
+///   `entrant: OtherThanDoubler` rejects the doubler's own entering.
 /// - `TriggerCause::CreatureAttacking` matches `AttackersDeclared` events.
 ///   CR 508.1a: every object declared as an attacker must be a creature,
 ///   so no further type check is required.
 /// - `TriggerCause::ControlledCreatureDealtDamage` matches `DamageDealt`
+///   events whose target is a creature controlled by `doubler_controller`.
+/// - `TriggerCause::ControlledCreatureBecameTarget` matches `BecomesTarget`
 ///   events whose target is a creature controlled by `doubler_controller`.
 fn trigger_cause_matches(
     state: &GameState,
     cause: &TriggerCause,
     event: Option<&GameEvent>,
     doubler_controller: PlayerId,
+    doubler_id: ObjectId,
 ) -> bool {
     match cause {
         TriggerCause::Any => true,
-        TriggerCause::EntersBattlefield { core_types } => {
+        TriggerCause::EntersBattlefield {
+            core_types,
+            entrant,
+        } => {
             let Some(GameEvent::ZoneChanged {
                 to: Zone::Battlefield,
                 record,
@@ -14638,6 +14647,11 @@ fn trigger_cause_matches(
             else {
                 return false;
             };
+            // CR 603.2d: "another permanent entering" (The Fish Brewer) is
+            // not caused by the doubler's own entering.
+            if *entrant == CausingObject::OtherThanDoubler && *object_id == doubler_id {
+                return false;
+            }
             if core_types.is_empty() {
                 return true;
             }
@@ -14685,6 +14699,21 @@ fn trigger_cause_matches(
             };
             obj.controller == doubler_controller
                 && obj.card_types.core_types.contains(&CoreType::Creature)
+        }
+        TriggerCause::ControlledCreatureBecameTarget => {
+            // CR 603.2d + CR 115.1: Valiant Emberkin doubles triggers caused by
+            // a creature you control becoming the target of a spell or ability.
+            let Some(GameEvent::BecomesTarget {
+                target: TargetRef::Object(target_id),
+                ..
+            }) = event
+            else {
+                return false;
+            };
+            state.objects.get(target_id).is_some_and(|obj| {
+                obj.controller == doubler_controller
+                    && obj.card_types.core_types.contains(&CoreType::Creature)
+            })
         }
         TriggerCause::RoomEntered => {
             // CR 309.4c: Room abilities of dungeons you own trigger an
@@ -22030,10 +22059,18 @@ pub mod tests {
         };
         for cause in [
             TriggerCause::Any,
-            TriggerCause::EntersBattlefield { core_types: vec![] },
+            TriggerCause::EntersBattlefield {
+                core_types: vec![],
+                entrant: CausingObject::Any,
+            },
+            TriggerCause::EntersBattlefield {
+                core_types: vec![],
+                entrant: CausingObject::OtherThanDoubler,
+            },
             TriggerCause::CreatureAttacking,
             TriggerCause::CreatureDying,
             TriggerCause::ControlledCreatureDealtDamage,
+            TriggerCause::ControlledCreatureBecameTarget,
             TriggerCause::ControllerCastOrCopiedSpell {
                 core_types: vec![CoreType::Instant],
             },
@@ -22046,7 +22083,7 @@ pub mod tests {
         ] {
             assert_eq!(
                 trigger_cause_can_match_control_change(&cause),
-                trigger_cause_matches(&state, &cause, Some(&event), PlayerId(0)),
+                trigger_cause_matches(&state, &cause, Some(&event), PlayerId(0), ObjectId(2)),
                 "{cause:?}"
             );
         }

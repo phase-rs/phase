@@ -301,9 +301,13 @@ pub fn resolve(
         if !owned.is_empty() {
             crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
             // CR 603.2c: this occurrence's ordinary observers are now collected;
-            // claim it so the post-action collector, which scans the same
-            // action buffer, does not trigger Magecraft a second time.
-            crate::game::triggers::claim_events_for_ordinary_collection(state, events, copied_at);
+            // claim exactly it so the post-action collector, which scans the
+            // same action buffer, does not trigger Magecraft a second time.
+            crate::game::triggers::claim_events_for_ordinary_collection(
+                state,
+                &events[..=copied_at],
+                copied_at,
+            );
         }
     }
 

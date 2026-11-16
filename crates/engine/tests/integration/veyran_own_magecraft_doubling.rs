@@ -7,38 +7,47 @@
 //!
 //! Veyran is "a permanent you control", so its own Magecraft is in the
 //! doubler's scope and triggers twice per instant or sorcery its controller
-//! casts or copies (https://github.com/phase-rs/phase/issues/8838). A doubler
-//! that says "another" (Harmonic Prodigy) still leaves its own triggers alone,
-//! because its scope excludes itself.
+//! casts or copies (https://github.com/phase-rs/phase/issues/8838). A
+//! doubler's own triggers are decided by its scope and cause alone: "another"
+//! scopes (Harmonic Prodigy), "a ... spell" scopes (Echoes of Eternity) and
+//! "another permanent entering" causes (The Fish Brewer) leave the doubler's
+//! own triggers alone, and a typed cause (Valiant Emberkin) doubles only what
+//! that event causes.
 //!
-//! Signals: Veyran's power counts how many of its Magecraft instances resolved
-//! (+1 each); an observer's "you gain 1 life" Magecraft counts its own.
+//! Signals: a creature's power counts its resolved pump/counter instances;
+//! Witherbloom Apprentice's life gain counts its resolved Magecraft instances.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::triggers::drain_order_triggers_with_identity;
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const VEYRAN: &str = "Magecraft — Whenever you cast or copy an instant or sorcery spell, Veyran gets +1/+1 until end of turn.\nIf you casting or copying an instant or sorcery spell causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
-const MAGECRAFT_OBSERVER: &str =
-    "Magecraft — Whenever you cast or copy an instant or sorcery spell, you gain 1 life.";
+const WITHERBLOOM_APPRENTICE: &str = "Magecraft — Whenever you cast or copy an instant or sorcery spell, each opponent loses 1 life and you gain 1 life.";
 const HARMONIC_PRODIGY: &str = "Prowess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)\nIf a triggered ability of a Shaman or another Wizard you control triggers, that ability triggers an additional time.";
-const DRAW: &str = "Draw a card.";
-const TARGET_DRAW: &str = "Target player draws a card.";
-/// Copies without a new-targets choice (the copy resolver's immediate drain).
-const COPY: &str = "Copy target instant or sorcery spell.";
-/// Twincast: copies with a CR 707.10c new-targets choice when the copied spell
-/// has targets (the copy resolver's deferred drain after the retarget walk).
+const STORMCHASER_MAGE: &str = "Flying, haste\nProwess (Whenever you cast a noncreature spell, this creature gets +1/+1 until end of turn.)";
+const ECHOES_OF_ETERNITY: &str = "If a triggered ability of a colorless spell you control or another colorless permanent you control triggers, that ability triggers an additional time.\nWhenever you cast a colorless spell, copy it. You may choose new targets for the copy. (A copy of a permanent spell becomes a token.)";
+const VALIANT_EMBERKIN: &str = "Haste\nWhenever this creature enters or attacks, target creature you control perpetually gets +1/+0.\nIf a creature you control becoming the target of a spell or ability causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
+const HEARTFIRE_HERO: &str = "Valiant — Whenever this creature becomes the target of a spell or ability you control for the first time each turn, put a +1/+1 counter on it.\nWhen this creature dies, it deals damage equal to its power to each opponent.";
+const THE_FISH_BREWER: &str = "When The Fish Brewer enters the battlefield or attacks, create a 1/1 Fish creature token that's all colors.\nIf another permanent entering the battlefield causes a triggered ability of a permanent you control to trigger, tap any number of Fish you control. That ability triggers an additional time for each Fish tapped this way.";
+/// No target: Twincast copying it takes the copy resolver's immediate drain.
+const QUICK_STUDY: &str = "Draw two cards.";
+/// Targeted: Twincast copying it takes the CR 707.10c retarget walk, whose
+/// copy observers drain after the walk completes.
+const INSPIRATION: &str = "Target player draws two cards.";
 const TWINCAST: &str =
     "Copy target instant or sorcery spell. You may choose new targets for the copy.";
+const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
 
 fn scenario() -> GameScenario {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
-    for i in 0..16 {
+    for i in 0..30 {
         s.add_card_to_library_top(P0, &format!("P0 Lib {i}"));
     }
     s
@@ -48,6 +57,21 @@ fn add_veyran(s: &mut GameScenario) -> ObjectId {
     s.add_creature_from_oracle(P0, "Veyran, Voice of Duality", 2, 2, VEYRAN)
         .with_subtypes(vec!["Efreet", "Wizard"])
         .id()
+}
+
+fn add_apprentice(s: &mut GameScenario) -> ObjectId {
+    s.add_creature_from_oracle(P0, "Witherbloom Apprentice", 2, 2, WITHERBLOOM_APPRENTICE)
+        .with_subtypes(vec!["Human", "Druid"])
+        .id()
+}
+
+fn add_echoes(s: &mut GameScenario) {
+    s.add_enchantment_from_oracle(P0, "Echoes of Eternity", ECHOES_OF_ETERNITY)
+        .with_subtypes(vec!["Eldrazi"]);
+}
+
+fn add_instant(s: &mut GameScenario, name: &str, text: &str) -> ObjectId {
+    s.add_spell_to_hand_from_oracle(P0, name, true, text).id()
 }
 
 fn power(runner: &GameRunner, id: ObjectId) -> i32 {
@@ -66,6 +90,13 @@ fn life(runner: &GameRunner) -> i32 {
         .life
 }
 
+fn count_copies(events: &[GameEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, GameEvent::SpellCopied { .. }))
+        .count()
+}
+
 fn cast(runner: &mut GameRunner, spell: ObjectId) -> Vec<GameEvent> {
     let card_id = runner.state().objects[&spell].card_id;
     runner
@@ -79,13 +110,17 @@ fn cast(runner: &mut GameRunner, spell: ObjectId) -> Vec<GameEvent> {
         .events
 }
 
-/// Answer prompts with their first legal choice; resolve the stack fully when
-/// `resolve` is set, else stop at the first priority window. Returns the
-/// events of every action taken.
-fn drive(runner: &mut GameRunner, resolve: bool) -> Vec<GameEvent> {
+/// Answer prompts (a target: `prefer` when legal, else the first legal one);
+/// resolve the stack fully when `resolve` is set, else stop at the first
+/// priority window. Returns the events of every action taken.
+fn drive_preferring(
+    runner: &mut GameRunner,
+    resolve: bool,
+    prefer: Option<TargetRef>,
+) -> Vec<GameEvent> {
     let mut events = Vec::new();
     for _ in 0..256 {
-        match runner.state().waiting_for.clone() {
+        let action = match runner.state().waiting_for.clone() {
             WaitingFor::TargetSelection {
                 target_slots,
                 selection,
@@ -96,57 +131,44 @@ fn drive(runner: &mut GameRunner, resolve: bool) -> Vec<GameEvent> {
                 selection,
                 ..
             } => {
-                let target = target_slots[selection.current_slot]
-                    .legal_targets
-                    .first()
-                    .cloned();
-                events.extend(
-                    runner
-                        .act(GameAction::ChooseTarget { target })
-                        .expect("choose target")
-                        .events,
-                );
+                let legal = &target_slots[selection.current_slot].legal_targets;
+                let target = prefer
+                    .clone()
+                    .filter(|t| legal.contains(t))
+                    .or_else(|| legal.first().cloned());
+                GameAction::ChooseTarget { target }
             }
             WaitingFor::OrderTriggers { .. } => {
                 drain_order_triggers_with_identity(runner.state_mut());
+                continue;
             }
-            WaitingFor::CopyRetarget { .. } => {
-                events.extend(
-                    runner
-                        .act(GameAction::KeepAllCopyTargets)
-                        .expect("keep the copy's targets")
-                        .events,
-                );
-            }
+            WaitingFor::CopyRetarget { .. } => GameAction::KeepAllCopyTargets,
             WaitingFor::Priority { .. } => {
                 if !resolve || runner.state().stack.is_empty() {
                     return events;
                 }
-                events.extend(
-                    runner
-                        .act(GameAction::PassPriority)
-                        .expect("pass priority")
-                        .events,
-                );
+                GameAction::PassPriority
             }
             other => panic!("unexpected prompt: {other:?}"),
-        }
+        };
+        events.extend(runner.act(action).expect("action accepted").events);
     }
     panic!("drive did not settle");
 }
 
-/// Cast `first`, respond with the copy spell `copier` (it targets `first`, the
-/// only spell on the stack), and resolve everything. Returns how many
-/// `SpellCopied` events the copy produced.
-fn cast_then_copy(runner: &mut GameRunner, first: ObjectId, copier: ObjectId) -> usize {
+fn drive(runner: &mut GameRunner, resolve: bool) -> Vec<GameEvent> {
+    drive_preferring(runner, resolve, None)
+}
+
+/// Cast `first`, respond with Twincast (it targets `first`, the only spell on
+/// the stack), and resolve everything. Returns how many `SpellCopied` events
+/// the copy produced.
+fn cast_then_twincast(runner: &mut GameRunner, first: ObjectId, twincast: ObjectId) -> usize {
     cast(runner, first);
     drive(runner, false);
-    let mut events = cast(runner, copier);
+    let mut events = cast(runner, twincast);
     events.extend(drive(runner, true));
-    events
-        .iter()
-        .filter(|e| matches!(e, GameEvent::SpellCopied { .. }))
-        .count()
+    count_copies(&events)
 }
 
 /// Casting an instant gives exactly two instances of Veyran's own Magecraft.
@@ -156,9 +178,7 @@ fn cast_then_copy(runner: &mut GameRunner, first: ObjectId, copier: ObjectId) ->
 fn veyran_doubles_its_own_magecraft_on_cast() {
     let mut s = scenario();
     let veyran = add_veyran(&mut s);
-    let spell = s
-        .add_spell_to_hand_from_oracle(P0, "Quick Study", true, DRAW)
-        .id();
+    let spell = add_instant(&mut s, "Quick Study", QUICK_STUDY);
     let mut runner = s.build();
 
     cast(&mut runner, spell);
@@ -172,23 +192,19 @@ fn veyran_doubles_its_own_magecraft_on_cast() {
 }
 
 /// Copying gives exactly two instances of Veyran's own Magecraft from one
-/// `SpellCopied`, on the copy resolver's immediate path. Casts: the drawn
-/// spell (+2) and the copy spell (+2); the copy (+2). Revert-to-red: the
-/// self-exclusion leaves +1 per event (power 5); a second collection of the
-/// same `SpellCopied` adds extra instances (power above 8).
+/// `SpellCopied`, on the copy resolver's immediate path (Twincast copying an
+/// untargeted spell). Casts: Quick Study (+2) and Twincast (+2); the copy
+/// (+2). Revert-to-red: the self-exclusion leaves +1 per cast; a second
+/// collection of the same `SpellCopied` adds instances for the copy.
 #[test]
 fn veyran_doubles_its_own_magecraft_on_copy() {
     let mut s = scenario();
     let veyran = add_veyran(&mut s);
-    let spell = s
-        .add_spell_to_hand_from_oracle(P0, "Quick Study", true, DRAW)
-        .id();
-    let copier = s
-        .add_spell_to_hand_from_oracle(P0, "Echo Spell", true, COPY)
-        .id();
+    let spell = add_instant(&mut s, "Quick Study", QUICK_STUDY);
+    let twincast = add_instant(&mut s, "Twincast", TWINCAST);
     let mut runner = s.build();
 
-    let copies = cast_then_copy(&mut runner, spell, copier);
+    let copies = cast_then_twincast(&mut runner, spell, twincast);
 
     assert_eq!(copies, 1, "one copy, one SpellCopied");
     assert_eq!(
@@ -198,21 +214,17 @@ fn veyran_doubles_its_own_magecraft_on_copy() {
     );
 }
 
-/// Same as above through the CR 707.10c retarget walk (Twincast copying a
-/// targeted spell), whose copy observers drain after the walk completes.
+/// Same through the CR 707.10c retarget walk (Twincast copying a targeted
+/// spell), whose copy observers drain after the walk completes.
 #[test]
 fn veyran_doubles_its_own_magecraft_on_retargetable_copy() {
     let mut s = scenario();
     let veyran = add_veyran(&mut s);
-    let spell = s
-        .add_spell_to_hand_from_oracle(P0, "Targeted Study", true, TARGET_DRAW)
-        .id();
-    let copier = s
-        .add_spell_to_hand_from_oracle(P0, "Twincast", true, TWINCAST)
-        .id();
+    let spell = add_instant(&mut s, "Inspiration", INSPIRATION);
+    let twincast = add_instant(&mut s, "Twincast", TWINCAST);
     let mut runner = s.build();
 
-    let copies = cast_then_copy(&mut runner, spell, copier);
+    let copies = cast_then_twincast(&mut runner, spell, twincast);
 
     assert_eq!(copies, 1, "one copy, one SpellCopied");
     assert_eq!(
@@ -222,54 +234,43 @@ fn veyran_doubles_its_own_magecraft_on_retargetable_copy() {
     );
 }
 
-/// Without a doubler, one copy is one Magecraft trigger: a `SpellCopied` is
-/// collected once. Three events (two casts, one copy) gain 3 life.
+/// CR 603.2c: without a doubler, one copy is one Magecraft trigger: a
+/// `SpellCopied` is collected once. Three events (two casts, one copy) gain 3
+/// life. Revert-to-red: dropping the copy resolver's claim gains 4.
 #[test]
 fn copied_spell_triggers_magecraft_once_without_a_doubler() {
-    for copy_text in [COPY, TWINCAST] {
+    for (name, text) in [("Quick Study", QUICK_STUDY), ("Inspiration", INSPIRATION)] {
         let mut s = scenario();
-        s.add_creature_from_oracle(P0, "Apprentice", 1, 1, MAGECRAFT_OBSERVER);
-        let spell = s
-            .add_spell_to_hand_from_oracle(P0, "Targeted Study", true, TARGET_DRAW)
-            .id();
-        let copier = s
-            .add_spell_to_hand_from_oracle(P0, "Copier", true, copy_text)
-            .id();
+        add_apprentice(&mut s);
+        let spell = add_instant(&mut s, name, text);
+        let twincast = add_instant(&mut s, "Twincast", TWINCAST);
         let mut runner = s.build();
         let before = life(&runner);
 
-        cast_then_copy(&mut runner, spell, copier);
+        cast_then_twincast(&mut runner, spell, twincast);
 
-        assert_eq!(
-            life(&runner) - before,
-            3,
-            "{copy_text}: two casts + one copy"
-        );
+        assert_eq!(life(&runner) - before, 3, "{name}: two casts + one copy");
     }
 }
 
 /// Another Magecraft permanent you control is doubled on both cast and copy.
 #[test]
 fn veyran_doubles_another_magecraft_permanent_on_cast_and_copy() {
-    for copy_text in [COPY, TWINCAST] {
+    for (name, text) in [("Quick Study", QUICK_STUDY), ("Inspiration", INSPIRATION)] {
         let mut s = scenario();
         add_veyran(&mut s);
-        s.add_creature_from_oracle(P0, "Apprentice", 1, 1, MAGECRAFT_OBSERVER);
-        let spell = s
-            .add_spell_to_hand_from_oracle(P0, "Targeted Study", true, TARGET_DRAW)
-            .id();
-        let copier = s
-            .add_spell_to_hand_from_oracle(P0, "Copier", true, copy_text)
-            .id();
+        add_apprentice(&mut s);
+        let spell = add_instant(&mut s, name, text);
+        let twincast = add_instant(&mut s, "Twincast", TWINCAST);
         let mut runner = s.build();
         let before = life(&runner);
 
-        cast_then_copy(&mut runner, spell, copier);
+        cast_then_twincast(&mut runner, spell, twincast);
 
         assert_eq!(
             life(&runner) - before,
             6,
-            "{copy_text}: three events, each doubled"
+            "{name}: three events, each doubled"
         );
     }
 }
@@ -281,15 +282,11 @@ fn two_veyrans_trigger_each_magecraft_three_times() {
     let mut s = scenario();
     let first = add_veyran(&mut s);
     let second = add_veyran(&mut s);
-    let spell = s
-        .add_spell_to_hand_from_oracle(P0, "Quick Study", true, DRAW)
-        .id();
-    let copier = s
-        .add_spell_to_hand_from_oracle(P0, "Echo Spell", true, COPY)
-        .id();
+    let spell = add_instant(&mut s, "Quick Study", QUICK_STUDY);
+    let twincast = add_instant(&mut s, "Twincast", TWINCAST);
     let mut runner = s.build();
 
-    cast_then_copy(&mut runner, spell, copier);
+    cast_then_twincast(&mut runner, spell, twincast);
 
     // Three events (two casts, one copy), three instances each.
     assert_eq!(power(&runner, first), 2 + 9);
@@ -297,8 +294,8 @@ fn two_veyrans_trigger_each_magecraft_three_times() {
 }
 
 /// A doubler that says "another" skips its own triggers through its scope:
-/// Harmonic Prodigy (a Wizard, not a Shaman) doubles another Wizard's prowess
-/// but not its own.
+/// Harmonic Prodigy (a Wizard, not a Shaman) doubles another Wizard's
+/// (Stormchaser Mage's) prowess but not its own.
 #[test]
 fn another_scoped_doubler_does_not_double_itself() {
     let mut s = scenario();
@@ -307,14 +304,12 @@ fn another_scoped_doubler_does_not_double_itself() {
         .with_subtypes(vec!["Human", "Wizard"])
         .from_oracle_text_with_keywords(&["Prowess"], HARMONIC_PRODIGY)
         .id();
-    let wizard = s
-        .add_creature(P0, "Prowess Wizard", 1, 1)
+    let mage = s
+        .add_creature(P0, "Stormchaser Mage", 1, 3)
         .with_subtypes(vec!["Human", "Wizard"])
-        .from_oracle_text_with_keywords(&["Prowess"], "Prowess")
+        .from_oracle_text_with_keywords(&["Flying", "Haste", "Prowess"], STORMCHASER_MAGE)
         .id();
-    let spell = s
-        .add_spell_to_hand_from_oracle(P0, "Quick Study", true, DRAW)
-        .id();
+    let spell = add_instant(&mut s, "Quick Study", QUICK_STUDY);
     let mut runner = s.build();
 
     cast(&mut runner, spell);
@@ -326,57 +321,51 @@ fn another_scoped_doubler_does_not_double_itself() {
         "Prodigy's own prowess triggers once"
     );
     assert_eq!(
-        power(&runner, wizard),
+        power(&runner, mage),
         3,
         "another Wizard's prowess is doubled"
     );
 }
 
-const ECHOES_OF_ETERNITY: &str = "If a triggered ability of a colorless spell you control or another colorless permanent you control triggers, that ability triggers an additional time.\nWhenever you cast a colorless spell, copy it. You may choose new targets for the copy. (A copy of a permanent spell becomes a token.)";
-
 /// CR 603.2d: Echoes of Eternity scopes its doubling to "a colorless spell you
 /// control or another colorless permanent you control". Echoes is a colorless
 /// permanent, not a spell, and not "another", so its own copy trigger triggers
 /// once: one colorless spell cast, one copy. Revert-to-red: without the stack
-/// zone on the "spell" disjunct, that disjunct matches Echoes on the
+/// scope on the "spell" disjunct, that disjunct matches Echoes on the
 /// battlefield and the spell is copied twice.
 #[test]
 fn echoes_of_eternity_does_not_double_its_own_trigger() {
     let mut s = scenario();
-    s.add_enchantment_from_oracle(P0, "Echoes of Eternity", ECHOES_OF_ETERNITY)
-        .with_subtypes(vec!["Eldrazi"]);
-    let spell = s
-        .add_spell_to_hand_from_oracle(P0, "Quick Study", true, DRAW)
-        .id();
+    add_echoes(&mut s);
+    let spell = add_instant(&mut s, "Quick Study", QUICK_STUDY);
     let mut runner = s.build();
 
     let mut events = cast(&mut runner, spell);
     events.extend(drive(&mut runner, true));
 
-    let copies = events
-        .iter()
-        .filter(|e| matches!(e, GameEvent::SpellCopied { .. }))
-        .count();
-    assert_eq!(copies, 1, "Echoes' own copy trigger must trigger once");
+    assert_eq!(
+        count_copies(&events),
+        1,
+        "Echoes' own copy trigger triggers once"
+    );
 }
 
 /// CR 603.2d + CR 112.1: the stack-scoped "colorless spell you control"
-/// disjunct still doubles a colorless spell's own cast trigger. The copy Echoes
-/// makes is not cast (CR 707.10), so the only life gained is the doubled cast
-/// trigger: +2.
+/// disjunct still doubles a colorless spell's own cast trigger. No printed
+/// colorless instant or sorcery has a cast trigger; the nearest printed card,
+/// Kozilek, Butcher of Truth, is a legendary creature whose Echoes copy would
+/// also enter and invoke the legend rule, so a minimal colorless instant
+/// stands in. The copy Echoes makes is not cast (CR 707.10), so the only life
+/// gained is the doubled cast trigger: +2.
 #[test]
 fn echoes_of_eternity_doubles_a_colorless_spells_cast_trigger() {
     let mut s = scenario();
-    s.add_enchantment_from_oracle(P0, "Echoes of Eternity", ECHOES_OF_ETERNITY)
-        .with_subtypes(vec!["Eldrazi"]);
-    let spell = s
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Eldrazi Study",
-            true,
-            "When you cast this spell, you gain 1 life.\nDraw a card.",
-        )
-        .id();
+    add_echoes(&mut s);
+    let spell = add_instant(
+        &mut s,
+        "Colorless Study",
+        "When you cast this spell, you gain 1 life.\nDraw a card.",
+    );
     let mut runner = s.build();
     let before = life(&runner);
 
@@ -388,4 +377,94 @@ fn echoes_of_eternity_doubles_a_colorless_spells_cast_trigger() {
         2,
         "the spell's cast trigger is doubled"
     );
+}
+
+/// CR 603.2d: Valiant Emberkin doubles only triggers that a creature you
+/// control becoming the target causes. Its own enters trigger is caused by it
+/// entering, so it triggers once: Emberkin (1/2), the only creature you
+/// control, perpetually gets +1/+0 once. Revert-to-red: with the cause parsed
+/// as `Any`, the enters trigger is doubled (power 3).
+#[test]
+fn valiant_emberkin_does_not_double_its_own_enters_trigger() {
+    let mut s = scenario();
+    let emberkin = s
+        .add_creature_to_hand(P0, "Valiant Emberkin", 1, 2)
+        .with_subtypes(vec!["Mouse", "Glimmer"])
+        .from_oracle_text_with_keywords(&["Haste"], VALIANT_EMBERKIN)
+        .id();
+    let mut runner = s.build();
+
+    cast(&mut runner, emberkin);
+    drive(&mut runner, true);
+
+    assert_eq!(runner.state().objects[&emberkin].zone, Zone::Battlefield);
+    assert_eq!(power(&runner, emberkin), 2, "one enters trigger resolved");
+}
+
+/// CR 603.2d + CR 115.1: a creature you control becoming the target of a
+/// spell you control is Emberkin's cause, so Heartfire Hero's valiant trigger
+/// triggers twice when Giant Growth targets it: 1/1 + two counters + 3.
+#[test]
+fn valiant_emberkin_doubles_a_becomes_target_trigger() {
+    let mut s = scenario();
+    s.add_creature(P0, "Valiant Emberkin", 1, 2)
+        .with_subtypes(vec!["Mouse", "Glimmer"])
+        .from_oracle_text_with_keywords(&["Haste"], VALIANT_EMBERKIN);
+    let hero = s
+        .add_creature_from_oracle(P0, "Heartfire Hero", 1, 1, HEARTFIRE_HERO)
+        .with_subtypes(vec!["Mouse", "Soldier"])
+        .id();
+    let growth = add_instant(&mut s, "Giant Growth", GIANT_GROWTH);
+    let mut runner = s.build();
+
+    cast(&mut runner, growth);
+    drive_preferring(&mut runner, true, Some(TargetRef::Object(hero)));
+
+    assert_eq!(power(&runner, hero), 1 + 2 + 3);
+}
+
+/// Emberkin's typed cause no longer doubles triggers that a cast causes:
+/// Witherbloom Apprentice's Magecraft triggers once for an untargeted
+/// instant. Revert-to-red: with the cause parsed as `Any`, it gains 2.
+#[test]
+fn valiant_emberkin_does_not_double_unrelated_triggers() {
+    let mut s = scenario();
+    s.add_creature(P0, "Valiant Emberkin", 1, 2)
+        .with_subtypes(vec!["Mouse", "Glimmer"])
+        .from_oracle_text_with_keywords(&["Haste"], VALIANT_EMBERKIN);
+    add_apprentice(&mut s);
+    let spell = add_instant(&mut s, "Quick Study", QUICK_STUDY);
+    let mut runner = s.build();
+    let before = life(&runner);
+
+    cast(&mut runner, spell);
+    drive(&mut runner, true);
+
+    assert_eq!(life(&runner) - before, 1);
+}
+
+/// CR 603.2d: The Fish Brewer doubles triggers caused by "another permanent
+/// entering", so its own enters trigger, caused by its own entering, triggers
+/// once: one Fish. Revert-to-red: dropping "another" from the cause makes the
+/// Brewer double its own enters trigger (two Fish).
+#[test]
+fn the_fish_brewer_does_not_double_its_own_enters_trigger() {
+    let mut s = scenario();
+    let brewer = s
+        .add_creature_to_hand_from_oracle(P0, "The Fish Brewer", 4, 4, THE_FISH_BREWER)
+        .with_subtypes(vec!["Human", "Wizard"])
+        .id();
+    let mut runner = s.build();
+
+    cast(&mut runner, brewer);
+    drive(&mut runner, true);
+
+    let fish = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| runner.state().objects[id].name == "Fish")
+        .count();
+    assert_eq!(runner.state().objects[&brewer].zone, Zone::Battlefield);
+    assert_eq!(fish, 1, "one enters trigger, one Fish");
 }

@@ -3963,6 +3963,10 @@ pub(crate) fn parse_static_line_inner(
             }
             // An unqualified "a spell" leaves core_types empty = any spell.
             TriggerCause::ControllerCastOrCopiedSpell { core_types }
+        } else if nom_primitives::scan_contains(tp.lower, "becoming the target of") {
+            // CR 603.2d + CR 115.1: "a creature you control becoming the target
+            // of a spell or ability causes" (Valiant Emberkin).
+            TriggerCause::ControlledCreatureBecameTarget
         } else if nom_primitives::scan_contains(tp.lower, "being dealt damage causes")
             || nom_primitives::scan_contains(tp.lower, "dealt damage causes")
         {
@@ -3997,7 +4001,17 @@ pub(crate) fn parse_static_line_inner(
                 core_types.push(CoreType::Planeswalker);
             }
             // Empty core_types (e.g. "a permanent entering") means any type.
-            TriggerCause::EntersBattlefield { core_types }
+            // CR 603.2d: "another permanent entering" (The Fish Brewer) is not
+            // caused by the doubler's own entering.
+            let entrant = if nom_primitives::scan_contains(tp.lower, "if another ") {
+                CausingObject::OtherThanDoubler
+            } else {
+                CausingObject::Any
+            };
+            TriggerCause::EntersBattlefield {
+                core_types,
+                entrant,
+            }
         } else {
             TriggerCause::Any
         };
