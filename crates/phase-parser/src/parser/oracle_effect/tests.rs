@@ -34213,6 +34213,22 @@ fn strip_exact_target_prefix_no_match() {
 }
 
 #[test]
+fn strip_exact_target_prefix_x_and_or() {
+    let result = strip_exact_target_prefix("x target creatures and/or planeswalkers");
+    assert_eq!(
+        result,
+        Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            },
+            "target creatures and/or planeswalkers"
+        ))
+    );
+}
+
+#[test]
 fn strip_optional_target_prefix_up_to_one_other_target() {
     let (rest, multi_target) =
         strip_optional_target_prefix("up to one other target creature or spell");

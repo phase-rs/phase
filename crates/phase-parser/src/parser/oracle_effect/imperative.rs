@@ -2770,12 +2770,15 @@ pub(super) fn parse_targeted_action_ast(
             .parse(input)
         })
         .is_some();
-        // CR 115.1d + CR 601.2c: Preserve the "up to N target" count instead of discarding
-        // it. `strip_optional_target_prefix` already parses the quantifier; the
-        // spec was previously dropped here, so "gain control of up to two target
-        // creatures" collapsed to a single optional slot and only one creature
-        // could be chosen (issue #6205).
-        let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
+        // CR 115.1d + CR 601.2c: Preserve the target count prefix ("X target",
+        // "two target", "up to N target", "any number of target") instead of
+        // discarding it. Try exact-count prefix first ("X target", "two target"),
+        // then fall back to optional prefix ("up to N target", "any number of
+        // target"). The spec was previously dropped here, so "gain control of X
+        // target creatures" collapsed to a single target slot (issue #7862).
+        let (target_text, multi_target) = super::strip_exact_target_prefix(rest)
+            .map(|(count, rest)| (rest, Some(MultiTargetSpec::exact(count))))
+            .unwrap_or_else(|| super::strip_optional_target_prefix(rest));
         // CR 608.2k: A singular bare object pronoun ("gains control of it") in a subject-bearing
         // clause is an anaphor, not a parent-target chain. Route it through
         // `resolve_it_pronoun` — identical to the tap/sacrifice/counter clauses — so
@@ -22403,6 +22406,157 @@ mod tests {
             matches!(lower_targeted_action_ast(ast), Effect::GainControl { .. }),
             "targeted gain control must stay GainControl"
         );
+    }
+
+    /// CR 115.1d + CR 601.2c: "gain control of X target creatures" (Mass
+    /// Manipulation) must carry a `MultiTargetSpec::exact(Variable("X"))` so
+    /// the engine offers X target slots instead of collapsing to one.
+    #[test]
+    fn parse_gain_control_of_x_target_creatures_carries_exact_multi_target() {
+        use crate::types::ability::{MultiTargetSpec, QuantityExpr, QuantityRef};
+        let text = "gain control of x target creatures";
+        let lower = text.to_lowercase();
+        let ast = parse_targeted_action_ast(text, &lower, &mut ParseContext::default())
+            .expect("gain control of X target should parse");
+        let effect = lower_targeted_action_ast(ast.clone());
+        match effect {
+            Effect::GainControl { target } => {
+                // Verify the target filter is correct
+                let TargetFilter::Typed(tf) = target else {
+                    panic!("expected Typed filter, got {target:?}");
+                };
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                // The multi_target spec should be on the clause AST, not the effect
+            }
+            other => panic!("Expected GainControl, got {other:?}"),
+        }
+        // Check the AST carries the exact multi_target spec
+        match ast {
+            TargetedImperativeAst::GainControl { multi_target, .. } => {
+                assert_eq!(
+                    multi_target,
+                    Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name: "X".to_string() }
+                    })),
+                    "gain control of X target must carry exact(X) multi_target"
+                );
+            }
+            other => panic!("Expected GainControl AST, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gain_control_of_two_target_creatures_carries_exact_multi_target() {
+        use crate::types::ability::{MultiTargetSpec, QuantityExpr};
+        let text = "gain control of two target creatures";
+        let lower = text.to_lowercase();
+        let ast = parse_targeted_action_ast(text, &lower, &mut ParseContext::default())
+            .expect("gain control of two target should parse");
+        let effect = lower_targeted_action_ast(ast.clone());
+        match effect {
+            Effect::GainControl { target } => {
+                let TargetFilter::Typed(tf) = target else {
+                    panic!("expected Typed filter, got {target:?}");
+                };
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("Expected GainControl, got {other:?}"),
+        }
+        match ast {
+            TargetedImperativeAst::GainControl { multi_target, .. } => {
+                assert_eq!(
+                    multi_target,
+                    Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 2 })),
+                    "gain control of two target must carry exact(2) multi_target"
+                );
+            }
+            other => panic!("Expected GainControl AST, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gain_control_of_up_to_x_target_creatures_carries_up_to_multi_target() {
+        use crate::types::ability::{MultiTargetSpec, QuantityExpr, QuantityRef};
+        let text = "gain control of up to x target creatures";
+        let lower = text.to_lowercase();
+        let ast = parse_targeted_action_ast(text, &lower, &mut ParseContext::default())
+            .expect("gain control of up to X target should parse");
+        let effect = lower_targeted_action_ast(ast.clone());
+        match effect {
+            Effect::GainControl { target } => {
+                let TargetFilter::Typed(tf) = target else {
+                    panic!("expected Typed filter, got {target:?}");
+                };
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("Expected GainControl, got {other:?}"),
+        }
+        match ast {
+            TargetedImperativeAst::GainControl { multi_target, .. } => {
+                assert_eq!(
+                    multi_target,
+                    Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name: "X".to_string() }
+                    })),
+                    "gain control of up to X target must carry up_to(X) multi_target"
+                );
+            }
+            other => panic!("Expected GainControl AST, got {other:?}"),
+        }
+    }
+
+    /// Regression test for Mass Manipulation (issue #7862): "Gain control of X
+    /// target creatures and/or planeswalkers." must parse with exact X target
+    /// count, not collapse to a single target.
+    #[test]
+    fn parse_mass_manipulation_oracle_text() {
+        use crate::types::ability::{MultiTargetSpec, QuantityExpr, QuantityRef};
+        // Exact Oracle text from Scryfall (lowercase, no period for parser)
+        let text = "gain control of x target creatures and/or planeswalkers";
+        let lower = text.to_lowercase();
+        let ast = parse_targeted_action_ast(text, &lower, &mut ParseContext::default())
+            .expect("Mass Manipulation oracle text should parse");
+        let effect = lower_targeted_action_ast(ast.clone());
+        match effect {
+            Effect::GainControl { target } => {
+                // Verify the target filter includes both creatures and planeswalkers
+                // "and/or" produces an Or filter with two Typed legs
+                match target {
+                    TargetFilter::Or { filters } => {
+                        assert_eq!(filters.len(), 2);
+                        let mut found_creature = false;
+                        let mut found_planeswalker = false;
+                        for filter in filters {
+                            if let TargetFilter::Typed(tf) = filter {
+                                if tf.type_filters.contains(&TypeFilter::Creature) {
+                                    found_creature = true;
+                                }
+                                if tf.type_filters.contains(&TypeFilter::Planeswalker) {
+                                    found_planeswalker = true;
+                                }
+                            }
+                        }
+                        assert!(found_creature, "filter must include Creature");
+                        assert!(found_planeswalker, "filter must include Planeswalker");
+                    }
+                    other => panic!("expected Or filter for and/or, got {other:?}"),
+                }
+            }
+            other => panic!("Expected GainControl, got {other:?}"),
+        }
+        // Check the AST carries the exact multi_target spec
+        match ast {
+            TargetedImperativeAst::GainControl { multi_target, .. } => {
+                assert_eq!(
+                    multi_target,
+                    Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { name: "X".to_string() }
+                    })),
+                    "Mass Manipulation must carry exact(X) multi_target"
+                );
+            }
+            other => panic!("Expected GainControl AST, got {other:?}"),
+        }
     }
 
     #[test]

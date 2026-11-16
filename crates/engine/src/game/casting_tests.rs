@@ -8077,6 +8077,104 @@ fn x_cost_exact_multi_target_spell_chooses_x_before_targets() {
 }
 
 #[test]
+fn gain_control_of_x_target_creatures_creates_x_target_slots() {
+    let mut state = setup_game_at_main_phase();
+    let target_a = create_object(
+        &mut state,
+        CardId(920),
+        PlayerId(1),
+        "Target A".to_string(),
+        Zone::Battlefield,
+    );
+    let target_b = create_object(
+        &mut state,
+        CardId(921),
+        PlayerId(1),
+        "Target B".to_string(),
+        Zone::Battlefield,
+    );
+    let target_c = create_object(
+        &mut state,
+        CardId(940),
+        PlayerId(1),
+        "Target C".to_string(),
+        Zone::Battlefield,
+    );
+    for target in [target_a, target_b, target_c] {
+        state
+            .objects
+            .get_mut(&target)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+    }
+
+    let obj_id = create_object(
+        &mut state,
+        CardId(922),
+        PlayerId(0),
+        "Synthetic Mass Manipulation".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainControl {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        );
+        ability.multi_target = Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        }));
+        Arc::make_mut(&mut obj.abilities).push(ability);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X],
+            generic: 0,
+        };
+    }
+    add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+    let result = apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: obj_id,
+            card_id: CardId(922),
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .unwrap();
+    let max = match result.waiting_for {
+        WaitingFor::ChooseXValue { max, .. } => max,
+        other => panic!("expected ChooseXValue before target selection, got {other:?}"),
+    };
+    assert_eq!(max, 3);
+
+    // X=2 should create 2 mandatory target slots
+    apply_as_current(&mut state, GameAction::ChooseX { value: 2 }).unwrap();
+    let WaitingFor::TargetSelection {
+        target_slots,
+        selection,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "expected exact-X target selection after ChooseX, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(target_slots.len(), 2);
+    assert!(target_slots.iter().all(|slot| !slot.optional));
+    assert_eq!(selection.current_slot, 0);
+    assert!(selection.selected_slots.is_empty());
+}
+
+#[test]
 fn required_x_sacrifice_spell_selects_targets_before_sacrificing() {
     let mut state = setup_game_at_main_phase();
     let sacrifice_a = create_object(
