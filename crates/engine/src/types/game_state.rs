@@ -38891,6 +38891,7 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                | GameEvent::PhaseChangedForPlayer { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }
@@ -39255,6 +39256,9 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                // Synthetic per-player phase occurrence (shared-turn fan-out):
+                // carries only phase + player, no incarnation-bearing records.
+                | GameEvent::PhaseChangedForPlayer { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }
@@ -39435,6 +39439,9 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                // Synthetic per-player phase occurrence (shared-turn fan-out):
+                // carries only phase + player, no incarnation-bearing records.
+                | GameEvent::PhaseChangedForPlayer { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }
@@ -56329,11 +56336,11 @@ mod tests {
             }
             AbilityPinSlot::CostPaidLki => ability.cost_paid_object = Some(snapshot(true)),
             AbilityPinSlot::DiscardResultLki => {
-                ability.context.direct_discard_result = Some(DiscardedCardResult {
+                ability.context.direct_discard_result = Some(Box::new(DiscardedCardResult {
                     object_id: x,
                     lki: snapshot(true).lki,
                     final_zone: Zone::Graveyard,
-                })
+                }))
             }
             AbilityPinSlot::CreationLookbackEvent => {
                 ability.context.creation_lookback_event = Some(Box::new(GameEvent::DamageDealt {
