@@ -22137,12 +22137,9 @@ pub struct PendingCombatLifelink {
 pub struct PendingCombatDamageReplacement {
     /// Every assignment that passed the pre-replacement gate, in batch order.
     pub entries: Vec<PendingCombatDamageEntry>,
-    /// The progress of `entries[..resolved.len()]` — every leg whose event has
-    /// been proposed, aligned 1:1 with `entries`. A leg is settled, or still
-    /// owes a choice (see [`PendingCombatLegProgress`]).
+    /// The progress of every leg, aligned 1:1 with `entries`. A leg is not yet
+    /// proposed, settled, or owes a choice (see [`PendingCombatLegProgress`]).
     pub resolved: Vec<PendingCombatLegProgress>,
-    /// The events of `entries[resolved.len()..]`, not yet proposed.
-    pub unstarted: VecDeque<ProposedEvent>,
     /// CR 510.2 + CR 615.8: the one-shot shields that already applied to an
     /// earlier portion of this simultaneous instance, keyed by damage source. A
     /// "the next time [source] would deal damage" shield prevents the source's
@@ -22163,6 +22160,11 @@ pub struct PendingCombatDamageReplacement {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PendingCombatLegProgress {
+    /// CR 616.2: the leg's event has not been proposed yet. Its first chooser
+    /// is known only once it has been advanced through its choice-free steps (a
+    /// redirect hands it to another seat), so every unstarted leg stays in its
+    /// own slot until its chooser outranks the prompts already outstanding.
+    Unstarted(ProposedEvent),
     /// The leg's event has settled: `Some(event)` survives to Phase C, `None`
     /// was fully replaced or prevented.
     Settled(Option<ProposedEvent>),

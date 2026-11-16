@@ -14720,7 +14720,7 @@ pub(crate) fn replace_event_on_entry_board(
 /// the batch around it (`combat_damage::CombatDamageBatch::Paused`). CR 510.2
 /// rules out a priority window here, not these choices. When several legs owe
 /// a choice the prompts follow CR 101.4 APNAP order of the player who actually
-/// owes each one: an unstarted leg is ranked by the first chooser its event
+/// owes each one: every unstarted leg is ranked by the first chooser its event
 /// reaches after any redirect (CR 616.2), so a leg that a redirect handed to an
 /// earlier seat is started before a later seat's outstanding choice is
 /// published. A parked leg is reconciled against the live game (CR 616.1f +
@@ -14755,8 +14755,12 @@ pub(crate) fn replace_combat_damage_batch(
     // this batch). Suspending the ledger isolates independent events; it does not rebase its keys after
     // such a mutation. Printed cards in this class run no such follow-up between portions.
 
-    let mut step = resume.map(|resume| {
-        let (leg, awaiting) = pass.take_surfaced_leg();
+    // CR 800.4a + CR 616.1f: a surfaced leg whose chooser left the game was
+    // lifted back into `parked` by `elimination` (its event is still owed to the
+    // surviving recipient), so there may be no surfaced leg to advance; the
+    // reconciliation below re-proposes it instead.
+    let mut step = resume.and_then(|resume| {
+        let (leg, awaiting) = pass.take_surfaced_leg()?;
         let step = match awaiting {
             PendingCombatLegProgress::AwaitingChoice { .. } => match resume.choice {
                 // CR 616.1f: the answer was given to the prompt as it stood when it
@@ -14789,14 +14793,11 @@ pub(crate) fn replace_combat_damage_batch(
                     let result = continue_replacement(state, index, events);
                     settle_combat_damage_replacement(state, result, events)
                 }
-                // CR 800.4a + CR 800.4e: no answer can arrive — the seat that
-                // owed it left the game and `elimination` cleared the pending
-                // event. Combat damage to a player who has left is not dealt,
-                // so the event settles with no survivor. strict-failure: when
-                // the departed seat only CONTROLLED a damaged permanent it does
-                // not own, CR 800.4h would have the next player choose; that
-                // event is skipped here as well, exactly as every combat-damage
-                // ordering choice was before the batch could park.
+                // CR 800.4a: no answer can arrive and the surfaced leg's record is
+                // gone. `elimination` lifts a departed chooser's combat leg back
+                // into the pass (so it never reaches this arm), which leaves only
+                // a record cleared by something else; its event cannot be
+                // re-proposed, so it settles with no survivor.
                 _ => {
                     state.pending_replacement = None;
                     CombatDamageReplacementStep::Settled(None)
@@ -14805,11 +14806,11 @@ pub(crate) fn replace_combat_damage_batch(
             PendingCombatLegProgress::AwaitingContinuation { survivor } => {
                 drain_combat_damage_continuation(state, survivor, events)
             }
-            PendingCombatLegProgress::Settled(_) => {
-                unreachable!("a surfaced leg is never settled")
+            PendingCombatLegProgress::Settled(_) | PendingCombatLegProgress::Unstarted(_) => {
+                unreachable!("a surfaced leg is neither settled nor unstarted")
             }
         };
-        (leg, step)
+        Some((leg, step))
     });
 
     let outcome = loop {
@@ -14884,24 +14885,36 @@ pub(crate) fn replace_combat_damage_batch(
         // result of another replacement that modifies it, so who owes an
         // unstarted event's first choice is known only once the event has been
         // advanced through its choice-free steps (a redirect hands it to another
-        // seat). The event is therefore started when its first chooser outranks
-        // every parked leg's; until then nothing of it is applied, so a
-        // replacement that leaves the game meanwhile never reaches it.
-        let start_unstarted = match (waiting_leg, pass.unstarted.front()) {
-            (_, None) => false,
-            (None, Some(_)) => true,
-            (Some((waiting_rank, _)), Some(event)) => {
-                let chooser = first_chooser_of_unstarted_combat_leg(state, event);
-                chooser.and_then(rank).unwrap_or(usize::MAX) < waiting_rank
-            }
-        };
-        if start_unstarted {
-            let event = pass
-                .unstarted
-                .pop_front()
-                .expect("an unstarted leg was ranked");
-            let leg = pass.resolved.len();
-            pass.resolved.push(PendingCombatLegProgress::Settled(None));
+        // seat). With no prompt outstanding the next unstarted leg simply
+        // starts. With one outstanding, EVERY unstarted leg is examined, not
+        // just the first, and the first whose chooser outranks the outstanding
+        // prompt starts, so that chooser is discovered before the prompt is
+        // published; a leg owing no choice ranks by the seat it damages. Until a
+        // leg starts nothing of it is applied, so a replacement that leaves the
+        // game meanwhile never reaches it. Each leg keeps its own slot, so
+        // starting one out of order cannot misalign the batch.
+        let start_leg = pass
+            .resolved
+            .iter()
+            .enumerate()
+            .find_map(|(leg, progress)| {
+                let PendingCombatLegProgress::Unstarted(event) = progress else {
+                    return None;
+                };
+                let starts = match waiting_leg {
+                    None => true,
+                    Some((waiting_rank, _)) => first_chooser_of_unstarted_combat_leg(state, event)
+                        .is_some_and(|chooser| rank(chooser).unwrap_or(usize::MAX) < waiting_rank),
+                };
+                starts.then_some(leg)
+            });
+        if let Some(leg) = start_leg {
+            let PendingCombatLegProgress::Unstarted(event) = std::mem::replace(
+                &mut pass.resolved[leg],
+                PendingCombatLegProgress::Settled(None),
+            ) else {
+                unreachable!("the started leg was selected as unstarted");
+            };
             prepare_replacement_index_for_pipeline(state);
             let result = pipeline_loop(state, event, 0, replacement_registry(), events, None);
             clear_replacement_index_pipeline(state);
@@ -14977,13 +14990,53 @@ fn reconcile_parked_combat_leg(
     None
 }
 
+/// CR 800.4a + CR 616.1f: the player a surfaced combat-damage leg is waiting on
+/// has left the game. Lift the leg's in-progress record out of the single
+/// `pending_replacement` slot back into the parked batch, so the pass's
+/// reconciliation re-proposes the event against the live game instead of
+/// discarding it: the damaged permanent may survive the departure (a Control
+/// Magic host returns to its owner) and still be owed the event. Returns whether
+/// a surfaced combat leg was lifted; the caller abandons the choice otherwise.
+pub(crate) fn lift_departed_combat_leg_choice(state: &mut GameState) -> bool {
+    let Some(parked) = state
+        .pending_combat_lifelink
+        .as_mut()
+        .and_then(|record| record.replacement.as_mut())
+    else {
+        return false;
+    };
+    let Some(PendingCombatLegProgress::AwaitingChoice { parked: slot, .. }) =
+        parked.resolved.iter_mut().find(|leg| {
+            matches!(
+                leg,
+                PendingCombatLegProgress::AwaitingChoice { parked: None, .. }
+            )
+        })
+    else {
+        return false;
+    };
+    let Some(pending) = state.pending_replacement.take() else {
+        return false;
+    };
+    *slot = Some(Box::new(PendingCombatLegChoice {
+        pending,
+        auto_choice_tail: state.replacement_auto_choice_tail.take(),
+    }));
+    true
+}
+
 /// CR 616.2 + CR 616.1: the player who owes an unstarted combat-damage event's
-/// first replacement choice. A replacement can become applicable only after
-/// another one modified the event (a redirect), so the event is advanced through
-/// the shared replacement pipeline on a copy of the game, which discovers the
-/// chooser exactly as the real run will without applying anything to the game.
-/// An event that settles without a choice has no chooser to rank, and falls back
-/// to the seat it damages.
+/// first replacement choice. An event that settles without a choice has none to
+/// rank and falls back to the seat it damages (`None` only when it has no
+/// affected seat). A
+/// replacement can become applicable only after another one modified the event
+/// (a redirect), so the chooser is found by advancing the event through the
+/// shared replacement pipeline on a copy of the game, which discovers it exactly
+/// as the real run will without applying anything to the game. A copy is the
+/// cheapest faithful probe: a bare candidate scan cannot see past a mandatory
+/// redirect, whose effect on the event is what reveals the later chooser. The
+/// caller pays for it only while a prompt is outstanding, and stops at the first
+/// leg that can start.
 fn first_chooser_of_unstarted_combat_leg(
     state: &GameState,
     event: &ProposedEvent,
@@ -15050,13 +15103,12 @@ fn repropose_combat_damage_leg(
 }
 
 /// CR 510.2 + CR 616.1: the progress of one combat-damage batch's replacement
-/// pass. `resolved` holds every proposed event's leg in batch order (settled, or
-/// still owing a choice); `unstarted` the events not yet proposed; `tally` the
-/// `Prevention::All` aggregate so far.
+/// pass. `resolved` holds every event's leg in batch order (not yet proposed,
+/// settled, or still owing a choice); `tally` the `Prevention::All` aggregate so
+/// far.
 #[derive(Debug, Default)]
 pub(crate) struct CombatDamageReplacementPass {
     pub(crate) resolved: Vec<PendingCombatLegProgress>,
-    pub(crate) unstarted: std::collections::VecDeque<ProposedEvent>,
     pub(crate) tally: HashMap<AppliedReplacementKey, i32>,
     /// CR 615.8: successful one-shot applications so far (see
     /// `GameState::combat_one_shot_applications`).
@@ -15064,25 +15116,34 @@ pub(crate) struct CombatDamageReplacementPass {
 }
 
 impl CombatDamageReplacementPass {
+    /// A pass over `events`, every leg not yet proposed.
+    pub(crate) fn new(events: impl IntoIterator<Item = ProposedEvent>) -> Self {
+        Self {
+            resolved: events
+                .into_iter()
+                .map(PendingCombatLegProgress::Unstarted)
+                .collect(),
+            ..Self::default()
+        }
+    }
+
     /// Take the surfaced leg — the one whose prompt is open — out of the pass
     /// for the resume to advance, leaving a placeholder the resume overwrites.
-    fn take_surfaced_leg(&mut self) -> (usize, PendingCombatLegProgress) {
-        let leg = self
-            .resolved
-            .iter()
-            .position(|leg| {
-                matches!(
-                    leg,
-                    PendingCombatLegProgress::AwaitingChoice { parked: None, .. }
-                        | PendingCombatLegProgress::AwaitingContinuation { .. }
-                )
-            })
-            .expect("a parked combat-damage pass has a surfaced leg");
+    /// `None` when no leg is surfaced: the surfaced leg's chooser left the game
+    /// and its record was lifted back into the pass.
+    fn take_surfaced_leg(&mut self) -> Option<(usize, PendingCombatLegProgress)> {
+        let leg = self.resolved.iter().position(|leg| {
+            matches!(
+                leg,
+                PendingCombatLegProgress::AwaitingChoice { parked: None, .. }
+                    | PendingCombatLegProgress::AwaitingContinuation { .. }
+            )
+        })?;
         let progress = std::mem::replace(
             &mut self.resolved[leg],
             PendingCombatLegProgress::Settled(None),
         );
-        (leg, progress)
+        Some((leg, progress))
     }
 }
 
@@ -15097,9 +15158,10 @@ pub(crate) fn settled_survivors(
         .into_iter()
         .map(|leg| match leg {
             PendingCombatLegProgress::Settled(survivor) => survivor,
-            PendingCombatLegProgress::AwaitingChoice { .. }
+            PendingCombatLegProgress::Unstarted(_)
+            | PendingCombatLegProgress::AwaitingChoice { .. }
             | PendingCombatLegProgress::AwaitingContinuation { .. } => {
-                unreachable!("a completed pass has no leg owing a choice")
+                unreachable!("a completed pass has no unstarted leg or leg owing a choice")
             }
         })
         .collect()
@@ -29703,10 +29765,7 @@ mod tests {
 
         let mut events = Vec::new();
         let batch_recorded = record_proposed_events(|| {
-            let mut pass = CombatDamageReplacementPass {
-                unstarted: [damage.clone()].into(),
-                ..Default::default()
-            };
+            let mut pass = CombatDamageReplacementPass::new([damage.clone()]);
             let _ = replace_combat_damage_batch(&mut state, &mut events, &mut pass, None);
         });
         assert!(

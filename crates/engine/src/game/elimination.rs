@@ -1729,6 +1729,11 @@ fn do_eliminate(
     if state.pending_replacement.is_some()
         && leaving_is_latched_chooser
         && !settles_with_parked_payment
+        // CR 800.4a + CR 616.1f: a combat-damage leg's choice is not abandoned
+        // with its chooser: the damaged permanent may survive the departure (a
+        // Control Magic host returns to its owner), so the event is lifted back
+        // into the parked batch and re-proposed to whoever now owes it.
+        && !super::replacement::lift_departed_combat_leg_choice(state)
     {
         state.pending_replacement = None;
         // CR 800.4a: a paused frameless single-card discard belongs to the

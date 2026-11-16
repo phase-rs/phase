@@ -657,3 +657,233 @@ fn parked_choice_drops_a_replacement_whose_owner_conceded() {
         "Torbran's 5, prevented by Vigor, with no Furnace of Rath doubling"
     );
 }
+
+/// CR 616.2 + CR 616.1 + CR 101.4: every unstarted leg is examined, not only the
+/// first, before a prompt is published. P0 controls Torbran, Vigor and a Centaur
+/// Courser shielded by a resolved Boon of Safety; P1 controls Solitary
+/// Confinement; P2 controls Pariah on P0's shielded Courser. P0 attacks with a
+/// red Goblin Piker and a green Courser at P1, and a second green Courser at P2:
+/// - the Piker's hit on P1 is Torbran's (plus 2) or Solitary Confinement's
+///   (prevent): P1's choice, which parks first;
+/// - the first Courser's hit on P1 is Solitary Confinement's alone (Torbran
+///   wants a red source): it owes no choice, so it is ranked by the seat it
+///   damages (P1) and does not outrank P1's parked prompt;
+/// - the second Courser's hit on P2 is redirected onto the shielded Courser,
+///   where P0 chooses between Vigor and the shield counter.
+///
+/// P0's choice sits behind the choice-free leg, which discovery looks past.
+#[test]
+fn a_choice_free_leg_does_not_hide_a_later_legs_earlier_chooser() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let green = vec![engine::types::mana::ManaColor::Green];
+    let piker = scenario
+        .add_creature(P0, "Goblin Piker", 2, 1)
+        .with_color(vec![engine::types::mana::ManaColor::Red])
+        .id();
+    let courser_p1 = scenario
+        .add_creature(P0, "Centaur Courser", 3, 3)
+        .with_color(green.clone())
+        .id();
+    let courser_p2 = scenario
+        .add_creature(P0, "Centaur Courser", 3, 3)
+        .with_color(green)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Torbran, Thane of Red Fell", TORBRAN_ORACLE);
+    scenario.add_creature_from_oracle(P0, "Vigor", 6, 6, VIGOR_ORACLE);
+    let host = scenario.add_creature(P0, "Shielded Courser", 3, 3).id();
+    scenario.with_counter(host, engine::types::counter::CounterType::Shield, 1);
+    scenario.add_enchantment_from_oracle(P1, "Solitary Confinement", SOLITARY_CONFINEMENT_ORACLE);
+    let pariah = scenario
+        .add_creature(P2, "Pariah", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(PARIAH_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), pariah, host);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (piker, AttackTarget::Player(P1)),
+            (courser_p1, AttackTarget::Player(P1)),
+            (courser_p2, AttackTarget::Player(P2)),
+        ])
+        .expect("declare attackers");
+
+    let mut prompts: Vec<(PlayerId, Vec<String>)> = Vec::new();
+    for _ in 0..64 {
+        let past_combat = matches!(
+            runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        );
+        if past_combat && runner.state().stack.is_empty() {
+            break;
+        }
+        if let Some((player, names)) = replacement_prompt(&runner) {
+            let want = match player {
+                P0 => "Vigor",
+                _ => "Solitary Confinement",
+            };
+            choose_by_name(&mut runner, &names, want);
+            prompts.push((player, names));
+            continue;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+
+    let seats: Vec<PlayerId> = prompts.iter().map(|(player, _)| *player).collect();
+    assert_eq!(
+        seats,
+        vec![P0, P1],
+        "CR 616.1 + CR 101.4: P0 chooses for the redirected hit first, though a choice-free leg sits between"
+    );
+    assert!(
+        prompts[0].1.iter().any(|name| name == "Vigor"),
+        "P0 prompt is the redirected leg: {:?}",
+        prompts[0].1
+    );
+    assert!(
+        prompts[1]
+            .1
+            .iter()
+            .any(|name| name == "Torbran, Thane of Red Fell"),
+        "P1 prompt is the Piker leg, Torbran against Solitary Confinement: {:?}",
+        prompts[1].1
+    );
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "Solitary Confinement prevented both hits on P1"
+    );
+    assert_eq!(runner.life(P2), 20, "Pariah redirected the hit on P2");
+    let host = &runner.state().objects[&host];
+    assert_eq!(host.damage_marked, 0, "Vigor prevented the redirected hit");
+    assert_eq!(
+        host.counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied(),
+        Some(3),
+        "Vigor put a counter for each damage prevented"
+    );
+}
+
+const CONTROL_MAGIC_ORACLE: &str = "Enchant creature\nYou control enchanted creature.";
+
+/// CR 800.4a + CR 616.1f + CR 616.2: a surfaced chooser leaving the game does
+/// not discard the damage owed to a permanent that survives it. P0 (Furnace of
+/// Rath) attacks P1 with a Goblin Piker. P1 owns Control Magic, which controls
+/// P2's shielded Centaur Courser, and Pariah on that Courser:
+/// - P1 chooses Pariah over Furnace of Rath, redirecting the hit onto the
+///   Courser, where P1 (its controller) is asked to order Furnace of Rath and
+///   the shield counter;
+/// - P1 concedes at that prompt: Control Magic and Pariah leave with their
+///   owner, and the Courser returns to P2.
+///
+/// The redirected hit is still owed to the Courser, so P2 is asked in P1's
+/// place; either order consumes the shield exactly once and the Courser takes
+/// no damage (the doubled 4 would have killed it).
+#[test]
+fn surfaced_chooser_conceding_re_proposes_the_event_to_the_surviving_recipient() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let piker = scenario.add_creature(P0, "Goblin Piker", 2, 1).id();
+    scenario.add_enchantment_from_oracle(P0, "Furnace of Rath", FURNACE_ORACLE);
+    let courser = scenario.add_creature(P2, "Centaur Courser", 3, 3).id();
+    scenario.with_counter(courser, engine::types::counter::CounterType::Shield, 1);
+    let control_magic = scenario
+        .add_enchantment_from_oracle(P1, "Control Magic", CONTROL_MAGIC_ORACLE)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let pariah = scenario
+        .add_creature(P1, "Pariah", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text(PARIAH_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), control_magic, courser);
+    attach_to(runner.state_mut(), pariah, courser);
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(piker, AttackTarget::Player(P1))])
+        .expect("declare attackers");
+    assert_eq!(
+        runner.state().objects[&courser].controller,
+        P1,
+        "reach guard: Control Magic gives P1 the Courser"
+    );
+
+    let mut prompts: Vec<(PlayerId, Vec<String>)> = Vec::new();
+    for _ in 0..64 {
+        let past_combat = matches!(
+            runner.state().phase,
+            Phase::EndCombat | Phase::PostCombatMain
+        );
+        if past_combat && runner.state().stack.is_empty() {
+            break;
+        }
+        if let Some((player, names)) = replacement_prompt(&runner) {
+            prompts.push((player, names.clone()));
+            match prompts.len() {
+                1 => choose_by_name(&mut runner, &names, "Pariah"),
+                2 => {
+                    // The redirected leg prompt is surfaced to P1, the Courser
+                    // controller; its chooser leaves instead of answering it.
+                    runner
+                        .act(GameAction::Concede { player_id: P1 })
+                        .expect("P1 concedes");
+                }
+                _ => choose_by_name(&mut runner, &names, "Furnace of Rath"),
+            }
+            continue;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            // P1 controls the Courser, so P1 is asked to block; nothing blocks.
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: Vec::new(),
+                    })
+                    .expect("declare no blockers");
+            }
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+
+    let seats: Vec<PlayerId> = prompts.iter().map(|(player, _)| *player).collect();
+    assert_eq!(
+        seats,
+        vec![P1, P1, P2],
+        "P1 chooses Pariah, concedes at the Courser prompt, and P2 answers it in P1 place"
+    );
+    assert!(
+        prompts[2].1.iter().any(|name| name == "Furnace of Rath") && prompts[2].1.len() == 2,
+        "P2 orders Furnace of Rath and the shield counter: {:?}",
+        prompts[2].1
+    );
+    let courser = &runner.state().objects[&courser];
+    assert_eq!(courser.controller, P2, "CR 800.4a: Control Magic ended");
+    assert_eq!(
+        courser.damage_marked, 0,
+        "the shield prevented the redirected hit, doubled or not"
+    );
+    assert_eq!(
+        courser
+            .counters
+            .get(&engine::types::counter::CounterType::Shield)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "the shield counter was consumed exactly once"
+    );
+    assert_eq!(runner.life(P2), 20, "the redirected hit never reached P2");
+}

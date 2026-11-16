@@ -2081,10 +2081,7 @@ pub(crate) fn apply_combat_damage(
         replacement: None,
         phase_c_remnant: None,
     };
-    let pass = replacement::CombatDamageReplacementPass {
-        unstarted: proposed_events,
-        ..Default::default()
-    };
+    let pass = replacement::CombatDamageReplacementPass::new(proposed_events);
     run_combat_damage_replacements(state, record, entries, pass, None)
 }
 
@@ -2128,7 +2125,6 @@ fn run_combat_damage_replacements(
             record.replacement = Some(PendingCombatDamageReplacement {
                 entries,
                 resolved: pass.resolved,
-                unstarted: pass.unstarted,
                 one_shot_applications: pass.one_shot_applications,
             });
             state.waiting_for = (*waiting_for).clone();
@@ -2157,7 +2153,6 @@ fn resume_combat_damage_replacements(
     let resume = replacement::CombatDamageReplacementResume { choice };
     let pass = replacement::CombatDamageReplacementPass {
         resolved: parked.resolved,
-        unstarted: parked.unstarted,
         tally: std::mem::take(&mut record.prevention_tally)
             .into_iter()
             .collect(),
