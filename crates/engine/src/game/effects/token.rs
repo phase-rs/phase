@@ -2593,6 +2593,7 @@ pub(crate) fn place_liminal_token_in_zone(
     zone: Zone,
 ) {
     let owner = object.owner;
+    // allow-raw-zone: liminal token birth has no from-zone move; the projection is born in the replacement's zone (CR 111.1 + CR 614.6).
     object.zone = zone;
     state.objects.insert(entry_ref, object);
     // allow-raw-zone: liminal token birth has no from-zone move; TokenEntry already consults entry replacements (CR 111.2 + CR 614.12).
