@@ -3578,9 +3578,13 @@ fn target_filter_contains_nonland(filter: &TargetFilter) -> bool {
         }
 }
 
+/// CR 109.5 (#8751): "you control" in a guard under a per-player fan-out is the
+/// ability's controller, so the object-count filter keeps `ControllerRef::You`;
+/// only the subject-relative `PlayerScope::Controller` is rescoped to the
+/// iterated player.
 #[test]
-fn rewrite_condition_quantity_expr_scopes_shared_quality_count_filter() {
-    let mut expr = QuantityExpr::Ref {
+fn rewrite_condition_quantity_expr_keeps_you_filters_and_scopes_player_refs() {
+    let mut count = QuantityExpr::Ref {
         qty: QuantityRef::ObjectCountBySharedQuality {
             filter: TargetFilter::Typed(TypedFilter {
                 type_filters: vec![TypeFilter::Creature],
@@ -3591,21 +3595,24 @@ fn rewrite_condition_quantity_expr_scopes_shared_quality_count_filter() {
             aggregate: AggregateFunction::Max,
         },
     };
+    let before = count.clone();
+    rewrite_condition_quantity_expr(&mut count);
+    assert_eq!(count, before);
 
-    rewrite_condition_quantity_expr(&mut expr);
-
-    assert!(matches!(
-        expr,
+    let mut hand = QuantityExpr::Ref {
+        qty: QuantityRef::HandSize {
+            player: PlayerScope::Controller,
+        },
+    };
+    rewrite_condition_quantity_expr(&mut hand);
+    assert_eq!(
+        hand,
         QuantityExpr::Ref {
-            qty: QuantityRef::ObjectCountBySharedQuality {
-                filter: TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::ScopedPlayer),
-                    ..
-                }),
-                ..
-            }
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::ScopedPlayer,
+            },
         }
-    ));
+    );
 }
 
 /// Build a typed Cat trigger subject ("one or more other Cats you

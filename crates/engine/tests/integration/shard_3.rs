@@ -266,6 +266,7 @@ mod goad_badge_defender_gated_anchor;
 mod goblin_charbelcher;
 mod goblin_furrier_snow_damage;
 mod god_pharaohs_gift_second_instance_2350;
+mod golbez_artifact_count_scope_8751;
 mod gollum_scheming_guide_card_predicate_guess;
 mod gonti_lord_of_luxury_exiles_dug_card;
 mod good_king_mog_xii_chapter_iv_588;

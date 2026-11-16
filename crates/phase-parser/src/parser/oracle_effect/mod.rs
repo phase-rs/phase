@@ -43139,10 +43139,10 @@ fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
             {
                 *player = PlayerScope::ScopedPlayer;
             }
-            QuantityRef::ObjectCount { filter }
-            | QuantityRef::ObjectCountBySharedQuality { filter, .. } => {
-                rewrite_filter_controller_to_scoped(filter)
-            }
+            // CR 109.5: "you control" in a guard is the ability's controller, so
+            // an object count's `ControllerRef::You` stays bound to it. Only a
+            // subject-relative `PlayerScope::Controller` ("each opponent with no
+            // cards in hand") names the iterated player.
             _ => {}
         },
         QuantityExpr::DivideRounded { inner, .. }
@@ -43342,17 +43342,6 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                 quantity,
                 quality: _,
             } => rewrite_condition_quantity_expr(quantity),
-            AbilityCondition::TargetMatchesFilter { filter, .. }
-            | AbilityCondition::SourceMatchesFilter { filter }
-            | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
-            | AbilityCondition::ControllerControlsMatching { filter }
-            | AbilityCondition::ZoneChangedThisWay {
-                filter,
-                destination: _,
-            }
-            | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
-                rewrite_filter_controller_to_scoped(filter);
-            }
             AbilityCondition::Not { condition }
             | AbilityCondition::ConditionInstead { inner: condition } => {
                 rewrite_condition(condition)
