@@ -5,10 +5,11 @@ use engine::game::restrictions::{
     ability_confined_to_sorcery_timing, spell_confined_to_sorcery_timing,
 };
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration,
-    Effect, EffectScope, PerpetualGrantModification, PerpetualModification, PlayerFilter, PtValue,
-    QuantityExpr, ResolvedAbility, StaticDefinition, SubAbilityLink, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition, TypeFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ChoiceAssignmentSide, ContinuousModification,
+    ControllerRef, Duration, Effect, EffectScope, PerpetualGrantModification,
+    PerpetualModification, PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, StaticDefinition,
+    SubAbilityLink, TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef, TriggerDefinition,
+    TypeFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -1188,6 +1189,11 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         // A tracked set narrowed by an inner filter — the narrowing decides.
         TargetFilter::TrackedSetFiltered { filter, .. } => filter_domain(filter),
 
+        TargetFilter::ChoiceAssignment { side } => match side {
+            ChoiceAssignmentSide::Objects => FilterDomain::SOME_OBJECT,
+            ChoiceAssignmentSide::PlayerForObject => FilterDomain::SOME_PLAYER,
+        },
+
         TargetFilter::Typed(typed) => {
             // Repo invariant (not a CR rule): `type_filters` is a CONJUNCTION,
             // and an EMPTY list is an empty conjunction — "no type-line
@@ -1901,7 +1907,7 @@ pub(crate) fn static_mode_polarity(mode: &StaticMode) -> EffectPolarity {
         // Beneficial: enhances the enchanted permanent
         StaticMode::CantBeBlocked
         | StaticMode::CantBeBlockedExceptBy { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCountered
         | StaticMode::CantBeCopied
         | StaticMode::Protection

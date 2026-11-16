@@ -2133,6 +2133,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // state. The client needs only the exact public prompt projection, never its
     // LKI/links/cost facts, so strip the private context before serialization.
     if let WaitingFor::NamedChoice {
+        decision_subject_id,
         player,
         choice_type,
         options,
@@ -2146,6 +2147,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             source.context = None;
         }
         filtered.waiting_for = WaitingFor::NamedChoice {
+            // CR 608.2c + CR 608.2d: the object a per-object choice is for is public
+            // (display-only); every viewer sees which permanent the prompt assigns.
+            decision_subject_id: *decision_subject_id,
             player: *player,
             choice_type: choice_type.clone(),
             options: options.clone(),
@@ -8591,6 +8595,7 @@ mod tests {
             options: vec!["Anchor".to_string()],
         };
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: choice_type.clone(),
@@ -8604,6 +8609,7 @@ mod tests {
         assert!(matches!(
             source_less_view.waiting_for,
             WaitingFor::NamedChoice {
+                decision_subject_id: _,
                 free_entry: _,
                 player: PlayerId(0),
                 ref choice_type,
@@ -8632,6 +8638,7 @@ mod tests {
         );
         let expected_prompt = source.prompt.clone();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type,
@@ -12745,6 +12752,7 @@ mod tests {
         // P0 has already answered; P1 is the pending chooser.
         state.players[0].chosen_attributes = vec![ChosenAttribute::Number(4)];
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::NumberRange {

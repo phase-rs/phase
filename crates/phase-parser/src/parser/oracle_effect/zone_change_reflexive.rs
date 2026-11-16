@@ -98,6 +98,7 @@ fn target_names_one_object(target: &TargetFilter) -> bool {
         | TargetFilter::CostPaidObject
         | TargetFilter::ExiledBySource
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ControllerAndControlledPermanents { .. } => false,
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().all(target_names_one_object)
