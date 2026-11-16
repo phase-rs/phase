@@ -6787,6 +6787,39 @@ const MAIN_BUILD_UNTAP_SUBSET: &str =
 const MAIN_BUILD_PHASED_OUT_CANDIDATE: &str =
     include_str!("../fixtures/legacy_untap_prompts/phased_out_candidate.json");
 
+/// A main-build save as the committed fixture. These saves predate the per-player
+/// `spells_cast_last_turn` snapshot: each carries a NONZERO table-wide total of the previous turn,
+/// which cannot say which player cast the spells, so restore refuses the unchanged fixture
+/// (CR 603.4, EH1). The fixture stays byte-for-byte as recorded, as evidence of that refusal. The
+/// untap-step behavior these tests pin does not read the snapshot, so it is exercised on the same
+/// save with the legacy key removed in memory (the state a save taken after a turn without casts
+/// has).
+fn main_build_save(raw: &str) -> serde_json::Value {
+    let save: serde_json::Value = serde_json::from_str(raw).expect("main save");
+    assert!(
+        save["state"]["spells_cast_last_turn"]
+            .as_u64()
+            .is_some_and(|total| total > 0),
+        "reach: the committed save carries a nonzero legacy table-wide total"
+    );
+    let refusal = serde_json::from_value::<PersistedGameState>(save.clone())
+        .map_err(|error| format!("{error:?}"))
+        .and_then(|persisted| {
+            persisted
+                .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}"))
+        });
+    let error = refusal.expect_err("the unchanged legacy save is refused at restore");
+    assert!(error.contains("spells_cast_last_turn"), "{error}");
+    let mut restorable = save;
+    restorable["state"]
+        .as_object_mut()
+        .expect("state object")
+        .remove("spells_cast_last_turn");
+    restorable
+}
+
 /// Restore through the persisted pipeline every load uses (the WASM restore and
 /// server-core's `from_persisted` call this chokepoint).
 fn restore_save(save: serde_json::Value) -> GameRunner {
@@ -6852,7 +6885,7 @@ fn a_main_build_save_at_the_untap_choice_restarts_the_untap_step() {
     ] {
         assert_oracle(db, name, oracle);
     }
-    let save: serde_json::Value = serde_json::from_str(MAIN_BUILD_UNTAP_CHOICE).expect("main save");
+    let save = main_build_save(MAIN_BUILD_UNTAP_CHOICE);
     assert!(!save["state"]["waiting_for"]["data"]
         .as_object()
         .unwrap()
@@ -6952,7 +6985,7 @@ fn a_main_build_save_at_the_untap_subset_restarts_the_untap_step() {
     ] {
         assert_oracle(db, name, oracle);
     }
-    let save: serde_json::Value = serde_json::from_str(MAIN_BUILD_UNTAP_SUBSET).expect("main save");
+    let save = main_build_save(MAIN_BUILD_UNTAP_SUBSET);
     assert!(!save["state"]["waiting_for"]["data"]
         .as_object()
         .unwrap()
@@ -7049,8 +7082,7 @@ fn a_main_build_save_offers_the_determinations_phasing_produces() {
     let db = load_db().expect("card db");
     assert_oracle(db, HEDGE_WHISPERER, HEDGE_WHISPERER_ORACLE);
     assert_oracle(db, REALITY_RIPPLE, REALITY_RIPPLE_ORACLE);
-    let save: serde_json::Value =
-        serde_json::from_str(MAIN_BUILD_PHASED_OUT_CANDIDATE).expect("main save");
+    let save = main_build_save(MAIN_BUILD_PHASED_OUT_CANDIDATE);
     assert!(!save["state"]["waiting_for"]["data"]
         .as_object()
         .unwrap()

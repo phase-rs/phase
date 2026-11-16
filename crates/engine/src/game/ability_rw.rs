@@ -2383,16 +2383,15 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
         | QuantityRef::TokensCreatedThisTurn { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::DamageDealtThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::CardsDrawnLastTurn { .. }
         | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
@@ -4325,7 +4324,7 @@ fn characteristic_source_read(source: &CardTypeSetSource) -> RwProfile {
         // taken this turn — the recorded spells have left the stack (CR 400.7)
         // and are read from their snapshots, not from the board. That is why
         // this classifies as turn-scoped player state rather than a board read.
-        // Mirrors `QuantityRef::SpellsCastThisTurn`'s own `JournalCast` read so
+        // Mirrors `QuantityRef::SpellsCast`'s own `JournalCast` read so
         // the two readings of the same population agree.
         //
         // NOT CR 601.2a, which this comment used to cite: 601.2a describes how a
@@ -7331,15 +7330,14 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // (Fairgrounds Trumpeter). Fail-closed on a departure reentry hazard.
         QuantityRef::CounterAddedThisTurn { .. } => reads_frozen_of(StateKind::ObjectCounters),
         // Player-resource journals.
-        QuantityRef::LifeLostThisTurn { player: _ }
+        QuantityRef::LifeLost { .. }
         | QuantityRef::LifeGainedThisTurn { player: _ }
         | QuantityRef::DamageDealtThisTurn { .. } => reads_player_of(StateKind::JournalLife),
         QuantityRef::CardsDrawnThisTurn { player: _ }
         | QuantityRef::CardsDrawnLastTurn { player: _ }
         | QuantityRef::CardsDiscardedThisTurn { .. } => reads_player_of(StateKind::JournalCards),
-        QuantityRef::SpellsCastThisTurn { .. }
+        QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::OpponentSpellsCastSinceLastTurn { player: _ }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
@@ -8435,7 +8433,7 @@ mod tests {
         );
 
         // (a) CR 601.2a: a turn journal is turn-scoped PLAYER state. It must
-        // declare the same `JournalCast` read `QuantityRef::SpellsCastThisTurn`
+        // declare the same `JournalCast` read `QuantityRef::SpellsCast`
         // declares, and must NOT claim a board read.
         let journal_profile = characteristic_source_read(&journal);
         assert_eq!(

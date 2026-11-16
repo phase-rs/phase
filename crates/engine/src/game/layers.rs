@@ -2872,7 +2872,7 @@ fn evaluate_condition_inner(
         // CR 102.1: "during your turn" means the turn of the static's source
         // controller — never the caster. Most call sites pass the source's
         // controller as `controller`, but the cost-modification resolver passes
-        // the *caster* (so caster-relative conditions like SpellsCastThisTurn
+        // the *caster* (so caster-relative conditions like SpellsCast
         // resolve correctly), which would invert this turn check for an
         // opponent-affecting tax (Tithe Taker: "During your turn, spells your
         // opponents cast cost {1} more"). Bind to the source permanent's
@@ -4798,13 +4798,13 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -4836,7 +4836,6 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::TokensCreatedThisTurn { .. }
@@ -5066,7 +5065,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         // per-turn accumulators track life lost / gained this turn.
         QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::LifeGainedThisTurn { .. } => true,
         // `StartingLifeTotal` is a format constant (CR 119.1), NOT a live read —
         // a life change never moves it. Classified with the payload-free leaves
@@ -5100,7 +5099,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
 
         // Optional-`TargetFilter` variants route through the `Option`.
         QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. } => {
@@ -5208,7 +5207,6 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
         | QuantityRef::DungeonsCompleted
@@ -13866,6 +13864,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, BasicLandType,
         CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChosenAttribute,
@@ -32955,8 +32954,9 @@ mod tests {
             player: PlayerScope::Controller
         }));
         assert!(quantity_ref_reads_life(&QuantityRef::LifeAboveStarting));
-        assert!(quantity_ref_reads_life(&QuantityRef::LifeLostThisTurn {
-            player: PlayerScope::Controller
+        assert!(quantity_ref_reads_life(&QuantityRef::LifeLost {
+            player: PlayerScope::Controller,
+            window: TurnWindow::ThisTurn,
         }));
         assert!(quantity_ref_reads_life(&QuantityRef::LifeGainedThisTurn {
             player: PlayerScope::Controller

@@ -15,8 +15,15 @@ fn load_state() -> GameState {
     )
     .read_to_string(&mut json)
     .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    let envelope: serde_json::Value =
+    let mut envelope: serde_json::Value =
         serde_json::from_str(&json).expect("game-state envelope parses as JSON");
+    // CR 117.1 + CR 603.4: the capture predates the per-player `spells_cast_last_turn` snapshot and
+    // carries a nonzero table-wide total that restore refuses; this test's subject does not read
+    // last turn's casts, so the total is declared absent (the committed bytes stay as recorded).
+    envelope["gameState"]
+        .as_object_mut()
+        .expect("the capture's game state is an object")
+        .remove("spells_cast_last_turn");
     serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("gameState deserializes through the production decoder")
         .into_game_state()

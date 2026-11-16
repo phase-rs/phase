@@ -1831,7 +1831,7 @@ pub struct GameObject {
     /// CR 611.2f: Spell keywords effective AT CAST TIME (printed + statically /
     /// transiently granted), snapshotted during `finalize_cast` BEFORE
     /// `record_spell_cast_from_zone` increments the turn's spell history. Cast-time
-    /// "first qualifying spell each turn" grants (a `SpellsCastThisTurn == 0`-gated
+    /// "first qualifying spell each turn" grants (a `SpellsCast == 0`-gated
     /// `CastWithKeyword` static) must attach to THIS spell at the moment it is put
     /// on the stack; re-querying the grant in `process_triggers` (post-record)
     /// would see the spell already counted and wrongly drop the grant. Consumed by

@@ -11,7 +11,9 @@ use std::time::Instant;
 use engine::analysis::loop_check::OfferRoad;
 use engine::types::game_state::{GameState, LoopDetectionMode, PersistedGameState, WaitingFor};
 
-use crate::loop_shortcut_drain_boards::{collect_gz, committed_document, drive_one_beat};
+use crate::loop_shortcut_drain_boards::{
+    collect_gz, committed_document, committed_document_as_recorded, drive_one_beat,
+};
 
 /// Beats a dump that restores short of an offer is driven, one `apply()` each.
 const OFFER_BEAT_BUDGET: u32 = 40;
@@ -19,8 +21,30 @@ const OFFER_BEAT_BUDGET: u32 = 40;
 /// Restore a committed dump in `Interactive` mode through `PersistedGameState`, trying the bare
 /// document, then its `gameState`, then that debug snapshot projected onto the versioned wire.
 pub(crate) fn restore_committed(path: &Path) -> Result<GameState, String> {
-    let document = committed_document(path);
-    let decode = |board: serde_json::Value| {
+    restore_document(path, committed_document(path), false)
+}
+
+/// [`restore_committed`] on the dump exactly as recorded, legacy table-wide
+/// `spells_cast_last_turn` total included: the restore the walk pins (CR 117.1 + CR 603.4: a
+/// nonzero total cannot say which player cast the spells of the previous turn, so production
+/// refuses it).
+fn restore_committed_as_recorded(path: &Path) -> Result<GameState, String> {
+    restore_document(path, committed_document_as_recorded(path), true)
+}
+
+fn restore_document(
+    path: &Path,
+    document: serde_json::Value,
+    keep_legacy_snapshot: bool,
+) -> Result<GameState, String> {
+    let decode = |mut board: serde_json::Value| {
+        // The projected capture is built from the raw bytes, so the legacy total must be dropped
+        // there too unless the restore under test is the as-recorded one.
+        if !keep_legacy_snapshot {
+            if let Some(board) = board.as_object_mut() {
+                board.remove("spells_cast_last_turn");
+            }
+        }
         serde_json::from_value::<PersistedGameState>(board)
             .map_err(|error| error.to_string())
             .and_then(|persisted| {
@@ -84,7 +108,7 @@ fn offer_line(state: &GameState) -> Option<String> {
 }
 
 fn walk_outcome(path: &Path) -> String {
-    let mut state = match restore_committed(path) {
+    let mut state = match restore_committed_as_recorded(path) {
         Ok(state) => state,
         Err(error) => return format!("RESTOREERR {}", error.chars().take(60).collect::<String>()),
     };
@@ -108,6 +132,84 @@ fn walk_outcome(path: &Path) -> String {
             }
         }
     }
+}
+
+/// The legacy table-wide total a committed dump recorded, read from whichever root holds the game
+/// state (debug export, trusted envelope, or bare state).
+fn recorded_legacy_spells_cast_total(document: &serde_json::Value) -> Option<u64> {
+    let root = document
+        .get("gameState")
+        .or_else(|| document.get("state"))
+        .unwrap_or(document);
+    root.get("spells_cast_last_turn")
+        .and_then(serde_json::Value::as_u64)
+}
+
+/// CR 603.4 + CR 601.2i: a committed dump written before the per-player `spells_cast_last_turn`
+/// snapshot carries one table-wide total of the previous turn; for a nonzero total the split between
+/// players is unrecoverable, so production restore refuses it. The dumps stay byte-for-byte as
+/// recorded (evidence). Unlike the ignored whole-population walk below, this runs in every build and
+/// pins each nonzero dump: refused with the legacy message, and restorable once the total is
+/// declared absent (paired, so the refusal is the total's and nothing else's).
+#[test]
+fn every_committed_dump_with_a_nonzero_legacy_spells_cast_total_is_refused() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_gz(&root, &mut files);
+    files.sort();
+    let mut refused = Vec::new();
+    let mut restorable_despite_total = Vec::new();
+    let mut refused_for_another_reason = Vec::new();
+    for path in &files {
+        let recorded = committed_document_as_recorded(path);
+        let Some(total) = recorded_legacy_spells_cast_total(&recorded) else {
+            continue;
+        };
+        if total == 0 {
+            continue;
+        }
+        let name = path
+            .strip_prefix(&root)
+            .expect("collected under the root")
+            .to_string_lossy()
+            .into_owned();
+        match restore_committed_as_recorded(path) {
+            Err(error) if error.contains("legacy spells_cast_last_turn snapshot") => {
+                refused.push(name)
+            }
+            Err(_) => refused_for_another_reason.push(name),
+            Ok(_) => restorable_despite_total.push(name),
+        }
+    }
+    // Reach: the refusal population is the one the ticket measured, not an empty walk.
+    assert!(refused.len() >= 14, "refused dumps: {refused:#?}");
+    for name in &refused {
+        let path = root.join(name);
+        assert!(
+            restore_committed(&path)
+                .err()
+                .is_none_or(|error| !error.contains("legacy spells_cast_last_turn snapshot")),
+            "{name}: the total alone is the refusal"
+        );
+    }
+    // These carry a nonzero total yet restore as recorded: their restore goes through the
+    // resolution-stack projection (`projected_capture_snapshot`), which rebuilds the state from the
+    // capture's resolution record and never reads the legacy key.
+    assert_eq!(
+        restorable_despite_total,
+        [
+            "engine/tests/integration/fixtures/issue_8024_spell_rest_turn26.json.gz",
+            "engine/tests/integration/fixtures/mycoloth_devour_wedge_turn15.json.gz",
+            "engine/tests/integration/fixtures/mycoloth_devour_wedge_turn20.json.gz",
+        ],
+        "{restorable_despite_total:#?}"
+    );
+    // A debug export that is refused for an older, unrelated reason before the total is read ("missing
+    // the private rules record"); its total is pinned by `committed_dump_walk`'s EXPECTED row only.
+    assert_eq!(
+        refused_for_another_reason,
+        ["engine/tests/integration/fixtures/ureni_turn10_raw_resolution_stack.json.gz"]
+    );
 }
 
 /// Walks every committed dump, then asserts the outcome strings.
@@ -165,7 +267,7 @@ fn every_committed_dump_reaches_its_pinned_outcome() {
 
 const EXPECTED: &[(&str, &str)] = &[
     ("engine/tests/fixtures/basalt_power_artifact_infinite_colorless.json.gz", "BUDGET Priority"),
-    ("engine/tests/fixtures/codie_turn14.json.gz", "GAMEOVER@5"),
+    ("engine/tests/fixtures/codie_turn14.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
     ("engine/tests/fixtures/combo_infinite_pile_4p_offer.json.gz", "OFFER@restore bounded=false threshold=None unbounded=[TokensCreated] road=RecordedPeriod"),
     ("engine/tests/fixtures/combo_infinite_pile_4p_untapped_precast.json.gz", "BUDGET Priority"),
     ("engine/tests/fixtures/combo_infinite_pile_decklist_4p.json.gz", "RESTOREERR persisted game state has an invalid turn_number"),
@@ -173,12 +275,12 @@ const EXPECTED: &[(&str, &str)] = &[
     ("engine/tests/fixtures/cr733/blocked_write_sites.json.gz", "RESTOREERR persisted game state has an invalid turn_number"),
     ("engine/tests/fixtures/cr733/rng_allocator_map.json.gz", "RESTOREERR persisted game state has an invalid turn_number"),
     ("engine/tests/fixtures/cr733/side_effect_map.json.gz", "RESTOREERR persisted game state has an invalid turn_number"),
-    ("engine/tests/fixtures/dellian_emblem_conqueror_4p.json.gz", "BUDGET Priority"),
+    ("engine/tests/fixtures/dellian_emblem_conqueror_4p.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
     ("engine/tests/fixtures/dina_conqueror_4p.json.gz", "OFFER@19 bounded=true threshold=Some(36) unbounded=[Life(PlayerId(0)), Life(PlayerId(1)), Life(PlayerId(2)), Life(PlayerId(3))] road=Ring"),
     ("engine/tests/fixtures/dina_conqueror_phase5_no_offer_4p.json.gz", "OFFER@21 bounded=true threshold=Some(34) unbounded=[Life(PlayerId(0)), Life(PlayerId(1)), Life(PlayerId(2)), Life(PlayerId(3))] road=Ring"),
     ("engine/tests/fixtures/dina_noff_turn5_4p.json.gz", "OFFER@21 bounded=true threshold=Some(31) unbounded=[Life(PlayerId(0)), Life(PlayerId(1)), Life(PlayerId(2)), Life(PlayerId(3))] road=Ring"),
-    ("engine/tests/fixtures/exquisite_blood_tenacity_alternating_offer_4p.json.gz", "OFFER@restore bounded=true threshold=Some(8) unbounded=[Life(PlayerId(0)), Life(PlayerId(1))] road=Ring"),
-    ("engine/tests/fixtures/exquisite_blood_tenacity_three_opponents_4p.json.gz", "OFFER@restore bounded=true threshold=Some(10) unbounded=[Life(PlayerId(0)), Life(PlayerId(3))] road=Ring"),
+    ("engine/tests/fixtures/exquisite_blood_tenacity_alternating_offer_4p.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
+    ("engine/tests/fixtures/exquisite_blood_tenacity_three_opponents_4p.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
     ("engine/tests/fixtures/f4_user_mode1_no_offer_4p.json.gz", "OFFER@37 bounded=true threshold=Some(87) unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] road=Ring"),
     ("engine/tests/fixtures/f4_user_mode2_accept_commits_nothing_4p.json.gz", "OFFER@39 bounded=true threshold=Some(84) unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] road=Ring"),
     ("engine/tests/fixtures/fantastic_four_bounded_loop_4p.json.gz", "OFFER@39 bounded=true threshold=Some(88) unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] road=Ring"),
@@ -188,18 +290,18 @@ const EXPECTED: &[(&str, &str)] = &[
     ("engine/tests/fixtures/legacy_deferred_spell_delivery/finale_of_promise_raw.json.gz", "RESTOREERR legacy deferred_spell_delivery snapshot cannot prove which o"),
     ("engine/tests/fixtures/legacy_deferred_spell_delivery/taigam_collected_conjuring_plain.json.gz", "RESTOREERR legacy deferred_spell_delivery snapshot cannot prove which o"),
     ("engine/tests/fixtures/legacy_deferred_spell_delivery/taigam_collected_conjuring_raw.json.gz", "RESTOREERR legacy deferred_spell_delivery snapshot cannot prove which o"),
-    ("engine/tests/fixtures/lethal_lifegain_loss_4p.json.gz", "OFFER@restore bounded=true threshold=Some(2) unbounded=[Life(PlayerId(0)), Life(PlayerId(1))] road=Ring"),
-    ("engine/tests/fixtures/mass_library_order_turn15.json.gz", "BUDGET Priority"),
-    ("engine/tests/fixtures/smaug_devil_bats_4p.json.gz", "BUDGET Priority"),
+    ("engine/tests/fixtures/lethal_lifegain_loss_4p.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
+    ("engine/tests/fixtures/mass_library_order_turn15.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
+    ("engine/tests/fixtures/smaug_devil_bats_4p.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
     ("engine/tests/fixtures/sprout_witherbloom_realistic_lands_4p.json.gz", "BUDGET Priority"),
     ("engine/tests/fixtures/tenacity_exquisite_blood_4p.json.gz", "OFFER@restore bounded=false threshold=None unbounded=[Life(PlayerId(0)), Life(PlayerId(3))] road=Ring"),
     ("engine/tests/fixtures/vanquish_the_horde_manapayment_4p.json.gz", "BUDGET Priority"),
-    ("engine/tests/fixtures/weird_drain_4p.json.gz", "OFFER@restore bounded=true threshold=Some(10) unbounded=[Life(PlayerId(0)), Life(PlayerId(2))] road=Ring"),
-    ("engine/tests/fixtures/witherbloom_altar_sprout_swarm_4p.json.gz", "BUDGET Priority"),
-    ("engine/tests/fixtures/witherbloom_sprout_lumaret_4p.json.gz", "BUDGET Priority"),
+    ("engine/tests/fixtures/weird_drain_4p.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
+    ("engine/tests/fixtures/witherbloom_altar_sprout_swarm_4p.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
+    ("engine/tests/fixtures/witherbloom_sprout_lumaret_4p.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
     ("engine/tests/fixtures/witherbloom_sprout_lumaret_simple_4p.json.gz", "BUDGET Priority"),
-    ("engine/tests/integration/fixtures/issue_7087_recruit_discard_provenance.json.gz", "BUDGET Priority"),
-    ("engine/tests/integration/fixtures/issue_7212_recruit_with_sibling_trigger.json.gz", "BUDGET Priority"),
+    ("engine/tests/integration/fixtures/issue_7087_recruit_discard_provenance.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
+    ("engine/tests/integration/fixtures/issue_7212_recruit_with_sibling_trigger.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
     ("engine/tests/integration/fixtures/issue_8024_devour_rest_turn10.json.gz", "BUDGET Priority"),
     ("engine/tests/integration/fixtures/issue_8024_spell_rest_turn26.json.gz", "BUDGET Priority"),
     ("engine/tests/integration/fixtures/mycoloth_devour_wedge_turn15.json.gz", "BUDGET Priority"),
@@ -207,7 +309,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("engine/tests/integration/fixtures/ureni_turn10_raw_resolution_stack.json.gz", "RESTOREERR This saved game is missing the private rules record for the "),
     ("engine/tests/integration/fixtures/zurs_weirding_nested_dispatching_pre_7485.json.gz", "RESTOREERR OwnerlessPostReplacementDispatch"),
     ("phase-ai/fixtures/scenarios/galvanic-blast-manapayment-turn4.json.gz", "BUDGET Priority"),
-    ("phase-ai/fixtures/scenarios/invisible-woman-cosmic-crucible-mana.json.gz", "BUDGET Priority"),
-    ("phase-ai/fixtures/scenarios/judged-cryptbreaker-draw-step.json.gz", "BUDGET Priority"),
-    ("phase-ai/fixtures/scenarios/judged-karns-bastion-upkeep.json.gz", "BUDGET Priority"),
+    ("phase-ai/fixtures/scenarios/invisible-woman-cosmic-crucible-mana.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
+    ("phase-ai/fixtures/scenarios/judged-cryptbreaker-draw-step.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
+    ("phase-ai/fixtures/scenarios/judged-karns-bastion-upkeep.json.gz", "RESTOREERR legacy spells_cast_last_turn snapshot cannot say which playe"),
 ];

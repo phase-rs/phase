@@ -350,7 +350,7 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // Wild-Magic Sorcerer, Current Curriculum). Reuses the same
     // `parse_nth_qualified_spell_filter` grammar + `nth_qualified_spell_condition`
     // gate as the paired cost-modifier consumer, so the qualifying spell filter,
-    // cast-origin restriction, and `SpellsCastThisTurn == 0` gate are all preserved
+    // cast-origin restriction, and `SpellsCast == 0` gate are all preserved
     // instead of collapsing to "every spell you cast". `None` falls through to
     // the ordinary patterns below, preserving the gateless static.
     if let Some(def) = nth_qualified_spell_grant(

@@ -248,7 +248,8 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
     case "GraveyardSize": return "cards in your graveyard";
     case "StartingLifeTotal": return "starting life total";
     case "LifeAboveStarting": return "life above your starting total";
-    case "LifeLostThisTurn": return "life you lost this turn";
+    case "LifeLost":
+      return ref.window === "LastTurn" ? "life you lost last turn" : "life you lost this turn";
     case "LifeGainedThisTurn": return "life you gained this turn";
     case "OpponentLifeLostThisTurn": return "life an opponent lost this turn";
     // Source-object references
@@ -260,8 +261,8 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
     case "AnyCountersOnTarget": return "counters on target";
     // Per-turn aggregates
     case "TurnsTaken": return "turns taken";
-    case "SpellsCastThisTurn": return "spells cast this turn";
-    case "SpellsCastLastTurn": return "spells cast last turn";
+    case "SpellsCast":
+      return ref.window === "LastTurn" ? "spells cast last turn" : "spells cast this turn";
     case "CreaturesDiedThisTurn": return "creatures that died this turn";
     case "AttackedThisTurn": return "creatures that attacked this turn";
     case "DescendedThisTurn": return "permanents that left the battlefield this turn";

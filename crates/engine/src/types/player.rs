@@ -134,6 +134,14 @@ pub struct Player {
     /// Used by "if an opponent lost life during their last turn" intervening-if conditions.
     #[serde(default)]
     pub life_lost_last_turn: u32,
+    /// CR 601.2i + CR 603.4: Number of spells this player cast during the
+    /// previous turn, latched at the turn boundary from that turn's per-player
+    /// cast journal (`GameState::spells_cast_this_turn_by_player`) before the
+    /// journal is cleared. Read by `QuantityRef::SpellsCast { window: LastTurn }`
+    /// ("a player cast two or more spells last turn", the werewolf transform
+    /// clause). A player who has left the game keeps their snapshot (CR 800.4i).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub spells_cast_last_turn: u32,
     #[serde(default)]
     pub descended_this_turn: bool,
     #[serde(default)]
@@ -272,6 +280,7 @@ impl Default for Player {
             life_lost_this_turn: 0,
             energy_paid_or_lost_this_turn: 0,
             life_lost_last_turn: 0,
+            spells_cast_last_turn: 0,
             descended_this_turn: false,
             cards_drawn_this_turn: 0,
             cards_drawn_last_turn: 0,

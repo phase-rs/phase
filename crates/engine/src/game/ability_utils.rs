@@ -13252,6 +13252,7 @@ fn build_mode_sequences(
 
 #[cfg(test)]
 mod tests {
+    use crate::types::ability::TurnWindow;
     use std::cell::RefCell;
 
     use super::DistributionCoverage::{AnySubset, EveryRecipient};
@@ -24112,9 +24113,10 @@ mod tests {
         assert!(quantity_expr_references_target_creature(&damage));
 
         let spell_filter = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(target_power_filter()),
+                window: TurnWindow::ThisTurn,
             },
         };
         assert!(quantity_expr_references_target_creature(&spell_filter));

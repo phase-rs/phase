@@ -19956,6 +19956,7 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::TurnWindow;
 
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::counter::CounterType;
@@ -22334,10 +22335,10 @@ mod tests {
                     matches!(
                         amount,
                         QuantityExpr::Ref {
-                            qty: crate::types::ability::QuantityRef::LifeLostThisTurn { .. }
+                            qty: crate::types::ability::QuantityRef::LifeLost { .. }
                         }
                     ),
-                    "Expected LifeLostThisTurn, got {amount:?}"
+                    "Expected LifeLost, got {amount:?}"
                 );
             }
             other => panic!("Expected GainLife, got {other:?}"),
@@ -23803,7 +23804,7 @@ mod tests {
     /// CR 115.1 + CR 119.3: Astarion (Feed mode) — "loses life equal to the
     /// amount of life they lost this turn." The third-person "they" anaphor in a
     /// targeted life-change refers to the effect's player target, so it maps to
-    /// `LifeLostThisTurn { Target }` (NOT `Controller` like the "you" form). The
+    /// `LifeLost { Target }` (NOT `Controller` like the "you" form). The
     /// maintainer's shared `parse_life_lost_ref` "amount of … they lost" tag is
     /// unreachable behind its own prefix strip, so this targeted-context
     /// recognizer is what resurrects the Feed mode.
@@ -23820,8 +23821,9 @@ mod tests {
                 NumericImperativeAst::LoseLife { amount } => assert_eq!(
                     amount,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn {
+                        qty: QuantityRef::LifeLost {
                             player: PlayerScope::Target,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     "{text:?} must be Target-scoped",
@@ -30466,11 +30468,11 @@ mod tests {
             "draw a card for each spell you've cast this turn from anywhere other than your hand";
         match parse_numeric_imperative_ast(text, text) {
             Some(NumericImperativeAst::Draw { count, .. }) => {
-                // Must resolve to the SpellsCastThisTurn ref carrying the cast-origin
+                // Must resolve to the SpellsCast ref carrying the cast-origin
                 // filter, not a Fixed(1) draw.
                 match count {
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn { filter, .. },
+                        qty: QuantityRef::SpellsCast { filter, .. },
                     } => {
                         let filter = filter.expect("cast-origin filter must be present");
                         assert!(
@@ -30479,7 +30481,7 @@ mod tests {
                             "draw count must carry the cast-origin Not(InZone(Hand)) filter, got {filter:?}"
                         );
                     }
-                    other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+                    other => panic!("expected SpellsCast ref, got {other:?}"),
                 }
             }
             other => panic!("expected Draw imperative, got {other:?}"),

@@ -3,6 +3,7 @@
 //! snapshot rather than re-evaluating the live static after `SpellCast`.
 
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::ability::TurnWindow;
 use engine::types::ability::{
     Comparator, ControllerRef, CountScope, QuantityExpr, QuantityRef, StaticCondition,
     StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
@@ -33,9 +34,10 @@ fn first_spell_storm_grant_is_snapshotted_before_cast_recording() {
             ))
             .condition(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,

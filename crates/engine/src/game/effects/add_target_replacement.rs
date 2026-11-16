@@ -410,7 +410,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal { .. }
         | QuantityRef::StartingDeckSize { .. }
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::LifeGainedThisTurn { .. }
@@ -444,7 +444,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         QuantityRef::ControlledByEachPlayer { .. }
         | QuantityRef::ZoneChangeCountThisTurn { .. }
         | QuantityRef::ZoneChangeAggregateThisTurn { .. }
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::TargetObjectManaValue { .. }
@@ -479,7 +479,6 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::ChosenNumber
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::DungeonsCompleted
         | QuantityRef::TimesCostPaidThisResolution

@@ -2898,7 +2898,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             aggregate: _,
         } => Axes::NONE,
         QuantityRef::PreviousEffectCount => Axes::NONE,
-        QuantityRef::LifeLostThisTurn { player } => {
+        QuantityRef::LifeLost { player, .. } => {
             let mut acc = Axes {
                 event: false,
                 sibling: false,
@@ -2956,7 +2956,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             source_counters: false,
             history: HistoryReads::NONE,
         },
-        QuantityRef::SpellsCastThisTurn { scope, filter } => {
+        QuantityRef::SpellsCast { scope, filter, .. } => {
             let mut acc = Axes {
                 event: false,
                 sibling: false,
@@ -3025,7 +3025,7 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         }
         QuantityRef::CrimesCommittedThisTurn => Axes::NONE,
         // CR 107.14 + CR 122.1: controller energy-spent journal; a projected
-        // per-turn resource tracker like `LifeLostThisTurn`.
+        // per-turn resource tracker like `LifeLost`.
         QuantityRef::EnergyPaidOrLostThisTurn => Axes {
             event: false,
             sibling: false,
@@ -3217,13 +3217,6 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc = acc.or(scan_player_scope(player));
             acc
         }
-        QuantityRef::SpellsCastLastTurn => Axes {
-            event: false,
-            sibling: false,
-            projected: true,
-            source_counters: false,
-            history: HistoryReads::NONE,
-        },
         QuantityRef::SpellsCastThisGame { scope, filter } => {
             let mut acc = Axes {
                 event: false,
@@ -8456,6 +8449,7 @@ fn effect_census_role(e: &Effect) -> CensusRole {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AbilityKind, AggregateFunction, CastManaObjectScope, CastManaSpentMetric,
         CombatHistoryScope, Comparator, CostDerivation, DamageKindFilter, DelayedTriggerLifetime,
@@ -9437,16 +9431,33 @@ mod tests {
                 },
             ),
             (
-                "LifeLostThisTurn",
-                QuantityRef::LifeLostThisTurn {
+                "LifeLost",
+                QuantityRef::LifeLost {
                     player: PlayerScope::Controller,
+                    window: TurnWindow::ThisTurn,
                 },
             ),
             (
-                "SpellsCastThisTurn",
-                QuantityRef::SpellsCastThisTurn {
+                "SpellsCast",
+                QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
+                },
+            ),
+            (
+                "SpellsCast (LastTurn)",
+                QuantityRef::SpellsCast {
+                    scope: CountScope::ScopedPlayer,
+                    filter: None,
+                    window: TurnWindow::LastTurn,
+                },
+            ),
+            (
+                "LifeLost (LastTurn)",
+                QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window: TurnWindow::LastTurn,
                 },
             ),
             (
@@ -10936,9 +10947,10 @@ mod tests {
         )));
         // Cast journal (spells cast this turn, cleared by project_out_resources).
         assert!(ability_reads_projected_resource(&ability_with_amount(
-            QuantityRef::SpellsCastThisTurn {
+            QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
-                filter: None
+                filter: None,
+                window: TurnWindow::ThisTurn,
             }
         )));
         // Damage journal (damage dealt this turn).

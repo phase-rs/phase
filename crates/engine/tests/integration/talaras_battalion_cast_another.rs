@@ -2,7 +2,7 @@
 //!
 //! CR 601.3: the restriction is checked when the spell would be cast — before
 //! it is recorded in this turn's spell history. The condition used to be
-//! `SpellsCastThisTurn >= 2` ("counting this spell"), so with one earlier spell
+//! `SpellsCast >= 2` ("counting this spell"), so with one earlier spell
 //! the count was 1 and the card was never castable.
 //!
 //! Field report (2026-10-03, Mesa): Talara's Battalion stayed uncastable after

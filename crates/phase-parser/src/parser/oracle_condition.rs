@@ -1604,15 +1604,16 @@ mod tests {
                 lhs:
                     QuantityExpr::Ref {
                         qty:
-                            QuantityRef::SpellsCastThisTurn {
+                            QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { .. }),
+                                ..
                             },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 3 },
             } => {}
-            other => panic!("expected filtered SpellsCastThisTurn >= 3, got {other:?}"),
+            other => panic!("expected filtered SpellsCast >= 3, got {other:?}"),
         }
     }
 

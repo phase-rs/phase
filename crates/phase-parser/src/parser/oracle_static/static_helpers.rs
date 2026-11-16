@@ -5,6 +5,7 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::PlayerScope;
+use crate::types::ability::TurnWindow;
 
 /// CR 113.6 + CR 201.2: Recognize the "sources with the chosen name" / "cards with
 /// the chosen name" subject phrase and map it to `TargetFilter::HasChosenName`.
@@ -1260,13 +1261,14 @@ pub(crate) fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCon
     }
     Some(StaticCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: if filter == TargetFilter::Any {
                     None
                 } else {
                     Some(filter)
                 },
+                window: TurnWindow::ThisTurn,
             },
         },
         comparator: Comparator::GE,

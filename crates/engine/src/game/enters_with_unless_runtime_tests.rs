@@ -280,7 +280,7 @@ fn steel_exemplar_reanimated_uncast_applies_counters() {
 // Thunder Salvo (DealDamage) and Lock and Load (Draw) share the SAME own-cast
 // exclusion seam as the ETB "unless" replacement: their spell-history filter
 // carries `FilterProp::Another`, peels through `peel_own_cast_exclusion`, and
-// resolves through the `SpellsCastThisTurn` exclusion arm. Unlike an ETB
+// resolves through the `SpellsCast` exclusion arm. Unlike an ETB
 // entrant, the resolving instant is still on the STACK and carries NO
 // `cast_from_zone`, so it is the direct runtime witness for the on-stack arm.
 

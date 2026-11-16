@@ -24,7 +24,18 @@ Each entry MUST include:
 
 ## Active shims
 
-_(none)_
+### `LEGACY_SPELLS_CAST_LAST_TURN_2026Q4`
+
+- **Covers:** the pre-`TurnWindow` serialized `QuantityRef` shapes: the unit tag
+  `SpellsCastLastTurn` (read as `SpellsCast { scope: All, filter: None, window: LastTurn }`
+  by `quantity_ref_from_value`, at all ten serialized `QuantityRef` positions), and the
+  `SpellsCastThisTurn` / `LifeLostThisTurn` tags (serde aliases onto `SpellsCast` / `LifeLost`,
+  `window` defaulting to `ThisTurn`). Separately, a saved `GameState` carrying a nonzero
+  table-wide `spells_cast_last_turn` is refused at restore (`GameStateDecode`,
+  `LEGACY_SPELLS_CAST_LAST_TURN_ERROR`): the per-player split of that turn cannot be recovered.
+- **Added in:** 0.127.
+- **Removal trigger:** the tripwire const fails the build once the workspace minor version passes 0.140.
+- **Source:** `crates/phase-ast/src/types/ability.rs` (`_LEGACY_SPELLS_CAST_LAST_TURN_2026Q4`).
 
 ## Removed shims
 
