@@ -6670,6 +6670,15 @@ mod tests {
             !result.commander.compatible,
             "Whtz in the main deck must not lift the maximum"
         );
+        assert!(
+            result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100")),
+            "expected the exact-size reason, got: {:?}",
+            result.commander.reasons
+        );
 
         // Hostile: Whtz as companion + 101 elsewhere still fails.
         let mut hostile = whtz_commander_request(100);
@@ -6679,6 +6688,15 @@ mod tests {
         assert!(
             !hostile_result.commander.compatible,
             "Whtz as companion must not lift the maximum"
+        );
+        assert!(
+            hostile_result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100")),
+            "expected the exact-size reason for the companion case, got: {:?}",
+            hostile_result.commander.reasons
         );
     }
 
