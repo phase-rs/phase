@@ -18,7 +18,12 @@
 //!
 //! The Dash Hopes rows at the bottom cover the rest of the class: the poll
 //! continues past the first acceptance, and a player who cannot pay does not
-//! consume the slot of one who can.
+//! consume the slot of one who can. Two further rows cover what the continuing
+//! poll owes a responder who LEAVES the game while the accepted action is still
+//! resolving (CR 800.4f) — one where a later responder is still owed its offer,
+//! one where the departure exhausts the poll — and a printed Sin Prodder row is
+//! the opposite control: an acceptance that consumes the thing being offered
+//! ends the trigger instead of continuing it.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
@@ -30,7 +35,7 @@ use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
 use engine::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
@@ -38,9 +43,15 @@ use engine::types::zones::{EtbTapState, Zone};
 
 /// `scenario` exports only P0/P1; the three-player rows below need the third.
 const P2: PlayerId = PlayerId(2);
+/// The departed-responder row needs a fourth seat: one to leave the game and one
+/// to still be owed its offer afterwards.
+const P3: PlayerId = PlayerId(3);
 
 // Verbatim Oracle text (Scryfall, 2026-11-05).
 const TEMPORAL_EXTORTION: &str = "When you cast this spell, any player may pay half their life, rounded up. If a player does, counter Temporal Extortion.\nTake an extra turn after this one.";
+
+// Verbatim Oracle text (Scryfall, 2026-11-16). 3/2 Devil, {2}{R}.
+const SIN_PRODDER: &str = "Menace\nAt the beginning of your upkeep, reveal the top card of your library. Any opponent may have you put that card into your graveyard. If a player does, this creature deals damage to that player equal to that card's mana value. Otherwise, put that card into your hand.";
 
 // Verbatim Oracle text (Scryfall, 2026-11-09).
 const DASH_HOPES: &str = "When you cast this spell, any player may pay 5 life. If a player does, counter Dash Hopes.\nCounter target spell.";
@@ -83,6 +94,19 @@ struct Settled {
 }
 
 fn settle_cast(runner: &mut GameRunner, accepts: &dyn Fn(PlayerId) -> bool) -> Settled {
+    settle_cast_with(runner, accepts, &|_| {})
+}
+
+/// `settle_cast` plus a hook that runs at each CR 616.1 ordering choice, BEFORE
+/// it is answered — i.e. while the accepted action is suspended and the poll
+/// cursor is parked beneath it. That is the only window in which a responder can
+/// leave the game between the park and the arm, so it is the window the
+/// departed-responder rows need.
+fn settle_cast_with(
+    runner: &mut GameRunner,
+    accepts: &dyn Fn(PlayerId) -> bool,
+    while_suspended: &dyn Fn(&mut GameRunner),
+) -> Settled {
     let mut prompted = Vec::new();
     let mut events = Vec::new();
     let mut replacement_choices = 0usize;
@@ -103,6 +127,7 @@ fn settle_cast(runner: &mut GameRunner, accepts: &dyn Fn(PlayerId) -> bool) -> S
             // a mid-resolution suspension.
             WaitingFor::ReplacementChoice { .. } => {
                 replacement_choices += 1;
+                while_suspended(runner);
                 let result = runner
                     .act(GameAction::ChooseReplacement { index: 0 })
                     .expect("the CR 616.1 ordering choice must accept a decision");
@@ -304,6 +329,16 @@ fn cast_dash_hopes(
     opposing: ObjectId,
     accepts: &dyn Fn(PlayerId) -> bool,
 ) -> (Vec<PlayerId>, Vec<GameEvent>, usize) {
+    cast_dash_hopes_with(runner, dash, opposing, accepts, &|_| {})
+}
+
+fn cast_dash_hopes_with(
+    runner: &mut GameRunner,
+    dash: ObjectId,
+    opposing: ObjectId,
+    accepts: &dyn Fn(PlayerId) -> bool,
+    while_suspended: &dyn Fn(&mut GameRunner),
+) -> (Vec<PlayerId>, Vec<GameEvent>, usize) {
     let card_id = runner.state().objects[&dash].card_id;
     let mut events = runner
         .act(GameAction::CastSpell {
@@ -314,7 +349,7 @@ fn cast_dash_hopes(
         })
         .expect("Dash Hopes must be castable with {B}{B} available and a spell to target")
         .events;
-    let settled = settle_cast(runner, accepts);
+    let settled = settle_cast_with(runner, accepts, while_suspended);
     events.extend(settled.events);
     (settled.prompted, events, settled.replacement_choices)
 }
@@ -398,52 +433,83 @@ fn an_acceptance_does_not_end_the_poll_for_the_remaining_players() {
 /// option. Dash Hopes: "A player can't choose to pay 5 life unless they
 /// actually have 5 or more life to pay."
 ///
-/// P1 at 4 life tries to accept. That must not spend the poll: P2, who can pay,
-/// still gets the offer. Reverting the affordability pre-flight lets P1 take the
-/// slot, records a payment that never happened in `player_actions_this_way`, and
-/// leaves P2 unasked.
+/// So a seat that cannot pay is not offered the payment at all, and — the
+/// finding — it does not spend the poll either: the seat behind it, who can pay,
+/// still gets its offer.
+///
+/// The two legs differ by ONE life point and nothing else, which is what makes
+/// this discriminating: at 6 life P1 is offered the choice and takes it, at 4
+/// life P1 is skipped. A run that offered every seat regardless would prompt P1
+/// in both legs; one that dropped the rest of the poll would leave P2 unasked in
+/// the 4-life leg.
+///
+/// The judgment lives in `effects::offered_seat_cannot_accept`, the single
+/// per-seat feasibility authority, so it is asked when a seat is offered AND
+/// again when it accepts. Before the upstream merge this branch asked it only at
+/// acceptance time, from the handler; re-homing it onto that authority is what
+/// also makes a seat skipped rather than prompted-then-refused.
 #[test]
-fn an_unpayable_acceptance_does_not_consume_a_payable_players_option() {
-    let (mut runner, dash, opposing) = stage_dash_hopes(3, &[(P0, 20), (P1, 4), (P2, 17)]);
-    // Everyone but the caster tries to pay; only P2 can afford it.
-    let (prompted, events, _) =
-        cast_dash_hopes(&mut runner, dash, opposing, &|player| player != P0);
+fn a_seat_that_cannot_pay_is_skipped_without_spending_the_poll() {
+    for (p1_life, p1_is_offered) in [(6, true), (4, false)] {
+        let (mut runner, dash, opposing) =
+            stage_dash_hopes(3, &[(P0, 20), (P1, p1_life), (P2, 17)]);
+        // Everyone but the caster tries to pay.
+        let (prompted, events, _) =
+            cast_dash_hopes(&mut runner, dash, opposing, &|player| player != P0);
 
-    // Reach-guard: P1 must genuinely have been offered the choice and tried to
-    // take it, or this proves nothing about the unaffordable path.
-    assert!(
-        prompted.contains(&P1),
-        "P1 must be offered the choice in order to fail it; prompted={prompted:?}"
-    );
-    assert_eq!(
-        life(&runner, P1),
-        4,
-        "P1 cannot pay 5 from 4 life, so no life is lost"
-    );
-    assert!(
-        !runner
-            .state()
-            .player_actions_this_way
-            .contains(&(P1, PlayerActionKind::AcceptedOptionalEffect)),
-        "a player who cannot pay never performed the action, so the ledger \
-         'did a player do this' riders read must not record them"
-    );
+        // Reach-guard: the poll ran at all, and reached the caster first.
+        assert!(
+            prompted.contains(&P0),
+            "the poll must open on the caster; p1_life={p1_life} prompted={prompted:?}"
+        );
 
-    // The finding: the payable player still gets their option, and it works.
-    assert!(
-        prompted.contains(&P2),
-        "a player who cannot pay must not consume a payable player's option; prompted={prompted:?}"
-    );
-    assert_eq!(life(&runner, P2), 12, "P2 can pay 5 from 17 life, and did");
-    assert!(
-        was_countered(&events, dash),
-        "P2's payment must counter Dash Hopes; events={events:?}"
-    );
-    assert_eq!(
-        life(&runner, P0),
-        20,
-        "the caster is never the payer for an accepted any-player offer"
-    );
+        assert_eq!(
+            prompted.contains(&P1),
+            p1_is_offered,
+            "a seat is offered the payment exactly when it can pay it (CR 118.3); \
+             p1_life={p1_life} prompted={prompted:?}"
+        );
+        if !p1_is_offered {
+            assert!(
+                !runner
+                    .state()
+                    .player_actions_this_way
+                    .contains(&(P1, PlayerActionKind::AcceptedOptionalEffect)),
+                "a seat that was never offered the payment cannot have performed \
+                 it — the ledger the \"did a player do this\" riders read must \
+                 not record them; p1_life={p1_life}"
+            );
+        }
+
+        if p1_is_offered {
+            // P1 could pay and accepted, so P1 paid and the spell is countered.
+            assert_eq!(life(&runner, P1), p1_life - 5, "P1 paid the 5 life");
+        } else {
+            assert_eq!(
+                life(&runner, P1),
+                p1_life,
+                "P1 could not pay, so no life is lost"
+            );
+            // The finding: the unpayable seat did not consume P2's option.
+            assert!(
+                prompted.contains(&P2),
+                "a seat that cannot pay must not spend a payable seat's option; \
+                 prompted={prompted:?}"
+            );
+            assert_eq!(life(&runner, P2), 12, "P2 can pay 5 from 17 life, and did");
+        }
+
+        assert!(
+            was_countered(&events, dash),
+            "the accepted payment must counter Dash Hopes; p1_life={p1_life} \
+             events={events:?}"
+        );
+        assert_eq!(
+            life(&runner, P0),
+            20,
+            "the caster is never the payer for an accepted any-player offer"
+        );
+    }
 }
 
 /// Rest in Peace / Leyline of the Void class: "If a card would be put into a
@@ -476,6 +542,42 @@ fn graveyard_exile_redirect(description: &str) -> ReplacementDefinition {
         .description(description.to_string())
 }
 
+/// Two simultaneously applicable `Moved` redirects, so a countered spell's
+/// stack → graveyard move has two replacements competing for it and
+/// `effects/counter.rs` raises a CR 616.1 ordering choice mid-resolution. That
+/// is what makes an acceptance suspend on a prompt of its own.
+///
+/// The owner matters: CR 800.4a takes a departing player's objects with them, so
+/// a row whose responder concedes must not host its redirects on that responder,
+/// or the concession would dismantle the very suspension the row depends on.
+fn install_graveyard_redirects(runner: &mut GameRunner, hosts: &[(PlayerId, &str)]) {
+    for &(owner, description) in hosts {
+        let host = engine::game::zones::create_object(
+            runner.state_mut(),
+            CardId(702),
+            owner,
+            description.to_string(),
+            Zone::Battlefield,
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&host)
+            .expect("the redirect host was just created")
+            .replacement_definitions = vec![graveyard_exile_redirect(description)].into();
+    }
+}
+
+/// Concede `player` once, while the accepted action is suspended. Idempotent, so
+/// it is safe if the suspension raises more than one ordering choice.
+fn concede_once(runner: &mut GameRunner, player: PlayerId) {
+    if engine::game::players::is_alive(runner.state(), player) {
+        runner
+            .act(GameAction::Concede { player_id: player })
+            .expect("CR 104.3a: a player can concede at any time");
+    }
+}
+
 /// CR 101.4 + CR 616.1: the poll survives a replacement choice raised by the
 /// accepted action itself.
 ///
@@ -493,21 +595,10 @@ fn graveyard_exile_redirect(description: &str) -> ReplacementDefinition {
 #[test]
 fn an_acceptance_that_suspends_on_a_replacement_choice_still_offers_the_rest() {
     let (mut runner, dash, opposing) = stage_dash_hopes(3, &[(P0, 20), (P1, 13), (P2, 17)]);
-    for (owner, description) in [(P1, "Rest in Peace"), (P2, "Leyline of the Void")] {
-        let host = engine::game::zones::create_object(
-            runner.state_mut(),
-            CardId(702),
-            owner,
-            description.to_string(),
-            Zone::Battlefield,
-        );
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&host)
-            .expect("the redirect host was just created")
-            .replacement_definitions = vec![graveyard_exile_redirect(description)].into();
-    }
+    install_graveyard_redirects(
+        &mut runner,
+        &[(P1, "Rest in Peace"), (P2, "Leyline of the Void")],
+    );
 
     let (prompted, events, replacement_choices) =
         cast_dash_hopes(&mut runner, dash, opposing, &|player| player == P1);
@@ -542,5 +633,311 @@ fn an_acceptance_that_suspends_on_a_replacement_choice_still_offers_the_rest() {
         life(&runner, P2),
         17,
         "P2 was offered the choice and declined, so P2 pays nothing"
+    );
+}
+
+/// CR 800.4f + CR 102.1: a responder who leaves the game while the accepted
+/// action resolves is skipped when the parked poll resumes, and the responders
+/// after them are still owed their offers.
+///
+/// Four seats. P0 casts Dash Hopes and declines its own offer; P1 accepts and
+/// pays, which counters the spell and suspends on a CR 616.1 ordering choice for
+/// the two competing graveyard redirects; P2 concedes inside that window, i.e.
+/// after the poll cursor parked naming P2 as next and before it arms. CR 800.4f:
+/// "If an object requires a player who has left the game to pay a cost or choose
+/// whether to pay a cost, that cost is not paid."
+///
+/// This is F1 of the #10741 round-4 review. Before the fix,
+/// `arm_parked_opponent_may_poll` re-armed `WaitingFor::OpponentMayChoice` with
+/// the seat recorded at park time, and the departure reconciliation only checks
+/// the player currently on the clock — so a responder buried in the parked
+/// cursor survived their own departure and the poll stalled waiting on them.
+#[test]
+fn a_responder_who_left_the_game_is_skipped_when_the_parked_poll_resumes() {
+    let (mut runner, dash, opposing) =
+        stage_dash_hopes(4, &[(P0, 20), (P1, 13), (P2, 17), (P3, 11)]);
+    // Both hosted by P0, so P2's concession cannot remove a redirect and
+    // dismantle the suspension this row depends on (CR 800.4a).
+    install_graveyard_redirects(
+        &mut runner,
+        &[(P0, "Rest in Peace"), (P0, "Leyline of the Void")],
+    );
+
+    let (prompted, events, replacement_choices) = cast_dash_hopes_with(
+        &mut runner,
+        dash,
+        opposing,
+        &|player| player == P1,
+        &|runner| concede_once(runner, P2),
+    );
+
+    // Reach-guards, in the order the run depends on them. Each one failing would
+    // make the finding assertions below pass for the wrong reason.
+    assert!(
+        prompted.contains(&P1),
+        "P1 must be offered the choice in order to accept it; prompted={prompted:?}"
+    );
+    assert_eq!(life(&runner, P1), 8, "P1 accepted, so P1 paid the 5 life");
+    assert!(
+        was_countered(&events, dash),
+        "P1's payment must counter Dash Hopes; events={events:?}"
+    );
+    assert!(
+        replacement_choices >= 1,
+        "the countered spell's move must raise a CR 616.1 ordering choice, or the \
+         cursor never parks and this row degenerates into the plain poll row; \
+         answered {replacement_choices}"
+    );
+    assert!(
+        !engine::game::players::is_alive(runner.state(), P2),
+        "the concession must actually have removed P2 from the game, or the \
+         skip below is not being tested at all"
+    );
+
+    // The finding: P2 is not asked, and P3 — queued behind the departed seat —
+    // still is.
+    assert!(
+        !prompted.contains(&P2),
+        "a responder who left the game must not be offered the payment \
+         (CR 800.4f); prompted={prompted:?}"
+    );
+    assert!(
+        prompted.contains(&P3),
+        "the responder queued behind the departed seat is still owed its offer \
+         (CR 101.4); prompted={prompted:?}"
+    );
+    assert_eq!(
+        life(&runner, P3),
+        11,
+        "P3 was offered the choice and declined, so P3 pays nothing"
+    );
+}
+
+/// CR 800.4f + CR 608.2d: when the departed seat was the LAST responder owed an
+/// offer, the poll has nobody left to ask and closes instead of arming.
+///
+/// Same shape as the row above with three seats, so P2's concession exhausts the
+/// queue. This is the sibling branch: the row above proves the cursor advances
+/// PAST a departed seat, this one proves it terminates when advancing finds
+/// nothing — the frame is taken and priority settles rather than the poll
+/// hanging on a prompt for a player who is gone.
+#[test]
+fn a_parked_poll_whose_last_responder_left_the_game_settles() {
+    let (mut runner, dash, opposing) = stage_dash_hopes(3, &[(P0, 20), (P1, 13), (P2, 17)]);
+    install_graveyard_redirects(
+        &mut runner,
+        &[(P0, "Rest in Peace"), (P0, "Leyline of the Void")],
+    );
+
+    let (prompted, events, replacement_choices) = cast_dash_hopes_with(
+        &mut runner,
+        dash,
+        opposing,
+        &|player| player == P1,
+        &|runner| concede_once(runner, P2),
+    );
+
+    // Reach-guards: the acceptance happened, it suspended, and P2 really left.
+    assert_eq!(life(&runner, P1), 8, "P1 accepted, so P1 paid the 5 life");
+    assert!(
+        was_countered(&events, dash),
+        "P1's payment must counter Dash Hopes; events={events:?}"
+    );
+    assert!(
+        replacement_choices >= 1,
+        "the acceptance must suspend on a CR 616.1 ordering choice for the \
+         cursor to park; answered {replacement_choices}"
+    );
+    assert!(
+        !engine::game::players::is_alive(runner.state(), P2),
+        "the concession must actually have removed P2 from the game"
+    );
+    assert!(
+        !prompted.contains(&P2),
+        "the departed last responder must not be offered the payment \
+         (CR 800.4f); prompted={prompted:?}"
+    );
+
+    // The finding: the exhausted poll closes. `settle_cast_with` returning at
+    // all already proves it did not hang, and these pin the end state: the
+    // optional-effect frame is gone rather than left parked on the stack.
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "an exhausted poll returns to priority; waiting_for={:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().active_optional_effect_frame().is_none(),
+        "the exhausted poll's frame must be taken, not left parked"
+    );
+}
+
+/// CR 608.2d + the printed Sin Prodder ruling: an acceptance whose action
+/// CONSUMES the thing being offered ends the trigger, so the opponents after the
+/// accepting one get no offer.
+///
+/// > Each opponent in turn order, starting with the one after you in turn order,
+/// > may choose to have you put that card into your graveyard. Once a player
+/// > does so, Sin Prodder deals damage equal to that card's mana value to that
+/// > player immediately and Sin Prodder's trigger has no further action.
+///
+/// This is the printed-card control for `acceptance_leaves_the_option_open`, and
+/// the reason the Dash Hopes re-offer above is not unconditional. The two are
+/// each other's discriminator: an engine that re-offers after EVERY acceptance
+/// passes the Dash Hopes rows and fails this one, and an engine that ends the
+/// poll at the first acceptance does the reverse.
+///
+/// F2 of the #10741 round-4 review, which asked for the printed trigger — the
+/// card move and the damage — rather than a synthetic any-player offer. The
+/// generic shape is still covered at the unit level by
+/// `a_one_shot_acceptance_ends_the_poll_for_the_remaining_responders`.
+/// Drive to `player`'s upkeep and on to the any-opponent offer its upkeep
+/// trigger makes.
+///
+/// Two established harness idioms composed, because a single
+/// `advance_to_upkeep()` satisfies neither on its own:
+///
+/// - `GameScenario::advance_to_phase` passes priority *two* seats per iteration
+///   (`scenario.rs`), so in a three-seat game the upkeep it stops on is a parity
+///   accident rather than the next seat's. Walking turn by turn and checking
+///   `active_player` is the idiom in `advance_to_upkeep_of`
+///   (`kashi_tribe_damage_tap_freeze.rs`, `issue_4271_birthing_ritual_cmc_filter.rs`).
+/// - CR 603.3: reaching the step is not reaching the trigger. The ability is put
+///   on the stack and resolves only once priority is passed, so the offer
+///   surfaces some passes later — the idiom in `advance_to_upkeep_unless_prompt`
+///   (`counter_indexed_unless_and_chroma_runtime.rs`).
+///
+/// Panics with the walk it took, so a harness miss reports where it ended up
+/// instead of only that it missed.
+fn advance_to_upkeep_offer_of(runner: &mut GameRunner, player: PlayerId) {
+    fn snapshot(runner: &GameRunner) -> String {
+        format!(
+            "{:?}/{:?} {:?}",
+            runner.state().active_player,
+            runner.state().phase,
+            runner.state().waiting_for
+        )
+    }
+    fn offer_is_open(runner: &GameRunner) -> bool {
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OpponentMayChoice { .. }
+        )
+    }
+    let at_upkeep_of = |runner: &GameRunner| {
+        runner.state().phase == Phase::Upkeep && runner.state().active_player == player
+    };
+
+    let mut walk = vec![snapshot(runner)];
+    for _ in 0..8 {
+        if offer_is_open(runner) || at_upkeep_of(runner) {
+            break;
+        }
+        runner.advance_to_upkeep();
+        walk.push(snapshot(runner));
+        if offer_is_open(runner) || at_upkeep_of(runner) {
+            break;
+        }
+        if runner.waiting_for_kind() == "DeclareAttackers" {
+            runner.declare_attackers(&[]).expect("declare no attackers");
+        } else {
+            runner.advance_to_end_step();
+        }
+        walk.push(snapshot(runner));
+    }
+    for _ in 0..20 {
+        if offer_is_open(runner) {
+            return;
+        }
+        if runner.act(GameAction::PassPriority).is_err() {
+            break;
+        }
+        walk.push(snapshot(runner));
+    }
+    panic!(
+        "never reached {player:?}'s any-opponent upkeep offer; walk:\n  {}",
+        walk.join("\n  ")
+    );
+}
+
+#[test]
+fn an_accepted_sin_prodder_trigger_makes_no_further_offer() {
+    // Sin Prodder is P1's, so `advance_to_upkeep_offer_of` walks to P1's upkeep
+    // — the "your upkeep" the printed trigger names — and its opponents are then
+    // offered in turn order starting with the one after P1 (the ruling above):
+    // P2 first, then P0.
+    const REVEALED_MANA_VALUE: i32 = 3;
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for &player in &[P0, P1, P2] {
+        scenario.with_life(player, 20);
+    }
+    let prodder = {
+        let mut builder = scenario.add_creature(P1, "Sin Prodder", 3, 2);
+        builder.from_oracle_text_with_keywords(&["Menace"], SIN_PRODDER);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 2,
+        });
+        builder.id()
+    };
+    // Mana value 3, so the damage dealt is distinguishable from a default of 0
+    // or 1 — an engine that failed to read the revealed card's mana value would
+    // not land on 3 by accident.
+    let revealed = {
+        let mut builder = scenario.add_spell_to_library_top(P1, "Revealed Card", false);
+        builder.with_mana_cost(ManaCost::generic(REVEALED_MANA_VALUE as u32));
+        builder.id()
+    };
+    let mut runner = scenario.build();
+
+    // Reach-guard: the printed upkeep trigger must actually fire and reach its
+    // poll — the helper panics with its walk if it never does. Without this,
+    // every assertion below would hold vacuously on an engine where Sin Prodder
+    // does nothing at all.
+    advance_to_upkeep_offer_of(&mut runner, P1);
+    assert_eq!(
+        runner.state().objects[&prodder].controller,
+        P1,
+        "reach-guard: the trigger that fired is the one on P1's Sin Prodder"
+    );
+
+    let settled = settle_cast(&mut runner, &|_| true);
+    let prompted = settled.prompted;
+
+    // Reach-guard: the first opponent after the controller is the one offered,
+    // and it is the one that accepted.
+    assert_eq!(
+        prompted.first().copied(),
+        Some(P2),
+        "the offer opens on the opponent after the controller in turn order; \
+         prompted={prompted:?}"
+    );
+
+    // The printed consequences of the acceptance: the revealed card is put into
+    // its owner's graveyard, and Sin Prodder deals damage equal to that card's
+    // mana value to the accepting opponent.
+    assert_eq!(
+        runner.state().objects[&revealed].zone,
+        Zone::Graveyard,
+        "the accepted action puts the revealed card into the graveyard"
+    );
+    assert_eq!(
+        life(&runner, P2),
+        20 - REVEALED_MANA_VALUE,
+        "Sin Prodder deals damage equal to the revealed card's mana value to \
+         the opponent who accepted"
+    );
+
+    // The finding: the trigger "has no further action", so P0 is never asked.
+    assert!(
+        !prompted.contains(&P0),
+        "the accepted one-shot action consumes the revealed card, so no further \
+         opponent is offered (CR 608.2d); prompted={prompted:?}"
+    );
+    assert_eq!(
+        life(&runner, P0),
+        20,
+        "P0 was never offered the choice, so P0 takes no damage"
     );
 }

@@ -2206,7 +2206,12 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
             parked_poll: Some(_),
             ..
         }) => {
-            crate::game::engine_payment_choices::arm_parked_opponent_may_poll(state);
+            // CR 102.1 + CR 800.4f: the arming judges the parked seats again,
+            // because a responder can have left the game while the accepted
+            // action resolved. Fallible only on a resolution-stack invariant,
+            // which this drain cannot propagate (see the sibling drains above).
+            let _ =
+                crate::game::engine_payment_choices::arm_parked_opponent_may_poll(state, events);
         }
         ResolutionFrame::OptionalEffect(_)
         | ResolutionFrame::CoinFlip(_)

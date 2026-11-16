@@ -503,19 +503,27 @@ fn handle_opponent_may_choice_inner(
             // `DieRoll` carry, and the reason `parked_poll` moves the gate to
             // `AfterChild`.
             if acceptance_leaves_the_option_open(&ability.effect) {
-                if let Some((&next, rest)) = remaining.split_first() {
-                    let mut reoffered = frame.ability.clone();
-                    reoffered.context.optional_effect_performed = true;
-                    let settled = matches!(state.waiting_for, WaitingFor::Priority { .. });
-                    let mut offer = OptionalEffectFrame {
-                        parked_poll: None,
-                        ability: reoffered,
-                        trigger_event: frame.trigger_event.clone(),
-                        trigger_events: frame.trigger_events.clone(),
-                        trigger_match_count: frame.trigger_match_count,
-                        return_result_occurrence: frame.return_result_occurrence,
-                    };
-                    if settled {
+                let mut reoffered = frame.ability.clone();
+                reoffered.context.optional_effect_performed = true;
+                let mut offer = OptionalEffectFrame {
+                    parked_poll: None,
+                    ability: reoffered,
+                    trigger_event: frame.trigger_event.clone(),
+                    trigger_events: frame.trigger_events.clone(),
+                    trigger_match_count: frame.trigger_match_count,
+                    return_result_occurrence: frame.return_result_occurrence,
+                };
+                // CR 608.2d: each seat is judged when its own offer is made, and
+                // the two branches below make that offer at different times, so
+                // they judge at different times.
+                if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+                    // Settled: this offer goes live NOW, so it is judged now —
+                    // through the same authority as the fan-out and the decline
+                    // path, so a re-offer can no more name a seat that has left
+                    // the game or cannot take the option than they can.
+                    if let Some((next, rest)) =
+                        effects::next_offerable_seat(state, &frame.ability, &remaining)
+                    {
                         state
                             .install_direct_choice_frame(
                                 crate::types::resolution::ResolutionFrame::OptionalEffect(offer),
@@ -524,22 +532,29 @@ fn handle_opponent_may_choice_inner(
                                     decision_subject_id,
                                     source_id,
                                     description,
-                                    remaining: rest.to_vec(),
+                                    remaining: rest,
                                 },
                             )
                             .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
-                    } else {
-                        offer.parked_poll = Some(Box::new(ParkedOpponentMayPoll {
-                            next,
-                            remaining: rest.to_vec(),
-                            decision_subject_id,
-                            source_id,
-                            description,
-                        }));
-                        state
-                            .park_opponent_may_poll_beneath_live_prompt(offer)
-                            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                     }
+                } else if let Some((&next, rest)) = remaining.split_first() {
+                    // Suspended: the offer is not made until the cursor arms,
+                    // which is after the accepted action finishes. Judging the
+                    // seats HERE would be judging them too early — the accepted
+                    // action can still change who may accept, in both directions
+                    // — so the cursor is parked unjudged and
+                    // `arm_parked_opponent_may_poll` judges it at the moment the
+                    // offer is actually made.
+                    offer.parked_poll = Some(Box::new(ParkedOpponentMayPoll {
+                        next,
+                        remaining: rest.to_vec(),
+                        decision_subject_id,
+                        source_id,
+                        description,
+                    }));
+                    state
+                        .park_opponent_may_poll_beneath_live_prompt(offer)
+                        .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
                 }
             }
         }
@@ -616,23 +631,72 @@ fn advance_opponent_may_offer(
 /// the invariant `install_direct_choice_frame` enforces when it installs a fresh
 /// owner, held here by mutating a frame that is already the top one, exactly as
 /// `cipher::arm_parked_encode_offer` does.
-pub(crate) fn arm_parked_opponent_may_poll(state: &mut GameState) {
-    let Some(poll) = state
-        .active_optional_effect_frame()
-        .and_then(|frame| frame.parked_poll.as_deref().cloned())
-    else {
-        return;
+///
+/// CR 102.1 + CR 800.4f + CR 608.2d: the parked seats are judged here, not at
+/// park time, because the accepted action resolves in between and can remove a
+/// responder from the game or take their option away. With no seat left to ask,
+/// the poll closes instead of arming.
+pub(crate) fn arm_parked_opponent_may_poll(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let Some((poll, ability)) = state.active_optional_effect_frame().and_then(|frame| {
+        frame
+            .parked_poll
+            .as_deref()
+            .cloned()
+            .map(|poll| (poll, frame.ability.as_ref().clone()))
+    }) else {
+        return Ok(());
     };
+
+    // CR 102.1 + CR 800.4f + CR 608.2d: the cursor was parked before the
+    // accepted action resolved, and that action can change who may still be
+    // asked — a responder can leave the game while it resolves (CR 104.3a +
+    // CR 800.4a, taking their objects with them), and "If an object requires a
+    // player who has left the game to pay a cost or choose whether to pay a
+    // cost, that cost is not paid." A seat can also simply stop being able to
+    // take the option (CR 608.2d). So the parked seats are judged HERE, when
+    // the offer is actually made, through the same authority the fan-out and
+    // the decline path use (`effects::next_offerable_seat`) rather than
+    // trusting the seat recorded at park time.
+    //
+    // `poll.next` is the seat that was next when the cursor parked, so it goes
+    // back at the head of the queue to be judged like any other.
+    let mut seats = Vec::with_capacity(poll.remaining.len() + 1);
+    seats.push(poll.next);
+    seats.extend_from_slice(&poll.remaining);
+
+    let Some((next, rest)) = effects::next_offerable_seat(state, &ability, &seats) else {
+        // CR 101.4 + CR 800.4f: no seat is left to ask, so the poll is over and
+        // its frame closes. A parked poll exists only because an earlier
+        // responder accepted, so the "if no one does" rider is already spent —
+        // the completion below is a no-op for that reason, not by omission, and
+        // it stays routed through the one authority so a future producer that
+        // parks an unperformed poll still fires the rider.
+        debug_assert!(
+            ability.context.optional_effect_performed,
+            "a parked poll is only created after a responder accepted"
+        );
+        state
+            .take_active_optional_effect_frame()
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?
+            .expect("a parked poll's frame stays active until it is armed or closed");
+        set_active_priority(state);
+        return resolve_all_declined_opponent_may(state, &ability, events);
+    };
+
     if let Some(frame) = state.active_optional_effect_frame_mut() {
         frame.parked_poll = None;
     }
     state.waiting_for = WaitingFor::OpponentMayChoice {
-        player: poll.next,
+        player: next,
         decision_subject_id: poll.decision_subject_id,
         source_id: poll.source_id,
         description: poll.description,
-        remaining: poll.remaining,
+        remaining: rest,
     };
+    Ok(())
 }
 
 /// CR 101.4 + CR 608.2d: whether an acceptance leaves the offer standing for the
