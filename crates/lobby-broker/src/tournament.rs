@@ -1135,6 +1135,22 @@ impl TournamentMeta {
         self.players.iter().find(|p| p.player_key == player_key)
     }
 
+    /// The bytes this event's retained decks add to its persisted record: each
+    /// submitted deck's encoding ([`deck_encoded_bytes`]) less the
+    /// [`ABSENT_DECK_FIELD_ENCODED_BYTES`] the always-serialized `deck` field
+    /// already occupies as `null`. Exactly what a submission or withdrawal
+    /// changes in the record's encoded size, so the rest of the record (the
+    /// event's metadata) is independent of deck traffic. The deck account of the
+    /// persistence boundary's reservation
+    /// ([`crate::broker::EVENT_DECK_RESERVE_ENCODED_BYTES`]).
+    pub fn retained_deck_bytes(&self) -> usize {
+        self.players
+            .iter()
+            .filter_map(|p| p.deck.as_ref())
+            .map(|deck| deck_encoded_bytes(deck).saturating_sub(ABSENT_DECK_FIELD_ENCODED_BYTES))
+            .fold(0usize, usize::saturating_add)
+    }
+
     pub fn pairing(&self, id: PairingId) -> Option<&TournamentPairing> {
         self.pairings.iter().find(|p| p.id == id)
     }
@@ -2202,6 +2218,11 @@ pub const MAX_EVENT_DECK_ENCODED_BYTES: usize = 8 * MAX_SINGLE_DECK_ENCODED_BYTE
 /// [`deck_encoded_bytes`] codec as the per-event budget.
 pub const MAX_SINGLE_DECK_ENCODED_BYTES: usize = 64 * 1024;
 
+/// What the `deck` field of a [`TournamentPlayer`] encodes to while no deck has
+/// been submitted: `null`. The field is always serialized, so a submitted deck
+/// adds its own encoding minus this.
+const ABSENT_DECK_FIELD_ENCODED_BYTES: usize = "null".len();
+
 /// The exact byte cost `deck` adds to the persisted broker snapshot: its
 /// `serde_json` encoding, the same codec the lobby Durable Object snapshots the
 /// whole broker with (`serde_json::to_string(&broker)` in `broker-wasm`). Charging
@@ -2257,6 +2278,13 @@ impl TournamentManager {
     /// private.
     pub fn iter(&self) -> impl Iterator<Item = &TournamentMeta> {
         self.tournaments.values()
+    }
+
+    /// Mutable access to one event's record, for test fixtures that must build
+    /// a persisted state the protocol itself would not reach byte for byte.
+    #[cfg(test)]
+    pub(crate) fn fixture_meta_mut(&mut self, code: &str) -> Option<&mut TournamentMeta> {
+        self.tournaments.get_mut(code)
     }
 
     fn meta_mut(&mut self, code: &str) -> Result<&mut TournamentMeta, String> {

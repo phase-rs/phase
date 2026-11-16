@@ -955,21 +955,18 @@ mod tests {
         let env = WorkerEnv { now_ms: T0 as u64 };
         let mut broker = Broker::new();
         // Admitted state is not required to build the fixture: it only has to put
-        // the persisted value at/over its ceiling, so write the registry directly
-        // with big decks (each within the per-deck cap) across enough events.
-        let big_deck = |chars: usize| {
-            serde_json::from_value(serde_json::json!({ "main_deck": ["x".repeat(chars)] }))
-                .expect("deck parses")
-        };
+        // the persisted value at/over its ceiling with events whose metadata is
+        // past its allowance, so write the registry directly with big event names
+        // across enough events.
         let mut first_code = String::new();
-        for event in 0..14 {
+        for event in 0..13 {
             let code = format!("PAD{event:03}");
             broker
                 .tournaments_mut()
                 .create_tournament(
                     &code,
                     CreateTournamentRequest {
-                        name: "Pad".into(),
+                        name: "p".repeat(600_000),
                         arity: MatchArity::HEAD_TO_HEAD,
                         scoring: ScoringPolicy::default(),
                         bracket: BracketShape::Swiss,
@@ -981,16 +978,6 @@ mod tests {
                     &env,
                 )
                 .expect("fixture event");
-            for seat in 0..8 {
-                let key = format!("k{seat}");
-                let tournaments = broker.tournaments_mut();
-                tournaments
-                    .join_tournament(&code, &key, &key, &env)
-                    .expect("fixture join");
-                tournaments
-                    .submit_deck(&code, &key, big_deck(60_000), &env)
-                    .expect("fixture deck");
-            }
             if first_code.is_empty() {
                 first_code = code;
             }

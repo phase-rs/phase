@@ -28,7 +28,7 @@ use crate::reservation_auth::{
 };
 use crate::tournament::{
     BracketShape, CreateTournamentRequest, CredentialVerdict, MatchArity, PairingId, PodOutcome,
-    ScoringPolicy, TournamentExpiryEvent, TournamentManager, TournamentRole,
+    ScoringPolicy, TournamentExpiryEvent, TournamentManager, TournamentMeta, TournamentRole,
 };
 
 /// Capacity cap for the broker path. `LobbyManager` is otherwise unbounded —
@@ -83,13 +83,14 @@ pub const MAX_TOURNAMENT_ENTRIES: usize =
 /// crosses; a refusal rolls the growth back so the last persistable state — decks and readiness included —
 /// is preserved.
 ///
-/// Set to 6 MiB, a deliberate margin below the 8 MB ceiling: it absorbs the
+/// Set to 7 MiB, a deliberate 1 MiB margin below the 8 MB ceiling: it absorbs the
 /// storage key's own bytes, SQLite per-row overhead, the ambiguity between 8 MB
 /// as 8·10⁶ and 8·2²⁰, and future `Broker` fields, while still leaving room for
-/// a dozen events at the full per-event deck budget. Conservative on purpose —
+/// [`MAX_TOURNAMENT_ENTRIES`] events at the full per-event guarantee
+/// ([`EVENT_RESERVE_ENCODED_BYTES`]). Conservative on purpose —
 /// the cost of refusing one late submission is far lower than the cost of a
 /// snapshot that cannot be written at all.
-pub const MAX_SNAPSHOT_ENCODED_BYTES: usize = 6 * 1024 * 1024;
+pub const MAX_SNAPSHOT_ENCODED_BYTES: usize = 7 * 1024 * 1024;
 
 /// The physical single-key value ceiling of the Durable Object store the broker
 /// snapshot lives under (Cloudflare's 8 MiB). Distinct from
@@ -103,23 +104,48 @@ pub const PHYSICAL_SNAPSHOT_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 const _: () = assert!(MAX_SNAPSHOT_ENCODED_BYTES < PHYSICAL_SNAPSHOT_LIMIT_BYTES);
 
-/// Capacity guaranteed to every *admitted* tournament, in encoded bytes of that
-/// event's own serialized record (entrants, pairings, retained decks).
+/// Metadata capacity guaranteed to every *admitted* tournament, in encoded
+/// bytes of that event's own record with its retained decks set aside
+/// (entrants, pairings, standings).
 ///
 /// [`MAX_SNAPSHOT_ENCODED_BYTES`] is shared by every event, so a bound on the
 /// total alone lets whichever event grows first take the room another admitted
-/// event still needs. The reservation closes that: while an event's record is
+/// event still needs. The reservations close that: while an event's metadata is
 /// smaller than this figure, the unused remainder counts as already spoken for
 /// ([`Broker::committed_bytes`]), so no write to *another* event, to the lobby or
 /// a new admission can be accepted if it would leave this event unable to reach
-/// it. The guarantee is therefore: an admitted event can always grow to
-/// `EVENT_RESERVE_ENCODED_BYTES`, however full the shared store is. Sized as one
-/// deck at the [`crate::tournament::MAX_SINGLE_DECK_ENCODED_BYTES`] abuse ceiling
-/// plus 32 KiB for entrant/pairing metadata, so an admitted event's next
-/// otherwise-valid first submission always fits. Growth beyond the reservation
-/// competes for the unreserved headroom and is refused when none is left.
+/// it. Metadata growth past it competes for the unreserved headroom of the shared
+/// store and is refused when none is left; it can never draw on
+/// [`EVENT_DECK_RESERVE_ENCODED_BYTES`], which is a separate account.
+pub const EVENT_METADATA_RESERVE_ENCODED_BYTES: usize = 32 * 1024;
+
+/// Deck capacity guaranteed to every *admitted* tournament: exactly the deck
+/// budget the event advertises ([`crate::tournament::MAX_EVENT_DECK_ENCODED_BYTES`]),
+/// so the room a submission was promised is the room admission holds for it.
+///
+/// A separate account from the metadata reserve, measured by
+/// [`TournamentMeta::retained_deck_bytes`]: only this event's own deck
+/// submissions consume it, and no metadata growth, in this event or another, and
+/// no other event's decks can. Because the per-event deck gate refuses a deck
+/// that would take the retained total past this same figure, a deck the event
+/// accepts is, by construction, already paid for at the persistence boundary, at
+/// any fill level of the shared store. At least two decks at the
+/// [`crate::tournament::MAX_SINGLE_DECK_ENCODED_BYTES`] abuse ceiling fit (a
+/// head-to-head pairing's two submissions).
+pub const EVENT_DECK_RESERVE_ENCODED_BYTES: usize = crate::tournament::MAX_EVENT_DECK_ENCODED_BYTES;
+
+/// Capacity guaranteed to every *admitted* tournament in total: its metadata
+/// allowance plus its deck allowance, each protected independently (see
+/// [`EVENT_METADATA_RESERVE_ENCODED_BYTES`] and
+/// [`EVENT_DECK_RESERVE_ENCODED_BYTES`]). This is the unit the registry is sized
+/// in ([`MAX_TOURNAMENT_ENTRIES`]) and the room a new admission must leave free.
 pub const EVENT_RESERVE_ENCODED_BYTES: usize =
-    crate::tournament::MAX_SINGLE_DECK_ENCODED_BYTES + 32 * 1024;
+    EVENT_METADATA_RESERVE_ENCODED_BYTES + EVENT_DECK_RESERVE_ENCODED_BYTES;
+
+// A head-to-head pairing's two supported submissions must fit the deck account.
+const _: () = assert!(
+    2 * crate::tournament::MAX_SINGLE_DECK_ENCODED_BYTES <= EVENT_DECK_RESERVE_ENCODED_BYTES
+);
 
 /// The same guarantee for the lobby registry as a whole: lobby rows may always
 /// grow to this many encoded bytes, so tournament traffic cannot starve game
@@ -1784,7 +1810,9 @@ impl Broker {
 
     /// The snapshot size plus every reservation not yet used: what the persisted
     /// value is *committed* to occupy. Each tournament contributes
-    /// `max(record, EVENT_RESERVE_ENCODED_BYTES)` and the lobby
+    /// `max(metadata, EVENT_METADATA_RESERVE_ENCODED_BYTES) +
+    /// max(decks, EVENT_DECK_RESERVE_ENCODED_BYTES)` (see
+    /// [`unused_event_reserve`]) and the lobby
     /// `max(lobby, LOBBY_RESERVE_ENCODED_BYTES)` (the measured snapshot already
     /// holds the used part; this adds the unused remainder). Admitting a write
     /// only while this stays within [`MAX_SNAPSHOT_ENCODED_BYTES`] makes the
@@ -1806,7 +1834,7 @@ impl Broker {
         let unused_events = self
             .tournaments
             .iter()
-            .map(|meta| EVENT_RESERVE_ENCODED_BYTES.saturating_sub(encoded_len(meta)))
+            .map(unused_event_reserve)
             .fold(0usize, usize::saturating_add);
         let unused_lobby = LOBBY_RESERVE_ENCODED_BYTES.saturating_sub(encoded_len(&self.lobby));
         let actual = self.snapshot_encoded_bytes();
@@ -2222,6 +2250,20 @@ fn error(message: &str) -> Outbound {
 /// encoded, so every capacity check refuses rather than under-counts.
 fn encoded_len<T: Serialize + ?Sized>(value: &T) -> usize {
     serde_json::to_vec(value).map_or(usize::MAX, |bytes| bytes.len())
+}
+
+/// The part of one event's guarantee its record has not yet used: the unused
+/// metadata allowance plus the unused deck allowance, tracked as two separate
+/// accounts. The deck account is charged only by this event's retained decks
+/// ([`TournamentMeta::retained_deck_bytes`]); everything else the record encodes
+/// is metadata. Metadata growth therefore never eats the deck account, and one
+/// event's decks never touch another event's allowance.
+fn unused_event_reserve(meta: &TournamentMeta) -> usize {
+    let deck_bytes = meta.retained_deck_bytes();
+    let metadata_bytes = encoded_len(meta).saturating_sub(deck_bytes);
+    EVENT_METADATA_RESERVE_ENCODED_BYTES
+        .saturating_sub(metadata_bytes)
+        .saturating_add(EVENT_DECK_RESERVE_ENCODED_BYTES.saturating_sub(deck_bytes))
 }
 
 /// The state a growth-capable frame may change, captured before it runs so a
@@ -5958,18 +6000,19 @@ mod tests {
 
     /// Blocker-1 proof: the complete-snapshot bound caps the *whole* persisted
     /// broker — every event's entrant/pairing metadata as well as its decks — not
-    /// deck bytes alone, and a submission that would cross it is a state-preserving
-    /// refusal. Heavy decks are admitted across many fresh events (each within its
-    /// own per-event budget) until the growing single-key snapshot would exceed
-    /// [`MAX_SNAPSHOT_ENCODED_BYTES`]; that submission is refused through the
-    /// production `Broker::handle` path naming the persistence ceiling, while a deck
-    /// admitted earlier — and the slot that readiness derives from — is left exactly
-    /// as it was, and the refused entrant's own slot stays empty. REVERT-FAIL: drop
-    /// the persistence boundary in `Broker::handle` and the submission is
-    /// admitted, letting the persisted snapshot grow past the 8 MB Durable Object
-    /// key ceiling that silently fails the next `put`.
+    /// deck bytes alone, and a write that would cross it is a state-preserving
+    /// refusal. Every event the registry admits holds a heavy deck (each within its
+    /// own per-event budget, and paid for by its own reservation); one greedy event
+    /// then registers entrants through the production `Broker::handle` path until
+    /// the shared remainder is gone. That registration is refused naming the
+    /// persistence ceiling, while a deck admitted earlier — and the slot that
+    /// readiness derives from — is left exactly as it was, and the refused
+    /// entrant is not registered. REVERT-FAIL: drop the persistence boundary in
+    /// `Broker::handle` and the registration is admitted, letting the persisted
+    /// snapshot grow past the 8 MB Durable Object key ceiling that silently fails
+    /// the next `put`.
     #[test]
-    fn a_submission_past_the_snapshot_budget_is_refused_without_losing_state() {
+    fn a_registration_past_the_snapshot_budget_is_refused_without_losing_state() {
         fn heavy_deck(entries: usize) -> engine::starter_decks::DeckData {
             use engine::types::card_printing::{
                 CardPrinting, DeckPrinting, DeckSection, MAX_DECK_CARD_NAME_LEN,
@@ -5991,27 +6034,7 @@ mod tests {
             }
         }
 
-        // Non-panicking classifiers, so the fill loop can tell an admit from either
-        // kind of refusal (per-event budget vs. the complete-snapshot ceiling).
-        fn ack_id(out: &[Outbound]) -> Option<TournamentRequestId> {
-            out.iter().find_map(|ob| match ob {
-                Outbound::ToSelf(LobbyServerMessage::TournamentActionAck {
-                    request_id, ..
-                }) => Some(*request_id),
-                _ => None,
-            })
-        }
-        fn reject_reason(out: &[Outbound]) -> Option<String> {
-            out.iter().find_map(|ob| match ob {
-                Outbound::ToSelf(LobbyServerMessage::TournamentActionRejected {
-                    message, ..
-                }) => Some(message.clone()),
-                _ => None,
-            })
-        }
-
-        // A deck under the per-deck cap, so each is individually admitted; many of
-        // them across many events grow the single-key snapshot toward its ceiling.
+        // A deck under the per-deck cap, so each is individually admitted.
         let heavy = heavy_deck(120);
         let each = serde_json::to_vec(&heavy).expect("serializes").len();
         assert!(
@@ -6023,81 +6046,73 @@ mod tests {
         let mut broker = Broker::new();
         let mut organizer = ConnState::default();
 
-        // The first deck we admit — kept to prove it survives the later refusal.
+        // Fill the registry; each event admits one heavy deck. The first is kept to
+        // prove it survives the later refusal.
         let mut witness: Option<(String, String)> = None; // (code, player_key)
-        let mut refused: Option<(String, String, String)> = None; // (code, player_key, reason)
-
-        // Fill event after event, each to its own per-event budget, until a
-        // submission is refused by the complete-snapshot guard rather than a
-        // per-event budget. 64 events at the 512 KiB per-event cap is 32 MiB of
-        // decks — far past the 6 MiB snapshot ceiling — so the guard fires well
-        // inside the bound; the `expect` below is a fixture tripwire, not the path.
-        'fill: for ev in 0..64 {
+        let mut greedy = String::new();
+        for ev in 0..MAX_TOURNAMENT_ENTRIES {
             let (code, _org) =
                 make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
-            for seat in 0..16u64 {
-                let key = format!("k{ev}-{seat}");
-                let mut conn = ConnState::default();
-                let token = join_tournament(
-                    &mut conn,
-                    &mut broker,
-                    &env,
-                    &code,
-                    &key,
-                    &format!("P{ev}-{seat}"),
-                );
-                let id = TournamentRequestId(1_000_000 + (ev as u64) * 100 + seat);
-                let out = broker.handle(
-                    &mut conn,
-                    LobbyClientMessage::SubmitTournamentDeck {
-                        code: code.clone(),
-                        player_token: token,
-                        deck: heavy.clone(),
-                        request_id: Some(id),
-                    },
-                    &env,
-                );
-                if ack_id(&out) == Some(id) {
-                    witness.get_or_insert_with(|| (code.clone(), key.clone()));
-                    continue;
-                }
-                let reason =
-                    reject_reason(&out).expect("a submission is either admitted or refused");
-                if reason.contains("persisted tournament state is at capacity") {
-                    refused = Some((code.clone(), key.clone(), reason));
-                    break 'fill;
-                }
-                // Otherwise this event reached its own per-event budget; the snapshot
-                // is not yet full. Move to a fresh event.
-                assert!(
-                    reason.contains("this event's deck budget"),
-                    "the only other refusal is the per-event budget, got: {reason}"
-                );
-                break;
-            }
+            let key = format!("k{ev}");
+            let mut conn = ConnState::default();
+            let token = join_tournament(&mut conn, &mut broker, &env, &code, &key, "Deck Owner");
+            let id = TournamentRequestId(1_000_000 + ev as u64);
+            let out = broker.handle(
+                &mut conn,
+                LobbyClientMessage::SubmitTournamentDeck {
+                    code: code.clone(),
+                    player_token: token,
+                    deck: heavy.clone(),
+                    request_id: Some(id),
+                },
+                &env,
+            );
+            assert_eq!(ack_of(&out).0, id, "a deck within its event's budget fits");
+            witness.get_or_insert_with(|| (code.clone(), key.clone()));
+            greedy = code;
         }
+        let (witness_code, witness_key) = witness.expect("a deck was admitted");
 
-        let (witness_code, witness_key) =
-            witness.expect("at least one deck must be admitted before the snapshot fills");
-        let (refused_code, refused_key, reason) =
-            refused.expect("the snapshot guard must eventually refuse a submission");
-
+        // Register entrants into one event until the shared snapshot is full.
+        let mut refused: Option<(String, String)> = None; // (player_key, reason)
+        for seat in 0..10_000 {
+            let key = format!("late-{seat}");
+            let mut conn = ConnState::default();
+            let out = broker.handle(
+                &mut conn,
+                LobbyClientMessage::JoinTournament {
+                    code: greedy.clone(),
+                    player_key: key.clone(),
+                    display_name: key.clone(),
+                },
+                &env,
+            );
+            if matches!(
+                out.first(),
+                Some(Outbound::ToSelf(
+                    LobbyServerMessage::TournamentJoined { .. }
+                ))
+            ) {
+                continue;
+            }
+            refused = Some((key, gated_rejection_reason(&out)));
+            break;
+        }
+        let (refused_key, reason) =
+            refused.expect("the snapshot guard must eventually refuse a registration");
         assert!(
             reason.contains("persisted tournament state is at capacity"),
             "the refusal must name the persistence ceiling, got: {reason}"
         );
-        // State-preserving refusal: the refused entrant's own slot stays empty.
-        let refused_player = broker
-            .tournaments()
-            .get(&refused_code)
-            .expect("refused event retained")
-            .players
-            .iter()
-            .find(|p| p.player_key == refused_key)
-            .expect("refused entrant retained");
+        // State-preserving refusal: the refused entrant was never registered.
         assert!(
-            refused_player.deck.is_none(),
-            "a snapshot-refused submission must leave the entrant's slot empty"
+            broker
+                .tournaments()
+                .get(&greedy)
+                .expect("event retained")
+                .player(&refused_key)
+                .is_none(),
+            "a snapshot-refused registration must leave no entrant behind"
         );
         // And a deck admitted before the guard fired — the slot `deck_submitted`
         // readiness derives from — is left exactly as it was.
@@ -6105,9 +6120,7 @@ mod tests {
             .tournaments()
             .get(&witness_code)
             .expect("witness event retained")
-            .players
-            .iter()
-            .find(|p| p.player_key == witness_key)
+            .player(&witness_key)
             .expect("witness entrant retained");
         assert!(
             witness_player.deck.is_some(),
@@ -6853,7 +6866,16 @@ mod tests {
 
         let overshoot = 5;
         let mut codes = Vec::new();
+        let mut reaped = 0;
         for _ in 0..MAX_CONN_TOURNAMENT_ENTRIES + overshoot {
+            // The registry holds fewer events than this socket's list bound, so
+            // the staleness reaper frees it whenever it fills.
+            if broker.tournaments().len() >= MAX_TOURNAMENT_ENTRIES {
+                reaped += broker.tournaments().len();
+                env.advance_secs(REGISTRATION_TIMEOUT_SECS + 1);
+                broker.reap_expired(300, &env);
+                assert!(broker.tournaments().is_empty());
+            }
             // Both helpers panic on an error outbound, so reaching the end of
             // the loop is itself the proof that the cap never failed a create
             // or a join.
@@ -6876,10 +6898,10 @@ mod tests {
         );
         assert_eq!(player.joined_tournaments.as_slice(), newest);
 
-        // The registry itself is untouched by the per-connection bound: every
-        // event still exists, only this socket's convenience list is trimmed.
+        // The registry itself is untouched by the per-connection bound: only the
+        // reaper removed events, this socket's convenience list is what is trimmed.
         assert_eq!(
-            broker.tournaments().len(),
+            broker.tournaments().len() + reaped,
             MAX_CONN_TOURNAMENT_ENTRIES + overshoot
         );
     }
@@ -7549,89 +7571,82 @@ mod tests {
                 .expect("fixture deck");
         }
 
-        /// Pushes event `code` past its reservation with `keys`' decks, so its
-        /// further growth competes for shared headroom instead of its own
-        /// guarantee. Two big decks exceed [`EVENT_RESERVE_ENCODED_BYTES`].
-        fn inflate(broker: &mut Broker, env: &FakeEnv, code: &str, keys: &[&str]) {
-            for key in keys {
-                put_deck(broker, env, code, key, BIG);
-            }
-            let size = serde_json::to_vec(broker.tournaments().get(code).expect("event"))
-                .expect("event serializes")
-                .len();
+        /// Sets event `code`'s name to exactly `chars` bytes. The name is event
+        /// metadata of any size the fixture likes (the wire guard is bypassed on
+        /// purpose), so this grows or shrinks the record byte for byte without
+        /// touching its decks, entrants or pairings.
+        fn set_event_name_chars(broker: &mut Broker, code: &str, chars: usize) {
+            broker
+                .tournaments_mut()
+                .fixture_meta_mut(code)
+                .expect("event")
+                .name = "n".repeat(chars);
+        }
+
+        /// The encoded bytes of event `code`'s record outside its retained decks.
+        fn metadata_bytes(broker: &Broker, code: &str) -> usize {
+            let meta = broker.tournaments().get(code).expect("event");
+            encoded_len(meta) - meta.retained_deck_bytes()
+        }
+
+        /// Pushes event `code`'s metadata past its metadata allowance, so its
+        /// further metadata growth competes for shared headroom instead of its own
+        /// guarantee.
+        fn inflate(broker: &mut Broker, code: &str) {
+            set_event_name_chars(broker, code, 2 * EVENT_METADATA_RESERVE_ENCODED_BYTES);
+            let size = metadata_bytes(broker, code);
             assert!(
-                size > EVENT_RESERVE_ENCODED_BYTES,
-                "fixture: event {code} ({size} bytes) must exceed its reservation"
+                size > EVENT_METADATA_RESERVE_ENCODED_BYTES,
+                "fixture: event {code} ({size} metadata bytes) must exceed its allowance"
             );
         }
 
         /// The tunable absorber [`fill_to_headroom`] leaves behind: shrinking its
-        /// deck gives capacity back, growing it takes capacity away, byte for byte.
+        /// name gives capacity back, growing it takes capacity away, byte for byte.
         struct Filler {
             code: String,
             chars: usize,
         }
 
         impl Filler {
-            const KEY: &'static str = "tune";
-
-            fn set_deck_chars(&mut self, broker: &mut Broker, env: &FakeEnv, chars: usize) {
-                broker
-                    .tournaments_mut()
-                    .submit_deck(&self.code, Self::KEY, deck_of(chars), env)
-                    .expect("fixture deck");
+            fn set_name_chars(&mut self, broker: &mut Broker, chars: usize) {
+                set_event_name_chars(broker, &self.code, chars);
                 self.chars = chars;
             }
 
             /// Give `bytes` of shared headroom back.
-            fn release(&mut self, broker: &mut Broker, env: &FakeEnv, bytes: usize) {
+            fn release(&mut self, broker: &mut Broker, bytes: usize) {
                 let chars = self.chars - bytes;
-                self.set_deck_chars(broker, env, chars);
+                self.set_name_chars(broker, chars);
             }
         }
 
         /// Drives `broker` to exactly `want` bytes below the ceiling (as measured
-        /// by [`Broker::committed_bytes`]) using fresh events that each stay
-        /// within their own per-event deck budget.
+        /// by [`Broker::committed_bytes`]) with fresh, empty events that each hold
+        /// their own full reservation, then one tunable absorber whose metadata is
+        /// already past its allowance, so every byte it grows is shared headroom.
         fn fill_to_headroom(broker: &mut Broker, env: &FakeEnv, want: usize) -> Filler {
             let mut organizer = ConnState::default();
-            // The absorber event exists first, so its reservation is already counted.
             let (code, _) = make_tournament(&mut organizer, broker, env, BracketShape::Swiss);
+            let mut filler = Filler { code, chars: 0 };
+            filler.set_name_chars(broker, 2 * EVENT_METADATA_RESERVE_ENCODED_BYTES);
             let target = MAX_SNAPSHOT_ENCODED_BYTES - want;
 
-            // Bulk: whole events of big decks while far from the target.
-            while target.saturating_sub(broker.committed_bytes()) >= 400_000 {
-                let room = target - broker.committed_bytes();
-                let (bulk, _) = make_tournament(&mut organizer, broker, env, BracketShape::Swiss);
-                let mut estimate = 0;
-                for seat in 0..8 {
-                    if estimate + BIG + 200 > room - 200_000 {
-                        break;
-                    }
-                    put_deck(broker, env, &bulk, &format!("bulk-{seat}"), BIG);
-                    estimate += BIG + 200;
-                }
+            // Bulk: whole events, while one more reservation still fits the target.
+            while target.saturating_sub(broker.committed_bytes())
+                >= EVENT_RESERVE_ENCODED_BYTES + 1_024
+            {
+                make_tournament(&mut organizer, broker, env, BracketShape::Swiss);
             }
 
-            // Absorber: past its reservation, then big decks until under 50 KB away.
-            let mut seat = 0;
-            while target.saturating_sub(broker.committed_bytes()) > 50_000 || seat < 2 {
-                put_deck(broker, env, &code, &format!("pad-{seat}"), BIG);
-                seat += 1;
-            }
-            let mut filler = Filler { code, chars: 1 };
-            put_deck(broker, env, &filler.code, Filler::KEY, 1);
             let base = broker.committed_bytes();
             assert!(base <= target, "fixture overshot: {base} > {target}");
-            filler.set_deck_chars(broker, env, 1 + (target - base));
+            let chars = filler.chars + (target - base);
+            filler.set_name_chars(broker, chars);
             assert_eq!(
                 headroom(broker),
                 want,
                 "fixture: store must sit at exactly the requested headroom"
-            );
-            assert!(
-                filler.chars < MAX_SINGLE_DECK_ENCODED_BYTES,
-                "fixture: tuning deck stays within the per-deck ceiling"
             );
             filler
         }
@@ -7699,7 +7714,7 @@ mod tests {
             let mut broker = Broker::new();
             let mut organizer = ConnState::default();
             let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
-            inflate(&mut broker, &env, &code, &["a", "b"]);
+            inflate(&mut broker, &code);
             let mut filler = fill_to_headroom(&mut broker, &env, 40);
 
             let before = serialized(&broker);
@@ -7723,7 +7738,7 @@ mod tests {
                 players
             );
 
-            filler.release(&mut broker, &env, 5_000);
+            filler.release(&mut broker, 5_000);
             let out = broker.handle(&mut joiner, join_frame(&code, "late"), &env);
             assert!(
                 matches!(
@@ -7755,12 +7770,12 @@ mod tests {
 
             // One byte of capacity returned still does not fit it: the event's
             // registry key and separator are persisted outside its record.
-            filler.release(&mut broker, &env, 1);
+            filler.release(&mut broker, 1);
             let out = broker.handle(&mut conn, create_frame(), &env);
             assert!(error_reason(&out).contains("at capacity"), "{out:?}");
 
             // With room for the record, its key and separator, it is admitted.
-            filler.release(&mut broker, &env, 63);
+            filler.release(&mut broker, 63);
             let out = broker.handle(&mut conn, create_frame(), &env);
             assert!(
                 matches!(
@@ -7788,7 +7803,7 @@ mod tests {
             let alice_token = join_tournament(&mut alice, &mut broker, &env, &code, "a", "Alice");
             let mut bob = ConnState::default();
             join_tournament(&mut bob, &mut broker, &env, &code, "b", "Bob");
-            inflate(&mut broker, &env, &code, &["a", "b"]);
+            inflate(&mut broker, &code);
             let mut filler = fill_to_headroom(&mut broker, &env, 10);
 
             // Round start.
@@ -7806,7 +7821,7 @@ mod tests {
                 broker.tournaments().get(&code).expect("event").status,
                 TournamentStatus::Registration
             );
-            filler.release(&mut broker, &env, 20_000);
+            filler.release(&mut broker, 20_000);
             let out = broker.handle(&mut organizer, start(8), &env);
             assert_eq!(ack_of(&out).0, TournamentRequestId(8));
 
@@ -7814,7 +7829,7 @@ mod tests {
             let pairing = broker.tournaments().get(&code).expect("event").pairings[0].id;
             let tighten = headroom(&broker) - 10;
             let chars = filler.chars + tighten;
-            filler.set_deck_chars(&mut broker, &env, chars);
+            filler.set_name_chars(&mut broker, chars);
             assert_eq!(headroom(&broker), 10);
 
             let report = |request: u64| LobbyClientMessage::ReportMatchResult {
@@ -7829,46 +7844,105 @@ mod tests {
             let out = broker.handle(&mut alice, report(9), &env);
             assert_refused_intact(&out, &before, &broker, &before_conn, &alice);
             assert_eq!(rejection_of(&out).0, TournamentRequestId(9));
-            filler.release(&mut broker, &env, 20_000);
+            filler.release(&mut broker, 20_000);
             let out = broker.handle(&mut alice, report(10), &env);
             assert_eq!(ack_of(&out).0, TournamentRequestId(10));
         }
 
-        /// A deck submission is refused by the same boundary, with the retained
-        /// deck and readiness exactly as they were.
+        /// F2: an admitted event's deck guarantee is its own account. With the
+        /// shared store at its ceiling, an event whose metadata has already grown
+        /// to its whole allowance (the next metadata byte is refused) still takes
+        /// both head-to-head deck submissions at the maximum supported size:
+        /// metadata growth draws only on the metadata allowance or the shared
+        /// remainder, never on the deck allowance.
         #[test]
-        fn a_deck_submission_past_the_ceiling_is_refused_by_the_boundary() {
+        fn metadata_growth_cannot_consume_an_admitted_events_deck_guarantee() {
             let env = FakeEnv::new();
             let mut broker = Broker::new();
             let mut organizer = ConnState::default();
             let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
             let mut alice = ConnState::default();
-            let token = join_tournament(&mut alice, &mut broker, &env, &code, "a", "Alice");
-            inflate(&mut broker, &env, &code, &["b", "c"]);
-            let _filler = fill_to_headroom(&mut broker, &env, 100);
+            let alice_token = join_tournament(&mut alice, &mut broker, &env, &code, "a", "Alice");
+            let mut bob = ConnState::default();
+            let bob_token = join_tournament(&mut bob, &mut broker, &env, &code, "b", "Bob");
+            let _filler = fill_to_headroom(&mut broker, &env, 0);
+            assert_eq!(broker.committed_bytes(), MAX_SNAPSHOT_ENCODED_BYTES);
 
-            let before = serialized(&broker);
-            let before_conn = alice.clone();
-            let out = broker.handle(
-                &mut alice,
-                LobbyClientMessage::SubmitTournamentDeck {
-                    code: code.clone(),
-                    player_token: token,
-                    deck: deck_of(100),
-                    request_id: Some(TournamentRequestId(21)),
-                },
-                &env,
+            // Grow the event's metadata through production registrations until the
+            // shared store refuses the next one.
+            let mut refused = None;
+            for seat in 0..2_000 {
+                let mut entrant = ConnState::default();
+                let key = format!("p{seat}");
+                let before = serialized(&broker);
+                let before_conn = entrant.clone();
+                let out = broker.handle(&mut entrant, join_frame(&code, &key), &env);
+                if !matches!(
+                    out.first(),
+                    Some(Outbound::ToSelf(
+                        LobbyServerMessage::TournamentJoined { .. }
+                    ))
+                ) {
+                    assert_refused_intact(&out, &before, &broker, &before_conn, &entrant);
+                    refused = Some(seat);
+                    break;
+                }
+            }
+            assert!(
+                refused.is_some_and(|seat| seat > 0),
+                "registrations were admitted up to the allowance, then refused"
             );
-            assert_refused_intact(&out, &before, &broker, &before_conn, &alice);
-            assert_eq!(rejection_of(&out).0, TournamentRequestId(21));
-            assert!(broker
-                .tournaments()
-                .get(&code)
-                .expect("event")
-                .player("a")
-                .expect("Alice")
-                .deck
-                .is_none());
+            let metadata = metadata_bytes(&broker, &code);
+            assert!(
+                metadata <= EVENT_METADATA_RESERVE_ENCODED_BYTES
+                    && metadata + 1_024 > EVENT_METADATA_RESERVE_ENCODED_BYTES,
+                "fixture: the event's metadata sits at its allowance ({metadata})"
+            );
+            assert_eq!(broker.committed_bytes(), MAX_SNAPSHOT_ENCODED_BYTES);
+
+            // Two supported head-to-head submissions are still admitted.
+            let max_deck = wire_max_deck();
+            for (request, conn, token) in [(61, &mut alice, alice_token), (62, &mut bob, bob_token)]
+            {
+                let out = broker.handle(
+                    conn,
+                    LobbyClientMessage::SubmitTournamentDeck {
+                        code: code.clone(),
+                        player_token: token,
+                        deck: max_deck.clone(),
+                        request_id: Some(TournamentRequestId(request)),
+                    },
+                    &env,
+                );
+                assert_eq!(
+                    ack_of(&out).0,
+                    TournamentRequestId(request),
+                    "metadata growth must not have consumed the deck guarantee"
+                );
+            }
+            assert_eq!(broker.committed_bytes(), MAX_SNAPSHOT_ENCODED_BYTES);
+            assert_eq!(
+                metadata_bytes(&broker, &code),
+                metadata,
+                "deck traffic changes only the deck account"
+            );
+        }
+
+        /// The deck account is exact: whatever decks an event retains, the rest of
+        /// its record (its metadata) encodes to the same size, so a submission or a
+        /// resubmission can never be charged to the metadata allowance.
+        #[test]
+        fn a_deck_submission_changes_only_the_deck_account() {
+            let env = FakeEnv::new();
+            let mut broker = Broker::new();
+            let mut organizer = ConnState::default();
+            let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+            put_deck(&mut broker, &env, &code, "a", 1);
+            let baseline = metadata_bytes(&broker, &code);
+            for chars in [1_000, 61_000, 7] {
+                put_deck(&mut broker, &env, &code, "a", chars);
+                assert_eq!(metadata_bytes(&broker, &code), baseline);
+            }
         }
 
         /// The capacity guarantee. With the shared store at exactly its ceiling:
@@ -7887,7 +7961,7 @@ mod tests {
             // A greedy event, past its reservation.
             let (greedy, _) =
                 make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
-            inflate(&mut broker, &env, &greedy, &["g0", "g1"]);
+            inflate(&mut broker, &greedy);
             let _filler = fill_to_headroom(&mut broker, &env, 0);
             assert_eq!(broker.committed_bytes(), MAX_SNAPSHOT_ENCODED_BYTES);
 
@@ -7901,12 +7975,15 @@ mod tests {
             // Nor can a new admission.
             let mut newcomer = ConnState::default();
             let out = broker.handle(&mut newcomer, create_frame(), &env);
-            assert!(error_reason(&out).contains("at capacity"), "{out:?}");
+            assert!(
+                error_reason(&out).contains("tournament registry is full")
+                    || error_reason(&out).contains("at capacity"),
+                "{out:?}"
+            );
 
-            // The unrelated, still-reserved event is unaffected: it registers an
-            // entrant and takes a maximum-size deck within its reservation.
-            let mut quinn = ConnState::default();
-            let token = join_tournament(&mut quinn, &mut broker, &env, &quiet, "q", "Quinn");
+            // The unrelated, still-reserved event is unaffected: it registers both
+            // entrants of a head-to-head pairing and takes a maximum-size deck
+            // from each, within its reservation.
             let max_deck = wire_max_deck();
             let encoded = serde_json::to_vec(&max_deck).expect("encodes").len();
             assert!(
@@ -7914,21 +7991,26 @@ mod tests {
                     && encoded <= MAX_SINGLE_DECK_ENCODED_BYTES,
                 "fixture: a maximum-size valid deck ({encoded} bytes)"
             );
-            let out = broker.handle(
-                &mut quinn,
-                LobbyClientMessage::SubmitTournamentDeck {
-                    code: quiet.clone(),
-                    player_token: token,
-                    deck: max_deck,
-                    request_id: Some(TournamentRequestId(31)),
-                },
-                &env,
-            );
-            assert_eq!(
-                ack_of(&out).0,
-                TournamentRequestId(31),
-                "an admitted event's next valid submission fits even at the ceiling"
-            );
+            for (seat, (key, name)) in [("q", "Quinn"), ("r", "Rae")].into_iter().enumerate() {
+                let mut entrant = ConnState::default();
+                let token = join_tournament(&mut entrant, &mut broker, &env, &quiet, key, name);
+                let request = 31 + seat as u64;
+                let out = broker.handle(
+                    &mut entrant,
+                    LobbyClientMessage::SubmitTournamentDeck {
+                        code: quiet.clone(),
+                        player_token: token,
+                        deck: max_deck.clone(),
+                        request_id: Some(TournamentRequestId(request)),
+                    },
+                    &env,
+                );
+                assert_eq!(
+                    ack_of(&out).0,
+                    TournamentRequestId(request),
+                    "an admitted event's valid submissions fit even at the ceiling ({key})"
+                );
+            }
             assert_eq!(broker.committed_bytes(), MAX_SNAPSHOT_ENCODED_BYTES);
             assert!(serialized(&broker).len() <= MAX_SNAPSHOT_ENCODED_BYTES);
 
@@ -7954,11 +8036,11 @@ mod tests {
             let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
             let mut alice = ConnState::default();
             join_tournament(&mut alice, &mut broker, &env, &code, "a", "Alice");
-            inflate(&mut broker, &env, &code, &["a", "b"]);
+            inflate(&mut broker, &code);
             let mut filler = fill_to_headroom(&mut broker, &env, 0);
             // Over the ceiling, as a legacy snapshot could be.
             let chars = filler.chars + 4_000;
-            filler.set_deck_chars(&mut broker, &env, chars);
+            filler.set_name_chars(&mut broker, chars);
             assert!(broker.committed_bytes() > MAX_SNAPSHOT_ENCODED_BYTES);
 
             let mut impostor = ConnState::default();
@@ -7977,32 +8059,21 @@ mod tests {
             let mut organizer = ConnState::default();
             let mut broker = Broker::new();
             let mut codes = Vec::new();
-            for _ in 0..21 {
+            for _ in 0..MAX_TOURNAMENT_ENTRIES {
                 codes
                     .push(make_tournament(&mut organizer, &mut broker, env, BracketShape::Swiss).0);
             }
             let victim = codes.pop().expect("a spare event");
             let target = PHYSICAL_SNAPSHOT_LIMIT_BYTES - gap;
-            let (mut event, mut seat) = (0, 0);
-            while target - broker.snapshot_encoded_bytes() > 61_000 + 2_000 {
-                if seat == 8 {
-                    event += 1;
-                    seat = 0;
-                }
-                put_deck(&mut broker, env, &codes[event], &format!("s{seat}"), BIG);
-                seat += 1;
+            // The previous writer's events had grown past their allowances: spread
+            // the bulk over their names, then tune the last one to the exact byte.
+            let pad = (target - broker.snapshot_encoded_bytes()) / codes.len();
+            for code in &codes {
+                set_event_name_chars(&mut broker, code, pad);
             }
-            // Tune the last deck to land exactly on the target.
-            let key = "tune";
-            put_deck(&mut broker, env, &codes[event + 1], key, 1);
-            let base = broker.snapshot_encoded_bytes();
-            put_deck(
-                &mut broker,
-                env,
-                &codes[event + 1],
-                key,
-                1 + (target - base),
-            );
+            let last = codes.last().expect("an event to tune");
+            let short = target - broker.snapshot_encoded_bytes();
+            set_event_name_chars(&mut broker, last, pad + short);
             assert_eq!(
                 broker.snapshot_encoded_bytes(),
                 target,
@@ -8078,7 +8149,7 @@ mod tests {
             let mut broker = Broker::new();
             let mut organizer = ConnState::default();
             let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
-            inflate(&mut broker, &env, &code, &["a", "b"]);
+            inflate(&mut broker, &code);
             let before = serialized(&broker);
 
             let mut conn = ConnState::default();
