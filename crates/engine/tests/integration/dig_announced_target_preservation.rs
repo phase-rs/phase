@@ -882,6 +882,7 @@ fn direct_dig_action_preserves_own_target_and_binds_current_conditional_result()
                     filter: TargetFilter::Typed(TypedFilter::creature()),
                     use_lki: false,
                     subject_slot: None,
+                    subject: engine::types::ability::ObjectScope::Target,
                 })
             }
             .sub_ability(tail);
@@ -996,6 +997,7 @@ fn paused_dig_action_preserves_own_target_and_binds_settled_result() {
                     filter: TargetFilter::Typed(TypedFilter::creature()),
                     use_lki: false,
                     subject_slot: None,
+                    subject: engine::types::ability::ObjectScope::Target,
                 })
             };
             head.capture_target_incarnations_recursive(runner.state());

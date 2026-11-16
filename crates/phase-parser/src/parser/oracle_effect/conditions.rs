@@ -709,6 +709,7 @@ pub(super) fn strip_target_declaring_chosen_type_conditional(
             filter: TargetFilter::Typed(typed),
             use_lki: false,
             subject_slot: Some(0),
+            subject: ObjectScope::Target,
         },
         rewritten_body,
     ))
@@ -783,6 +784,7 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
                             .into(),
                         use_lki: false,
                         subject_slot: None,
+                        subject: ObjectScope::Target,
                     },
                 ],
             }),
@@ -1689,6 +1691,7 @@ pub(super) fn card_type_condition_as_target_match(
         // destroyed this way still matches.
         use_lki: true,
         subject_slot: None,
+        subject: ObjectScope::Target,
     })
 }
 
@@ -2097,6 +2100,7 @@ fn parse_its_a_card_type_gate_body<'a>(
                         filter,
                         use_lki: false,
                         subject_slot: None,
+                        subject: ObjectScope::Target,
                     },
                     negated,
                 ),
@@ -2400,6 +2404,7 @@ fn parse_target_color_condition(
                 filter,
                 use_lki,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
             negated,
         ),
@@ -2615,6 +2620,7 @@ fn parse_target_type_membership_condition<'a>(
                 filter,
                 use_lki,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
             negated,
         ),
@@ -2853,6 +2859,7 @@ fn parse_target_attacked_this_turn_condition(
                 ),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
             negated,
         ),
@@ -2929,6 +2936,7 @@ fn parse_target_entered_this_turn_condition(input: &str) -> OracleResult<'_, Abi
             filter,
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         },
     ))
 }
@@ -3052,6 +3060,7 @@ fn parse_target_reflexive_property_condition(
                 filter: TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
                 use_lki,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
             negated,
         ),
@@ -3140,6 +3149,7 @@ fn parse_target_pt_threshold_condition(
             ])),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         },
     ))
 }
@@ -3326,6 +3336,7 @@ pub(super) fn strip_property_conditional(
                         filter,
                         use_lki: *use_lki,
                         subject_slot: None,
+                        subject: ObjectScope::Target,
                     }),
                     before.original.to_string(),
                 );
@@ -4136,6 +4147,7 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
                 ])),
                 use_lki: true,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             };
             return (
                 Some(condition),
@@ -4153,6 +4165,7 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
                 ),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             };
             return (
                 Some(condition),
@@ -4179,6 +4192,7 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
                 filter: TargetFilter::Typed(TypedFilter::default().properties(vec![prop])),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             };
             return (
                 Some(condition),
@@ -4445,6 +4459,7 @@ fn parse_leading_mana_value_condition_body(
         }])),
         use_lki,
         subject_slot: None,
+        subject: ObjectScope::Target,
     };
     Some((condition, original[body_start..].to_string()))
 }
@@ -4528,6 +4543,7 @@ pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityC
                 ),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             };
             return (
                 Some(maybe_negate(condition, *negated)),
@@ -4548,6 +4564,7 @@ fn nonbasic_land_lki_condition() -> AbilityCondition {
         ])),
         use_lki: true,
         subject_slot: None,
+        subject: ObjectScope::Target,
     }
 }
 
@@ -8177,6 +8194,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                 }),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             });
         }
     }
@@ -8390,6 +8408,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                 filter: TargetFilter::Typed(TypedFilter::new(type_filter)),
                 use_lki: true,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
             negated,
         ));
@@ -8423,6 +8442,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                         filter,
                         use_lki: true,
                         subject_slot: None,
+                        subject: ObjectScope::Target,
                     },
                     negated_lki,
                 ));
@@ -8460,6 +8480,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                     }),
                     use_lki: true,
                     subject_slot: None,
+                    subject: ObjectScope::Target,
                 };
                 return Some(maybe_negate(cond, negated));
             }
@@ -8513,6 +8534,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                         filter,
                         use_lki: false,
                         subject_slot: None,
+                        subject: ObjectScope::Target,
                     },
                     negated,
                 ));
@@ -8607,6 +8629,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                         filter: filter.clone(),
                         use_lki: false,
                         subject_slot: None,
+                        subject: ObjectScope::Target,
                     },
                     negated,
                 ));
@@ -8645,6 +8668,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                 }),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             });
         }
     }
@@ -8671,6 +8695,7 @@ fn try_unrouted_nom_condition_tail(text: &str, ctx: &mut ParseContext) -> Option
                     }),
                     use_lki: false,
                     subject_slot: None,
+                    subject: ObjectScope::Target,
                 },
                 // CR 611.2b: a self-subject predicate with a dedicated precise
                 // `AbilityCondition` variant (e.g. "tapped" → `SourceIsTapped`) must
@@ -8817,6 +8842,7 @@ fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCo
             filter,
             use_lki,
             subject_slot: None,
+            subject: ObjectScope::Target,
         },
         negated,
     ))
@@ -8838,6 +8864,7 @@ fn parse_opponent_controls_target(input: &str) -> OracleResult<'_, AbilityCondit
             filter: TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         },
     ))
 }
@@ -9350,6 +9377,7 @@ fn previous_effect_damage_recipient_to_condition(
                         filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
                         use_lki: true,
                         subject_slot: None,
+                        subject: ObjectScope::Target,
                     }),
                 },
             ],
@@ -9367,6 +9395,7 @@ fn previous_effect_damage_recipient_to_condition(
                     filter,
                     use_lki: false,
                     subject_slot: None,
+                    subject: ObjectScope::Target,
                 },
             ],
         },
@@ -9984,6 +10013,7 @@ fn parse_target_supertype_condition_text(lower: &str) -> Option<AbilityCondition
             ),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         },
         negated,
     ))
@@ -14213,6 +14243,7 @@ mod tests {
                     filter: TargetFilter::Typed(filter),
                     use_lki: false,
                     subject_slot: None,
+                    ..
                 } if filter.type_filters.iter().any(
                     |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Dragon"))
                 )
@@ -15623,6 +15654,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
+            ..
         }) = cond
         else {
             panic!("expected TargetMatchesFilter, got {cond:?}");
@@ -15671,6 +15703,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
+            ..
         }) = cond
         else {
             panic!("expected TargetMatchesFilter, got {cond:?}");
@@ -15902,6 +15935,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
+            ..
         } = inner.as_ref()
         else {
             panic!("expected TargetMatchesFilter inside ConditionInstead, got {inner:?}");
@@ -15933,6 +15967,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
+            ..
         }) = cond
         else {
             panic!("expected TargetMatchesFilter, got {cond:?}");
@@ -16114,6 +16149,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
+            ..
         } = inner.as_ref()
         else {
             panic!("expected TargetMatchesFilter inside ConditionInstead, got {inner:?}");
@@ -17092,6 +17128,7 @@ mod tests {
                 }),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             }
         );
     }
@@ -17254,6 +17291,7 @@ mod tests {
                 filter: TargetFilter::Typed(tf),
                 use_lki,
                 subject_slot,
+                ..
             } => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
                 assert_eq!(tf.controller, Some(ControllerRef::You));

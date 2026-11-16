@@ -57,6 +57,7 @@ fn play_with_fire_parses_player_damage_scry_condition() {
                     filter: TargetFilter::Typed(filter),
                     use_lki: true,
                     subject_slot: None,
+                    ..
                 } if filter.type_filters == vec![TypeFilter::Permanent])
         )),
         "the rider must reject permanent damage targets: {conditions:?}"

@@ -1731,6 +1731,7 @@ fn rewrite_keyword_anaphor_for_cost_paid_parent(
         filter,
         use_lki: false,
         subject_slot: None,
+        ..
     }) = &condition
     else {
         return condition;
@@ -1797,6 +1798,7 @@ fn keyword_anaphor_referent_is_unpublished_resolution_pick(
         filter,
         use_lki: false,
         subject_slot: None,
+        ..
     }) = condition
     else {
         return false;
@@ -57952,6 +57954,7 @@ pub mod test_helpers {
             filter: TargetFilter::Typed(TypedFilter::creature()),
             use_lki: true,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     }
 

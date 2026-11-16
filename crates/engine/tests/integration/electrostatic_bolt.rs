@@ -81,6 +81,7 @@ fn electrostatic_bolt_parses_without_unimplemented() {
         filter,
         use_lki,
         subject_slot,
+        ..
     } = inner.as_ref()
     else {
         panic!("expected TargetMatchesFilter inside ConditionInstead, got {inner:?}");

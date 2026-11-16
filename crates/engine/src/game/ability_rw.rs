@@ -4032,6 +4032,21 @@ fn legacy_choice_type(choice_type: &crate::types::ability::ChoiceType) -> bool {
 // Read builders.
 // ---------------------------------------------------------------------------
 
+/// CR 122.1: whether a filter tests counters anywhere in its structure.
+fn filter_reads_counters(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(typed) => typed
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::Counters { .. })),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_reads_counters)
+        }
+        TargetFilter::Not { filter } => filter_reads_counters(filter),
+        _ => false,
+    }
+}
+
 fn reads_board_of(k: StateKind) -> RwProfile {
     let mut p = RwProfile::empty();
     p.reads_board = KindSet::one(k);
@@ -7410,9 +7425,10 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // counter on ~" (Taborax / Uglúk / Venom / Locus Cobra / Overgrowth
         // Elemental / Magnanimous Magistrate / Prowling Geistcatcher).
         AbilityCondition::TargetMatchesFilter {
-            filter: _,
+            filter,
             use_lki,
             subject_slot,
+            subject,
         } => {
             let mut p = if *use_lki {
                 frozen_source_read()
@@ -7421,6 +7437,16 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
                 p.current_pt_reads.add(PtReadScope::Board);
                 p
             };
+            // CR 122.1 + CR 603.3b: a counter leaf reads the referent's counters, so a
+            // sibling that puts or removes counters must feed this condition (Hadana's
+            // Climb, the Ordeals); a fail-open read would let two such triggers auto-order.
+            if !*use_lki && filter_reads_counters(filter) {
+                p.merge(reads_board_of(StateKind::ObjectCounters));
+            }
+            // CR 603.2: `EventSource` reads the object the trigger event names.
+            if matches!(subject, ObjectScope::EventSource) {
+                p.merge(reads_event_live());
+            }
             // CR 608.2c (PR-6.75 c5): Some(n) tests a specific DECLARED chain slot
             // resolved per member instance — the same per-member binding
             // member_bound_target_filter flags for TargetFilter::ParentTargetSlot.
@@ -10347,6 +10373,7 @@ mod tests {
                 filter: creature(),
                 use_lki: true,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
         );
         assert!(
@@ -10361,6 +10388,7 @@ mod tests {
                 filter: creature(),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
         );
         assert!(
@@ -10639,6 +10667,7 @@ mod tests {
                 filter: creature(),
                 use_lki: false,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             },
         );
         assert!(
@@ -10760,6 +10789,7 @@ mod tests {
             filter: creature(),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         });
         let mut neg = ra(base());
         neg.mode_abilities = vec![def(put_counter_all(qfix(1), creature())), reader];

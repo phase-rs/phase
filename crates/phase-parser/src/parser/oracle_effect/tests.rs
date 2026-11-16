@@ -20105,6 +20105,7 @@ fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
             filter: without_keyword_kind_filter(KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the anaphor must bind the ability's object subject, not its source"
     );
@@ -20144,6 +20145,7 @@ fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
             filter: without_keyword_kind_filter(KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "\"does not have\" must lower identically to \"doesn't have\""
     );
@@ -20160,6 +20162,7 @@ fn it_doesnt_have_keyword_lowers_to_target_matches_filter() {
             filter: without_keyword_kind_filter(KeywordKind::FirstStrike),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the arm must cover the whole keyword class, not just Suspend"
     );
@@ -20239,6 +20242,7 @@ fn it_has_keyword_lowers_to_the_same_kind_level_prop_as_its_negative_twin() {
             filter: has_keyword_kind_filter(KeywordKind::FirstStrike),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the affirmative arm must emit the kind-level HasKeywordKind prop"
     );
@@ -20364,6 +20368,7 @@ fn keyword_anaphor_strict_fails_when_kind_does_not_identify_the_ability() {
             filter: without_keyword_kind_filter(crate::types::keywords::KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "the guard must narrow the arm, not disable it"
     );
@@ -20428,6 +20433,7 @@ fn keyword_anaphor_rebinds_to_cost_paid_object_after_cost_paid_parent() {
             filter: without_keyword_kind_filter(KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "an effect-introduced referent must keep the target-scoped reading"
     );
@@ -20541,6 +20547,7 @@ fn keyword_anaphor_after_resolution_time_pick_strict_fails_to_unimplemented() {
             filter: without_keyword_kind_filter(crate::types::keywords::KeywordKind::Suspend),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }),
         "a deterministic context-ref parent must not be mistaken for a player pick"
     );
@@ -20593,6 +20600,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
         filter: without_keyword_kind_filter(KeywordKind::Suspend),
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     };
     rewrite_ability_condition_keyword(&mut target_seam, &Keyword::Flying);
     assert_eq!(
@@ -20601,6 +20609,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
             filter: without_keyword_kind_filter(KeywordKind::Flying),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     );
 
@@ -20627,6 +20636,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
         }),
         use_lki: false,
         subject_slot: None,
+        subject: ObjectScope::Target,
     };
     rewrite_ability_condition_keyword(&mut has_kind, &Keyword::Flying);
     assert_eq!(
@@ -20640,6 +20650,7 @@ fn rewrite_ability_condition_keyword_swaps_subject_filter_keyword_props() {
             }),
             use_lki: false,
             subject_slot: None,
+            subject: ObjectScope::Target,
         }
     );
 

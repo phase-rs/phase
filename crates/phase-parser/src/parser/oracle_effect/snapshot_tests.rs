@@ -1198,6 +1198,7 @@ fn unrevealed_search_type_gate_reads_selected_target() {
             filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
             use_lki: true,
             subject_slot: None,
+            subject: ObjectScope::Target,
         })
     );
     assert!(put.optional);

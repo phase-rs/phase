@@ -5037,9 +5037,13 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
             format!("target has {} (instead)", keyword_label(keyword))
         }
         AbilityCondition::HasObjectTarget => "has an object target".into(),
-        AbilityCondition::TargetMatchesFilter { filter, .. } => {
-            format!("target is {}", fmt_target(filter))
-        }
+        AbilityCondition::TargetMatchesFilter {
+            filter, subject, ..
+        } => match subject {
+            // CR 603.2: the object the trigger event names, not a declared target.
+            ObjectScope::EventSource => format!("triggering object is {}", fmt_target(filter)),
+            _ => format!("target is {}", fmt_target(filter)),
+        },
         AbilityCondition::TriggeringSpellTargetsFilter { filter } => {
             format!("triggering spell targets {}", fmt_target(filter))
         }
@@ -25999,6 +26003,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     filter: TargetFilter::Any,
                     use_lki: false,
                     subject_slot: None,
+                    subject: ObjectScope::Target,
                 },
                 "TargetMatchesFilter",
             ),

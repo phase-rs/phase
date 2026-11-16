@@ -497,6 +497,7 @@ mod gate_reflexive_rider_tests {
                 ),
                 use_lki: true,
                 subject_slot: None,
+                subject: ObjectScope::Target,
             }),
         }
     }

@@ -28975,6 +28975,7 @@ fn target_has_pt_threshold_gate_lowers_to_target_filter() {
             filter: TargetFilter::Typed(tf),
             use_lki: false,
             subject_slot: None,
+            ..
         }) = &def.condition
         {
             if let [FilterProp::PtComparison {

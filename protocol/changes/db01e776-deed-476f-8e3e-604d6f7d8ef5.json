@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "AbilityCondition::TargetMatchesFilter gains subject: ObjectScope (default Target, omitted when default). Carried in ability definitions inside GameState. An older peer drops EventSource and silently reads the first target or the triggering source instead of the event object; full-game peers and P2P move in lockstep, no lobby carrier names it."
+}
