@@ -125,6 +125,16 @@
 //! large rarely-populated field went inline, so the ceiling moves by the rule
 //! to 15,376.next_multiple_of(256) + 256 = 15,872.
 //!
+//! `GameState` re-measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
+//! 15,888 B when the counter-removal instruction-scope work (#10699) merged
+//! main through `ed6fd9ae`. Main alone measures 15,824 B; the branch adds two
+//! execution-local fields, `instruction_scopes` (`Vec<OpenInstruction>`, 24 B)
+//! and `last_closed_instruction` (`Option<ClosedInstruction>`, 32 B), and the
+//! union crosses 15,872 by 16 B. Neither field is a large rarely-populated
+//! one: `zones::within_instruction` writes both on every instruction scope,
+//! so boxing would put an allocation on that path. The ceiling moves by the
+//! rule to 15,888.next_multiple_of(256) + 256 = 16,384.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
@@ -134,7 +144,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 15_872,
+        size_of::<crate::types::game_state::GameState>() <= 16_384,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \
