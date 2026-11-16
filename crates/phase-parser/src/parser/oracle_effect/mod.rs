@@ -30216,7 +30216,19 @@ fn lower_subject_predicate_ast_body(
             // predicates keep their original scope.
             // CR 608.2c: both an enclosing source target and an inherited damage
             // tail remain ineligible when the general splitter retries.
+            // CR 608.2k + CR 509.1g: an explicit source subject ("This creature
+            // deals damage ... to target creature blocking or blocked by it")
+            // is the nearest antecedent of a bare "it" in its own predicate, so
+            // the predicate parses with the source as the context subject.
+            // Only an EMPTY slot is seeded; the enclosing subject wins.
+            let seeds_source_subject = affected == TargetFilter::SelfRef && ctx.subject.is_none();
+            if seeds_source_subject {
+                ctx.subject = Some(TargetFilter::SelfRef);
+            }
             let mut clause = lower_imperative_clause(&text, ctx, damage_context);
+            if seeds_source_subject {
+                ctx.subject = None;
+            }
             // A subject-led placement names its own follower, which this seam does
             // not resolve to an arranger: no printed card puts an announced target
             // set "in any order" under a subject, so the owner default stands.

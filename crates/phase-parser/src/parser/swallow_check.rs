@@ -15301,11 +15301,6 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 &[][..],
                 "{U}: Put this creature and each creature blocking or blocked by it on top of their owners' libraries, then those players shuffle.\n{3}{U}{U}: Target creature blocks this creature this turn if able.",
             ),
-            (
-                "Steadfast Armasaur",
-                &["Vigilance"][..],
-                "Vigilance\n{1}{W}, {T}: This creature deals damage equal to its toughness to target creature blocking or blocked by it.",
-            ),
         ] {
             let parsed = parse_card(name, keywords, &["Creature"], text);
             assert!(
@@ -15347,6 +15342,12 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 &["Defender", "Reach"][..],
                 &["Creature"][..],
                 "Defender; reach (This creature can block creatures with flying.)\nYou may choose not to untap this creature during your untap step.\n{T}: Tap target creature with flying blocked by this creature. That creature doesn't untap during its controller's untap step for as long as this creature remains tapped.",
+            ),
+            (
+                "Steadfast Armasaur",
+                &["Vigilance"][..],
+                &["Creature"][..],
+                "Vigilance\n{1}{W}, {T}: This creature deals damage equal to its toughness to target creature blocking or blocked by it.",
             ),
             (
                 "Kjeldoran Frostbeast",
