@@ -4887,6 +4887,7 @@ fn typed_slot_type_axis_matches(
         | TargetFilter::Neighbor { .. }
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::DeclaredPlayer { .. }

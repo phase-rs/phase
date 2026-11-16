@@ -373,6 +373,7 @@ pub(super) fn collect_object_targets(
                         | TargetFilter::AmassedArmy
                         | TargetFilter::ChosenCard
                         | TargetFilter::TrackedSet { .. }
+                        | TargetFilter::ChoiceAssignment { .. }
                         | TargetFilter::TrackedSetFiltered { .. }
                         | TargetFilter::ExiledBySource
                         | TargetFilter::ExiledCardByIndex { .. }
