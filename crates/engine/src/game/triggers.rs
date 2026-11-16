@@ -10492,12 +10492,15 @@ pub(crate) fn collect_and_drain_entry_observer_triggers_if_settled(
 }
 
 fn is_battlefield_entry(event: &GameEvent) -> bool {
+    // CR 701.3b + CR 603.2: an entering Aura's host attachment is part of the
+    // same entry answer; its canonical `Attached` event feeds attachment
+    // observers alongside the battlefield entry.
     matches!(
         event,
         GameEvent::ZoneChanged {
             to: Zone::Battlefield,
             ..
-        }
+        } | GameEvent::Attached { .. }
     )
 }
 

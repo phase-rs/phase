@@ -3,13 +3,15 @@
 //! Saproling tokens when an Aura spell resolves attached to it.
 //!
 //! Root cause: `GameRunner` cast-resolution called `attach::attach_to` /
-//! `attach::attach_to_player` directly (stack.rs) without emitting
-//! `GameEvent::EffectResolved { kind: EffectKind::Attach }`, so the
-//! `TriggerMode::Attached` matcher never saw the attach event and Bramble's
-//! trigger never fired. The fix emits the event at both call sites.
+//! `attach::attach_to_player` directly (stack.rs) without emitting an
+//! attachment event, so the `TriggerMode::Attached` matcher never saw the
+//! attach and Bramble's trigger never fired. Both call sites now attach through
+//! `attach_to*_with_events`, which publish `GameEvent::Attached` (the single
+//! "becomes attached" trigger event) on an actual host transition.
 
 use engine::game::game_object::{AttachTarget, GameObject};
 use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, CopyTargetPurpose, Effect, EffectScope, ReplacementDefinition,
     ReplacementMode, TapStateChange, TargetFilter, TargetRef,
@@ -321,11 +323,192 @@ fn bramble_elemental_triggers_on_first_attachment_after_replacement_pause() {
         Some(AttachTarget::Object(bramble))
     );
     // The first attachment genuinely occurred on the replacement resume path,
-    // emitting EffectResolved { Attach } and triggering Bramble Elemental once.
+    // emitting GameEvent::Attached and triggering Bramble Elemental once.
     let tokens = saproling_tokens(&runner);
     assert_eq!(
         tokens.len(),
         2,
         "first attachment on replacement resume must trigger Bramble Elemental once"
     );
+}
+
+/// Bramble Elemental enters as a Ninja (Maskwood Nexus: "Creatures you control
+/// are every creature type") while Smoke Shroud waits in P0's graveyard. Smoke
+/// Shroud: "When a Ninja you control enters, you may return this card from your
+/// graveyard to the battlefield attached to that creature." Bramble Elemental
+/// observes the attachment. `runestone` adds P1's Weathered Runestone
+/// ("Nonland permanent cards in graveyards and libraries can't enter the
+/// battlefield."). Returns the runner, Smoke Shroud, and every emitted event.
+fn smoke_shroud_returns_onto_entering_ninja(
+    runestone: bool,
+) -> (
+    engine::game::scenario::GameRunner,
+    ObjectId,
+    Vec<engine::types::events::GameEvent>,
+) {
+    let db = crate::support::shared_card_db().expect("the committed integration fixture loads");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Maskwood Nexus", Zone::Battlefield, db);
+    if runestone {
+        scenario.add_artifact_from_oracle(
+            P0,
+            "Weathered Runestone",
+            "Nonland permanent cards in graveyards and libraries can't enter the battlefield.\nPlayers can't cast spells from graveyards or libraries.",
+        );
+    }
+    let smoke_shroud = scenario.add_real_card(P0, "Smoke Shroud", Zone::Graveyard, db);
+    let bramble = scenario.add_real_card(P0, "Bramble Elemental", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(9_990), false, vec![]),
+            ManaUnit::new(ManaType::Green, ObjectId(9_991), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_992), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_993), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_994), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    // Changeling-class "every creature type" matching consults the game's
+    // creature-type universe, which a deck load normally populates.
+    runner.state_mut().all_creature_types = vec!["Elemental".to_string(), "Ninja".to_string()];
+    let outcome = runner.cast(bramble).accept_optional().resolve();
+    let events = outcome.events().to_vec();
+    drop(outcome);
+    runner.advance_until_stack_empty();
+    (runner, smoke_shroud, events)
+}
+
+fn attached_events(events: &[engine::types::events::GameEvent], attachment: ObjectId) -> usize {
+    events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                engine::types::events::GameEvent::Attached { attachment_id, .. }
+                    if *attachment_id == attachment
+            )
+        })
+        .count()
+}
+
+/// Control: with no entry prohibition, Smoke Shroud returns attached to the
+/// entering Ninja (CR 303.4 + CR 701.3a), publishes exactly one `Attached`
+/// event, and Bramble Elemental's observer triggers once (two Saprolings).
+#[test]
+fn smoke_shroud_return_attaches_once_and_triggers_bramble_once() {
+    let (runner, smoke_shroud, events) = smoke_shroud_returns_onto_entering_ninja(false);
+    let aura = &runner.state().objects[&smoke_shroud];
+    assert_eq!(aura.zone, Zone::Battlefield);
+    assert!(matches!(aura.attached_to, Some(AttachTarget::Object(_))));
+    assert_eq!(attached_events(&events, smoke_shroud), 1);
+    assert_eq!(saproling_tokens(&runner).len(), 2);
+}
+
+/// CR 614.17d: Weathered Runestone refuses Smoke Shroud's battlefield entry
+/// from the graveyard. The Aura never entered, so it does not attach, no
+/// `Attached` event reaches Bramble Elemental, and no Saprolings are created.
+#[test]
+fn refused_graveyard_aura_entry_does_not_attach_or_notify_observers() {
+    let (runner, smoke_shroud, events) = smoke_shroud_returns_onto_entering_ninja(true);
+    let aura = &runner.state().objects[&smoke_shroud];
+    assert_eq!(aura.zone, Zone::Graveyard, "Runestone refuses the entry");
+    assert_eq!(aura.attached_to, None);
+    assert_eq!(attached_events(&events, smoke_shroud), 0);
+    assert_eq!(saproling_tokens(&runner).len(), 0);
+}
+
+const REPLENISH_ORACLE: &str =
+    "Return all enchantment cards from your graveyard to the battlefield.";
+const SHIELDING_PLAX_ORACLE: &str = "Enchant creature\nWhen this Aura enters, draw a card.\nEnchanted creature can't be the target of spells or abilities your opponents control.";
+const WEATHERED_RUNESTONE_ORACLE: &str = "Nonland permanent cards in graveyards and libraries can't enter the battlefield.\nPlayers can't cast spells from graveyards or libraries.";
+
+/// Replenish returns Shielding Plax from P0's graveyard while Bramble Elemental
+/// and a second creature are both legal hosts (so the controller would be asked
+/// to choose). `runestone` adds Weathered Runestone. Returns the runner, the Aura,
+/// Bramble Elemental, and the events of the resolution.
+fn replenish_returns_shielding_plax(
+    runestone: bool,
+) -> (
+    engine::game::scenario::GameRunner,
+    ObjectId,
+    ObjectId,
+    Vec<engine::types::events::GameEvent>,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bramble = scenario
+        .add_creature_from_oracle(P0, "Bramble Elemental", 3, 2, BRAMBLE_ELEMENTAL_ORACLE)
+        .id();
+    scenario.add_creature(P0, "Other Bear", 2, 2);
+    if runestone {
+        scenario.add_artifact_from_oracle(P0, "Weathered Runestone", WEATHERED_RUNESTONE_ORACLE);
+    }
+    // Plax's enter trigger draws a card; keep the library non-empty.
+    scenario.add_card_to_library_top(P0, "Filler One");
+    scenario.add_card_to_library_top(P0, "Filler Two");
+    let plax = scenario
+        .add_spell_to_graveyard(P0, "Shielding Plax", false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["Enchant"], SHIELDING_PLAX_ORACLE)
+        .id();
+    let replenish = scenario
+        .add_spell_to_hand_from_oracle(P0, "Replenish", false, REPLENISH_ORACLE)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(replenish).resolve();
+    let events = outcome.events().to_vec();
+    drop(outcome);
+    (runner, plax, bramble, events)
+}
+
+/// CR 101.2 + CR 614.17 + CR 603.2g: Weathered Runestone refuses Replenish's
+/// return of Shielding Plax, so no host choice is offered even with several
+/// legal hosts; the Aura stays in the graveyard, nothing attaches, no
+/// `Attached` event is published, and Bramble Elemental never triggers.
+#[test]
+fn refused_replenish_aura_return_with_multiple_hosts_opens_no_prompt() {
+    let (mut runner, plax, bramble, events) = replenish_returns_shielding_plax(true);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "a refused return must not prompt: {:?}",
+        runner.state().waiting_for
+    );
+    runner.advance_until_stack_empty();
+    let aura = &runner.state().objects[&plax];
+    assert_eq!(aura.zone, Zone::Graveyard, "Runestone refuses the entry");
+    assert_eq!(aura.attached_to, None);
+    assert!(runner.state().objects[&bramble].attachments.is_empty());
+    assert_eq!(attached_events(&events, plax), 0);
+    assert_eq!(saproling_tokens(&runner).len(), 0);
+}
+
+/// Control: the same board without Runestone prompts for the host; choosing
+/// Bramble Elemental attaches Plax once and Bramble triggers once.
+#[test]
+fn replenish_aura_return_with_multiple_hosts_prompts_and_attaches_once() {
+    let (mut runner, plax, bramble, mut events) = replenish_returns_shielding_plax(false);
+    let WaitingFor::ReturnAsAuraTarget { legal_targets, .. } = &runner.state().waiting_for else {
+        panic!(
+            "two legal hosts: the controller chooses, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(legal_targets.contains(&TargetRef::Object(bramble)));
+    let result = runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(bramble)),
+        })
+        .expect("Bramble Elemental is an offered host");
+    events.extend(result.events);
+    runner.advance_until_stack_empty();
+    let aura = &runner.state().objects[&plax];
+    assert_eq!(aura.zone, Zone::Battlefield);
+    assert_eq!(aura.attached_to, Some(AttachTarget::Object(bramble)));
+    assert_eq!(attached_events(&events, plax), 1);
+    assert_eq!(saproling_tokens(&runner).len(), 2);
 }
