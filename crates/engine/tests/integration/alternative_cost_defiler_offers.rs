@@ -117,7 +117,7 @@ fn cast_accepting_the_defiler(runner: &mut GameRunner, spell: ObjectId) -> i32 {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the Defiler must complete the cast");
     life_before - runner.state().players[0].life
 }
@@ -303,7 +303,7 @@ fn defiler_is_offered_when_its_life_and_the_residuals_are_payable() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying the Defiler's life must be legal");
 
     // The cast completed: both life payments were made (4 - 2 - 2) and the
@@ -387,7 +387,7 @@ fn blitz_affordable_only_with_a_payable_defiler_is_offered_and_completes() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying the Defiler's life must be legal");
     assert_eq!(runner.state().players[0].life, 0, "both life payments made");
     assert_eq!(
@@ -489,7 +489,7 @@ fn blitz_with_a_defiler_and_an_imposed_life_tax_completes_when_payable() {
     runner.act(action).expect("the offered cast is accepted");
     if let WaitingFor::DefilerPayment { .. } = runner.state().waiting_for {
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("paying the Defiler's life");
     }
     assert_eq!(runner.state().players[0].life, 0, "all 6 life paid");
@@ -593,7 +593,7 @@ fn drive_cast(runner: &mut GameRunner, spell: ObjectId, answers: &Answers) -> Ca
                 Some(choice) => GameAction::ChooseAlternativeCast { choice },
                 None => return stopped(runner, &prompts),
             },
-            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::PayCost { .. } => match answers.sacrifice {
                 Some(id) => GameAction::SelectCards { cards: vec![id] },
                 None => return stopped(runner, &prompts),
@@ -669,7 +669,7 @@ fn assert_refused(runner: &mut GameRunner, spell: ObjectId) {
                 "accepting is refused as unpayable: {error}"
             );
             assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
-            let declined = runner.act(GameAction::DecideOptionalCost { pay: false });
+            let declined = runner.act(GameAction::DecideOptionalCost { index: 1 });
             assert!(declined.is_err(), "declining is refused too: {declined:?}");
             assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
         }
@@ -1044,7 +1044,7 @@ fn cast_crabomination(
                     choice: alternative.expect("no AlternativeCastChoice expected"),
                 }
             }
-            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::PayCost { .. } => GameAction::SelectCards {
                 cards: vec![sacrifice.expect("no sacrifice expected")],
             },
@@ -1428,7 +1428,7 @@ fn converted_spell_is_priced_as_the_converted_face() {
         .expect("choose the converted cast");
     assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the Defiler");
 
     assert_eq!(runner.state().objects[&optimus].zone, Zone::Stack);
@@ -1584,7 +1584,7 @@ fn printed_cost_needing_the_defilers_life_twice_is_not_offered() {
         "only prowl is offered, so there is no choice"
     );
     let paid = runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the Defiler");
 
     assert_spell_cast(&paid.events, squad);
@@ -1610,7 +1610,7 @@ fn printed_cost_payable_with_the_defiler_and_krrik_keeps_the_prowl_choice() {
         .expect("choose the printed cost");
     assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the Defiler");
     // CR 107.4f + CR 601.2g: K'rrik lets the remaining {B} be paid with 2 life.
     let WaitingFor::PhyrexianPayment { shards, .. } = &runner.state().waiting_for else {
@@ -1675,7 +1675,7 @@ fn native_phyrexian_shard_and_defiler_life_are_paid_together() {
         }
         assert_eq!(start_cast(&mut runner, omnath), "DefilerPayment");
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("accept the Defiler");
         let paid = runner
             .act(GameAction::SubmitPhyrexianChoices {

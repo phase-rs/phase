@@ -2974,7 +2974,7 @@ fn pitch_exile_cost_honors_moved_redirect_and_completes_cast() {
         })
         .expect("cast Nourishing Shoal");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept pitch cost");
 
     let result = runner
@@ -3060,7 +3060,7 @@ fn multi_card_exile_cost_resumes_after_each_replacement_choice() {
         })
         .expect("cast two-card pitch witness");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept two-card pitch cost");
     let result = runner
         .act(GameAction::SelectCards {
@@ -3133,7 +3133,7 @@ fn return_to_hand_cost_honors_moved_redirect_and_completes_cast() {
         })
         .expect("cast Daze cost witness");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept return-to-hand cost");
     assert!(matches!(
         runner.state().waiting_for,

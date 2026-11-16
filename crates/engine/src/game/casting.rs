@@ -15158,16 +15158,20 @@ fn swap_to_alternative_spell_face(obj: &mut crate::game::game_object::GameObject
     super::printed_cards::swap_object_faces(obj);
     // CR 715.2a (#7714): while the Adventure/Omen face IS in use, the stored
     // slot holds the NORMAL face — it must not read as "has an Adventure"
-    // (`SpellCastRecord.has_adventure`, Garenbrig Squire's qualifier).
-    // `restore_alternative_spell_normal_face` re-stamps the marker from the
-    // cast's variant when the normal face returns. Split/MDFC markers are a
-    // different semantic (card-level layout class) and stay preserved.
+    // (`SpellCastRecord.has_adventure`, Garenbrig Squire's qualifier), nor as a
+    // double-faced card's other face (`transform::stored_double_face`). CR 715.3a /
+    // CR 720.3a + CR 715.3b / CR 720.3b + CR 715.2c / CR 720.2c: the spell has only
+    // its alternative characteristics and the card is one single-faced card, so the
+    // slot is marked `Single`, not erased: an erased layout is what a double-faced
+    // token's stored face carries. `restore_alternative_spell_normal_face` re-stamps
+    // the marker from the cast's variant when the normal face returns. Split/MDFC
+    // markers are a different semantic (card-level layout class) and stay preserved.
     if let Some(back) = obj.back_face.as_mut() {
         if matches!(
             back.layout_kind,
             Some(LayoutKind::Adventure) | Some(LayoutKind::Omen)
         ) {
-            back.layout_kind = None;
+            back.layout_kind = Some(LayoutKind::Single);
         }
     }
 }
@@ -22455,8 +22459,10 @@ fn can_cast_prepared_now_with_probe(
     // castable only when at least one branch can be paid with the spell's full
     // mana cost. Reuse the declaration-time authority so discard/life,
     // sacrifice/mana, and other choice shapes cannot reach target selection
-    // and then fail during payment after the cast has been announced.
-    if let Some(AdditionalCost::Choice(preferred, fallback)) = state
+    // and then fail during payment after the cast has been announced — and so
+    // a branch the declaration accepts with a matching Defiler's reduction is
+    // castable here too.
+    if let Some(AdditionalCost::Choice(costs)) = state
         .objects
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
@@ -22477,15 +22483,10 @@ fn can_cast_prepared_now_with_probe(
         pending.origin_zone = prepared.origin_zone;
         pending.payment_mode = prepared.payment_mode;
         let branch_is_offerable = |cost: &AbilityCost| {
-            casting_costs::additional_cost_declaration_is_offerable(
-                state,
-                player,
-                &pending,
-                cost.clone(),
-            )
-            .unwrap_or(false)
+            casting_costs::required_declaration_offerable(state, player, &pending, cost, None)
+                .unwrap_or(false)
         };
-        if !branch_is_offerable(preferred) && !branch_is_offerable(fallback) {
+        if !costs.iter().any(branch_is_offerable) {
             return false;
         }
     }

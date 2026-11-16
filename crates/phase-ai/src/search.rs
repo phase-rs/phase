@@ -5178,10 +5178,41 @@ pub(crate) fn deterministic_choice(
             }
             engine::types::ability::AdditionalCost::Optional { .. } => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
-            engine::types::ability::AdditionalCost::Choice(_, _) => true,
+            engine::types::ability::AdditionalCost::Choice(_) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,
         };
-        return Some(GameAction::DecideOptionalCost { pay });
+        // CR 601.2b + CR 601.2h: a Choice offers every alternative in printed
+        // order and the caster must pay exactly one. Commit to the first branch
+        // that is in the issued candidate domain, that the engine's payability
+        // gate (the authority cost resolution uses) accepts, and whose payment
+        // the engine's life-safety receipt does not prove lethal (CR 119.4 +
+        // CR 704.5a — the same authority the AntiSelfHarm veto consults, which
+        // this early return would otherwise skip). With no such branch, defer
+        // to scoring so the policy registry judges every branch.
+        if let engine::types::ability::AdditionalCost::Choice(costs) = additional_cost {
+            let issued = engine::ai_support::candidate_actions(state);
+            return costs.iter().enumerate().find_map(|(index, cost)| {
+                let action = GameAction::DecideOptionalCost { index };
+                if !actions.contains(&action)
+                    || !engine::game::cost_payability::AbilityCostPayability::is_payable_for_spell(
+                        cost,
+                        state,
+                        *player,
+                        pending_cast.object_id,
+                    )
+                {
+                    return None;
+                }
+                let candidate = issued.iter().find(|candidate| candidate.action == action)?;
+                matches!(
+                    engine::game::life_safety::preview_candidate_life_safety(state, candidate),
+                    engine::game::life_safety::CandidateLifeSafety::NotUnsafe
+                )
+                .then_some(action)
+            });
+        }
+        let index = if pay { 0 } else { 1 };
+        return Some(GameAction::DecideOptionalCost { index });
     }
 
     // CR 601.2b: Defiler — accept life payment when life cushion is sufficient.
@@ -5191,7 +5222,8 @@ pub(crate) fn deterministic_choice(
     {
         let life = state.players[player.0 as usize].life;
         let pay = life > (*life_cost as i32) * 3;
-        return Some(GameAction::DecideOptionalCost { pay });
+        let index = if pay { 0 } else { 1 };
+        return Some(GameAction::DecideOptionalCost { index });
     }
 
     // CR 514.1 + CR 701.9a: cleanup discard. The give-up order is
@@ -15476,7 +15508,7 @@ mod tests {
             .expect("deterministic_choice must decide the kicker prompt");
         assert_eq!(
             action,
-            GameAction::DecideOptionalCost { pay: false },
+            GameAction::DecideOptionalCost { index: 1 },
             "AI must decline a multikick that over-commits its mana"
         );
     }
@@ -15492,8 +15524,122 @@ mod tests {
             .expect("deterministic_choice must decide the kicker prompt");
         assert_eq!(
             action,
-            GameAction::DecideOptionalCost { pay: true },
+            GameAction::DecideOptionalCost { index: 0 },
             "AI must pay a multikick when it has mana to spare"
+        );
+    }
+
+    // --- Additional-cost Choice branch selection (issue #10442) ---
+
+    /// Verbatim Oracle text (Scryfall, 2026-11-16).
+    const FINAL_PAYMENT_ORACLE: &str = "As an additional cost to cast this spell, pay 5 life or sacrifice a creature or enchantment.\nDestroy target creature.";
+
+    /// P0 at `life` controls a Grizzly Bears (sacrifice fodder) and casts
+    /// Final Payment at P1's Grizzly Bears, stopping at the additional-cost
+    /// prompt where both printed branches are payable.
+    fn final_payment_choice_state(life: i32) -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_life(P0, life);
+        scenario.add_basic_land(P0, ManaColor::White);
+        scenario.add_basic_land(P0, ManaColor::Black);
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        let target = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let final_payment = scenario
+            .add_spell_to_hand_from_oracle(P0, "Final Payment", true, FINAL_PAYMENT_ORACLE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::Black],
+                generic: 0,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&final_payment].card_id;
+        let result = runner
+            .act(GameAction::CastSpell {
+                object_id: final_payment,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("announcing Final Payment must succeed");
+        if matches!(result.waiting_for, WaitingFor::TargetSelection { .. }) {
+            runner
+                .act(GameAction::SelectTargets {
+                    targets: vec![TargetRef::Object(target)],
+                })
+                .expect("P1's Grizzly Bears is a legal target");
+        }
+        let WaitingFor::OptionalCostChoice {
+            cost: engine::types::ability::AdditionalCost::Choice(costs),
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "Final Payment must prompt for its additional cost, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert!(
+            matches!(
+                costs.as_slice(),
+                [AbilityCost::PayLife { .. }, AbilityCost::Sacrifice(_)]
+            ),
+            "Final Payment's printed branches: pay 5 life or sacrifice, got {costs:?}"
+        );
+        runner.state().clone()
+    }
+
+    /// CR 119.4 + CR 704.5a: paying 5 life at 5 life is payable but lethal.
+    /// The deterministic chooser must not commit to it ahead of the payable
+    /// sacrifice branch — both through `deterministic_choice` (the planner's
+    /// quiescence route) and through `choose_action` (the root route that
+    /// returns before policy scoring).
+    #[test]
+    fn choice_cost_skips_a_lethal_first_life_branch() {
+        let state = final_payment_choice_state(5);
+        let actions = issued_actions(&state, P0);
+        assert!(
+            actions.contains(&GameAction::DecideOptionalCost { index: 0 }),
+            "reach guard: the lethal life branch is issued"
+        );
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &actions, None),
+            Some(GameAction::DecideOptionalCost { index: 1 }),
+        );
+        assert_eq!(
+            choose_action(&state, P0, &config, &mut SmallRng::seed_from_u64(7)),
+            Some(GameAction::DecideOptionalCost { index: 1 }),
+        );
+    }
+
+    /// Control: at 20 life the life branch is safe, so the chooser keeps the
+    /// first payable branch in printed order.
+    #[test]
+    fn choice_cost_keeps_a_safe_first_life_branch() {
+        let state = final_payment_choice_state(20);
+        let actions = issued_actions(&state, P0);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &actions, None),
+            Some(GameAction::DecideOptionalCost { index: 0 }),
+        );
+    }
+
+    /// A branch outside the issued domain is never committed: with only the
+    /// sacrifice answer issued, the chooser picks it even though the life
+    /// branch is first and safe.
+    #[test]
+    fn choice_cost_only_commits_to_an_issued_branch() {
+        let state = final_payment_choice_state(20);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let actions = vec![
+            GameAction::DecideOptionalCost { index: 1 },
+            GameAction::CancelCast,
+        ];
+        assert_eq!(
+            deterministic_choice(&state, P0, &config, &actions, None),
+            Some(GameAction::DecideOptionalCost { index: 1 }),
         );
     }
 

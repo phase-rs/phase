@@ -67,7 +67,9 @@ fn drive_cast_collecting(
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 let result = runner
-                    .act(GameAction::DecideOptionalCost { pay: promise_gift })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if promise_gift { 0 } else { 1 },
+                    })
                     .expect("decide gift");
                 events.extend(result.events);
             }

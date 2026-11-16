@@ -509,8 +509,13 @@ pub enum GameAction {
     SelectModes {
         indices: Vec<usize>,
     },
+    /// CR 601.2b: Resolve a `WaitingFor::OptionalCostChoice` by selecting an
+    /// option index. For `AdditionalCost::Optional`, index 0 = pay the cost,
+    /// index 1 = skip. For `AdditionalCost::Choice`, the index selects which
+    /// alternative cost to pay. For `AdditionalCost::Kicker`, index 0 = pay
+    /// kicker, index 1 = decline (handled separately for repeatable kicker).
     DecideOptionalCost {
-        pay: bool,
+        index: usize,
     },
     /// CR 715.3a: Choose creature face (true) or Adventure half (false).
     ChooseAdventureFace {
