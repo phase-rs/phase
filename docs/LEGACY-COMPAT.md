@@ -24,7 +24,21 @@ Each entry MUST include:
 
 ## Active shims
 
-_(none)_
+### `LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`
+
+- **Covers:** the unit `TriggerCause::ControlledCreatureDealtDamage` (Wayta,
+  Trainer Prodigy's doubler cause) written before the "creature you control"
+  doubler causes were parameterized into `TriggerCause::ControlledCreature {
+  event: ControlledCreatureEvent }`. `TriggerCauseWire` (the
+  `#[serde(from)]` deserialize mirror of `TriggerCause`) maps it to
+  `ControlledCreature { event: DealtDamage }`, so persisted games and older
+  card exports still load.
+- **Added in:** 0.126.0.
+- **Removal trigger:** the tripwire fails to compile once the workspace
+  version exceeds 0.140.x. Remove the legacy arm (or the whole
+  `TriggerCauseWire` mirror and `#[serde(from)]`) and the tripwire.
+- **Source:** `crates/phase-ast/src/types/statics.rs`
+  (`_LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`).
 
 ## Removed shims
 

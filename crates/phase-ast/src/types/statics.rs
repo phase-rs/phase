@@ -713,6 +713,7 @@ impl CausingObject {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "TriggerCauseWire")]
 pub enum TriggerCause {
     /// Unrestricted doubler — matches any trigger cause.
     Any,
@@ -776,6 +777,104 @@ pub enum TriggerCause {
 fn default_true() -> bool {
     true
 }
+
+/// Deserialize-only mirror of [`TriggerCause`] that also accepts the legacy
+/// unit `"ControlledCreatureDealtDamage"` written before the "creature you
+/// control" causes were parameterized into `ControlledCreature { event }`
+/// (persisted games and card exports). Tripwired by
+/// `_LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4`; see
+/// docs/LEGACY-COMPAT.md.
+#[derive(Deserialize)]
+#[serde(rename = "TriggerCause")]
+enum TriggerCauseWire {
+    Any,
+    EntersBattlefield {
+        #[serde(default)]
+        core_types: Vec<super::card_type::CoreType>,
+        #[serde(default)]
+        entrant: CausingObject,
+    },
+    CreatureAttacking,
+    CreatureDying,
+    ControlledCreature {
+        event: ControlledCreatureEvent,
+    },
+    /// LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: the pre-2026-Q4
+    /// shape of `ControlledCreature { event: DealtDamage }`.
+    ControlledCreatureDealtDamage,
+    ControllerCastOrCopiedSpell {
+        #[serde(default)]
+        core_types: Vec<super::card_type::CoreType>,
+    },
+    RoomEntered,
+    BattlefieldTransition {
+        #[serde(default = "default_true")]
+        enter: bool,
+        #[serde(default)]
+        leave: bool,
+        #[serde(default)]
+        qualifiers: Vec<ZoneChangeQualifier>,
+    },
+}
+
+impl From<TriggerCauseWire> for TriggerCause {
+    fn from(wire: TriggerCauseWire) -> Self {
+        match wire {
+            TriggerCauseWire::Any => TriggerCause::Any,
+            TriggerCauseWire::EntersBattlefield {
+                core_types,
+                entrant,
+            } => TriggerCause::EntersBattlefield {
+                core_types,
+                entrant,
+            },
+            TriggerCauseWire::CreatureAttacking => TriggerCause::CreatureAttacking,
+            TriggerCauseWire::CreatureDying => TriggerCause::CreatureDying,
+            TriggerCauseWire::ControlledCreature { event } => {
+                TriggerCause::ControlledCreature { event }
+            }
+            TriggerCauseWire::ControlledCreatureDealtDamage => TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage,
+            },
+            TriggerCauseWire::ControllerCastOrCopiedSpell { core_types } => {
+                TriggerCause::ControllerCastOrCopiedSpell { core_types }
+            }
+            TriggerCauseWire::RoomEntered => TriggerCause::RoomEntered,
+            TriggerCauseWire::BattlefieldTransition {
+                enter,
+                leave,
+                qualifiers,
+            } => TriggerCause::BattlefieldTransition {
+                enter,
+                leave,
+                qualifiers,
+            },
+        }
+    }
+}
+
+const fn parse_legacy_version_component(text: &str) -> u32 {
+    let bytes = text.as_bytes();
+    let mut value = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        value = value * 10 + (bytes[index] - b'0') as u32;
+        index += 1;
+    }
+    value
+}
+
+/// Tripwire: fails to compile once the workspace ships past 0.140.x, the
+/// removal point for the legacy `ControlledCreatureDealtDamage` shape.
+#[allow(dead_code, clippy::absurd_extreme_comparisons)]
+const _LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: () = {
+    const MAJOR: u32 = parse_legacy_version_component(env!("CARGO_PKG_VERSION_MAJOR"));
+    const MINOR: u32 = parse_legacy_version_component(env!("CARGO_PKG_VERSION_MINOR"));
+    assert!(
+        !(MAJOR > 0 || MINOR > 140),
+        "LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: remove TriggerCauseWire's          ControlledCreatureDealtDamage arm (or the whole TriggerCauseWire mirror and          `#[serde(from)]` on TriggerCause) and this tripwire. See docs/LEGACY-COMPAT.md."
+    );
+};
 
 impl fmt::Display for TriggerCause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -4766,6 +4865,60 @@ mod tests {
     use super::*;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
+
+    /// LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: a persisted
+    /// pre-parameterization Wayta cause still decodes, and every current shape
+    /// round-trips through the deserialize mirror.
+    #[test]
+    fn trigger_cause_decodes_the_legacy_controlled_creature_shape() {
+        let legacy: TriggerCause =
+            serde_json::from_str("\"ControlledCreatureDealtDamage\"").expect("legacy decodes");
+        assert_eq!(
+            legacy,
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealtDamage
+            }
+        );
+        for cause in [
+            TriggerCause::Any,
+            TriggerCause::EntersBattlefield {
+                core_types: vec![super::super::card_type::CoreType::Land],
+                entrant: CausingObject::OtherThanDoubler,
+            },
+            TriggerCause::CreatureAttacking,
+            TriggerCause::CreatureDying,
+            TriggerCause::ControlledCreature {
+                event: ControlledCreatureEvent::DealsCombatDamageToPlayer,
+            },
+            TriggerCause::ControllerCastOrCopiedSpell {
+                core_types: vec![super::super::card_type::CoreType::Instant],
+            },
+            TriggerCause::RoomEntered,
+            TriggerCause::BattlefieldTransition {
+                enter: true,
+                leave: false,
+                qualifiers: vec![ZoneChangeQualifier::Supertype(
+                    super::super::card_type::Supertype::Legendary,
+                )],
+            },
+        ] {
+            let json = serde_json::to_string(&cause).unwrap();
+            assert_eq!(
+                serde_json::from_str::<TriggerCause>(&json).unwrap(),
+                cause,
+                "{json}"
+            );
+        }
+        // An unqualified entering cause keeps its pre-entrant wire shape.
+        assert_eq!(
+            serde_json::to_string(&TriggerCause::EntersBattlefield {
+                core_types: vec![],
+                entrant: CausingObject::Any,
+            })
+            .unwrap(),
+            r#"{"EntersBattlefield":{"core_types":[]}}"#
+        );
+    }
 
     // ===== ROW C — the polarity-typed deferral rule, STRUCTURAL half =====
 
