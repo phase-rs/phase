@@ -160,6 +160,17 @@ pub(super) fn reach_combat_damage(
                 declared || blocks.is_empty(),
                 "the requested blockers must actually be declared"
             );
+            // CR 510.4 + CR 510.3: a first-strike combat's first combat damage step
+            // ends with an empty priority window; pass it so the second step runs and
+            // every caller sees the complete damage.
+            while runner.between_combat_damage_steps() {
+                events.extend(
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("pass the window between the combat damage steps")
+                        .events,
+                );
+            }
             return events;
         }
         match &runner.state().waiting_for {
@@ -635,8 +646,8 @@ fn unblocked_case(won: bool, double_strike: bool) {
                 .expect("combat exists")
                 .first_strike_done
         );
-        // Ordered life events observe the intermediate total even when both
-        // unblocked steps complete in the same public action.
+        // Ordered life events observe the intermediate total across the two steps:
+        // the driver passes the CR 510.3 window between them.
         let mut life = 20;
         let totals: Vec<_> = events
             .iter()

@@ -1925,6 +1925,17 @@ impl GameRunner {
         }
     }
 
+    /// Whether a player must pass priority now to move from the first combat
+    /// damage step to the second (CR 510.4): the CR 510.3 window between the two
+    /// steps is open with an empty stack, so one more pass round starts the
+    /// regular step. The window definition is
+    /// [`combat_damage::between_combat_damage_steps`](super::combat_damage::between_combat_damage_steps);
+    /// the extra conjunct only requires that someone currently holds priority.
+    pub fn between_combat_damage_steps(&self) -> bool {
+        super::combat_damage::between_combat_damage_steps(&self.state)
+            && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
+    }
+
     /// Pass priority until the top of the stack resolves.
     pub fn resolve_top(&mut self) {
         // Keep passing priority until the stack shrinks or we can't pass anymore
