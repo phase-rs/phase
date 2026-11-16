@@ -608,14 +608,13 @@ fn elect(r: &mut GameRunner, card: ObjectId, keyword: &Keyword) -> WaitingFor {
 }
 
 /// How [`finish`] answers the announcement: each target slot gets the next of
-/// `targets`; optional costs follow `optional_costs`.
+/// `targets`; optional costs follow `costs`.
 #[derive(Default)]
 struct Answers {
-    optional_costs: OptionalPolicy,
+    costs: OptionalPolicy,
     targets: Vec<TargetRef>,
     x: u32,
     modes: Vec<usize>,
-    announcer: Option<PlayerId>,
 }
 
 fn aim(targets: &[TargetRef]) -> Answers {
@@ -637,16 +636,8 @@ impl Answers {
     }
 
     fn paying(self) -> Self {
-        let optional_costs = OptionalPolicy::Accept;
-        Self {
-            optional_costs,
-            ..self
-        }
-    }
-
-    fn announcer(self, player: PlayerId) -> Self {
-        let announcer = Some(player);
-        Self { announcer, ..self }
+        let costs = OptionalPolicy::Accept;
+        Self { costs, ..self }
     }
 }
 
@@ -661,7 +652,7 @@ fn finish(r: &mut GameRunner, keyword: &Keyword, answers: Answers) {
         }
         let action = match &r.state().waiting_for {
             WaitingFor::Priority { .. } => break,
-            WaitingFor::OptionalCostChoice { .. } => match answers.optional_costs {
+            WaitingFor::OptionalCostChoice { .. } => match answers.costs {
                 OptionalPolicy::Accept => GameAction::DecideOptionalCost { index: 0 },
                 OptionalPolicy::Decline => GameAction::DecideOptionalCost { index: 1 },
                 OptionalPolicy::Stop => break,
@@ -673,7 +664,7 @@ fn finish(r: &mut GameRunner, keyword: &Keyword, answers: Answers) {
             },
             WaitingFor::ChooseAnnouncingOpponent { candidates, .. } => {
                 GameAction::ChooseAnnouncingOpponent {
-                    opponent: answers.announcer.unwrap_or(candidates[0]),
+                    opponent: candidates[0],
                 }
             }
             WaitingFor::ChooseGiftRecipient { candidates, .. } => GameAction::ChooseGiftRecipient {
@@ -1027,7 +1018,8 @@ fn conditional_modes_keep_the_elected_flashback() {
 /// don't control and target nonbasic land of an opponent's choice you don't
 /// control. Volcanic Offering deals 7 damage to target creature you don't
 /// control and 7 damage to target creature of an opponent's choice you don't
-/// control." P1 announces and picks P2's land and its own other creature.
+/// control." P1 announces both slots (CR 601.2c: the caster and P1 choose
+/// alternately) and picks P2's land and its own other creature.
 #[test]
 fn announcing_opponent_keeps_the_elected_flashback() {
     let mut s = GameScenario::new_n_player(3, 7);
@@ -1050,14 +1042,23 @@ fn announcing_opponent_keeps_the_elected_flashback() {
         matches!(w, WaitingFor::ChooseAnnouncingOpponent { candidates, .. }
             if candidates.len() == 2 && candidates.contains(&P1) && candidates.contains(&p2))
     };
-    let picks = [
-        object(land_one),
-        object(land_two),
-        object(bear),
-        object(cub),
-    ];
-    let answers = aim(&picks).announcer(P1);
-    cast_row(&mut r, offering, &lier_flashback(), announce, answers);
+    elect(&mut r, offering, &lier_flashback());
+    for _ in 0..2 {
+        let w = &r.state().waiting_for;
+        assert!(announce(w), "{w:?}");
+        let p1 = GameAction::ChooseAnnouncingOpponent { opponent: P1 };
+        r.act(p1).expect("P1 announces");
+    }
+    for (chooser, pick) in [(P0, land_one), (P1, land_two), (P0, bear), (P1, cub)] {
+        let w = &r.state().waiting_for;
+        let slot = matches!(w, WaitingFor::TargetSelection { player, .. } if *player == chooser);
+        assert!(slot, "{chooser:?} chooses: {w:?}");
+        let pending = w.pending_cast_ref().expect("a paused cast");
+        assert_eq!(pending.alternative_cost_keyword, Some(lier_flashback()));
+        let target = Some(object(pick));
+        r.act(GameAction::ChooseTarget { target }).expect("legal");
+    }
+    finish(&mut r, &lier_flashback(), Answers::default());
     for id in [land_one, land_two, bear, cub] {
         assert_eq!(r.state().objects[&id].zone, Zone::Graveyard);
     }
