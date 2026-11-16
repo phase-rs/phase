@@ -4288,6 +4288,7 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
                 },
                 false,
             ),
@@ -6449,6 +6450,7 @@ mod tests {
             trigger_event: None,
             effect_description: Some("counter target spell".to_string()),
             remaining: vec![],
+            affected_object: None,
         };
 
         // Reach-guard: the waiting state is genuinely non-`Priority`.

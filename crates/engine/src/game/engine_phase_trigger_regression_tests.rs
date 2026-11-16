@@ -2228,6 +2228,7 @@ fn unless_payment_decline_preserves_nested_effect_zone_choice_continuation() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2306,6 +2307,7 @@ fn static_prison_unless_pay_sacrifice_returns_exiled_permanent() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
     };
 
     apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2376,6 +2378,7 @@ fn unless_pay_success_runs_if_a_player_does_sub_ability() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2465,6 +2468,7 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2570,6 +2574,7 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2651,6 +2656,7 @@ fn unless_pay_decline_runs_primary_not_if_a_player_does_sub() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2695,6 +2701,7 @@ fn unless_pay_success_with_no_sub_ability_is_inert() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2755,6 +2762,7 @@ fn unless_pay_success_clears_stale_cost_payment_failed_flag() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2796,6 +2804,7 @@ fn unless_energy_payment_deducts_energy_and_skips_effect() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
@@ -2858,6 +2867,7 @@ fn unless_discard_payment_filters_eligible_hand_cards() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();

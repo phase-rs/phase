@@ -3876,6 +3876,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
         trigger_event: None,
         effect_description: Some("unless payment witness".to_string()),
         remaining: vec![P1],
+        affected_object: None,
     };
     let mut initial_events = Vec::new();
     let initial = activate_mana_ability(
@@ -3905,6 +3906,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
                 trigger_event: None,
                 effect_description: Some(description),
                 remaining,
+                affected_object: _,
             } if cost.as_ref() == &unless_cost
                 && paused_effect.as_ref() == &pending_effect
                 && description == "unless payment witness"
@@ -3947,6 +3949,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
             trigger_event,
             effect_description,
             remaining,
+            affected_object: _,
         } => {
             assert_eq!(*player, P0);
             assert_eq!(cost, &unless_cost);
@@ -4088,6 +4091,7 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
         trigger_event: None,
         effect_description: Some("auto-tap unless payment witness".to_string()),
         remaining: vec![P1],
+        affected_object: None,
     };
 
     let paused = runner
@@ -4108,6 +4112,7 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
                 trigger_event: None,
                 effect_description: Some(description),
                 remaining,
+                affected_object: None,
             } if cost.as_ref() == &unless_cost
                 && paused_effect.as_ref() == &pending_effect
                 && description == "auto-tap unless payment witness"
@@ -9465,6 +9470,7 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
             trigger_event: None,
             effect_description: Some("prevented unless payment witness".to_string()),
             remaining: vec![P1],
+            affected_object: None,
         },
         None,
     )
@@ -9490,6 +9496,7 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
             trigger_event: None,
             effect_description: Some(ref description),
             ref remaining,
+            affected_object: _,
         } if cost == &unless_cost
             && resumed_effect.as_ref() == &pending_effect
             && description == "prevented unless payment witness"

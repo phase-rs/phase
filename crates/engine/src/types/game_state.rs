@@ -10429,6 +10429,13 @@ pub enum ManaAbilityResume {
         /// mana ability mid-payment.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
+        /// CR 118.12a: The object the unless-gated effect acts on (the revealed
+        /// card a "for each of those cards" loop is deciding — Sword-Point
+        /// Diplomacy — or the spell a Mana Leak would counter), so the payer can
+        /// tell what their payment prevents. Display-only; `None` when the
+        /// effect names no object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        affected_object: Option<ObjectId>,
     },
     /// CR 508.1d + CR 508.1h + CR 509.1c + CR 509.1d + CR 605.4a: A combat
     /// declaration whose locked-in tax payment suspended before spending on a
@@ -18246,6 +18253,13 @@ pub enum WaitingFor {
         /// effect. Empty for ordinary single-payer unless-costs (Mana Leak).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
+        /// CR 118.12a: The object the unless-gated effect acts on (the revealed
+        /// card a "for each of those cards" loop is deciding — Sword-Point
+        /// Diplomacy — or the spell a Mana Leak would counter), so the payer can
+        /// tell what their payment prevents. Display-only; `None` when the
+        /// effect names no object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        affected_object: Option<ObjectId>,
     },
     /// CR 118.12a: Player must choose **which** sub-cost to pay from a
     /// disjunctive ("unless they X or Y") unless-cost. Once a sub-cost is
@@ -18284,6 +18298,13 @@ pub enum WaitingFor {
         /// unless-payments.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         chosen: Vec<AbilityCost>,
+        /// CR 118.12a: The object the unless-gated effect acts on (the revealed
+        /// card a "for each of those cards" loop is deciding — Sword-Point
+        /// Diplomacy — or the spell a Mana Leak would counter), so the payer can
+        /// tell what their payment prevents. Display-only; `None` when the
+        /// effect names no object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        affected_object: Option<ObjectId>,
     },
     /// CR 702.21a: Player must choose a card to discard as ward cost payment.
     WardDiscardChoice {
@@ -48620,6 +48641,7 @@ mod tests {
                     }),
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
                 },
                 cost_move_resume: None,
                 chosen_tappers: None,
@@ -57070,6 +57092,7 @@ mod restored_exact_attack_authority_tests {
                             trigger_event: trigger_event.clone(),
                             effect_description: None,
                             remaining: vec![],
+                            affected_object: None,
                         },
                     ))),
                 },
@@ -57668,6 +57691,7 @@ mod restored_exact_attack_authority_tests {
             trigger_event: trigger_event.clone(),
             effect_description: None,
             remaining: vec![],
+            affected_object: None,
         };
         let transaction =
             |root: Box<ResolvedAbility>, base, context| ResolutionPaymentTransaction {

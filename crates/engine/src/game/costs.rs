@@ -854,6 +854,7 @@ fn effect_pay_cost_mana_resume(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
     } = &state.waiting_for
     {
         return Some(ManaAbilityResume::UnlessPayment {
@@ -863,6 +864,7 @@ fn effect_pay_cost_mana_resume(
             trigger_event: trigger_event.clone(),
             effect_description: effect_description.clone(),
             remaining: remaining.clone(),
+            affected_object: *affected_object,
         });
     }
     let PaymentScope::Resolution {

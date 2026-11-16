@@ -7467,6 +7467,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining,
+            affected_object: None,
         };
         state
     }

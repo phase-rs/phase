@@ -16401,12 +16401,14 @@ fn pin_member_loop_tail_to_set(ability: &mut ResolvedAbility, set_id: TrackedSet
         return;
     }
     let sentinel = TrackedSetId(0);
-    match &mut sub.effect {
-        Effect::ChangeZoneAll {
-            target: TargetFilter::TrackedSet { id },
-            ..
-        } if *id == sentinel => *id = set_id,
-        _ => {}
+    if let Effect::ChangeZoneAll {
+        target: TargetFilter::TrackedSet { id },
+        ..
+    } = &mut sub.effect
+    {
+        if *id == sentinel {
+            *id = set_id;
+        }
     }
 }
 
@@ -23682,7 +23684,7 @@ fn resolve_chain_body(
                     pinned_tail = pinned;
                     &pinned_tail
                 }
-                _ => effective,
+                Some(_) | None => effective,
             };
 
             // CR 122.1 + CR 608.2c: A `repeat_for: DistinctCounterKindsAmong`
@@ -26611,6 +26613,13 @@ fn unless_payment_prompt(
 ) -> WaitingFor {
     let mut pending = ability.clone();
     pending.unless_pay = None;
+    // CR 118.12a + CR 608.2c: surface the object the gated effect acts on. A
+    // member-driven loop rebinds each iteration's member into the first object
+    // slot, so every per-card prompt names its own card.
+    let affected_object = ability.targets.iter().find_map(|target| match target {
+        TargetRef::Object(id) => Some(*id),
+        _ => None,
+    });
     // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
     // sub-cost choice first; the chosen single cost re-enters
     // `WaitingFor::UnlessPayment` via
@@ -26632,6 +26641,7 @@ fn unless_payment_prompt(
                     trigger_event: state.current_trigger_event.clone(),
                     effect_description: ability.description.clone(),
                     remaining: remaining_payers.to_vec(),
+                    affected_object,
                 }
             } else {
                 WaitingFor::UnlessPaymentChooseCost {
@@ -26642,6 +26652,7 @@ fn unless_payment_prompt(
                     effect_description: ability.description.clone(),
                     remaining_choices: vec![],
                     chosen: vec![],
+                    affected_object,
                 }
             }
         }
@@ -26683,6 +26694,7 @@ fn unless_payment_prompt(
                 effect_description: ability.description.clone(),
                 remaining_choices: queue,
                 chosen: vec![],
+                affected_object,
             }
         }
         cost => WaitingFor::UnlessPayment {
@@ -26692,6 +26704,7 @@ fn unless_payment_prompt(
             trigger_event: state.current_trigger_event.clone(),
             effect_description: ability.description.clone(),
             remaining: remaining_payers.to_vec(),
+            affected_object,
         },
     }
 }

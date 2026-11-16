@@ -4201,6 +4201,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
             trigger_event,
             effect_description,
             remaining,
+            affected_object,
         } => {
             let remaining_cost = super::costs::remaining_cost_after_paid_mana_prefix(cost.as_ref());
             match remaining_cost {
@@ -4217,6 +4218,7 @@ pub(crate) fn finish_mana_root_after_deferred_life_payment(
                         trigger_event,
                         effect_description,
                         remaining,
+                        affected_object,
                         events,
                     )
                 }
@@ -6077,6 +6079,7 @@ pub(crate) fn resume_waiting_for(
             trigger_event,
             effect_description,
             remaining,
+            affected_object,
         } => WaitingFor::UnlessPayment {
             player: outer_player.unwrap_or(mana_source_controller),
             cost: *cost,
@@ -6084,6 +6087,7 @@ pub(crate) fn resume_waiting_for(
             trigger_event,
             effect_description,
             remaining,
+            affected_object,
         },
         ManaAbilityResume::EffectPayCost { .. }
         | ManaAbilityResume::PhyrexianCastPayment { .. }
