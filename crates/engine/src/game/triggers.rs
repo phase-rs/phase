@@ -52989,7 +52989,9 @@ pub mod tests {
                 WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
                 WaitingFor::OptionalCostChoice { .. } => {
                     runner
-                        .act(GameAction::DecideOptionalCost { pay: kicked })
+                        .act(GameAction::DecideOptionalCost {
+                            index: if kicked { 0 } else { 1 },
+                        })
                         .expect("kicker decision must be accepted");
                 }
                 WaitingFor::TriggerTargetSelection { .. }
@@ -53165,7 +53167,9 @@ pub mod tests {
                 WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
                 WaitingFor::OptionalCostChoice { .. } => {
                     runner
-                        .act(GameAction::DecideOptionalCost { pay: kicked })
+                        .act(GameAction::DecideOptionalCost {
+                            index: if kicked { 0 } else { 1 },
+                        })
                         .expect("kicker decision must be accepted");
                 }
                 _ => {

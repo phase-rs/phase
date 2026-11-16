@@ -14656,13 +14656,13 @@ fn apply_non_priority_pass_action(
                 pending_cast,
                 ..
             },
-            GameAction::DecideOptionalCost { pay },
+            GameAction::DecideOptionalCost { index },
         ) => engine_casting::handle_optional_cost_choice(
             state,
             *player,
             *pending_cast.clone(),
             cost,
-            pay,
+            index,
             &mut events,
         )?,
         (
@@ -14715,7 +14715,7 @@ fn apply_non_priority_pass_action(
                 reach,
                 pending_cast,
             },
-            GameAction::DecideOptionalCost { pay },
+            GameAction::DecideOptionalCost { index },
         ) => engine_casting::handle_defiler_payment(
             state,
             *player,
@@ -14723,7 +14723,7 @@ fn apply_non_priority_pass_action(
             *life_cost,
             mana_reduction,
             *reach,
-            pay,
+            index,
             &mut events,
         )?,
         (

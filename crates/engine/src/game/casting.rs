@@ -22458,8 +22458,10 @@ fn can_cast_prepared_now_with_probe(
     // castable only when at least one branch can be paid with the spell's full
     // mana cost. Reuse the declaration-time authority so discard/life,
     // sacrifice/mana, and other choice shapes cannot reach target selection
-    // and then fail during payment after the cast has been announced.
-    if let Some(AdditionalCost::Choice(preferred, fallback)) = state
+    // and then fail during payment after the cast has been announced — and so
+    // a branch the declaration accepts with a matching Defiler's reduction is
+    // castable here too.
+    if let Some(AdditionalCost::Choice(costs)) = state
         .objects
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
@@ -22480,15 +22482,10 @@ fn can_cast_prepared_now_with_probe(
         pending.origin_zone = prepared.origin_zone;
         pending.payment_mode = prepared.payment_mode;
         let branch_is_offerable = |cost: &AbilityCost| {
-            casting_costs::additional_cost_declaration_is_offerable(
-                state,
-                player,
-                &pending,
-                cost.clone(),
-            )
-            .unwrap_or(false)
+            casting_costs::required_declaration_offerable(state, player, &pending, cost, None)
+                .unwrap_or(false)
         };
-        if !branch_is_offerable(preferred) && !branch_is_offerable(fallback) {
+        if !costs.iter().any(branch_is_offerable) {
             return false;
         }
     }

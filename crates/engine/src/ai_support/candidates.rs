@@ -2311,18 +2311,20 @@ pub fn candidate_actions_broad_with_probe(
             };
             bounded_select_card_candidates(*player, cards, sizes)
         }
-        WaitingFor::OptionalCostChoice { player, .. } => vec![
-            candidate(
-                GameAction::DecideOptionalCost { pay: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::DecideOptionalCost { pay: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
+        // CR 601.2b: one candidate per option the prompt actually presents.
+        // `optional_cost_options` is the shared authority for the index domain,
+        // so candidate enumeration cannot disagree with the handler's
+        // bounds check about how many answers exist.
+        WaitingFor::OptionalCostChoice { player, cost, .. } => (0
+            ..crate::game::casting_costs::optional_cost_options(cost).len())
+            .map(|index| {
+                candidate(
+                    GameAction::DecideOptionalCost { index },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 702.47a–e: splice another eligible card onto the spell, or finish.
         WaitingFor::SpliceOffer {
             player, eligible, ..
@@ -2385,12 +2387,12 @@ pub fn candidate_actions_broad_with_probe(
         // CR 601.2b: Defiler cycle — accept or decline life payment for mana reduction.
         WaitingFor::DefilerPayment { player, .. } => vec![
             candidate(
-                GameAction::DecideOptionalCost { pay: true },
+                GameAction::DecideOptionalCost { index: 0 },
                 TacticalClass::Selection,
                 Some(*player),
             ),
             candidate(
-                GameAction::DecideOptionalCost { pay: false },
+                GameAction::DecideOptionalCost { index: 1 },
                 TacticalClass::Selection,
                 Some(*player),
             ),
