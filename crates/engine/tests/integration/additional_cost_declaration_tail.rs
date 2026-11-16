@@ -3113,12 +3113,174 @@ fn altar_mana_made_before_the_cast_pays_the_floor() {
     assert_eq!((life(&runner), pool(&runner)), (14, 0));
 }
 
-/// Found, not fixed (#1235): two Altar activations could pay the floored {3},
-/// but the shared manual-route capacity estimate counts one repeatable
-/// consuming activation, so the alternative is refused and nothing is spent.
+/// CR 601.2g-h: Matt's board. Four Walking Corpses and Scathe Zombies, Ashnod's
+/// Altar, two tapped Swamps and an empty pool, under Trinisphere: three
+/// creatures pay the leg and the other two fuel two Altar activations during
+/// payment, which pay the floored {3} with {C} left over.
 #[test]
-fn altar_needed_twice_for_the_floor_is_refused() {
-    let (mut runner, demon, _, corpses) = demon_with_altar(5, 0);
+fn altar_activated_twice_pays_the_floor() {
+    let mut scenario = board();
+    add_trinisphere(&mut scenario);
+    let mut fodder = creatures(&mut scenario, "Walking Corpse", 4, "", ManaColor::Black);
+    fodder.extend(creatures(
+        &mut scenario,
+        "Scathe Zombies",
+        1,
+        "",
+        ManaColor::Black,
+    ));
+    let swamps = [
+        scenario.add_basic_land(P0, ManaColor::Black),
+        scenario.add_basic_land(P0, ManaColor::Black),
+    ];
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .id();
+    let demon = add_demon(&mut scenario);
+    let mut runner = scenario.build();
+    for swamp in swamps {
+        runner.state_mut().objects.get_mut(&swamp).unwrap().tapped = true;
+    }
+    assert_eq!(
+        verdict(&runner, demon),
+        engine::game::ReservationVerdict::Witness
+    );
+    assert!(offered(&runner, demon));
+
+    let trail = manual_cast(
+        &mut runner,
+        demon,
+        &Answers {
+            picks: fodder[..3].to_vec(),
+            ..ACCEPT_BOTH
+        },
+    );
+    assert_eq!(trail.prompts, ["OptionalCostChoice", "PayCost"]);
+    sacrifice_to_altar(&mut runner, altar, fodder[3]);
+    sacrifice_to_altar(&mut runner, altar, fodder[4]);
+
+    assert!(finish_payment(&mut runner, demon));
+    assert_eq!((life(&runner), pool(&runner)), (14, 1));
+    assert!(fodder.iter().all(|&c| zone(&runner, c) == Zone::Graveyard));
+}
+
+const LAKE_OF_THE_DEAD: &str = "If this land would enter, sacrifice a Swamp instead. If you do, put this land onto the battlefield. If you don't, put it into its owner's graveyard.\n{T}: Add {B}.\n{T}, Sacrifice a Swamp: Add {B}{B}{B}{B}.";
+
+/// CR 601.2g + CR 605.3a: Wurmcoil Engine ({6}) with an untapped Lake of the
+/// Dead, a tapped Swamp, two Ashnod's Altars and two Walking Corpses: Lake's
+/// sacrifice ability ({B}{B}{B}{B}) and one Altar activation pay it. Ordinary
+/// castability sizes each Altar by one activation, so the sacrificial-mana
+/// payment keeps Lake untapped for its four-mana ability rather than tapping
+/// it for {B}. Paired with a Manual cast.
+#[test]
+fn ordinary_payment_keeps_the_four_mana_land_for_its_sacrifice() {
+    for payment_mode in [
+        CastPaymentMode::AutoExceptSacrificialMana,
+        CastPaymentMode::Manual,
+    ] {
+        let mut scenario = board();
+        let lake = scenario
+            .add_land_from_oracle(P0, "Lake of the Dead", LAKE_OF_THE_DEAD)
+            .id();
+        let swamp = scenario.add_basic_land(P0, ManaColor::Black);
+        let altars = [
+            scenario
+                .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+                .id(),
+            scenario
+                .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+                .id(),
+        ];
+        let corpses = creatures(&mut scenario, "Walking Corpse", 2, "", ManaColor::Black);
+        let wurmcoil = scenario
+            .add_creature_to_hand_from_oracle(P0, "Wurmcoil Engine", 6, 6, "Deathtouch, lifelink")
+            .as_artifact_creature()
+            .with_mana_cost(ManaCost::generic(6))
+            .id();
+        let mut runner = scenario.build();
+        runner.state_mut().objects.get_mut(&swamp).unwrap().tapped = true;
+        let lake_four =
+            engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0)
+                .into_iter()
+                .find(|s| s.source.object_id == lake && s.ability_index == Some(1));
+        assert!(
+            lake_four.is_some(),
+            "reach: Lake's four-mana ability is a selection"
+        );
+
+        let card_id = runner.state().objects[&wurmcoil].card_id;
+        let mut events = runner
+            .act(GameAction::CastSpell {
+                object_id: wurmcoil,
+                card_id,
+                targets: vec![],
+                payment_mode,
+            })
+            .expect("cast Wurmcoil Engine")
+            .events;
+        assert!(
+            !runner.state().objects[&lake].tapped,
+            "{payment_mode:?}: Lake stays untapped for its sacrifice ability"
+        );
+        assert_eq!(pool(&runner), 0, "{payment_mode:?}: nothing was prepaid");
+
+        let mut sources = vec![(lake, 1, swamp), (altars[0], 0, corpses[0])].into_iter();
+        let mut victim = None;
+        for _ in 0..12 {
+            if runner.state().objects[&wurmcoil].zone == Zone::Stack {
+                break;
+            }
+            let action = match &runner.state().waiting_for {
+                WaitingFor::PayCost { .. } => GameAction::SelectCards {
+                    cards: vec![victim.take().expect("a sacrifice is pending")],
+                },
+                WaitingFor::ManaSourceSelection { options, .. } => match sources.next() {
+                    Some((source, index, fodder)) => {
+                        victim = Some(fodder);
+                        GameAction::ActivateManaSource {
+                            selection: options
+                                .iter()
+                                .find(|s| {
+                                    s.source.object_id == source && s.ability_index == Some(index)
+                                })
+                                .cloned()
+                                .expect("the source is offered"),
+                        }
+                    }
+                    None => GameAction::PassPriority,
+                },
+                WaitingFor::ManaPayment { .. } => match sources.next() {
+                    Some((source, index, fodder)) => {
+                        victim = Some(fodder);
+                        GameAction::ActivateAbility {
+                            source_id: source,
+                            ability_index: index,
+                            payment_mode: CastPaymentMode::Auto,
+                        }
+                    }
+                    None => GameAction::PassPriority,
+                },
+                other => panic!("{payment_mode:?}: unexpected {other:?}"),
+            };
+            events.extend(runner.act(action).expect("answer the payment").events);
+        }
+        assert!(
+            events.iter().any(
+                |e| matches!(e, GameEvent::SpellCast { object_id, .. } if *object_id == wurmcoil)
+            ),
+            "{payment_mode:?}: the cast completes"
+        );
+        assert_eq!(zone(&runner, swamp), Zone::Graveyard);
+        assert_eq!(zone(&runner, corpses[0]), Zone::Graveyard);
+        assert_eq!(zone(&runner, corpses[1]), Zone::Battlefield);
+    }
+}
+
+/// CR 118.3 + CR 601.2h: with three Corpses all held for the leg, the Altar has
+/// no fuel, so {C} can't pay the floored {3}: refused, nothing spent.
+#[test]
+fn altar_without_spare_fuel_cant_pay_the_floor() {
+    let (mut runner, demon, _, corpses) = demon_with_altar(3, 1);
     assert_eq!(
         verdict(&runner, demon),
         engine::game::ReservationVerdict::Rejected
@@ -3126,7 +3288,10 @@ fn altar_needed_twice_for_the_floor_is_refused() {
     assert!(!offered(&runner, demon));
     let trail = cast(&mut runner, demon, &ACCEPT_BOTH);
     assert!(trail.refused, "{:?}", trail.prompts);
-    assert_eq!((zone(&runner, demon), life(&runner)), (Zone::Hand, 20));
+    assert_eq!(
+        (zone(&runner, demon), life(&runner), pool(&runner)),
+        (Zone::Hand, 20, 1)
+    );
     assert!(corpses
         .iter()
         .all(|&c| zone(&runner, c) == Zone::Battlefield));
@@ -3182,33 +3347,44 @@ fn self_sacrificing_fuel_held_for_the_leg_cant_pay_the_floor() {
     }
 }
 
-/// Found, not fixed (#1235): Sephara's {W}, less Defiler of Faith's {W}, is
-/// floored to {3}, which two Altar activations could pay, but the shared
-/// manual-route capacity estimate counts one repeatable consuming activation,
-/// so the alternative is refused and nothing is spent.
+/// CR 601.2g-h: Sephara's {W}, less Defiler of Faith's {W}, is floored to {3},
+/// which two Altar activations pay while the four Ornithopters are tapped for
+/// the leg.
 #[test]
-fn altar_needed_twice_for_a_floored_printed_mana_leg_is_refused() {
+fn altar_fuels_a_floored_printed_mana_leg() {
     let mut scenario = board();
     add_trinisphere(&mut scenario);
     add_parsed_defiler(&mut scenario, "Defiler of Faith", DEFILER_OF_FAITH);
     let flyers = ornithopters(&mut scenario, 4);
     let corpses = creatures(&mut scenario, "Walking Corpse", 2, "", ManaColor::Black);
-    scenario.add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR);
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .id();
     let sephara = add_sephara(&mut scenario);
     let mut runner = scenario.build();
-
     assert_eq!(
         verdict(&runner, sephara),
-        engine::game::ReservationVerdict::Rejected
+        engine::game::ReservationVerdict::Witness
     );
-    assert!(!offered(&runner, sephara));
-    let trail = cast(&mut runner, sephara, &ACCEPT_BOTH);
-    assert!(trail.refused, "{:?}", trail.prompts);
-    assert_eq!((zone(&runner, sephara), life(&runner)), (Zone::Hand, 20));
-    assert!(flyers.iter().all(|&f| !runner.state().objects[&f].tapped));
-    assert!(corpses
-        .iter()
-        .all(|&c| zone(&runner, c) == Zone::Battlefield));
+
+    let trail = manual_cast(
+        &mut runner,
+        sephara,
+        &Answers {
+            picks: flyers.clone(),
+            ..ACCEPT_BOTH
+        },
+    );
+    assert_eq!(
+        trail.prompts,
+        ["DefilerPayment", "OptionalCostChoice", "PayCost"]
+    );
+    sacrifice_to_altar(&mut runner, altar, corpses[0]);
+    sacrifice_to_altar(&mut runner, altar, corpses[1]);
+
+    assert!(finish_payment(&mut runner, sephara));
+    assert_eq!((life(&runner), pool(&runner)), (18, 1));
+    assert!(flyers.iter().all(|&f| runner.state().objects[&f].tapped));
 }
 
 /// Zahid with Defiler of Dreams, a Gold token, two Plains and, when `spare`,

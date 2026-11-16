@@ -13110,6 +13110,7 @@ pub(super) fn reserved_assignment_payable(
         } else {
             PausedManaPayment::Unresumable
         },
+        super::mana_sources::CapacityUse::ReservedOffer,
     )
 }
 
@@ -24131,9 +24132,23 @@ pub(crate) fn spell_payment_manual_route(
     if super::casting_costs::cost_has_x(cost) {
         let mut concrete = cost.clone();
         concrete.concretize_x(0);
-        return manual_mana_payment_route(state, player, Some(source_id), &concrete, None);
+        return manual_mana_payment_route(
+            state,
+            player,
+            Some(source_id),
+            &concrete,
+            None,
+            super::mana_sources::CapacityUse::Castability,
+        );
     }
-    manual_mana_payment_route(state, player, Some(source_id), cost, None)
+    manual_mana_payment_route(
+        state,
+        player,
+        Some(source_id),
+        cost,
+        None,
+        super::mana_sources::CapacityUse::Castability,
+    )
 }
 
 /// CR 601.2g-h: Choose the payment mode for an already-prepared spell cost.
@@ -24556,26 +24571,36 @@ fn can_feasibly_pay_mana_cost_without_x_with_probe(
         cost,
         probe,
         PausedManaPayment::Resumable,
+        super::mana_sources::CapacityUse::Castability,
     )
 }
 
 /// CR 601.2f + CR 601.2g-h: [`can_feasibly_pay_mana_cost`] with the paused-Auto
-/// capability explicit: `Unresumable` doesn't count a paused Auto preview as a
-/// payment.
+/// capability explicit (`Unresumable` doesn't count a paused Auto preview as a
+/// payment) and the manual route's capacity estimate named by `capacity_use`.
 pub(super) fn can_feasibly_pay_mana_cost_with_options(
     state: &GameState,
     player: PlayerId,
     source_id: Option<ObjectId>,
     cost: &crate::types::mana::ManaCost,
     paused: PausedManaPayment,
+    capacity_use: super::mana_sources::CapacityUse,
 ) -> bool {
     // CR 107.1b: X = 0 is the cheapest concrete probe, as in the default entry.
     if source_id.is_some() && super::casting_costs::cost_has_x(cost) {
         let mut concrete = cost.clone();
         concrete.concretize_x(0);
-        return feasibly_payable_without_x(state, player, source_id, &concrete, None, paused);
+        return feasibly_payable_without_x(
+            state,
+            player,
+            source_id,
+            &concrete,
+            None,
+            paused,
+            capacity_use,
+        );
     }
-    feasibly_payable_without_x(state, player, source_id, cost, None, paused)
+    feasibly_payable_without_x(state, player, source_id, cost, None, paused, capacity_use)
 }
 
 fn feasibly_payable_without_x(
@@ -24585,6 +24610,7 @@ fn feasibly_payable_without_x(
     cost: &crate::types::mana::ManaCost,
     probe: Option<&PriorityCastProbe>,
     paused: PausedManaPayment,
+    capacity_use: super::mana_sources::CapacityUse,
 ) -> bool {
     // CR 117.1d: Auto-tap path remains the fast path. Anything that can be
     // paid with only `{T}` activations was castable before this predicate
@@ -24616,7 +24642,8 @@ fn feasibly_payable_without_x(
         ) => return true,
     }
 
-    manual_mana_payment_route(state, player, source_id, cost, probe) == ManualPaymentRoute::Feasible
+    manual_mana_payment_route(state, player, source_id, cost, probe, capacity_use)
+        == ManualPaymentRoute::Feasible
 }
 
 /// CR 601.2h: The unpaid part of `cost` once the caster's floating mana is
@@ -24657,6 +24684,7 @@ fn manual_mana_payment_route(
     source_id: Option<ObjectId>,
     cost: &ManaCost,
     probe: Option<&PriorityCastProbe>,
+    capacity_use: super::mana_sources::CapacityUse,
 ) -> ManualPaymentRoute {
     // CR 117.1d + CR 601.2g + CR 605.3a + CR 605.3b: Before the residual approximation
     // rejects the cast for lacking a manually activated non-tap source, prove
@@ -24740,12 +24768,13 @@ fn manual_mana_payment_route(
         .iter()
         .filter(|id| Some(**id) != excluded)
         .map(|&id| {
-            super::mana_sources::feasible_mana_capacity_for_cast(
+            super::mana_sources::cast_mana_capacity(
                 state,
                 id,
                 player,
                 spell_ctx.as_ref(),
                 source_id,
+                capacity_use,
             )
         })
         .sum::<u32>()
