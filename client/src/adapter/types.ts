@@ -1,4 +1,3 @@
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import type {
   InteractionActionId,
   InteractionId,
@@ -812,7 +811,9 @@ export interface ReplayPlayerDeckList {
   contraption_deck: string[];
   sticker_sheets: string[];
   signature_spell: string[];
-  bracket_tier: string;
+  /** `null` when the deck declares no bracket. */
+  bracket_tier: string | null;
+  combo_declaration?: import("../types/bracketEstimate").ComboDeclaration;
   /** The owner's explicit printing choices; display-only. Absent when empty. */
   printings?: DeckPrinting[];
 }
@@ -3152,7 +3153,7 @@ export type WaitingFor =
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore; min_main_deck_size: number; max_sideboard_size: number | null } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "ChooseStartingPlayer"; data: { player: PlayerId; candidates: PlayerId[] } }
-  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" | "PendingEntry" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
+  | { type: "NamedChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" | "PendingEntry" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
@@ -5490,7 +5491,6 @@ export const AdapterErrorCode = {
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   DECK_REJECTED: "DECK_REJECTED",
-  BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
   /**
@@ -6075,15 +6075,6 @@ export interface EngineAdapter {
   exportPersistenceState?(): Promise<string>;
   dispose(): void;
 
-  /**
-   * Estimates a Commander deck's bracket from card contents. Returns null
-   * when the deck has no commander, is empty, or the adapter doesn't
-   * support local deck analysis (multiplayer adapters throw via
-   * `AdapterError` instead of silently returning null).
-   *
-   * Pure — no game state, no side effects. Safe to call on every deck edit.
-   */
-  estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
 }
 
 /**

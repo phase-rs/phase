@@ -3081,7 +3081,8 @@ fn legacy_custom_replay_keeps_its_recorded_commander_predicate() {
         let log: ReplayLog =
             serde_json::from_str(&custom_replay_json(with_uses_commander(&config, stored)))
                 .unwrap_or_else(|err| panic!("stored {stored}: {err}"));
-        let mut player = ReplayPlayer::load(log, None).unwrap();
+        let mut player =
+            ReplayPlayer::load(log, None, &engine::database::ComboTable::default()).unwrap();
         let recorded = &player.seek(0).unwrap().format_config;
         assert_eq!(recorded.uses_commander, expected);
         assert_eq!(recorded.commander_damage_threshold, None);

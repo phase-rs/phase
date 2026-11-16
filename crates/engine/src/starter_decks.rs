@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::game::bracket_estimate::CommanderBracketTier;
+use crate::game::bracket_estimate::{ComboDeclaration, CommanderBracketTier};
 use crate::types::card_printing::DeckPrinting;
 
 /// A deck specified as card name strings — the wire format used by clients
@@ -34,10 +34,16 @@ pub struct DeckData {
     /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker formats.
     #[serde(default)]
     pub signature_spell: Vec<String>,
-    /// Declared bracket tier for this deck. Defaults to `Core` when omitted,
-    /// preserving backward compatibility with older wire payloads.
+    /// The bracket this deck's owner declared. `None` means undeclared — the
+    /// engine then plays the deck at its estimate — and is what older wire
+    /// payloads that omit the field deserialize to.
     #[serde(default)]
-    pub bracket_tier: CommanderBracketTier,
+    pub bracket_tier: Option<CommanderBracketTier>,
+    /// The deck owner's answer to the two-card-infinite-combo barometer. Defaults to
+    /// `Undeclared` when omitted — every payload that predates this field is unanswered,
+    /// which is deliberately NOT the same as a declared absence.
+    #[serde(default)]
+    pub combo_declaration: ComboDeclaration,
     /// The owner's explicit printing choices for this list's cards, keyed by section and
     /// name. Display-only (CR 203.1 + CR 206.1): no deck validator, format gate or
     /// bracket estimator reads it. Absent from the wire when empty, so a name-only deck
@@ -172,6 +178,43 @@ fn starter_to_deck_data(deck: &StarterDeck) -> DeckData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::deck_loading::PlayerDeckList;
+
+    #[test]
+    fn player_deck_list_from_deck_data_round_trips_every_field() {
+        let source = DeckData {
+            main_deck: vec!["Main".to_string()],
+            sideboard: vec!["Side".to_string()],
+            commander: vec!["Commander".to_string()],
+            companion: vec!["Companion".to_string()],
+            attraction_deck: vec!["Attraction".to_string()],
+            planar_deck: vec!["Plane".to_string()],
+            scheme_deck: vec!["Scheme".to_string()],
+            contraption_deck: vec!["Contraption".to_string()],
+            sticker_sheets: vec!["Stickers".to_string()],
+            signature_spell: vec!["Signature".to_string()],
+            bracket_tier: Some(CommanderBracketTier::Optimized),
+            combo_declaration: ComboDeclaration::Intended {
+                window: Some(crate::game::bracket_estimate::ComboWindow::EarlyGame),
+            },
+            printings: Vec::new(),
+        };
+
+        let converted = PlayerDeckList::from(source.clone());
+
+        assert_eq!(converted.main_deck, source.main_deck);
+        assert_eq!(converted.sideboard, source.sideboard);
+        assert_eq!(converted.commander, source.commander);
+        assert_eq!(converted.companion, source.companion);
+        assert_eq!(converted.attraction_deck, source.attraction_deck);
+        assert_eq!(converted.planar_deck, source.planar_deck);
+        assert_eq!(converted.scheme_deck, source.scheme_deck);
+        assert_eq!(converted.contraption_deck, source.contraption_deck);
+        assert_eq!(converted.sticker_sheets, source.sticker_sheets);
+        assert_eq!(converted.signature_spell, source.signature_spell);
+        assert_eq!(converted.bracket_tier, source.bracket_tier);
+        assert_eq!(converted.combo_declaration, source.combo_declaration);
+    }
 
     #[test]
     fn all_starter_decks_have_60_cards() {

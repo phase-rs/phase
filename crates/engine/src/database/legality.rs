@@ -199,7 +199,8 @@ pub enum CedhBracketError {
     /// The deck at `seat_index` was not declared as `Cedh`.
     DeckNotCedh {
         seat_index: u8,
-        actual_tier: CommanderBracketTier,
+        /// The seat's declaration; `None` when the deck declares no bracket.
+        actual_tier: Option<CommanderBracketTier>,
     },
     /// The proposed table has more than 4 seats. cEDH is exclusively played
     /// at 4-player free-for-all tables; the difficulty preset's search
@@ -217,10 +218,13 @@ impl std::fmt::Display for CedhBracketError {
             Self::DeckNotCedh {
                 seat_index,
                 actual_tier,
-            } => write!(
-                f,
-                "seat {seat_index} is not declared cEDH (actual tier: {actual_tier})"
-            ),
+            } => match actual_tier {
+                Some(tier) => write!(
+                    f,
+                    "seat {seat_index} is not declared cEDH (actual tier: {tier})"
+                ),
+                None => write!(f, "seat {seat_index} is not declared cEDH (undeclared)"),
+            },
             Self::TooManyPlayers { count } => {
                 write!(f, "cEDH games are limited to 4 seats (table has {count})")
             }
@@ -269,7 +273,7 @@ pub fn validate_cedh_bracket(decks: &[&PlayerDeckPayload]) -> Result<(), CedhBra
         });
     }
     for (idx, deck) in decks.iter().enumerate() {
-        if deck.bracket_tier != CommanderBracketTier::Cedh {
+        if deck.bracket_tier != Some(CommanderBracketTier::Cedh) {
             return Err(CedhBracketError::DeckNotCedh {
                 // Seat count is bounded by the guard above.
                 seat_index: idx as u8,
@@ -362,14 +366,14 @@ mod cedh_bracket_tests {
 
     fn cedh_deck() -> PlayerDeckPayload {
         PlayerDeckPayload {
-            bracket_tier: CommanderBracketTier::Cedh,
+            bracket_tier: Some(CommanderBracketTier::Cedh),
             ..Default::default()
         }
     }
 
     fn non_cedh_deck(tier: CommanderBracketTier) -> PlayerDeckPayload {
         PlayerDeckPayload {
-            bracket_tier: tier,
+            bracket_tier: Some(tier),
             ..Default::default()
         }
     }
@@ -394,7 +398,7 @@ mod cedh_bracket_tests {
             result,
             Err(CedhBracketError::DeckNotCedh {
                 seat_index: 1,
-                actual_tier: CommanderBracketTier::Optimized,
+                actual_tier: Some(CommanderBracketTier::Optimized),
             })
         );
     }
@@ -417,7 +421,7 @@ mod cedh_bracket_tests {
             result,
             Err(CedhBracketError::DeckNotCedh {
                 seat_index: 0,
-                actual_tier: CommanderBracketTier::Core,
+                actual_tier: Some(CommanderBracketTier::Core),
             })
         );
     }
@@ -454,7 +458,7 @@ mod cedh_bracket_tests {
     fn cedh_bracket_error_display_includes_seat_and_tier() {
         let err = CedhBracketError::DeckNotCedh {
             seat_index: 2,
-            actual_tier: CommanderBracketTier::Upgraded,
+            actual_tier: Some(CommanderBracketTier::Upgraded),
         };
         let msg = err.to_string();
         assert!(
@@ -476,7 +480,7 @@ mod cedh_gate_tests {
 
     fn deck(tier: CommanderBracketTier) -> PlayerDeckPayload {
         PlayerDeckPayload {
-            bracket_tier: tier,
+            bracket_tier: Some(tier),
             ..Default::default()
         }
     }

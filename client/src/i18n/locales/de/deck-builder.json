@@ -265,16 +265,96 @@
     "clearOverride": "Artwork-Überschreibung aufheben"
   },
   "bracket": {
-    "unavailable": "Die Bracket-Schätzung ist in diesem Build nicht verfügbar.",
+    "card": {
+      "estimatedLabel": "Geschätztes Bracket",
+      "tierName": "B{{tier}} {{label}}",
+      "tierShort": "B{{tier}}",
+      "declaredNone": "Angegeben: keins",
+      "declared": "Angegeben: B{{tier}} {{label}}",
+      "youMarker": "Du",
+      "belowFloor": "Du hast B{{declared}} angegeben, aber dieses Deck kann nicht unter B{{floor}} liegen. Die KI spielt dein angegebenes B{{declared}}.",
+      "partialCoverage_one": "{{count}} Kartenname wurde nicht gefunden; die Zählungen könnten zu niedrig sein",
+      "partialCoverage_few": "{{count}} Kartennamen wurden nicht gefunden; die Zählungen könnten zu niedrig sein",
+      "partialCoverage_many": "{{count}} Kartennamen wurden nicht gefunden; die Zählungen könnten zu niedrig sein",
+      "partialCoverage_other": "{{count}} Kartennamen wurden nicht gefunden; die Zählungen könnten zu niedrig sein",
+      "combosUnchecked": "Zwei-Karten-Kombos wurden in diesem Build nicht geprüft. Beantworte die Kombo-Frage oben, um sie einzubeziehen.",
+      "tabsLabel": "Bracket-Details",
+      "tabWhy": "Warum B{{tier}}",
+      "tabBringDown": "Herunterstufen",
+      "commanderTag": "Kommandeur",
+      "listComma": ", ",
+      "listOr": " oder ",
+      "why": {
+        "nothingRaises": "Nichts in diesem Deck hebt es über B2, wo jede Schätzung beginnt.",
+        "rulesOutB1": "Diese schließen die Angabe von B1 aus:"
+      },
+      "reason": {
+        "cardRule": "{{axis}}: {{count}}",
+        "comboStandalone": "Zwei-Karten-Kombo",
+        "comboEarly": "Frühe Zwei-Karten-Kombo",
+        "ownerAnswer": "Deine Kombo-Antwort",
+        "ownerIntended": "Du hast angegeben, dass dieses Deck eine beabsichtigte Zwei-Karten-Kombo enthält.",
+        "ownerIntendedEarly": "Du hast angegeben, dass dieses Deck eine frühe Zwei-Karten-Kombo enthält.",
+        "ownerIntendedLate": "Du hast angegeben, dass dieses Deck eine Zwei-Karten-Kombo enthält, die erst spät zusammenkommt.",
+        "comboFromTable": "(Kombo)"
+      },
+      "combo": {
+        "assembles": "wird für {{cost}} Mana zusammengesetzt"
+      },
+      "explain": {
+        "cardRule": "B{{tier}} erlaubt bis zu {{allowed}}; dieses Deck hat {{observed}}.",
+        "cardRuleNone": "B{{tier}} erlaubt keine; dieses Deck hat {{observed}}.",
+        "comboStandalone": "B1 und B2 erlauben keine beabsichtigten unendlichen Zwei-Karten-Kombos.",
+        "comboEarly": "B3 erlaubt Zwei-Karten-Kombos nur, wenn sie erst spät zusammenkommen (mehr als {{ceiling}} Mana).",
+        "ownerAnswer": "phase kann diese Antwort nicht prüfen; es verwendet deine Angabe. Ändere sie in der Kombo-Frage oben."
+      },
+      "source": "{{document}}, {{published}} ↗",
+      "ladder": {
+        "removeAll_one": "Entferne sie:",
+        "removeAll_few": "Entferne alle {{count}}:",
+        "removeAll_many": "Entferne alle {{count}}:",
+        "removeAll_other": "Entferne alle {{count}}:",
+        "removeSome_one": "Entferne {{count}} von:",
+        "removeSome_few": "Entferne {{count}} von:",
+        "removeSome_many": "Entferne {{count}} von:",
+        "removeSome_other": "Entferne {{count}} von:",
+        "breakCombo": "Die Kombo aufbrechen",
+        "removeOneOf": "Entferne eine von:",
+        "removeThis": "Entferne:",
+        "replaceCommander_one": "Für ein niedrigeres Bracket braucht es außerdem einen anderen Kommandeur:",
+        "replaceCommander_few": "Für ein niedrigeres Bracket braucht es außerdem {{count}} andere Kommandeure:",
+        "replaceCommander_many": "Für ein niedrigeres Bracket braucht es außerdem {{count}} andere Kommandeure:",
+        "replaceCommander_other": "Für ein niedrigeres Bracket braucht es außerdem {{count}} andere Kommandeure:",
+        "changeComboAnswer": "Ändere deine Kombo-Antwort in der Frage oben.",
+        "footnote": "B2 ist die Untergrenze der Schätzung; B1 hängt vom Decktheme ab."
+      }
+    },
+    "unavailable": "Für die Bracket-Schätzung werden Kartendaten benötigt, die noch nicht geladen wurden.",
     "addCommander": "Füge einen Kommandeur hinzu, um deine Bracket-Schätzung zu sehen.",
-    "estimated": "Geschätzt: B{{tier}} {{label}}",
-    "manual": "Manuell: B{{tier}} {{label}}",
-    "mismatch": " ⚠ Abweichung",
-    "hideBreakdown": "Aufschlüsselung ausblenden",
-    "showBreakdown": "Aufschlüsselung anzeigen",
-    "hideBreakdownButton": "▲ Aufschlüsselung ausblenden",
-    "showBreakdownButton": "▼ Aufschlüsselung anzeigen",
-    "forced": "(erzwungen B{{tier}})",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Massenhafte Landzerstörung",
+      "extraTurns": "Extrazüge",
+      "efficientTutors": "Effiziente Tutoren"
+    },
+    "combo": {
+      "attribution": "Kombo-Daten: {{attribution}}, Stand {{date}}",
+      "outcome": {
+        "wins": "Gewinnt das Spiel",
+        "unbounded": "Unbegrenzt: {{resource}}"
+      },
+      "resource": {
+        "mana": "Mana",
+        "damage": "Schaden",
+        "lifeLoss": "Lebenspunkteverlust",
+        "lifegain": "Lebenspunktegewinn",
+        "mill": "Mühlen",
+        "draw": "Kartenziehen",
+        "tokens": "Spielsteine",
+        "combat": "Kampfphasen",
+        "turns": "Züge"
+      }
+    },
     "dataVersion": "Daten: {{version}}",
     "aboutBrackets": "Über Brackets ↗",
     "estimatedChip": "Geschätzt: B{{tier}}",
@@ -285,6 +365,37 @@
   "bracketPicker": {
     "ariaLabel": "Deck-Bracket",
     "unrated": "Unbewertet"
+  },
+  "signals": {
+    "title": "Deck-Signale",
+    "disclaimer": "Beschreibende Statistiken aus dem analysierten Kartentext des Decks. Sie sind keine Bracket-Kriterien und ändern die Schätzung nie.",
+    "avgManaValue": "Durchschnittlicher Manawert (Nichtländer): {{value}}",
+    "notMeasurable": "nicht messbar",
+    "noCommander": "Füge einen Commander hinzu, um Deck-Signale zu sehen.",
+    "unavailable": "Deck-Signale benötigen Kartendaten, die noch nicht geladen wurden.",
+    "unresolved": "{{n}} Kartennamen wurden in den Kartendaten nicht gefunden.",
+    "kind": {
+      "counterspells": "Gegenzauber",
+      "spot_removal": "Gezielte Entfernung",
+      "sweepers": "Massenentfernung",
+      "card_advantage": "Kartenvorteil",
+      "free_interaction": "Kostenlose Interaktion",
+      "mana_producers": "Manaproduzenten",
+      "land_fetch": "Landsuche",
+      "rituals": "Rituale",
+      "extra_land_drops": "Zusätzliche Länder pro Zug"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Unendliche Zwei-Karten-Kombo",
+    "question": "Beabsichtigte unendliche Zwei-Karten-Kombo?",
+    "undeclared": "Nicht beantwortet",
+    "noneIntended": "Keine beabsichtigt",
+    "intended": "Beabsichtigt",
+    "windowAriaLabel": "Wann kann sie zusammengestellt werden?",
+    "windowUnstated": "Nicht angegeben",
+    "windowEarly": "Frühes Spiel",
+    "windowLate": "Nur spätes Spiel"
   },
   "warnings": {
     "commanderCount": "Das Deck hat {{count}} Karten (genau {{expected}} erforderlich)",

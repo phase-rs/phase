@@ -696,6 +696,7 @@ impl EventObjectSnapshot {
             | TargetFilter::AmassedArmy
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
             | TargetFilter::CastingSpell
@@ -828,6 +829,9 @@ impl EventObjectSnapshot {
             // CR 702.122c: the crew ledger is keyed by the subject's own
             // incarnation, which the snapshot carries (look-back arm in filter.rs).
             FilterProp::CrewedThisTurn { .. } => Supported,
+            // CR 701.14a: the fight ledger is keyed by the subject's own
+            // incarnation, which the snapshot carries (look-back arm in filter.rs).
+            FilterProp::FoughtThisTurn => Supported,
 
             // ---- embedded per-turn history ----
             FilterProp::WasDealtDamageThisTurn
@@ -1602,6 +1606,12 @@ pub enum GameEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         subject: Option<Box<EventObjectSnapshot>>,
     },
+    /// CR 701.3a + CR 603.2e: An Aura, Equipment, or Fortification became attached
+    /// to an object or player.
+    Attached {
+        attachment_id: ObjectId,
+        target: TargetRef,
+    },
     /// CR 701.3d: An Aura, Equipment, or Fortification became unattached from
     /// the object or player it was attached to.
     Unattached {
@@ -1635,14 +1645,23 @@ pub enum GameEvent {
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
     },
-    /// CR 509.3c: An effect or entering blocker changed an unblocked attacker
-    /// into a blocked attacker. Only the bare "becomes blocked" form consumes
-    /// this first-transition event.
+    /// CR 509.3c + CR 509.3e: An attacker-side becomes-blocked occurrence whose
+    /// referent is the ATTACKER. Raw form: an effect or an entering blocker
+    /// changed an unblocked attacker into a blocked attacker (the CR 509.3c
+    /// first transition; only the bare form consumes it). Narrowed form: a
+    /// `BecomesBlocked` trigger's CR 509.3e blocker-count crossing, emitted by
+    /// the matcher as the firing's context.
     /// CR 509.3d + CR 509.4: It carries no blocker identity and never fires
     /// qualified "becomes blocked by" or blocker-side "blocks" abilities; an
     /// entering blocker supplies a separate per-creature event below.
-    AttackerBecameBlockedByEffect {
+    #[serde(alias = "AttackerBecameBlockedByEffect")]
+    AttackerBecameBlocked {
         attacker: ObjectId,
+        /// CR 400.7 + CR 608.2k: the attacker's incarnation when it became
+        /// blocked, stamped by the emitter. `None` on legacy events, which
+        /// cannot discriminate a later object at the same id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attacker_incarnation: Option<u64>,
     },
     /// CR 509.3d: An attacker-side, qualified `BecomesBlocked` or
     /// `BlocksOrBecomesBlocked` occurrence, from declaration or an entering
