@@ -1799,13 +1799,13 @@ mod tests {
             .as_mut()
             .expect("test grandchild exists")
             .context
-            .direct_discard_result = Some(result.clone());
+            .direct_discard_result = Some(Box::new(result.clone()));
         direct_child
             .else_ability
             .as_mut()
             .expect("test else branch exists")
             .context
-            .direct_discard_result = Some(result.clone());
+            .direct_discard_result = Some(Box::new(result.clone()));
         let continuation = PendingContinuation::new(Box::new(direct_child), &state);
         state.park_ability_continuation(continuation);
 
