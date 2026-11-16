@@ -10191,7 +10191,7 @@ fn as_enters_roller(roll: &GameEvent) -> Option<ObjectId> {
         | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }

@@ -4436,7 +4436,7 @@ pub(crate) fn is_entry_event_of(event: &GameEvent, source_id: ObjectId) -> bool 
         | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
@@ -4603,7 +4603,7 @@ fn parked_event_holds(parked: &GameEvent, event: &GameEvent) -> bool {
         | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
@@ -5046,7 +5046,7 @@ fn parked_entry_is_of_incarnation(event: &GameEvent, entrant: ObjectIncarnationR
             | GameEvent::ContinuousEffectEnded { .. }
             | GameEvent::AttackersDeclared { .. }
             | GameEvent::BlockersDeclared { .. }
-            | GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlocked { .. }
             | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
             | GameEvent::CombatTaxPaid { .. }
             | GameEvent::CombatTaxDeclined { .. }
@@ -5527,7 +5527,7 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
             | GameEvent::ContinuousEffectEnded { .. }
             | GameEvent::AttackersDeclared { .. }
             | GameEvent::BlockersDeclared { .. }
-            | GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlocked { .. }
             | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
             | GameEvent::CombatTaxPaid { .. }
             | GameEvent::CombatTaxDeclined { .. }
@@ -5685,7 +5685,7 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
         | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
