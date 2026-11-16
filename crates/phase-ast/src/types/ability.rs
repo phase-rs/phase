@@ -7048,8 +7048,7 @@ pub enum FilterProp {
     /// In zone-change record evaluation (e.g., `restrictions.rs` entry snapshots),
     /// and in spell-cost reduction predicates (e.g., `casting.rs` cost filters),
     /// the check is source-relative only — no recipient context is available there.
-    /// Used for "another [type]" predicates (CR 109.1) and per-recipient layer
-    /// contexts (CR 613.4c).
+    /// Used for "another [type]" predicates and per-recipient evaluation contexts.
     Another,
     /// CR 702.95b: Matches objects that are not paired with another creature.
     Unpaired,
@@ -20016,9 +20015,9 @@ pub enum AdditionalCost {
         )]
         repeatability: AdditionalCostRepeatability,
     },
-    /// "[cost A] or [cost B] or [cost C]..." — player must pay exactly one.
+    /// "[cost A] or [cost B]" — player must pay exactly one.
     /// Choosing the first cost sets `additional_cost_paid = true`.
-    Choice(Vec<AbilityCost>),
+    Choice(AbilityCost, AbilityCost),
     /// Mandatory additional cost (e.g., "As an additional cost, waterbend {5}").
     Required(AbilityCost),
 }

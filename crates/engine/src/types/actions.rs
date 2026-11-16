@@ -501,6 +501,9 @@ pub enum GameAction {
     SelectModes {
         indices: Vec<usize>,
     },
+    /// CR 601.2b + CR 601.2f: Caster submits their decision on an optional additional cost.
+    /// `pay: true` pays the cost; `pay: false` declines and proceeds to the total cost
+    /// (for kicker/casualty) or selects the fallback cost (for "X or pay Y" choices).
     DecideOptionalCost {
         pay: bool,
     },

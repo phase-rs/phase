@@ -1251,7 +1251,7 @@ impl<'a> PlannerServices<'a> {
             state.waiting_for,
             engine::types::game_state::WaitingFor::Priority { .. }
         );
-        // DecideOptionalCost { pay: false } is always legal — declining an optional
+        // DecideOptionalCost { choice_index: 1 } is always legal — declining an optional
         // cost cannot fail since it just proceeds with the base cost.
         let is_optional_cost = matches!(
             state.waiting_for,
@@ -1260,7 +1260,7 @@ impl<'a> PlannerServices<'a> {
         match &candidate.action {
             engine::types::actions::GameAction::PassPriority if pass_always_valid => true,
             engine::types::actions::GameAction::ChooseTarget { .. } => true,
-            engine::types::actions::GameAction::DecideOptionalCost { pay: false }
+            engine::types::actions::GameAction::DecideOptionalCost { choice_index: 1 }
                 if is_optional_cost =>
             {
                 true
@@ -3595,7 +3595,7 @@ pub(crate) mod tests {
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { choice_index: 0 })
             .expect("paying the behold cost must be accepted");
         let state = runner.state().clone();
         match &state.waiting_for {

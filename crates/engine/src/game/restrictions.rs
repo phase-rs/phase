@@ -424,11 +424,15 @@ pub(crate) fn battlefield_entry_record_for(
         // for an attached token). See the field doc on `BattlefieldEntryRecord.keywords`.
         keywords: obj.keywords.clone(),
         controller: obj.controller,
-        // CR 708.2: snapshot the object's face-down status at entry time — morph,
+        // CR 708.2: snapshot the object's face state at entry time — morph,
         // disguise, manifest, and cloak creatures enter face down. This enables
         // data-driven ETB condition queries like "if a face-down creature entered
         // the battlefield under your control this turn" (Tunnel Tipster).
-        face_down: obj.face_down,
+        face_state: if obj.face_down {
+            crate::types::game_state::FaceState::FaceDown
+        } else {
+            crate::types::game_state::FaceState::FaceUp
+        },
     }
 }
 
@@ -554,7 +558,9 @@ pub(crate) fn battlefield_entry_matches_filter(
                 // entered this turn" (Tunnel Tipster). The entry snapshot captures
                 // whether the object was face down when it entered (morph, disguise,
                 // manifest, cloak), before any turn-face-up replacement applies.
-                FilterProp::FaceDown => record.face_down,
+                FilterProp::FaceDown => {
+                    matches!(record.face_state, crate::types::game_state::FaceState::FaceDown)
+                }
                 // CR 109.1: "another [type]" is a same-object identity check —
                 // excludes the ability's own source object (e.g. Flying Drone's
                 // "another creature with flying entered this turn"). Mirrors the
@@ -3051,7 +3057,7 @@ mod tests {
             colors: vec![],
             keywords: vec![],
             controller: PlayerId(0),
-            face_down: false,
+            face_state: crate::types::game_state::FaceState::FaceUp,
         };
 
         assert!(
@@ -3324,7 +3330,7 @@ mod tests {
                 colors: vec![ManaColor::Green],
                 keywords: vec![],
                 controller: PlayerId(1),
-                face_down: false,
+                face_state: crate::types::game_state::FaceState::FaceUp,
             });
         let mut filter = crate::types::ability::TypedFilter::creature();
         filter.controller = Some(ControllerRef::Opponent);
@@ -3394,7 +3400,7 @@ mod tests {
                             colors: vec![],
                             keywords: vec![],
                             controller: *controller,
-                            face_down: false,
+                            face_state: crate::types::game_state::FaceState::FaceUp,
                         });
                     next_id += 1;
                 }
@@ -5342,7 +5348,7 @@ mod tests {
             colors: vec![ManaColor::Green],
             keywords: vec![Keyword::Flying],
             controller: player,
-            face_down: false,
+            face_state: crate::types::game_state::FaceState::FaceUp,
         };
         let typed = |properties: Vec<FilterProp>, controller: Option<ControllerRef>| {
             TargetFilter::Typed(crate::types::ability::TypedFilter {
@@ -5387,7 +5393,7 @@ mod tests {
             colors: vec![],
             keywords: vec![],
             controller: player,
-            face_down: true,
+            face_state: crate::types::game_state::FaceState::FaceDown,
         };
         let face_down_filter = typed(vec![FilterProp::FaceDown], None);
         assert!(ledger_filter_is_evaluable(&face_down_filter));

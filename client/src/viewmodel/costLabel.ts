@@ -671,12 +671,12 @@ export function formatAbilityCost(cost: SerializedAbilityCost): string {
 }
 
 /**
- * A single option in the OptionalCostChoice modal. `pay` maps to
- * `DecideOptionalCost { pay: true }`, `decline` to `{ pay: false }`. The two
- * `id`s are stable so `OptionalCostModal` can dispatch the right action.
+ * A single option in the OptionalCostChoice modal. `index` maps to
+ * `DecideOptionalCost { choice_index: index }`. The index is stable so
+ * `OptionalCostModal` can dispatch the right action.
  */
 export interface AdditionalCostOption {
-  id: "pay" | "decline";
+  index: number;
   label: string;
   description?: string;
 }
@@ -702,9 +702,9 @@ export function additionalCostChoices(
           return {
             title: `Additional cost — paid ${timesKicked}×. Pay ${label} again?`,
             options: [
-              { id: "pay", label: `Pay ${label} again` },
+              { index: 0, label: `Pay ${label} again` },
               {
-                id: "decline",
+                index: 1,
                 label: `Done — finish casting (paid ${timesKicked}×)`,
                 description: "Stop paying this additional cost and pay the total cost.",
               },
@@ -715,12 +715,12 @@ export function additionalCostChoices(
           title: `Pay additional cost: ${label}?`,
           options: [
             {
-              id: "pay",
+              index: 0,
               label: `Pay ${label}`,
               description: "You'll be asked again so you can pay it multiple times.",
             },
             {
-              id: "decline",
+              index: 1,
               label: "Cast without paying",
               description: "Finish casting now with 0 payments.",
             },
@@ -730,8 +730,8 @@ export function additionalCostChoices(
       return {
         title: `Pay additional cost: ${label}?`,
         options: [
-          { id: "pay", label: `Pay ${label}` },
-          { id: "decline", label: "Skip" },
+          { index: 0, label: `Pay ${label}` },
+          { index: 1, label: "Skip" },
         ],
       };
     }
@@ -744,9 +744,9 @@ export function additionalCostChoices(
         return {
           title: `Multikicker — kicked ${timesKicked}×. Pay ${label} again?`,
           options: [
-            { id: "pay", label: `Pay ${label} — kick again` },
+            { index: 0, label: `Pay ${label} — kick again` },
             {
-              id: "decline",
+              index: 1,
               label: `Done — finish casting (kicked ${timesKicked}×)`,
               description: "Stop kicking and pay the total cost.",
             },
@@ -761,14 +761,14 @@ export function additionalCostChoices(
           : `Kicker — pay ${label} to kick this spell?`,
         options: [
           {
-            id: "pay",
+            index: 0,
             label: `Pay ${label} — kick it`,
             description: repeatable
               ? "Adds a kicker. You'll be asked again so you can kick multiple times."
               : "Adds a kicker to this spell.",
           },
           {
-            id: "decline",
+            index: 1,
             label: "Cast without kicking",
             description: "Finish casting now with 0 kickers — the spell still resolves.",
           },
@@ -779,18 +779,20 @@ export function additionalCostChoices(
       return {
         title: `Pay additional cost: ${formatAbilityCost(cost.data)}`,
         options: [
-          { id: "pay", label: `Pay ${formatAbilityCost(cost.data)}` },
-          { id: "decline", label: "Cancel" },
+          { index: 0, label: `Pay ${formatAbilityCost(cost.data)}` },
+          { index: 1, label: "Cancel" },
         ],
       };
-    case "Choice":
+    case "Choice": {
+      const choices = cost.data as SerializedAbilityCost[];
       return {
         title: "Choose additional cost",
-        options: [
-          { id: "pay", label: formatAbilityCost(cost.data[0]) },
-          { id: "decline", label: formatAbilityCost(cost.data[1]) },
-        ],
+        options: choices.map((choice, index) => ({
+          index,
+          label: formatAbilityCost(choice),
+        })),
       };
+    }
   }
 }
 

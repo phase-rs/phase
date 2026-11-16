@@ -6399,10 +6399,9 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
                     build_cost_item(cost, items);
                 }
             }
-            AdditionalCost::Choice(costs) => {
-                for cost in costs {
-                    build_cost_item(cost, items);
-                }
+            AdditionalCost::Choice(cost_a, cost_b) => {
+                build_cost_item(cost_a, items);
+                build_cost_item(cost_b, items);
             }
         }
         return;
@@ -6425,7 +6424,7 @@ fn build_additional_cost_items(additional_cost: &AdditionalCost, items: &mut Vec
             }
         }
         AdditionalCost::Required(_) => "AdditionalCost:Required",
-        AdditionalCost::Choice(_) => "AdditionalCost:Choice",
+        AdditionalCost::Choice(_, _) => "AdditionalCost:Choice",
     };
     items.push(ParsedItem {
         category: ParseCategory::Cost,
@@ -6453,8 +6452,8 @@ fn additional_cost_has_unimplemented(additional_cost: &AdditionalCost) -> bool {
         AdditionalCost::Kicker { costs, .. } => {
             costs.iter().any(AbilityCost::contains_unimplemented)
         }
-        AdditionalCost::Choice(costs) => {
-            costs.iter().any(AbilityCost::contains_unimplemented)
+        AdditionalCost::Choice(cost_a, cost_b) => {
+            cost_a.contains_unimplemented() || cost_b.contains_unimplemented()
         }
     }
 }
@@ -8949,10 +8948,9 @@ fn collect_additional_cost_missing_parts(
                 collect_ability_cost_missing_parts(cost, missing);
             }
         }
-        AdditionalCost::Choice(costs) => {
-            for cost in costs {
-                collect_ability_cost_missing_parts(cost, missing);
-            }
+        AdditionalCost::Choice(cost_a, cost_b) => {
+            collect_ability_cost_missing_parts(cost_a, missing);
+            collect_ability_cost_missing_parts(cost_b, missing);
         }
     }
 }
@@ -11196,8 +11194,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         // (`extract_trigger_condition_features`, called from `extract_trigger_features` and,
         // for delayed definitions, from `extract_ability_features_with_token_statics`),
         // `repeat_for`, and effect positions. Tunnel Tipster's intervening-if reads
-        // `FilterProp::FaceDown`, which the entry record cannot answer, so this arm marks it
-        // unsupported. Measure the walked positions with
+        // `FilterProp::FaceDown`, which the entry record NOW answers (FaceState enum),
+        // so this arm marks it Handled. Measure the walked positions with
         // `cargo run --profile tool --bin coverage-report -- data --all`.
         QuantityRef::BattlefieldEntriesThisTurn { filter, .. } => (
             "BattlefieldEntriesThisTurn",
@@ -22414,15 +22412,16 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     /// T22 (Step 7c). `battlefield_entry_matches_filter` fails closed on the
     /// `FilterProp`s the entry snapshot never captured, so a ledger read over one
     /// of them resolves a silent constant 0. The classifier must stop calling that
-    /// `Handled`. Case (a) is Tunnel Tipster's real live *filter shape* (its
-    /// intervening-if carries `FilterProp::FaceDown`, so its trigger can never fire).
-    /// This test drives `quantity_ref_feature` directly; the classifier now also
-    /// reaches Tunnel Tipster's trigger intervening-if through
-    /// `extract_trigger_condition_features`, which
-    /// `trigger_condition_walk_marks_tunnel_tipster_unsupported` proves end to end.
+    /// `Handled`. The entry snapshot NOW captures `FaceDown` (FaceState enum), so
+    /// Tunnel Tipster's intervening-if is answerable. Case (a) uses `NonToken`
+    /// which the entry snapshot cannot answer. This test drives
+    /// `quantity_ref_feature` directly; the classifier now also reaches Tunnel
+    /// Tipster's trigger intervening-if through `extract_trigger_condition_features`,
+    /// which `trigger_condition_walk_marks_tunnel_tipster_unsupported` proves is
+    /// now Handled end to end.
     ///
-    /// REVERT-PROBE: restore the unconditional `Handled` arm → (a) and (d) FAIL;
-    /// (b)/(c) pass in both builds and are the vacuity controls.
+    /// REVERT-PROBE: remove `FaceDown` from `ledger_filter_is_evaluable` allow-list
+    /// → (a) and (d) FAIL; (b)/(c) pass in both builds and are the vacuity controls.
     #[test]
     fn ledger_ref_feature_is_unhandled_when_filter_is_unevaluable() {
         let ledger = |properties: Vec<FilterProp>| QuantityRef::BattlefieldEntriesThisTurn {
@@ -22434,11 +22433,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             }),
         };
 
-        // (a) Tunnel Tipster's shape — unanswerable from the entry record.
+        // (a) NonToken is unanswerable from the entry record (FaceDown IS answerable now).
         assert_eq!(
-            quantity_ref_feature(&ledger(vec![FilterProp::FaceDown])),
+            quantity_ref_feature(&ledger(vec![FilterProp::NonToken])),
             ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
-            "(a) FaceDown is not answerable from a BattlefieldEntryRecord"
+            "(a) NonToken is not answerable from a BattlefieldEntryRecord"
         );
         // (b)/(c) vacuity controls — the feature stays Handled for evaluable filters.
         assert_eq!(
@@ -22451,15 +22450,15 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                 color: ManaColor::Green
             }])),
             ("BattlefieldEntriesThisTurn", FeatureSupport::Handled),
-            "(c) HasColor is one of the four props the matcher answers"
+            "(c) HasColor is one of the props the matcher answers"
         );
         // (d) composite recursion — one unanswerable leaf poisons the whole read.
         let QuantityRef::BattlefieldEntriesThisTurn { filter: bare, .. } = ledger(vec![]) else {
             unreachable!()
         };
         let QuantityRef::BattlefieldEntriesThisTurn {
-            filter: face_down, ..
-        } = ledger(vec![FilterProp::FaceDown])
+            filter: non_token, ..
+        } = ledger(vec![FilterProp::NonToken])
         else {
             unreachable!()
         };
@@ -22467,7 +22466,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             quantity_ref_feature(&QuantityRef::BattlefieldEntriesThisTurn {
                 player: PlayerScope::Controller,
                 filter: TargetFilter::Or {
-                    filters: vec![bare, face_down]
+                    filters: vec![bare, non_token]
                 },
             }),
             ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
@@ -22479,8 +22478,8 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     // -----------------------------------------------------------------------
     // F2: condition-quantity walks and the sticky feature merge. Every real-card
     // row parses verbatim Oracle text; hostile rows mutate the parsed real shape
-    // (one ledger filter given `FilterProp::FaceDown`, or the parsed leaf wrapped
-    // in a compound), never a free-hand AST.
+    // (one ledger filter given an unevaluable prop like `FilterProp::NonToken`,
+    // or the parsed leaf wrapped in a compound), never a free-hand AST.
     // -----------------------------------------------------------------------
 
     const TUNNEL_TIPSTER_ORACLE: &str = "At the beginning of your end step, if a face-down creature entered the battlefield under your control this turn, put a +1/+1 counter on this creature.\n{T}: Add {G}.";
@@ -22521,11 +22520,11 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .collect()
     }
 
-    /// Gives a ledger read `FilterProp::FaceDown`, which the entry record cannot
-    /// answer. Returns how many ledger reads it mutated; each one is asserted to
-    /// have been evaluable before (the reach guard that the parse produced the
-    /// shape the row assumes).
-    fn face_down_ledger(qty: &mut QuantityExpr) -> usize {
+    /// Gives a ledger read an unevaluable `FilterProp` (e.g., `NonToken`). Returns
+    /// how many ledger reads it mutated; each one is asserted to have been
+    /// evaluable before (the reach guard that the parse produced the shape the
+    /// row assumes).
+    fn unevaluable_ledger(qty: &mut QuantityExpr) -> usize {
         match qty {
             QuantityExpr::Ref {
                 qty:
@@ -22538,40 +22537,40 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
                     !typed
                         .properties
                         .iter()
-                        .any(|prop| matches!(prop, FilterProp::FaceDown)),
+                        .any(|prop| matches!(prop, FilterProp::NonToken)),
                     "the parsed ledger read must start evaluable"
                 );
-                typed.properties.push(FilterProp::FaceDown);
+                typed.properties.push(FilterProp::NonToken);
                 1
             }
             _ => 0,
         }
     }
 
-    fn face_down_ability_condition(cond: &mut AbilityCondition) -> usize {
+    fn unevaluable_ability_condition(cond: &mut AbilityCondition) -> usize {
         match cond {
             AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
-                face_down_ledger(lhs) + face_down_ledger(rhs)
+                unevaluable_ledger(lhs) + unevaluable_ledger(rhs)
             }
-            AbilityCondition::ConditionInstead { inner } => face_down_ability_condition(inner),
-            AbilityCondition::Not { condition } => face_down_ability_condition(condition),
+            AbilityCondition::ConditionInstead { inner } => unevaluable_ability_condition(inner),
+            AbilityCondition::Not { condition } => unevaluable_ability_condition(condition),
             AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
-                conditions.iter_mut().map(face_down_ability_condition).sum()
+                conditions.iter_mut().map(unevaluable_ability_condition).sum()
             }
             _ => 0,
         }
     }
 
-    fn face_down_trigger_condition(cond: &mut TriggerCondition) -> usize {
+    fn unevaluable_trigger_condition(cond: &mut TriggerCondition) -> usize {
         match cond {
             TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
-                face_down_ledger(lhs) + face_down_ledger(rhs)
+                unevaluable_ledger(lhs) + unevaluable_ledger(rhs)
             }
             TriggerCondition::Not { condition } | TriggerCondition::EventTime { condition } => {
-                face_down_trigger_condition(condition)
+                unevaluable_trigger_condition(condition)
             }
             TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
-                conditions.iter_mut().map(face_down_trigger_condition).sum()
+                conditions.iter_mut().map(unevaluable_trigger_condition).sum()
             }
             _ => 0,
         }
@@ -22623,7 +22622,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         )
     }
 
-    /// Tunnel Tipster's parsed intervening-if leaf (a `FaceDown` ledger read).
+    /// Tunnel Tipster's parsed intervening-if leaf (a ledger read with `FaceDown`).
     fn tunnel_tipster_leaf() -> TriggerCondition {
         let face = tunnel_tipster_face();
         let leaf = face.triggers[0]
@@ -22743,7 +22742,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         let StaticCondition::QuantityComparison { lhs, rhs, .. } = condition else {
             panic!("Armory Mice's condition must be a quantity comparison, got {condition:?}");
         };
-        assert_eq!(face_down_ledger(lhs) + face_down_ledger(rhs), 1);
+        assert_eq!(unevaluable_ledger(lhs) + unevaluable_ledger(rhs), 1);
 
         let features_with = |statics: Vec<StaticDefinition>| {
             let mut face = mice.clone();
@@ -22783,7 +22782,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             .condition
             .as_mut()
             .expect("found by condition");
-        assert_eq!(face_down_ability_condition(condition), 1);
+        assert_eq!(unevaluable_ability_condition(condition), 1);
 
         // Ability condition Unhandled, then trigger condition Handled (Zimone).
         let mut first = blaze_unhandled;
@@ -22894,7 +22893,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             panic!("Searing Blaze parses a ConditionInstead condition");
         };
         let mut leaf = *inner;
-        assert_eq!(face_down_ability_condition(&mut leaf), 1);
+        assert_eq!(unevaluable_ability_condition(&mut leaf), 1);
 
         let cases = [
             (
@@ -22942,15 +22941,16 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     }
 
     /// V6. Tunnel Tipster's intervening-if reads "a face-down creature entered
-    /// … this turn", which the entry ledger cannot answer, so its trigger can
-    /// never fire. The trigger-condition walk now reports it.
-    /// REVERT-PROBE: drop the walk from `extract_trigger_features` → supported.
+    /// … this turn". The entry ledger NOW captures face-down state (FaceState enum),
+    /// so its trigger CAN fire and the card is fully supported.
+    /// REVERT-PROBE: remove `FaceDown` from `ledger_filter_is_evaluable` allow-list
+    /// → unsupported with LEDGER_GAP.
     #[test]
-    fn trigger_condition_walk_marks_tunnel_tipster_unsupported() {
+    fn trigger_condition_walk_marks_tunnel_tipster_supported() {
         let _shape_guard = tunnel_tipster_leaf();
         let result = coverage_result_for_face(tunnel_tipster_face());
-        assert!(!result.supported);
-        assert_eq!(gap_handlers(&result), vec![LEDGER_GAP]);
+        assert!(result.supported);
+        assert_eq!(gap_handlers(&result), Vec::<&str>::new());
     }
 
     /// V7. Zimone's compound intervening-if: both refs are walked and evaluable,
@@ -22987,7 +22987,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
 
         let mut hostile = face;
         let condition = hostile.triggers[0].condition.as_mut().expect("present");
-        assert_eq!(face_down_trigger_condition(condition), 1);
+        assert_eq!(unevaluable_trigger_condition(condition), 1);
         assert_eq!(
             face_features(&hostile).get(&ledger_key()),
             Some(&FeatureSupport::Unhandled)

@@ -61,17 +61,21 @@ fn demon_of_fates_design_offers_alt_cost_for_enchantment() {
     // The engine must surface an OptionalCostChoice with the PayLife alternative.
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(costs) => {
-                assert_eq!(costs.len(), 2);
-                assert_eq!(
-                    costs[0],
+            AdditionalCost::Choice(cost_a, cost_b) => {
+                // Check the alternative cost is PayLife with SelfManaValue
+                let alt_cost = if matches!(cost_a, AbilityCost::PayLife { .. }) {
+                    cost_a
+                } else {
+                    cost_b
+                };
+                assert!(matches!(
+                    alt_cost,
                     AbilityCost::PayLife {
                         amount: QuantityExpr::Ref {
                             qty: QuantityRef::SelfManaValue,
                         },
-                    },
-                    "alternative cost must be PayLife with SelfManaValue"
-                );
+                    }
+                ), "alternative cost must be PayLife with SelfManaValue");
             }
             other => panic!("expected AdditionalCost::Choice, got {other:?}"),
         },

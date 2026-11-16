@@ -1969,9 +1969,11 @@ fn trigger_firing_groups(
     // CR 508.5 + CR 603.4: Attacks triggers with intervening-if clauses read
     // the defending player from each expanded attack event; the batch-level
     // event is the wrong context, so their check waits for the narrowed firing.
+    let condition_holds = conditions.hold(state, controller, source_context, event);
+    eprintln!("DEBUG_TRIGGER: trigger_firing_groups: condition_holds={} for trig_def.mode={:?}", condition_holds, trig_def.mode);
     if !trig_def.batched
         && !matches!(trig_def.mode, TriggerMode::Attacks)
-        && !conditions.hold(state, controller, source_context, event)
+        && !condition_holds
     {
         return Vec::new();
     }
@@ -3241,6 +3243,7 @@ fn collect_matching_triggers_inner(
             .map(|(i, (kind, def))| (printed_trigger_count + i, None, def, Some(*kind))),
     );
     for (trig_idx, definition_ref, trig_def, granted_keyword_kind) in all_triggers {
+        eprintln!("DEBUG_TRIGGER: Checking trigger trig_idx={} mode={:?} phase={:?} condition={:?}", trig_idx, trig_def.mode, trig_def.phase, trig_def.condition);
         let source_context = source_context_for_definition(&source_context, trig_def);
         // CR 603.10d: a look-back control-change trigger exists, and has its
         // controller, as of immediately before the change, so it is collected
@@ -3365,6 +3368,7 @@ fn collect_matching_triggers_inner(
             } else {
                 matcher(event, trig_def, &source_context, state)
             };
+            eprintln!("DEBUG_TRIGGER: Trigger trig_idx={} admitted={}", trig_idx, admitted);
             if !admitted {
                 continue;
             }
