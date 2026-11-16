@@ -2630,7 +2630,8 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
             legacy_quantity_expr(value)
         }
-        FilterProp::ProtectorMatches { controller }
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::ProtectorMatches { controller }
         | FilterProp::Owned { controller }
         // CR 303.4 + CR 301.5: the attachment referent is a `ControllerRef`, so
         // whether this prop nests a frozen-12 event-context tag is exactly
@@ -2945,7 +2946,8 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         FilterProp::Cmc { value, .. } | FilterProp::PtComparison { value, .. } => {
             rw_quantity_expr(value).reads_member_bound()
         }
-        FilterProp::ProtectorMatches { controller }
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::ProtectorMatches { controller }
         | FilterProp::Owned { controller }
         // CR 303.4 + CR 301.5: the attachment referent is a `ControllerRef`
         // resolved against the reading ability's OWN source (an
@@ -4463,6 +4465,7 @@ fn filter_prop_operand_reads(prop: &FilterProp) -> RwProfile {
         | FilterProp::RepresentedByCard
         | FilterProp::ControllerChoseLabel { .. }
         | FilterProp::WasPlayed
+        | FilterProp::CastThisTurn { .. }
         | FilterProp::Attacking { .. }
         | FilterProp::Blocking
         | FilterProp::BlockingSource

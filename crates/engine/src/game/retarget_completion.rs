@@ -274,9 +274,9 @@ fn filter_prop_deps(prop: &FilterProp) -> RetargetDeps {
         FilterProp::Attacking { defender } => defender
             .as_ref()
             .map_or(RetargetDeps::Independent, controller_deps),
-        FilterProp::ProtectorMatches { controller } | FilterProp::Owned { controller } => {
-            controller_deps(controller)
-        }
+        FilterProp::CastThisTurn { caster: controller }
+        | FilterProp::ProtectorMatches { controller }
+        | FilterProp::Owned { controller } => controller_deps(controller),
         FilterProp::HasAttachment { controller, .. } => controller
             .as_ref()
             .map_or(RetargetDeps::Independent, controller_deps),
