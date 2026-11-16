@@ -1098,7 +1098,9 @@ pub fn quantity_is_cast_stable_for_pre_cast(expr: &QuantityExpr) -> bool {
 /// expression authority above.
 pub fn quantity_ref_is_cast_stable_for_pre_cast(qty: &QuantityRef) -> bool {
     match qty {
-        QuantityRef::StartingLifeTotal { .. } => true,
+        // CR 103.2a: the starting-deck latch is written once at deck load and
+        // no cast changes it — stable beside StartingLifeTotal.
+        QuantityRef::StartingLifeTotal { .. } | QuantityRef::StartingDeckSize { .. } => true,
         QuantityRef::ObjectCount { filter } => target_filter_is_property_free_population(filter),
         _ => false,
     }
@@ -1905,6 +1907,12 @@ fn quantity_expr_is_source_context_previewable(
         QuantityExpr::Ref {
             qty: QuantityRef::StartingLifeTotal { player },
         } => player_scope_is_source_context_previewable(player),
+        // CR 103.2a: the starting-deck latch lives on the player, readable in
+        // any source context exactly like the starting-life snapshot — the
+        // Whtz activation discount previews under the same scope rule.
+        QuantityExpr::Ref {
+            qty: QuantityRef::StartingDeckSize { player },
+        } => player_scope_is_source_context_previewable(player),
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => target_filter_is_source_context_free(filter),
@@ -2441,6 +2449,7 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -2799,6 +2808,7 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -3134,6 +3144,7 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -3405,12 +3416,15 @@ fn entered_object_perturbs_quantity_ref(
         // Player-level, single-object, history-record, payment, and choice refs:
         // an object's battlefield entry/exit cannot change their value. Identical
         // enumeration to the `false` arm of `quantity_ref_uses_object_count`.
+        // CR 103.2a: the starting-deck latch is written once at deck load —
+        // no battlefield entry/exit perturbs it.
         QuantityRef::HandSize { .. }
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -5096,6 +5110,15 @@ fn resolve_ref(
                 state
                     .format_config
                     .starting_life_total_for_player(p.id, state.players.len())
+            })
+        }
+        // CR 103.2a + CR 702.139b: the latched submitted-starting-deck count
+        // for the scoped player (`Player::starting_deck_size`), written once
+        // at deck load. Mill, draw, and command-zone moves never change it —
+        // the Whtz discount reads the snapshot.
+        QuantityRef::StartingDeckSize { player: scope } => {
+            resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
+                usize_to_i32_saturating(p.starting_deck_size as usize)
             })
         }
         // CR 701.57a: the mana-value limit of the discover that fired the current
@@ -14378,6 +14401,78 @@ mod tests {
             ),
             30,
             "StartingLifeTotal reads the shared team baseline, not a per-seat half"
+        );
+    }
+
+    /// CR 103.2a: `StartingDeckSize` reads the latched
+    /// `Player::starting_deck_size` snapshot, not the live library — and a
+    /// strict-GT gate over the two resolved sides evaluates (50 > 40 true,
+    /// 40 > 40 false). Mill after the latch cannot move the snapshot: the
+    /// revert (resolving live library size) collapses the distinction.
+    #[test]
+    fn starting_deck_size_reads_the_latched_snapshot() {
+        let mut state = GameState::new_two_player(42);
+        // V9-style latches: P0 submitted 200 (199 distinct + Whtz), P1 60.
+        state.players[0].starting_deck_size = 200;
+        state.players[1].starting_deck_size = 60;
+        // P0 mills down to a 50-card library: the latch must not move.
+        // NOTE: the entries must back real `GameObject`s — `ZoneCardCount`
+        // only counts library entries present in `state.objects` (CR 400.1
+        // zone membership), so pushing raw `ObjectId`s would count 0 and
+        // the comparative below would exercise nothing.
+        for id in 1..=50 {
+            create_object(
+                &mut state,
+                CardId(id),
+                PlayerId(0),
+                format!("Milled Card {id}"),
+                Zone::Library,
+            );
+        }
+
+        let latch = QuantityExpr::Ref {
+            qty: QuantityRef::StartingDeckSize {
+                player: PlayerScope::Controller,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &latch, PlayerId(0), ObjectId(0)),
+            200,
+            "controller-scoped latch reads P0's 200 despite the mill"
+        );
+        assert_eq!(
+            resolve_quantity(&state, &latch, PlayerId(1), ObjectId(1)),
+            60,
+            "controller-scoped latch reads P1's 60"
+        );
+
+        // V12 (library-vs-starting-deck GT): live library GT latched starting size.
+        // Reset P0's latch to the 40 boundary for the discriminating rows.
+        state.players[0].starting_deck_size = 40;
+        let library = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneCardCount {
+                zone: ZoneRef::Library,
+                card_types: Vec::new(),
+                filter: None,
+                scope: CountScope::Controller,
+            },
+        };
+        let lhs = resolve_quantity(&state, &library, PlayerId(0), ObjectId(0));
+        let rhs = resolve_quantity(&state, &latch, PlayerId(0), ObjectId(0));
+        assert_eq!((lhs, rhs), (50, 40));
+        assert!(
+            Comparator::GT.evaluate(lhs, rhs),
+            "library-vs-starting-deck gate: 50-card library > 40-card starting deck must hold"
+        );
+        while state.players[0].library.len() > 40 {
+            state.players[0].library.pop_back();
+        }
+        let lhs = resolve_quantity(&state, &library, PlayerId(0), ObjectId(0));
+        let rhs = resolve_quantity(&state, &latch, PlayerId(0), ObjectId(0));
+        assert_eq!((lhs, rhs), (40, 40));
+        assert!(
+            !Comparator::GT.evaluate(lhs, rhs),
+            "library-vs-starting-deck gate: strict GT must fail at equality (40 == 40)"
         );
     }
 

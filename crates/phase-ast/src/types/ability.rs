@@ -10031,6 +10031,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -10895,6 +10896,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -13210,6 +13212,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::StartingLifeTotal { player, .. }
+        | QuantityRef::StartingDeckSize { player, .. }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
@@ -14097,6 +14100,19 @@ pub enum QuantityRef {
     /// 40 for Commander or Archenemy, etc.). Legacy serialized unit values
     /// default to `Controller`.
     StartingLifeTotal {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
+    /// CR 103.2a + CR 702.139b: The card count of the scoped player's
+    /// submitted starting deck (library + command-zone decklist cards,
+    /// single-counted), latched into `Player::starting_deck_size` at deck
+    /// load. Read by Whtz, the Bibliophile's activation discount ("if you had
+    /// 200 or more cards in your starting deck"). Past-tense "had" is
+    /// deliberate: the latch never changes mid-game.
+    StartingDeckSize {
         #[serde(
             default = "player_scope_controller",
             skip_serializing_if = "is_player_scope_controller"
@@ -15125,6 +15141,7 @@ impl QuantityRef {
             | QuantityRef::CardsDrawnLastTurn { player }
             | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::StartingDeckSize { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
             | QuantityRef::PlayerChosenNumber { player }
@@ -15310,6 +15327,7 @@ impl QuantityRef {
             | QuantityRef::GraveyardSize { .. }
             | QuantityRef::LifeAboveStarting
             | QuantityRef::StartingLifeTotal { .. }
+            | QuantityRef::StartingDeckSize { .. }
             | QuantityRef::TriggeringDiscoverValue
             | QuantityRef::TriggeringScryLookCount
             | QuantityRef::TriggeringScryBottomCount
@@ -15397,6 +15415,7 @@ impl QuantityRef {
             | QuantityRef::CardsDrawnLastTurn { player }
             | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::StartingDeckSize { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
             | QuantityRef::PlayerChosenNumber { player }
@@ -16298,7 +16317,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::CommanderManaValue { .. }
         // Player-scoped quantities.
         | QuantityRef::HandSize { .. } | QuantityRef::LifeTotal { .. } | QuantityRef::GraveyardSize { .. }
-        | QuantityRef::StartingLifeTotal { .. } | QuantityRef::LifeLostThisTurn { .. } | QuantityRef::PartySize { .. }
+        | QuantityRef::StartingLifeTotal { .. } | QuantityRef::StartingDeckSize { .. } | QuantityRef::LifeLostThisTurn { .. } | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. } | QuantityRef::LifeGainedThisTurn { .. } | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::CardsDrawnLastTurn { .. }
         | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
@@ -28972,6 +28991,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::LifeTotal { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::StartingDeckSize { player }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
@@ -46140,6 +46160,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn starting_deck_size_scope_defaults_for_legacy_json_and_round_trips() {
+        // CR 103.2a + CR 702.139b: Whtz, the Bibliophile's latched
+        // starting-deck count. Legacy unit payloads default to controller
+        // scope, exactly like the sibling StartingLifeTotal axis.
+        let legacy: QuantityRef = serde_json::from_str(r#"{"type":"StartingDeckSize"}"#)
+            .expect("legacy unit payload defaults to controller scope");
+        assert_eq!(
+            legacy,
+            QuantityRef::StartingDeckSize {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy).expect("serializes legacy controller payload"),
+            r#"{"type":"StartingDeckSize"}"#,
+            "controller scope must preserve the legacy serialized shape",
+        );
+
+        let scoped = QuantityRef::StartingDeckSize {
+            player: PlayerScope::ScopedPlayer,
+        };
+        let json = serde_json::to_string(&scoped).expect("serializes scoped payload");
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).expect("scoped payload round-trips"),
+            scoped,
+        );
+    }
+
     /// The legacy lift must never capture a CURRENT payload. `TargetFilter` and
     /// `CardTypeSetSource` are both internally tagged on `"type"` and share
     /// exactly two tag names (`ExiledBySource`, `TrackedSet`), so those are the
@@ -52429,6 +52478,9 @@ mod monarch_subject_axis_tests {
                 player: player.clone(),
             },
             QuantityRef::StartingLifeTotal {
+                player: player.clone(),
+            },
+            QuantityRef::StartingDeckSize {
                 player: player.clone(),
             },
             QuantityRef::LifeLostThisTurn {

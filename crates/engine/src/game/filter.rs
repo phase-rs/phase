@@ -3504,6 +3504,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount

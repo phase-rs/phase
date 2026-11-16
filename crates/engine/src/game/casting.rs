@@ -33690,6 +33690,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         QuantityRef::HandSize { player }
         | QuantityRef::LifeTotal { player }
         | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::StartingDeckSize { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }

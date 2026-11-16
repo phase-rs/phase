@@ -2517,6 +2517,9 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             history: HistoryReads::NONE,
         },
         QuantityRef::StartingLifeTotal { player } => scan_player_scope(player),
+        // CR 103.2a: the starting-deck latch is a second per-player starting
+        // snapshot — same player-scope read axis as starting life.
+        QuantityRef::StartingDeckSize { player } => scan_player_scope(player),
         // CR 701.57a: reads a transient game-state scalar (the last discover's
         // mana-value limit); no growing resource, sibling, or projected axis.
         QuantityRef::TriggeringDiscoverValue => Axes::NONE,
@@ -8546,6 +8549,32 @@ mod tests {
         };
         assert!(scan(AttackSubject::EventAttackers).event);
         assert!(!scan(AttackSubject::You).event);
+    }
+
+    /// CR 103.2a: the starting-deck latch scans exactly like the starting-life
+    /// snapshot — the same player-scope read axis for every scope. The
+    /// revert (a `NONE` arm) would hide the latch from ordering/projection.
+    #[test]
+    fn starting_deck_size_scans_like_starting_life_total() {
+        for scope in [
+            PlayerScope::Controller,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::Target,
+        ] {
+            let life = scan_quantity_ref(
+                &QuantityRef::StartingLifeTotal {
+                    player: scope.clone(),
+                },
+                ScanMode::Conservative,
+            );
+            let deck = scan_quantity_ref(
+                &QuantityRef::StartingDeckSize { player: scope },
+                ScanMode::Conservative,
+            );
+            assert_eq!(deck.event, life.event);
+            assert_eq!(deck.sibling, life.sibling);
+            assert_eq!(deck.projected, life.projected);
+        }
     }
 
     #[test]

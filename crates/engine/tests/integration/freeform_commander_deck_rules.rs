@@ -1819,3 +1819,33 @@ fn no_other_command_zone_format_admits_a_card_this_format_now_admits() {
         );
     }
 }
+
+/// V3 (Whtz guard row): without a `deck_size_override` marker the exact
+/// CR 903.5a rule holds — an unmarked commander with 101 cards fails on both
+/// paths. The marker-bearing Whtz/Covert lists live in the deck-validation
+/// unit tests (the shared export carries no marker face); this row pins the
+/// unmarked control in the real-card integration file.
+#[test]
+fn commander_rejects_101_card_deck_without_marker() {
+    let Some(db) = db() else {
+        eprintln!("skipping: card database not available");
+        return;
+    };
+    let wastes_100 = repeat("Wastes", 100);
+
+    for summary_only in [false, true] {
+        let request = DeckCompatibilityRequest {
+            main_deck: wastes_100.clone(),
+            commander: vec!["Tymna the Weaver".to_string()],
+            selected_format: Some(SelectedFormat::Tag(GameFormat::Commander)),
+            summary_only,
+            ..DeckCompatibilityRequest::default()
+        };
+        let result = evaluate_deck_compatibility(db, &request);
+        assert_eq!(
+            result.selected_format_reasons,
+            vec!["Commander deck must have exactly 100 cards (found 101)".to_string()],
+            "summary_only={summary_only}"
+        );
+    }
+}
