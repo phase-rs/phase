@@ -13461,12 +13461,11 @@ mod entry_continuation_release_tests {
         let mut state = settled_state(2);
         assert!(take_parked_entries_of(&mut state, ObjectId(900)).is_empty());
 
-        // An attach resolution moves with its entrant.
+        // An entering Aura's attachment moves with its entrant.
         let mut state = settled_state(2);
-        let attach = GameEvent::EffectResolved {
-            kind: EffectKind::Attach,
-            source_id: ObjectId(900),
-            subject: None,
+        let attach = GameEvent::Attached {
+            attachment_id: ObjectId(900),
+            target: TargetRef::Object(ObjectId(901)),
         };
         state.deferred_entry_events = vec![seeded(attach.clone(), PENDING)];
         assert_eq!(
