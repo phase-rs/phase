@@ -123,13 +123,16 @@ fi
 #
 # `source_corpus_hash` is read as: absent/null -> "" (no identity recorded);
 # a non-empty string -> itself; anything else (including "") -> a
-# `malformed:` marker, which the SHA-256 shape check below rejects.
+# `malformed:` marker, which the SHA-256 shape check below rejects. The
+# trailing CR of native Windows jq is dropped as in `jq_num` (#10549).
 read_source_corpus_hash() {
-    jq -r '.source_corpus_hash
+    local value
+    value="$(jq -r '.source_corpus_hash
         | if . == null then ""
           elif type == "string" and . != "" then .
           else "malformed:" + tojson
-          end' "$1"
+          end' "$1")" || return
+    printf '%s\n' "${value%$'\r'}"
 }
 is_sha256_hex() {
     [[ "$1" =~ ^[0-9a-f]{64}$ ]]

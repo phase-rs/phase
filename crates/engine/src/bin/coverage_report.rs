@@ -477,9 +477,21 @@ mod tests {
 
     const CARD_DATA: &str = include_str!("../../tests/fixtures/runtime_card_export_fixture.json");
 
+    fn source_corpus_sha256() -> String {
+        "a".repeat(64)
+    }
+
+    /// A data root whose provenance sidecar describes the exact export bytes,
+    /// as `oracle-gen --provenance-out` writes it.
     fn data_root(card_data: &str) -> TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("card-data.json"), card_data).unwrap();
+        CardDataProvenance {
+            source_corpus_sha256: source_corpus_sha256(),
+            card_data_sha256: sha256_bytes(card_data.as_bytes()),
+        }
+        .write_atomic(&dir.path().join("card-data.provenance.json"))
+        .unwrap();
         dir
     }
 
@@ -518,6 +530,35 @@ mod tests {
 
         let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
         assert!(report["total_cards"].as_u64().unwrap() > 0);
+        assert_eq!(report["source_corpus_hash"], source_corpus_sha256());
         assert!(!output.is_empty());
+    }
+
+    #[test]
+    fn missing_or_mismatched_provenance_returns_error_without_rendering_a_report() {
+        let missing = data_root(CARD_DATA);
+        std::fs::remove_file(missing.path().join("card-data.provenance.json")).unwrap();
+        let mismatched = data_root(CARD_DATA);
+        CardDataProvenance {
+            source_corpus_sha256: source_corpus_sha256(),
+            card_data_sha256: "b".repeat(64),
+        }
+        .write_atomic(&mismatched.path().join("card-data.provenance.json"))
+        .unwrap();
+
+        for (dir, code) in [
+            (&missing, "CARD_DATA_PROVENANCE_MISSING"),
+            (&mismatched, "CARD_DATA_PROVENANCE_MISMATCH"),
+        ] {
+            let mut output = Vec::new();
+            let error = run(
+                [dir.path().to_string_lossy().into_owned()].into_iter(),
+                &mut output,
+            )
+            .unwrap_err();
+
+            assert!(error.starts_with(code), "expected {code}, got {error}");
+            assert!(output.is_empty(), "{code} must not emit a report");
+        }
     }
 }
