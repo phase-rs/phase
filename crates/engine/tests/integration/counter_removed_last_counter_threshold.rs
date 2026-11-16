@@ -813,3 +813,69 @@ fn regenerations_restored_sacrificed_first_gets_no_extra_turn() {
     assert_eq!(s.objects[&regen].zone, Zone::Graveyard, "sacrificed");
     assert_eq!(s.extra_turns.len(), turns_before, "no extra turn");
 }
+
+/// CR 603.2c + CR 608.2c + CR 122.1: two instructions of one resolution each
+/// remove an ore counter from Orcish Mine and the second takes the last one.
+/// "When the last ore counter is removed" happens once, in the second
+/// instruction, so the Mine triggers once. The batched "one or more counters"
+/// form splits per instruction (Cloudsculpt Armorer, chandra_fire_artisan_loyalty_damage.rs);
+/// this form must not, or the live count read after the batch makes both
+/// instructions' groups fire.
+#[test]
+fn last_counter_trigger_fires_once_when_two_instructions_take_it_to_zero() {
+    let ore = parse_counter_type("ore");
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    let land = sc.add_basic_land(P1, ManaColor::Red);
+    let mine = sc
+        .add_creature(P0, "Orcish Mine", 0, 0)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["enchant"], ORCISH_MINE)
+        .id();
+    let spell = sc
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Ore Siphon",
+            false,
+            "Remove an ore counter from target enchantment. Remove an ore counter from target enchantment.",
+        )
+        .id();
+    sc.with_counter(mine, ore.clone(), 2);
+    sc.with_library_top(P0, &["Card A", "Card B", "Card C"]);
+    sc.with_library_top(P1, &["Card D", "Card E", "Card F"]);
+    let mut runner = sc.build();
+    attach(&mut runner, mine, land);
+
+    runner.cast(spell).target_objects(&[mine, mine]).commit();
+    for _ in 0..64 {
+        let spell_on_stack = runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == spell);
+        if !spell_on_stack {
+            break;
+        }
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::OrderTriggers { .. } => place_pending_triggers(&mut runner),
+            other => panic!("unexpected prompt: {other:?}"),
+        }
+    }
+    place_pending_triggers(&mut runner);
+
+    // Reach guard: both instructions removed one counter each, 2 -> 0.
+    assert_eq!(
+        counters(runner.state(), mine, &ore),
+        0,
+        "reach guard: two instructions took the Mine from 2 to 0"
+    );
+    assert_eq!(
+        stack_triggers_from(runner.state(), mine),
+        1,
+        "the last ore counter left once, in the second instruction"
+    );
+}

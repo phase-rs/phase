@@ -1452,6 +1452,7 @@ fn matching_batched_trigger_events(
 fn matching_counter_added_events_by_recipient(
     state: &GameState,
     event_batch: &[GameEvent],
+    scope: CounterOccurrenceScope,
     trig_def: &TriggerDefinition,
     source_context: &TriggerSourceContext,
     controller: PlayerId,
@@ -1466,7 +1467,12 @@ fn matching_counter_added_events_by_recipient(
         };
         let key = CounterOccurrenceKey {
             object_id,
-            instruction_start: counter_event_instruction_start(index, candidate),
+            instruction_start: match scope {
+                CounterOccurrenceScope::PerInstruction => {
+                    counter_event_instruction_start(index, candidate)
+                }
+                CounterOccurrenceScope::PerBatch => None,
+            },
         };
         if !candidate_passes_batched_filters(
             state,
@@ -1486,6 +1492,20 @@ fn matching_counter_added_events_by_recipient(
         }
     }
     groups.into_iter().map(|(_, events)| events).collect()
+}
+
+/// CR 603.2c + CR 608.2c: how finely a counter trigger's firings are split.
+#[derive(Clone, Copy)]
+enum CounterOccurrenceScope {
+    /// "Whenever one or more counters are removed": each instruction's
+    /// simultaneous removals are one event, so a recipient fires once per
+    /// instruction that removed from it.
+    PerInstruction,
+    /// "When the last [type] counter is removed" (and placements): the matcher
+    /// reads the live count after the whole batch, so the recipient fires once
+    /// for the batch however many instructions removed counters; only the
+    /// removal that leaves none is "the last".
+    PerBatch,
 }
 
 /// CR 603.2c + CR 608.2c: one occurrence of a batched counter trigger — the
@@ -1649,6 +1669,8 @@ fn counter_event_fires_per_recipient(trig_def: &TriggerDefinition) -> bool {
 /// kind (two attackers' combat damage to one Siege, CR 510.2) remove "the last" counter once. Like
 /// `damage_received_aggregates_whole_event`, the definition stays `batched: false` (no subject count) but fires once
 /// per batch (`fires_once_per_batch`).
+/// Removals of different instructions of one resolution still fire once: the last counter leaves in only one of them
+/// (CR 603.2c; the "one or more" form splits by instruction, see `CounterOccurrenceScope`).
 /// Known limit (no printed producer): one resolution that drops a kind to 0, re-adds it and removes it again fires
 /// once (and one that drops to 0 then re-adds fires zero times), because the matcher reads the live count after the batch.
 fn counter_removal_threshold_fires_once_per_recipient(trig_def: &TriggerDefinition) -> bool {
@@ -2145,9 +2167,15 @@ fn trigger_firing_groups(
         // recipient fire once; the matcher's live `== 0` gate is the same for
         // every candidate in the batch, so per-candidate matching + fold is
         // exact.
+        let scope = if counter_removal_threshold_fires_once_per_recipient(trig_def) {
+            CounterOccurrenceScope::PerBatch
+        } else {
+            CounterOccurrenceScope::PerInstruction
+        };
         let recipients = matching_counter_added_events_by_recipient(
             state,
             event_batch,
+            scope,
             trig_def,
             source_context,
             controller,
