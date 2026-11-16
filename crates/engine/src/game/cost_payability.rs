@@ -12,7 +12,8 @@
 //! This is the authoritative gate consulted before:
 //!   - Offering an `OptionalCostChoice` prompt (if unpayable, the prompt is skipped).
 //!   - Paying a `Required` additional cost (if unpayable, the spell cannot be cast).
-//!   - Falling through an `AdditionalCost::Choice(A, B)` when A is unpayable.
+//!   - Choosing which `AdditionalCost::Choice` branches to offer (a sole payable
+//!     branch that pays no life is applied without a prompt).
 //!   - Activating an ability whose cost requires a choice-of-object.
 //!
 //! The predicate is pure: it reads `&GameState` and never mutates. Delegate to
@@ -198,12 +199,14 @@ fn relax_x_mana_value_constraint_player(player: &PlayerFilter) -> PlayerFilter {
             source,
             kind,
             min_sources,
+            relation,
         } => PlayerFilter::OpponentDealtDamage {
             source: source
                 .as_deref()
                 .map(|s| Box::new(relax_x_mana_value_constraint(s))),
             kind: *kind,
             min_sources: *min_sources,
+            relation: *relation,
         },
         PlayerFilter::ControlsCount {
             filter,
@@ -2658,6 +2661,7 @@ mod tests {
             source: Some(Box::new(cmc_x())),
             kind: DamageKindFilter::Any,
             min_sources: 1,
+            relation: crate::types::ability::PlayerRelation::Opponent,
         });
         let tracked_set = wrap(PlayerFilter::TrackedSetPossessor {
             filter: cmc_x(),

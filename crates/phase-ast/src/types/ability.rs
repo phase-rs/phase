@@ -10031,6 +10031,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -10895,6 +10896,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -11050,7 +11052,8 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// against a `BattlefieldEntryRecord`?
 ///
 /// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types::game_state::BattlefieldEntryRecord`). Every other
+/// supertypes / colors / keywords / controller / face_state`
+/// (`types::game_state::BattlefieldEntryRecord`). Every other
 /// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
 /// matcher fails closed at the `FilterProp` match's fail-closed arm inside
 /// `battlefield_entry_matches_filter`'s `TargetFilter::Typed` case, and at the fail-closed
@@ -11058,7 +11061,7 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// a silent constant 0 — but see the `Or` exception documented beside that function's
 /// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
 /// instead. Measured: 100
-/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
+/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 5.
 ///
 /// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
 /// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
@@ -11069,8 +11072,8 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// `ledger_guard_agrees_with_matcher` (test, `crate::game::restrictions`).
 ///
 /// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
-/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
-/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
+/// / `record.name` TODAY — one matcher arm plus one line here. `Token`/`NonToken` and `Tapped`
+/// need a new snapshot field on `BattlefieldEntryRecord`.
 ///
 /// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
 /// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
@@ -11090,6 +11093,7 @@ pub fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
                         FilterProp::HasColor { .. }
                             | FilterProp::InZone { .. }
                             | FilterProp::WithKeyword { .. }
+                            | FilterProp::FaceDown
                             | FilterProp::Another
                     )
                 })
@@ -13208,6 +13212,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::StartingLifeTotal { player, .. }
+        | QuantityRef::StartingDeckSize { player, .. }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
@@ -14095,6 +14100,19 @@ pub enum QuantityRef {
     /// 40 for Commander or Archenemy, etc.). Legacy serialized unit values
     /// default to `Controller`.
     StartingLifeTotal {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
+    /// CR 103.2a + CR 702.139b: The card count of the scoped player's
+    /// submitted starting deck (library + command-zone decklist cards,
+    /// single-counted), latched into `Player::starting_deck_size` at deck
+    /// load. Read by Whtz, the Bibliophile's activation discount ("if you had
+    /// 200 or more cards in your starting deck"). Past-tense "had" is
+    /// deliberate: the latch never changes mid-game.
+    StartingDeckSize {
         #[serde(
             default = "player_scope_controller",
             skip_serializing_if = "is_player_scope_controller"
@@ -15123,6 +15141,7 @@ impl QuantityRef {
             | QuantityRef::CardsDrawnLastTurn { player }
             | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::StartingDeckSize { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
             | QuantityRef::PlayerChosenNumber { player }
@@ -15308,6 +15327,7 @@ impl QuantityRef {
             | QuantityRef::GraveyardSize { .. }
             | QuantityRef::LifeAboveStarting
             | QuantityRef::StartingLifeTotal { .. }
+            | QuantityRef::StartingDeckSize { .. }
             | QuantityRef::TriggeringDiscoverValue
             | QuantityRef::TriggeringScryLookCount
             | QuantityRef::TriggeringScryBottomCount
@@ -15395,6 +15415,7 @@ impl QuantityRef {
             | QuantityRef::CardsDrawnLastTurn { player }
             | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::StartingDeckSize { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
             | QuantityRef::PlayerChosenNumber { player }
@@ -15714,6 +15735,19 @@ fn is_player_relation_all(relation: &PlayerRelation) -> bool {
     matches!(relation, PlayerRelation::All)
 }
 
+/// Back-compat default for `PlayerFilter::OpponentDealtDamage`'s `relation`
+/// field. Legacy data serialized before the field existed encoded the
+/// opponents-only semantics, so an absent `relation` must deserialize to
+/// `Opponent` — NOT `All`, which would newly qualify the controller and
+/// misresolve reloaded games/scenarios.
+fn player_relation_opponent() -> PlayerRelation {
+    PlayerRelation::Opponent
+}
+
+fn is_player_relation_opponent(relation: &PlayerRelation) -> bool {
+    matches!(relation, PlayerRelation::Opponent)
+}
+
 fn target_zone_count_scope_default() -> ControllerRef {
     ControllerRef::TargetOpponent
 }
@@ -15795,18 +15829,19 @@ pub enum PlayerFilter {
     /// effect recipient filter. Rampant Frogantua class: "+10/+10 for each
     /// player who has lost the game".
     HasLostTheGame,
-    /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was dealt
-    /// damage this turn matching `kind`, optionally restricted to damage from a
-    /// source matching `source`. Resolved against `state.damage_dealt_this_turn`
-    /// records whose `target = Player(p.id)` and whose combat status matches
-    /// `kind` (CR 120.2a combat / CR 120.2b noncombat / `Any` = either).
-    /// `kind = CombatOnly` + `source = None` counts any combat-damage source
-    /// (Tymna the Weaver); `kind = Any` counts any damage combat or noncombat
-    /// (Furious Spinesplitter, You've Been Caught Stealing); `source = Some(f)`
-    /// (CR 120.9) further restricts to opponents dealt matching damage by a
-    /// source matching `f` — matched against each record's CR 608.2i look-back
-    /// source snapshot, so the source's qualities are checked as they were at
-    /// damage time (Estinien Varlineau: "by ~ or a Dragon").
+    /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each player in `relation`
+    /// who was dealt damage this turn matching `kind`, optionally restricted
+    /// to damage from a source matching `source`. Resolved against
+    /// `state.damage_dealt_this_turn` records whose `target = Player(p.id)`
+    /// and whose combat status matches `kind` (CR 120.2a combat / CR 120.2b
+    /// noncombat / `Any` = either). `kind = CombatOnly` + `source = None`
+    /// counts any combat-damage source (Tymna the Weaver); `kind = Any` counts
+    /// any damage combat or noncombat (Furious Spinesplitter, You've Been
+    /// Caught Stealing); `source = Some(f)` (CR 120.9) further restricts to
+    /// players dealt matching damage by a source matching `f` — matched
+    /// against each record's CR 608.2i look-back source snapshot, so the
+    /// source's qualities are checked as they were at damage time (Estinien
+    /// Varlineau: "by ~ or a Dragon").
     ///
     /// `min_sources` (CR 120.9) requires damage from at least that many DISTINCT
     /// matching sources ("was dealt combat damage by three or more Pirates this
@@ -15814,6 +15849,15 @@ pub enum PlayerFilter {
     /// counted by `DamageRecord::source_id` across the matching records; the
     /// default `1` preserves the historical "≥1 matching source" semantics for
     /// every existing card.
+    ///
+    /// `relation` selects the candidate population. Clauses naming an opponent
+    /// ("for each opponent dealt …", Tymna) emit `Opponent`; clauses with no
+    /// opponent word ("a player who was dealt …", Beckett; "whose controller
+    /// was dealt …", Steel Hellkite — CR 608.2c reads the English as written)
+    /// emit `All`, so a damaged player who later gains control of the source
+    /// still qualifies. The name stays `OpponentDealtDamage` (and the
+    /// historical `player != controller` gate stays for `Opponent`) so existing
+    /// card-data and saves resolve byte-identically; only `All` widens.
     #[serde(alias = "OpponentDealtCombatDamage")]
     OpponentDealtDamage {
         /// CR 120.2a/120.2b: which damage kind counts. Defaults to `CombatOnly`
@@ -15827,6 +15871,14 @@ pub enum PlayerFilter {
         /// `1` (any matching source) for back-compat; Beckett sets `3`.
         #[serde(default = "default_one", skip_serializing_if = "is_one")]
         min_sources: u32,
+        /// CR 102.2 + CR 608.2c: which players may qualify. Defaults to
+        /// `Opponent` on absence (preserving the historical opponents-only
+        /// gate for legacy data) and is omitted from serialized output then.
+        #[serde(
+            default = "player_relation_opponent",
+            skip_serializing_if = "is_player_relation_opponent"
+        )]
+        relation: PlayerRelation,
     },
     /// CR 508.6: Each opponent that `subject` attacked (declared one or more
     /// creatures attacking, per CR 508.1b; CR 508.5 resolves planeswalker/battle
@@ -16296,7 +16348,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::CommanderManaValue { .. }
         // Player-scoped quantities.
         | QuantityRef::HandSize { .. } | QuantityRef::LifeTotal { .. } | QuantityRef::GraveyardSize { .. }
-        | QuantityRef::StartingLifeTotal { .. } | QuantityRef::LifeLostThisTurn { .. } | QuantityRef::PartySize { .. }
+        | QuantityRef::StartingLifeTotal { .. } | QuantityRef::StartingDeckSize { .. } | QuantityRef::LifeLostThisTurn { .. } | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. } | QuantityRef::LifeGainedThisTurn { .. } | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::CardsDrawnLastTurn { .. }
         | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
@@ -21146,9 +21198,9 @@ pub enum AdditionalCost {
         )]
         repeatability: AdditionalCostRepeatability,
     },
-    /// "[cost A] or [cost B]" — player must pay exactly one.
-    /// Choosing the first cost sets `additional_cost_paid = true`.
-    Choice(AbilityCost, AbilityCost),
+    /// "[cost A] or [cost B] or [cost C]..." — player must pay exactly one.
+    /// Choosing any cost sets `additional_cost_paid = true`.
+    Choice(Vec<AbilityCost>),
     /// Mandatory additional cost (e.g., "As an additional cost, waterbend {5}").
     Required(AbilityCost),
 }
@@ -28970,6 +29022,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::LifeTotal { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::StartingDeckSize { player }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
@@ -46138,6 +46191,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn starting_deck_size_scope_defaults_for_legacy_json_and_round_trips() {
+        // CR 103.2a + CR 702.139b: Whtz, the Bibliophile's latched
+        // starting-deck count. Legacy unit payloads default to controller
+        // scope, exactly like the sibling StartingLifeTotal axis.
+        let legacy: QuantityRef = serde_json::from_str(r#"{"type":"StartingDeckSize"}"#)
+            .expect("legacy unit payload defaults to controller scope");
+        assert_eq!(
+            legacy,
+            QuantityRef::StartingDeckSize {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy).expect("serializes legacy controller payload"),
+            r#"{"type":"StartingDeckSize"}"#,
+            "controller scope must preserve the legacy serialized shape",
+        );
+
+        let scoped = QuantityRef::StartingDeckSize {
+            player: PlayerScope::ScopedPlayer,
+        };
+        let json = serde_json::to_string(&scoped).expect("serializes scoped payload");
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).expect("scoped payload round-trips"),
+            scoped,
+        );
+    }
+
     /// The legacy lift must never capture a CURRENT payload. `TargetFilter` and
     /// `CardTypeSetSource` are both internally tagged on `"type"` and share
     /// exactly two tag names (`ExiledBySource`, `TrackedSet`), so those are the
@@ -52427,6 +52509,9 @@ mod monarch_subject_axis_tests {
                 player: player.clone(),
             },
             QuantityRef::StartingLifeTotal {
+                player: player.clone(),
+            },
+            QuantityRef::StartingDeckSize {
                 player: player.clone(),
             },
             QuantityRef::LifeLostThisTurn {

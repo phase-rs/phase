@@ -98,7 +98,7 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, answers: Answers) -> Cast {
             WaitingFor::OptionalCostChoice { .. } => {
                 out.optional_offers += 1;
                 GameAction::DecideOptionalCost {
-                    pay: answers.pay_optional,
+                    index: if answers.pay_optional { 0 } else { 1 },
                 }
             }
             WaitingFor::PayCost { choices, count, .. } => {

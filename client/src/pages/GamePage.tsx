@@ -3775,11 +3775,11 @@ function DefilerPaymentModal() {
       title={t("gamePage.defiler.title")}
       subtitle={t("gamePage.defiler.subtitle", { lifeCost: life_cost })}
       options={[
-        { id: "pay", label: t("gamePage.defiler.payLife", { lifeCost: life_cost }) },
-        { id: "skip", label: t("gamePage.defiler.decline") },
+        { id: "0", label: t("gamePage.defiler.payLife", { lifeCost: life_cost }) },
+        { id: "1", label: t("gamePage.defiler.decline") },
       ]}
       onChoose={(id) =>
-        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
+        dispatch({ type: "DecideOptionalCost", data: { index: id === "0" ? 0 : 1 } })
       }
       onClose={() => dispatch({ type: "CancelCast" })}
     />

@@ -112,10 +112,17 @@ fn process_combat_damage_triggers(
 
 /// Resolve combat damage with first strike / double strike support (CR 510.1).
 /// CR 702.7b: If any creature has first strike or double strike, two damage sub-steps run.
-/// Between sub-steps: SBAs are checked and triggers processed.
+/// Between sub-steps: SBAs are checked, triggers processed, and (CR 510.3) the active
+/// player gets priority.
+///
+/// Performs at most ONE combat damage step per call. After the first-strike step it
+/// returns `Some(WaitingFor::Priority)` (the CR 510.3 window, whether or not anything is
+/// on the stack); the all-pass completeness gate in `priority.rs` calls it again for the
+/// regular step.
 ///
 /// Returns `Some(WaitingFor)` when an attacker with 2+ blockers needs interactive
-/// damage assignment. Returns `None` when all damage for the current phase is resolved.
+/// damage assignment, or at the window after the first-strike step. Returns `None` when
+/// the regular step's damage is resolved.
 /// Re-entrant: call again after the player submits `GameAction::AssignCombatDamage`.
 pub fn resolve_combat_damage(
     state: &mut GameState,
@@ -130,9 +137,10 @@ pub fn resolve_combat_damage(
     if state.pending_combat_lifelink.is_some() {
         // Any live prompt — the CR 616.1 ordering choice itself, or a sub-choice
         // raised while answering it — means an answer is still coming. Surface it
-        // rather than re-collecting assignments. The `matches!` below has already
-        // excluded `Priority`, so what is returned is always a genuine prompt;
-        // `resolve_combat_damage`'s contract never yields a bare `Priority`.
+        // rather than re-collecting assignments. The `matches!` below excludes
+        // `Priority`, so what is returned here is always a genuine prompt; a bare
+        // `Priority` comes only from the CR 510.3 window after the first-strike
+        // step, never from a parked batch.
         if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
             return Some(state.waiting_for.clone());
         }
@@ -191,15 +199,17 @@ pub fn resolve_combat_damage(
                 );
                 return Some(*waiting_for);
             }
+            // CR 510.3 + CR 510.4: the first combat damage step is complete and ends
+            // with the active player's priority window (or a prompt that must come
+            // first); the regular step is a separate call, entered once that window
+            // closes.
             CombatDamageBatch::Complete(damage_events) => {
-                if let Some(wf) = finish_combat_damage_sub_step(
+                return finish_combat_damage_sub_step(
                     state,
                     CombatDamageSubStep::FirstStrike,
                     &damage_events,
                     events,
-                ) {
-                    return Some(wf);
-                }
+                );
             }
         }
     }
@@ -262,9 +272,10 @@ fn finish_combat_damage_sub_step(
     //
     // Reproduces the previous `!combat.first_strike_done && !has_first_or_double`,
     // which read the entry-time clone. Evaluated BEFORE the `regular_damage_done`
-    // write. Equivalent for all three reachable entry states:
+    // write. Equivalent for both reachable entry states (one combat damage step per
+    // call, so the first-strike step is never followed by the regular step in the
+    // same call):
     //   * no first strike, single sub-step               -> true  (== old true)
-    //   * first-strike sub-step ran earlier in THIS call -> first_strike_done -> false
     //   * re-entry after a prior call's first strike     -> first_strike_done -> false
     let include_phase_event = match sub_step {
         CombatDamageSubStep::FirstStrike => true,
@@ -304,27 +315,27 @@ fn finish_combat_damage_sub_step(
             }
 
             // CR 510.3 + CR 510.3a + CR 510.4: The first-strike combat-damage step is a
-            // complete step. Abilities that triggered on first-strike damage (or on SBAs
-            // taken afterward) are put on the stack, and THEN the active player receives
-            // priority — players must finish with the stack before the second (regular)
-            // combat-damage sub-step begins. If the first-strike sub-step placed anything
-            // on the stack (e.g. No Mercy's "destroy that creature", a damage trigger that
-            // bounces/exiles the attacker), grant priority now so that object resolves
-            // first. Skipping this would let a now-doomed double-strike attacker deal its
-            // regular-sub-step damage before the trigger that removes it resolves (#692).
+            // complete step, and every combat damage step ends the same way: abilities
+            // that triggered on the damage (or on SBAs taken afterward) are put on the
+            // stack, and THEN the active player receives priority. That window is
+            // unconditional, so players can respond before the second (regular) combat-
+            // damage step begins even when nothing is on the stack (kill, pump or give
+            // double strike to a creature, activate an ability, ninjutsu).
+            // A trigger on the stack (e.g. No Mercy's "destroy that creature", a damage
+            // trigger that bounces/exiles the attacker) is one case, resolved inside the
+            // window before a now-doomed double-strike attacker can deal its regular-
+            // sub-step damage (#692); an empty stack is the other.
             // Returning here leaves `regular_damage_done == false`; the mandatory regular
-            // sub-step is resumed once the stack drains and all players pass, via the
+            // sub-step is resumed once the stack is empty and all players pass, via the
             // empty-stack completeness gate in priority.rs.
-            if !state.stack.is_empty() {
-                // reset_priority here is defensive — unlike the sibling regular-substep entry in
-                // turns.rs, this returns mid-step after the first-strike substep, so we explicitly
-                // clear any stale passes before the CR 510.3 priority window (harmless if already clear).
-                crate::game::priority::reset_priority(state);
-                return Some(WaitingFor::Priority {
-                    player: state.active_player,
-                });
-            }
-            None
+            //
+            // reset_priority here is defensive — unlike the sibling regular-substep entry in
+            // turns.rs, this returns mid-step after the first-strike substep, so we explicitly
+            // clear any stale passes before the CR 510.3 priority window (harmless if already clear).
+            crate::game::priority::reset_priority(state);
+            Some(WaitingFor::Priority {
+                player: state.active_player,
+            })
         }
         CombatDamageSubStep::Regular => {
             if let Some(c) = &mut state.combat {
@@ -425,16 +436,14 @@ pub(crate) fn resume_pending_combat_lifelink(
                 events,
                 action_event_start,
             );
-            if let Some(wf) = waiting_for {
-                return Some(wf);
-            }
-            // CR 510.4: the second combat damage step is MANDATORY. Re-enter so a
-            // paused first-strike batch still runs it, exactly as the inline path
-            // does. Bounded: the record was `.take()`n above, so the re-entry
-            // guard cannot route back here; a regular sub-step that parks returns
-            // its own prompt without recursing, and a regular sub-step already
-            // done short-circuits on `regular_damage_done`.
-            resolve_combat_damage(state, events).or(Some(WaitingFor::Priority {
+            // CR 510.3 + CR 510.4: a completed batch ends its combat damage step with
+            // the active player's priority window. A first-strike batch already
+            // returned that window (or a prompt that must come first) from
+            // `finish_combat_damage_sub_step`, and the mandatory regular step is
+            // entered through it by the all-pass gate in priority.rs, the one path
+            // the inline first-strike step takes too; a regular batch is the last
+            // step and ends with this window.
+            waiting_for.or(Some(WaitingFor::Priority {
                 player: state.active_player,
             }))
         }
@@ -550,6 +559,24 @@ pub fn participates_in_pending_combat_damage_substep(
     };
     deals_in_substep(object, sub_step, &first_strike_participants)
         && combat_damage_amount(object) > 0
+}
+
+/// Whether combat sits between its two combat damage steps with nothing on the
+/// stack: the first-strike step is over, the regular step has not begun, and the
+/// active player's CR 510.3 priority window is open (or about to be passed).
+///
+/// CR 510.4: a combat with a first-strike or double-strike creature has two
+/// combat damage steps. CR 510.3: each step ends with the active player getting
+/// priority, so passing it on an empty stack (CR 117.4) is what starts the
+/// second step. Reads only the combat flags and the stack, never `waiting_for`
+/// or `phase`, so the unit-test drivers that call [`resolve_combat_damage`]
+/// directly share it with the integration harness.
+pub(crate) fn between_combat_damage_steps(state: &GameState) -> bool {
+    state
+        .combat
+        .as_ref()
+        .is_some_and(|combat| combat.first_strike_done && !combat.regular_damage_done)
+        && state.stack.is_empty()
 }
 
 /// Damage amounts fixed by an ordinary one-on-one combat exchange.
@@ -2861,6 +2888,21 @@ mod tests {
             .push(Keyword::BandsWithOther("Wolf".to_string()));
     }
 
+    /// CR 510.3 + CR 510.4: resolve BOTH combat damage steps of a first-strike or
+    /// double-strike combat. `resolve_combat_damage` performs one step per call and
+    /// returns the active player's priority window after the first-strike step;
+    /// while that window is open with an empty stack, calling it again models every
+    /// player passing it (the all-pass gate in `priority.rs` re-enters the function).
+    /// Tests that assert the window itself make the two calls explicitly instead.
+    fn resolve_both_combat_damage_steps(state: &mut GameState, events: &mut Vec<GameEvent>) {
+        let mut waiting = resolve_combat_damage(state, events);
+        while matches!(waiting, Some(WaitingFor::Priority { .. }))
+            && between_combat_damage_steps(state)
+        {
+            waiting = resolve_combat_damage(state, events);
+        }
+    }
+
     /// Drive `resolve_combat_damage` and, whenever it pauses on an
     /// `AssignCombatDamage` prompt (now reachable for single-blocker trample with
     /// excess per CR 702.19b, as well as the existing 2+ blocker case), submit the
@@ -3011,7 +3053,7 @@ mod tests {
                 add_orphaned_blocker(&mut state, orphan);
 
                 let mut events = Vec::new();
-                resolve_combat_damage(&mut state, &mut events);
+                resolve_both_combat_damage_steps(&mut state, &mut events);
 
                 let row = format!("{keyword:?} power {orphan_power}");
                 assert_eq!(
@@ -3410,8 +3452,14 @@ mod tests {
         setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        let first = resolve_combat_damage(&mut state, &mut events);
 
+        // CR 510.3: the first-strike step ends with the priority window.
+        assert!(
+            matches!(first, Some(WaitingFor::Priority { .. })),
+            "the first-strike step ends with a priority window, got {first:?}"
+        );
+        assert!(between_combat_damage_steps(&state));
         // First strike dealt 3 damage (lethal) to blocker
         // SBAs ran between steps -- blocker should have been destroyed
         // Blocker can't deal damage back in regular step (dead)
@@ -3419,12 +3467,63 @@ mod tests {
         assert_eq!(state.objects[&attacker].damage_marked, 0);
         // Blocker should be in graveyard (SBAs ran between steps)
         assert!(!state.battlefield.contains(&blocker));
+
+        // The regular step (one pass round later) adds nothing: the dead blocker
+        // deals no damage and the first striker does not strike again.
+        let second = resolve_combat_damage(&mut state, &mut events);
+        assert!(second.is_none(), "the regular step completes: {second:?}");
+        assert!(state.combat.as_ref().unwrap().regular_damage_done);
+        assert_eq!(state.objects[&attacker].damage_marked, 0);
     }
 
+    /// CR 510.4 + CR 702.7b: Youthful Knight (2/1, first strike) blocked by Goblin
+    /// Piker (2/1). The Knight's first-strike damage kills the Piker, so the Piker
+    /// never deals its regular-step damage and the Knight survives; the Knight does
+    /// not deal damage again in the second step.
+    #[test]
+    fn youthful_knight_kills_a_toughness_one_blocker_before_it_strikes_back() {
+        let mut state = setup();
+        let knight = create_creature(&mut state, PlayerId(0), "Youthful Knight", 2, 1);
+        state
+            .objects
+            .get_mut(&knight)
+            .unwrap()
+            .keywords
+            .push(Keyword::FirstStrike);
+        let piker = create_creature(&mut state, PlayerId(1), "Goblin Piker", 2, 1);
+        setup_combat(&mut state, vec![knight], vec![(knight, vec![piker])]);
+
+        let mut events = Vec::new();
+        let first = resolve_combat_damage(&mut state, &mut events);
+
+        assert!(matches!(first, Some(WaitingFor::Priority { .. })));
+        assert!(
+            !state.battlefield.contains(&piker),
+            "reach guard: the Piker died"
+        );
+        assert_eq!(state.objects[&knight].damage_marked, 0);
+
+        let second = resolve_combat_damage(&mut state, &mut events);
+
+        assert!(second.is_none());
+        assert_eq!(
+            state.objects[&knight].damage_marked, 0,
+            "the dead Piker deals no regular-step damage"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "a blocked attacker deals no damage to the player"
+        );
+    }
+
+    /// CR 510.4 + CR 702.4b + CR 510.3: Fencing Ace (1/1, double strike) attacks an
+    /// unblocked player. The first combat damage step deals 1 and ends with the
+    /// active player's priority window; the regular step, one pass round later,
+    /// deals 1 more.
     #[test]
     fn double_strike_deals_damage_twice() {
         let mut state = setup();
-        let attacker = create_creature(&mut state, PlayerId(0), "Knight", 3, 3);
+        let attacker = create_creature(&mut state, PlayerId(0), "Fencing Ace", 1, 1);
         state
             .objects
             .get_mut(&attacker)
@@ -3432,12 +3531,33 @@ mod tests {
             .keywords
             .push(Keyword::DoubleStrike);
         setup_combat(&mut state, vec![attacker], vec![]);
+        // Stale priority bookkeeping the window must clear (CR 510.3).
+        state.priority_player = PlayerId(1);
+        state.priority_passes.insert(PlayerId(1));
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        let first = resolve_combat_damage(&mut state, &mut events);
 
-        // 3 + 3 = 6 damage to player
-        assert_eq!(state.players[1].life, 14);
+        // First step: 1 damage, then the active player's priority window.
+        assert!(
+            matches!(first, Some(WaitingFor::Priority { player }) if player == PlayerId(0)),
+            "CR 510.3: the first combat damage step ends with the active player's priority, got {first:?}"
+        );
+        assert_eq!(state.players[1].life, 19, "the first-strike hit landed");
+        let combat = state.combat.as_ref().unwrap();
+        assert!(combat.first_strike_done && !combat.regular_damage_done);
+        assert!(state.stack.is_empty());
+        assert!(between_combat_damage_steps(&state));
+        assert_eq!(state.priority_player, PlayerId(0));
+        assert!(state.priority_passes.is_empty());
+
+        // All players pass: the gate re-enters for the regular step.
+        let second = resolve_combat_damage(&mut state, &mut events);
+
+        assert!(second.is_none(), "the regular step completes: {second:?}");
+        assert_eq!(state.players[1].life, 18, "1 + 1 = 2 damage to the player");
+        assert!(state.combat.as_ref().unwrap().regular_damage_done);
+        assert!(!between_combat_damage_steps(&state));
     }
 
     #[test]
@@ -5480,7 +5600,24 @@ mod tests {
         setup_combat(&mut state, vec![attacker], vec![]);
 
         let mut events = Vec::new();
-        resolve_combat_damage(&mut state, &mut events);
+        let prevented_count = |events: &[GameEvent]| {
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::DamagePrevented { .. }))
+                .count()
+        };
+
+        // CR 510.4: the first combat-damage step is its own batch and its own
+        // rider firing (4), ending with the CR 510.3 priority window.
+        let first = resolve_combat_damage(&mut state, &mut events);
+        assert!(matches!(first, Some(WaitingFor::Priority { .. })));
+        assert_eq!(state.players[1].life, 20, "the first strike was prevented");
+        assert_eq!(count_inklings(&state), 4, "first-strike step: 4 Inklings");
+        assert_eq!(prevented_count(&events), 1, "one DamagePrevented so far");
+
+        // The regular step is the second batch and the second firing (4).
+        let second = resolve_combat_damage(&mut state, &mut events);
+        assert!(second.is_none());
 
         assert_eq!(state.players[1].life, 20, "both strikes prevented");
         // CR 510.4: two separate combat-damage steps → two rider firings of 4.
@@ -5490,11 +5627,11 @@ mod tests {
             "double strike: 4 (first-strike step) + 4 (regular step) = 8"
         );
         // CR 510.4: two DamagePrevented events, one per combat-damage step.
-        let prevented = events
-            .iter()
-            .filter(|e| matches!(e, GameEvent::DamagePrevented { .. }))
-            .count();
-        assert_eq!(prevented, 2, "one DamagePrevented per combat-damage step");
+        assert_eq!(
+            prevented_count(&events),
+            2,
+            "one DamagePrevented per combat-damage step"
+        );
     }
 
     /// Step 7: Trample attacker partially blocked, defending player shielded.
@@ -6313,8 +6450,9 @@ mod tests {
     }
 
     /// CR 510.4 + CR 702.7b + CR 702.4b: a first-strike combat damage step is
-    /// followed by a second combat damage step, and both are counted. Here the
-    /// second step follows the first in the same `resolve_combat_damage` call.
+    /// followed by a second combat damage step, and both are counted. The second
+    /// step follows the CR 510.3 priority window after the first (one pass round
+    /// later), not the first step in the same `resolve_combat_damage` call.
     #[test]
     fn step_tally_counts_the_second_combat_damage_step() {
         for double_strike in [false, true] {
@@ -6336,6 +6474,30 @@ mod tests {
             let mut runner = scenario.build();
             let life_before = runner.life(P1);
             drive_to_combat_damage(&mut runner, &[attacker], vec![]);
+
+            // The first step is over and its priority window is open: its damage is
+            // dealt (Youthful Knight 2, Fencing Ace 1) and only it has begun.
+            let state = runner.state();
+            assert!(
+                matches!(state.waiting_for, WaitingFor::Priority { .. }),
+                "double strike {double_strike}: {:?}",
+                state.waiting_for
+            );
+            assert!(state.stack.is_empty());
+            assert!(combat(&runner).first_strike_done && !combat(&runner).regular_damage_done);
+            assert_eq!(
+                runner.life(P1),
+                life_before - if double_strike { 1 } else { 2 },
+                "double strike {double_strike}: only the first step's damage is dealt"
+            );
+            assert_eq!(
+                combat_damage_steps(&runner),
+                1,
+                "double strike {double_strike}: one combat damage step has begun"
+            );
+
+            // Both players pass the window; the second step begins.
+            runner.pass_both_players();
 
             let state = runner.state();
             assert!(
@@ -6390,9 +6552,10 @@ mod tests {
         assert_eq!(combat_damage_steps(&runner), 1);
     }
 
-    /// CR 510.3a + CR 510.4: a trigger from the first-strike step pauses the
-    /// combat before the second step. The second step is counted once, when it
-    /// begins through the `priority.rs` completeness gate, and not before.
+    /// CR 510.3a + CR 510.4: a trigger from the first-strike step fills the
+    /// (unconditional) priority window before the second step. The second step is
+    /// counted once, when it begins through the `priority.rs` completeness gate,
+    /// and not before.
     #[test]
     fn step_tally_counts_the_second_combat_damage_step_after_a_pause() {
         let mut scenario = GameScenario::new();
@@ -6460,6 +6623,22 @@ mod tests {
             &[knight, bears],
             vec![(cadet_1, bears), (cadet_2, bears)],
         );
+
+        // The first step (the Knight's 2) ends in its priority window; the second
+        // step has not begun.
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(combat(&runner).first_strike_done);
+        assert!(!combat(&runner).regular_damage_done);
+        assert!(combat(&runner).damage_step_index.is_none());
+        assert_eq!(runner.life(P1), life_before - 2);
+        assert_eq!(combat_damage_steps(&runner), 1);
+
+        // Passing the window begins the second step, which prompts the Bears'
+        // assignment.
+        runner.pass_both_players();
 
         assert!(
             matches!(
