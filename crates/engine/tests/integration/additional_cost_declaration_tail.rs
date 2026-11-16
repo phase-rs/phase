@@ -1796,7 +1796,7 @@ fn defiler_with_unpayable_life_at_acceptance_still_offers_the_alternative() {
 
     let trail = drive(
         &mut runner,
-        GameAction::DecideOptionalCost { pay: true },
+        GameAction::DecideOptionalCost { index: 0 },
         &ACCEPT_BOTH,
     );
 
@@ -1913,7 +1913,7 @@ fn saved_at_the_defiler_prompt_resumes_into_the_alternative() {
 
     let trail = drive(
         &mut restored,
-        GameAction::DecideOptionalCost { pay: true },
+        GameAction::DecideOptionalCost { index: 0 },
         &ACCEPT_BOTH,
     );
 
@@ -1935,14 +1935,14 @@ fn saved_at_the_alternative_choice_completes() {
         .act(cast_action(&runner, bringer))
         .expect("the cast starts");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the Defiler");
     assert_eq!(runner.waiting_for_kind(), "OptionalCostChoice");
     let mut restored = round_trip(&runner);
 
     let trail = drive(
         &mut restored,
-        GameAction::DecideOptionalCost { pay: true },
+        GameAction::DecideOptionalCost { index: 0 },
         &ACCEPT_BOTH,
     );
 
@@ -2394,11 +2394,11 @@ fn accepted_defiler_offers_each_payable_alternative_in_turn() {
     runner.act(first).expect("the cast starts");
     assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the Defiler");
     assert_eq!(offered_alternative(&runner), Some(wubrg_cost()));
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("decline the spell's own alternative");
     assert_eq!(
         offered_alternative(&runner),
@@ -2406,7 +2406,7 @@ fn accepted_defiler_offers_each_payable_alternative_in_turn() {
         "As Foretold's alternative is offered next"
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("choose As Foretold's alternative");
 
     assert_cast_completes(
@@ -2460,11 +2460,11 @@ fn declined_own_alternative_offers_the_payable_grant() {
     runner.act(first).expect("the cast starts");
     assert_eq!(offered_alternative(&runner), Some(wubrg_cost()));
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("decline the spell's own alternative");
     assert_eq!(offered_alternative(&runner), Some(ManaCost::zero()));
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("choose As Foretold's alternative");
 
     assert!(
@@ -2497,13 +2497,12 @@ fn wubrg_cost() -> ManaCost {
 fn offered_alternative(runner: &GameRunner) -> Option<ManaCost> {
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice {
-            cost:
-                engine::types::ability::AdditionalCost::Choice(
-                    engine::types::ability::AbilityCost::Mana { cost },
-                    _,
-                ),
+            cost: engine::types::ability::AdditionalCost::Choice(costs),
             ..
-        } => Some(cost.clone()),
+        } => match costs.first() {
+            Some(engine::types::ability::AbilityCost::Mana { cost }) => Some(cost.clone()),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -2837,10 +2836,10 @@ fn granted_alternative_for_a_card_with_no_mana_cost_offers_the_defiler() {
         .expect("the cast starts");
     assert_eq!(runner.waiting_for_kind(), "DefilerPayment");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the Defiler");
     let WaitingFor::OptionalCostChoice {
-        cost: engine::types::ability::AdditionalCost::Choice(preferred, fallback),
+        cost: engine::types::ability::AdditionalCost::Choice(costs),
         ..
     } = &runner.state().waiting_for
     else {
@@ -2848,6 +2847,9 @@ fn granted_alternative_for_a_card_with_no_mana_cost_offers_the_defiler() {
             "the alternative is offered after the Defiler, got {:?}",
             runner.state().waiting_for
         );
+    };
+    let [preferred, fallback] = costs.as_slice() else {
+        panic!("expected [alternative, printed] options, got {costs:?}");
     };
     assert_eq!(
         preferred,
@@ -2865,7 +2867,7 @@ fn granted_alternative_for_a_card_with_no_mana_cost_offers_the_defiler() {
     );
     let trail = drive(
         &mut runner,
-        GameAction::DecideOptionalCost { pay: true },
+        GameAction::DecideOptionalCost { index: 0 },
         &ACCEPT_BOTH,
     );
 
@@ -3661,7 +3663,7 @@ fn chalices_then_zahid(kicks: [u32; 2]) -> (GameRunner, ObjectId, Vec<ObjectId>)
         while let WaitingFor::OptionalCostChoice { times_kicked, .. } = runner.state().waiting_for {
             runner
                 .act(GameAction::DecideOptionalCost {
-                    pay: times_kicked < kick,
+                    index: if times_kicked < kick { 0 } else { 1 },
                 })
                 .expect("answer multikicker");
         }
@@ -3807,7 +3809,7 @@ fn declining_every_alternative_reaches_the_printed_cost_once_each() {
         let first = cast_action(&runner, bringer);
         runner.act(first).expect("the cast starts");
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("accept the Defiler");
 
         let mut offers = Vec::new();
@@ -3819,7 +3821,7 @@ fn declining_every_alternative_reaches_the_printed_cost_once_each() {
             runner = round_trip(&runner);
             assert_eq!(offered_alternative(&runner), offers.last().cloned());
             if runner
-                .act(GameAction::DecideOptionalCost { pay: false })
+                .act(GameAction::DecideOptionalCost { index: 1 })
                 .is_err()
             {
                 break;
@@ -3878,7 +3880,7 @@ fn imposed_life_and_defiler_life_are_held_from_life_for_mana() {
             assert!(trail.refused, "{:?}", trail.prompts);
             assert_eq!(trail.prompts, ["TargetSelection", "DefilerPayment"]);
             assert!(runner
-                .act(GameAction::DecideOptionalCost { pay: false })
+                .act(GameAction::DecideOptionalCost { index: 1 })
                 .is_err());
             assert_eq!((zone(&runner, enslave), life(&runner)), (Zone::Hand, 5));
         }

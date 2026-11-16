@@ -818,7 +818,7 @@ fn raise_alternative_cost_choice(
     Ok(make_optional_cost_choice(
         state,
         player,
-        AdditionalCost::Choice(alt_cost.cost, AbilityCost::Mana { cost: fallback }),
+        AdditionalCost::Choice(vec![alt_cost.cost, AbilityCost::Mana { cost: fallback }]),
         0,
         pending,
     ))
