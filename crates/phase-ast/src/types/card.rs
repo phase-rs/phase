@@ -444,7 +444,7 @@ mod deck_size_override_compat_tests {
         // Serialize a full default face first: most fields carry no
         // `#[serde(default)]`, so a hand-written minimal object would not
         // deserialize. Mutating the one key keeps the payload realistic.
-        let mut json = serde_json::to_value(&CardFace::default()).expect("face serializes");
+        let mut json = serde_json::to_value(CardFace::default()).expect("face serializes");
         json["no_maximum_deck_size"] = value;
         json
     }
