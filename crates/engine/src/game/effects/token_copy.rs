@@ -1527,7 +1527,8 @@ fn apply_copy_token_batch_on_board(
                 .expect("resolved copy-token creation must have a live journal cause");
         }
 
-        match crate::game::zone_pipeline::apply_entering_aura_hosts(state, token_id, hosts) {
+        match crate::game::zone_pipeline::apply_entering_aura_hosts(state, token_id, hosts, events)
+        {
             // `NoLegalHost` is unreachable here — the empty-host arm above `continue`d.
             crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
             | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
@@ -1996,7 +1997,9 @@ pub(crate) fn continue_copy_token_after_entry_payment(
             // pauses again behind the AURA variant — the birth above is
             // already journaled, so that resume's straight-to-finish shape
             // stays sound.
-            match crate::game::zone_pipeline::apply_entering_aura_hosts(state, token_id, hosts) {
+            match crate::game::zone_pipeline::apply_entering_aura_hosts(
+                state, token_id, hosts, events,
+            ) {
                 crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
                 | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
                 | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
