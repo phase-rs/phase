@@ -352,8 +352,9 @@ fn hallowed_moonlight_parses_to_floating_enter_exile_install_and_draw() {
     }));
 }
 
-/// P3. CR 611.2a: with no stated window the clause is not an effect created by
-/// resolution, so the front door declines and the clause keeps its honest guard gap.
+/// P3. With no stated window the parser front door declines (it supports only clauses with
+/// a stated duration; CR 611.2a permits durationless resolution-generated effects, which
+/// stay unsupported here) and the clause keeps its honest guard gap.
 #[test]
 fn unwindowed_enter_exile_clause_keeps_its_guard_gap() {
     let parsed = parse(
@@ -689,7 +690,7 @@ fn three_hallowed_moonlights_prompt_once_for_a_token_batch() {
             runner.state().waiting_for,
             WaitingFor::ReplacementChoice { .. }
         ),
-        "no second prompt once the batch is zeroed, got {:?}",
+        "no second prompt once the batch is redirected, got {:?}",
         runner.state().waiting_for
     );
     assert!(battlefield_tokens_named(runner.state(), "Soldier").is_empty());
@@ -946,7 +947,7 @@ fn urza_copy_of_noncreature_artifact_is_an_artifact_creature() {
 }
 
 /// R10. Under Hallowed Moonlight, Urza's copy is a creature (CR 707.9b), so it is exiled
-/// instead and never created.
+/// instead and does not enter the battlefield.
 #[test]
 fn hallowed_moonlight_exiles_copy_made_a_creature_by_its_exception() {
     let (mut scenario, urza, trinket) = urza_scenario();
@@ -1462,13 +1463,17 @@ fn metamorph_copy_token_copying_a_creature_is_exiled_under_moonlight() {
 // F4 — a substituted creation delivers the substitute, not the replaced copy body.
 // ---------------------------------------------------------------------------
 
-/// DECLARED SYNTHETIC: a tapped copy maker, the nearest printed analogue being any
-/// "create a tapped token that's a copy of ..." effect.
+/// DECLARED SYNTHETIC: a tapped copy maker as an instant. The printed shape is a triggered
+/// ability, not a spell: Compy Swarm's "create a tapped token that's a copy of this creature"
+/// (end step) is the nearest printed donor, and no printed instant or sorcery makes a tapped
+/// copy token. The row tests the substitution seam's retention of the creating instruction's
+/// tapped state for a copy batch, not that card.
 const COPY_CREATURE_TAPPED: &str =
     "Create a tapped token that's a copy of target creature you control.";
 
-/// DECLARED SYNTHETIC: a tapped plain-token maker.
-const MAKE_TAPPED_SOLDIER: &str = "Create a tapped 1/1 white Soldier creature token.";
+/// Bone Offering's printed adventure text (Scryfall), cast here as a zero-cost instant
+/// fixture: a printed tapped creature-token maker.
+const BONE_OFFERING: &str = "Create a tapped 4/1 black Skeleton creature token with menace.";
 
 /// F4. CR 614.1a + CR 707.9b: Urza copies a noncreature artifact "except it's a 1/1
 /// Soldier creature in addition to its other types", which makes the copy a creature
@@ -1500,11 +1505,11 @@ fn divine_visitation_substitutes_urza_copy_of_a_noncreature_artifact() {
 fn divine_visitation_substitute_keeps_a_plain_batchs_tapped_state() {
     let mut scenario = base_scenario();
     scenario.add_enchantment_from_oracle(P0, "Divine Visitation", DIVINE_VISITATION);
-    let soldier = add_instant(&mut scenario, P0, "Tapped Soldier", MAKE_TAPPED_SOLDIER);
+    let soldier = add_instant(&mut scenario, P0, "Bone Offering", BONE_OFFERING);
     let mut runner = scenario.build();
 
     let outcome = runner.cast(soldier).resolve();
-    assert_settled(outcome.state(), "F4 tapped soldier");
+    assert_settled(outcome.state(), "F4 bone offering");
     let angels = battlefield_tokens_named(outcome.state(), "Angel");
     assert_eq!(angels.len(), 1, "one Angel");
     assert!(outcome.state().objects[&angels[0]].tapped, "tapped");

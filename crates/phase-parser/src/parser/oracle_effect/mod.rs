@@ -12821,8 +12821,9 @@ fn parse_effect_clause_inner_with_damage_context(
     // Hallowed Moonlight). Dispatched after `strip_leading_duration` for the same
     // reason as the Don't Blink lift above: the duration-stripped recursive call
     // reaches it and the window is re-attached as `AbilityDefinition.duration`.
-    // Gated on the stated window (CR 611.2a: created by resolution, not printed),
-    // so an un-windowed clause keeps its honest guard gap.
+    // This front door supports only clauses with a stated duration; durationless
+    // clauses remain unsupported here (CR 611.2a permits resolution-generated
+    // continuous effects without a stated duration) and keep their honest guard gap.
     if let Some(effect) = super::oracle_replacement::parse_windowed_enter_wasnt_cast_exile_install(
         &lower,
         text,

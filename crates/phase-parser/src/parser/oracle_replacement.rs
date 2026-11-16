@@ -8149,10 +8149,11 @@ fn parse_creature_enter_wasnt_cast_exile_replacement(
 /// [`parse_windowed_graveyard_redirect_install`] is for the graveyard family.
 ///
 /// `stated_window` is the window the clause pipeline peeled off this clause
-/// (`ParseContext::stated_clause_duration`); its presence is the CR 611.2a
-/// discriminator between an effect created by a resolving spell or ability and
-/// a printed static (CR 604.2), so an un-windowed clause is declined and keeps
-/// its honest guard gap. The window itself is not mapped here: it travels on
+/// (`ParseContext::stated_clause_duration`). This parser front door supports only
+/// clauses with a stated duration; durationless clauses remain unsupported here
+/// (CR 611.2a permits resolution-generated continuous effects without a stated
+/// duration), so an un-windowed clause is declined and keeps its honest guard
+/// gap. The window itself is not mapped here: it travels on
 /// `AbilityDefinition.duration`, and the install resolver derives the lifetime
 /// through `expiry_from_duration` (refusing unenforceable windows through
 /// `replacement_install_is_refused`), so the definition's own `expiry` stays
