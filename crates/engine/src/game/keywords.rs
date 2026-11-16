@@ -9,7 +9,7 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, CastVariantPaid, Effect, NinjutsuVariant, RuntimeHandler,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{CastingVariant, GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{
     BestowCost, BlitzCost, EmbalmCost, EmergeCost, EternalizeCost, EvokeCost, FlashbackCost,
@@ -21,7 +21,7 @@ use crate::types::player::PlayerId;
 use crate::types::statics::{CostModifyMode, StaticMode};
 use crate::types::zones::Zone;
 
-use super::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
+use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 
 /// An engine-authored Ninjutsu-family activation announcement for Priority
 /// preflight. The hand/command source and return creature stay private to the
@@ -176,12 +176,25 @@ pub fn stack_has_split_second(state: &GameState) -> bool {
 
 pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Option<FlashbackCost> {
     let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Flashback)?;
+    flashback_cost_of(state, object_id, &keyword)
+}
+
+/// CR 702.34a: the flashback cost one flashback instance of `object_id` names,
+/// with its placeholder mana cost resolved against the card. `None` when
+/// `keyword` isn't a flashback instance.
+pub(crate) fn flashback_cost_of(
+    state: &GameState,
+    object_id: ObjectId,
+    keyword: &Keyword,
+) -> Option<FlashbackCost> {
     match keyword {
         Keyword::Flashback(cost) => match cost {
             FlashbackCost::Mana(mana_cost) => Some(FlashbackCost::Mana(resolve_keyword_mana_cost(
-                state, object_id, &mana_cost,
+                state, object_id, mana_cost,
             ))),
-            FlashbackCost::NonMana(ability_cost) => Some(FlashbackCost::NonMana(ability_cost)),
+            FlashbackCost::NonMana(ability_cost) => {
+                Some(FlashbackCost::NonMana(ability_cost.clone()))
+            }
         },
         _ => None,
     }
@@ -237,9 +250,20 @@ pub fn effective_escape_data(
     object_id: ObjectId,
 ) -> Option<(ManaCost, AbilityCost)> {
     let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Escape)?;
+    escape_data_of(state, object_id, &keyword)
+}
+
+/// CR 702.138a: the mana sub-cost and residual one escape instance of
+/// `object_id` names (see [`effective_escape_data`]). `None` when `keyword`
+/// isn't an escape instance or has no residual.
+pub(crate) fn escape_data_of(
+    state: &GameState,
+    object_id: ObjectId,
+    keyword: &Keyword,
+) -> Option<(ManaCost, AbilityCost)> {
     match keyword {
         Keyword::Escape(escape) => {
-            let (mana, residual) = super::casting::split_escape_cost_components(&escape);
+            let (mana, residual) = super::casting::split_escape_cost_components(escape);
             // CR 702.138a: a real escape cost always has a non-mana residual
             // (the exile sub-cost). No residual ⇒ unparsed placeholder ⇒ refuse.
             let residual = residual?;
@@ -404,6 +428,170 @@ fn effective_keyword_for_object(
     }
 
     crate::game::off_zone_characteristics::effective_off_zone_keyword(state, object_id, kind)
+}
+
+/// CR 113.2c + CR 601.2b: the casting methods whose cast elects one keyword
+/// instance — a card can have several distinct instances of that keyword
+/// (Deep Analysis' printed flashback and Lier's granted one), each its own
+/// alternative cost, and the caster announces which one they pay. `Some` of
+/// the keyword kind for those methods; `None` for every other method, which
+/// keeps its single-instance read.
+pub fn instance_elected_kind(variant: CastingVariant) -> Option<KeywordKind> {
+    match variant {
+        CastingVariant::Flashback | CastingVariant::Escape => variant.cast_keyword(),
+        CastingVariant::Normal
+        | CastingVariant::Adventure
+        | CastingVariant::Omen
+        | CastingVariant::Warp
+        | CastingVariant::Retrace
+        | CastingVariant::Harmonize
+        | CastingVariant::Mayhem
+        | CastingVariant::Aftermath
+        | CastingVariant::Disturb
+        | CastingVariant::GraveyardPermission { .. }
+        | CastingVariant::HandPermission { .. }
+        | CastingVariant::ExilePermission { .. }
+        | CastingVariant::Sneak { .. }
+        | CastingVariant::WebSlinging { .. }
+        | CastingVariant::Miracle
+        | CastingVariant::Madness
+        | CastingVariant::Evoke
+        | CastingVariant::Emerge
+        | CastingVariant::Dash
+        | CastingVariant::Blitz
+        | CastingVariant::Spectacle
+        | CastingVariant::Suspend
+        | CastingVariant::Plot
+        | CastingVariant::Foretell
+        | CastingVariant::Overload
+        | CastingVariant::Bestow
+        | CastingVariant::Awaken
+        | CastingVariant::Cleave
+        | CastingVariant::MoreThanMeetsTheEye
+        | CastingVariant::Impending
+        | CastingVariant::Prototype
+        | CastingVariant::Mutate
+        | CastingVariant::Freerunning
+        | CastingVariant::Prowl
+        | CastingVariant::JumpStart
+        | CastingVariant::Surge
+        | CastingVariant::FaceDown
+        | CastingVariant::Fuse => None,
+    }
+}
+
+/// The instance of `kind` a single-instance reader uses (the latest applied
+/// grant off the battlefield). For an instance-elected method this is the
+/// cast route the engine took before casts announced an instance; AI reach
+/// prices its first pass from it so that pass stays exactly the earlier one.
+pub(crate) fn default_keyword_instance(
+    state: &GameState,
+    object_id: ObjectId,
+    kind: KeywordKind,
+) -> Option<Keyword> {
+    effective_keyword_for_object(state, object_id, kind)
+}
+
+/// CR 113.2c + CR 601.2b: whether `object_id` has two or more distinct
+/// instances of an instance-elected casting keyword, so a cast of it can
+/// announce among several alternative costs of one method.
+pub fn has_alternative_cost_instance_choice(state: &GameState, object_id: ObjectId) -> bool {
+    let effective =
+        crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id);
+    [CastingVariant::Flashback, CastingVariant::Escape]
+        .into_iter()
+        .filter_map(instance_elected_kind)
+        .any(|kind| {
+            effective
+                .iter()
+                .filter(|keyword| keyword.kind() == kind)
+                .count()
+                > 1
+        })
+}
+
+/// CR 113.2c: every effective instance of `kind` on `object_id`, in keyword-list
+/// order (printed first, then grants in application order). Distinct payloads
+/// are distinct instances; identical grants were already collapsed to one by
+/// the keyword-grant policy.
+pub fn effective_keyword_instances(
+    state: &GameState,
+    object_id: ObjectId,
+    kind: KeywordKind,
+) -> Vec<Keyword> {
+    crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
+        .into_iter()
+        .filter(|keyword| keyword.kind() == kind)
+        .collect()
+}
+
+/// CR 601.2b + CR 118.9a: the keyword instance a cast pays for `kind`, as the
+/// cast announces it. A named instance must still be one of the card's
+/// instances; with none named, a sole instance is the answer and several are
+/// refused as ambiguous rather than priced off whichever comes last. `Ok(None)`
+/// when the card has no instance of `kind`.
+pub(crate) fn elect_alternative_cost_keyword(
+    state: &GameState,
+    object_id: ObjectId,
+    kind: KeywordKind,
+    named: Option<&Keyword>,
+) -> Result<Option<Keyword>, EngineError> {
+    let mut instances = effective_keyword_instances(state, object_id, kind);
+    match named {
+        Some(keyword) if instances.contains(keyword) => Ok(Some(keyword.clone())),
+        Some(_) => Err(EngineError::ActionNotAllowed(
+            "The announced alternative cost is no longer one of this card's abilities".to_string(),
+        )),
+        None if instances.len() > 1 => Err(EngineError::ActionNotAllowed(
+            "This card has several alternative costs of that kind; announce which one is paid"
+                .to_string(),
+        )),
+        None => Ok(instances.pop()),
+    }
+}
+
+/// CR 601.2f: the instance a cast already announced (its total cost is locked
+/// from it), read back after preparation. The bound payload is used as is: a
+/// grantor that has since left doesn't retract the announced cost. Without a
+/// bound instance the cast elects one as at preparation.
+pub(crate) fn bound_alternative_cost_keyword(
+    state: &GameState,
+    object_id: ObjectId,
+    kind: KeywordKind,
+    bound: Option<&Keyword>,
+) -> Result<Option<Keyword>, EngineError> {
+    match bound {
+        Some(keyword) if keyword.kind() == kind => Ok(Some(keyword.clone())),
+        Some(_) => Err(EngineError::InvalidAction(
+            "Announced alternative cost does not match the casting method".to_string(),
+        )),
+        None => elect_alternative_cost_keyword(state, object_id, kind, None),
+    }
+}
+
+/// CR 702.34a: the flashback cost of the instance this cast pays.
+pub(crate) fn bound_flashback_cost(
+    state: &GameState,
+    object_id: ObjectId,
+    bound: Option<&Keyword>,
+) -> Result<Option<FlashbackCost>, EngineError> {
+    Ok(
+        bound_alternative_cost_keyword(state, object_id, KeywordKind::Flashback, bound)?
+            .and_then(|keyword| flashback_cost_of(state, object_id, &keyword)),
+    )
+}
+
+/// CR 702.138a: the escape mana sub-cost and residual of the instance this
+/// cast pays.
+pub(crate) fn bound_escape_data(
+    state: &GameState,
+    object_id: ObjectId,
+    bound: Option<&Keyword>,
+) -> Result<Option<(ManaCost, AbilityCost)>, EngineError> {
+    Ok(
+        bound_alternative_cost_keyword(state, object_id, KeywordKind::Escape, bound)?
+            .and_then(|keyword| escape_data_of(state, object_id, &keyword)),
+    )
 }
 
 /// Which entry survives when a grant is identical to an entry already on the

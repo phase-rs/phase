@@ -5,6 +5,8 @@
 //! time in hand order is exactly how "Seal + Seal" (4 damage) beats
 //! "Seal + Flame Rift" (6 damage) — each Seal is cheaper in isolation.
 
+use std::collections::HashSet;
+
 use super::sources::{Gain, LifeLoss, Linear, PricedSource};
 use super::LineStep;
 
@@ -63,7 +65,7 @@ pub(super) fn lethal_combinations(sources: &[PricedSource], budget: &Budget) -> 
             .iter()
             .filter(|&&index| sources[index].loss.opponent.per_x > 0);
         let x_member = scaling.next();
-        if scaling.next().is_some() {
+        if scaling.next().is_some() || casts_one_object_twice(sources, &members) {
             continue;
         }
         let mana_value: u32 = members
@@ -145,7 +147,7 @@ pub(super) fn response_combinations(sources: &[PricedSource], mana: u32) -> Vec<
             .iter()
             .filter(|&&index| sources[index].loss.opponent.per_x > 0);
         let x_member = scaling.next();
-        if scaling.next().is_some() {
+        if scaling.next().is_some() || casts_one_object_twice(sources, &members) {
             continue;
         }
         let mana_value: u32 = members
@@ -175,6 +177,17 @@ pub(super) fn response_combinations(sources: &[PricedSource], mana: u32) -> Vec<
         .into_iter()
         .map(|(.., combination)| combination)
         .collect()
+}
+
+/// Two members casting the same object are alternative ways to cast one card
+/// (CR 601.2b, one alternative cost per cast), never both in one line.
+/// Activations carry no object and may repeat.
+fn casts_one_object_twice(sources: &[PricedSource], members: &[usize]) -> bool {
+    let mut seen = HashSet::new();
+    members
+        .iter()
+        .filter_map(|&index| sources[index].exclusive_object)
+        .any(|object| !seen.insert(object))
 }
 
 /// The least X at which `damage` reaches `life`, or `None` when no X does.

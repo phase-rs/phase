@@ -482,11 +482,12 @@ pub(crate) fn effective_off_zone_keyword_contributions(
     keywords
 }
 
-/// The single instance of `kind` that a single-cost reader (flashback, escape,
-/// foretell, miracle, …) uses: the LAST entry of that kind, which is the latest
-/// applied surviving grant, or the printed instance when no grant of that kind
-/// applies. Choosing among several instances of the same keyword (CR 113.2c) is
-/// tracked by phase-rs/phase#10957; until then this keeps the latest instance.
+/// The single instance of `kind` that a single-cost reader (foretell, miracle,
+/// …) uses: the LAST entry of that kind, which is the latest applied surviving
+/// grant, or the printed instance when no grant of that kind applies. A cast
+/// elects among several flashback or escape instances (CR 113.2c + CR 601.2b)
+/// through `keywords::elect_alternative_cost_keyword`; the other kinds keep
+/// the latest instance (phase-rs/phase#10957).
 pub fn effective_off_zone_keyword(
     state: &GameState,
     object_id: ObjectId,

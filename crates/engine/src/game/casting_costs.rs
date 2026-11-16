@@ -9685,6 +9685,7 @@ pub(super) fn check_additional_cost_or_pay(
     cast_timing_permission: Option<CastTimingRoute>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    alternative_cost_keyword: Option<crate::types::keywords::Keyword>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     check_additional_cost_or_pay_with_distribute(
@@ -9701,7 +9702,10 @@ pub(super) fn check_additional_cost_or_pay(
         None,
         origin_zone,
         payment_mode,
-        CostLockInput::default(),
+        CostLockInput {
+            alternative_cost_keyword,
+            ..CostLockInput::default()
+        },
         events,
     )
 }
@@ -9785,8 +9789,13 @@ pub(super) fn finish_pending_cast_cost_or_pay(
         // `begin_deferred_target_selection` clears the deferral, and the
         // authority's own pendings never defer targets, so each cast meets the
         // tail once, here or in the authority.
-        let residual =
-            cast_variant_cost_residual(state, player, pending.object_id, pending.casting_variant);
+        let residual = cast_variant_cost_residual(
+            state,
+            player,
+            pending.object_id,
+            pending.casting_variant,
+            pending.alternative_cost_keyword.as_ref(),
+        )?;
         return continue_cost_declarations(
             state,
             player,
@@ -9851,6 +9860,7 @@ pub(super) fn begin_modal_additional_cost_declaration(
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    alternative_cost_keyword: Option<crate::types::keywords::Keyword>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let additional = state
@@ -9870,6 +9880,7 @@ pub(super) fn begin_modal_additional_cost_declaration(
         let mut pending = PendingCast::new(object_id, card_id, ability, cost);
         pending.base_cost = base_cost;
         pending.casting_variant = casting_variant;
+        pending.alternative_cost_keyword = alternative_cost_keyword;
         pending.casting_permission_index = casting_permission_index;
         pending.cast_timing_permission = cast_timing_permission;
         pending.distribute = distribute;
@@ -9887,6 +9898,7 @@ pub(super) fn begin_modal_additional_cost_declaration(
     let mut pending = PendingCast::new(object_id, card_id, ability, cost);
     pending.base_cost = base_cost;
     pending.casting_variant = casting_variant;
+    pending.alternative_cost_keyword = alternative_cost_keyword;
     pending.casting_permission_index = casting_permission_index;
     pending.cast_timing_permission = cast_timing_permission;
     pending.distribute = distribute;
@@ -9915,6 +9927,7 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    alternative_cost_keyword: Option<crate::types::keywords::Keyword>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let additional = state
@@ -9933,6 +9946,7 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
             let mut pending = PendingCast::new(object_id, card_id, ability, cost);
             pending.base_cost = base_cost;
             pending.casting_variant = casting_variant;
+            pending.alternative_cost_keyword = alternative_cost_keyword;
             pending.casting_permission_index = casting_permission_index;
             pending.cast_timing_permission = cast_timing_permission;
             pending.distribute = distribute;
@@ -9978,6 +9992,7 @@ pub(super) fn begin_target_dependent_additional_cost_declaration(
                 distribute,
                 origin_zone,
                 payment_mode,
+                alternative_cost_keyword,
                 events,
             )
         }
@@ -10006,11 +10021,13 @@ pub(super) fn begin_keyword_queue_before_targets(
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    alternative_cost_keyword: Option<crate::types::keywords::Keyword>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let mut pending = PendingCast::new(object_id, card_id, ability, cost);
     pending.base_cost = base_cost;
     pending.casting_variant = casting_variant;
+    pending.alternative_cost_keyword = alternative_cost_keyword;
     pending.casting_permission_index = casting_permission_index;
     pending.cast_timing_permission = cast_timing_permission;
     pending.distribute = distribute;
@@ -10042,11 +10059,13 @@ pub(super) fn begin_optional_cost_before_targets(
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    alternative_cost_keyword: Option<crate::types::keywords::Keyword>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let mut pending = PendingCast::new(object_id, card_id, ability, cost);
     pending.base_cost = base_cost;
     pending.casting_variant = casting_variant;
+    pending.alternative_cost_keyword = alternative_cost_keyword;
     pending.casting_permission_index = casting_permission_index;
     pending.cast_timing_permission = cast_timing_permission;
     pending.distribute = distribute;
@@ -10096,6 +10115,7 @@ pub(super) fn begin_required_cost_before_targets(
     distribute: Option<DistributionUnit>,
     origin_zone: Zone,
     payment_mode: CastPaymentMode,
+    alternative_cost_keyword: Option<crate::types::keywords::Keyword>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let mut ability = ability;
@@ -10110,6 +10130,7 @@ pub(super) fn begin_required_cost_before_targets(
     let mut pending = PendingCast::new(object_id, card_id, ability, cost);
     pending.base_cost = base_cost;
     pending.casting_variant = casting_variant;
+    pending.alternative_cost_keyword = alternative_cost_keyword;
     pending.casting_permission_index = casting_permission_index;
     pending.cast_timing_permission = cast_timing_permission;
     pending.distribute = distribute;
@@ -10876,7 +10897,13 @@ fn check_additional_cost_or_pay_with_kept_cost(
     // CR 118.9d + CR 601.2f: the cast variant's non-mana residual is part of the
     // total cost whichever additional costs the spell also declares, so every
     // declaration arm below hands it to `continue_cost_declarations`.
-    let residual = cast_variant_cost_residual(state, player, object_id, casting_variant);
+    let residual = cast_variant_cost_residual(
+        state,
+        player,
+        object_id,
+        casting_variant,
+        lock.alternative_cost_keyword.as_ref(),
+    )?;
 
     if !additional_cost_queue.is_empty() {
         let mut pending = pending_cast_keeping(
@@ -11566,17 +11593,20 @@ fn encode_declaration_exit(
 /// - CR 107.14: casting from exile for energy (`ExileWithEnergyCost`) pays {E}
 ///   equal to the card's mana value (CR 202.3d + CR 709.4b: a split card off the
 ///   stack has its combined mana value).
-/// - CR 702.138a: Escape's residual after its mana sub-cost ("Exile three other
-///   cards from your graveyard"; possibly a Composite, Lunar Hatchling).
 /// - CR 702.81a: Retrace's land discard.
 /// - CR 702.133a: Jump-start's discard.
-/// - A card's own compound alternative cost (`alternative_cost_residual`).
+/// - A card's own compound alternative cost (`alternative_cost_residual`),
+///   including Escape's exile clause.
+///
+/// An announced keyword instance (`alternative_cost_keyword`) that can't be
+/// read is an error, never "no residual": that would waive the cost.
 fn cast_variant_cost_residual(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
     casting_variant: CastingVariant,
-) -> Option<AbilityCost> {
+    alternative_cost_keyword: Option<&crate::types::keywords::Keyword>,
+) -> Result<Option<AbilityCost>, EngineError> {
     let energy_mv = state.objects.get(&object_id).and_then(|obj| {
         (obj.zone == Zone::Exile
             && obj.casting_permissions.iter().any(|p| {
@@ -11588,23 +11618,24 @@ fn cast_variant_cost_residual(
         .then(|| obj.effective_mana_value())
     });
     if let Some(energy_mv) = energy_mv {
-        return Some(AbilityCost::PayEnergy {
+        return Ok(Some(AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed {
                 value: energy_mv as i32,
             },
-        });
+        }));
     }
     match casting_variant {
-        CastingVariant::Escape => {
-            if let Some((_, residual)) = super::keywords::effective_escape_data(state, object_id) {
-                return Some(residual);
-            }
-        }
-        CastingVariant::Retrace => return Some(retrace_discard_land_cost()),
-        CastingVariant::JumpStart => return Some(jumpstart_discard_card_cost()),
+        CastingVariant::Retrace => return Ok(Some(retrace_discard_land_cost())),
+        CastingVariant::JumpStart => return Ok(Some(jumpstart_discard_card_cost())),
         _ => {}
     }
-    alternative_cost_residual(state, player, object_id, casting_variant)
+    alternative_cost_residual(
+        state,
+        player,
+        object_id,
+        casting_variant,
+        alternative_cost_keyword,
+    )
 }
 
 /// CR 601.2b + CR 601.2h + CR 119.4: the matching Defiler a cast can be offered,
@@ -11756,6 +11787,12 @@ fn defiler_reduction_alongside(
 ///   evidence 6").
 /// - CR 702.152a: a compound blitz cost (Sabin, Master Monk's "Discard a card",
 ///   Tenacious Underdog's "Pay 2 life").
+/// - CR 702.138a: Escape's residual after its mana sub-cost ("Exile three other
+///   cards from your graveyard"; possibly a Composite, Lunar Hatchling).
+///
+/// For Flashback and Escape the residual is the announced instance's
+/// (`alternative_cost_keyword`, CR 113.2c + CR 601.2b); a cast that announced
+/// none reads its sole instance and is refused when it has several.
 ///
 /// CR 702.102b: each arm requires its own casting variant, which Fuse never
 /// equals, so a fused split cast never reaches these reads.
@@ -11764,7 +11801,8 @@ pub(super) fn alternative_cost_residual(
     player: PlayerId,
     object_id: ObjectId,
     casting_variant: CastingVariant,
-) -> Option<AbilityCost> {
+    alternative_cost_keyword: Option<&crate::types::keywords::Keyword>,
+) -> Result<Option<AbilityCost>, EngineError> {
     use crate::types::keywords::Keyword;
     let keyword_residual = |split: fn(&Keyword) -> Option<Option<AbilityCost>>| {
         super::casting::effective_spell_keywords(state, player, object_id)
@@ -11772,10 +11810,15 @@ pub(super) fn alternative_cost_residual(
             .find_map(split)
             .flatten()
     };
-    match casting_variant {
+    Ok(match casting_variant {
         CastingVariant::Flashback => {
-            let flashback_cost = super::keywords::effective_flashback_cost(state, object_id);
+            let flashback_cost =
+                super::keywords::bound_flashback_cost(state, object_id, alternative_cost_keyword)?;
             super::casting::split_flashback_cost_components(flashback_cost.as_ref()).1
+        }
+        CastingVariant::Escape => {
+            super::keywords::bound_escape_data(state, object_id, alternative_cost_keyword)?
+                .map(|(_, residual)| residual)
         }
         CastingVariant::Evoke => keyword_residual(|keyword| match keyword {
             Keyword::Evoke(cost) => Some(super::casting::split_evoke_cost_components(cost).1),
@@ -11790,7 +11833,7 @@ pub(super) fn alternative_cost_residual(
             _ => None,
         }),
         _ => None,
-    }
+    })
 }
 
 fn find_defiler_reduction(
@@ -14345,6 +14388,10 @@ pub(super) struct CostLockInput {
     /// re-analyze", which is what keeps the resume from prompting forever.
     pub election: Option<CostReductionElection>,
     pub alternative_cost_election: crate::types::game_state::SpellAlternativeCostElection,
+    /// CR 113.2c + CR 601.2b: the keyword instance the cast announced
+    /// (`PendingCast::alternative_cost_keyword`), carried through every pending
+    /// rebuilt from exploded fields.
+    pub alternative_cost_keyword: Option<crate::types::keywords::Keyword>,
 }
 
 impl CostLockInput {
@@ -14357,6 +14404,7 @@ impl CostLockInput {
             accepted: pending.accepted_cost_reductions.clone(),
             election: pending.cost_reduction_election.clone(),
             alternative_cost_election: pending.alternative_cost_election,
+            alternative_cost_keyword: pending.alternative_cost_keyword.clone(),
         }
     }
 
@@ -14372,6 +14420,9 @@ impl CostLockInput {
         pending.accepted_cost_reductions.clone_from(&self.accepted);
         pending.cost_reduction_election.clone_from(&self.election);
         pending.alternative_cost_election = self.alternative_cost_election;
+        pending
+            .alternative_cost_keyword
+            .clone_from(&self.alternative_cost_keyword);
     }
 }
 
@@ -19553,6 +19604,7 @@ fn finalize_mana_payment_with_resume(
                 crate::types::mana::ManaCost::NoCost,
             );
             pending_resumed.casting_variant = pending.casting_variant;
+            pending_resumed.alternative_cost_keyword = pending.alternative_cost_keyword.clone();
             pending_resumed.casting_permission_index = pending.casting_permission_index;
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
@@ -20007,6 +20059,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
                 crate::types::mana::ManaCost::NoCost,
             );
             pending_resumed.casting_variant = pending.casting_variant;
+            pending_resumed.alternative_cost_keyword = pending.alternative_cost_keyword.clone();
             pending_resumed.casting_permission_index = pending.casting_permission_index;
             pending_resumed.origin_zone = pending.origin_zone;
             pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
@@ -21110,6 +21163,7 @@ mod tests {
             None,
             Zone::Graveyard,
             CastPaymentMode::Auto,
+            None,
             &mut events,
         )
         .expect("the required cost must be offered");
@@ -21978,6 +22032,7 @@ mod tests {
 
     fn make_pending(source_id: ObjectId) -> PendingCast {
         PendingCast {
+            alternative_cost_keyword: None,
             object_id: source_id,
             card_id: CardId(0),
             ability: Box::new(ResolvedAbility::new(
@@ -28492,6 +28547,7 @@ mod tests {
 
         let mut events = Vec::new();
         let pending = PendingCast {
+            alternative_cost_keyword: None,
             object_id: source_id,
             card_id: CardId(900),
             ability: Box::new(ResolvedAbility::new(
@@ -28642,6 +28698,7 @@ mod tests {
         }
 
         let pending = PendingCast {
+            alternative_cost_keyword: None,
             object_id: source_id,
             card_id: CardId(900),
             ability: Box::new(ResolvedAbility::new(
@@ -28761,6 +28818,7 @@ mod tests {
             Zone::Hand,
         );
         let pending = PendingCast {
+            alternative_cost_keyword: None,
             object_id: source_id,
             card_id: CardId(900),
             ability: Box::new(ResolvedAbility::new(
@@ -28870,6 +28928,7 @@ mod tests {
             Zone::Hand,
         );
         let pending = PendingCast {
+            alternative_cost_keyword: None,
             object_id: source_id,
             card_id: CardId(900),
             ability: Box::new(ResolvedAbility::new(
@@ -29012,6 +29071,7 @@ mod tests {
 
         let mut events = Vec::new();
         let pending = PendingCast {
+            alternative_cost_keyword: None,
             object_id: source_id,
             card_id: CardId(900),
             ability: Box::new(ResolvedAbility::new(
