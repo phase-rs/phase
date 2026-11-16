@@ -1362,6 +1362,7 @@ struct RawActionApplication {
     cast_undo_action: Option<super::engine_casting::CastUndoAction>,
     independent_cast_action: Option<(PlayerId, PlayerId, GameAction)>,
     is_actor_scoped_preference: bool,
+    carries_answer_receipts: bool,
     suppress_auto_pass_once: bool,
     boundary_snapshot: std::sync::Arc<GameState>,
     cast_start_snapshot: Option<super::engine_casting::CastStartBoundary>,
@@ -1540,6 +1541,7 @@ fn apply_action_boundary_core(
         && !action.is_submitter_scoped())
     .then(|| super::engine_casting::CastUndoAction::of(&action));
     let is_actor_scoped_preference = action.is_actor_scoped_preference();
+    let carries_answer_receipts = carries_answer_receipts(&action);
     let suppress_auto_pass_once = recovered_stale_priority_pass
         || matches!(
             &action,
@@ -1583,6 +1585,7 @@ fn apply_action_boundary_core(
             cast_undo_action,
             independent_cast_action,
             is_actor_scoped_preference,
+            carries_answer_receipts,
             suppress_auto_pass_once,
             boundary_snapshot,
             cast_start_snapshot: cast_undo_boundary.take(),
@@ -1724,6 +1727,7 @@ fn apply_action_boundary_core(
             cast_undo_action,
             independent_cast_action,
             is_actor_scoped_preference,
+            carries_answer_receipts,
             suppress_auto_pass_once,
             boundary_snapshot,
             cast_start_snapshot: cast_undo_boundary.take(),
@@ -1870,6 +1874,7 @@ fn apply_action_boundary_core(
         cast_undo_action,
         independent_cast_action,
         is_actor_scoped_preference,
+        carries_answer_receipts,
         suppress_auto_pass_once,
         boundary_snapshot,
         cast_start_snapshot: cast_undo_boundary.take(),
@@ -2672,6 +2677,7 @@ fn finish_action_boundary_with_lifecycle(
         cast_undo_action,
         independent_cast_action,
         is_actor_scoped_preference,
+        carries_answer_receipts,
         suppress_auto_pass_once,
         boundary_snapshot,
         cast_start_snapshot,
@@ -2798,8 +2804,8 @@ fn finish_action_boundary_with_lifecycle(
     finalize_rules_state(state);
     super::un_actions::announce_pending_tells(state);
     super::un_actions::refresh_menu(state);
-    // `PartialEq` compares every store a standing preference writes, not every store an action can.
-    if is_actor_scoped_preference {
+    // CR 732.2b: a carrier writes only hand order (CR 402.3) or stores `same_position` compares.
+    if carries_answer_receipts {
         carry_answer_receipts(&boundary_snapshot, state);
     }
     result.waiting_for = state.waiting_for.clone();
@@ -7410,7 +7416,7 @@ pub enum ShortcutEvidence {
 /// frame, its proposer is still in the game after `n` repetitions: what it reaches is performed,
 /// not modelled. Its performance is read from the period's record when the offer already
 /// performed it; with no record, `Measured` evidence admits it and `Performed` performs it,
-/// unless the window's declarations have spent its budget, which refuses it unperformed.
+/// unless the offer's declarations have spent its budget, which refuses it unperformed.
 pub(crate) fn performance_conforms(
     state: &GameState,
     schema: &crate::analysis::decision_template::ShortcutDecisionSchema,
@@ -7434,7 +7440,7 @@ pub(crate) fn performance_conforms(
         state,
     ) && match period.declared_reach(&declared.decisions, state.state_revision) {
         Some(reach) => reach >= *n,
-        None if period.receipts.declare_budget_spent(state.state_revision) => false,
+        None if period.receipts.declare_budget_spent() => false,
         None => match evidence {
             ShortcutEvidence::Measured => true,
             ShortcutEvidence::Performed => {
@@ -7519,6 +7525,33 @@ pub(crate) fn record_answer_receipt(state: &mut GameState, action: &GameAction) 
         }
         _ => {}
     }
+}
+
+/// Whether `waiting_for` holds a loop-shortcut window open.
+pub(crate) fn shortcut_window_open(waiting_for: &WaitingFor) -> bool {
+    LoopShortcutOffer::of(waiting_for).is_some()
+        || matches!(waiting_for, WaitingFor::RespondToShortcut { .. })
+}
+
+/// CR 732.2a + CR 732.2c: every drive that answers an open shortcut window reads the standing
+/// preferences, so they stay as the offer was confirmed until it closes; hand order is no part of
+/// the position (CR 402.3).
+pub(crate) fn preference_frozen(waiting_for: &WaitingFor, action: &GameAction) -> bool {
+    action.is_actor_scoped_preference()
+        && !matches!(action, GameAction::ReorderHand { .. })
+        && shortcut_window_open(waiting_for)
+}
+
+/// CR 732.2b + CR 402.3: the window-admitted actions whose writes `same_position` compares, so a
+/// take's verdict survives one of them exactly when it leaves the position unchanged.
+fn carries_answer_receipts(action: &GameAction) -> bool {
+    matches!(
+        action,
+        GameAction::ReorderHand { .. }
+            | GameAction::UnAction {
+                action: crate::types::un_actions::UnAction::PerformTell { .. },
+            }
+    )
 }
 
 /// The receipts of the loop-shortcut window `waiting_for` holds open, if any.
@@ -8291,11 +8324,18 @@ fn remember_public_reveals(state: &mut GameState, events: &[GameEvent], journal_
 ///   `WaitingFor`. `SetAutoPass` is deliberately NOT exempt: its handler
 ///   stores the mode for the `WaitingFor::Priority` player and immediately
 ///   passes that priority, so it must come from the authorized submitter.
+///   Every preference but hand order is frozen while a shortcut window is open
+///   (`preference_frozen`).
 pub(crate) fn check_actor_authorization(
     state: &GameState,
     actor: PlayerId,
     action: &GameAction,
 ) -> Result<(), EngineError> {
+    if preference_frozen(&state.waiting_for, action) {
+        return Err(EngineError::ActionNotAllowed(
+            "preferences are frozen while a shortcut offer is open".to_string(),
+        ));
+    }
     if action.is_submitter_scoped() {
         return Ok(());
     }

@@ -3959,11 +3959,24 @@ mod recorded_niv_table {
         Result<(), engine::types::interaction::InteractionReasonCode>,
         u64,
     ) {
+        submit_declaration(state, |_| vec![(P2, None)], iterations)
+    }
+
+    /// Submits the declaration naming `seats_at` at each published point for `iterations` through
+    /// the ingress and returns its answer with the probe entries it cost.
+    fn submit_declaration(
+        state: &mut GameState,
+        seats_at: impl Fn(&DecisionSlot) -> Vec<(PlayerId, Option<u32>)>,
+        iterations: u32,
+    ) -> (
+        Result<(), engine::types::interaction::InteractionReasonCode>,
+        u64,
+    ) {
         use engine::game::interaction::submit_interaction;
         use engine::types::interaction::{
             InteractionResponse, InteractionShortcutDecision, InteractionSubmission,
         };
-        let (interaction_id, pins) = shortcut_interaction(state, |_| vec![(P2, None)]);
+        let (interaction_id, pins) = shortcut_interaction(state, seats_at);
         let before = play_trace_counters();
         let submitted = submit_interaction(
             state,
@@ -3985,11 +3998,41 @@ mod recorded_niv_table {
         matches!(state.waiting_for, WaitingFor::LoopShortcut { .. })
     }
 
-    /// CR 732.2a + CR 402.3: P0's reversed hand or P2's emptied stop list changes nothing the
-    /// performance reads, so the refused 14 stands at no cost; a real stop changes what the drive
-    /// auto-submits, so 14 is performed again.
+    /// `seat`'s `action`, applied through the transport boundary inside the open offer, is refused
+    /// with nothing written.
+    fn refused_in_window(state: &mut GameState, seat: PlayerId, action: GameAction) {
+        let revision = state.state_revision;
+        let applied = engine::game::engine::apply(state, seat, action.clone());
+        assert!(
+            matches!(
+                applied,
+                Err(engine::game::engine::EngineError::ActionNotAllowed(_))
+            ),
+            "{seat:?} {action:?}: {applied:?}"
+        );
+        assert_eq!(state.state_revision, revision, "{seat:?} {action:?}");
+        assert!(offer_open(state), "{seat:?} {action:?}");
+    }
+
+    fn clear_may_choices() -> GameAction {
+        GameAction::SetMayTriggerAutoChoice {
+            op: engine::types::actions::MayTriggerAutoChoiceOp::ClearAll,
+        }
+    }
+
+    fn end_stop() -> GameAction {
+        GameAction::SetPhaseStops {
+            stops: vec![engine::types::phase::PhaseStop {
+                phase: Phase::End,
+                scope: engine::types::phase::PhaseStopScope::AllTurns,
+            }],
+        }
+    }
+
+    /// CR 732.2a + CR 402.3: P0's reversed hand is no part of the position, so the refused 14
+    /// stands at no cost; P2's stops are frozen while the offer is open, so 14 stands too.
     #[test]
-    fn a_declared_receipt_survives_a_preference_that_changes_nothing() {
+    fn a_declared_receipt_survives_a_preference() {
         use engine::types::interaction::InteractionReasonCode::ConstraintUnsatisfied;
         let refused_once = || {
             let mut state = offered(&TABLE, &[], 0, false)?.state().clone();
@@ -3998,56 +4041,271 @@ mod recorded_niv_table {
             assert!(cost > 0, "reach: the submission performs the declaration");
             Some(state)
         };
-        for reorder in [true, false] {
-            let Some(mut state) = refused_once() else {
-                return;
-            };
-            if reorder {
-                let hand: Vec<ObjectId> = state.players[0].hand.iter().copied().collect();
-                assert!(hand.len() >= 2, "reach: a hand whose order can change");
-                let reversed: Vec<ObjectId> = hand.iter().rev().copied().collect();
-                engine::game::engine::apply(
-                    &mut state,
-                    P0,
-                    GameAction::ReorderHand { order: reversed },
-                )
-                .expect("P0 reorders its hand");
-                assert_ne!(
-                    state.players[0].hand.iter().copied().collect::<Vec<_>>(),
-                    hand
-                );
-            } else {
-                engine::game::engine::apply(
-                    &mut state,
-                    P2,
-                    GameAction::SetPhaseStops { stops: vec![] },
-                )
-                .expect("P2 empties its stops");
-            }
-            assert_eq!(
-                submit_at_p2(&mut state, 14),
-                (Err(ConstraintUnsatisfied), 0),
-                "reorder={reorder}"
-            );
-            assert!(offer_open(&state));
-        }
+        let Some(mut state) = refused_once() else {
+            return;
+        };
+        let hand: Vec<ObjectId> = state.players[0].hand.iter().copied().collect();
+        assert!(hand.len() >= 2, "reach: a hand whose order can change");
+        let reversed: Vec<ObjectId> = hand.iter().rev().copied().collect();
+        engine::game::engine::apply(&mut state, P0, GameAction::ReorderHand { order: reversed })
+            .expect("P0 reorders its hand");
+        assert_ne!(
+            state.players[0].hand.iter().copied().collect::<Vec<_>>(),
+            hand
+        );
+        assert_eq!(
+            submit_at_p2(&mut state, 14),
+            (Err(ConstraintUnsatisfied), 0)
+        );
+        assert!(offer_open(&state));
 
         let Some(mut state) = refused_once() else {
             return;
         };
-        engine::game::engine::apply(
+        refused_in_window(&mut state, P2, GameAction::SetPhaseStops { stops: vec![] });
+        refused_in_window(&mut state, P2, end_stop());
+        assert_eq!(
+            submit_at_p2(&mut state, 14),
+            (Err(ConstraintUnsatisfied), 0)
+        );
+    }
+
+    /// CR 732.2a + CR 732.2c + CR 603.5: P0's stored Accept of Curiosity's "may" is its choice in
+    /// every repetition of the offer, so clearing it is refused while the offer is open and the
+    /// suggestion's take ends the game; once P0 declines the offer, the same clear is accepted.
+    #[test]
+    fn a_preference_is_frozen_while_the_offer_is_open() {
+        let Some(runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let mut state = runner.state().clone();
+        assert_eq!(state.may_trigger_auto_choices.len(), 1);
+        refused_in_window(&mut state, P0, clear_may_choices());
+        assert_eq!(state.may_trigger_auto_choices.len(), 1);
+        let IterationCount::Fixed(count) = offer_count(&state) else {
+            panic!("a fixed count");
+        };
+        assert_eq!(count, 40);
+        let declared = suggestion(&state);
+        let (submitted, _) = submit_declaration(
             &mut state,
-            P2,
-            GameAction::SetPhaseStops {
-                stops: vec![engine::types::phase::PhaseStop {
-                    phase: Phase::End,
-                    scope: engine::types::phase::PhaseStopScope::AllTurns,
-                }],
-            },
-        )
-        .expect("P2 sets a stop");
-        let (_, cost) = submit_at_p2(&mut state, 14);
-        assert!(cost > 0, "a real stop performs the declaration again");
+            |slot| stated_seats(&declared, slot, count),
+            count,
+        );
+        assert_eq!(submitted, Ok(()));
+        accept_every_responder(&mut state);
+        assert!(won_by_p0(&state), "{:?}", state.waiting_for);
+        assert_eq!(lives(&state), [20, 0, 0, 0]);
+
+        let mut closed = runner.state().clone();
+        engine::game::engine::apply(&mut closed, P0, GameAction::DeclineShortcut)
+            .expect("P0 declines");
+        assert_eq!(closed.waiting_for, WaitingFor::Priority { player: P0 });
+        engine::game::engine::apply(&mut closed, P0, clear_may_choices())
+            .expect("the clear is accepted once the offer closed");
+        assert!(closed.may_trigger_auto_choices.is_empty());
+    }
+
+    /// Every responder accepts through the interaction ingress until the window closes.
+    fn accept_every_responder(state: &mut GameState) {
+        use engine::game::interaction::{derive_viewer_interaction, submit_interaction};
+        use engine::game::visibility::filter_state_for_viewer;
+        use engine::types::interaction::{
+            InteractionOpportunityResponse, InteractionResponse, InteractionResponseSpec,
+            InteractionShortcutReply, InteractionSubmission,
+        };
+        while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
+            let filtered = filter_state_for_viewer(state, player);
+            let interaction_id = derive_viewer_interaction(state, &filtered, player)
+                .opportunities
+                .into_iter()
+                .find(|opportunity| {
+                    matches!(
+                        &opportunity.response,
+                        InteractionOpportunityResponse::Schema {
+                            spec: InteractionResponseSpec::ShortcutReply { .. },
+                            ..
+                        }
+                    )
+                })
+                .map(|opportunity| opportunity.interaction_id)
+                .expect("reach: the responder's window publishes a shortcut reply");
+            submit_interaction(
+                state,
+                player,
+                InteractionSubmission {
+                    interaction_id,
+                    response: InteractionResponse::ShortcutReply {
+                        reply: InteractionShortcutReply::Accept,
+                    },
+                },
+            )
+            .unwrap_or_else(|error| panic!("{player:?} accepts: {error:?}"));
+        }
+    }
+
+    /// CR 732.2a: frozen preferences toggled by the proposer, a responder and back write nothing,
+    /// so the refused 14 stands at no cost through every toggle and its reach admits 13 unperformed.
+    #[test]
+    fn refused_declarations_between_frozen_preferences_perform_once() {
+        use engine::types::interaction::InteractionReasonCode::ConstraintUnsatisfied;
+        let Some(runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let mut state = runner.state().clone();
+        let (refused, cost) = submit_at_p2(&mut state, 14);
+        assert_eq!(refused, Err(ConstraintUnsatisfied));
+        assert!(cost > 0, "reach: the submission performs the declaration");
+        let toggles = [
+            (P0, end_stop()),
+            (P0, GameAction::SetPhaseStops { stops: vec![] }),
+            (
+                P2,
+                GameAction::SetPriorityPassingMode {
+                    mode: engine::types::game_state::PriorityPassingMode::FullControl,
+                },
+            ),
+            (P0, clear_may_choices()),
+        ];
+        for (seat, toggle) in toggles.iter().cycle().take(8) {
+            refused_in_window(&mut state, *seat, toggle.clone());
+            assert_eq!(
+                submit_at_p2(&mut state, 14),
+                (Err(ConstraintUnsatisfied), 0),
+                "{seat:?} {toggle:?}"
+            );
+        }
+        assert_eq!(submit_at_p2(&mut state, 13), (Ok(()), 0));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::RespondToShortcut { .. }
+        ));
+    }
+
+    /// CR 732.2a + CR 104.3a: P3's concession moves the position while the offer stays open; the
+    /// declarations performed before it still count against the offer's one budget, so a spent
+    /// budget refuses 14 and a novel declaration unperformed after it.
+    #[test]
+    fn a_concession_leaves_the_declare_budget_spent() {
+        use engine::game::period_confirm::leave_declare_budget_for_tests;
+        use engine::types::interaction::InteractionReasonCode::ConstraintUnsatisfied;
+        let Some(runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let refused = Err(ConstraintUnsatisfied);
+        let novel = |state: &mut GameState| {
+            submit_declaration(state, |_| vec![(P2, Some(1)), (P1, Some(39))], 40)
+        };
+        let concede = |state: &mut GameState| {
+            let revision = state.state_revision;
+            engine::game::engine::apply(state, P3, GameAction::Concede { player_id: P3 })
+                .expect("P3 concedes");
+            assert!(offer_open(state), "the offer survives P3");
+            assert_ne!(
+                state.state_revision, revision,
+                "the concession moves the position"
+            );
+        };
+        let refused_14 = |state: &mut GameState| {
+            let (first, cost) = submit_at_p2(state, 14);
+            assert_eq!(first, refused);
+            assert!(cost > 0, "reach: the submission performs the declaration");
+        };
+
+        let mut spent = runner.state().clone();
+        leave_declare_budget_for_tests(&mut spent, 14);
+        refused_14(&mut spent);
+        concede(&mut spent);
+        assert_eq!(submit_at_p2(&mut spent, 14), (refused, 0));
+        assert_eq!(novel(&mut spent), (refused, 0));
+
+        let mut left = runner.state().clone();
+        leave_declare_budget_for_tests(&mut left, 20);
+        refused_14(&mut left);
+        concede(&mut left);
+        let (again, cost) = submit_at_p2(&mut left, 14);
+        assert_eq!(again, refused);
+        assert!(cost > 0, "the new board is performed again");
+        assert_eq!(novel(&mut left), (refused, 0));
+        assert_eq!(submit_at_p2(&mut left, 13), (Ok(()), 0));
+
+        let mut full = runner.state().clone();
+        concede(&mut full);
+        let (submitted, cost) = novel(&mut full);
+        assert_eq!(submitted, refused);
+        assert!(
+            cost > 0,
+            "reach: a full budget performs the novel declaration"
+        );
+    }
+
+    /// CR 732.2b: a debug edit inside the offer is no carrier, so a declaration refused before it is
+    /// answered after it as on a fresh offer with the same edit: detaching Curiosity, or turning
+    /// P0's infinite mana back off.
+    #[test]
+    fn a_declared_receipt_dies_with_a_debug_edit() {
+        use engine::types::actions::DebugAction;
+        use engine::types::interaction::InteractionReasonCode::ConstraintUnsatisfied;
+        let Some(runner) = offered(&TABLE, &[], 0, false) else {
+            return;
+        };
+        let mut window = runner.state().clone();
+        window.debug_mode = true;
+        let debug = |state: &mut GameState, action: DebugAction| {
+            let revision = state.state_revision;
+            engine::game::engine::apply(state, P0, GameAction::Debug(action))
+                .expect("P0's debug edit applies");
+            assert_ne!(state.state_revision, revision);
+            assert!(offer_open(state));
+        };
+        let refused_14 = |state: &mut GameState| {
+            let (first, cost) = submit_at_p2(state, 14);
+            assert_eq!(first, Err(ConstraintUnsatisfied));
+            assert!(cost > 0, "reach: the submission performs the declaration");
+        };
+        let curiosity = window
+            .battlefield
+            .iter()
+            .copied()
+            .find(|id| window.objects[id].name == "Curiosity")
+            .expect("Curiosity");
+        let detach = || DebugAction::Detach {
+            object_id: curiosity,
+        };
+        let infinite = |enabled| DebugAction::SetInfiniteMana {
+            player_id: P0,
+            enabled,
+        };
+
+        let detached_13 = |refuse_first: bool| {
+            let mut state = window.clone();
+            if refuse_first {
+                refused_14(&mut state);
+            }
+            debug(&mut state, detach());
+            assert_eq!(state.objects[&curiosity].attached_to, None);
+            submit_at_p2(&mut state, 13)
+        };
+        let fresh = detached_13(false);
+        assert_eq!(fresh.0, Err(ConstraintUnsatisfied));
+        assert!(fresh.1 > 0, "reach: 13 is performed on the detached board");
+        assert_eq!(detached_13(true), fresh);
+
+        let mana_off_14 = |refuse_first: bool| {
+            let mut state = window.clone();
+            debug(&mut state, infinite(true));
+            assert!(state.unbounded_resources.contains_key(&P0));
+            if refuse_first {
+                refused_14(&mut state);
+            }
+            debug(&mut state, infinite(false));
+            assert!(!state.unbounded_resources.contains_key(&P0));
+            submit_at_p2(&mut state, 14)
+        };
+        let fresh = mana_off_14(false);
+        assert_eq!(fresh.0, Err(ConstraintUnsatisfied));
+        assert!(fresh.1 > 0, "reach: 14 is performed with infinite mana off");
+        assert_eq!(mana_off_14(true), fresh);
     }
 
     /// CR 732.2a: a declaration the offer never performed is performed once when submitted, as

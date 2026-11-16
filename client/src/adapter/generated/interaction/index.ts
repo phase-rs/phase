@@ -21,7 +21,11 @@ export type SimultaneousDecisionKind = "mulligan" | "openingBottom" | "resolveAl
 
 export type InteractionWaitingForCode = "terminal" | "mulligan" | "openingBottom" | "choose" | "select" | "sequence" | "relations" | "manaGroups" | "text" | "deckPartition" | "number" | "shortcut" | "assignAmounts" | "assignDamage";
 
-export type InteractionWaitingForKind = { simultaneous: SimultaneousDecisionKind | null, terminal: boolean, code: InteractionWaitingForCode, };
+export type InteractionWaitingForKind = { simultaneous: SimultaneousDecisionKind | null, terminal: boolean, code: InteractionWaitingForCode, 
+/**
+ * Preference actions are refused while this holds (a shortcut window is open).
+ */
+preferencesFrozen?: boolean, };
 
 export type InteractionReasonCode = "authorityUnbound" | "invalidAuthorityState" | "notAuthorized" | "staleInteraction" | "unknownChoice" | "malformedResponse" | "payloadTooLarge" | "constraintUnsatisfied" | "noLegalResponse" | "cancelOnly" | "reducerRejected" | "unsupportedResponse";
 

@@ -656,6 +656,7 @@ fn waiting_for_kind(waiting_for: &WaitingFor) -> InteractionWaitingForKind {
         simultaneous: classification.simultaneous,
         terminal: classification.slot_kind.is_none(),
         code: classification.code,
+        preferences_frozen: super::engine::shortcut_window_open(waiting_for),
     }
 }
 

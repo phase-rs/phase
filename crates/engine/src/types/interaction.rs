@@ -114,6 +114,9 @@ pub struct InteractionWaitingForKind {
     pub simultaneous: Option<SimultaneousDecisionKind>,
     pub terminal: bool,
     pub code: InteractionWaitingForCode,
+    /// Preference actions are refused while this holds (a shortcut window is open).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preferences_frozen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

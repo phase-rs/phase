@@ -13308,9 +13308,22 @@ fn submit_shorten(
     state: &mut GameState,
     place: u32,
 ) -> Result<(), engine::types::interaction::InteractionReasonCode> {
+    submit_reply(
+        state,
+        engine::types::interaction::InteractionShortcutReply::Shorten {
+            at_iteration: place,
+        },
+    )
+}
+
+/// P2's `reply`, submitted through the interaction ingress of a bound `state`.
+fn submit_reply(
+    state: &mut GameState,
+    reply: engine::types::interaction::InteractionShortcutReply,
+) -> Result<(), engine::types::interaction::InteractionReasonCode> {
     use engine::types::interaction::{
         InteractionOpportunityResponse, InteractionResponse, InteractionResponseSpec,
-        InteractionShortcutReply, InteractionSubmission,
+        InteractionSubmission,
     };
     let filtered = engine::game::visibility::filter_state_for_viewer(state, P2);
     let interaction_id = engine::game::interaction::derive_viewer_interaction(state, &filtered, P2)
@@ -13332,15 +13345,33 @@ fn submit_shorten(
         P2,
         InteractionSubmission {
             interaction_id,
-            response: InteractionResponse::ShortcutReply {
-                reply: InteractionShortcutReply::Shorten {
-                    at_iteration: place,
-                },
-            },
+            response: InteractionResponse::ShortcutReply { reply },
         },
     )
     .map(drop)
     .map_err(|error| error.code)
+}
+
+/// `seat`'s `action`, applied through the transport boundary inside P2's window, is refused with
+/// nothing written.
+fn refused_in_window(state: &mut GameState, seat: PlayerId, action: GameAction) {
+    let revision = state.state_revision;
+    let applied = apply(state, seat, action.clone());
+    assert!(
+        matches!(applied, Err(EngineError::ActionNotAllowed(_))),
+        "{seat:?} {action:?}: {applied:?}"
+    );
+    assert_eq!(state.state_revision, revision, "{seat:?} {action:?}");
+    assert!(p2_answers(state), "{seat:?} {action:?}");
+}
+
+fn end_stop() -> GameAction {
+    GameAction::SetPhaseStops {
+        stops: vec![engine::types::phase::PhaseStop {
+            phase: Phase::End,
+            scope: engine::types::phase::PhaseStopScope::AllTurns,
+        }],
+    }
 }
 
 fn bind(state: &mut GameState) {
@@ -13416,11 +13447,10 @@ fn a_shorten_receipt_dies_with_a_concession() {
     }
 }
 
-/// CR 732.2b + CR 402.3: an emptied stop list (P2's or P1's) or P2's hand order changes nothing
-/// the take reads, so the refusal stands at no cost; a real stop changes what the drive
-/// auto-submits, so the take runs again.
+/// CR 732.2b + CR 402.3: P2's hand order is no part of the position, so the refusal stands at no
+/// cost; stops are frozen while the window is open, so it stands through them too.
 #[test]
-fn a_shorten_receipt_survives_a_preference_that_changes_nothing() {
+fn a_shorten_receipt_survives_a_preference() {
     let refused_once = || {
         let mut runner = cascade_at_p2_window();
         let (first, cost) = with_entries(|| apply(runner.state_mut(), P2, shorten_at(1)));
@@ -13428,45 +13458,133 @@ fn a_shorten_receipt_survives_a_preference_that_changes_nothing() {
         assert!(cost > 0, "reach: the refusal performs the take");
         runner
     };
-    let prefer = |state: &mut GameState, seat: PlayerId, preference: GameAction| {
-        let revision = state.state_revision;
-        apply(state, seat, preference).expect("the preference applies");
-        assert_ne!(
-            state.state_revision, revision,
-            "reach: the preference ran through the boundary"
-        );
-    };
-    for (seat, reorder) in [(P2, false), (P1, false), (P2, true)] {
-        let mut runner = refused_once();
-        let state = runner.state_mut();
-        let preference = if reorder {
-            GameAction::ReorderHand {
-                order: state.players[2].hand.iter().copied().collect(),
-            }
-        } else {
-            GameAction::SetPhaseStops { stops: vec![] }
-        };
-        prefer(state, seat, preference);
+    let refusal_stands = |state: &mut GameState| {
         let (again, cost) = with_entries(|| apply(state, P2, shorten_at(1)));
         assert!(names_no_different_choice(&again), "{again:?}");
-        assert_eq!(cost, 0, "seat={seat:?} reorder={reorder}");
+        assert_eq!(cost, 0);
         assert!(p2_answers(state));
-    }
+    };
 
     let mut runner = refused_once();
     let state = runner.state_mut();
-    prefer(
-        state,
+    let revision = state.state_revision;
+    let order = state.players[2].hand.iter().copied().collect();
+    apply(state, P2, GameAction::ReorderHand { order }).expect("P2 reorders its hand");
+    assert_ne!(
+        state.state_revision, revision,
+        "reach: the reorder ran through the boundary"
+    );
+    refusal_stands(state);
+
+    for (seat, stops) in [
+        (P2, GameAction::SetPhaseStops { stops: vec![] }),
+        (P1, GameAction::SetPhaseStops { stops: vec![] }),
+        (P2, end_stop()),
+    ] {
+        let mut runner = refused_once();
+        let state = runner.state_mut();
+        refused_in_window(state, seat, stops);
+        refusal_stands(state);
+    }
+}
+
+/// CR 732.2b: frozen preferences toggled by the answering seat and the others write nothing, so
+/// P2's refused place 7 stands at no cost through every toggle and P2's Accept still takes the
+/// shortcut.
+#[test]
+fn refused_shortens_between_frozen_preferences_perform_once() {
+    use engine::types::interaction::{InteractionReasonCode, InteractionShortcutReply};
+    let mut state = cascade_at_p2_window().state().clone();
+    bind(&mut state);
+    let refused = Err(InteractionReasonCode::ReducerRejected);
+    let (first, cost) = with_entries(|| submit_shorten(&mut state, 7));
+    assert_eq!(first, refused);
+    assert!(cost > 0, "reach: the refusal performs the take");
+    let toggles = [
+        (P2, end_stop()),
+        (P1, end_stop()),
+        (
+            P0,
+            GameAction::SetPriorityPassingMode {
+                mode: engine::types::game_state::PriorityPassingMode::FullControl,
+            },
+        ),
+        (
+            P2,
+            GameAction::SetPriorityYield {
+                op: engine::types::actions::PriorityYieldOp::ClearAll,
+            },
+        ),
+    ];
+    for (seat, toggle) in toggles.iter().cycle().take(8) {
+        refused_in_window(&mut state, *seat, toggle.clone());
+        assert_eq!(
+            with_entries(|| submit_shorten(&mut state, 7)),
+            (refused, 0),
+            "{seat:?} {toggle:?}"
+        );
+    }
+    assert_eq!(
+        submit_reply(&mut state, InteractionShortcutReply::Accept),
+        Ok(())
+    );
+    assert_eq!(state.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+}
+
+/// CR 732.2b: a tell writes only what the position compares, so P2's refused place 7 survives it;
+/// P2's Un-card opt-out is a frozen preference and is refused.
+#[test]
+fn a_refused_shorten_survives_a_tell() {
+    use engine::types::interaction::InteractionReasonCode;
+    use engine::types::un_actions::{UnAction, UnTell};
+    let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
+    apply(
+        runner.state_mut(),
         P2,
-        GameAction::SetPhaseStops {
-            stops: vec![engine::types::phase::PhaseStop {
-                phase: Phase::End,
-                scope: engine::types::phase::PhaseStopScope::AllTurns,
-            }],
+        GameAction::UnAction {
+            action: UnAction::SetEnabled { enabled: true },
+        },
+    )
+    .expect("P2 opts in before the window");
+    let mut state = answered_to_p2(runner, kickoff).state().clone();
+    bind(&mut state);
+    let refused = Err(InteractionReasonCode::ReducerRejected);
+    let (first, cost) = with_entries(|| submit_shorten(&mut state, 7));
+    assert_eq!(first, refused);
+    assert!(cost > 0, "reach: the refusal performs the take");
+    refused_in_window(
+        &mut state,
+        P2,
+        GameAction::UnAction {
+            action: UnAction::SetEnabled { enabled: false },
         },
     );
-    let (_, cost) = with_entries(|| apply(state, P2, shorten_at(1)));
-    assert!(cost > 0, "a real stop runs the take again");
+    assert_eq!(with_entries(|| submit_shorten(&mut state, 7)), (refused, 0));
+    for i in 0..4 {
+        let revision = state.state_revision;
+        apply(
+            &mut state,
+            P2,
+            GameAction::UnAction {
+                action: UnAction::PerformTell {
+                    tell: UnTell::Said {
+                        text: format!("t{i}"),
+                    },
+                },
+            },
+        )
+        .expect("P2's tell applies");
+        assert_ne!(
+            state.state_revision, revision,
+            "reach: the tell moved the revision"
+        );
+        assert!(p2_answers(&state));
+        assert_eq!(
+            with_entries(|| submit_shorten(&mut state, 7)),
+            (refused, 0),
+            "tell {i}"
+        );
+    }
 }
 
 /// A refused Shorten submitted again through the ingress reads the receipt its first submission

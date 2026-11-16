@@ -143,7 +143,7 @@ pub(crate) struct AnswerReceipts {
     revision: u64,
     /// Declarations the offer did not publish, each performed from the offer frame to its count.
     declared: Vec<PerformedReach>,
-    /// Repetitions the performances in `declared` spent, summed.
+    /// Repetitions the offer's declarations spent, summed; no revision change resets it.
     declared_spent: u32,
     /// CR 732.2b: per responder, the one forward performance every place they name is read from.
     shortened: Vec<ShortenRun>,
@@ -220,6 +220,7 @@ impl AnswerReceipts {
         if self.revision != revision {
             *self = Self {
                 revision,
+                declared_spent: self.declared_spent,
                 ..Self::default()
             };
         }
@@ -249,11 +250,9 @@ impl AnswerReceipts {
     }
 
     /// IMPLEMENTATION BUDGET BOUND (see `MAX_SHORTCUT_CYCLES`): whether the declarations
-    /// performed at `revision` spent the window's repetitions.
-    pub(crate) fn declare_budget_spent(&self, revision: u64) -> bool {
-        self.at(revision).is_some_and(|receipts| {
-            receipts.declared_spent >= crate::game::engine::MAX_SHORTCUT_CYCLES
-        })
+    /// the offer performed spent its repetitions.
+    pub(crate) fn declare_budget_spent(&self) -> bool {
+        self.declared_spent >= crate::game::engine::MAX_SHORTCUT_CYCLES
     }
 
     /// `seat`'s run at `revision`, if one was performed there.
@@ -5557,9 +5556,10 @@ mod tests {
         for _ in 1..MAX_SHORTCUT_CYCLES {
             receipts.record_declared(7, unreached.clone());
         }
-        assert!(!receipts.declare_budget_spent(7));
+        assert!(!receipts.declare_budget_spent());
         receipts.record_declared(7, unreached);
-        assert!(receipts.declare_budget_spent(7));
-        assert!(!receipts.declare_budget_spent(8));
+        assert!(receipts.declare_budget_spent());
+        receipts.at_mut(8);
+        assert!(receipts.declare_budget_spent());
     }
 }
