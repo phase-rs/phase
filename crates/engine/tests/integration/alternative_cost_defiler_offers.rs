@@ -967,9 +967,16 @@ const CRABOMINATION: &str = "Emerge from artifact {5}{B}{B} (You may cast this s
 
 const LOTUS_PETAL: &str = "{T}, Sacrifice this artifact: Add one mana of any color.";
 
-/// Crabomination with Defiler of Flesh, five Plains, Lotus Petal and, when
-/// `ornithopter`, an Ornithopter; an empty pool.
-fn crabomination_board(ornithopter: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+/// The artifact besides Lotus Petal that P0 controls.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SpareArtifact {
+    Absent,
+    Ornithopter,
+}
+
+/// Crabomination with Defiler of Flesh, five Plains, Lotus Petal and `spare`;
+/// an empty pool.
+fn crabomination_board(spare: SpareArtifact) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     add_defiler_of_flesh(&mut scenario);
@@ -979,7 +986,7 @@ fn crabomination_board(ornithopter: bool) -> (GameRunner, ObjectId, ObjectId, Op
     let petal = scenario
         .add_artifact_from_oracle(P0, "Lotus Petal", LOTUS_PETAL)
         .id();
-    let ornithopter = ornithopter.then(|| {
+    let ornithopter = (spare == SpareArtifact::Ornithopter).then(|| {
         scenario
             .add_creature_from_oracle(P0, "Ornithopter", 0, 2, "Flying")
             .as_artifact_creature()
@@ -1001,14 +1008,14 @@ fn crabomination_board(ornithopter: bool) -> (GameRunner, ObjectId, ObjectId, Op
     (runner, crab, petal, ornithopter)
 }
 
-/// Casts `crab`, accepting the Defiler, choosing `emerge` at an
+/// Casts `crab`, accepting the Defiler, answering `alternative` at an
 /// `AlternativeCastChoice`, sacrificing `sacrifice`, and paying {B} with Lotus
 /// Petal. Returns the prompts answered; the cast must reach `SpellCast`.
 fn cast_crabomination(
     runner: &mut GameRunner,
     crab: ObjectId,
     petal: ObjectId,
-    emerge: Option<bool>,
+    alternative: Option<AlternativeCastDecision>,
     sacrifice: Option<ObjectId>,
 ) -> Vec<&'static str> {
     let card_id = runner.state().objects[&crab].card_id;
@@ -1034,11 +1041,7 @@ fn cast_crabomination(
                     "the alternative offered is Emerge"
                 );
                 GameAction::ChooseAlternativeCast {
-                    choice: if emerge.expect("no AlternativeCastChoice expected") {
-                        AlternativeCastDecision::Alternative
-                    } else {
-                        AlternativeCastDecision::Normal
-                    },
+                    choice: alternative.expect("no AlternativeCastChoice expected"),
                 }
             }
             WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: true },
@@ -1082,7 +1085,7 @@ fn cast_crabomination(
 /// for {4}{B} through the Defiler with Petal's {B}.
 #[test]
 fn emerge_candidate_cant_also_pay_for_the_emerge_cost() {
-    let (mut runner, crab, petal, _) = crabomination_board(false);
+    let (mut runner, crab, petal, _) = crabomination_board(SpareArtifact::Absent);
     assert!(offered(&runner, crab), "the printed cast is a legal action");
 
     let prompts = cast_crabomination(&mut runner, crab, petal, None, None);
@@ -1099,10 +1102,16 @@ fn emerge_candidate_cant_also_pay_for_the_emerge_cost() {
 /// Plains pay {5}{B}.
 #[test]
 fn emerge_sacrificing_another_artifact_pays_with_the_petal() {
-    let (mut runner, crab, petal, ornithopter) = crabomination_board(true);
+    let (mut runner, crab, petal, ornithopter) = crabomination_board(SpareArtifact::Ornithopter);
     let ornithopter = ornithopter.unwrap();
 
-    let prompts = cast_crabomination(&mut runner, crab, petal, Some(true), Some(ornithopter));
+    let prompts = cast_crabomination(
+        &mut runner,
+        crab,
+        petal,
+        Some(AlternativeCastDecision::Alternative),
+        Some(ornithopter),
+    );
 
     assert_eq!(
         prompts.first(),
