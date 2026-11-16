@@ -3584,8 +3584,9 @@ fn same_name_owner_zones(
 /// - "your" → `You` (CR 109.5): the caster.
 /// - "that player's" declines: it names whichever player the chain last named
 ///   (CR 608.2c), and no printed card in this class uses it.
-/// - "target opponent's" and "an opponent's" decline: the announced or unspecified
-///   opponent is one player, not the population `Opponent`.
+/// - "target opponent's" declines: no printed card in this class uses it (it would
+///   be `TargetOpponent`). "an opponent's" declines: one unspecified opponent is
+///   not the population `Opponent`.
 ///
 /// Unlike [`parse_zone_owner_possessive`], explicit and subject-relative owners
 /// stay distinct here, so neither late binder can overwrite an explicit owner.

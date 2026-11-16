@@ -22571,7 +22571,7 @@ fn bind_subjectless_zone_owner(effect: &mut Effect, ctx: &ParseContext, original
         tense: nom_target::ControllerTense::Present,
     };
     match bind_controller_phrase(&phrase, &ctx.player_antecedents()) {
-        // CR 109.5: a for-each iteration's player is already `ScopedPlayer`.
+        // A for-each iteration's player is already `ScopedPlayer`; nothing to bind.
         Some(ControllerRef::ScopedPlayer) => {}
         Some(owner) => rebind_owned_scope(target, owner),
         None => *effect = Effect::unimplemented(subject::UNBOUND_SUBJECT_GAP, original_clause),

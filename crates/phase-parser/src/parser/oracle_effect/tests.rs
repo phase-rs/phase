@@ -103314,7 +103314,7 @@ fn from_among_them_reads_a_parent_target_players_revealed_hand() {
     assert_eq!(*target, TargetFilter::ExiledBySource);
 }
 
-// CR 115.1 + CR 611.2c: a duration-scoped targeting prohibition naming a source
+/// CR 115.1 + CR 611.2c: a duration-scoped targeting prohibition naming a source
 /// kind or quality (Display of Dominance: "blue or black spells your opponents
 /// control") cannot be expressed by `CantBeTargeted { who }`, so the effect pipeline
 /// fails closed with an honest `Unimplemented` rather than a blanket restriction.
