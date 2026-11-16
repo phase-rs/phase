@@ -377,6 +377,22 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
+    // CR 616.1 + CR 510.2: the ordering choice of one of the parked batch's OWN
+    // damage events. The batch answers it and keeps the event inside the
+    // simultaneous batch (Phase C applies the survivor, the substitute runs
+    // inline); the generic dispatcher below would deal the damage on its own.
+    if super::combat_damage::parked_combat_damage_awaits_replacement_choice(state) {
+        validate_replacement_choice_index(state, index)?;
+        let waiting_for = super::combat_damage::resume_pending_combat_lifelink(
+            state,
+            action_event_start,
+            Some(index),
+            events,
+        )
+        .unwrap_or_else(|| state.waiting_for.clone());
+        state.waiting_for = waiting_for.clone();
+        return Ok(waiting_for);
+    }
     // A record stamped for rejection came from an action-ingress player-resource
     // change. Resume it inside an ingress window so every life, player-counter
     // and energy settlement the handler reaches (a substitute's drain,
@@ -400,6 +416,8 @@ pub(super) fn handle_replacement_choice(
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
+    // CR 616.1g: this is also how a batch parked on its substitute's prompt
+    // (counters, mill) resumes — once that prompt's round trip has settled.
     let WaitingFor::Priority { player } = waiting_for else {
         state.waiting_for = waiting_for.clone();
         // CR 603.6a + CR 616.1f: this answer's battlefield entries leave with its
@@ -420,10 +438,13 @@ pub(super) fn handle_replacement_choice(
         },
     };
     state.waiting_for = waiting_for.clone();
-    Ok(
-        super::combat_damage::resume_pending_combat_lifelink(state, action_event_start, events)
-            .unwrap_or(waiting_for),
+    Ok(super::combat_damage::resume_pending_combat_lifelink(
+        state,
+        action_event_start,
+        None,
+        events,
     )
+    .unwrap_or(waiting_for))
 }
 
 /// What resuming a parked player-scope sacrifice batch produced.
@@ -495,11 +516,8 @@ pub(crate) fn resume_paused_player_scope_sacrifice(
     }
 }
 
-fn handle_replacement_choice_inner(
-    state: &mut GameState,
-    index: usize,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
+/// CR 616.1: the answer must name one of the open prompt's options.
+fn validate_replacement_choice_index(state: &GameState, index: usize) -> Result<(), EngineError> {
     let Some(pending) = state.pending_replacement.as_ref() else {
         return Err(EngineError::InvalidAction(
             "replacement choice has no pending replacement".to_string(),
@@ -511,12 +529,22 @@ fn handle_replacement_choice_inner(
             "replacement choice index {index} is outside 0..{option_count}"
         )));
     }
+    Ok(())
+}
+
+fn handle_replacement_choice_inner(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    validate_replacement_choice_index(state, index)?;
     // CR 614.17c: a parked replacement (optional or a mandatory ordering
     // candidate) for a draw that can no longer happen cannot be applied. Settle
     // the event with no replacement: the draw is clamped and its payment
     // resumes without milling or returning the replacement's card.
-    let impossible_parked_draw =
-        super::replacement::proposed_draw_cannot_happen(state, &pending.proposed);
+    let impossible_parked_draw = state.pending_replacement.as_ref().is_some_and(|pending| {
+        super::replacement::proposed_draw_cannot_happen(state, &pending.proposed)
+    });
     let replacement_action_event_start = events.len();
     let parked_search_found_replacement = state
         .pending_replacement
