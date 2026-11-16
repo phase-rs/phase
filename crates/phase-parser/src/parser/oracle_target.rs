@@ -4115,9 +4115,12 @@ fn parse_type_phrase_folding_unbound<'a>(
                     && extra_core_type_filters.is_empty()
                     && neg_type_filters.is_empty()
                 {
-                    if let Some(union) =
-                        parse_color_or_type_union(&properties, &other_filter, after_trimmed)
-                    {
+                    if let Some(union) = parse_color_or_type_union(
+                        &properties,
+                        &property_disjunction_ranges,
+                        &other_filter,
+                        after_trimmed,
+                    ) {
                         return (union, final_rest);
                     }
                 }
@@ -5100,37 +5103,7 @@ fn parse_type_phrase_folding_unbound<'a>(
             .collect::<Vec<_>>()
     };
 
-    let property_branches = if property_disjunction_ranges.is_empty() {
-        vec![properties]
-    } else {
-        let mut disjunctive_indices = vec![false; properties.len()];
-        for (start, len) in &property_disjunction_ranges {
-            for is_disjunctive in disjunctive_indices.iter_mut().skip(*start).take(*len) {
-                *is_disjunctive = true;
-            }
-        }
-        let common_props = properties
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| !disjunctive_indices[*idx])
-            .map(|(_, prop)| prop.clone())
-            .collect::<Vec<_>>();
-        let mut branch_props = vec![common_props];
-        for (start, len) in property_disjunction_ranges {
-            let disjunctive_props = properties[start..start + len].to_vec();
-            branch_props = branch_props
-                .into_iter()
-                .flat_map(|common| {
-                    disjunctive_props.iter().cloned().map(move |prop| {
-                        let mut branch = common.clone();
-                        branch.push(prop);
-                        branch
-                    })
-                })
-                .collect();
-        }
-        branch_props
-    };
+    let property_branches = expand_property_disjunctions(&properties, &property_disjunction_ranges);
 
     let mut filters = Vec::new();
     for type_filters in type_filter_branches {
@@ -5716,51 +5689,199 @@ fn finalize_or_disjunction(combined: TargetFilter, shared_props: &[FilterProp]) 
     distribute_properties_to_or(combined)
 }
 
+/// Expand the recorded property groups that the Oracle grammar joined with
+/// "or". Properties outside a recorded group remain conjunctive.
+fn expand_property_disjunctions(
+    properties: &[FilterProp],
+    ranges: &[(usize, usize)],
+) -> Vec<Vec<FilterProp>> {
+    if ranges.is_empty() {
+        return vec![properties.to_vec()];
+    }
+
+    let mut disjunctive_indices = vec![false; properties.len()];
+    for &(start, len) in ranges {
+        for is_disjunctive in disjunctive_indices.iter_mut().skip(start).take(len) {
+            *is_disjunctive = true;
+        }
+    }
+    let common_props = properties
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !disjunctive_indices[*idx])
+        .map(|(_, prop)| prop.clone())
+        .collect::<Vec<_>>();
+    let mut branches = vec![common_props];
+    for &(start, len) in ranges {
+        let disjunctive_props = &properties[start..start + len];
+        branches = branches
+            .into_iter()
+            .flat_map(|common| {
+                disjunctive_props.iter().cloned().map(move |prop| {
+                    let mut branch = common.clone();
+                    branch.push(prop);
+                    branch
+                })
+            })
+            .collect();
+    }
+    branches
+}
+
 /// CR 105.2 + CR 205.2a: "<color> or <type> <noun>" ("black or artifact
 /// creature") joins two kinds of the same noun: the noun of that color, or the
-/// noun with that type. `left_props` hold the color-only left leg, `right` is
-/// the parsed right leg and `right_text` its lowercase source. Returns `None`
-/// unless the left leg is a color and the right leg leads with a type word.
+/// noun with that type. Color alternatives on the right join the same color
+/// group, while separately colored noun legs remain independent. `left_props`
+/// and `property_disjunction_ranges` retain the left leg's conjunction groups;
+/// `right_text` is the lowercase source of the parsed right phrase. Returns
+/// `None` unless the left leg is a color and the right leg starts with a type
+/// phrase.
 ///
 /// Skips `distribute_core_type_to_or`: backfilling the color-only leg with the
 /// right leg's whole type list would include the type adjective and make the
 /// two legs identical.
 fn parse_color_or_type_union(
     left_props: &[FilterProp],
+    property_disjunction_ranges: &[(usize, usize)],
     right: &TargetFilter,
     right_text: &str,
 ) -> Option<TargetFilter> {
-    if !left_props
+    let left_colors: Vec<ManaColor> = left_props
         .iter()
-        .any(|prop| matches!(prop, FilterProp::HasColor { .. }))
-    {
+        .filter_map(|prop| match prop {
+            FilterProp::HasColor { color } => Some(*color),
+            _ => None,
+        })
+        .collect();
+    if left_colors.is_empty() {
         return None;
     }
-    let TargetFilter::Typed(right_typed) = right else {
-        return None;
-    };
-    let (_, adjective) = nom_target::parse_type_filter_word(right_text).ok()?;
-    let mut noun = right_typed
-        .type_filters
-        .iter()
-        .filter(|type_filter| **type_filter != adjective)
-        .cloned();
-    let left = typed(
-        noun.next().unwrap_or(TypeFilter::Any),
-        None,
-        left_props.to_vec(),
-        noun.collect(),
-    );
-    let shared: Vec<FilterProp> = left_props
-        .iter()
-        .filter(|prop| !is_adjective_prefix_prop(prop))
-        .cloned()
-        .collect();
-    let combined = distribute_controller_to_or(TargetFilter::Or {
-        filters: vec![left, right.clone()],
-    });
-    let combined = distribute_shared_properties(combined, &shared);
-    Some(distribute_properties_to_or(combined))
+    match right {
+        TargetFilter::Typed(right_typed) => {
+            let (_, adjective) = nom_target::parse_type_filter_word(right_text).ok()?;
+            let mut noun = right_typed
+                .type_filters
+                .iter()
+                .filter(|type_filter| **type_filter != adjective)
+                .cloned();
+            let noun_head = noun.next().unwrap_or(TypeFilter::Any);
+            let noun_tail = noun.collect::<Vec<_>>();
+            let mut filters = expand_property_disjunctions(left_props, property_disjunction_ranges)
+                .into_iter()
+                .map(|properties| typed(noun_head.clone(), None, properties, noun_tail.clone()))
+                .collect::<Vec<_>>();
+            filters.push(right.clone());
+            let shared: Vec<FilterProp> = left_props
+                .iter()
+                .filter(|prop| !is_adjective_prefix_prop(prop))
+                .cloned()
+                .collect();
+            let combined = distribute_controller_to_or(TargetFilter::Or { filters });
+            let combined = distribute_shared_properties(combined, &shared);
+            Some(distribute_properties_to_or(combined))
+        }
+        TargetFilter::Or { filters }
+            if left_props
+                .iter()
+                .all(|prop| matches!(prop, FilterProp::HasColor { .. })) =>
+        {
+            let typed_legs = filters
+                .iter()
+                .map(|leg| match leg {
+                    TargetFilter::Typed(typed_leg)
+                        if !typed_leg.type_filters.is_empty()
+                            && !typed_leg.type_filters.contains(&TypeFilter::Any) =>
+                    {
+                        Some(typed_leg)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let first_leg = typed_legs.first()?;
+            let first_leg_colors = first_leg
+                .properties
+                .iter()
+                .filter_map(|prop| match prop {
+                    FilterProp::HasColor { color } => Some(*color),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let mut product = Vec::new();
+            let left_color_options =
+                expand_property_disjunctions(left_props, property_disjunction_ranges)
+                    .into_iter()
+                    .flat_map(|branch| {
+                        branch.into_iter().filter_map(|prop| match prop {
+                            FilterProp::HasColor { color } => Some(color),
+                            _ => None,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+            if first_leg_colors.is_empty() {
+                let adjective_text = parse_color_prefix(right_text)
+                    .map_or(right_text, |(_, consumed)| &right_text[consumed..]);
+                let (_, adjective) = nom_target::parse_type_filter_word(adjective_text).ok()?;
+                let mut noun = first_leg
+                    .type_filters
+                    .iter()
+                    .filter(|type_filter| **type_filter != adjective)
+                    .cloned();
+                let noun_head = noun.next().unwrap_or(TypeFilter::Any);
+                let noun_tail = noun.collect::<Vec<_>>();
+                for color in &left_color_options {
+                    product.push(typed(
+                        noun_head.clone(),
+                        None,
+                        vec![FilterProp::HasColor { color: *color }],
+                        noun_tail.clone(),
+                    ));
+                }
+            }
+
+            let mut shared_colors = left_color_options;
+            for color in &first_leg_colors {
+                if !shared_colors.contains(color) {
+                    shared_colors.push(*color);
+                }
+            }
+            for (index, typed_leg) in typed_legs.into_iter().enumerate() {
+                let leg_colors: Vec<ManaColor> = typed_leg
+                    .properties
+                    .iter()
+                    .filter_map(|prop| match prop {
+                        FilterProp::HasColor { color } => Some(*color),
+                        _ => None,
+                    })
+                    .collect();
+                let common_properties: Vec<FilterProp> = typed_leg
+                    .properties
+                    .iter()
+                    .filter(|prop| !matches!(prop, FilterProp::HasColor { .. }))
+                    .cloned()
+                    .collect();
+                let joins_leading_color_group = if index == 0 {
+                    !first_leg_colors.is_empty()
+                } else {
+                    leg_colors.len() == 1 && first_leg_colors.contains(&leg_colors[0])
+                };
+                if !joins_leading_color_group {
+                    product.push(TargetFilter::Typed(typed_leg.clone()));
+                    continue;
+                }
+                for color in &shared_colors {
+                    let mut colored_leg = typed_leg.clone();
+                    colored_leg.properties = common_properties.clone();
+                    colored_leg
+                        .properties
+                        .push(FilterProp::HasColor { color: *color });
+                    product.push(TargetFilter::Typed(colored_leg));
+                }
+            }
+            (!product.is_empty()).then_some(TargetFilter::Or { filters: product })
+        }
+        _ => None,
+    }
 }
 
 /// CR 609.7 + CR 702.72a: Read a reader's whole "X or Y" qualifier ("red or
@@ -6994,7 +7115,8 @@ fn parse_crewed_by_source_suffix(text: &str) -> Option<(FilterProp, usize)> {
 /// source outright, a bare `Pronoun` names the source or, in a history clause,
 /// an earlier instruction's target only when the parse context supplies that
 /// antecedent, `Demonstrative` names an earlier instruction's target the same
-/// way, and `TargetCreature` names the ability's first object target.
+/// way, `OneOfThose` names any of the creature targets an earlier instruction
+/// announced, and `TargetCreature` names the ability's first object target.
 /// `resolve_relation_subject` is the single binding authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CombatRelationSubjectWord {
@@ -7006,6 +7128,9 @@ pub(crate) enum CombatRelationSubjectWord {
     TargetCreature,
     /// "that creature" — a demonstrative for an earlier instruction's target.
     Demonstrative,
+    /// "one of those creatures" — any member of the plural antecedent an earlier
+    /// instruction announced.
+    OneOfThose,
 }
 
 /// The grammatical form of a postnominal current-block-pairing clause.
@@ -7101,7 +7226,8 @@ pub(crate) struct BlockHistoryClause {
 /// The partner a block-history clause names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HistoryPartner {
-    /// A subject word the relation can bind ("it", "~", "that creature").
+    /// A subject word the relation can bind ("it", "~", "that creature", "one of
+    /// those creatures").
     Subject(CombatRelationSubjectWord),
     /// An indefinite filter phrase ("a Zombie", "a legendary creature"): any creature
     /// of a kind, not one object. No relation represents it yet, so like `Unbound` it
@@ -7109,7 +7235,7 @@ pub(crate) enum HistoryPartner {
     /// distinct because a filter-subject relation could represent it, which an unbound
     /// partner cannot.
     Filter,
-    /// Any other phrase no subject word covers ("target Wall", "one of those creatures").
+    /// Any other phrase no subject word covers ("target Wall", "another creature").
     Unbound,
 }
 
@@ -7145,6 +7271,10 @@ fn parse_history_partner(input: &str) -> OracleResult<'_, (HistoryPartner, Comba
                     value(
                         CombatRelationSubjectWord::Demonstrative,
                         tag("that creature"),
+                    ),
+                    value(
+                        CombatRelationSubjectWord::OneOfThose,
+                        (tag("one of "), tag("those creatures")),
                     ),
                     parse_source_subject_word,
                 )),
@@ -7255,8 +7385,8 @@ pub(crate) fn strip_block_history_clauses(lower: &str) -> String {
 /// one, so a represented clause can't vouch for a second clause of the same shape, and
 /// two populations of one instruction can't cover another instruction's dropped clause.
 /// Both ways a parse drops the clause land here: a partner no subject word covers
-/// (Triton Tactics: "one of those creatures"; Time to Reflect's filter phrase "a Zombie"),
-/// and a recognized "it" or "that creature" whose antecedent `resolve_relation_subject`
+/// ("target Wall"; Time to Reflect's filter phrase "a Zombie"), and a recognized "it",
+/// "that creature" or "one of those creatures" whose antecedent `resolve_relation_subject`
 /// rejects ("destroy target creature and all creatures it blocked this turn").
 pub(crate) fn population_drops_block_history_clause(
     lower: &str,
@@ -7392,7 +7522,8 @@ enum CombatClauseKind {
 }
 
 /// The single subject-binding authority. CR 608.2c + CR 115.10a: a pronoun or demonstrative
-/// bound to an earlier instruction's target gives `AnaphoricTarget`. A self-reference, or a
+/// bound to an earlier instruction's target, or "one of those creatures" bound to the
+/// creature targets an earlier instruction announced, gives `AnaphoricTarget`. A self-reference, or a
 /// pronoun whose antecedent is the source, gives `Source`. Any other antecedent, or none,
 /// has no subject, and the clause stays unconsumed for the swallow audit.
 fn resolve_relation_subject(
@@ -7413,6 +7544,13 @@ fn resolve_relation_subject(
         }
         CombatRelationSubjectWord::Demonstrative => {
             names_earlier_target(&ctx.demonstrative_object_ref)
+                .then_some(CombatRelationSubject::AnaphoricTarget)
+        }
+        // CR 608.2c + CR 601.2c: "those creatures" names the creatures the earlier
+        // instruction announced as targets when they are the nearest antecedent;
+        // the relation holds for any of them.
+        CombatRelationSubjectWord::OneOfThose => {
+            names_earlier_target(&ctx.plural_demonstrative_object_ref)
                 .then_some(CombatRelationSubject::AnaphoricTarget)
         }
         CombatRelationSubjectWord::TargetCreature => Some(CombatRelationSubject::ParentTarget),
@@ -12058,7 +12196,7 @@ pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleRes
 
 #[cfg(test)]
 mod tests {
-    use super::CombatRelationSubjectWord::{Demonstrative, Pronoun, SelfName};
+    use super::CombatRelationSubjectWord::{Demonstrative, OneOfThose, Pronoun, SelfName};
     use super::*;
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -13105,7 +13243,10 @@ mod tests {
             ("an elf", HistoryPartner::Filter),
             ("another creature", HistoryPartner::Unbound),
             ("target wall", HistoryPartner::Unbound),
-            ("one of those creatures", HistoryPartner::Unbound),
+            (
+                "one of those creatures",
+                HistoryPartner::Subject(OneOfThose),
+            ),
         ];
         for (head, direction) in [
             ("that blocked or was blocked by ", Either),
@@ -13160,7 +13301,7 @@ mod tests {
         population_drops_block_history_clause(lower, instructions, |word| match word {
             CombatRelationSubjectWord::Pronoun => Some(it),
             CombatRelationSubjectWord::SelfName => Some(CombatRelationSubject::Source),
-            CombatRelationSubjectWord::Demonstrative => {
+            CombatRelationSubjectWord::Demonstrative | CombatRelationSubjectWord::OneOfThose => {
                 Some(CombatRelationSubject::AnaphoricTarget)
             }
             CombatRelationSubjectWord::TargetCreature => Some(CombatRelationSubject::ParentTarget),
@@ -26243,8 +26384,10 @@ mod color_or_type_union {
             .collect()
     }
 
-    /// CR 105.2 + CR 205.2a: Soldevi Adnate's "black or artifact creature" is a
-    /// black creature or an artifact creature, never two identical legs.
+    /// CR 105.2 + CR 205.2a: Soldevi Adnate's Oracle text is "{T}, Sacrifice a
+    /// black or artifact creature: Add an amount of {B} equal to the sacrificed
+    /// creature's mana value." Its filter is a black creature or an artifact
+    /// creature, never two identical legs.
     #[test]
     fn color_or_type_noun_reads_both_kinds() {
         let (filter, rest) = parse_type_phrase_folding("black or artifact creature");
@@ -26254,6 +26397,26 @@ mod color_or_type_union {
             vec![
                 (vec![TypeFilter::Creature], vec![ManaColor::Black]),
                 (vec![TypeFilter::Artifact, TypeFilter::Creature], vec![]),
+            ]
+        );
+    }
+
+    /// CR 105.2 + CR 205.2a: Essence Burn's Oracle text is "Essence Burn deals
+    /// 5 damage to target black or green creature or planeswalker. If that
+    /// permanent would die this turn, exile it instead." Its target names
+    /// exactly the four color/type pairs.
+    #[test]
+    fn shared_color_alternatives_cross_with_noun_alternatives() {
+        let phrase = "black or green creature or planeswalker";
+        let (filter, rest) = parse_type_phrase_folding(phrase);
+        assert_eq!(rest, "", "the full grammar phrase must be consumed");
+        assert_eq!(
+            legs(&filter),
+            vec![
+                (vec![TypeFilter::Creature], vec![ManaColor::Black]),
+                (vec![TypeFilter::Creature], vec![ManaColor::Green]),
+                (vec![TypeFilter::Planeswalker], vec![ManaColor::Black]),
+                (vec![TypeFilter::Planeswalker], vec![ManaColor::Green]),
             ]
         );
     }
