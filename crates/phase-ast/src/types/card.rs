@@ -281,6 +281,14 @@ pub struct CardFace {
     /// singleton) limit applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deck_copy_limit: Option<DeckCopyLimit>,
+    /// CR 903.5a: Deck-construction override — "A deck with this commander has
+    /// no maximum deck size" (Whtz, the Bibliophile) and the "your starting
+    /// deck can contain any number of cards beyond the maximum deck size"
+    /// class (Covert Blue Mage). Read at deck-validation time by
+    /// `effective_deck_size_rule`, never at runtime. `false` for every other
+    /// face, keeping serialized card data byte-identical for the corpus.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_maximum_deck_size: bool,
     /// CR 717.1: Lit-up roll numbers for Attraction card variants (d6 values 1–6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attraction_lights: Vec<u8>,

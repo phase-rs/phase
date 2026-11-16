@@ -2061,6 +2061,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            no_maximum_deck_size: false,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],

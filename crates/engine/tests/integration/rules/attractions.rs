@@ -53,6 +53,7 @@ fn test_attraction_face(name: &str, oracle: &str, lights: Vec<u8>) -> CardFace {
         is_commander: false,
         is_oathbreaker: false,
         deck_copy_limit: None,
+        no_maximum_deck_size: false,
         parse_warnings: vec![],
         metadata: Default::default(),
         rarities: Default::default(),

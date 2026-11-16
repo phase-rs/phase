@@ -262,6 +262,7 @@ mod vrestin_menoptra_leader_5949;
 mod vulcan_mind_meld_exiler_plays;
 mod wba_fodder_multiset;
 mod wba_loop_firewall_interposition;
+mod whtz_bibliophile;
 mod will_of_the_mardu_target_player_token_count;
 mod witherbloom_altar_probe;
 mod wolverine_fierce_fighter_heal;

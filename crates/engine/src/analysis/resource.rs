@@ -8604,6 +8604,7 @@ fn project_out_player_consumables(p: &mut Player) {
         noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
+        starting_deck_size: _,
     } = p;
     // CR 119: life is monotone in a drain/lifegain loop.
     *life = 0;
@@ -8928,6 +8929,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
+        starting_deck_size: _,
     } = p;
     vec![
         *poison_counters as i64,
@@ -8990,6 +8992,7 @@ fn projected_player_maps(
         noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
+        starting_deck_size: _,
     } = p;
     vec![player_counters]
 }

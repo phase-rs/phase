@@ -4344,6 +4344,37 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
 
+    // CR 103.2a: "you have more cards in your library than your starting
+    // deck" (the Nylea comparative) — strict library-size-over-latched-start
+    // gate: live `ZoneCardCount` library size GT the `Player::starting_deck_size`
+    // snapshot. Only the library noun binds; a graveyard comparative ("more
+    // cards in your graveyard than your starting deck") MUST fail loud —
+    // the graveyard size is a different count and must never alias the latch.
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("more cards in your library than your starting deck")
+            .parse(rest)
+    {
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: Vec::new(),
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::StartingDeckSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+            },
+        ));
+    }
+
     // "you have exactly N life" → LifeTotal EQ N
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exactly ").parse(rest) {
         let (rest, n) = parse_number(rest)?;
@@ -10032,6 +10063,28 @@ fn parse_no_on_battlefield(input: &str) -> OracleResult<'_, StaticCondition> {
     ))
 }
 
+/// CR 103.2a + CR 702.139b: "N or more cards in your starting deck" —
+/// Whtz, the Bibliophile's activation discount ("...if you had 200 or more
+/// cards in your starting deck"). Reads the `Player::starting_deck_size`
+/// latch (library + command-zone decklist cards, single-counted at load),
+/// never the live library. Only the "your" possessive binds
+/// (`PlayerScope::Controller`); any other possessive fails loud so a
+/// mistargeted count can never silently gate a discount. The caller strips the
+/// past-tense "you had " auxiliary.
+fn parse_you_had_starting_deck_count(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_number(input)?;
+    let (rest, _) = tag(" or more cards in your starting deck").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::StartingDeckSize {
+                player: PlayerScope::Controller,
+            },
+            n,
+        ),
+    ))
+}
+
 /// Parse "[N or more / a / an] [type] entered the battlefield under your control this turn".
 ///
 /// Unifies the count variant ("two or more creatures entered...") and the singular
@@ -10041,6 +10094,14 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let had_enter_suffix = "enter the battlefield under your control this turn";
 
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you had ").parse(input) {
+        // CR 103.2a: "you had N or more cards in your starting deck" (Whtz,
+        // the Bibliophile's activation discount) — the latched
+        // `Player::starting_deck_size` snapshot, not an ETB count. Tried
+        // before the entered-count shapes so the "200 or more cards" numeral
+        // cannot be misread as an entering-permanents threshold.
+        if let Ok((rest, condition)) = parse_you_had_starting_deck_count(rest) {
+            return Ok((rest, condition));
+        }
         // "you had N or more [type] enter ..." (counted threshold, GE) — the
         // "you had" auxiliary reads the present-tense "enter" surface. Falls
         // back to the singular "you had a/an/another [type] enter ..." form.
@@ -16401,6 +16462,80 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 200 },
             } if card_types.is_empty()
         ));
+    }
+
+    #[test]
+    fn whtz_had_starting_deck_count_parses_to_latched_count_ge() {
+        // CR 103.2a: Whtz, the Bibliophile's activation discount — "if you
+        // had 200 or more cards in your starting deck" reads the latched
+        // `Player::starting_deck_size` snapshot, never the live library.
+        // The revert (loud `None`) would leave the discount unconditional.
+        assert_eq!(
+            crate::parser::oracle_condition::parse_restriction_condition(
+                "you had 200 or more cards in your starting deck"
+            ),
+            Some(crate::types::ability::ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::StartingDeckSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 200 },
+            })
+        );
+    }
+
+    #[test]
+    fn nylea_library_vs_starting_deck_comparative_parses_strict_gt() {
+        // CR 103.2a: "you have more cards in your library than your starting
+        // deck" — live library size strictly greater than the latched
+        // starting size. The graveyard variant MUST NOT bind: the graveyard
+        // size is a different count and must fail loud rather than alias the
+        // latch.
+        let (rest, condition) =
+            parse_inner_condition("you have more cards in your library than your starting deck")
+                .expect("nylea comparative must parse");
+        assert_eq!(rest, "");
+        assert_eq!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Library,
+                        card_types: Vec::new(),
+                        filter: None,
+                        scope: CountScope::Controller,
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Ref {
+                    qty: QuantityRef::StartingDeckSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+            }
+        );
+        assert!(
+            parse_inner_condition("you have more cards in your graveyard than your starting deck")
+                .is_err(),
+            "graveyard comparative must not bind the starting-deck latch"
+        );
+    }
+
+    #[test]
+    fn present_tense_have_starting_deck_stays_a_loud_gap() {
+        // Coverage honesty: the latch is past-tense ("had") by rule — a
+        // present-tense "you have 200 or more cards in your starting deck"
+        // has no live-library reading that preserves the snapshot semantics,
+        // so it must fail loud (`None`) rather than bind `ZoneCardCount`.
+        assert_eq!(
+            crate::parser::oracle_condition::parse_restriction_condition(
+                "you have 200 or more cards in your starting deck"
+            ),
+            None,
+            "present-tense starting-deck count must stay a loud gap"
+        );
     }
 
     #[test]
