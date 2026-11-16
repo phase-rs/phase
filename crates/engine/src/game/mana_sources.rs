@@ -7278,10 +7278,21 @@ mod tests {
         assert!(state.pending_taps_for_mana_overrides.is_empty());
         let prefix = events.clone();
         let pool = state.players[0].mana_pool.clone();
-        // Existing legacy subtype-only construction: no printed/indexed
-        // ability, and no public-action claim for this helper-domain leg.
         let second = subtype_forest_with_priority(&mut state);
         crate::game::effects::attach::attach_to(&mut state, auras[1], second);
+        assert!(
+            activatable_land_mana_options(&state, second, P0)
+                .iter()
+                .any(|option| option.ability_index.is_some() && option.mana_type == ManaType::Green),
+            "the attachment layer flush materializes an indexed Forest mana ability"
+        );
+        // Restore the legacy subtype-only helper input after attachment: no
+        // indexed ability, and no public-action claim for this helper-domain leg.
+        Arc::make_mut(&mut state.objects.get_mut(&second).unwrap().abilities).clear();
+        assert!(
+            state.objects[&second].abilities.is_empty(),
+            "the legacy helper-domain leg has no indexed mana ability"
+        );
         let option = activatable_land_mana_options(&state, second, P0)
             .into_iter()
             .find(|option| {
