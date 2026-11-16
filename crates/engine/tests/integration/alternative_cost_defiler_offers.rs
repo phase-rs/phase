@@ -963,6 +963,159 @@ fn emerge_with_a_defiler_under_trinisphere_pays_exactly_the_floor() {
     );
 }
 
+const CRABOMINATION: &str = "Emerge from artifact {5}{B}{B} (You may cast this spell by sacrificing an artifact and paying the emerge cost reduced by that artifact's mana value.)\nWhen this creature enters, target opponent exiles the top card of their library, a card at random from their graveyard, and a card at random from their hand. You may cast a spell from among cards exiled this way without paying its mana cost.";
+
+const LOTUS_PETAL: &str = "{T}, Sacrifice this artifact: Add one mana of any color.";
+
+/// Crabomination with Defiler of Flesh, five Plains, Lotus Petal and, when
+/// `ornithopter`, an Ornithopter; an empty pool.
+fn crabomination_board(ornithopter: bool) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    add_defiler_of_flesh(&mut scenario);
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+    let petal = scenario
+        .add_artifact_from_oracle(P0, "Lotus Petal", LOTUS_PETAL)
+        .id();
+    let ornithopter = ornithopter.then(|| {
+        scenario
+            .add_creature_from_oracle(P0, "Ornithopter", 0, 2, "Flying")
+            .as_artifact_creature()
+            .id()
+    });
+    let crab = scenario
+        .add_creature_to_hand_from_oracle(P0, "Crabomination", 5, 5, CRABOMINATION)
+        .with_mana_cost(cost(4, &[ManaCostShard::Black, ManaCostShard::Black]))
+        .with_color(vec![ManaColor::Black])
+        .id();
+    let runner = scenario.build();
+    assert!(
+        runner.state().objects[&crab]
+            .keywords
+            .iter()
+            .any(|k| matches!(k, Keyword::Emerge(_))),
+        "reach: Crabomination carries Emerge"
+    );
+    (runner, crab, petal, ornithopter)
+}
+
+/// Casts `crab`, accepting the Defiler, choosing `emerge` at an
+/// `AlternativeCastChoice`, sacrificing `sacrifice`, and paying {B} with Lotus
+/// Petal. Returns the prompts answered; the cast must reach `SpellCast`.
+fn cast_crabomination(
+    runner: &mut GameRunner,
+    crab: ObjectId,
+    petal: ObjectId,
+    emerge: Option<bool>,
+    sacrifice: Option<ObjectId>,
+) -> Vec<&'static str> {
+    let card_id = runner.state().objects[&crab].card_id;
+    let mut events = runner
+        .act(GameAction::CastSpell {
+            object_id: crab,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Crabomination")
+        .events;
+    let mut prompts = Vec::new();
+    for _ in 0..10 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } if runner.state().objects[&crab].zone == Zone::Stack => {
+                break;
+            }
+            WaitingFor::AlternativeCastChoice { keyword, .. } => {
+                assert_eq!(
+                    *keyword,
+                    engine::types::game_state::AlternativeCastKeyword::Emerge,
+                    "the alternative offered is Emerge"
+                );
+                GameAction::ChooseAlternativeCast {
+                    choice: if emerge.expect("no AlternativeCastChoice expected") {
+                        AlternativeCastDecision::Alternative
+                    } else {
+                        AlternativeCastDecision::Normal
+                    },
+                }
+            }
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::PayCost { .. } => GameAction::SelectCards {
+                cards: vec![sacrifice.expect("no sacrifice expected")],
+            },
+            WaitingFor::ManaPayment { .. }
+                if runner.state().objects[&petal].zone == Zone::Battlefield =>
+            {
+                GameAction::ActivateAbility {
+                    source_id: petal,
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
+                }
+            }
+            WaitingFor::ChooseManaColor { .. } => GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Black),
+                count: 1,
+            },
+            WaitingFor::ManaPayment { .. } => GameAction::PassPriority,
+            other => panic!("unexpected {other:?} after {prompts:?}"),
+        };
+        prompts.push(match &runner.state().waiting_for {
+            WaitingFor::AlternativeCastChoice { .. } => "AlternativeCastChoice",
+            _ => runner.waiting_for_kind(),
+        });
+        events.extend(runner.act(action).expect("answer the prompt").events);
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, engine::types::events::GameEvent::SpellCast { object_id, .. } if *object_id == crab)),
+        "the cast completes: {prompts:?}"
+    );
+    prompts
+}
+
+/// CR 702.119a + CR 601.2g: Lotus Petal is the only artifact, so Emerge would
+/// both sacrifice it and need its {B} ({5}{B}{B} less Petal's mana value 0,
+/// less the Defiler's {B}). Only the printed route is offered; it completes
+/// for {4}{B} through the Defiler with Petal's {B}.
+#[test]
+fn emerge_candidate_cant_also_pay_for_the_emerge_cost() {
+    let (mut runner, crab, petal, _) = crabomination_board(false);
+    assert!(offered(&runner, crab), "the printed cast is a legal action");
+
+    let prompts = cast_crabomination(&mut runner, crab, petal, None, None);
+
+    assert!(
+        !prompts.contains(&"AlternativeCastChoice"),
+        "Emerge isn't offered: {prompts:?}"
+    );
+    assert_eq!(runner.state().objects[&petal].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].life, 18);
+}
+
+/// Control: an Ornithopter is the Emerge sacrifice, so Petal's {B} and five
+/// Plains pay {5}{B}.
+#[test]
+fn emerge_sacrificing_another_artifact_pays_with_the_petal() {
+    let (mut runner, crab, petal, ornithopter) = crabomination_board(true);
+    let ornithopter = ornithopter.unwrap();
+
+    let prompts = cast_crabomination(&mut runner, crab, petal, Some(true), Some(ornithopter));
+
+    assert_eq!(
+        prompts.first(),
+        Some(&"AlternativeCastChoice"),
+        "{prompts:?}"
+    );
+    assert!(prompts.contains(&"PayCost"), "{prompts:?}");
+    assert_eq!(runner.state().objects[&ornithopter].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&petal].zone, Zone::Graveyard);
+    assert_eq!(runner.state().players[0].life, 18);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
 /// CR 702.76a + CR 118.9d: prowl {2}{B} less the Defiler's {B} is {2}. With two
 /// colourless mana the printed {3}{B}{B} (reduced {3}{B}) and the raw prowl cost
 /// are unaffordable, so the prowl cast is the only one, taken for {2} and 2 life.

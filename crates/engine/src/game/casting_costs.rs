@@ -1920,10 +1920,6 @@ pub enum ReservationVerdict {
     /// The probe budget ran out first. Offered, as base offered it; the real
     /// payment decides (Found, not fixed).
     Exhausted,
-    /// A mana ability the payer can activate now consumes another object, which
-    /// the capacity estimate can't hold apart. Offered; the real payment
-    /// decides (Found, not fixed).
-    ConsumerFuelled,
 }
 
 /// The most assignments the reservation search explores before
@@ -1948,9 +1944,6 @@ fn reserved_alternative_verdict(
     legs: &[super::cost_payability::ReservableLeg],
 ) -> ReservationVerdict {
     let reach = super::mana_sources::player_mana_ability_reach(state, player);
-    if super::mana_sources::player_has_activatable_consuming_mana_ability(state, player) {
-        return ReservationVerdict::ConsumerFuelled;
-    }
     let totals = super::casting::cast_mana_totals(
         state,
         player,
@@ -13231,6 +13224,9 @@ pub(super) fn can_pay_emerge_cost(
             ManaCost::generic(candidate.effective_mana_value()),
             SpellCostSource::Emerge,
         )];
+        // CR 702.119a + CR 601.2g: the candidate may be tapped for mana before
+        // it's sacrificed, but it can't also be consumed for mana (Lotus Petal).
+        let held = [(permanent, super::casting::ReservedUse::Present)];
         super::casting::cast_mana_affordable(
             state,
             player,
@@ -13241,7 +13237,10 @@ pub(super) fn can_pay_emerge_cost(
                 permission,
                 accepted: &accepted,
                 defiler: super::casting::DefilerCredit::Offerable,
-                reserved: super::casting::PaymentReservation::NONE,
+                reserved: super::casting::PaymentReservation {
+                    life: 0,
+                    objects: &held,
+                },
             },
         )
     })

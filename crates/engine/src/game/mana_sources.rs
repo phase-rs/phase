@@ -1483,25 +1483,6 @@ fn cost_consumes_other_object(cost: &Option<AbilityCost>) -> bool {
     })
 }
 
-/// CR 605.3a + CR 118.3: whether `player` can activate a mana ability now whose
-/// cost consumes another object (Ashnod's Altar; an untapped Priest of
-/// Yawgmoth). A tapped Priest's {T} can't be paid, so it isn't counted.
-pub(crate) fn player_has_activatable_consuming_mana_ability(
-    state: &GameState,
-    player: PlayerId,
-) -> bool {
-    activatable_mana_source_selections(state, player)
-        .iter()
-        .any(|selection| {
-            state
-                .objects
-                .get(&selection.source.object_id)
-                .zip(selection.ability_index)
-                .and_then(|(object, index)| object.abilities.get(index))
-                .is_some_and(|ability| cost_consumes_other_object(&ability.cost))
-        })
-}
-
 /// Fold an `Option<u16>` sum with saturation and non-fixed poisoning.
 /// Threading this as a small private helper keeps the recursive walker and
 /// the composite-cost loop in sync: any `None` contribution collapses the

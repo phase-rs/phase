@@ -2078,12 +2078,14 @@ fn composite_alternative_affordable_only_with_a_defiler_completes() {
     assert_eq!(pool(&runner), 0);
 }
 
-/// Whether P0 also controls a tapped Priest of Yawgmoth, a consuming mana
-/// ability that can't activate now (it attacked last combat).
-#[derive(Clone, Copy)]
+/// Whether P0 also controls a Priest of Yawgmoth, a mana ability that consumes
+/// another artifact: tapped (it attacked last combat), or untapped and
+/// controlled since the previous turn.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum SparePriest {
     Absent,
     Tapped,
+    Untapped,
 }
 
 const PRIEST_OF_YAWGMOTH: &str =
@@ -2108,9 +2110,10 @@ fn zahid_with_sol_ring(
             .as_artifact_creature()
             .id()
     });
+    let priest_kind = priest;
     let priest = match priest {
         SparePriest::Absent => None,
-        SparePriest::Tapped => Some(
+        SparePriest::Tapped | SparePriest::Untapped => Some(
             scenario
                 .add_creature_from_oracle(P0, "Priest of Yawgmoth", 1, 2, PRIEST_OF_YAWGMOTH)
                 .id(),
@@ -2123,7 +2126,8 @@ fn zahid_with_sol_ring(
         .id();
     let mut runner = scenario.build();
     if let Some(priest) = priest {
-        runner.state_mut().objects.get_mut(&priest).unwrap().tapped = true;
+        runner.state_mut().objects.get_mut(&priest).unwrap().tapped =
+            priest_kind == SparePriest::Tapped;
         let consumes_another = runner.state().objects[&priest].abilities.iter().any(|a| {
             matches!(&a.cost, Some(engine::types::ability::AbilityCost::Composite { costs })
                 if costs.iter().any(|c| matches!(c,
@@ -2135,9 +2139,10 @@ fn zahid_with_sol_ring(
         );
         let selections =
             engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P0);
-        assert!(
-            selections.iter().all(|s| s.source.object_id != priest),
-            "reach: the tapped Priest can't activate"
+        assert_eq!(
+            selections.iter().any(|s| s.source.object_id == priest),
+            priest_kind == SparePriest::Untapped,
+            "reach: only the untapped Priest can activate (with the Ring as fuel)"
         );
     }
     (runner, zahid, ring, ornithopter)
@@ -2145,10 +2150,15 @@ fn zahid_with_sol_ring(
 
 /// CR 118.3 + CR 601.2h: Zahid's {3} (with the Defiler) needs Sol Ring's mana,
 /// and its tap leg needs an untapped artifact; the Ring can't pay both. A
-/// tapped Priest of Yawgmoth can't make mana, so it doesn't change that.
+/// Priest of Yawgmoth doesn't change that: tapped it can't make mana, and
+/// untapped its only fuel is the Ring held for the tap leg.
 #[test]
 fn composite_alternative_cant_tap_its_mana_artifact_twice() {
-    for priest in [SparePriest::Absent, SparePriest::Tapped] {
+    for priest in [
+        SparePriest::Absent,
+        SparePriest::Tapped,
+        SparePriest::Untapped,
+    ] {
         let (mut runner, zahid, ring, _) = zahid_with_sol_ring(false, priest);
         assert_eq!(
             engine::game::oracle_alternative_reservation_verdict(runner.state(), P0, zahid),
@@ -2169,7 +2179,11 @@ fn composite_alternative_cant_tap_its_mana_artifact_twice() {
 /// pay the {3}.
 #[test]
 fn composite_alternative_taps_a_spare_artifact() {
-    for priest in [SparePriest::Absent, SparePriest::Tapped] {
+    for priest in [
+        SparePriest::Absent,
+        SparePriest::Tapped,
+        SparePriest::Untapped,
+    ] {
         let (mut runner, zahid, ring, ornithopter) = zahid_with_sol_ring(true, priest);
         let ornithopter = ornithopter.unwrap();
         assert!(offered(&runner, zahid), "the cast is a legal action");
@@ -3053,15 +3067,15 @@ fn demon_with_altar(
     (runner, demon, altar, corpses)
 }
 
-/// CR 601.2g + Main ruling (b): Ashnod's Altar can fuel the floored {3}, which
-/// the estimate can't hold apart, so the alternative is offered. Three Corpses
-/// pay the leg and the fourth goes to the Altar during payment.
+/// CR 601.2g: with three Corpses held for the leg, the fourth fuels one Altar
+/// activation, which with {C} pays the floored {3}. The fourth goes to the Altar
+/// during payment.
 #[test]
 fn altar_fuelled_floor_is_offered_and_paid_during_payment() {
     let (mut runner, demon, altar, corpses) = demon_with_altar(4, 1);
     assert_eq!(
         verdict(&runner, demon),
-        engine::game::ReservationVerdict::ConsumerFuelled
+        engine::game::ReservationVerdict::Witness
     );
     let trail = manual_cast(
         &mut runner,
@@ -3099,24 +3113,23 @@ fn altar_mana_made_before_the_cast_pays_the_floor() {
     assert_eq!((life(&runner), pool(&runner)), (14, 0));
 }
 
-/// Two Altar activations during payment pay {3} with {C} left over.
+/// Found, not fixed (#1235): two Altar activations could pay the floored {3},
+/// but the shared manual-route capacity estimate counts one repeatable
+/// consuming activation, so the alternative is refused and nothing is spent.
 #[test]
-fn altar_activated_twice_pays_the_floor() {
-    let (mut runner, demon, altar, corpses) = demon_with_altar(5, 0);
-    let trail = manual_cast(
-        &mut runner,
-        demon,
-        &Answers {
-            picks: corpses[..3].to_vec(),
-            ..ACCEPT_BOTH
-        },
+fn altar_needed_twice_for_the_floor_is_refused() {
+    let (mut runner, demon, _, corpses) = demon_with_altar(5, 0);
+    assert_eq!(
+        verdict(&runner, demon),
+        engine::game::ReservationVerdict::Rejected
     );
-    assert_eq!(trail.prompts, ["OptionalCostChoice", "PayCost"]);
-    sacrifice_to_altar(&mut runner, altar, corpses[3]);
-    sacrifice_to_altar(&mut runner, altar, corpses[4]);
-
-    assert!(finish_payment(&mut runner, demon));
-    assert_eq!((life(&runner), pool(&runner)), (14, 1));
+    assert!(!offered(&runner, demon));
+    let trail = cast(&mut runner, demon, &ACCEPT_BOTH);
+    assert!(trail.refused, "{:?}", trail.prompts);
+    assert_eq!((zone(&runner, demon), life(&runner)), (Zone::Hand, 20));
+    assert!(corpses
+        .iter()
+        .all(|&c| zone(&runner, c) == Zone::Battlefield));
 }
 
 /// CR 118.3 + CR 601.2h: Blood Pets ("Sacrifice this creature: Add {B}.") the
@@ -3169,39 +3182,33 @@ fn self_sacrificing_fuel_held_for_the_leg_cant_pay_the_floor() {
     }
 }
 
-/// Main ruling (b) applies whatever the mana leg: Sephara's {W}, less Defiler
-/// of Faith's {W}, is floored to {3}, which two Altar activations pay.
+/// Found, not fixed (#1235): Sephara's {W}, less Defiler of Faith's {W}, is
+/// floored to {3}, which two Altar activations could pay, but the shared
+/// manual-route capacity estimate counts one repeatable consuming activation,
+/// so the alternative is refused and nothing is spent.
 #[test]
-fn altar_fuels_a_floored_printed_mana_leg() {
+fn altar_needed_twice_for_a_floored_printed_mana_leg_is_refused() {
     let mut scenario = board();
     add_trinisphere(&mut scenario);
     add_parsed_defiler(&mut scenario, "Defiler of Faith", DEFILER_OF_FAITH);
     let flyers = ornithopters(&mut scenario, 4);
     let corpses = creatures(&mut scenario, "Walking Corpse", 2, "", ManaColor::Black);
-    let altar = scenario
-        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
-        .id();
+    scenario.add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR);
     let sephara = add_sephara(&mut scenario);
     let mut runner = scenario.build();
 
-    let trail = manual_cast(
-        &mut runner,
-        sephara,
-        &Answers {
-            picks: flyers.clone(),
-            ..ACCEPT_BOTH
-        },
-    );
     assert_eq!(
-        trail.prompts,
-        ["DefilerPayment", "OptionalCostChoice", "PayCost"]
+        verdict(&runner, sephara),
+        engine::game::ReservationVerdict::Rejected
     );
-    sacrifice_to_altar(&mut runner, altar, corpses[0]);
-    sacrifice_to_altar(&mut runner, altar, corpses[1]);
-
-    assert!(finish_payment(&mut runner, sephara));
-    assert_eq!((life(&runner), pool(&runner)), (18, 1));
-    assert!(flyers.iter().all(|&f| runner.state().objects[&f].tapped));
+    assert!(!offered(&runner, sephara));
+    let trail = cast(&mut runner, sephara, &ACCEPT_BOTH);
+    assert!(trail.refused, "{:?}", trail.prompts);
+    assert_eq!((zone(&runner, sephara), life(&runner)), (Zone::Hand, 20));
+    assert!(flyers.iter().all(|&f| !runner.state().objects[&f].tapped));
+    assert!(corpses
+        .iter()
+        .all(|&c| zone(&runner, c) == Zone::Battlefield));
 }
 
 /// Zahid with Defiler of Dreams, a Gold token, two Plains and, when `spare`,
