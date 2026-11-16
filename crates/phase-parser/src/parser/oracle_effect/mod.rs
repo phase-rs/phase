@@ -24734,7 +24734,8 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // the binding it was parsed with instead of being rewritten to
     // `ParentTarget` here. The blank continuation context never carries the
     // trigger subject, so no CR 608.2k `TriggeringSource` binding reaches this
-    // point; a typed primary referent is pinned to `ParentTarget` above instead.
+    // point; a typed primary referent is pinned to `ParentTarget` above instead,
+    // unless the continuation holds a block-history clause (see the pin's guard).
     if uses_parent_target_reference && !ctx_has_typed_trigger_subject(ctx) {
         // CR 608.2c: same fail-closed refusal as the chunk-loop arms —
         // see `anaphor_rewrite_would_drop_this_way_binding`.

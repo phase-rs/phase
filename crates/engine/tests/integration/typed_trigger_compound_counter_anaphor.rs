@@ -228,7 +228,7 @@ struct FearBoard {
 }
 
 /// A textless land that is also an enchantment (an object can have several
-/// card types, CR 205.2a): playing it is "another enchantment you control"
+/// card types, CR 205.2b): playing it is "another enchantment you control"
 /// entering, with no casting machinery between the entry and the trigger. One
 /// entering enchantment, so exactly one eerie trigger goes on the stack.
 fn fear_board() -> FearBoard {
