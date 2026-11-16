@@ -673,6 +673,8 @@
     "commander": "Kommandeur",
     "commanderTitle": "Kommandeur: {{name}}",
     "commanderTitleTax": "Kommandeur: {{name}} (Steuer: +{{tax}})",
+    "boss": "Boss",
+    "bossTitle": "Boss: {{name}}",
     "castCommander": "{{name}} wirken — Doppelklick oder ziehen zum Spielen",
     "castCommanderTax": "{{name}} wirken (Steuer: +{{tax}}) — Doppelklick oder ziehen zum Spielen",
     "ninjutsuCommander": "Kommandeur-Ninjutsu: {{name}} — klicken, um einen ungeblockten Angreifer auf die Hand zurückzunehmen und diesen Kommandeur getappt und angreifend ins Spiel zu bringen",
@@ -1241,6 +1243,7 @@
       "draw": "UNENTSCHIEDEN",
       "victory": "SIEG",
       "defeat": "NIEDERLAGE",
+      "complete": "SPIEL VORBEI",
       "lifeSummary": "Du: <player>{{playerLife}}</player> <sep>/</sep> Gegner: <opponent>{{opponentLife}}</opponent>",
       "turns": "Züge: {{count}}",
       "duration": "Dauer: {{time}}",
@@ -1546,7 +1549,9 @@
       "titleReveal": "Von der Hand aufdecken",
       "titleOpponentHand": "Hand des Gegners",
       "subtitleReveal": "Wähle eine Karte zum Aufdecken oder lehne ab",
-      "subtitleChoose": "Wähle eine Karte"
+      "subtitleChoose": "Wähle eine Karte",
+      "subtitleRevealAnyNumber": "Wähle beliebig viele Karten zum Aufdecken",
+      "subtitleChooseCount": "Wähle {{count}} Karten"
     },
     "search": {
       "title": "Bibliothek durchsuchen",
@@ -2133,6 +2138,10 @@
     "title": "Geschenk-Empfänger wählen",
     "subtitle": "Wähle, welcher Gegner das versprochene Geschenk erhält."
   },
+  "costRecipient": {
+    "title": "Gegner wählen",
+    "subtitle": "Wähle den Gegner für diese Kosten: {{cost}}."
+  },
   "entryController": {
     "title": "Kontrolleur beim Eintreten wählen",
     "subtitle": "Wähle, welcher Gegner diese bleibende Karte beim Eintreten kontrolliert."
@@ -2487,6 +2496,8 @@
       "zoneHand": "deiner Hand",
       "discard": "Wirf {{count}} {{cards}} ab",
       "exile": "Schicke {{count}} {{cards}} aus {{zone}} ins Exil",
+      "haveOpponentGainLife": "Lass einen Gegner {{amount}} Lebenspunkte dazugewinnen",
+      "haveEachOtherPlayerGainLife": "Lass jeden anderen Spieler {{amount}} Lebenspunkte dazugewinnen",
       "reveal": "Zeige {{count}} {{cards}} aus {{zone}} vor"
     }
   },
@@ -2652,6 +2663,7 @@
   },
   "outsideGame": {
     "fromExile": "Aus dem Exil",
+    "fromCompanion": "Als Gefährte",
     "fromSideboard": "Aus dem Sideboard",
     "fromBoosterPack": "Aus einem {{setCode}}-Booster",
     "fromCubeBoosterPack": "Aus einem Cube-Booster"

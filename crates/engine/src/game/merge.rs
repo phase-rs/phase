@@ -126,6 +126,10 @@ pub fn merge_object_onto(
     crate::game::zones::absorb_component(state, merging_id, None);
     if let Some(merging) = state.objects.get_mut(&merging_id) {
         merging.mutate_form = None;
+        // CR 730.2b/c + CR 614.1d: a merged component never enters the
+        // battlefield, so a cast-this-way enters-tapped rider has no entry to
+        // modify; it ends with the spell (it is stack-scoped).
+        merging.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Unspecified;
     }
 
     // CR 730.2 multi-instance stacking: extend the existing stack when
@@ -1052,6 +1056,51 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::TurnedFaceUp { .. })),
             "merging is not 'turned face up' (CR 730.2e) — no TurnedFaceUp event"
+        );
+    }
+
+    // CR 730.2b/c + CR 614.1d: a spell cast through Edgar, Master Machinist's
+    // permission carries "that artifact enters tapped" while on the stack. If it
+    // merges instead of entering, there is no entry to modify: the absorbed
+    // component's rider is cleared, the survivor isn't tapped, and no entry
+    // event is created. (No production route casts Mutate from the graveyard
+    // today, so this pins the seam directly.)
+    #[test]
+    fn merge_clears_absorbed_cast_permission_enter_tapped() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        let survivor = make_creature(&mut state, 1, player, "Ornithopter", 0, 2);
+        let mutant = make_creature(&mut state, 2, player, "Gemrazer", 4, 4);
+        {
+            let obj = state.objects.get_mut(&mutant).unwrap();
+            obj.zone = Zone::Stack;
+            obj.cast_permission_enter_tapped = crate::types::zones::EtbTapState::Tapped;
+        }
+        state.battlefield.retain(|id| *id != mutant);
+
+        let mut events = Vec::new();
+        merge_object_onto(&mut state, mutant, survivor, MergeSide::Top, &mut events);
+
+        assert_eq!(
+            state.objects[&mutant].cast_permission_enter_tapped,
+            crate::types::zones::EtbTapState::Unspecified,
+            "the absorbed component carries no rider"
+        );
+        assert!(
+            !state.objects[&survivor].tapped,
+            "the survivor isn't tapped"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Mutated { .. })),
+            "reach guard: the merge happened"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::ZoneChanged { .. })),
+            "CR 730.2c: the merge isn't an entry"
         );
     }
 

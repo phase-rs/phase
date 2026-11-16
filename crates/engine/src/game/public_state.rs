@@ -293,6 +293,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
                 }
             }
             GameEvent::TokenCreated { object_id, .. }
+            | GameEvent::CardCopyCreated { object_id, .. }
             | GameEvent::ObjectConjured { object_id, .. } => {
                 // Mana-aware: a creature token (Scute storm) does NOT raise the
                 // mana signal, so the board-wide auto-tap sweep is skipped; a
@@ -522,6 +523,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::ShortcutRepetition { .. }
             | GameEvent::SpellCountered { .. }
             | GameEvent::EffectResolved { .. }
+            | GameEvent::Attached { .. }
             | GameEvent::Unattached { .. }
             // CR 116.2c + CR 613.1: ending a continuous effect DOES change
             // derived characteristics, but `GameState::end_continuous_effect`
@@ -531,7 +533,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::ContinuousEffectEnded { .. }
             | GameEvent::AttackersDeclared { .. }
             | GameEvent::BlockersDeclared { .. }
-            | GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlocked { .. }
             | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
             | GameEvent::CombatTaxPaid { .. }
             | GameEvent::CombatTaxDeclined { .. }
@@ -562,6 +564,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::UnTellPerformed { .. }
             | GameEvent::PhraseSaid { .. }
             | GameEvent::GotchaSaid { .. }
+            | GameEvent::ObjectTouched { .. }
             // CR 103.1: starting-player contest carries no public-state delta;
             // it is rendered from the structured event log, not derived state.
             | GameEvent::StartingPlayerContest { .. }
@@ -871,6 +874,7 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,

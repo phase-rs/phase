@@ -20,7 +20,6 @@ import type {
   InteractionSubmission,
 } from "./generated/interaction";
 import { actionRejectionError, AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, isActionRejection, nextSnapshotSeq } from "./types";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
@@ -614,14 +613,6 @@ export class ServerDraftAdapter implements EngineAdapter {
     throw new AdapterError("WASM_ERROR", "Undo not supported in server draft", false);
   }
 
-  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    throw new AdapterError(
-      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
-      "Bracket estimation is a local feature; not available in server draft sessions.",
-      false,
-    );
-  }
-
   // ── Draft lifecycle methods ────────────────────────────────────────
 
   async createDraft(settings: CreateDraftSettings): Promise<void> {
@@ -816,7 +807,7 @@ export class ServerDraftAdapter implements EngineAdapter {
    * Preparation reserves the action slot and cannot be acknowledged by a
    * broadcast. After sending, acknowledgements remain uncorrelated as before.
    */
-  async submitDeck(mainDeck: string[], commanders: string[]): Promise<DraftPlayerView> {
+  async submitDeck(mainDeck: string[], commanders: string[], companion?: string | null): Promise<DraftPlayerView> {
     if (this.seatIndex === null || this.draftCode === null) {
       throw new AdapterError("PHASE_ERROR", "Not in a draft session", false);
     }
@@ -846,9 +837,12 @@ export class ServerDraftAdapter implements EngineAdapter {
             draft_code: draftCode,
             action: {
               type: "SubmitDeck",
-              // Key order matches the Rust carrier; absent art keeps old bytes.
+              // Key order matches the Rust carrier (`seat`, `main_deck`,
+              // `commanders`, `companion`, `printings`); absent companion and
+              // art keep old bytes.
               data: {
                 seat, main_deck: deck.main_deck, commanders: capturedCommanders,
+                ...(companion !== undefined ? { companion } : {}),
                 ...(deck.printings?.length ? { printings: deck.printings } : {}),
               },
             },

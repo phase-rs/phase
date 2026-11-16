@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "OutsideGameChoiceSource and OutsideGameSelection gain a Companion variant (CR 702.139a): a Living Wish-class search offers the player's revealed, not-yet-used companion, so an older peer cannot decode that OutsideGameChoice or the selection that answers it."
+}
