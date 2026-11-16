@@ -7,7 +7,8 @@
 //! the spell kills (damage, or -5/-5 for Ob Nixilis's Cruelty) is exiled instead of dying.
 //! The shared `single_target` harness also checks that a different creature killed
 //! afterwards by an unrelated Shock reaches the graveyard (the replacement is scoped, not
-//! board-wide); Bouncer's Beatdown and the both-modes test have their own setups.
+//! board-wide); Bouncer's Beatdown, the both-modes test and the planeswalker test (0 loyalty,
+//! CR 704.5i) have their own setups.
 //!
 //! Deliberately NOT covered: "If a creature dealt damage this way would die ..." faces
 //! (Pillar of Flame, Annihilating Fire, ...). Their rider is not gated on damage having
