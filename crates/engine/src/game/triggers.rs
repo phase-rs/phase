@@ -1501,7 +1501,7 @@ enum CounterOccurrenceScope {
     /// simultaneous removals are one event, so a recipient fires once per
     /// instruction that removed from it.
     PerInstruction,
-    /// "When the last [type] counter is removed" (and placements): the matcher
+    /// "When the last [type] counter is removed": the matcher
     /// reads the live count after the whole batch, so the recipient fires once
     /// for the batch however many instructions removed counters; only the
     /// removal that leaves none is "the last".

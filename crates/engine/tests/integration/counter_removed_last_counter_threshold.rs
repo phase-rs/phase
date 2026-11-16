@@ -8,6 +8,7 @@
 use engine::ai_support::legal_actions;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{Effect, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::{parse_counter_type, CounterType};
@@ -814,47 +815,67 @@ fn regenerations_restored_sacrificed_first_gets_no_extra_turn() {
     assert_eq!(s.extra_turns.len(), turns_before, "no extra turn");
 }
 
-/// CR 603.2c + CR 608.2c + CR 122.1: two instructions of one resolution each
-/// remove an ore counter from Orcish Mine and the second takes the last one.
-/// "When the last ore counter is removed" happens once, in the second
-/// instruction, so the Mine triggers once. The batched "one or more counters"
-/// form splits per instruction (Cloudsculpt Armorer, chandra_fire_artisan_loyalty_damage.rs);
-/// this form must not, or the live count read after the batch makes both
-/// instructions' groups fire.
+/// CR 603.2c + CR 608.2c + CR 122.1 + CR 310.12b: Unite the Coalition ("Choose
+/// five. You may choose the same mode more than once.") chooses its "deals 2
+/// damage to any target" mode twice, both at Invasion of Amonkhet (defense 4).
+/// Each damage instruction is its own event: defense goes 4 -> 2 -> 0, and the
+/// last defense counter leaves in the second instruction only. "When the last
+/// [type] counter is removed" therefore happens once and the Siege triggers
+/// once. The batched "one or more counters" form splits per instruction
+/// (Cloudsculpt Armorer, chandra_fire_artisan_loyalty_damage.rs); this form must
+/// not, or the live count read after the batch lets both instructions' groups
+/// fire.
 #[test]
 fn last_counter_trigger_fires_once_when_two_instructions_take_it_to_zero() {
-    let ore = parse_counter_type("ore");
+    let Some(db) = crate::support::shared_card_db() else {
+        return;
+    };
     let mut sc = GameScenario::new();
     sc.at_phase(Phase::PreCombatMain);
-    let land = sc.add_basic_land(P1, ManaColor::Red);
-    let mine = sc
-        .add_creature(P0, "Orcish Mine", 0, 0)
-        .as_enchantment()
-        .with_subtypes(vec!["Aura"])
-        .from_oracle_text_with_keywords(&["enchant"], ORCISH_MINE)
-        .id();
-    let spell = sc
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Ore Siphon",
-            false,
-            "Remove an ore counter from target enchantment. Remove an ore counter from target enchantment.",
-        )
-        .id();
-    sc.with_counter(mine, ore.clone(), 2);
+    let siege = sc.add_real_card(P0, "Invasion of Amonkhet", Zone::Battlefield, db);
+    let unite = sc.add_real_card(P0, "Unite the Coalition", Zone::Hand, db);
     sc.with_library_top(P0, &["Card A", "Card B", "Card C"]);
     sc.with_library_top(P1, &["Card D", "Card E", "Card F"]);
     let mut runner = sc.build();
-    attach(&mut runner, mine, land);
+    {
+        // CR 310.11 + CR 310.4b: a Siege that entered this scenario directly
+        // has no protector and no defense counters; give it its printed four.
+        let obj = runner.state_mut().objects.get_mut(&siege).unwrap();
+        obj.defense = Some(4);
+        obj.base_defense = Some(4);
+        obj.counters.insert(CounterType::Defense, 4);
+        obj.chosen_attributes
+            .push(engine::types::ability::ChosenAttribute::Player(P1));
+    }
+    // {2}{W}{U}{B}{R}{G}
+    for color in [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+        ManaType::Colorless,
+        ManaType::Colorless,
+    ] {
+        let _ = runner
+            .state_mut()
+            .add_mana_to_pool(P0, ManaUnit::new(color, ObjectId(0), false, vec![]));
+    }
 
-    runner.cast(spell).target_objects(&[mine, mine]).commit();
+    // Modes: 1 = target player draws a card, 3 = 2 damage to any target.
+    runner
+        .cast(unite)
+        .modes(&[3, 3, 1, 1, 1])
+        .target_objects(&[siege, siege])
+        .target_players(&[P0, P0, P0])
+        .commit();
     for _ in 0..64 {
-        let spell_on_stack = runner
+        let unite_on_stack = runner
             .state()
             .stack
             .iter()
-            .any(|entry| entry.source_id == spell);
-        if !spell_on_stack {
+            .any(|entry| entry.source_id == unite);
+        if !unite_on_stack {
             break;
         }
         match runner.state().waiting_for.clone() {
@@ -867,15 +888,15 @@ fn last_counter_trigger_fires_once_when_two_instructions_take_it_to_zero() {
     }
     place_pending_triggers(&mut runner);
 
-    // Reach guard: both instructions removed one counter each, 2 -> 0.
+    // Reach guard: both damage instructions removed two defense counters each.
     assert_eq!(
-        counters(runner.state(), mine, &ore),
+        counters(runner.state(), siege, &CounterType::Defense),
         0,
-        "reach guard: two instructions took the Mine from 2 to 0"
+        "reach guard: two instructions took the Siege from 4 to 0"
     );
     assert_eq!(
-        stack_triggers_from(runner.state(), mine),
+        stack_triggers_from(runner.state(), siege),
         1,
-        "the last ore counter left once, in the second instruction"
+        "the last defense counter left once, in the second instruction"
     );
 }
