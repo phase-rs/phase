@@ -16844,6 +16844,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -25765,6 +25766,7 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::GraveyardSize { .. }
             | QuantityRef::LifeAboveStarting
             | QuantityRef::StartingLifeTotal { .. }
+            | QuantityRef::StartingDeckSize { .. }
             | QuantityRef::TriggeringDiscoverValue
             | QuantityRef::TriggeringScryLookCount
             | QuantityRef::TriggeringScryBottomCount
@@ -33477,7 +33479,21 @@ fn lower_subject_predicate_ast_body(
                 &mut ctx.clause_subject_chooser,
                 non_controller_subject_chooser(&affected),
             );
+            // An explicit source subject ("This creature deals damage ... to
+            // target creature blocking or blocked by it") is the nearest
+            // antecedent of a bare "it" in its own predicate, so the predicate
+            // parses with the source as the context subject. Only an EMPTY slot
+            // is seeded; the enclosing subject wins. This is parser rationale for
+            // the pronoun binding, not a CR citation: no Comprehensive Rules
+            // section describes antecedent resolution inside a predicate.
+            let seeds_source_subject = affected == TargetFilter::SelfRef && ctx.subject.is_none();
+            if seeds_source_subject {
+                ctx.subject = Some(TargetFilter::SelfRef);
+            }
             let mut clause = lower_imperative_clause(&text, ctx, damage_context);
+            if seeds_source_subject {
+                ctx.subject = None;
+            }
             ctx.clause_subject_chooser = enclosing_subject_chooser;
             // A subject-led placement names its own follower, which this seam does
             // not resolve to an arranger: no printed card puts an announced target

@@ -3504,6 +3504,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -22560,6 +22561,7 @@ mod tests {
                     kind: DamageKindFilter::Any,
                     source: Some(Box::new(TargetFilter::LastCreated)),
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 }),
             }],
         ] {
@@ -23070,6 +23072,7 @@ mod tests {
                                     kind: DamageKindFilter::Any,
                                     source: Some(Box::new(owned())),
                                     min_sources: 1,
+                                    relation: crate::types::ability::PlayerRelation::Opponent,
                                 }),
                             },
                         ]),
@@ -23352,6 +23355,7 @@ mod tests {
                         kind: DamageKindFilter::Any,
                         source: Some(Box::new(chosen())),
                         min_sources: 1,
+                        relation: crate::types::ability::PlayerRelation::Opponent,
                     }),
                 },
             ])),
@@ -27112,6 +27116,7 @@ mod tests {
                         ),
                     ))),
                     min_sources: 3,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 }),
             },
         ]))

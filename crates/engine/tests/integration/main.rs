@@ -245,6 +245,7 @@ mod play_trace;
 mod power_fist_combat_damage_regression;
 mod preacher_of_the_schism_life_gates;
 mod primo_unbounded_fractal_counters;
+mod priority_between_combat_damage_steps;
 mod pugnacious_hammerskull_another_dinosaur;
 mod purged_source_intervening_if_lki;
 mod queen_parser_near_misses;
