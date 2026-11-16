@@ -31,7 +31,7 @@ use super::sequence::parse_dig_from_among;
 use super::subject;
 use super::{parse_effect_clause_inner, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
-use crate::parser::oracle_ir::context::TriggerZoneChangeProvenance;
+use crate::parser::oracle_ir::context::{SpellAnaphorBinding, TriggerZoneChangeProvenance};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, EffectChainIr,
@@ -3056,6 +3056,19 @@ enum ReferentSurface {
     NonbasicLand,
     /// Bare possessive "its power|toughness is <threshold>".
     ItsStat,
+    /// `that spell|permanent|creature|card` + "'s mana value was|is N or less|greater" /
+    /// " has mana value N or less|greater". The noun names the referent (see [`ReferentNoun`]).
+    NounManaValue,
+}
+
+/// The noun of a demonstrative referent whose binding depends on the clause context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReferentNoun {
+    /// "that spell": a declared spell target (Reject Imperfection) or the spell the trigger
+    /// event names (Prismari Apprentice, Herald of Ilharg).
+    Spell,
+    /// "that permanent|creature|card": the earlier instruction's declared target.
+    Object,
 }
 
 /// The characteristic a referent clause tests.
@@ -3076,6 +3089,8 @@ struct ReferentClause {
     negated: bool,
     use_lki: bool,
     predicate: ReferentPredicate,
+    /// The demonstrative noun, for the surfaces whose referent binding depends on it.
+    noun: Option<ReferentNoun>,
 }
 
 impl ReferentClause {
@@ -3084,6 +3099,7 @@ impl ReferentClause {
             negated,
             use_lki,
             predicate: ReferentPredicate::Filter(filter),
+            noun: None,
         }
     }
 }
@@ -3162,6 +3178,7 @@ fn parse_referent_predicate(
                         value,
                         from_x: false,
                     },
+                    noun: None,
                 },
             ))
         }
@@ -3195,6 +3212,48 @@ fn parse_referent_predicate(
             Ok((
                 "",
                 ReferentClause::filter(mana_value_filter(comparator, qty), false, false),
+            ))
+        }
+        ReferentSurface::NounManaValue => {
+            let (rest, noun) = preceded(
+                tag("that "),
+                alt((
+                    value(ReferentNoun::Spell, tag("spell")),
+                    value(
+                        ReferentNoun::Object,
+                        alt((tag("permanent"), tag("creature"), tag("card"))),
+                    ),
+                )),
+            )
+            .parse(input)?;
+            // CR 400.7 + CR 608.2h: past tense reads last known information; the present
+            // tense ("is", "has") reads the object as it is.
+            let (rest, (use_lki, (comparator, threshold))) = alt((
+                preceded(
+                    tag("'s mana value was "),
+                    map(parse_mana_value_or_threshold, |t| (true, t)),
+                ),
+                preceded(
+                    tag("'s mana value is "),
+                    map(parse_mana_value_or_threshold, |t| (false, t)),
+                ),
+                preceded(
+                    tag(" has mana value "),
+                    map(parse_mana_value_or_threshold, |t| (false, t)),
+                ),
+            ))
+            .parse(rest)?;
+            Ok((
+                rest,
+                ReferentClause {
+                    negated: false,
+                    use_lki,
+                    predicate: ReferentPredicate::Filter(mana_value_filter(
+                        comparator,
+                        QuantityExpr::Fixed { value: threshold },
+                    )),
+                    noun: Some(noun),
+                },
             ))
         }
         ReferentSurface::Supertype => {
@@ -3279,6 +3338,7 @@ fn parse_referent_predicate(
                         value,
                         from_x,
                     },
+                    noun: None,
                 },
             ))
         }
@@ -3358,11 +3418,12 @@ fn lower_referent_stat(
 }
 
 /// Lower a parsed clause whose referent is the node's own (`ObjectScope::Target`).
-fn lower_referent_clause(clause: ReferentClause) -> AbilityCondition {
+fn lower_referent_clause(clause: ReferentClause, subject: ObjectScope) -> AbilityCondition {
     let ReferentClause {
         negated,
         use_lki,
         predicate,
+        noun: _,
     } = clause;
     let filter = match predicate {
         ReferentPredicate::Filter(filter) => filter,
@@ -3373,10 +3434,7 @@ fn lower_referent_clause(clause: ReferentClause) -> AbilityCondition {
             ..
         } => stat_threshold_filter(stat, comparator, value),
     };
-    maybe_negate(
-        referent_condition(filter, use_lki, ObjectScope::Target, None),
-        negated,
-    )
+    maybe_negate(referent_condition(filter, use_lki, subject, None), negated)
 }
 
 /// Owner + lowering for the router entry points (the remainder is returned for `all_consuming`).
@@ -3385,7 +3443,50 @@ fn parse_referent_condition(
     surface: ReferentSurface,
 ) -> OracleResult<'_, AbilityCondition> {
     let (rest, clause) = parse_referent_predicate(input, surface)?;
-    Ok((rest, lower_referent_clause(clause)))
+    Ok((rest, lower_referent_clause(clause, ObjectScope::Target)))
+}
+
+/// CR 608.2c + CR 603.2: which referent "that spell" names in this clause, through the same
+/// authority the effect parser uses for the anaphor (`ParseContext::effective_spell_anaphor_binding`,
+/// `oracle_target.rs`). In a resolving spell's body the spell its earlier text announced
+/// (Reject Imperfection: "Counter target spell. If that spell's mana value was 3 or less, ...")
+/// is read through the announced target; in a triggered ability's body the spell the trigger
+/// event names (Prismari Apprentice, Herald of Ilharg: "Whenever you cast a creature spell, ...
+/// If that spell has mana value 5 or greater, ...") through `ObjectScope::EventSource`, even
+/// when the ability also declares a target of its own.
+fn spell_referent_scope(ctx: &ParseContext) -> ObjectScope {
+    match ctx.effective_spell_anaphor_binding() {
+        SpellAnaphorBinding::ParentTarget => ObjectScope::Target,
+        SpellAnaphorBinding::EventSource => ObjectScope::EventSource,
+    }
+}
+
+/// CR 202.3 + CR 608.2c: "that spell's mana value was N or less" / "that permanent's mana
+/// value was N or less" / "that spell has mana value N or greater" — the owner's noun
+/// surface. `that permanent|creature|card` read the earlier instruction's declared target
+/// (the P/T threshold family's binding guard applies); `that spell` binds through
+/// [`spell_referent_scope`].
+fn parse_referent_noun_mana_value_condition_text(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<(AbilityCondition, LeadingConditionRoute)> {
+    let lower = text.trim().trim_end_matches('.').to_ascii_lowercase();
+    let (_, clause) =
+        all_consuming(|input| parse_referent_predicate(input, ReferentSurface::NounManaValue))
+            .parse(lower.as_str())
+            .ok()?;
+    let subject = match clause.noun? {
+        ReferentNoun::Spell => spell_referent_scope(ctx),
+        ReferentNoun::Object => ObjectScope::Target,
+    };
+    // The binding guard of the threshold route protects the `Target` reading (the condition
+    // reads the gated node's own first object target); an event-object reading has no such
+    // hazard — a node declaring its own target can still gate on the event spell.
+    let route = match subject {
+        ObjectScope::Target => LeadingConditionRoute::TargetPtThreshold,
+        _ => LeadingConditionRoute::General,
+    };
+    Some((lower_referent_clause(clause, subject), route))
 }
 
 /// CR 608.2c + CR 400.7: target-anaphoric reflexive object-property gate — the
@@ -4409,7 +4510,7 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
             {
                 let body_start = text.len() - rest.len();
                 return (
-                    Some(lower_referent_clause(clause)),
+                    Some(lower_referent_clause(clause, ObjectScope::Target)),
                     text[body_start..].to_string(),
                 );
             }
@@ -4441,7 +4542,7 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
             let clause_text = clause_text.trim_end_matches('.');
             if let Ok((_, clause)) = parse_referent_predicate(clause_text, surface) {
                 return (
-                    Some(lower_referent_clause(clause)),
+                    Some(lower_referent_clause(clause, ObjectScope::Target)),
                     before.original.trim_end_matches('.').trim().to_string(),
                 );
             }
@@ -4712,7 +4813,7 @@ pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityC
             if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(", ").parse(rest) {
                 let body_start = text.len() - rest.len();
                 return (
-                    Some(lower_referent_clause(clause)),
+                    Some(lower_referent_clause(clause, ObjectScope::Target)),
                     text[body_start..].to_string(),
                 );
             }
@@ -4731,7 +4832,7 @@ pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityC
         .map(|(_, clause)| clause);
         if let Some(clause) = parsed {
             return (
-                Some(lower_referent_clause(clause)),
+                Some(lower_referent_clause(clause, ObjectScope::Target)),
                 before.original.trim_end_matches('.').trim().to_string(),
             );
         }
@@ -4756,7 +4857,7 @@ pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityC
                 continue;
             }
             return (
-                Some(lower_referent_clause(clause)),
+                Some(lower_referent_clause(clause, ObjectScope::Target)),
                 before.original.trim_end_matches('.').trim().to_string(),
             );
         }
@@ -8221,6 +8322,15 @@ pub(super) fn try_routed_nom_condition_as_ability_condition(
         return Some((condition, LeadingConditionRoute::TargetPtThreshold));
     }
 
+    // CR 202.3 + CR 608.2c: "that spell's mana value was 3 or less" (Reject Imperfection,
+    // Sound the Trumpets), "that permanent's mana value was 3 or less" (Carnivorous Canopy,
+    // Vindictive Triumph), "that spell has mana value 5 or greater" (Prismari Apprentice,
+    // Herald of Ilharg): the mana-value leaf of the threshold family, with the demonstrative
+    // noun deciding the referent.
+    if let Some(routed) = parse_referent_noun_mana_value_condition_text(lower.as_str(), ctx) {
+        return Some(routed);
+    }
+
     try_unrouted_nom_condition_tail(text, ctx)
         .map(|condition| (condition, LeadingConditionRoute::General))
 }
@@ -10122,7 +10232,7 @@ fn parse_target_supertype_condition_text(lower: &str) -> Option<AbilityCondition
     if !rest.trim().is_empty() {
         return None;
     }
-    Some(lower_referent_clause(clause))
+    Some(lower_referent_clause(clause, ObjectScope::Target))
 }
 
 fn parse_supertype_word(input: &str) -> nom::IResult<&str, Supertype, OracleError<'_>> {
@@ -17853,7 +17963,7 @@ mod referent_owner_tests {
         let (rest, clause) = parse_referent_predicate(text, surface).ok()?;
         rest.trim()
             .is_empty()
-            .then(|| lower_referent_clause(clause))
+            .then(|| lower_referent_clause(clause, ObjectScope::Target))
     }
 
     /// Every clause is accepted by the owner on its surface and rejected on none of the claims
