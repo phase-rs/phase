@@ -6122,6 +6122,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -10084,6 +10085,7 @@ pub(crate) fn parse_whose_controller_suffix(text: &str) -> Option<(FilterProp, u
 /// - CR 400.7: "that entered (the battlefield) this turn" → `EnteredThisTurn`
 /// - CR 508.1a: "that attacked this turn" → `AttackedThisTurn`
 /// - CR 509.1a: "that blocked this turn" → `BlockedThisTurn`
+/// - CR 701.14a: "that fought this turn" → `FoughtThisTurn`
 /// - CR 301.5 + CR 303.4: "that are enchanted or equipped" → attachment predicate
 ///
 /// Returns `(properties, bytes_consumed)` or `None` if the text doesn't match.
@@ -10409,6 +10411,8 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             FilterProp::AttackedThisTurn { defender: None },
         ),
         ("blocked this turn", FilterProp::BlockedThisTurn),
+        // CR 701.14a: "that fought this turn" (Boxing Ring).
+        ("fought this turn", FilterProp::FoughtThisTurn),
         // CR 702.171c: "that saddled it [this turn]" — the creature was tapped to
         // pay the source's saddle cost (recorded in the source's `saddled_by`,
         // cleared at end of turn so "this turn" is implicit). "it" refers to the
@@ -10964,6 +10968,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController

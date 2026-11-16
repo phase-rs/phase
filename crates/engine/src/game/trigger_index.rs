@@ -510,6 +510,12 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
         GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
+        // CR 805.4d: a fanned occurrence indexes under its phase like the
+        // production event (synthetic occurrences never enter the batch, but
+        // the key must exist if one is ever indexed).
+        GameEvent::PhaseChangedForPlayer { phase, .. } => {
+            push(TriggerEventKey::BeginningOfPhase(*phase))
+        }
         GameEvent::PriorityPassed { .. } => {}
         GameEvent::StickerPlaced { .. } => {}
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
@@ -653,7 +659,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::CreatureDestroyed { .. } => push(TriggerEventKey::Destroyed),
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
-        GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
+        GameEvent::Attached { .. } | GameEvent::Unattached { .. } => {
+            push(TriggerEventKey::AttachmentChanged)
+        }
         // CR 116.2c + CR 116.1: no printed trigger condition matches "a
         // continuous effect ended". The special action doesn't use the stack, and
         // any consequential board change (a Licid reverting to a creature and
@@ -788,11 +796,6 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
 /// matcher in `trigger_matchers.rs` emit keys; all others are no-ops.
 fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey)) {
     match kind {
-        // Production EffectResolved matchers — see `trigger_matchers.rs` lines
-        // 1896, 2072, 2126, 2172, 2198, 2234, 2261, 2313, 2338.
-        EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip => {
-            push(TriggerEventKey::AttachmentChanged);
-        }
         EffectKind::Reveal => push(TriggerEventKey::Revealed),
         EffectKind::GainControl | EffectKind::GainControlAll => {
             push(TriggerEventKey::ChangesController)
@@ -812,7 +815,10 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         // Explicit `&[]`-equivalent arms — a future contributor who adds a
         // new EffectResolved-dispatching matcher will force this match to be
         // re-classified.
-        EffectKind::StartYourEngines
+        EffectKind::Attach
+        | EffectKind::AttachAll
+        | EffectKind::Equip
+        | EffectKind::StartYourEngines
         | EffectKind::ChangeSpeed
         | EffectKind::DealDamage
         | EffectKind::ApplyPostReplacementDamage
