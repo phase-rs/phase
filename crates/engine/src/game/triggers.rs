@@ -2522,6 +2522,50 @@ pub(crate) fn is_look_back_control_change(mode: &TriggerMode) -> bool {
     )
 }
 
+/// CR 603.10d: whether a look-back control-change trigger could read the
+/// evidence of a control change a layer pass derives on the current board: a
+/// battlefield object carrying a lose-side `ChangesController` definition, or a
+/// delayed trigger waiting for one (Stolen Uniform). A superset of the
+/// functioning watchers `latch_control_change_watchers` latches, so the layer
+/// pass captures evidence whenever a reader can exist.
+pub(crate) fn look_back_control_change_listener_exists(state: &GameState) -> bool {
+    use crate::types::ability::DelayedTriggerCondition as Cond;
+    let printed = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .any(|obj| {
+            obj.trigger_definitions
+                .iter_all()
+                .any(|entry| is_look_back_control_change(&entry.definition.mode))
+        });
+    printed
+        || state
+            .delayed_triggers
+            .iter()
+            .any(|delayed| match &delayed.condition {
+                Cond::WheneverEvent { trigger, .. } => is_look_back_control_change(&trigger.mode),
+                Cond::WhenNextEvent {
+                    trigger,
+                    or_trigger,
+                    ..
+                } => {
+                    is_look_back_control_change(&trigger.mode)
+                        || or_trigger
+                            .as_deref()
+                            .is_some_and(|or| is_look_back_control_change(&or.mode))
+                }
+                Cond::AtNextPhase { .. }
+                | Cond::AtNextPhaseForPlayer { .. }
+                | Cond::AtBeginningOfAddedPhase { .. }
+                | Cond::WhenLeavesPlay { .. }
+                | Cond::WhenLeavesPlayFiltered { .. }
+                | Cond::WhenDies { .. }
+                | Cond::WhenEntersBattlefield { .. }
+                | Cond::WhenDiesOrExiled { .. } => false,
+            })
+}
+
 /// CR 603.10: Capture the full immediately-before authority for a logical
 /// zone-change owner after its initial layer flush and before its first
 /// delivery, preserving the look-back exception's pre-event trigger state.

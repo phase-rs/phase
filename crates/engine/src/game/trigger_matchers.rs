@@ -4018,15 +4018,18 @@ pub(super) fn match_taps_for_mana(
 /// targeted `GainControl`, `GainControlAll`, `GiveControl`,
 /// `apply_permanent_control_change`, `exchange_control::resolve` (CR 701.12a,
 /// success path only) and the until-end-of-turn reversion in
-/// `turns::execute_cleanup` (CR 514.2).
+/// `turns::execute_cleanup` (CR 514.2). Control a full layer evaluation derives
+/// without an instruction (a static ability's layer-2 effect such as Control
+/// Magic or Confiscate entering or leaving, a lapsed `ForAsLongAs` duration) is
+/// published from that pass's controller diff
+/// (`layers::queue_derived_control_changes`, drained by
+/// `layers::publish_layer_control_changes`), deduplicated against the
+/// instruction publishers.
 ///
-/// Control the layer pass assigns or retires publishes nothing: a static
-/// ability's layer-2 effect (Confiscate, Control Magic) is applied as
-/// `ContinuousModification::ChangeController`, a lapsed `ForAsLongAs` duration
-/// (Callous Oppressor) is retired by `layers::retire_ended_effects`, and
-/// `layers::finish_layer_evaluation` only diffs the settled controllers
-/// (phase-rs/phase#9903). Coverage keeps the `Gains` side unsupported for that
-/// reason (`coverage::trigger_mode_has_unpublished_event_source`).
+/// This publishes every control change actually derived by a full layer
+/// evaluation, without duplicating existing instruction publication. It does
+/// not guarantee that every rules-required control transition is derived;
+/// phase-rs/phase#10947 remains.
 ///
 /// The producers are the CR 603.10d look-back abilities: "When you lose control
 /// of ~" (Khârn the Betrayer, Duplicity, Gustha's Scepter), the Stolen Uniform

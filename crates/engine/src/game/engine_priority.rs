@@ -340,6 +340,10 @@ fn run_post_action_pipeline_core(
         // Skipped when the scan itself is skipped.
         if !skip_trigger_scan {
             super::archenemy::resolve_pending_as_set_in_motion_choices(state, events, event_start);
+            // CR 603.2 + CR 613.1b: control changes the layer pass derived during
+            // this action join this scan, so they are collected with the action's
+            // other events as one CR 603.3b batch.
+            super::layers::publish_layer_control_changes(state, events);
         }
         // A paused logical zone-change owner has already Segment-collected its
         // retained ZoneChanged occurrences into deferred trigger contexts. Do
@@ -594,6 +598,13 @@ fn run_post_action_pipeline_core(
     // inert with it rather than needing a second guard.
     if state.game_end.is_none() {
         check_exile_returns(state, events);
+        // CR 117.5 + CR 603.2: a control change derived since the scan above
+        // (an exile return re-attaching an Aura) joins this boundary's batch
+        // through the collection below, before placement. Under any other wait
+        // the action-return drain collects it.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::layers::publish_layer_control_changes(state, events);
+        }
     }
     if events.len() > events_before_exile_returns {
         let exile_return_events: Vec<_> = events[events_before_exile_returns..].to_vec();
@@ -927,7 +938,9 @@ pub(crate) fn queue_collected_triggers(
 
 /// The origin a boundary batch parks with behind `waiting_for`: SBA-owned
 /// choices merge with their answer; any other wait keeps the batch its own.
-fn parked_batch_origin(waiting_for: &WaitingFor) -> triggers::DeferredTriggerBatchOrigin {
+pub(crate) fn parked_batch_origin(
+    waiting_for: &WaitingFor,
+) -> triggers::DeferredTriggerBatchOrigin {
     if sba_choice_requires_combined_trigger_batch(waiting_for) {
         triggers::DeferredTriggerBatchOrigin::StateBasedActionChoice
     } else {

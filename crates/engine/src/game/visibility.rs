@@ -1631,6 +1631,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // stack entry, continuation) holds a key.
     filtered.control_change_observations.clear();
     filtered.control_change_captures.clear();
+    // Engine working memory, empty at every action-return boundary.
+    filtered.layer_control_changes.clear();
+    filtered.announced_control_changes.clear();
     // Deferred life-cost owners can embed a complete PendingCast, including
     // hidden card and target context. The projected WaitingFor is the only
     // viewer-facing interaction surface.

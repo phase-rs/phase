@@ -2608,7 +2608,7 @@ fn reject_or_publish_departure(
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
     mark_public_state_from_events(state, &result.events);
-    finalize_rules_state(state);
+    finalize_action_rules_state(state, &mut result.events);
     super::un_actions::refresh_menu(state);
     result.waiting_for = state.waiting_for.clone();
     if matches!(mode, PublicFinalizeMode::Immediate) {
@@ -2639,6 +2639,38 @@ fn finish_action_boundary(
     mode: PublicFinalizeMode,
 ) -> Result<ActionResult, EngineError> {
     finish_action_boundary_with_lifecycle(state, raw, mode, false).map(|(result, _)| result)
+}
+
+/// The action-return finalizer of the public reducer-action funnel and the
+/// restored-session runner: [`finalize_rules_state`], then settlement of every
+/// control change a full layer evaluation derived that no drain has published
+/// yet (the finalizer's own pass, or a pass after the action's last drain).
+///
+/// CR 603.2: "Whenever a game event or game state matches a triggered
+/// ability's trigger event, that ability automatically triggers." CR 603.3:
+/// "Once an ability has triggered, its controller puts it on the stack … the
+/// next time a player would receive priority." So each change is published
+/// into the action's events and the abilities it triggers are collected into
+/// the deferred-trigger queue under the batch the current wait parks; the open
+/// prompt is not touched, and the abilities reach the stack when a player
+/// would next receive priority.
+fn finalize_action_rules_state(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    finalize_rules_state(state);
+    let start = events.len();
+    if super::layers::publish_layer_control_changes(state, events) > 0 {
+        let origin = engine_priority::parked_batch_origin(&state.waiting_for);
+        super::triggers::collect_parked_triggers_into_deferred(state, &events[start..], origin);
+        super::triggers::collect_parked_delayed_triggers_into_deferred(
+            state,
+            &events[start..],
+            origin,
+        );
+        mark_public_state_from_events(state, &events[start..]);
+    }
+    debug_assert!(
+        state.layer_control_changes.is_empty() && state.announced_control_changes.is_empty(),
+        "layer-derived and announced control changes must be settled at the action boundary"
+    );
 }
 
 fn finish_action_boundary_with_lifecycle(
@@ -2786,7 +2818,7 @@ fn finish_action_boundary_with_lifecycle(
     {
         state.revealed_cards.clear();
     }
-    finalize_rules_state(state);
+    finalize_action_rules_state(state, &mut result.events);
     super::un_actions::announce_pending_tells(state);
     super::un_actions::refresh_menu(state);
     result.waiting_for = state.waiting_for.clone();
@@ -11433,7 +11465,7 @@ pub(crate) fn resume_stack_resolution_session_runner(
         super::mana_payment::refill_infinite_mana(state);
         remember_public_reveals(state, &result.events, journal_start);
         mark_public_state_from_events(state, &result.events);
-        finalize_rules_state(state);
+        finalize_action_rules_state(state, &mut result.events);
         result.waiting_for = state.waiting_for.clone();
         finalize_display_state(state);
         result.log_entries =

@@ -395,9 +395,12 @@ pub struct EventObjectSnapshot {
 /// moment immediately before its instruction.
 ///
 /// Deliberately not an `Option`: the absent case is a named policy. A payload
-/// saved before this field existed, or any event built without an instruction
-/// capture, is `Unrecorded`, and `Unrecorded` never authorizes a look-back
-/// control-change trigger. It is never reconstructed from current state.
+/// saved before this field existed, any event built without an instruction
+/// capture, or a change a full layer evaluation derived on a board with no
+/// look-back control-change trigger to read it
+/// (`triggers::look_back_control_change_listener_exists`), is `Unrecorded`,
+/// and `Unrecorded` never authorizes a look-back control-change trigger. It is
+/// never reconstructed from current state.
 ///
 /// `Observed` holds only the key of its observation in
 /// `GameState::control_change_observations`. The observation itself (latched
@@ -526,6 +529,17 @@ pub struct ControlChangeLink {
     pub capture: std::sync::Arc<ControlChangeInstructionCapture>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub published: std::collections::BTreeSet<ObjectId>,
+}
+
+/// CR 613.1b + CR 603.2: a control change a full layer evaluation derived and no
+/// instruction announced, waiting to be published into an action's event buffer
+/// (`layers::publish_layer_control_changes`). `subject` is the exact incarnation
+/// whose controller the pass changed (CR 400.7); `event` is always the
+/// `GameEvent::ControllerChanged` it publishes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedControlChange {
+    pub subject: ObjectIncarnationRef,
+    pub event: GameEvent,
 }
 
 /// How an [`EventObjectSnapshot`] can answer a given [`TargetFilter`] shape.
