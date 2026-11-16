@@ -15035,25 +15035,30 @@ fn resolve_effect_step(
             let clash = clash::resolve(state, ability, events)?;
             Ok(finish_clash_resolution(state, ability, clash))
         }
+        // CR 608.2c: a damage instruction that pauses between its events stashes
+        // its remaining recipients followed by this ability's tail, so the stash
+        // owns the tail; the chain driver must not place it a second time.
+        effect if deal_damage::is_multi_event_damage_instruction(effect) => {
+            let (tail, progress) = LegacyEffectBoundary::run(state, ability, |state, boundary| {
+                let tail = deal_damage::resolve_instruction(state, ability, events)
+                    .expect("multi-event damage instruction dispatches")?;
+                retire_empty_replacement_frames(state, boundary);
+                Ok(tail)
+            })?;
+            Ok(EffectStep {
+                progress,
+                result: None,
+                tail: match tail {
+                    deal_damage::DamageTail::Caller => TailOwnership::Caller,
+                    deal_damage::DamageTail::Stashed => TailOwnership::Transferred,
+                },
+            })
+        }
         _ => {
             let (result, progress) =
                 LegacyEffectBoundary::run(state, ability, |state, boundary| {
                     let result = resolve_legacy_effect(state, ability, events)?;
-                    // CR 608.2c: an exhausted replacement bookkeeping frame is not
-                    // unfinished child work. Retire only new active empty frames;
-                    // populated residents and frames predating this effect keep ownership.
-                    while state.resolution_stack.capture_child_boundary() > boundary.child_boundary
-                        && state.active_post_replacement_drains().is_some_and(
-                            crate::types::game_state::PostReplacementDrainStack::is_empty,
-                        )
-                    {
-                        state
-                            .resolution_stack
-                            .take_active_post_replacement()
-                            .expect(
-                                "legacy effect may retire only its active empty replacement frame",
-                            );
-                    }
+                    retire_empty_replacement_frames(state, boundary);
                     Ok(result)
                 })?;
             Ok(EffectStep {
@@ -15065,6 +15070,22 @@ fn resolve_effect_step(
     }
 }
 
+/// CR 608.2c: an exhausted replacement bookkeeping frame is not unfinished
+/// child work. Retire only new active empty frames; populated residents and
+/// frames predating this effect keep ownership.
+fn retire_empty_replacement_frames(state: &mut GameState, boundary: &LegacyEffectBoundary) {
+    while state.resolution_stack.capture_child_boundary() > boundary.child_boundary
+        && state
+            .active_post_replacement_drains()
+            .is_some_and(crate::types::game_state::PostReplacementDrainStack::is_empty)
+    {
+        state
+            .resolution_stack
+            .take_active_post_replacement()
+            .expect("legacy effect may retire only its active empty replacement frame");
+    }
+}
+
 fn resolve_legacy_effect(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -15073,15 +15094,8 @@ fn resolve_legacy_effect(
     match &ability.effect {
         Effect::StartYourEngines { .. } => speed_effects::resolve_start(state, ability, events),
         Effect::ChangeSpeed { .. } => speed_effects::resolve_change_speed(state, ability, events),
-        Effect::DealDamage { .. } => deal_damage::resolve(state, ability, events),
         Effect::ApplyPostReplacementDamage { .. } => {
             deal_damage::resolve_post_replacement(state, ability, events)
-        }
-        Effect::EachDealsDamageEqualToPower { .. } => {
-            deal_damage::resolve_each_deals_equal_to_power(state, ability, events)
-        }
-        Effect::EachSourceDealsDamage { .. } => {
-            deal_damage::resolve_each_source_deals_damage(state, ability, events)
         }
         Effect::Draw { .. } => draw::resolve(state, ability, events),
         Effect::Pump { .. } => pump::resolve(state, ability, events),
@@ -15103,8 +15117,6 @@ fn resolve_legacy_effect(
         Effect::Mill { .. } => mill::resolve(state, ability, events),
         Effect::Scry { .. } => scry::resolve(state, ability, events),
         Effect::PumpAll { .. } => pump::resolve_all(state, ability, events),
-        Effect::DamageAll { .. } => deal_damage::resolve_all(state, ability, events),
-        Effect::DamageEachPlayer { .. } => deal_damage::resolve_each_player(state, ability, events),
         Effect::DestroyAll { .. } => destroy::resolve_all(state, ability, events),
         Effect::ChangeZone { .. } => return change_zone::resolve(state, ability, events),
         Effect::ChangeZoneAll { .. } => change_zone::resolve_all(state, ability, events),
@@ -15148,6 +15160,13 @@ fn resolve_legacy_effect(
         Effect::EndCombatPhase => end_combat_phase::resolve(state, ability, events),
         Effect::Populate => populate::resolve(state, ability, events),
         Effect::Clash => unreachable!("native Clash dispatch precedes the legacy adapter"),
+        Effect::DealDamage { .. }
+        | Effect::DamageAll { .. }
+        | Effect::DamageEachPlayer { .. }
+        | Effect::EachDealsDamageEqualToPower { .. }
+        | Effect::EachSourceDealsDamage { .. } => {
+            unreachable!("multi-event damage dispatch precedes the legacy adapter")
+        }
         Effect::ExileTopCardContest { .. } => {
             exile_top_card_contest::resolve(state, ability, events)
         }
@@ -28837,7 +28856,8 @@ fn resolve_chain_body(
                 || state
                     .resolution_stack
                     .copy_token_at_child_boundary(child_stack_start)
-                    .is_some())
+                    .is_some()
+                || deal_damage::is_multi_event_damage_instruction(&ability.effect))
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
                 // CR 608.2c: the rest of the chain follows the complete producer action,
@@ -28848,6 +28868,10 @@ fn resolve_chain_body(
                 // at that boundary; a die roll parks its DieRoll frame, and a gift delivery
                 // (`gift_delivery::resolve`) its own completion, at the boundary captured
                 // before the producer, so the rest of the chain is inserted outside both.
+                // CR 608.2c + CR 616.1g: a damage instruction reaches here only when it
+                // stashed nothing (`DamageTail::Caller`) — its last recipient's substitute
+                // left a prompt open inside the child stack (a Szadek mill after its
+                // counters), and the next instruction follows all of that work.
                 let mut pending = PendingContinuation::new(Box::new(sub_clone), state);
                 pending.pending_return_result_producer = pending_return_result_producer;
                 state

@@ -13298,6 +13298,7 @@ mod tests {
                 damage_to_players: Vec::new(),
                 prevention_tally: Vec::new(),
                 sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
+                replacement: None,
                 phase_c_remnant: None,
             }));
 

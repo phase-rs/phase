@@ -1485,7 +1485,9 @@ fn answer_prayers_offer(runner: &mut GameRunner, pay: bool) {
 fn primal_prayers_upkeep_cast_is_kicked_for_only_the_kicker_cost() {
     let (mut runner, gnarlid) = prayers_and_gnarlid(Phase::Upkeep, 3);
     assert!(cast(&mut runner, gnarlid));
-    assert_eq!(energy(&runner), 1);
+    // CR 601.2b + CR 601.2h: the kicker is declared before costs are paid, so
+    // the {E} is still unpaid at the kicker prompt.
+    assert_eq!(energy(&runner), 2);
     kick_and_resolve(&mut runner, gnarlid);
     assert_eq!(energy(&runner), 1);
 }
