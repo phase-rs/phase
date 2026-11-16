@@ -4515,6 +4515,22 @@ fn parse_subject_application_for(
                 player_anaphor: None,
             });
         }
+        // CR 608.2c: the nearest instruction tapped or untapped a population as a
+        // whole ("tap each creature …"); the singular "it" of the affected object
+        // agrees with that distributive head and names each object it selected,
+        // which the runtime publishes to the grant on `ParentTarget`.
+        if consumer == AnaphorConsumer::AffectedObject
+            && ctx.chain_prior_mass_tap_selection.is_some()
+        {
+            return Some(SubjectApplication {
+                affected: TargetFilter::ParentTarget,
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: false,
+                player_anaphor: None,
+            });
+        }
         return Some(SubjectApplication {
             affected: resolve_it_pronoun(ctx),
             target: None,
@@ -14406,6 +14422,126 @@ mod tests {
                 "{predicate:?}: Choose head window"
             );
         }
+    }
+
+    /// Every node of `def`'s chain (`sub_ability` and `else_ability`), in walk order.
+    fn chain_nodes(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
+        let mut out = Vec::new();
+        let mut stack = vec![def];
+        while let Some(node) = stack.pop() {
+            out.push(node);
+            stack.extend(node.else_ability.as_deref());
+            stack.extend(node.sub_ability.as_deref());
+        }
+        out
+    }
+
+    /// The `affected` of every `CantUntap` static granted anywhere in `text`'s
+    /// parse as an Instant.
+    fn cant_untap_affected(text: &str) -> Vec<Option<TargetFilter>> {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text,
+            "Test Card",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        parsed
+            .abilities
+            .iter()
+            .flat_map(chain_nodes)
+            .filter_map(|node| match &*node.effect {
+                Effect::GenericEffect {
+                    static_abilities, ..
+                } => Some(static_abilities),
+                _ => None,
+            })
+            .flatten()
+            .filter(|def| def.mode == StaticMode::CantUntap)
+            .map(|def| def.affected.clone())
+            .collect()
+    }
+
+    /// CR 608.2c + CR 502.3: a bare "it" that is the affected object of the
+    /// instruction right after a mass tap names each object that tap selected
+    /// (`ParentTarget`, published by the runtime to the grant). A nearer clause
+    /// keeps "it" off the selection, and a non-affected-object reader (a damage
+    /// source) keeps its own binding. Synthetic texts: no printed card has these
+    /// shapes; Triton Tactics' delayed payload is the nearest printed card.
+    #[test]
+    fn bare_it_after_mass_tap_names_the_selected_population() {
+        // (a) the adjacent restriction names the population.
+        let text = "Tap each creature your opponents control and it doesn't untap during its controller's next untap step.";
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            text,
+            "Test Card",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let head = parsed.abilities.first().expect("one ability");
+        assert!(
+            matches!(
+                &*head.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    ..
+                }
+            ),
+            "reach guard: the head is the mass tap; {:?}",
+            parsed.abilities
+        );
+        assert_eq!(
+            cant_untap_affected(text),
+            vec![Some(TargetFilter::ParentTarget)],
+            "(a) \"it\" names each creature the mass tap selected"
+        );
+
+        // (b) a nearer clause is the nearer antecedent: "it" keeps its BASE binding.
+        assert_eq!(
+            cant_untap_affected(
+                "Tap each creature your opponents control. Draw a card. It doesn't untap during its controller's next untap step."
+            ),
+            vec![Some(TargetFilter::SelfRef)],
+            "(b) a non-adjacent \"it\" is not the mass selection"
+        );
+
+        // (d) a damage source is not an affected object: the rung does not reach it.
+        let damage = crate::parser::oracle::parse_oracle_text(
+            "Tap each creature your opponents control. It deals 1 damage to each opponent.",
+            "Test Card",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let head = damage.abilities.first().expect("one ability");
+        assert!(
+            matches!(
+                &*head.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::All,
+                    ..
+                }
+            ),
+            "reach guard: the head is the mass tap; {:?}",
+            damage.abilities
+        );
+        let rider = head
+            .sub_ability
+            .as_deref()
+            .expect("reach guard: the damage instruction follows the mass tap");
+        // `DamageEachPlayer` has no source or recipient slot that could name the
+        // mass selection: the resolver deals the damage from `ability.source_id`.
+        // The exact effect is therefore the damage source keeping its own binding,
+        // and it fails if the rider is `Unimplemented` or any other effect.
+        assert_eq!(
+            *rider.effect,
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player_filter: PlayerFilter::Opponent,
+            },
+            "(d) \"It deals 1 damage to each opponent\" parses as the spell's own damage"
+        );
     }
 }
 

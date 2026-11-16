@@ -357,6 +357,11 @@ fn bloodsoaked_insights_any_type_rider_is_scoped_to_the_exiled_cards() {
 /// among cards exiled with this enchantment without paying its mana cost" —
 /// which the report also names ("as the monarch it should be free to cast").
 fn court_of_locthwain(monarch: bool) {
+    court_of_locthwain_with_older_link(monarch, false);
+}
+
+/// `older_link` pre-links a {G} card exiled by an EARLIER trigger to the Court.
+fn court_of_locthwain_with_older_link(monarch: bool, older_link: bool) {
     let mut scenario = GameScenario::new_n_player(2, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let deeper = scenario.add_card_to_library_top(P1, "Deeper");
@@ -381,7 +386,25 @@ fn court_of_locthwain(monarch: bool) {
     let court = scenario
         .add_enchantment_from_oracle(P0, "Court of Locthwain", COURT_OF_LOCTHWAIN)
         .id();
+    let older = older_link.then(|| {
+        let mut b = scenario.add_spell_to_exile(P0, "Older Sorcery", false);
+        b.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 0,
+        });
+        b.id()
+    });
     let mut runner = scenario.build();
+    if let Some(older) = older {
+        runner
+            .state_mut()
+            .exile_links
+            .push(engine::types::game_state::ExileLink {
+                exiled_id: older,
+                source_id: court,
+                kind: engine::types::game_state::ExileLinkKind::TrackedBySource,
+            });
+    }
     if monarch {
         // Court's own ETB made its controller the monarch when it entered;
         // the enchantment starts on the battlefield here, so set the crown.
@@ -450,6 +473,21 @@ fn court_of_locthwain(monarch: bool) {
     } else {
         assert_eq!(tapped, 1, "exactly one Swamp paid for {{G}}");
     }
+    if let Some(older) = older {
+        // CR 406.6: the monarch's window covers every card exiled with the
+        // Court, including one linked before this trigger resolved.
+        let tapped = cast_granted_card(&mut runner, older, &swamps);
+        assert_eq!(
+            tapped,
+            usize::from(!monarch),
+            "older linked card: free only for the monarch"
+        );
+    }
+}
+
+#[test]
+fn court_of_locthwains_older_linked_card_is_free_for_the_monarch() {
+    court_of_locthwain_with_older_link(true, true);
 }
 
 #[test]

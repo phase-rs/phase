@@ -8223,8 +8223,9 @@ fn spell_history_relative_clause_owns_suffix(input: &str) -> bool {
 /// turn") owns its trailing window; it is a look-back restriction, not an effect
 /// duration (#9179: Cathedral Membrane, Defiant Vanguard). Context-free on
 /// purpose: when the target parser declines to bind the clause's partner (a bare
-/// "it" with no antecedent, or a partner no subject word covers, such as Triton
-/// Tactics' "one of those creatures"), the window still belongs to the clause,
+/// "it" or a "one of those creatures" with no antecedent, or a partner no subject
+/// word covers, such as Glyph of Reincarnation's "target Wall"), the window still
+/// belongs to the clause,
 /// so no spurious duration appears and the instruction fails closed instead
 /// (`instruction_drops_block_partner`). The same holds for a partner that is an
 /// indefinite filter phrase ("a Zombie": Time to Reflect), which no relation
@@ -13851,7 +13852,7 @@ fn rebind_cost_paid_object_pt_value_to_target(value: &mut PtValue) {
 /// is not). A negation names what the target is *not*, so it never supplies an
 /// antecedent. Every remaining filter (`Any`, the player scopes, the stack and
 /// context refs) names no creature noun either.
-fn target_filter_names_creature(filter: &TargetFilter) -> bool {
+pub(super) fn target_filter_names_creature(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed.type_filters.contains(&TypeFilter::Creature),
         TargetFilter::And { filters } => filters.iter().any(target_filter_names_creature),

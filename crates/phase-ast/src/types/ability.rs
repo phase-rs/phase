@@ -7165,10 +7165,11 @@ pub enum CombatRelationSubject {
     ParentTarget,
     /// CR 608.2c + CR 115.10a: a target an EARLIER instruction of the same spell
     /// announced ("creatures that were blocked by that creature", Ride Down, Glyph
-    /// of Doom). Reads as `ParentTarget` does, the first object target by its
-    /// announced incarnation, and opens no target slot: the word "target" does not
-    /// identify it here. `ParentTarget` is the same-instruction form that does open
-    /// one (Trial).
+    /// of Doom; "… by one of those creatures", Triton Tactics). Reads every object
+    /// target an earlier instruction announced, each by its announced incarnation;
+    /// the relation holds for any of them (a singular 'it'/'that creature' has
+    /// one). It opens no target slot: the word "target" does not identify it here.
+    /// `ParentTarget` is the same-instruction form that does open one (Trial).
     AnaphoricTarget,
 }
 
@@ -11394,6 +11395,63 @@ mod r2_resolution_choice_authority_tests {
         ));
     }
 
+    /// Infrastructure contract for Triton Tactics: "Up to two target creatures
+    /// each get +0/+3 until end of turn. Untap those creatures. At this turn's
+    /// next end of combat, tap each creature that was blocked by one of those
+    /// creatures this turn and it doesn't untap during its controller's next
+    /// untap step." Printed-card support and its public cast belong to phase 2.
+    /// CR 115.10a + CR 701.26a + CR 701.26b: mass tap/untap is not targeting.
+    #[test]
+    fn mass_tap_population_is_a_parent_ref_slot_only_when_it_names_one() {
+        let contextual = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::AnaphoricTarget,
+            },
+        ]));
+        for state in [TapStateChange::Tap, TapStateChange::Untap] {
+            let all = Effect::SetTapState {
+                scope: EffectScope::All,
+                target: contextual.clone(),
+                state,
+            };
+            assert_eq!(mass_population_target(&all), Some(&contextual));
+            assert_eq!(effect_parent_ref_slots(&all), vec![&contextual]);
+            assert!(effect_refs_parent_target(&all));
+            assert_eq!(all.target_filter(), None);
+
+            let plain = TargetFilter::Typed(TypedFilter::creature());
+            let all_plain = Effect::SetTapState {
+                scope: EffectScope::All,
+                target: plain.clone(),
+                state,
+            };
+            assert_eq!(mass_population_target(&all_plain), Some(&plain));
+            assert_eq!(
+                effect_parent_ref_slots(&all_plain),
+                Vec::<&TargetFilter>::new()
+            );
+            assert!(!effect_refs_parent_target(&all_plain));
+            assert_eq!(all_plain.target_filter(), None);
+
+            let single = Effect::SetTapState {
+                scope: EffectScope::Single,
+                target: TargetFilter::ParentTarget,
+                state,
+            };
+            assert_eq!(mass_population_target(&single), None);
+            assert_eq!(
+                effect_parent_ref_slots(&single),
+                vec![&TargetFilter::ParentTarget]
+            );
+            assert!(effect_refs_parent_target(&single));
+            assert_eq!(single.target_filter(), Some(&TargetFilter::ParentTarget));
+        }
+    }
+
     #[test]
     fn terminal_owner_movement_exposes_bound_parent_slots() {
         for target in [
@@ -11989,6 +12047,13 @@ pub fn mass_population_target(effect: &Effect) -> Option<&TargetFilter> {
         // CR 122.1 + CR 115.10a: a mass counter removal's population is a
         // resolution-time scan, the removal twin of `PutCounterAll`.
         | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        // CR 701.26a + CR 701.26b + CR 115.10a: mass tap/untap acts on a
+        // population without making its members chosen targets.
+        | Effect::SetTapState {
             scope: EffectScope::All,
             target,
             ..
@@ -14405,6 +14470,17 @@ pub enum QuantityRef {
         filter: Box<TargetFilter>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
+        /// CR 614.6 + CR 701.17c: the zone a member must have ACTUALLY arrived
+        /// in for "<verb phrase> this way" to count it — "put into a graveyard
+        /// this way" names the graveyard as the destination, so a milled card
+        /// that a replacement (Rest in Peace, Leyline of the Void) sent to exile
+        /// instead was never put into a graveyard and is not counted. `None`
+        /// (the action-named forms — "milled this way", "sacrificed this way" —
+        /// and the Locke-style reference to the milled cards wherever they are)
+        /// admits a member in any zone. Read against the member's CURRENT zone,
+        /// never its departure snapshot (which is the zone it LEFT).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<Zone>,
     },
     /// CR 608.2c + CR 107.3e + CR 202.3: Reduce a numeric property
     /// over the most recent chain tracked set (sum/max/min), reading the same set as
@@ -21070,9 +21146,9 @@ pub enum AdditionalCost {
         )]
         repeatability: AdditionalCostRepeatability,
     },
-    /// "[cost A] or [cost B]" — player must pay exactly one.
-    /// Choosing the first cost sets `additional_cost_paid = true`.
-    Choice(AbilityCost, AbilityCost),
+    /// "[cost A] or [cost B] or [cost C]..." — player must pay exactly one.
+    /// Choosing any cost sets `additional_cost_paid = true`.
+    Choice(Vec<AbilityCost>),
     /// Mandatory additional cost (e.g., "As an additional cost, waterbend {5}").
     Required(AbilityCost),
 }

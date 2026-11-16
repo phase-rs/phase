@@ -7,7 +7,7 @@ use engine::ai_support::{
     activates_mana_ability, build_decision_context, classify_payment_continuation,
     witness_payment_continuations, AiDecisionContext, CandidateAction,
     PaymentContinuationBatchStatus, PaymentContinuationState, PaymentContinuationStep,
-    TacticalClass,
+    TacticalClass, WitnessedStepTrace,
 };
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
@@ -149,6 +149,9 @@ pub(crate) struct PreparedCandidate {
     pub payment_successor: Option<GameState>,
     /// Whether the witnessed edge finalizes the payment root in its own step.
     pub payment_step: Option<PaymentContinuationStep>,
+    /// The witnessed edge's own reducer step (its events and the deferred-trigger
+    /// queue length before it), so a consumer can read the step it already ran.
+    pub payment_trace: Option<WitnessedStepTrace>,
 }
 
 /// Fail closed for affiliated payment states before ranking or width limits.
@@ -169,6 +172,7 @@ pub(crate) fn prepare_payment_candidates(
                 candidate,
                 payment_successor: None,
                 payment_step: None,
+                payment_trace: None,
             })
             .collect(),
         PaymentContinuationState::UnsupportedAffiliated(_) => Vec::new(),
@@ -189,6 +193,7 @@ pub(crate) fn prepare_payment_candidates(
                             candidate,
                             payment_successor: Some(accepted.state),
                             payment_step: Some(accepted.step),
+                            payment_trace: Some(accepted.trace),
                         })
                     })
                     .collect(),
@@ -204,6 +209,7 @@ pub(crate) fn prepare_payment_candidates(
                                     candidate,
                                     payment_successor: Some(accepted.state),
                                     payment_step: Some(accepted.step),
+                                    payment_trace: Some(accepted.trace),
                                 })
                             })
                             .collect()
@@ -218,6 +224,7 @@ pub(crate) fn prepare_payment_candidates(
                                         candidate,
                                         payment_successor: None,
                                         payment_step: None,
+                                        payment_trace: None,
                                     },
                                 )
                             })
@@ -1317,17 +1324,23 @@ impl<'a> PlannerServices<'a> {
             state.waiting_for,
             engine::types::game_state::WaitingFor::Priority { .. }
         );
-        // DecideOptionalCost { pay: false } is always legal — declining an optional
-        // cost cannot fail since it just proceeds with the base cost.
-        let is_optional_cost = matches!(
+        // DecideOptionalCost { index: 1 } declines an Optional or Kicker cost,
+        // which is always legal because it just proceeds with the base cost.
+        // A Choice's index 1 is a real alternative and may be unpayable, so it
+        // goes through simulation like every other answer.
+        let is_skip_decision = matches!(
             state.waiting_for,
-            engine::types::game_state::WaitingFor::OptionalCostChoice { .. }
+            engine::types::game_state::WaitingFor::OptionalCostChoice {
+                cost: engine::types::ability::AdditionalCost::Optional { .. }
+                    | engine::types::ability::AdditionalCost::Kicker { .. },
+                ..
+            }
         );
         match &candidate.action {
             engine::types::actions::GameAction::PassPriority if pass_always_valid => true,
             engine::types::actions::GameAction::ChooseTarget { .. } => true,
-            engine::types::actions::GameAction::DecideOptionalCost { pay: false }
-                if is_optional_cost =>
+            engine::types::actions::GameAction::DecideOptionalCost { index: 1 }
+                if is_skip_decision =>
             {
                 true
             }
@@ -2452,6 +2465,7 @@ where
                 candidate,
                 payment_successor: None,
                 payment_step: None,
+                payment_trace: None,
             }),
         |candidate| scorer(candidate),
         limit,
@@ -3720,7 +3734,7 @@ pub(crate) mod tests {
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("paying the behold cost must be accepted");
         let state = runner.state().clone();
         match &state.waiting_for {
