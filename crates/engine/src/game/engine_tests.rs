@@ -6799,32 +6799,8 @@ fn inline_taps_for_mana_overrides_bind_each_live_trigger_occurrence() {
     let events_before = events.len();
     casting_costs::auto_tap_mana_sources(&mut state, PlayerId(0), &cost, &mut events, None);
 
-    assert_eq!(
-        state.pending_taps_for_mana_overrides.len(),
-        3,
-        "the plan must retain one override per qualifying live occurrence"
-    );
-    let planned_colors = state
-        .pending_taps_for_mana_overrides
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Green)));
-    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Blue)));
-    assert!(planned_colors.contains(&ProductionOverride::SingleColor(ManaType::Black)));
-    assert!(
-        state
-            .pending_taps_for_mana_overrides
-            .keys()
-            .filter(|definition_ref| definition_ref.source.object_id == duplicate_source)
-            .count()
-            == 2,
-        "the two byte-identical duplicate-source occurrences must retain separate overrides"
-    );
-
+    assert!(state.pending_taps_for_mana_overrides.is_empty());
     let stack_before = state.stack.len();
-    super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, events_before);
-
     assert_eq!(state.players[0].mana_pool.total(), 4);
     assert_eq!(
         state.players[0].mana_pool.count_color(ManaType::Green),
@@ -6847,6 +6823,37 @@ fn inline_taps_for_mana_overrides_bind_each_live_trigger_occurrence() {
         state.pending_taps_for_mana_overrides.is_empty(),
         "the synchronous inline-resolution tail must clear transient overrides"
     );
+    for (source, color, count) in [
+        (forest, ManaType::Green, 1),
+        (second_source, ManaType::Green, 1),
+        (duplicate_source, ManaType::Blue, 1),
+        (duplicate_source, ManaType::Black, 1),
+    ] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event,
+            GameEvent::ManaAdded { source_id, mana_type, .. }
+                if *source_id == source && *mana_type == color))
+                .count(),
+            count
+        );
+    }
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::TappedForMana { source_id, tap_state: crate::types::events::ManaTapState::FromTapTriggersResolved, .. }
+            if *source_id == forest)).count(), 1);
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        GameEvent::ManaAbilityProduced { source_id, trigger_state: crate::types::events::ManaAbilityTriggerState::InlineResolved, .. }
+            if *source_id == forest)).count(), 1);
+    let pool_before = state.players[0].mana_pool.clone();
+    let events_completed = events.clone();
+    for _ in 0..2 {
+        super::triggers::resolve_tap_mana_triggers_inline(&mut state, &mut events, events_before);
+        assert_eq!(state.players[0].mana_pool, pool_before);
+        assert_eq!(events, events_completed);
+        assert_eq!(state.stack.len(), stack_before);
+        assert!(state.pending_taps_for_mana_overrides.is_empty());
+    }
 }
 
 #[test]

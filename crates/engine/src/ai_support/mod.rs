@@ -16,10 +16,8 @@ use serde::Serialize;
 
 use crate::game::ability_utils::{choose_target_for_ability, TargetSelectionAdvance};
 use crate::game::casting;
-use crate::game::casting_costs;
 use crate::game::layers;
 use crate::game::mana_abilities;
-use crate::game::mana_payment;
 use crate::game::mana_sources;
 use crate::game::priority::{standing_priority_pass, StandingPriorityPass};
 use crate::game::restrictions;
@@ -30,7 +28,6 @@ use crate::types::ability::{
 };
 use crate::types::actions::{GameAction, MulliganChoice};
 use crate::types::card_type::CoreType;
-use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, GameState, MulliganDecisionPhase, NamedChoiceSourceBinding,
     PayCostKind, PendingMulliganAction, PriorityPassingMode, WaitingFor,
@@ -1281,76 +1278,24 @@ fn land_mana_options_for_priority(
 }
 
 fn resolve_mana_option_for_trigger_probe(
-    state: &GameState,
+    probe: &mut GameState,
     player: PlayerId,
     option: &mana_sources::ManaSourceOption,
 ) -> bool {
-    let mut probe = state.clone();
     let deferred_before = probe.deferred_triggers.len();
     let mut events = Vec::new();
-
-    for (trigger_ref, override_value) in &option.taps_for_mana_overrides {
-        probe
-            .pending_taps_for_mana_overrides
-            .insert(trigger_ref.clone(), override_value.clone());
-    }
-
-    if let Some(ability_index) = option.ability_index {
-        let Some(ability_def) = probe
-            .objects
-            .get(&option.object_id)
-            .and_then(|obj| obj.abilities.get(ability_index))
-            .cloned()
-        else {
-            return false;
-        };
-        let override_value = casting_costs::production_override_for_option(&ability_def, option);
-        if mana_abilities::resolve_mana_ability(
-            &mut probe,
-            option.object_id,
-            player,
-            &ability_def,
-            &mut events,
-            override_value,
-        )
-        .is_err()
-        {
-            return false;
-        }
-    } else {
-        if let Some(obj) = probe.objects.get_mut(&option.object_id) {
-            if !obj.tapped {
-                obj.tapped = true;
-                events.push(GameEvent::PermanentTapped {
-                    object_id: option.object_id,
-                    caused_by: None,
-                    incarnation: Some(obj.incarnation),
-                });
-            }
-        }
-        mana_payment::produce_mana(
-            &mut probe,
-            option.object_id,
-            option.mana_type,
-            player,
-            true,
-            &mut events,
-        );
-        events.push(GameEvent::TappedForMana {
-            player_id: player,
-            source_id: option.object_id,
-            produced: vec![option.mana_type],
-            tap_state: ManaTapState::FromTap,
-        });
-        events.push(GameEvent::ManaAbilityProduced {
-            player_id: player,
-            source_id: option.object_id,
-            produced: vec![option.mana_type],
-            trigger_state: crate::types::events::ManaAbilityTriggerState::Pending,
-        });
-    }
-
-    triggers::simulated_action_would_queue_non_mana_trigger(&mut probe, deferred_before, &events)
+    let Ok(waiting) = mana_sources::activate_mana_source_option_with_output_and_settle(
+        probe,
+        player,
+        option,
+        crate::types::mana::ManaSourceOutput::Concrete(option.mana_type),
+        &mut events,
+        crate::types::game_state::ManaAbilityResume::Priority,
+    ) else {
+        return false;
+    };
+    probe.waiting_for = waiting;
+    triggers::simulated_action_would_queue_non_mana_trigger(probe, deferred_before, &events)
 }
 
 fn activate_mana_action_would_queue_non_mana_trigger(
@@ -1378,9 +1323,10 @@ fn activate_mana_action_would_queue_non_mana_trigger(
             .filter(|option| option.ability_index == Some(ability_index))
             .collect::<Vec<_>>();
         if !matching_options.is_empty() {
-            return matching_options
-                .iter()
-                .any(|option| resolve_mana_option_for_trigger_probe(state, player, option));
+            return matching_options.iter().any(|option| {
+                let mut probe = state.clone();
+                resolve_mana_option_for_trigger_probe(&mut probe, player, option)
+            });
         }
     }
 
@@ -1421,8 +1367,10 @@ fn tap_land_action_would_queue_non_mana_trigger(
     )
     .iter()
     .any(|option| {
-        option.penalty.is_meaningful_priority_activation()
-            || resolve_mana_option_for_trigger_probe(state, player, option)
+        option.penalty.is_meaningful_priority_activation() || {
+            let mut probe = state.clone();
+            resolve_mana_option_for_trigger_probe(&mut probe, player, option)
+        }
     })
 }
 
@@ -3294,6 +3242,442 @@ mod tests {
             player: PlayerId(0),
         };
         state
+    }
+
+    const PROBE_FERTILE: &str = "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.";
+    const PROBE_NYKTHOS: &str = "{T}: Add {C}.\n{2}, {T}: Choose a color. Add an amount of mana of that color equal to your devotion to that color. (Your devotion to a color is the number of mana symbols of that color in the mana costs of permanents you control.)";
+
+    fn selected_probe_option(
+        state: &GameState,
+        land: ObjectId,
+        aura: ObjectId,
+        base: ManaType,
+        extra: ManaType,
+    ) -> mana_sources::ManaSourceOption {
+        let option =
+            mana_sources::activatable_land_mana_options(state, land, PlayerId(0))
+                .into_iter()
+                .find(|option| {
+                    option.mana_type == base
+                && option.taps_for_mana_overrides.iter().any(|(reference, value)|
+                    reference.source.object_id == aura
+                    && *value == crate::types::game_state::ProductionOverride::SingleColor(extra))
+                })
+                .expect("the real producer exposes an exact selected Aura color");
+        assert_eq!(option.taps_for_mana_overrides.len(), 1);
+        let refs: Vec<_> = crate::game::functioning_abilities::active_trigger_definitions(
+            state,
+            &state.objects[&aura],
+        )
+        .map(|active| active.definition_ref)
+        .collect();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(option.taps_for_mana_overrides[0].0, refs[0]);
+        option
+    }
+
+    fn forest_probe_board(
+        intrinsic: bool,
+        observer: bool,
+    ) -> (crate::game::scenario::GameRunner, ObjectId, ObjectId) {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::mana::parse_mtgjson_mana_cost;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        // Empty Oracle here is explicitly the existing helper-domain subtype
+        // fallback, not a claim that an ordinary printed Forest is unindexed.
+        let forest = scenario
+            .add_land_from_oracle(P0, "Forest", if intrinsic { "" } else { "({T}: Add {G}.)" })
+            .with_subtypes(vec!["Forest"])
+            .id();
+        let aura = scenario
+            .add_enchantment_from_oracle(P0, "Fertile Ground", PROBE_FERTILE)
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+            .id();
+        if observer {
+            scenario.add_enchantment_from_oracle(P0, "Manabarbs",
+                "Whenever a player taps a land for mana, this enchantment deals 1 damage to that player.")
+                .with_mana_cost(parse_mtgjson_mana_cost("{3}{R}"));
+        }
+        let mut runner = scenario.build();
+        crate::game::effects::attach::attach_to(runner.state_mut(), aura, forest);
+        crate::game::layers::evaluate_layers(runner.state_mut());
+        if intrinsic {
+            let land = runner.state_mut().objects.get_mut(&forest).unwrap();
+            land.abilities = Arc::new(Vec::new());
+            land.base_abilities = Arc::new(Vec::new());
+        }
+        (runner, forest, aura)
+    }
+
+    /// CR 106.3 + CR 608.2d + CR 605.4a: the actual candidate-clone handoff
+    /// retains selected G (GG), while the independent W choice gives GW.
+    #[test]
+    fn mana_option_trigger_probe_keeps_selected_aura_color() {
+        let (mut runner, forest, aura) = forest_probe_board(false, false);
+        let original = serde_json::to_value(runner.state()).unwrap();
+        for extra in [ManaType::Green, ManaType::White] {
+            let option =
+                selected_probe_option(runner.state(), forest, aura, ManaType::Green, extra);
+            assert!(option.ability_index.is_some());
+            let mut probe = runner.state().clone();
+            assert!(!super::resolve_mana_option_for_trigger_probe(
+                &mut probe,
+                PlayerId(0),
+                &option
+            ));
+            assert!(probe.objects[&forest].tapped);
+            let units: Vec<_> = probe.players[0].mana_pool.units().collect();
+            assert_eq!(units.len(), 2);
+            assert_eq!(
+                units
+                    .iter()
+                    .filter(|unit| unit.source_id == forest && unit.color == ManaType::Green)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                units.iter().filter(|unit| unit.source_id == aura).count(),
+                1
+            );
+            assert_eq!(
+                probe.players[0].mana_pool.count_color(ManaType::Green),
+                if extra == ManaType::Green { 2 } else { 1 },
+                "the selected handoff must produce GG rather than the default GW: {units:?}"
+            );
+            assert_eq!(
+                units
+                    .iter()
+                    .filter(|unit| unit.source_id == aura && unit.color == extra)
+                    .count(),
+                1
+            );
+            assert!(probe.pending_taps_for_mana_overrides.is_empty());
+            assert!(matches!(
+                probe.waiting_for,
+                WaitingFor::Priority {
+                    player: PlayerId(0)
+                }
+            ));
+            assert!(probe.stack.is_empty());
+        }
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), original);
+        let (_, _, grouped) = legal_actions_full(runner.state());
+        let action = grouped[&forest].iter().find(|action| matches!(action,
+            GameAction::TapLandForMana { selection }
+                if selection.taps_for_mana.iter().any(|selected|
+                    selected.source.object_id == aura
+                    && selected.production_override == crate::types::game_state::ProductionOverride::SingleColor(ManaType::Green))))
+            .expect("the public counterpart offers the selected G action").clone();
+        let events = runner.act(action).unwrap().events;
+        assert_eq!(
+            runner.state().players[0]
+                .mana_pool
+                .count_color(ManaType::Green),
+            2
+        );
+        for source in [forest, aura] {
+            assert_eq!(events.iter().filter(|event| matches!(event,
+                crate::types::events::GameEvent::ManaAdded { source_id, mana_type: ManaType::Green, .. }
+                    if *source_id == source)).count(), 1);
+        }
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
+    /// CR 305.6 + CR 605.4a: the legacy subtype-only route uses the same
+    /// real activation/event authority and settles its nondefault Aura once.
+    #[test]
+    fn mana_option_trigger_probe_settles_intrinsic_selected_aura() {
+        let (runner, forest, aura) = forest_probe_board(true, false);
+        let option = selected_probe_option(
+            runner.state(),
+            forest,
+            aura,
+            ManaType::Green,
+            ManaType::Green,
+        );
+        assert_eq!(option.ability_index, None);
+        let mut probe = runner.state().clone();
+        assert!(!super::resolve_mana_option_for_trigger_probe(
+            &mut probe,
+            PlayerId(0),
+            &option
+        ));
+        assert!(probe.objects[&forest].tapped);
+        assert_eq!(probe.players[0].mana_pool.total(), 2);
+        assert_eq!(probe.players[0].mana_pool.count_color(ManaType::Green), 2);
+        assert_eq!(
+            probe.players[0]
+                .mana_pool
+                .units()
+                .filter(|unit| unit.source_id == aura)
+                .count(),
+            1
+        );
+        assert!(probe.pending_taps_for_mana_overrides.is_empty());
+        assert!(matches!(probe.waiting_for, WaitingFor::Priority { .. }));
+        assert!(probe.stack.is_empty());
+        assert!(!runner.state().objects[&forest].tapped);
+        assert!(runner.state().players[0].mana_pool.is_empty());
+    }
+
+    /// CR 118.3 + CR 700.5 + CR 605.4a: independently paid C/C precedes
+    /// Nykthos's live devotion and selected U. Real observers and pauses keep
+    /// their own outcome; choosing a different color is not an observer.
+    #[test]
+    fn mana_option_trigger_probe_uses_cost_and_observer_boundaries() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::events::GameEvent;
+        use crate::types::mana::parse_mtgjson_mana_cost;
+        for observer in [false, true] {
+            let (mut runner, forest, aura) = forest_probe_board(false, observer);
+            let sources = mana_sources::taps_for_mana_trigger_sources(runner.state());
+            let gates = crate::game::mana_abilities::ManaActivationGates::compute(runner.state());
+            let option = selected_probe_option(
+                runner.state(),
+                forest,
+                aura,
+                ManaType::Green,
+                ManaType::Green,
+            );
+            assert_eq!(
+                super::activate_mana_action_would_queue_non_mana_trigger(
+                    runner.state(),
+                    P0,
+                    forest,
+                    option.ability_index.unwrap(),
+                    &sources,
+                    &gates
+                ),
+                observer
+            );
+            assert_eq!(
+                super::tap_land_action_would_queue_non_mana_trigger(
+                    runner.state(),
+                    P0,
+                    forest,
+                    &sources,
+                    &gates
+                ),
+                observer
+            );
+            assert_eq!(
+                super::grouped_mana_requires_priority(runner.state(), P0),
+                observer
+            );
+            let mut probe = runner.state().clone();
+            assert_eq!(
+                super::resolve_mana_option_for_trigger_probe(&mut probe, P0, &option),
+                observer
+            );
+            assert_eq!(probe.players[0].mana_pool.count_color(ManaType::Green), 2);
+            let (_, _, grouped) = legal_actions_full(runner.state());
+            let action = grouped[&forest].iter().find(|action| matches!(action,
+                GameAction::TapLandForMana { selection }
+                    if selection.taps_for_mana.iter().any(|selected|
+                        selected.production_override == crate::types::game_state::ProductionOverride::SingleColor(ManaType::Green))))
+                .unwrap().clone();
+            runner.act(action).unwrap();
+            if observer {
+                assert!(!runner.state().stack.is_empty());
+                runner.advance_until_stack_empty();
+                // CR 120.3a: the real Manabarbs observer deals one damage.
+                assert_eq!(runner.state().players[0].life, 19);
+            } else {
+                assert_eq!(runner.state().players[0].life, 20);
+            }
+            assert_eq!(runner.state().players[0].mana_pool.total(), 2);
+            assert!(runner.state().stack.is_empty());
+        }
+        for aura_controller in [P0, P1] {
+            for paused in [false, true] {
+                let mut scenario = GameScenario::new();
+                scenario.at_phase(Phase::PreCombatMain);
+                let nykthos = scenario
+                    .add_land_from_oracle(P0, "Nykthos, Shrine to Nyx", PROBE_NYKTHOS)
+                    .as_legendary()
+                    .id();
+                scenario
+                    .add_creature_from_oracle(P0, "Leatherback Baloth", 4, 5, "")
+                    .with_subtypes(vec!["Beast"])
+                    .with_mana_cost(parse_mtgjson_mana_cost("{G}{G}{G}"));
+                let aura = scenario
+                    .add_enchantment_from_oracle(aura_controller, "Fertile Ground", PROBE_FERTILE)
+                    .with_subtypes(vec!["Aura"])
+                    .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+                    .id();
+                let funders = if paused {
+                    scenario.add_enchantment_from_oracle(P1, "Rest in Peace",
+                        "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.")
+                        .with_mana_cost(parse_mtgjson_mana_cost("{1}{W}"));
+                    scenario.add_enchantment_from_oracle(P1, "Leyline of the Void",
+                        "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.")
+                        .with_mana_cost(parse_mtgjson_mana_cost("{2}{B}{B}"));
+                    vec![scenario
+                        .add_creature_from_oracle(
+                            P0,
+                            "Basal Thrull",
+                            1,
+                            2,
+                            "{T}, Sacrifice this creature: Add {B}{B}.",
+                        )
+                        .with_subtypes(vec!["Thrull"])
+                        .with_mana_cost(parse_mtgjson_mana_cost("{B}{B}"))
+                        .id()]
+                } else {
+                    (0..2)
+                        .map(|_| {
+                            scenario
+                                .add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.")
+                                .id()
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let mut runner = scenario.build();
+                crate::game::effects::attach::attach_to(runner.state_mut(), aura, nykthos);
+                crate::game::layers::evaluate_layers(runner.state_mut());
+                let green = if aura_controller == P0 { 4 } else { 3 };
+                assert_eq!(
+                    crate::game::devotion::count_devotion(runner.state(), P0, &[ManaColor::Green]),
+                    green
+                );
+                let option = selected_probe_option(
+                    runner.state(),
+                    nykthos,
+                    aura,
+                    ManaType::Green,
+                    ManaType::Blue,
+                );
+                assert_eq!(option.ability_index, Some(1));
+                let original = serde_json::to_value(runner.state()).unwrap();
+                let mut probe = runner.state().clone();
+                assert!(!super::resolve_mana_option_for_trigger_probe(
+                    &mut probe, P0, &option
+                ));
+                assert_eq!(serde_json::to_value(runner.state()).unwrap(), original);
+                if paused {
+                    assert!(matches!(
+                        probe.waiting_for,
+                        WaitingFor::ReplacementChoice {
+                            player: P0,
+                            candidate_count: 2,
+                            ..
+                        }
+                    ));
+                    assert!(!probe.objects[&nykthos].tapped);
+                    assert!(probe.players[0].mana_pool.is_empty());
+                    let Some(crate::types::game_state::PendingCostMoveResume::ManaAbilityPayment {
+                        cursor,
+                        ..
+                    }) = &probe.pending_cost_move_resume
+                    else {
+                        panic!("the real replacement pause retains the activation cursor");
+                    };
+                    let parent = cursor
+                        .parent
+                        .as_ref()
+                        .expect("the cost-paying child retains Nykthos");
+                    assert_eq!(parent.pending.source_id, nykthos);
+                    assert_eq!(
+                        parent.pending.selected_taps_for_mana,
+                        option
+                            .semantic_selection(runner.state())
+                            .unwrap()
+                            .taps_for_mana
+                    );
+                } else {
+                    assert!(probe.objects[&nykthos].tapped);
+                    assert!(funders.iter().all(|source| probe.objects[source].tapped));
+                    assert_eq!(
+                        probe.players[0].mana_pool.count_color(ManaType::Green),
+                        green as usize
+                    );
+                    assert_eq!(probe.players[0].mana_pool.count_color(ManaType::Blue), 1);
+                    assert!(matches!(probe.waiting_for, WaitingFor::Priority { .. }));
+                }
+                let (_, _, grouped) = legal_actions_full(runner.state());
+                let action = grouped[&nykthos].iter().find(|action| matches!(action,
+                    GameAction::TapLandForMana { selection }
+                        if selection.mana_type == ManaType::Green
+                        && selection.taps_for_mana.iter().any(|selected|
+                            selected.source.object_id == aura
+                            && selected.production_override == crate::types::game_state::ProductionOverride::SingleColor(ManaType::Blue))))
+                    .expect("public independently funded G/U capability").clone();
+                let mut events = runner.act(action).unwrap().events;
+                if paused {
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ReplacementChoice {
+                            player: P0,
+                            candidate_count: 2,
+                            ..
+                        }
+                    ));
+                    let restored =
+                        serde_json::from_slice(&serde_json::to_vec(runner.state()).unwrap())
+                            .unwrap();
+                    runner = crate::game::scenario::GameRunner::from_state(restored);
+                    events.extend(
+                        runner
+                            .act(GameAction::ChooseReplacement { index: 1 })
+                            .unwrap()
+                            .events,
+                    );
+                }
+                assert_eq!(
+                    runner.state().players[0]
+                        .mana_pool
+                        .count_color(ManaType::Green),
+                    green as usize
+                );
+                assert_eq!(
+                    runner.state().players[0]
+                        .mana_pool
+                        .count_color(ManaType::Blue),
+                    1
+                );
+                assert!(runner.state().players[1].mana_pool.is_empty());
+                for source in &funders {
+                    assert_eq!(
+                        events
+                            .iter()
+                            .filter(|event| matches!(event,
+                        GameEvent::ManaAdded { source_id, .. } if source_id == source))
+                            .count(),
+                        if paused { 2 } else { 1 }
+                    );
+                }
+                assert!(runner.state().stack.is_empty());
+                assert!(matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(runner.state().pending_taps_for_mana_overrides.is_empty());
+                if !paused {
+                    for malformed in [0, 1, 2] {
+                        let mut bad = option.clone();
+                        let mut state: GameState =
+                            serde_json::from_value(original.clone()).unwrap();
+                        match malformed {
+                            0 => bad.ability_index = Some(usize::MAX),
+                            1 => bad.object_id = ObjectId(u64::MAX),
+                            2 => state.objects.get_mut(&nykthos).unwrap().controller = P1,
+                            _ => unreachable!(),
+                        }
+                        assert!(!super::resolve_mana_option_for_trigger_probe(
+                            &mut state, P0, &bad
+                        ));
+                        assert!(state.players[0].mana_pool.is_empty());
+                        assert!(funders.iter().all(|source| !state.objects[source].tapped));
+                    }
+                }
+            }
+        }
     }
 
     #[test]
