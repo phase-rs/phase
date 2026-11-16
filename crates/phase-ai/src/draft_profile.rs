@@ -44,10 +44,11 @@ use nom::{IResult, Parser};
 use serde::{Deserialize, Serialize};
 
 use engine::game::effects::effect::generic_effect_application_filter;
+use engine::game::filter::{matches_target_filter_against_face_scoped, FaceControllerScope};
 use engine::types::ability::{
     extract_target_filter_from_effect, AbilityCost, AbilityDefinition, AbilityKind,
-    ContinuousModification, ControllerRef, Effect, FilterProp, PlayerFilter, PtValue,
-    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    ContinuousModification, ControllerRef, Effect, PlayerFilter, PtValue, StaticDefinition,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -1113,7 +1114,10 @@ fn static_makes_evasive(def: &StaticDefinition) -> bool {
 /// evasive — the enabler shape ("enchanted creature can't be blocked by
 /// Spirits", "creatures you control have flying").
 fn static_grants_evasion(def: &StaticDefinition) -> bool {
-    evasion_recipients(def.affected.as_ref()).other && static_makes_evasive(def)
+    def.affected
+        .as_ref()
+        .is_some_and(filter_may_name_another_creature)
+        && static_makes_evasive(def)
 }
 
 /// Whether the face is evasive by its own abilities under `reading`: a
@@ -1125,44 +1129,30 @@ fn is_evasive(face: &CardFace, reading: RoleReading) -> bool {
     face.keywords.iter().any(|k| is_evasion_keyword(k, reading))
         || (reading == RoleReading::Full
             && (face.static_abilities.iter().any(|s| {
-                static_makes_evasive(s) && evasion_recipients(s.affected.as_ref()).source
+                static_makes_evasive(s)
+                    && recipient_admits(face, s.affected.as_ref(), EvasionRecipient::Source)
             }) || face_grants_self_evasion(face)))
 }
 
-/// Whether any ability on the face grants evasion to the source itself,
-/// accounting for activation costs. An activated ability with a tap cost
-/// ({T}) cannot grant evasion to the source if the source also wants to
-/// attack: CR 508.1a requires attackers to be untapped, and CR 508.1f taps
-/// chosen attackers. Triggered abilities and abilities without tap costs
-/// (e.g., Higure's "{2}: Target Ninja can't be blocked") are fine.
+/// Whether an activated ability or trigger on the face can make the source
+/// itself evasive. An activated ability whose cost taps the source cannot: CR
+/// 508.1a requires attackers to be untapped and CR 508.1f taps the chosen
+/// attackers, so the source either pays the cost before attacks and cannot
+/// attack, or attacks first and cannot pay it (Minamo Sightbender's "{X}, {T}:
+/// Target creature with power X or less can't be blocked this turn").
+/// Triggered abilities and untapped activations (Higure, the Still Wind's
+/// "{2}: Target Ninja creature can't be blocked this turn") are unaffected.
 fn face_grants_self_evasion(face: &CardFace) -> bool {
-    // Check activated abilities
-    for ability in &face.abilities {
-        if ability.kind == AbilityKind::Activated {
-            // If the ability has a tap cost, it can't be used for self-evasion
-            // while also attacking.
-            if ability_has_tap_cost(ability) {
-                continue;
-            }
-            // Check if this ability's effects grant evasion to the source
-            for effect in collect_chain_effects(ability) {
-                if effect_makes_evasive(effect, EvasionRecipient::Source) {
-                    return true;
-                }
-            }
-        }
-    }
-    // Check triggered abilities (no activation cost to worry about)
-    for trigger in &face.triggers {
-        if let Some(execute) = &trigger.execute {
-            for effect in collect_chain_effects(execute) {
-                if effect_makes_evasive(effect, EvasionRecipient::Source) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
+    let activated = face
+        .abilities
+        .iter()
+        .filter(|ability| ability.kind == AbilityKind::Activated && !ability_has_tap_cost(ability));
+    let triggered = face.triggers.iter().filter_map(|t| t.execute.as_deref());
+    activated.chain(triggered).any(|ability| {
+        collect_chain_effects(ability)
+            .into_iter()
+            .any(|effect| effect_makes_evasive(face, effect, EvasionRecipient::Source))
+    })
 }
 
 /// Who an effect makes evasive (CR 509.1b).
@@ -1174,124 +1164,40 @@ enum EvasionRecipient {
     Other,
 }
 
-/// The recipients a continuous effect's filter can name. A target slot does not
-/// by itself separate the source from another creature: CR 115.1c fixes the
-/// target as the ability is activated, and the filter decides who is eligible.
-/// Higure, the Still Wind's "Target Ninja creature can't be blocked this turn"
-/// names a filter Higure itself satisfies, so the grant is its own evasion too.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EvasionRecipients {
-    /// The effect's own source can satisfy the filter.
-    source: bool,
-    /// A creature other than the source can satisfy the filter.
-    other: bool,
-}
-
-impl EvasionRecipients {
-    fn admits(self, recipient: EvasionRecipient) -> bool {
-        match recipient {
-            EvasionRecipient::Source => self.source,
-            EvasionRecipient::Other => self.other,
-        }
+/// Whether a continuous effect applied through `filter` can land on
+/// `recipient`. CR 608.2c: the filter is the authority for where a
+/// modification lands, so an absent recipient is the source itself.
+fn recipient_admits(
+    face: &CardFace,
+    filter: Option<&TargetFilter>,
+    recipient: EvasionRecipient,
+) -> bool {
+    match (filter, recipient) {
+        (None, EvasionRecipient::Source) => true,
+        (None, EvasionRecipient::Other) => false,
+        (Some(filter), EvasionRecipient::Source) => filter_may_name_the_source(face, filter),
+        (Some(filter), EvasionRecipient::Other) => filter_may_name_another_creature(filter),
     }
 }
 
-/// The recipients a continuous effect can land on, read from its application
-/// filter. CR 608.2c: the filter is the authority for where a modification
-/// lands, so an absent recipient is the source itself and `SelfRef` names only
-/// the source.
-fn evasion_recipients(filter: Option<&TargetFilter>) -> EvasionRecipients {
+/// Whether `filter` admits the source `face` itself. A target slot does not
+/// separate the source from another creature: CR 115.1c fixes the target as
+/// the ability is activated, and the source is a legal choice exactly when its
+/// own characteristics satisfy the filter. Higure, the Still Wind is a Ninja,
+/// so "Target Ninja creature" admits it; Soratami Mirror-Guard is a 3/1, so
+/// "Target creature with power 2 or less" does not.
+///
+/// The question is answered by the engine's face-level filter authority
+/// (`matches_target_filter_against_face_scoped`), which fails closed on any
+/// component a printed face cannot answer — "another", an Aura's host, a
+/// live power comparison. The source is its controller's own card, so the
+/// controller axis is read with `FaceControllerScope::AssumeOwn`.
+fn filter_may_name_the_source(face: &CardFace, filter: &TargetFilter) -> bool {
     match filter {
-        None => EvasionRecipients {
-            source: true,
-            other: false,
-        },
-        Some(filter) => EvasionRecipients {
-            source: filter_may_name_the_source(filter),
-            other: filter_may_name_another_creature(filter),
-        },
-    }
-}
-
-/// Whether `filter` can name the ability's own source. Fails closed for
-/// references the printed card alone cannot resolve (a parent target, an event
-/// object, a tracked set): over-crediting one of those would count a grant to
-/// another creature as the source's own evasion.
-fn filter_may_name_the_source(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::SelfRef | TargetFilter::SourceOrPaired | TargetFilter::Any => true,
-        TargetFilter::Typed(typed) => {
-            typed_filter_admits_creature(typed)
-                && !typed
-                    .properties
-                    .iter()
-                    .any(|property| matches!(property, FilterProp::Another))
-                && !matches!(
-                    typed.controller,
-                    Some(ControllerRef::Opponent | ControllerRef::TargetOpponent)
-                )
+        TargetFilter::SelfRef | TargetFilter::SourceOrPaired => true,
+        other => {
+            matches_target_filter_against_face_scoped(face, other, FaceControllerScope::AssumeOwn)
         }
-        TargetFilter::Or { filters } => filters.iter().any(filter_may_name_the_source),
-        // CR 109.3: every constraint of an `And` must hold for a match, so the
-        // source must satisfy all of them.
-        TargetFilter::And { filters } => filters.iter().all(filter_may_name_the_source),
-        // "Not this creature" names every other creature but never the source,
-        // and any other negation fails closed as well.
-        TargetFilter::Not { .. } => false,
-        TargetFilter::None
-        | TargetFilter::Player
-        | TargetFilter::Controller
-        | TargetFilter::SourceController
-        | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::Opponent
-        | TargetFilter::GrantingObject { .. }
-        | TargetFilter::SpecificObject { .. }
-        | TargetFilter::SpecificPlayer { .. }
-        | TargetFilter::PlayerWhoChoseLabel { .. }
-        | TargetFilter::PlayerMatching { .. }
-        | TargetFilter::Neighbor { .. }
-        | TargetFilter::ScopedPlayer
-        | TargetFilter::AttachedTo
-        | TargetFilter::LastCreated
-        | TargetFilter::LastRevealed
-        | TargetFilter::LastZoneChanged
-        | TargetFilter::ChosenCard
-        | TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
-        | TargetFilter::ExiledBySource
-        | TargetFilter::ExiledCardByIndex { .. }
-        | TargetFilter::TriggeringSpellController
-        | TargetFilter::TriggeringSpellOwner
-        | TargetFilter::TriggeringPlayer
-        | TargetFilter::TriggeringSource
-        | TargetFilter::EventTarget
-        | TargetFilter::TriggeringSourceController
-        | TargetFilter::SourceChosenPlayer
-        | TargetFilter::OriginalController
-        | TargetFilter::OriginalSource
-        | TargetFilter::PostReplacementSourceController
-        | TargetFilter::PostReplacementDamageSource
-        | TargetFilter::PostReplacementDamageTarget
-        | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::AttackedPlayerOrPlaneswalker
-        | TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { .. }
-        | TargetFilter::ParentTargetController
-        | TargetFilter::ParentTargetOwner
-        | TargetFilter::EventTargetController
-        | TargetFilter::DeclaredPlayer { .. }
-        | TargetFilter::AffectedObjectOwner
-        | TargetFilter::HasChosenName
-        | TargetFilter::Named { .. }
-        | TargetFilter::ChosenDamageSource { .. }
-        | TargetFilter::CostPaidObject
-        | TargetFilter::AmassedArmy
-        | TargetFilter::StackAbility { .. }
-        | TargetFilter::StackSpell
-        | TargetFilter::CastingSpell
-        | TargetFilter::Owner
-        | TargetFilter::AllPlayers => false,
     }
 }
 
@@ -1393,7 +1299,7 @@ fn granted_static_recipient<'a>(
 /// the outer target slot alone, which is empty on "this creature gains
 /// flying" (Kami of Tattered Shoji). A grant with no recipient identifies no
 /// attacker at all.
-fn effect_makes_evasive(effect: &Effect, recipient: EvasionRecipient) -> bool {
+fn effect_makes_evasive(face: &CardFace, effect: &Effect, recipient: EvasionRecipient) -> bool {
     let Effect::GenericEffect {
         static_abilities,
         target,
@@ -1405,7 +1311,7 @@ fn effect_makes_evasive(effect: &Effect, recipient: EvasionRecipient) -> bool {
     static_abilities.iter().any(|s| {
         static_makes_evasive(s)
             && granted_static_recipient(target.as_ref(), s.affected.as_ref())
-                .is_some_and(|application| evasion_recipients(Some(application)).admits(recipient))
+                .is_some_and(|application| recipient_admits(face, Some(application), recipient))
     })
 }
 
@@ -1419,7 +1325,7 @@ fn grants_evasion(face: &CardFace, reading: RoleReading) -> bool {
     reading == RoleReading::Full
         && (collect_face_effects(face)
             .into_iter()
-            .any(|e| effect_makes_evasive(e, EvasionRecipient::Other))
+            .any(|e| effect_makes_evasive(face, e, EvasionRecipient::Other))
             || face.static_abilities.iter().any(static_grants_evasion))
 }
 
@@ -1708,9 +1614,11 @@ fn may_be_opposing_creature(filter: &TargetFilter) -> bool {
 ///    (`TargetPlayer` for Exile into Darkness, `ScopedPlayer` for Akki
 ///    Underminer's "that player sacrifices");
 /// 2. `ParentTarget` binds to the parent object's controller ("Target
-///    permanent's controller sacrifices it" — Reweave), and `ParentTargetSlot`
-///    binds to the slot the anaphor names (CR 601.2c declaration order), so the
-///    parent must be able to be an opposing creature for either to be removal;
+///    permanent's controller sacrifices it" — Reweave), so the parent must be
+///    able to be an opposing creature for it to be removal. `ParentTargetSlot`
+///    indexes the runtime declaration order, which the engine numbers per
+///    resolving mode and per effect (one effect can declare several slots);
+///    a printed face does not carry that shape, so it fails closed;
 /// 3. otherwise the ability's own controller is instructed, unless the
 ///    ability's `player_scope` iterates other players ("Each player
 ///    sacrifices a permanent" — Crack the Earth).
@@ -1722,17 +1630,11 @@ fn sacrifice_reaches_opposing_creature(
     target: &TargetFilter,
     player_scope: Option<&PlayerFilter>,
     parent_target: Option<&TargetFilter>,
-    root_slots: &[&TargetFilter],
 ) -> bool {
     match target {
         // CR 701.21a: the parent object's controller is the instructed player,
         // so only a parent that can be an opposing creature is removal.
         TargetFilter::ParentTarget => parent_target.is_some_and(may_be_opposing_creature),
-        // CR 608.2c: a slot anaphor names one declared target, not "the parent"
-        // in general — a chain with two slots must index the right one.
-        TargetFilter::ParentTargetSlot { index } => root_slots
-            .get(*index)
-            .is_some_and(|filter| may_be_opposing_creature(filter)),
         TargetFilter::Typed(typed) => {
             let admits_creature = typed_filter_admits_creature(typed);
             match &typed.controller {
@@ -1740,15 +1642,15 @@ fn sacrifice_reaches_opposing_creature(
                 None => admits_creature && player_scope_instructs_others(player_scope),
             }
         }
-        TargetFilter::Or { filters } => filters.iter().any(|f| {
-            sacrifice_reaches_opposing_creature(f, player_scope, parent_target, root_slots)
-        }),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|f| sacrifice_reaches_opposing_creature(f, player_scope, parent_target)),
         // CR 109.3: every constraint of an `And` must hold for the match.
-        TargetFilter::And { filters } => filters.iter().all(|f| {
-            sacrifice_reaches_opposing_creature(f, player_scope, parent_target, root_slots)
-        }),
-        // `SelfRef` and every player/off-battlefield reference names no
-        // opposing creature.
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|f| sacrifice_reaches_opposing_creature(f, player_scope, parent_target)),
+        // `SelfRef`, `ParentTargetSlot` (see above) and every player or
+        // off-battlefield reference names no opposing creature.
         _ => false,
     }
 }
@@ -1796,22 +1698,6 @@ fn aura_host_filter(face: &CardFace) -> Option<&TargetFilter> {
     })
 }
 
-/// CR 601.2c + CR 115.1: the target slots a linear ability chain announces, in
-/// declaration order — the list `ParentTargetSlot { index }` indexes. A
-/// sacrifice anaphor must resolve the declared slot, not "the parent" in
-/// general: a chain with two declared permanents can instruct the second one's
-/// controller to sacrifice it. Branching nodes announce on separate paths, so a
-/// slot reference inside one fails closed.
-fn declared_chain_targets(root: &AbilityDefinition) -> Vec<&TargetFilter> {
-    let mut slots = Vec::new();
-    let mut node = Some(root);
-    while let Some(ability) = node {
-        slots.extend(extract_target_filter_from_effect(&ability.effect));
-        node = ability.sub_ability.as_deref();
-    }
-    slots
-}
-
 /// Whether a sacrifice anywhere on `ability`'s chain can reach an opposing
 /// creature (CR 701.21a).
 ///
@@ -1825,39 +1711,46 @@ fn declared_chain_targets(root: &AbilityDefinition) -> Vec<&TargetFilter> {
 /// root's scope and target to every clause loses both, so walk the tree
 /// instead: a node with its own `player_scope` starts a new population, and a
 /// node without one resolves inside the enclosing population.
+///
+/// Only the linear `sub_ability` continuation inherits the enclosing clause's
+/// target. The engine binds a mode's or an alternative branch's anaphors
+/// against that branch's own declarations (CR 700.2 + CR 608.2c), a shape the
+/// printed face does not carry, so a branch starts with no inherited target: a
+/// `ParentTarget` there binds only to a target the branch itself declares, and
+/// fails closed otherwise.
 fn ability_has_removal_sacrifice(
     ability: &AbilityDefinition,
     aura_host: Option<&TargetFilter>,
 ) -> bool {
-    let chain_root_target = extract_target_filter_from_effect(&ability.effect);
-    let root_slots = declared_chain_targets(ability);
-    node_has_removal_sacrifice(ability, None, chain_root_target.or(aura_host), &root_slots)
+    node_has_removal_sacrifice(ability, None, aura_host)
 }
 
 fn node_has_removal_sacrifice<'f>(
     ability: &'f AbilityDefinition,
     inherited_scope: Option<&PlayerFilter>,
-    parent_target: Option<&'f TargetFilter>,
-    root_slots: &[&'f TargetFilter],
+    inherited_target: Option<&'f TargetFilter>,
 ) -> bool {
     let scope = ability.player_scope.as_ref().or(inherited_scope);
+    // CR 608.2c: a node that declares its own target is the parent binding for
+    // its own "its controller sacrifices it" instruction and its continuation.
+    let parent = extract_target_filter_from_effect(&ability.effect).or(inherited_target);
     if matches!(
         ability.effect.as_ref(),
         Effect::Sacrifice { target, .. }
-            if sacrifice_reaches_opposing_creature(target, scope, parent_target, root_slots)
+            if sacrifice_reaches_opposing_creature(target, scope, parent)
     ) {
         return true;
     }
-    // CR 608.2c: a node that declares its own target is the parent binding for
-    // its "its controller sacrifices it" child.
-    let child_parent = extract_target_filter_from_effect(&ability.effect).or(parent_target);
     ability
         .sub_ability
         .as_deref()
-        .into_iter()
-        .chain(ability.else_ability.as_deref())
-        .chain(ability.mode_abilities.iter())
-        .any(|child| node_has_removal_sacrifice(child, scope, child_parent, root_slots))
+        .is_some_and(|child| node_has_removal_sacrifice(child, scope, parent))
+        || ability
+            .else_ability
+            .as_deref()
+            .into_iter()
+            .chain(ability.mode_abilities.iter())
+            .any(|branch| node_has_removal_sacrifice(branch, scope, None))
 }
 
 /// Whether any ability or trigger on the face instructs an opposing creature's
@@ -2199,7 +2092,8 @@ fn off_color_penalty(card: &ProfileCard<'_>, pool: &[ProfileCard<'_>]) -> f64 {
 mod tests {
     use super::*;
     use engine::types::ability::{
-        AbilityDefinition, Effect, ManaContribution, ManaProduction, QuantityExpr, StaticDefinition,
+        AbilityDefinition, Effect, FilterProp, ManaContribution, ManaProduction, QuantityExpr,
+        StaticDefinition,
     };
     use engine::types::card_type::CardType;
     use engine::types::mana::ManaColor;
@@ -4251,55 +4145,121 @@ mod tests {
         );
     }
 
+    /// Minamo Sightbender (BOK, printed {1}{U} 1/2): "{X}, {T}: Target creature
+    /// with power X or less can't be blocked this turn." It enables another
+    /// attacker but is not its own evasion. Jhessian Balmgiver (CON) isolates
+    /// the tap-cost guard: its "{T}: Target creature can't be blocked this
+    /// turn" filter admits the Balmgiver itself, yet tapping it before attacks
+    /// leaves it unable to attack (CR 508.1a), and declaring it as an attacker
+    /// taps it before it can pay the cost (CR 508.1f).
     #[test]
     fn minamo_sightbender_tap_cost_prevents_self_evasion_but_allows_enabler() {
         let p = DraftProfile::kamigawa_block();
         let blue = vec!["U".to_string()];
-        // Minamo Sightbender (BOK): "{X}, {T}: Target creature with power X or
-        // less can't be blocked this turn." The tap cost means it can't use the
-        // ability on itself and also attack (CR 508.1a + 508.1f).
         let minamo = oracle_face(serde_json::json!({
             "name": "Minamo Sightbender",
-            "manaCost": "{2}{U}",
-            "manaValue": 3.0,
+            "manaCost": "{1}{U}",
+            "manaValue": 2.0,
             "colors": ["U"],
             "type": "Creature — Human Wizard",
             "types": ["Creature"],
             "subtypes": ["Human", "Wizard"],
             "power": "1",
-            "toughness": "3",
+            "toughness": "2",
             "text": "{X}, {T}: Target creature with power X or less can't be blocked this turn.",
         }));
-        // Should NOT be its own evasion (tap cost prevents attacking after activation)
+        assert!(!face_grants_self_evasion(&minamo));
         assert!(!is_evasive(&minamo, RoleReading::Full));
-        assert!(!classify(&minamo).contains(&CardClass::EvasiveThreat));
-        // Should still be a Ninjutsu enabler for other creatures
         assert!(grants_evasion(&minamo, RoleReading::Full));
-        assert!(classify(&minamo).contains(&CardClass::NinjutsuEnabler));
-        // But the enabler bonus has a mana value cap (2 for ninjutsu enabler)
-        let scored = first_pick(p, &card("Minamo Sightbender", "BOK", &blue, &minamo));
-        // Minamo's mana value is 3, which equals NINJUTSU_ENABLER_MAX_MANA_VALUE (3)
-        // so it SHOULD get the NinjutsuEnabler class bonus.
-        assert_eq!(scored.class_bonus, 0.65);
+        let classes = classify(&minamo);
+        assert!(!classes.contains(&CardClass::EvasiveThreat));
+        assert!(classes.contains(&CardClass::NinjutsuEnabler));
+        let minamo_card = card("Minamo Sightbender", "BOK", &blue, &minamo);
+        assert!(
+            !p.is_threat(&minamo_card),
+            "a 1/2 that cannot make itself evasive is no finisher"
+        );
+        assert_eq!(first_pick(p, &minamo_card).class_bonus, 0.65);
 
-        // Positive control: Higure, the Still Wind has no tap cost, so it CAN be
-        // its own evasion.
-        let higure = oracle_face(serde_json::json!({
-            "name": "Higure, the Still Wind",
-            "manaCost": "{2}{U}{U}",
-            "manaValue": 4.0,
-            "colors": ["U"],
-            "type": "Legendary Creature — Human Ninja",
+        let balmgiver = oracle_face(serde_json::json!({
+            "name": "Jhessian Balmgiver",
+            "manaCost": "{1}{W}{U}",
+            "manaValue": 3.0,
+            "colors": ["W", "U"],
+            "type": "Creature — Human Cleric",
             "types": ["Creature"],
-            "subtypes": ["Human", "Ninja"],
-            "power": "2",
-            "toughness": "2",
-            "text": "Ninjutsu {1}{U} ({1}{U}, Return an unblocked attacker you control to hand: Put this card onto the battlefield from your hand tapped and attacking.)\n{2}: Target Ninja creature can't be blocked this turn.",
+            "subtypes": ["Human", "Cleric"],
+            "power": "1",
+            "toughness": "1",
+            "text": "{T}: Prevent the next 1 damage that would be dealt to any target this turn.\n{T}: Target creature can't be blocked this turn.",
         }));
+        // Positive guard: the grant's filter admits the Balmgiver itself, so
+        // only the tap cost keeps it from being its own evasion.
+        let grant = balmgiver
+            .abilities
+            .iter()
+            .find(|ability| {
+                collect_chain_effects(ability).into_iter().any(|effect| {
+                    effect_makes_evasive(&balmgiver, effect, EvasionRecipient::Source)
+                })
+            })
+            .expect("positive guard: the grant can land on the Balmgiver");
+        assert!(ability_has_tap_cost(grant));
+        assert!(!face_grants_self_evasion(&balmgiver));
+        assert!(!is_evasive(&balmgiver, RoleReading::Full));
+        assert!(grants_evasion(&balmgiver, RoleReading::Full));
+
+        // Positive control: Higure, the Still Wind's grant has no tap cost.
+        let higure = higure_the_still_wind();
+        assert!(face_grants_self_evasion(&higure));
         assert!(is_evasive(&higure, RoleReading::Full));
         assert!(classify(&higure).contains(&CardClass::EvasiveThreat));
         assert!(grants_evasion(&higure, RoleReading::Full));
-        assert!(classify(&higure).contains(&CardClass::NinjutsuEnabler));
+    }
+
+    /// Soratami Mirror-Guard (CHK, printed {3}{U} 3/1): "Flying / {2}, Return
+    /// a land you control to its owner's hand: Target creature with power 2 or
+    /// less can't be blocked this turn." The grant has no tap cost, but a 3/1
+    /// is not a creature with power 2 or less, so the grant is not its own
+    /// evasion — only the printed flying is. The grant still enables another
+    /// attacker.
+    #[test]
+    fn soratami_mirror_guard_grant_does_not_admit_its_own_source() {
+        let mirror_guard = oracle_face(serde_json::json!({
+            "name": "Soratami Mirror-Guard",
+            "manaCost": "{3}{U}",
+            "manaValue": 4.0,
+            "colors": ["U"],
+            "type": "Creature — Moonfolk Wizard",
+            "types": ["Creature"],
+            "subtypes": ["Moonfolk", "Wizard"],
+            "power": "3",
+            "toughness": "1",
+            "keywords": ["Flying"],
+            "text": "Flying\n{2}, Return a land you control to its owner's hand: Target creature with power 2 or less can't be blocked this turn.",
+        }));
+        // Positive guard: the activated grant exists and has no tap cost.
+        let grant = mirror_guard
+            .abilities
+            .iter()
+            .find(|ability| {
+                ability.kind == AbilityKind::Activated
+                    && collect_chain_effects(ability).into_iter().any(|effect| {
+                        effect_makes_evasive(&mirror_guard, effect, EvasionRecipient::Other)
+                    })
+            })
+            .expect("positive guard: the activated grant enables another creature");
+        assert!(!ability_has_tap_cost(grant));
+        assert!(!face_grants_self_evasion(&mirror_guard));
+        assert!(grants_evasion(&mirror_guard, RoleReading::Full));
+        // The printed keyword alone makes it evasive.
+        assert!(is_evasive(&mirror_guard, RoleReading::Full));
+        let mut grounded = mirror_guard.clone();
+        grounded.keywords.retain(|k| !matches!(k, Keyword::Flying));
+        assert!(
+            !is_evasive(&grounded, RoleReading::Full),
+            "without its flying, the grant does not make the Mirror-Guard evasive"
+        );
     }
 
     #[test]
@@ -5153,8 +5113,7 @@ mod tests {
         assert!(sacrifice_reaches_opposing_creature(
             &artifact_creature,
             Some(&PlayerFilter::All),
-            None,
-            &[]
+            None
         ));
         // An artifact is not necessarily a creature.
         assert!(!may_be_opposing_creature(&typed(vec![
@@ -5174,8 +5133,7 @@ mod tests {
         assert!(!sacrifice_reaches_opposing_creature(
             &typed(vec![TypeFilter::Creature]),
             None,
-            None,
-            &[]
+            None
         ));
     }
 
@@ -5226,47 +5184,79 @@ mod tests {
         assert!(!sacrifice_is_removal(&self_aura));
     }
 
-    /// CR 601.2c + CR 608.2c: a `ParentTargetSlot` names one declared slot, not
-    /// "the parent" in general. The first slot is an artifact, the second a
-    /// creature, and only the creature is a removal recipient.
+    /// CR 608.2c + CR 700.2: a sacrifice anaphor binds only to a declaration
+    /// the printed face fixes. The linear continuation inherits the enclosing
+    /// clause's target; a mode or an alternative branch is bound by the engine
+    /// against its own declarations, and a `ParentTargetSlot` index follows the
+    /// runtime declaration order (numbered per resolving mode, with several
+    /// slots per effect possible) — neither shape is on the face, so both fail
+    /// closed. Each case holds the same opposing-creature declaration and
+    /// changes only the link that reaches the sacrifice.
     #[test]
-    fn sacrifice_parent_target_slot_names_the_declared_slot() {
-        let artifact = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact));
-        let creature = TargetFilter::Typed(TypedFilter::creature());
-        let chain = |sacrifice_target: TargetFilter| {
+    fn sacrifice_anaphors_bind_only_declarations_the_face_fixes() {
+        let opposing_creature =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
+        let declare = || {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Destroy {
-                    target: artifact.clone(),
+                    target: opposing_creature.clone(),
                     cant_regenerate: false,
                 },
             )
-            .sub_ability(
-                AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::Destroy {
-                        target: creature.clone(),
-                        cant_regenerate: false,
-                    },
-                )
-                .sub_ability(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::Sacrifice {
-                        target: sacrifice_target,
-                        count: QuantityExpr::Fixed { value: 1 },
-                        min_count: 0,
-                    },
-                )),
+        };
+        let sacrifice = |target: TargetFilter| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Sacrifice {
+                    target,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
             )
         };
-        assert!(ability_has_removal_sacrifice(
-            &chain(TargetFilter::ParentTargetSlot { index: 1 }),
-            None
-        ));
-        assert!(!ability_has_removal_sacrifice(
-            &chain(TargetFilter::ParentTargetSlot { index: 0 }),
-            None
-        ));
+
+        // Positive control: the linear continuation inherits the declaration.
+        let linear = declare().sub_ability(sacrifice(TargetFilter::ParentTarget));
+        assert!(ability_has_removal_sacrifice(&linear, None));
+
+        // A mode does not inherit the root's declaration.
+        let mut modal = declare();
+        modal
+            .mode_abilities
+            .push(sacrifice(TargetFilter::ParentTarget));
+        assert!(!ability_has_removal_sacrifice(&modal, None));
+
+        // Nor does an alternative branch.
+        let mut alternative = declare();
+        alternative.else_ability = Some(Box::new(sacrifice(TargetFilter::ParentTarget)));
+        assert!(!ability_has_removal_sacrifice(&alternative, None));
+
+        // A branch that declares its own target binds its own continuation.
+        let mut modal_declared = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+        );
+        modal_declared
+            .mode_abilities
+            .push(declare().sub_ability(sacrifice(TargetFilter::ParentTarget)));
+        assert!(ability_has_removal_sacrifice(&modal_declared, None));
+
+        // A slot index fails closed in every position, including the one
+        // holding the opposing creature.
+        for index in 0..2 {
+            let indexed = declare().sub_ability(
+                declare().sub_ability(sacrifice(TargetFilter::ParentTargetSlot { index })),
+            );
+            assert!(
+                !ability_has_removal_sacrifice(&indexed, None),
+                "slot {index} is not resolvable from the face"
+            );
+        }
     }
 
     /// Higure, the Still Wind (BOK): "{2}: Target Ninja creature can't be
@@ -5282,7 +5272,7 @@ mod tests {
         // Ninja slot, not a hard-coded self-reference.
         let grant = collect_face_effects(&higure)
             .into_iter()
-            .find(|effect| effect_makes_evasive(effect, EvasionRecipient::Source))
+            .find(|effect| effect_makes_evasive(&higure, effect, EvasionRecipient::Source))
             .expect("positive guard: Higure grants itself evasion");
         let Effect::GenericEffect {
             target,
@@ -5296,40 +5286,54 @@ mod tests {
             granted_static_recipient(target.as_ref(), static_abilities[0].affected.as_ref())
                 .expect("positive guard: the grant has an application filter");
         assert!(matches!(application, TargetFilter::Typed(_)));
-        assert!(filter_may_name_the_source(application));
+        assert!(filter_may_name_the_source(&higure, application));
         assert!(filter_may_name_another_creature(application));
+        assert!(face_grants_self_evasion(&higure));
         assert!(is_evasive(&higure, RoleReading::Full));
         assert!(p.is_threat(&card("Higure, the Still Wind", "BOK", &blue, &higure)));
         // Classic has no targeted-grant reading.
         assert!(!is_evasive(&higure, RoleReading::Classic));
     }
 
-    /// Source-excluding controls for the recipient resolver: "another" and an
-    /// Aura/Equipment host are other creatures, never the source itself, and a
-    /// creature an opponent controls cannot be the source.
+    /// Source-excluding controls for the recipient resolver: the source is
+    /// eligible only when its own printed characteristics satisfy the filter.
+    /// "Another" and an Aura/Equipment host are other creatures, a creature an
+    /// opponent controls cannot be the source, and a type the source lacks
+    /// excludes it.
     #[test]
     fn evasion_recipients_exclude_another_and_the_source() {
+        let higure = higure_the_still_wind();
         let another = TargetFilter::Typed(TypedFilter {
             type_filters: vec![TypeFilter::Creature],
             controller: None,
             properties: vec![FilterProp::Another],
         });
-        assert!(!filter_may_name_the_source(&another));
+        assert!(!filter_may_name_the_source(&higure, &another));
         assert!(filter_may_name_another_creature(&another));
         // CR 303.4d: an Aura can't enchant itself, so its "enchanted creature"
         // is a different object.
-        assert!(!filter_may_name_the_source(&TargetFilter::AttachedTo));
+        assert!(!filter_may_name_the_source(
+            &higure,
+            &TargetFilter::AttachedTo
+        ));
         assert!(filter_may_name_another_creature(&TargetFilter::AttachedTo));
         let opposing =
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::Opponent));
-        assert!(!filter_may_name_the_source(&opposing));
+        assert!(!filter_may_name_the_source(&higure, &opposing));
         assert!(filter_may_name_another_creature(&opposing));
         // "Other than this creature" excludes the source but names others.
         let not_self = TargetFilter::Not {
             filter: Box::new(TargetFilter::SelfRef),
         };
-        assert!(!filter_may_name_the_source(&not_self));
+        assert!(!filter_may_name_the_source(&higure, &not_self));
         assert!(filter_may_name_another_creature(&not_self));
+        // The subtype axis reads the source's own type line: Higure is a
+        // Ninja, a Moonfolk filter does not admit it.
+        let ninja = TargetFilter::Typed(TypedFilter::creature().subtype("Ninja".to_string()));
+        let moonfolk = TargetFilter::Typed(TypedFilter::creature().subtype("Moonfolk".to_string()));
+        assert!(filter_may_name_the_source(&higure, &ninja));
+        assert!(!filter_may_name_the_source(&higure, &moonfolk));
+        assert!(filter_may_name_another_creature(&moonfolk));
     }
 
     /// Lingering Death's printed Oracle text (Scryfall).
