@@ -65,11 +65,7 @@ pub(crate) fn players_for_filter(
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
                 crate::game::quantity::opponent_dealt_damage_matches(
-                    state,
-                    player.id,
-                    controller,
-                    filter,
-                    source_id,
+                    state, player.id, controller, filter, source_id,
                 )
             })
             .map(|player| player.id)
