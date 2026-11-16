@@ -19401,6 +19401,7 @@ fn gift_recipient_auto_cast_remains_offered_and_reaches_gift_recipient_choice() 
     let WaitingFor::ChooseGiftRecipient {
         pending_cast,
         candidates,
+        purpose,
         ..
     } = &state.waiting_for
     else {
@@ -19408,6 +19409,11 @@ fn gift_recipient_auto_cast_remains_offered_and_reaches_gift_recipient_choice() 
     };
     assert_eq!(pending_cast.object_id, spell);
     assert_eq!(candidates, &vec![PlayerId(1), PlayerId(2)]);
+    // CR 702.174a: the Gift prompt keeps the Gift purpose (the default wire shape).
+    assert_eq!(
+        purpose,
+        &crate::types::game_state::CastOpponentChoicePurpose::Gift
+    );
 }
 
 #[test]
@@ -22590,13 +22596,11 @@ fn activation_restriction_only_once_each_turn_resets_after_source_reenters() {
     zones::move_to_zone(&mut state, source, Zone::Stack, &mut events);
     zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
 
-    assert_eq!(
-        state
-            .activated_abilities_this_turn
-            .get(&(source, 0))
-            .copied(),
-        None
-    );
+    // CR 602.5c: the counter is keyed by the resolved acquisition, derived
+    // the same way at check and record time.
+    let key = restrictions::ability_usage_key(&state, source, 0)
+        .expect("the printed ability resolves after re-entry");
+    assert_eq!(state.activated_abilities_this_turn.get(&key).copied(), None);
     handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events)
         .expect("re-entered permanent is a new object for activation limits");
 }
@@ -22632,13 +22636,11 @@ fn activation_restriction_only_once_resets_after_source_reenters() {
     zones::move_to_zone(&mut state, source, Zone::Stack, &mut events);
     zones::move_to_zone(&mut state, source, Zone::Battlefield, &mut events);
 
-    assert_eq!(
-        state
-            .activated_abilities_this_game
-            .get(&(source, 0))
-            .copied(),
-        None
-    );
+    // CR 602.5c: the counter is keyed by the resolved acquisition, derived
+    // the same way at check and record time.
+    let key = restrictions::ability_usage_key(&state, source, 0)
+        .expect("the printed ability resolves after re-entry");
+    assert_eq!(state.activated_abilities_this_game.get(&key).copied(), None);
     handle_activate_ability(&mut state, PlayerId(0), source, 0, &mut events)
         .expect("re-entered permanent is a new object for activation limits");
 }
@@ -23135,11 +23137,11 @@ fn return_to_hand_cost_moves_selected_permanent_before_activation() {
     // valid "target creature". auto_select_targets_for_ability picks the sole
     // legal target and pushes the ability to the stack without a TargetSelection
     // round-trip, which is why activated_abilities_this_turn is already incremented.
+    // CR 602.5c: keyed by the resolved acquisition, not the index.
+    let key = restrictions::ability_usage_key(&state, source, 0)
+        .expect("the Ranger ability resolves after cost payment");
     assert_eq!(
-        state
-            .activated_abilities_this_turn
-            .get(&(source, 0))
-            .copied(),
+        state.activated_abilities_this_turn.get(&key).copied(),
         Some(1)
     );
 }
@@ -23519,11 +23521,11 @@ fn mana_leg_detour_skips_vanilla_mana_tap_cost() {
         state.objects[&source].tapped,
         "the {{T}} leg must tap the source on the direct path"
     );
+    // CR 602.5c: keyed by the resolved acquisition, not the index.
+    let key = restrictions::ability_usage_key(&state, source, 0)
+        .expect("the printed ability resolves on the direct path");
     assert_eq!(
-        state
-            .activated_abilities_this_turn
-            .get(&(source, 0))
-            .copied(),
+        state.activated_abilities_this_turn.get(&key).copied(),
         Some(1),
         "the ability must be pushed on the unchanged direct path"
     );

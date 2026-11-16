@@ -2354,8 +2354,13 @@ pub(crate) fn handoff_paused_liminal_copy_token_batch(
         )
         .copied()
         .collect();
-    crate::game::triggers::collect_paused_exit_triggers_matching(state, events, 0, |event| {
-        match event {
+    // CR 603.6a: the committed entries pass the entry gate, so an entry whose entering
+    // instruction is still suspended is held for the event it belongs to, not matched here.
+    crate::game::triggers::collect_paused_exit_triggers_matching(
+        state,
+        events,
+        0,
+        |event| match event {
             // A consumer of the batch's entries, not a construction.
             GameEvent::ZoneChanged {
                 object_id,
@@ -2365,8 +2370,9 @@ pub(crate) fn handoff_paused_liminal_copy_token_batch(
             } if from.is_none() && *to == Zone::Battlefield => committed.contains(object_id),
             GameEvent::TokenCreated { object_id, .. } => committed.contains(object_id),
             _ => false,
-        }
-    });
+        },
+        crate::game::triggers::ObserverCollection::ThroughEntryGate,
+    );
 }
 
 /// CR 614.1a + CR 608.2c: a liminal copy batch whose entry paused has finished;

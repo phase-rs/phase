@@ -56,20 +56,35 @@ export function bestOfThreeCeilingForFormat(format: any): any;
  * `endpoint_json` is the player's configured `LlmEndpointConfig`. `history_json`
  * is the engine-authored game log the caller has accumulated from prior
  * `ActionResult`s — engine data handed back for rendering, not a client
- * derivation. Returns `null` when the seat has no decision to make; throws only
- * on a malformed argument, which is a programming error rather than a runtime
+ * derivation.
+ *
+ * `settings_revision` numbers the requesting seat's own provider settings:
+ * the AI controller advances it at every change the player makes to them,
+ * the message-thread toggle included, and the seat's message thread is kept
+ * only under the revision it was opened under
+ * ([`phase_llm::LlmThreadMemory::observe_settings_revision`]). `wall_ms` and
+ * `monotonic_ms` are the caller's wall clock (`Date.now()`) and monotonic
+ * clock (`performance.now()`) as the request is built, which goes out no
+ * earlier. A message thread expires after five idle minutes of real time,
+ * counted from its last request, and the engine counts an idle time only
+ * where both clocks agree on it ([`phase_llm::ClockReading`]).
+ *
+ * Returns `null` when the seat has no decision to make; throws only on a
+ * malformed argument, which is a programming error rather than a runtime
  * outcome.
  */
-export function buildLlmDecisionRequest(difficulty: string, player_id: number, endpoint_json: string, history_json: string): any;
+export function buildLlmDecisionRequest(difficulty: string, player_id: number, endpoint_json: string, history_json: string, settings_revision: number, wall_ms: number, monotonic_ms: number): any;
 
 /**
  * Build the connection-probe request for an endpoint.
  *
  * Stateless by design: a player configures a provider in Settings, usually
  * with no game running, and a test that required a live board would be
- * untestable exactly when it is most needed. The request is built by the same
- * `build_chat_request` a real decision uses, so a probe that succeeds proves
- * the endpoint, credential and model the game path will use.
+ * untestable exactly when it is most needed. The request is built in the shape
+ * a real decision's first request takes (`phase_llm::build_probe_request`:
+ * a message-thread create for a profile on threads), so a probe that succeeds
+ * proves the endpoint, credential, model and request shape the game path will
+ * use.
  */
 export function buildLlmProbeRequest(endpoint_json: string): any;
 
@@ -285,8 +300,17 @@ export function formatConfigForCustomRules(custom_rules: any): any;
  * selected action is admitted only if that contract contains it. There is
  * intentionally no endpoint by which model text becomes a `GameAction` without
  * this check.
+ *
+ * `thread_turn` is the `threadTurn` the request was built with
+ * ([`build_llm_decision_request`]), absent for a self-contained request.
+ * `wall_ms` and `monotonic_ms` are the same two clocks as the reply arrived.
+ * The API read the request no later, so a thread the reply reports lost is
+ * judged by how long it had idled by then, whatever the clocks read when the
+ * request was built: a sleep since the thread's last request is counted, or
+ * leaves the two clocks apart, which reads as a thread that may have
+ * expired.
  */
-export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, provider_label: string, status: number, response_body: string): any;
+export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, thread_turn: number | null | undefined, provider_label: string, status: number, response_body: string, wall_ms: number, monotonic_ms: number): any;
 
 /**
  * Return the authoritative list of selectable Horde challenge decks as a typed
@@ -874,7 +898,7 @@ export interface InitOutput {
     readonly __wbg_statecodechandle_free: (a: number, b: number) => void;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly bestOfThreeCeilingForFormat: (a: any) => any;
-    readonly buildLlmDecisionRequest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly buildLlmDecisionRequest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number];
     readonly buildLlmProbeRequest: (a: number, b: number) => [number, number, number];
     readonly build_ai_card_subset: () => [number, number, number, number];
     readonly cancel_takeback_js: (a: number) => [number, number, number];
@@ -894,7 +918,7 @@ export interface InitOutput {
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
-    readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number];
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];

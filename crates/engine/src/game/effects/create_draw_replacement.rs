@@ -1,3 +1,4 @@
+use crate::game::ability_utils::build_resolved_from_def_with_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ReplacementDefinition, ReplacementPlayerScope,
     ResolvedAbility, RestrictionExpiry,
@@ -9,7 +10,9 @@ use crate::types::replacements::ReplacementEvent;
 /// CR 614.1a + CR 614.6 + CR 514.2 + CR 121.1: Resolve
 /// `Effect::CreateDrawReplacement` — install a one-shot, this-turn "the next
 /// time you would draw a card this turn, [effect] instead" draw replacement
-/// (Words of Worship: gain 5 life; Words of Wilding: create a 2/2 Bear token).
+/// (the Words cycle: Worship gains 5 life, Wilding creates a 2/2 Bear, War deals
+/// 2 damage to any target, Wind has each player return a permanent, Waste has
+/// each opponent discard).
 ///
 /// Mirrors `create_damage_replacement::resolve` for the `Draw` event class: it
 /// builds a `ReplacementDefinition` for `ReplacementEvent::Draw` whose
@@ -44,14 +47,26 @@ pub fn resolve(
     // CR 614.6: the substitute that runs once in place of the replaced draw.
     // Capture it as a `ResolvedAbility` so the post-replacement continuation
     // drain (`apply_post_replacement_resolved_effect`) dispatches it directly
-    // with the source/controller bound at install time (CR 121.1).
-    let mut substitute = ResolvedAbility::new(
-        (**replacement_effect).clone(),
-        vec![],
+    // with the source/controller bound at install time (CR 121.1). Building
+    // from the definition carries its `player_scope` ("each player …" /
+    // "each opponent …") and sub-ability chain.
+    //
+    // CR 115.1c + CR 602.2b: a "target" in the substitute (Words of War's "any
+    // target") was chosen as this ability was activated and surfaced as this
+    // node's target slot; the substitute inherits those announced occurrences
+    // together with their announcement pins (CR 400.7), position for position,
+    // through the occurrence authority. A later draw therefore does not affect a
+    // new object after the chosen one changed zones.
+    let mut substitute = build_resolved_from_def_with_targets(
+        replacement_effect,
         ability.source_id,
         ability.controller,
+        Vec::new(),
     );
-    crate::game::ability_utils::materialize_coin_branches(&mut substitute);
+    substitute.mirror_targets_from(ability);
+    // CR 400.7 + CR 603.7c: referent pins the creating ability inherited stay
+    // keyed on the substitute's non-declaring riders.
+    substitute.set_target_incarnations_recursive(ability.target_incarnations.clone());
 
     // CR 614.1a + CR 113.7a: anchor the installing controller at resolution
     // time so the shield outlives the source permanent's zone/controller.
@@ -79,7 +94,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::scenario::{GameScenario, P0, P1};
-    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::game_state::WaitingFor;
@@ -105,10 +120,13 @@ mod tests {
     fn gain_five_replacement(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::CreateDrawReplacement {
-                replacement_effect: Box::new(Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: 5 },
-                    player: TargetFilter::Controller,
-                }),
+                replacement_effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 5 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
             },
             vec![],
             source,
@@ -244,7 +262,10 @@ mod tests {
         );
         let install = ResolvedAbility::new(
             Effect::CreateDrawReplacement {
-                replacement_effect: Box::new(token_payload),
+                replacement_effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    token_payload,
+                )),
             },
             vec![],
             source,
