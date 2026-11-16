@@ -398,6 +398,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::CardCopyCreated { .. }
         | GameEvent::ObjectConjured { .. } => LogImportance::Essential,
         GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::AbilityActivated { .. }
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::KeywordAbilityActivated { .. }
@@ -607,6 +608,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::Mutated { .. }
         | GameEvent::Augmented { .. }
@@ -953,6 +955,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedForPlayer { .. }
         | GameEvent::PriorityPassed { .. } => LogCategory::Turn,
 
         GameEvent::SpellCast { .. }
@@ -1140,6 +1143,11 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         ],
 
         GameEvent::PhaseChanged { phase } => {
+            vec![text(phase_label(*phase))]
+        }
+        // CR 805.4d: a fanned occurrence logs its phase like the production
+        // event; the bound player is firing context, not log content.
+        GameEvent::PhaseChangedForPlayer { phase, .. } => {
             vec![text(phase_label(*phase))]
         }
 

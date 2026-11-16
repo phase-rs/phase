@@ -1272,6 +1272,36 @@ fn onakke_oathkeeper_scales_per_attacker_and_tracks_live_source_controller() {
     ));
 }
 
+/// CR 508.1h: the counted population is the "for each" rider's — creatures
+/// attacking a planeswalker the Oathkeeper's controller controls. A mixed
+/// declaration (one protected-planeswalker attacker, one player attacker)
+/// owes {1} total: the player attacker never joins the count.
+/// REVERT-FAIL (counted scope lost): the total is {2}.
+#[test]
+fn onakke_oathkeeper_counts_only_planeswalker_attackers() {
+    let (mut runner, _, attacker, second_attacker, protected, _) =
+        build_3p_onakke_oathkeeper_scenario();
+    runner
+        .act(GameAction::DeclareAttackers {
+            attacks: vec![
+                (attacker, AttackTarget::Planeswalker(protected)),
+                (second_attacker, AttackTarget::Player(P1)),
+            ],
+            bands: vec![],
+        })
+        .expect("the mixed declaration must open the tax prompt");
+    match &runner.state().waiting_for {
+        WaitingFor::CombatTaxPayment { total_cost, .. } => {
+            assert_eq!(
+                total_cost.mana_value(),
+                1,
+                "only the planeswalker attacker is counted, got {total_cost:?}"
+            );
+        }
+        other => panic!("expected CombatTaxPayment for the mixed declaration, got {other:?}"),
+    }
+}
+
 fn add_enchantment(scenario: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
     scenario
         .add_creature(player, name, 2, 2)

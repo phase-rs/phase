@@ -1067,6 +1067,7 @@ fn binds_as_player(filter: &TargetFilter) -> bool {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -1643,7 +1644,7 @@ fn defended_scope_uses_source_controller_anchor(
 
     match filter {
         AttackTargetFilter::Player
-        | AttackTargetFilter::Planeswalker
+        | AttackTargetFilter::Planeswalker { .. }
         | AttackTargetFilter::PlayerOrPlaneswalker
         | AttackTargetFilter::Battle
         | AttackTargetFilter::PlayerOrPermanents => true,
@@ -1672,7 +1673,28 @@ mod tests {
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
     use crate::types::keywords::{Keyword, ProtectionTarget};
     use crate::types::player::PlayerId;
+    use crate::types::triggers::AttackTargetFilter;
     use crate::types::zones::Zone;
+
+    /// CR 508.1c: the subtype-defended scope is controller-anchored
+    /// (the matcher compares against `source_controller`), not
+    /// owner-anchored like `Owner`.
+    #[test]
+    fn subtype_planeswalkers_scope_uses_source_controller_anchor() {
+        assert!(
+            defended_scope_uses_source_controller_anchor(&AttackTargetFilter::Planeswalker {
+                subtype: Some("Jace".to_string())
+            }),
+            "Planeswalker {{ subtype: Some }} compares against source_controller"
+        );
+        // Reach-guards: the anchor classifier still separates the two families.
+        assert!(defended_scope_uses_source_controller_anchor(
+            &AttackTargetFilter::Planeswalker { subtype: None }
+        ));
+        assert!(!defended_scope_uses_source_controller_anchor(
+            &AttackTargetFilter::Owner
+        ));
+    }
 
     /// CR 702.16k + CR 608.2c + CR 608.2h: "you gain protection from that
     /// player" is fixed to the declared player target when the effect is

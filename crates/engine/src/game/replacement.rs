@@ -13371,6 +13371,7 @@ fn raise_as_enters_named_choice(
         subject: None,
     });
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         player,
         free_entry: choice_type.free_entry(),
         choice_type,

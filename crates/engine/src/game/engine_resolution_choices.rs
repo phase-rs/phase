@@ -27,6 +27,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::node_has_stack_target_declaration;
 use super::effects;
+use super::effects::choose::PlayerChoiceHolder;
 use super::engine::EngineError;
 use super::turns;
 use super::zones;
@@ -501,6 +502,96 @@ pub(crate) fn settle_resolution_object_choice_after_departure(
         // CR 800.4a: priority never names a player who has left the game.
         set_priority(state, super::players::next_player(state, chooser));
     }
+    resume_instructions_after_departure(state, events)?;
+    Ok(DepartureSettlement::Settled)
+}
+
+/// CR 800.4a + CR 608.2c + CR 609.3: after a player leaves, an open
+/// resolution-time player choice ("choose an opponent", "choose a different
+/// opponent") is brought back in line with the game, exactly as an object
+/// choice is ([`settle_resolution_object_choice_after_departure`]). The
+/// options stored on the prompt were enumerated when it was raised; the
+/// leaving player is no longer a player who can be chosen (CR 608.2d: a player
+/// can't choose an option that's illegal or impossible), so a later answer
+/// naming them must not be accepted or recorded.
+///
+/// - Every stored option is still choosable: nothing changes.
+/// - Some option remains: the prompt is re-offered with those options only, so
+///   a stale selection of the departed player is rejected like any non-option.
+/// - No option remains: the choice is impossible and does nothing (CR 609.3),
+///   exactly as when the instruction is first reached with nothing to choose
+///   from (`choose::resolve`'s empty-options path). It records no answer, and
+///   the resolution's remaining instructions run here: a per-object
+///   repetition's later members find no option the same way, and the
+///   instruction that follows the repetition (Dack Fayden's "each opponent
+///   gains control of the permanent for which they were chosen") performs only
+///   the assignments already made.
+///
+/// A chooser who left is settled by the departure's own prompt teardown
+/// (`abandon_source_bound_resolution_prompt`), and an as-enters choice
+/// answers its parked entry (CR 614.12a), which the departure tears down with
+/// that entry; neither is reconciled here. Reports whether it settled, so a
+/// departed controller's spell this continued is not retired as eliminated.
+pub(crate) fn settle_player_choice_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<DepartureSettlement, EngineError> {
+    let WaitingFor::NamedChoice {
+        player: chooser,
+        choice_type,
+        options,
+        source,
+        free_entry: None,
+        ..
+    } = &state.waiting_for
+    else {
+        return Ok(DepartureSettlement::NotSettled);
+    };
+    if !choice_type.chooses_player()
+        || source.as_ref().is_some_and(|source| {
+            source.binding == crate::types::game_state::NamedChoiceSourceBinding::PendingEntry
+        })
+        || !super::players::is_alive(state, *chooser)
+    {
+        return Ok(DepartureSettlement::NotSettled);
+    }
+    let chooser = *chooser;
+    // The one choosable-seat predicate every option enumeration routes through
+    // (`players::player_exists_for_choice`): a seat that left is not offered.
+    let eligible: Vec<String> = options
+        .iter()
+        .filter(|option| {
+            option.parse::<u8>().is_ok_and(|id| {
+                super::players::player_exists_for_choice(state, crate::types::player::PlayerId(id))
+            })
+        })
+        .cloned()
+        .collect();
+    if eligible.len() == options.len() {
+        return Ok(DepartureSettlement::NotSettled);
+    }
+    if !eligible.is_empty() {
+        if let WaitingFor::NamedChoice { options, .. } = &mut state.waiting_for {
+            *options = eligible;
+        }
+        return Ok(DepartureSettlement::NotSettled);
+    }
+    // CR 609.3: an impossible choice does nothing; dependents of its missing
+    // value are skipped and independent instructions proceed, as on the
+    // empty-options path of `choose::resolve`.
+    state.cost_payment_failed_flag = true;
+    set_priority(state, chooser);
+    resume_instructions_after_departure(state, events)?;
+    Ok(DepartureSettlement::Settled)
+}
+
+/// CR 800.4a: run the instructions a departure's settlement resumed, and
+/// collect the triggers their events produce (a concession is not scanned by
+/// the post-action pipeline).
+fn resume_instructions_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
     // CR 603.10a: the departure's own zone changes are not part of the resumed
     // instructions' event span.
     let base = events.len();
@@ -516,7 +607,7 @@ pub(crate) fn settle_resolution_object_choice_after_departure(
     // resumed instructions pause again (a replacement-order prompt during
     // "Destroy all creatures") the later answer runs on a new event buffer.
     retain_delayed_triggers_of_resumed_span(state, events, base);
-    Ok(DepartureSettlement::Settled)
+    Ok(())
 }
 
 /// CR 603.2 + CR 603.7: retain, for a later priority boundary, the ordinary
@@ -8790,6 +8881,7 @@ pub(super) fn handle_resolution_choice(
         }
         (
             WaitingFor::NamedChoice {
+                decision_subject_id: _,
                 player,
                 options,
                 choice_type,
@@ -8936,24 +9028,13 @@ pub(super) fn handle_resolution_choice(
                 });
             }
 
-            // CR 608.2c + CR 109.4: A `Choose(Player)`/`Choose(Opponent)`
-            // answer binds a resolution-scoped chosen player. Append it to the
-            // pending continuation chain's `chosen_players` so the dependent
-            // effect (`ControllerRef::ChosenPlayer { index }`) and any later
-            // `Choose(Player)` in the same resolution see this choice. The
-            // continuation chain carries the list because it is a
-            // `ResolvedAbility` — unlike `last_named_choice`, which is a
-            // single GameState slot cleared after every drain.
-            if matches!(
-                choice_type,
-                ChoiceType::Player { .. } | ChoiceType::Opponent { .. }
-            ) {
+            if choice_type.chooses_player() {
                 if let Ok(pid) = choice.parse::<u8>() {
-                    if let Some(frame) = state.active_ability_continuation_frame_mut() {
-                        let mut chosen = frame.pending.chain.chosen_players.clone();
-                        chosen.push(crate::types::player::PlayerId(pid));
-                        frame.pending.chain.set_chosen_players_recursive(&chosen);
-                    }
+                    record_own_player_choice(
+                        state,
+                        source.as_ref(),
+                        crate::types::player::PlayerId(pid),
+                    );
                 }
             }
 
@@ -10719,6 +10800,49 @@ pub(crate) fn withdraw_resolution_cast_delayed_triggers(
         );
     }
     Ok(())
+}
+
+/// CR 608.2c + CR 608.2d: record an answered `Choose(Player | Opponent)` into
+/// the holder of this ability's pending player answer, selected through the
+/// one selection the repeat driver binds a per-object member through
+/// (`effects::choose::player_choice_holder_mut`).
+///
+/// - A parked continuation: the answer binds a resolution-scoped chosen
+///   player (CR 608.2c + CR 608.2d) — appended to the chain's `chosen_players`
+///   so the dependent effect (`ControllerRef::ChosenPlayer { index }`) sees it
+///   (a later `Choose(Player)` reads the reference set, not this list); the
+///   chain carries the list because it is a `ResolvedAbility`, unlike
+///   `last_named_choice`, a single GameState slot cleared after every drain —
+///   and it joins the chain's player choice records.
+/// - A parked repeat template: the answer joins the template's player choice
+///   records only; the template keeps its pre-loop chosen-player list.
+///
+/// Either way the answer joins the reference set a later "different"/ordinal
+/// choice of this ability excludes and, when it settles a per-object
+/// repetition, the ability's object→player assignment. CR 614.12a +
+/// CR 607.2d: only an answer to the holder's OWN instruction is recorded — an
+/// entering permanent's "As ~ enters, choose a player" answered
+/// mid-resolution is that object's linked choice and must not shift the
+/// holder's `ChosenPlayer` index or join its records.
+fn record_own_player_choice(
+    state: &mut GameState,
+    source: Option<&crate::types::game_state::NamedChoiceSource>,
+    pid: crate::types::player::PlayerId,
+) {
+    match effects::choose::player_choice_holder_mut(state, |holder| {
+        effects::choose::named_choice_answer_owned_by(source, holder)
+    }) {
+        Some(PlayerChoiceHolder::Continuation(chain)) => {
+            let mut chosen = chain.chosen_players.clone();
+            chosen.push(pid);
+            chain.set_chosen_players_recursive(&chosen);
+            chain.record_prior_player_choice(pid);
+        }
+        Some(PlayerChoiceHolder::RepeatTemplate(template)) => {
+            template.record_prior_player_choice(pid);
+        }
+        None => {}
+    }
 }
 
 fn finish_with_continuation(
@@ -15365,6 +15489,7 @@ mod tests {
             Zone::Battlefield,
         );
         let waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: ChoiceType::CardPredicateGuess {
@@ -15417,6 +15542,7 @@ mod tests {
             Zone::Battlefield,
         );
         let waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::CardPredicate {
