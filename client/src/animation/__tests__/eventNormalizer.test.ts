@@ -365,6 +365,18 @@ describe("normalizeEvents", () => {
     expect(steps[0].effects[0].event.type).toBe("TurnStarted");
   });
 
+  it.each<GameEvent>([
+    { type: "ShortcutRepetition", data: { controller: 0, repetition: 3 } },
+    { type: "ResolutionHalted", data: { involved: [4, 5] } },
+  ])("$type is non-visual while the events around it keep their steps", (marker) => {
+    const turnStarted: GameEvent = { type: "TurnStarted", data: { player_id: 1, turn_number: 2 } };
+
+    expect(normalizeEvents([marker, marker])).toEqual([]);
+    const steps = normalizeEvents([marker, turnStarted]);
+    expect(steps).toHaveLength(1);
+    expect(steps[0].effects[0].event.type).toBe("TurnStarted");
+  });
+
   it("BlockersDeclared is non-visual (no animation step)", () => {
     const events: GameEvent[] = [
       { type: "BlockersDeclared", data: { assignments: [[3, 1]] } },

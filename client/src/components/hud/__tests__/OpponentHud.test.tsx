@@ -349,6 +349,23 @@ describe("OpponentHud", () => {
     expect(screen.queryByText("Speed")).toBeNull();
   });
 
+  it("renders the engine's unbounded life as ∞ in that opponent's tab only", () => {
+    // Only `life_magnitude` is seeded, so no `UnboundedBadge` can supply the title.
+    useGameStore.setState({
+      gameState: createGameState({ derived: { life_magnitude: { 2: "Unbounded" } } }),
+    });
+
+    render(<OpponentHud />);
+
+    const unboundedTab = document.querySelector<HTMLElement>('button[data-player-hud="2"]')!;
+    const readout = within(unboundedTab).getByText("∞");
+    expect(readout).toHaveAttribute("title", "Unbounded life (∞)");
+    expect(readout).toHaveAttribute("aria-label", "Unbounded life (∞)");
+    const finiteTab = document.querySelector<HTMLElement>('button[data-player-hud="3"]')!;
+    expect(within(finiteTab).getByText("40")).not.toHaveAttribute("title");
+    expect(within(finiteTab).queryByText("∞")).toBeNull();
+  });
+
   it("hides zero poison counters", () => {
     render(<OpponentHud />);
 

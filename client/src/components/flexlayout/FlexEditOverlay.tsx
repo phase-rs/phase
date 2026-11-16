@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -9,18 +10,19 @@ import { ZoneSplitter } from "./ZoneSplitter.tsx";
 /** Widget zones the overlay outlines + labels (the `data-flex-zone` values that
  *  map to a `settings:flexLayout.zones.*` key). The two board rows used only for
  *  splitter placement ("opp-row"/"player-row") are intentionally excluded. */
-const LABELLED_ZONES = new Set([
-  "playerHud",
-  "opponentHud",
-  "stackPanel",
-  "logPanel",
-  "actionRail",
-  "playerPiles",
-  "opponentPiles",
+const ZONE_LABEL_KEYS: ReadonlyMap<string, ParseKeys<"settings">> = new Map([
+  ["playerHud", "flexLayout.zones.playerHud"],
+  ["opponentHud", "flexLayout.zones.opponentHud"],
+  ["stackPanel", "flexLayout.zones.stackPanel"],
+  ["logPanel", "flexLayout.zones.logPanel"],
+  ["actionRail", "flexLayout.zones.actionRail"],
+  ["playerPiles", "flexLayout.zones.playerPiles"],
+  ["opponentPiles", "flexLayout.zones.opponentPiles"],
 ]);
 
 interface ZoneRect {
   key: string;
+  labelKey: ParseKeys<"settings">;
   left: number;
   top: number;
   width: number;
@@ -46,10 +48,11 @@ function measure(): Measured {
   const zones: ZoneRect[] = [];
   for (const el of document.querySelectorAll<HTMLElement>("[data-flex-zone]")) {
     const key = el.dataset.flexZone ?? "";
-    if (!LABELLED_ZONES.has(key)) continue;
+    const labelKey = ZONE_LABEL_KEYS.get(key);
+    if (labelKey === undefined) continue;
     const r = el.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) continue; // not currently rendered
-    zones.push({ key, left: r.left, top: r.top, width: r.width, height: r.height });
+    zones.push({ key, labelKey, left: r.left, top: r.top, width: r.width, height: r.height });
   }
   return {
     topBoundary: oppRow ? oppRow.getBoundingClientRect().bottom : null,
@@ -120,7 +123,7 @@ function FlexEditOverlayInner() {
                 the grip rides the draggable element. */}
             <span className="absolute left-0 top-0 flex items-center gap-1 rounded-tl-lg rounded-br-md bg-sky-400 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-slate-950">
               <span aria-hidden>⠿</span>
-              {t(`flexLayout.zones.${z.key}`)}
+              {t(z.labelKey)}
             </span>
           </div>
         ))}

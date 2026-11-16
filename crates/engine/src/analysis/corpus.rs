@@ -151,7 +151,7 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         family: ResourceFamily::Mana,
         win_kind: WinKind::Advantage,
         gated_on: None,
-        deferral: Some(DeferralBucket::Other),
+        deferral: None,
     },
     ComboRow {
         name: "Grim Monolith + Power Artifact",
@@ -566,8 +566,8 @@ pub(crate) const CORPUS: &[ComboRow] = &[
         cards: &["Helm of Obedience", "Rest in Peace"],
         family: ResourceFamily::Mill,
         win_kind: WinKind::Decking,
-        gated_on: None,
-        deferral: Some(DeferralBucket::Other),
+        gated_on: Some("Helm of Obedience"),
+        deferral: None,
     },
     ComboRow {
         name: "Food Chain + Squee, the Immortal",
@@ -636,6 +636,14 @@ pub(crate) const CORPUS: &[ComboRow] = &[
             "Ghostly Flicker",
         ],
         family: ResourceFamily::Turns,
+        win_kind: WinKind::Advantage,
+        gated_on: None,
+        deferral: None,
+    },
+    ComboRow {
+        name: "Displacer Kitten + Blazing Firesinger",
+        cards: &["Displacer Kitten", "Blazing Firesinger"],
+        family: ResourceFamily::Mana,
         win_kind: WinKind::Advantage,
         gated_on: None,
         deferral: None,
@@ -758,6 +766,7 @@ pub(crate) enum ComboDriver {
 pub(crate) const DRIVERS: &[(usize, ComboDriver)] = &[
     (0, ComboDriver::Offline(drive_offline_heliod_ballista)),
     (1, ComboDriver::Offline(drive_offline_kilo_freed_relic)),
+    (3, ComboDriver::Offline(drive_offline_basalt_rings)),
     (4, ComboDriver::Offline(drive_offline_grim_power)),
     (6, ComboDriver::Offline(drive_offline_devoted_vizier)),
     (9, ComboDriver::Offline(drive_offline_bloom_freed)),
@@ -781,6 +790,7 @@ pub(crate) const DRIVERS: &[(usize, ComboDriver)] = &[
         60,
         ComboDriver::Offline(drive_archaeomancer_time_warp_offer),
     ),
+    (61, ComboDriver::Offline(drive_kitten_firesinger_offer)),
 ];
 
 /// Number of rows in the corpus.
@@ -803,7 +813,7 @@ pub fn row(idx: usize) -> &'static ComboRow {
 pub(crate) fn classify_status(row: &ComboRow, outcome: Option<LoopCertificate>) -> RowStatus {
     match outcome {
         Some(cert)
-            if cert.win_kind == row.win_kind
+            if cert.win_kind == Some(row.win_kind)
                 && cert
                     .unbounded
                     .iter()
@@ -811,7 +821,7 @@ pub(crate) fn classify_status(row: &ComboRow, outcome: Option<LoopCertificate>) 
         {
             RowStatus::Confirmed {
                 unbounded: cert.unbounded,
-                win_kind: cert.win_kind,
+                win_kind: row.win_kind,
             }
         }
         Some(cert) => RowStatus::Failed {
@@ -1268,6 +1278,7 @@ pub(crate) fn activate_and_resolve(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .is_err()
     {
@@ -1628,6 +1639,7 @@ fn drive_ballista_ping(probe: &mut LoopProbe, ballista: ObjectId, ability_index:
         .act(GameAction::ActivateAbility {
             source_id: ballista,
             ability_index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Ballista remove-counter ability");
     // The ability targets "any target"; choose the opponent.
@@ -1701,6 +1713,106 @@ pub(crate) fn drive_offline_grim_power(db: &CardDatabase) -> Option<LoopCertific
             activate_and_resolve(probe, grim, tap_idx, None);
         }
     })
+}
+
+/// BASALT MONOLITH + RINGS OF BRIGHTHEARTH — infinite colorless mana. Basalt Monolith ("{T}:
+/// Add {C}{C}{C}." / "{3}: Untap this artifact.") taps for {C}{C}{C}, then activates its untap;
+/// Rings of Brighthearth ("Whenever you activate an ability, if it isn't a mana ability, you may
+/// pay {2}. If you do, copy that ability. You may choose new targets for the copy.") copies it
+/// (CR 707.10). The copy resolves first and untaps Monolith, which taps again while the original
+/// waits on the stack (CR 605.3a: a mana ability is activated whenever its controller has
+/// priority), and the original then untaps it once more. A steady cycle starts and ends with
+/// Monolith tapped: two taps for {C}x6 in, {3} + {2} out, +{C} net.
+pub(crate) fn drive_offline_basalt_rings(db: &CardDatabase) -> Option<LoopCertificate> {
+    drive_basalt_rings(db, true)
+}
+
+/// [`drive_offline_basalt_rings`] answering Rings' "you may pay {2}" with `copy`. Declining
+/// leaves one tap per {3} untap, so no loop stands.
+pub(crate) fn drive_basalt_rings(db: &CardDatabase, copy: bool) -> Option<LoopCertificate> {
+    let (board, cycle) = basalt_rings_board(db)?;
+    run_combo(board, |probe| {
+        let _ = cycle.run(probe, copy);
+    })
+}
+
+/// The Basalt Monolith + Rings of Brighthearth board and the cycle that drives it.
+pub(crate) fn basalt_rings_board(db: &CardDatabase) -> Option<(ComboBoard, BasaltRingsCycle)> {
+    let board = build_board(db, CORPUS[3].cards)?;
+    let monolith = board.ids[0];
+    let untap_idx = ability_index_where(board.runner.state(), monolith, is_untap_effect)?;
+    let tap_idx = ability_index_where(board.runner.state(), monolith, is_mana_effect)?;
+    Some((
+        board,
+        BasaltRingsCycle {
+            monolith,
+            untap_idx,
+            tap_idx,
+        },
+    ))
+}
+
+/// One Basalt Monolith + Rings of Brighthearth cycle: tap Monolith if it is untapped, activate
+/// its untap, answer Rings' "you may pay {2}", and tap Monolith whenever it is untapped while P0
+/// holds priority, until the stack is empty.
+pub(crate) struct BasaltRingsCycle {
+    pub(crate) monolith: ObjectId,
+    untap_idx: usize,
+    tap_idx: usize,
+}
+
+impl BasaltRingsCycle {
+    /// Drives one cycle, answering Rings' prompt with `copy`. `Some(answered)` when the cycle
+    /// reached an empty-stack priority window, `answered` saying whether Rings' prompt came;
+    /// `None` when an action was refused or an unexpected prompt appeared.
+    pub(crate) fn run(&self, probe: &mut LoopProbe, copy: bool) -> Option<bool> {
+        let tapped = |probe: &LoopProbe| {
+            probe
+                .runner()
+                .state()
+                .objects
+                .get(&self.monolith)
+                .is_some_and(|object| object.tapped)
+        };
+        let activate = |probe: &mut LoopProbe, ability_index: usize| {
+            probe
+                .act(GameAction::ActivateAbility {
+                    source_id: self.monolith,
+                    ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+                })
+                .ok()
+        };
+        if !tapped(probe) {
+            activate(probe, self.tap_idx)?;
+        }
+        activate(probe, self.untap_idx)?;
+        let mut answered = false;
+        for _ in 0..32 {
+            let state = probe.runner().state();
+            let action = match &state.waiting_for {
+                // CR 605.3a: tap the untapped Monolith for mana whenever P0 holds priority,
+                // including between the copy and the original untap resolving.
+                WaitingFor::Priority { .. } if !tapped(probe) => {
+                    activate(probe, self.tap_idx)?;
+                    continue;
+                }
+                WaitingFor::Priority { .. } if state.stack.is_empty() => return Some(answered),
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                    GameAction::PassPriority
+                }
+                // Rings' "you may pay {2}": accepting copies the untap.
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    answered = true;
+                    GameAction::DecideOptionalEffect { accept: copy }
+                }
+                WaitingFor::CopyRetarget { .. } => GameAction::KeepAllCopyTargets,
+                _ => return None,
+            };
+            probe.act(action).ok()?;
+        }
+        None
+    }
 }
 
 /// #47 SPIKE FEEDER + ARCHANGEL OF THUNE — infinite +1/+1 counters + life. Spike
@@ -2362,6 +2474,7 @@ fn drive_mana_outlet_offer(
             .act(GameAction::ActivateAbility {
                 source_id: outlet,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .ok()?;
         runner
@@ -2510,6 +2623,7 @@ pub(crate) fn drive_grove_marvin_offer(db: &CardDatabase) -> Option<LoopCertific
         runner.act(GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })?;
         if matches!(
             runner.state().waiting_for,
@@ -2660,6 +2774,7 @@ pub(crate) fn drive_najeela_urtet_offer(db: &CardDatabase) -> Option<LoopCertifi
                     Some(GameAction::ActivateAbility {
                         source_id: source,
                         ability_index: activated(state, source, untapped.is_some())?,
+                        payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                     })
                 })
                 .unwrap_or(GameAction::PassPriority)
@@ -2756,6 +2871,50 @@ pub(crate) fn drive_archaeomancer_time_warp_offer(db: &CardDatabase) -> Option<L
             }
             _ => pass_or_decline(state),
         }
+    })
+}
+
+/// CR 722.3c + CR 603.2 + CR 400.7: Blazing Firesinger ("This creature enters prepared.") casts
+/// its prepared Seething Song copy ("Add {R}{R}{R}{R}{R}.") for {2}{R}, and Displacer Kitten
+/// ("Whenever you cast a noncreature spell, exile up to one target nonland permanent you control,
+/// then return that card to the battlefield under its owner's control.") blinks Firesinger, which
+/// re-enters prepared as a new object with a new copy in exile, cycle by cycle until the engine
+/// offers the loop. Firesinger is cast from hand onto six Mountains, so it enters prepared through
+/// its own replacement.
+pub(crate) fn drive_kitten_firesinger_offer(db: &CardDatabase) -> Option<LoopCertificate> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Displacer Kitten", Zone::Battlefield, db);
+    let firesinger = scenario.add_real_card(P0, "Blazing Firesinger", Zone::Hand, db);
+    for _ in 0..6 {
+        scenario.add_real_card(P0, "Mountain", Zone::Battlefield, db);
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = crate::types::game_state::LoopDetectionMode::Interactive;
+    let card_id = runner.state().objects.get(&firesinger)?.card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: firesinger,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: Default::default(),
+        })
+        .ok()?;
+    answer_to_offer(&mut runner, 400, |state| match &state.waiting_for {
+        WaitingFor::Priority { player }
+            if *player == P0
+                && state.stack.is_empty()
+                && state
+                    .objects
+                    .get(&firesinger)
+                    .is_some_and(|object| object.prepared.is_some()) =>
+        {
+            GameAction::CastPreparedCopy { source: firesinger }
+        }
+        WaitingFor::TriggerTargetSelection { .. } => GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(firesinger)),
+        },
+        _ => pass_or_decline(state),
     })
 }
 

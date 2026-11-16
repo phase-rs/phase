@@ -223,6 +223,14 @@ fn combat_board(name: &str, text: &str, accept: bool) -> CombatBoard {
     scenario.add_creature_from_oracle(P0, name, 3, 3, text);
     let c1 = scenario.add_creature(P0, "c1", 2, 2).id();
     let c2 = scenario.add_creature(P0, "c2", 2, 2).id();
+    // CR 118.3 + CR 608.2d: fund the {2} (and Neyith's {2}{R/G}, Green-payable)
+    // offers with battlefield lands so the declined legs run the genuine
+    // decline branch instead of being suppressed as unpayable. Accept legs
+    // sharing this helper are unaffected: extra untapped lands change no
+    // assertion they make.
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
     scenario.with_library_top(P0, &["L1", "L2"]);
     let mut runner = scenario.build();
     runner.advance_to_phase(Phase::BeginCombat);
@@ -291,6 +299,11 @@ fn lorthos_declined_declared_permanent_does_not_untap() {
         .id();
     let o1 = scenario.add_creature(P1, "o1", 2, 2).id();
     let o2 = scenario.add_creature(P1, "o2", 2, 2).id();
+    // CR 118.3 + CR 608.2d: fund the printed {8} (any color pays generic) so
+    // the declined leg runs the genuine decline branch.
+    for _ in 0..8 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
     let mut runner = scenario.build();
     for id in [o1, o2] {
         runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
@@ -365,11 +378,22 @@ fn localized_destruction_declined_destroys_every_creature() {
     assert_eq!(runner.state().objects[&o1].zone, Zone::Graveyard);
 }
 
-/// J-2e: paid, the creature whose power equals the energy paid survives.
-/// GREEN AT BASE: reach guard of J-2c; preservation only.
+/// J-2e VACUITY PIN (PR #10008 round 2, B3a): the "pay one or more {E}" clause
+/// is deliberately unimplemented — a min-1 variable payment needing prompt-min
+/// machinery (see `one_or_more_energy_range_declines_while_neighbors_parse` in
+/// `parser::oracle_effect::imperative`). Accepting the optional therefore
+/// spends no energy and applies no power filter: c1's survival rides the
+/// pre-existing unfiltered indestructible grant, a filter gap that pre-dates
+/// this PR (report for triage; out of scope here). This row pins the decline:
+/// energy kept plus the resolution assertions that still hold.
 #[test]
-fn localized_destruction_paid_spares_the_matching_creature() {
+fn localized_destruction_accepted_pay_unimplemented_energy_kept() {
     let (runner, c1, o1) = localized_destruction(true);
+    assert_eq!(
+        runner.state().players[0].energy,
+        1,
+        "no energy spent: the pay clause is unimplemented"
+    );
     assert_eq!(runner.state().objects[&c1].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&o1].zone, Zone::Graveyard);
 }
@@ -492,6 +516,7 @@ fn wyll(accept: bool) -> (GameRunner, ObjectId, ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: wyll,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("specialize is activated");
     runner
@@ -804,6 +829,11 @@ fn syn_reanimate_that_declined_resolves_nothing() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "SynReThat", 3, 3, SYN_REANIMATE_THAT);
+    // CR 118.3 + CR 608.2d: fund the {2} offer (same rule as `combat_board`,
+    // which this setup does not share) so the decline is genuine.
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
     let bear = scenario.add_creature_to_graveyard(P0, "Gy Bear", 2, 2).id();
     let mut runner = scenario.build();
     runner.advance_to_phase(Phase::BeginCombat);
@@ -890,6 +920,10 @@ fn krenko_declined_creates_no_goblin() {
         })
         .id();
     scenario.with_mana_pool(P0, mana(1, ManaType::Colorless));
+    // CR 118.3 + CR 608.2d: fund the {R} offer with a Mountain (the pool
+    // colorless is consumed by the Shatter cast; the Mountain survives in the
+    // same PreCombatMain phase).
+    scenario.add_basic_land(P0, ManaColor::Red);
     let mut runner = scenario.build();
     grant_priority(&mut runner, P0);
     runner.cast(shatter).target_object(artifact).commit();
@@ -921,6 +955,9 @@ fn kalastria_highborn_declined_changes_no_life() {
         })
         .id();
     scenario.with_mana_pool(P0, mana(1, ManaType::Colorless));
+    // CR 118.3 + CR 608.2d: fund the {B} offer with a Swamp (same-phase
+    // survival, as in the Krenko leg above).
+    scenario.add_basic_land(P0, ManaColor::Black);
     let mut runner = scenario.build();
     grant_priority(&mut runner, P0);
     runner.cast(kill).target_object(vampire).commit();
@@ -941,6 +978,13 @@ fn hellkite_charger_declined_adds_no_combat_phase() {
     let hellkite = scenario
         .add_creature_from_oracle(P0, "Hellkite Charger", 5, 5, HELLKITE_CHARGER)
         .id();
+    // CR 118.3 + CR 608.2d: fund the exact printed {5}{R}{R} cost.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
     let mut runner = scenario.build();
     attack_with(&mut runner, hellkite);
     let events = drive(&mut runner, &[], false, vec![]);
@@ -973,18 +1017,22 @@ fn hollow_specter_declined_reveals_and_discards_nothing() {
     assert_eq!(runner.state().players[1].hand.len(), 2);
 }
 
-/// J-6 (b2) reach guard at X = 1: paid, the gated reveal and discard effects
-/// resolve. GREEN AT BASE; preservation only. KNOWN-BAD (residue): at X = 1
-/// the whole hand is revealed and nothing is discarded, at base and on the
-/// candidate (measured: 2 cards revealed, P1's hand 2, graveyard 0). This row
-/// pins only the resolved kinds.
+/// J-6 (b2) at X = 1, paid. CR 701.20a: "reveals X cards from their hand and
+/// you choose one of them" is a counted reveal whose chooser rider the reveal
+/// verb does not read, so the clause is an honest gap instead of a whole-hand
+/// reveal (the count-position migration; base resolved `[Reveal, DiscardCard]`
+/// with both cards revealed). The discard after the gap still resolves and
+/// discards nothing: no card was chosen.
 #[test]
-fn hollow_specter_paid_x1_resolves_the_reveal_and_discard_kinds() {
-    let (_, events) = hollow_specter(true);
-    assert_eq!(
-        resolved(&events),
-        vec![EffectKind::Reveal, EffectKind::DiscardCard]
-    );
+fn hollow_specter_paid_x1_reaches_the_honest_reveal_gap() {
+    let (runner, events) = hollow_specter(true);
+    let kinds = resolved(&events);
+    // Reach guard: the declined row resolves nothing, so a non-empty list is
+    // the paid branch running.
+    assert!(!kinds.is_empty());
+    assert_eq!(kinds, vec![EffectKind::DiscardCard]);
+    assert_eq!(runner.state().players[1].hand.len(), 2);
+    assert!(runner.state().players[1].graveyard.is_empty());
 }
 
 /// J-6 (b3): Ardent Dustspeaker declined: nothing is exiled and no play
@@ -1014,6 +1062,13 @@ fn kheru_lich_lord_declined_returns_nothing() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::Untap);
     scenario.add_creature_from_oracle(P0, "Kheru Lich Lord", 4, 4, KHERU_LICH_LORD);
+    // CR 118.3 + CR 608.2d: fund the printed {2}{B} with lands — pool funding
+    // would empty on the Untap→Upkeep transition (CR 106.4), so lands are
+    // mandatory, not stylistic.
+    scenario.add_basic_land(P0, ManaColor::Black);
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
     let bear = scenario.add_creature_to_graveyard(P0, "Gy Bear", 2, 2).id();
     let mut runner = scenario.build();
     runner.advance_to_phase(Phase::Upkeep);

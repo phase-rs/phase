@@ -1,3 +1,4 @@
+use crate::game::ability_utils::build_resolved_from_def_with_targets;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ReplacementDefinition, ReplacementPlayerScope,
     ResolvedAbility, RestrictionExpiry,
@@ -9,11 +10,14 @@ use crate::types::replacements::ReplacementEvent;
 /// CR 614.1a + CR 614.6 + CR 514.2 + CR 121.1: Resolve
 /// `Effect::CreateDrawReplacement` — install a one-shot, this-turn "the next
 /// time you would draw a card this turn, [effect] instead" draw replacement
-/// (Words of Worship: gain 5 life; Words of Wilding: create a 2/2 Bear token).
+/// (the Words cycle: Worship gains 5 life, Wilding creates a 2/2 Bear, War deals
+/// 2 damage to any target, Wind has each player return a permanent, Waste has
+/// each opponent discard).
 ///
 /// Mirrors `create_damage_replacement::resolve` for the `Draw` event class: it
 /// builds a `ReplacementDefinition` for `ReplacementEvent::Draw` whose
-/// substitute is carried in `runtime_execute` (a `ResolvedAbility`, so the
+/// substitute is named by `runtime_execute` (a handle to a `ResolvedAbility` in
+/// `GameState::replacement_continuations`, so the
 /// heterogeneous payload Effect resolves through the post-replacement
 /// continuation drain in `draw_through_replacement`). The shield is one-shot
 /// (`consume_on_apply`, CR 614.6) and dropped at end-of-turn cleanup
@@ -43,13 +47,26 @@ pub fn resolve(
     // CR 614.6: the substitute that runs once in place of the replaced draw.
     // Capture it as a `ResolvedAbility` so the post-replacement continuation
     // drain (`apply_post_replacement_resolved_effect`) dispatches it directly
-    // with the source/controller bound at install time (CR 121.1).
-    let substitute = ResolvedAbility::new(
-        (**replacement_effect).clone(),
-        vec![],
+    // with the source/controller bound at install time (CR 121.1). Building
+    // from the definition carries its `player_scope` ("each player …" /
+    // "each opponent …") and sub-ability chain.
+    //
+    // CR 115.1c + CR 602.2b: a "target" in the substitute (Words of War's "any
+    // target") was chosen as this ability was activated and surfaced as this
+    // node's target slot; the substitute inherits those announced occurrences
+    // together with their announcement pins (CR 400.7), position for position,
+    // through the occurrence authority. A later draw therefore does not affect a
+    // new object after the chosen one changed zones.
+    let mut substitute = build_resolved_from_def_with_targets(
+        replacement_effect,
         ability.source_id,
         ability.controller,
+        Vec::new(),
     );
+    substitute.mirror_targets_from(ability);
+    // CR 400.7 + CR 603.7c: referent pins the creating ability inherited stay
+    // keyed on the substitute's non-declaring riders.
+    substitute.set_target_incarnations_recursive(ability.target_incarnations.clone());
 
     // CR 614.1a + CR 113.7a: anchor the installing controller at resolution
     // time so the shield outlives the source permanent's zone/controller.
@@ -57,12 +74,12 @@ pub fn resolve(
     // time you would draw a card this turn, ... instead"), not the instruction count.
     let mut shield = ReplacementDefinition::new(ReplacementEvent::Draw)
         .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw);
-    shield.runtime_execute = Some(Box::new(substitute));
     shield.consume_on_apply = true; // CR 614.6: one-shot ("the next time").
     shield.expiry = Some(RestrictionExpiry::EndOfTurn); // CR 514.2: "this turn".
     shield.source_controller = Some(ability.controller);
     shield.valid_player = Some(ReplacementPlayerScope::You);
 
+    shield.runtime_execute = Some(state.install_replacement_continuation(substitute));
     state.pending_damage_replacements.push(shield);
 
     events.push(GameEvent::EffectResolved {
@@ -77,9 +94,13 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::scenario::{GameScenario, P0, P1};
-    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TargetFilter};
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::ObjectId;
+    use crate::types::mana::{ManaType, ManaUnit};
+    use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -99,10 +120,13 @@ mod tests {
     fn gain_five_replacement(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::CreateDrawReplacement {
-                replacement_effect: Box::new(Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: 5 },
-                    player: TargetFilter::Controller,
-                }),
+                replacement_effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 5 },
+                        player: TargetFilter::Controller,
+                    },
+                )),
             },
             vec![],
             source,
@@ -238,7 +262,10 @@ mod tests {
         );
         let install = ResolvedAbility::new(
             Effect::CreateDrawReplacement {
-                replacement_effect: Box::new(token_payload),
+                replacement_effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    token_payload,
+                )),
             },
             vec![],
             source,
@@ -360,5 +387,102 @@ mod tests {
         crate::game::effects::draw::resolve(&mut state, &draw_one_for(P1, source), &mut events)
             .unwrap();
         assert!(state.players[1].hand.contains(&p1_top));
+    }
+
+    /// Words of Worship, activated twice, then three draws (CR 614.1a + CR 614.6 +
+    /// CR 616.1). Card: "{1}: The next time you would draw a card this
+    /// turn, you gain 5 life instead." Each activation installs its own one-shot
+    /// shield, so the first two draws are each replaced by 5 life and the third draws
+    /// normally. The two substitutes are `==` and live under distinct arena handles.
+    /// The first draw parks a CR 616.1 choice between the two floating shields (the
+    /// engine's choice surface, recorded at base); floating shields are addressed by
+    /// the `ObjectId(0)` sentinel and have no exact definition identity, so no saved
+    /// preference can be offered for it.
+    #[test]
+    fn words_of_worship_twice_replaces_two_draws_under_distinct_handles() {
+        const WORDS_OF_WORSHIP: &str =
+            "{1}: The next time you would draw a card this turn, you gain 5 life instead.";
+
+        let mut sc = GameScenario::new();
+        sc.at_phase(Phase::PreCombatMain);
+        let words = sc
+            .add_enchantment_from_oracle(P0, "Words of Worship", WORDS_OF_WORSHIP)
+            .id();
+        for name in ["Mountain", "Forest", "Island", "Plains"] {
+            sc.add_card_to_library_top(P0, name);
+        }
+        let draws: Vec<ObjectId> = (0..3)
+            .map(|_| {
+                sc.add_spell_to_hand_from_oracle(P0, "Draw Spell", false, "Draw a card.")
+                    .id()
+            })
+            .collect();
+        sc.with_mana_pool(
+            P0,
+            vec![
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+                ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ],
+        );
+        let mut runner = sc.build();
+        for _ in 0..2 {
+            runner.activate(words, 0).resolve();
+        }
+
+        let state = runner.state();
+        assert_eq!(
+            state.pending_damage_replacements.len(),
+            2,
+            "reach guard: each activation installed its own shield"
+        );
+        let (first, second) = (
+            &state.pending_damage_replacements[0],
+            &state.pending_damage_replacements[1],
+        );
+        assert!(
+            first.runtime_execute.is_some() && first.runtime_execute != second.runtime_execute,
+            "each activation installs its own continuation"
+        );
+        assert_eq!(
+            state.replacement_rider(first),
+            state.replacement_rider(second),
+            "the two substitutes are the same effect"
+        );
+        assert_eq!(state.replacement_continuations.len(), 2);
+
+        let mut deltas = Vec::new();
+        for (n, spell) in draws.into_iter().enumerate() {
+            let life_before = runner.life(P0);
+            // The cast card leaves the hand; the delta counts only drawn cards.
+            let hand_before = runner.state().players[0].hand.len() as i64 - 1;
+            runner.cast(spell).resolve();
+            if let WaitingFor::ReplacementChoice {
+                candidate_count,
+                remember_identity,
+                ..
+            } = &runner.state().waiting_for
+            {
+                assert_eq!(n, 0, "only the first draw meets both shields");
+                assert_eq!(*candidate_count, 2);
+                assert!(
+                    remember_identity.is_none()
+                        && crate::game::replacement::replacement_auto_choice_key(runner.state())
+                            .is_none(),
+                    "floating shields offer no saved preference"
+                );
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .unwrap();
+                runner.advance_until_stack_empty();
+            } else {
+                assert_ne!(n, 0, "the first draw parks the CR 616.1 choice");
+            }
+            deltas.push((
+                runner.life(P0) - life_before,
+                runner.state().players[0].hand.len() as i64 - hand_before,
+            ));
+        }
+        assert_eq!(deltas, vec![(5, 0), (5, 0), (0, 1)]);
+        assert!(runner.state().replacement_auto_choices.is_empty());
     }
 }

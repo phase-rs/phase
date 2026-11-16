@@ -11,6 +11,7 @@ use engine::game::scenario::{GameRunner, GameScenario};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -36,8 +37,18 @@ fn damage(runner: &GameRunner, id: ObjectId) -> i32 {
 /// window: gift promise, target selection (targets fed in declared order), and
 /// priority passes. Returns once the stack empties.
 fn drive_cast(runner: &mut GameRunner, spell: ObjectId, targets: &[ObjectId], promise_gift: bool) {
+    let _events = drive_cast_collecting(runner, spell, targets, promise_gift);
+}
+
+fn drive_cast_collecting(
+    runner: &mut GameRunner,
+    spell: ObjectId,
+    targets: &[ObjectId],
+    promise_gift: bool,
+) -> Vec<GameEvent> {
+    let mut events = Vec::new();
     let card_id = runner.state().objects[&spell].card_id;
-    runner
+    let result = runner
         .act(GameAction::CastSpell {
             object_id: spell,
             card_id,
@@ -45,38 +56,44 @@ fn drive_cast(runner: &mut GameRunner, spell: ObjectId, targets: &[ObjectId], pr
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast spell");
+    events.extend(result.events);
 
     let mut next_target = 0usize;
     for _ in 0..60 {
         match &runner.state().waiting_for {
             WaitingFor::ManaPayment { .. } => {
-                runner.act(GameAction::PassPriority).expect("mana");
+                let result = runner.act(GameAction::PassPriority).expect("mana");
+                events.extend(result.events);
             }
             WaitingFor::OptionalCostChoice { .. } => {
-                runner
+                let result = runner
                     .act(GameAction::DecideOptionalCost { pay: promise_gift })
                     .expect("decide gift");
+                events.extend(result.events);
             }
             WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                 let opponent = candidates[0];
-                runner
+                let result = runner
                     .act(GameAction::ChooseGiftRecipient { opponent })
                     .expect("choose gift recipient");
+                events.extend(result.events);
             }
             WaitingFor::TargetSelection { .. } => {
                 let t = targets[next_target];
                 next_target += 1;
-                runner
+                let result = runner
                     .act(GameAction::ChooseTarget {
                         target: Some(TargetRef::Object(t)),
                     })
                     .expect("choose target");
+                events.extend(result.events);
             }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() {
-                    return;
+                    return events;
                 }
-                runner.act(GameAction::PassPriority).expect("resolve");
+                let result = runner.act(GameAction::PassPriority).expect("resolve");
+                events.extend(result.events);
             }
             other => panic!("unexpected window: {other:?}"),
         }
@@ -267,17 +284,42 @@ fn time_to_feed_incumbent_fight_unchanged_by_b2_guard() {
     let mut runner = scenario.build();
     // Declared order: opponent creature first ("Choose target creature an opponent
     // controls"), then the you-control fighter.
-    drive_cast(&mut runner, spell, &[opp, mine], false);
+    let events = drive_cast_collecting(&mut runner, spell, &[opp, mine], false);
+    assert_eq!(
+        runner.state().objects[&opp].zone,
+        engine::types::zones::Zone::Battlefield
+    );
     assert_eq!(
         damage(&runner, opp),
         2,
         "opponent (4/4) takes 2 from your 2/3 fighter"
     );
     assert_eq!(
-        damage(&runner, mine),
-        4,
-        "your fighter takes 4 from the opponent 4/4"
+        runner.state().objects[&mine].zone,
+        engine::types::zones::Zone::Graveyard,
+        "your fighter takes lethal 4 damage from the opponent 4/4"
     );
+    assert_eq!(runner.state().players[P0.0 as usize].life, 20);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(id),
+            amount: 2,
+            is_combat: false,
+            ..
+        } if *source_id == mine && *id == opp
+    )));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(id),
+            amount: 4,
+            is_combat: false,
+            ..
+        } if *source_id == opp && *id == mine
+    )));
 }
 
 const TAIL_SWIPE: &str =

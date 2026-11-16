@@ -9,16 +9,20 @@ import type {
   AiDecisionDiagnosticReceipt,
   AiLlmProposalResult,
   AiProposalSubmission,
+  ContestDriveResult,
   FormatConfig,
   GameAction,
   GameEvent,
   GameState,
   LegalActionsResult,
+  LlmClockReading,
   LlmDecisionRequestResult,
   MatchConfig,
   ReplayHeader,
   RestoredStackAutomationPresentation,
   SubmitResult,
+  TakebackReply,
+  TakebackVote,
   ViewerSnapshot,
   ViewerTransitionSnapshot,
 } from "./types";
@@ -33,7 +37,16 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
+import type {
+  BracketDeckRequest,
+  BracketEstimateRequest,
+} from "../types/bracketEstimate";
+import type { DeckSignals } from "../types/deckSignals";
+import type { EngineQueryArgs, EngineQueryName, EngineQueryResult } from "./engine-queries";
+import {
+  STATE_CODEC_DECODE_TIMEOUT_MS,
+  type StateCodecDecodeResult,
+} from "./state-codec-runtime";
 import { debugLog } from "../game/debugLog";
 import { notifyEngineSlow } from "../game/engineRecovery";
 
@@ -178,6 +191,7 @@ export class EngineWorkerClient {
     message: Record<string, unknown>,
     timeoutMs?: number,
     timeoutBehavior: RequestTimeoutBehavior = "notify",
+    transfer?: Transferable[],
   ): Promise<T> {
     const id = this.nextId++;
     return new Promise<T>((resolve, reject) => {
@@ -204,7 +218,18 @@ export class EngineWorkerClient {
         reject,
         timer,
       });
-      this.worker.postMessage({ ...message, id });
+      try {
+        if (transfer) this.worker.postMessage({ ...message, id }, transfer);
+        else this.worker.postMessage({ ...message, id });
+      } catch (error) {
+        // A synchronous postMessage throw must not leave a pending entry with
+        // a live timer: the caller's promise is the only failure signal.
+        const entry = this.pending.get(id);
+        if (!entry) return;
+        this.pending.delete(id);
+        if (entry.timer) clearTimeout(entry.timer);
+        entry.reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
   }
 
@@ -238,6 +263,12 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "evaluateDeckFormatGate", request });
   }
 
+  /** Engine resource-bound check of one guest deck's printings sidecar; rejects
+   *  with the engine's reason on abuse. See `P2PHostAdapter.handleNewGuest`. */
+  async checkDeckPrintingsBounds(printings: unknown): Promise<void> {
+    await this.request<null>({ type: "checkDeckPrintingsBounds", printings });
+  }
+
   async customFormatFromLobbyConfig(name: string, formatConfig: unknown): Promise<unknown> {
     return this.request<unknown>({ type: "customFormatFromLobbyConfig", name, formatConfig });
   }
@@ -262,6 +293,13 @@ export class EngineWorkerClient {
     return this.request<unknown>({ type: "canonicalCardNames", names });
   }
 
+  async query<K extends EngineQueryName>(
+    name: K,
+    args: EngineQueryArgs<K>,
+  ): Promise<EngineQueryResult<K>> {
+    return this.request<EngineQueryResult<K>>({ type: "query", name, args });
+  }
+
   async initializeGame(
     deckData: unknown | null,
     seed: number,
@@ -269,6 +307,7 @@ export class EngineWorkerClient {
     matchConfig: MatchConfig | null,
     playerCount?: number,
     firstPlayer?: number,
+    draftSessionMinDeckSize?: number,
   ): Promise<SubmitResult> {
     return this.request<SubmitResult>({
       type: "initializeGame",
@@ -278,6 +317,7 @@ export class EngineWorkerClient {
       matchConfig,
       playerCount,
       firstPlayer,
+      draftSessionMinDeckSize,
     });
   }
 
@@ -295,6 +335,7 @@ export class EngineWorkerClient {
     matchConfig: MatchConfig | null,
     playerCount?: number,
     firstPlayer?: number,
+    draftSessionMinDeckSize?: number,
   ): Promise<SubmitResult> {
     return this.request<SubmitResult>({
       type: "initializeMultiplayerHostGame",
@@ -304,6 +345,7 @@ export class EngineWorkerClient {
       matchConfig,
       playerCount,
       firstPlayer,
+      draftSessionMinDeckSize,
     });
   }
 
@@ -321,6 +363,50 @@ export class EngineWorkerClient {
   async submitAction(actor: number, action: GameAction): Promise<SubmitResult> {
     return this.request<SubmitResult>(
       { type: "submitAction", actor, action },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async driveContest(
+    nowMs: number,
+    aiPlayers: number[],
+    awayPlayers: number[],
+    clicks: unknown[],
+  ): Promise<ContestDriveResult> {
+    return this.request<ContestDriveResult>(
+      { type: "driveContest", nowMs, aiPlayers, awayPlayers, clicks },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async requestTakeback(actor: number, aiPlayers: number[]): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "requestTakeback", actor, aiPlayers },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async respondTakeback(
+    actor: number,
+    approve: boolean,
+    aiPlayers: number[],
+  ): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "respondTakeback", actor, approve, aiPlayers },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async cancelTakeback(actor: number): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "cancelTakeback", actor },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async pendingTakeback(): Promise<TakebackVote | null> {
+    return this.request<TakebackVote | null>(
+      { type: "pendingTakeback" },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -358,6 +444,10 @@ export class EngineWorkerClient {
       { type: "getFilteredState", viewerId },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
+  }
+
+  async setDebugHandReveal(enabled: boolean): Promise<void> {
+    await this.request<null>({ type: "setDebugHandReveal", enabled }, ENGINE_REQUEST_TIMEOUT_MS);
   }
 
   async getLegalActions(viewerId: number): Promise<LegalActionsResult> {
@@ -451,9 +541,19 @@ export class EngineWorkerClient {
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null> {
     return this.request<LlmDecisionRequestResult | null>(
-      { type: "buildLlmDecisionRequest", difficulty, playerId, endpointJson, historyJson },
+      {
+        type: "buildLlmDecisionRequest",
+        difficulty,
+        playerId,
+        endpointJson,
+        historyJson,
+        settingsRevision,
+        clock,
+      },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }
@@ -462,18 +562,22 @@ export class EngineWorkerClient {
   async getAiActionProposalFromLlmResponse(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null> {
     return this.request<AiLlmProposalResult | null>(
       {
         type: "getAiActionProposalFromLlmResponse",
         playerId,
         fingerprint,
+        threadTurn,
         provider,
         status,
         responseBody,
+        clock,
       },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
@@ -584,6 +688,38 @@ export class EngineWorkerClient {
     return this.request<string>({ type: "ping" });
   }
 
+  // ── Negotiated state-codec sessions ───────────────────────────────────
+  // The worker owns the Rust decoder handles; this client only carries ids and
+  // frames. Opening deliberately has NO client watchdog: a late success still
+  // resolves so its owner can close the session rather than orphan it — the
+  // preparation deadline that abandons an open is the caller's policy.
+
+  async openStateCodec(): Promise<number> {
+    return this.request<number>({ type: "openStateCodec" });
+  }
+
+  /**
+   * Decode one full/Delta frame. The frame's own ArrayBuffer is transferred
+   * (TextEncoder allocates a fresh, wholly owned buffer), so the caller's view
+   * is detached after the call. A timeout is fatal to the calling transport.
+   */
+  async decodeStateCodec(
+    sessionId: number,
+    frame: Uint8Array,
+  ): Promise<StateCodecDecodeResult> {
+    return this.request<StateCodecDecodeResult>(
+      { type: "decodeStateCodec", sessionId, frame },
+      STATE_CODEC_DECODE_TIMEOUT_MS,
+      "reject",
+      [frame.buffer as ArrayBuffer],
+    );
+  }
+
+  /** Release the worker's session and its retained baseline. */
+  async closeStateCodec(sessionId: number): Promise<void> {
+    await this.request<null>({ type: "closeStateCodec", sessionId });
+  }
+
   /**
    * Drain the panic message captured by the Rust panic hook in engine-wasm.
    * Returns `null` if no panic has been observed since the last drain.
@@ -596,8 +732,12 @@ export class EngineWorkerClient {
     return this.request<string | null>({ type: "takeLastPanic" });
   }
 
-  async estimateBracketForDeck(deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    return this.request<BracketEstimate | null>({ type: "estimateBracketForDeck", deck });
+  async estimateBracketForDeck(request: BracketEstimateRequest): Promise<unknown> {
+    return this.request<unknown>({ type: "estimateBracketForDeck", request });
+  }
+
+  async deckSignalsForDeck(deck: BracketDeckRequest): Promise<DeckSignals | null> {
+    return this.request<DeckSignals | null>({ type: "deckSignalsForDeck", deck });
   }
 
   // ── Replay system ──────────────────────────────────────────────────────

@@ -125,6 +125,7 @@ fn is_ramp_shaped_action(ctx: &PolicyContext<'_>) -> bool {
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => {
             let Some(obj) = ctx.state.objects.get(source_id) else {
                 return false;
@@ -256,6 +257,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         }
@@ -302,6 +304,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::land()),

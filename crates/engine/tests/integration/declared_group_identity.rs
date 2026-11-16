@@ -480,6 +480,8 @@ struct Out {
     bears: Vec<bool>,
     last_wait: String,
     fingerprint: String,
+    /// The zone the probe spell itself is in at the end of the run.
+    probe_zone: Zone,
     asked: Vec<String>,
     affected: Vec<String>,
     shuffled: Vec<u8>,
@@ -526,6 +528,7 @@ fn seed_records(state: &mut GameState) {
         .push_back(engine::types::game_state::CounterAddedRecord {
             actor: P1,
             object_id: bear,
+            incarnation: Some(0),
             counter_type: CounterType::Plus1Plus1,
             count: 1,
             name: "Bear".into(),
@@ -865,11 +868,29 @@ fn run_on(
             .iter()
             .map(|t| format!("{:?}", t.affected))
             .collect(),
+        probe_zone: state.objects[&spell].zone,
         fingerprint: format!(
             "{}|{:?}|{:?}",
-            serde_json::to_string(&state.players).unwrap(),
+            // CR 608.2n: the probe's own move to the graveyard is the final part of
+            // its resolution; where the probe is (`probe_zone`) is asserted
+            // separately, so the fingerprint compares only what its effect did.
+            serde_json::to_string(&{
+                let mut players = state.players.clone();
+                for player in &mut players {
+                    player.graveyard.retain(|id| *id != spell);
+                }
+                players
+            })
+            .unwrap(),
+            // CR 701.20a: a transient reveal ends with its resolution; what the
+            // table keeps is the public identity the reveal published.
             {
-                let mut revealed: Vec<_> = state.revealed_cards.iter().copied().collect();
+                let mut revealed: Vec<_> = state
+                    .revealed_cards
+                    .iter()
+                    .chain(state.public_revealed_cards.iter())
+                    .copied()
+                    .collect();
                 revealed.sort();
                 revealed
             },
@@ -969,6 +990,21 @@ fn d1_delayed_payload_matches_same_chain_for_every_player_effect() {
             (&reference.fingerprint, &reference.last_wait),
             (&delayed.fingerprint, &delayed.last_wait),
             "{name}: delayed vs same-chain"
+        );
+        // CR 608.2c + CR 608.2n: a clause that pauses for a choice
+        // (a chosen discard, scry, surveil or dig) leaves the probe on the stack
+        // until that choice is answered; every other clause lets it finish into
+        // the graveyard. The delayed run's probe finished long before.
+        let pauses = ["Discard", "Scry", "Surveil", "Dig"].contains(&name);
+        assert_eq!(
+            reference.probe_zone,
+            if pauses { Zone::Stack } else { Zone::Graveyard },
+            "{name}: same-chain probe zone"
+        );
+        assert_eq!(
+            delayed.probe_zone,
+            Zone::Graveyard,
+            "{name}: delayed probe zone"
         );
     }
 }

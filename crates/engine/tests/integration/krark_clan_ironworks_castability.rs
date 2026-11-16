@@ -312,6 +312,7 @@ fn manual_payment_flow_resolves_kci_sacrifice_to_pay_spell_cost() {
         GameAction::ActivateAbility {
             source_id: kci,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("ActivateAbility(KCI) during ManaPayment must succeed");

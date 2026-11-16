@@ -32,7 +32,7 @@
 //! GH #4234 (Bite Down) + carried into the `damage_source: Target` shape for
 //! #4960 (Nova Flame) already covers `Effect::DamageAll` explicitly
 //! (`one_sided_fight_source_supplies_quantity_creature` in
-//! `game/ability_utils.rs`) — so this reproduces as ALREADY FIXED, not a live
+//! `types/ability.rs`) — so this reproduces as ALREADY FIXED, not a live
 //! bug. This test pins that so a future regression is caught.
 
 use engine::game::scenario::{GameScenario, P0, P1};

@@ -33,16 +33,46 @@
 #   <current>   path to the newly produced coverage-data.json
 #   --fail-on-engine  exit 1 if REGRESSED (engine) bucket is non-empty
 #
+#   --self-test       run this script's own fixture suite
+#                     (scripts/lib/coverage_crlf_tests.sh) and exit with its status
+#
 # The coverage-data.json layout comes from `coverage-report` (see
 # crates/engine/src/bin/coverage_report.rs): .cards[] with .card_name,
 # .supported, and .gap_details[].handler.
 
 set -euo pipefail
 
+# Self-test entry, before the argument guard: the suite needs no arguments.
+if [[ "${1:-}" == "--self-test" ]]; then
+    exec /bin/bash "$(dirname "$0")/lib/coverage_crlf_tests.sh"
+fi
+
 if [[ $# -lt 2 ]]; then
     sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//' >&2
     exit 2
 fi
+
+# Native Windows jq terminates every line it prints with CRLF, so a value read from it carries a
+# CR into arithmetic: `net=$((cur_supported - base_supported))` then reports "invalid arithmetic
+# operator" and the comparison does not decide at all (#10549). Normalize at the boundary, and
+# fail with a named message when the value is still not a number — a threshold that silently does
+# not evaluate is the defect, so this must never fall through to a false "clean" verdict.
+jq_num() {
+    local value
+    value="$(jq "$@")"
+    value="${value%$'\r'}"
+    # A sign is allowed; anything else that is not a digit is refused. Testing the whole value
+    # against `[!0-9-]` let `-`, `--` and `1-2` through, and those fail inside `[[ ]]`'s CONDITION
+    # context silently — no verdict, exit 0 — which is the false clean this boundary exists to stop.
+    case "${value#-}" in
+        '' | *[!0-9]*)
+            echo "ERROR: jq produced a non-numeric value where a count was required: jq $*" >&2
+            echo "       got '$value' — refusing to compare against a value that is not a number" >&2
+            return 2
+            ;;
+    esac
+    printf '%s\n' "$value"
+}
 
 BASELINE="$1"
 CURRENT="$2"
@@ -140,14 +170,14 @@ jq -n --slurpfile base "$BASELINE" --slurpfile curr "$CURRENT" '
     )
 ' > "$tmpdir/flips.json"
 
-engine_count=$(jq '[.[] | select(.bucket=="engine_regress")] | length' "$tmpdir/flips.json")
-parser_count=$(jq '[.[] | select(.bucket=="parser_regress")] | length' "$tmpdir/flips.json")
-oracle_count=$(jq '[.[] | select(.bucket=="oracle_changed")] | length' "$tmpdir/flips.json")
-gained_count=$(jq '[.[] | select(.bucket=="gained")] | length' "$tmpdir/flips.json")
+engine_count=$(jq_num '[.[] | select(.bucket=="engine_regress")] | length' "$tmpdir/flips.json")
+parser_count=$(jq_num '[.[] | select(.bucket=="parser_regress")] | length' "$tmpdir/flips.json")
+oracle_count=$(jq_num '[.[] | select(.bucket=="oracle_changed")] | length' "$tmpdir/flips.json")
+gained_count=$(jq_num '[.[] | select(.bucket=="gained")] | length' "$tmpdir/flips.json")
 
-cur_total=$(jq '.total_cards' "$CURRENT")
-cur_supported=$(jq '.supported_cards' "$CURRENT")
-base_supported=$(jq '.supported_cards' "$BASELINE")
+cur_total=$(jq_num '.total_cards' "$CURRENT")
+cur_supported=$(jq_num '.supported_cards' "$CURRENT")
+base_supported=$(jq_num '.supported_cards' "$BASELINE")
 net=$((cur_supported - base_supported))
 
 echo "== Card support delta vs baseline =="
@@ -208,8 +238,8 @@ fi
 
 diag_fail=0
 if [[ "$baseline_has_diag" -eq 1 ]]; then
-    base_total=$(jq -r '.total_cards // 0' "$BASELINE" 2>/dev/null)
-    curr_total=$(jq -r '.total_cards // 0' "$CURRENT" 2>/dev/null)
+    base_total=$(jq_num -r '.total_cards // 0' "$BASELINE")
+    curr_total=$(jq_num -r '.total_cards // 0' "$CURRENT")
     new_cards=$((curr_total - base_total))
     if [[ "$new_cards" -lt 0 ]]; then
         new_cards=0
@@ -265,16 +295,24 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
     ' > "$tmpdir/honesty.json" 2>/dev/null
 
     while IFS='=' read -r cat count; do
-        base_count=$(jq -r ".diagnostics[\"$cat\"] // 0" "$BASELINE" 2>/dev/null)
+        count="${count%$'\r'}"
+        case "${count#-}" in
+            '' | *[!0-9]*)
+                echo "ERROR: non-numeric diagnostic count for '$cat': '$count'" >&2
+                echo "       refusing to compare against a value that is not a number" >&2
+                exit 2
+                ;;
+        esac
+        base_count=$(jq_num -r ".diagnostics[\"$cat\"] // 0" "$BASELINE")
         if [[ "$count" -gt "$base_count" ]]; then
             increase=$((count - base_count))
-            honesty_only=$(jq -r --arg cat "$cat" '
+            honesty_only=$(jq_num -r --arg cat "$cat" '
               [.[] | select(.category == $cat) | .honesty_only | length] | add // 0
             ' "$tmpdir/honesty.json")
             honesty_names=$(jq -r --arg cat "$cat" '
               [.[] | select(.category == $cat) | .honesty_only[]] | join(", ")
             ' "$tmpdir/honesty.json")
-            real_count=$(jq -r --arg cat "$cat" '
+            real_count=$(jq_num -r --arg cat "$cat" '
               [.[] | select(.category == $cat) | .real_regress | length] | add // 0
             ' "$tmpdir/honesty.json")
             if [[ "$honesty_only" -gt 0 ]]; then
@@ -299,6 +337,14 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
 
     # Also check for new categories not in baseline
     while IFS='=' read -r cat count; do
+        count="${count%$'\r'}"
+        case "${count#-}" in
+            '' | *[!0-9]*)
+                echo "ERROR: non-numeric diagnostic count for '$cat': '$count'" >&2
+                echo "       refusing to compare against a value that is not a number" >&2
+                exit 2
+                ;;
+        esac
         if ! jq -e ".diagnostics[\"$cat\"]" "$BASELINE" > /dev/null 2>&1; then
             echo "DIAGNOSTIC REGRESSION: new category $cat with count $count (not in baseline)" >&2
             diag_fail=1

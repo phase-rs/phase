@@ -373,7 +373,11 @@ fn find_best_colors<'a>(
     }
 
     let mut sorted: Vec<(&&str, &f64)> = color_scores.iter().collect();
-    sorted.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        b.1.partial_cmp(a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(b.0))
+    });
 
     sorted.iter().take(2).map(|(color, _)| **color).collect()
 }
@@ -770,6 +774,88 @@ mod tests {
             type_line: type_line.to_string(),
             draft_effect: None,
         }
+    }
+
+    fn tied_color_pool() -> Vec<DraftCardInstance> {
+        vec![
+            instance("Pearled Unicorn", &["W"], 3, "Creature — Unicorn"),
+            instance("Wind Drake", &["U"], 3, "Creature — Drake"),
+            instance("Scathe Zombies", &["B"], 3, "Creature — Zombie"),
+            instance("Gray Ogre", &["R"], 3, "Creature — Ogre"),
+            instance("Centaur Courser", &["G"], 3, "Creature — Centaur Warrior"),
+        ]
+    }
+
+    #[test]
+    fn repeated_suggestions_break_equal_color_scores_by_color_key() {
+        // With no database, these common cards all receive the real rarity
+        // fallback score of zero. Rebuild each suggestion's randomized map,
+        // including different insertion orders, at the public suggestion seam.
+        for reversed in [false, true] {
+            let mut pool = tied_color_pool();
+            if reversed {
+                pool.reverse();
+            }
+            for _ in 0..pool.len() {
+                pool.rotate_left(1);
+                for _ in 0..16 {
+                    let deck = suggest_deck(
+                        &pool,
+                        AiDifficulty::Medium,
+                        None,
+                        4,
+                        0,
+                        &DeckAddableCards::standard_basics(),
+                    );
+                    assert_eq!(
+                        deck.main_deck
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<HashSet<_>>(),
+                        HashSet::from(["Scathe Zombies", "Centaur Courser"]),
+                    );
+                    assert_eq!(deck.main_deck.len(), 2);
+                    assert_eq!(
+                        deck.lands,
+                        HashMap::from([("Swamp".to_string(), 1), ("Forest".to_string(), 1)]),
+                    );
+                    assert!(deck.commander.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn suggestion_color_scores_take_precedence_over_color_keys() {
+        let mut pool = tied_color_pool();
+        for (name, color, type_line) in [
+            ("Serra Angel", "W", "Creature — Angel"),
+            ("Air Elemental", "U", "Creature — Elemental"),
+        ] {
+            let mut card = instance(name, &[color], 5, type_line);
+            card.rarity = "uncommon".to_string();
+            pool.push(card);
+        }
+        let deck = suggest_deck(
+            &pool,
+            AiDifficulty::Medium,
+            None,
+            4,
+            0,
+            &DeckAddableCards::standard_basics(),
+        );
+        assert_eq!(
+            deck.main_deck
+                .iter()
+                .map(String::as_str)
+                .collect::<HashSet<_>>(),
+            HashSet::from(["Pearled Unicorn", "Wind Drake"]),
+        );
+        assert_eq!(deck.main_deck.len(), 2);
+        assert_eq!(
+            deck.lands,
+            HashMap::from([("Plains".to_string(), 1), ("Island".to_string(), 1)]),
+        );
     }
 
     /// Card DB with four W/U creatures plus an on-color (Plains/Island) and an

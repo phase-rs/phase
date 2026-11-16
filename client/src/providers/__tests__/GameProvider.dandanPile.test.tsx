@@ -1,7 +1,12 @@
 import { cleanup, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ComboDeclaration, CommanderBracketTier } from "../../types/bracketEstimate";
 
-type Deck = { main_deck: string[] };
+type Deck = {
+  main_deck: string[];
+  bracket_tier?: CommanderBracketTier | null;
+  combo_declaration?: ComboDeclaration;
+};
 type DeckList = { player: Deck; opponent: Deck; ai_decks: Deck[] };
 
 const {
@@ -46,6 +51,7 @@ const {
     setLatency: vi.fn(),
     setOpponentDisplayName: vi.fn(),
     setSpectators: vi.fn(),
+    setStateWithheld: vi.fn(),
     showToast: vi.fn(),
     takeActiveP2PHost: vi.fn(() => null),
     openBroker: vi.fn(),
@@ -117,6 +123,13 @@ vi.mock("../../services/nativeEngine", () => ({
 
 vi.mock("../../services/nativeEngineSocket", () => ({ NativeEngineSocket: class {} }));
 
+// A P2P host reads its pending Full terminal cleanup before building a deck;
+// jsdom has no IndexedDB, so these launches start with none pending.
+vi.mock("../../services/gamePersistence", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/gamePersistence")>(),
+  loadFullTerminalCleanupStrict: vi.fn(async () => null),
+}));
+
 vi.mock("../../stores/gameStore", () => ({
   clearActiveGame: vi.fn(),
   clearGame: vi.fn(),
@@ -145,7 +158,7 @@ vi.mock("../../services/aiDeckCatalog", () => ({ buildLegalAiDeckCatalog: vi.fn(
 vi.mock("../../stores/preferencesStore", () => ({
   AI_DECK_RANDOM: "Random",
   usePreferencesStore: Object.assign(vi.fn(), {
-    getState: () => ({ aiSeats: [], cedhMode: false, nativeEngineEnabled: true }),
+    getState: () => ({ aiSeats: [], cedhMode: false, nativeEngineEnabled: true, artChain: [], artOverrides: {} }),
   }),
 }));
 vi.mock("../../services/cedhLock", () => ({ effectiveAiDifficulty: (difficulty: string) => difficulty }));
@@ -272,6 +285,7 @@ describe("GameProvider host-supplied pile routes", () => {
       await waitFor(() => expect(recorded.ws).toHaveLength(1));
       expect(recorded.ws[0].mode).toBe("join");
       expect(recorded.ws[0].deck.main_deck).toEqual([]);
+      expect(recorded.ws[0].deck.bracket_tier).toBeUndefined();
     });
   });
 
@@ -293,7 +307,34 @@ describe("GameProvider host-supplied pile routes", () => {
     it("an online guest submits its active deck", async () => {
       renderRoute({ mode: "online", joinCode: "ABC123", formatConfig: config("Standard") });
       await waitFor(() => expect(recorded.ws).toHaveLength(1));
+      expect(recorded.ws[0].mode).toBe("join");
       expect(recorded.ws[0].deck.main_deck).toEqual(ACTIVE);
+      expect(recorded.ws[0].deck.bracket_tier).toBeNull();
+    });
+
+    it("an online guest preserves its active deck's declared bracket", async () => {
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}Active`, JSON.stringify({
+        main: [{ name: "Plains", count: 60 }],
+        sideboard: [],
+        bracket: 5,
+      }));
+      renderRoute({ mode: "online", joinCode: "ABC123", formatConfig: config("Commander") });
+      await waitFor(() => expect(recorded.ws).toHaveLength(1));
+      expect(recorded.ws[0].mode).toBe("join");
+      expect(recorded.ws[0].deck.main_deck).toEqual(ACTIVE);
+      expect(recorded.ws[0].deck.bracket_tier).toBe("cedh");
+    });
+
+    it("an online guest preserves its active deck's combo answer", async () => {
+      const declaration = { kind: "intended", window: "early_game" } as const;
+      localStorage.setItem(`${STORAGE_KEY_PREFIX}Active`, JSON.stringify({
+        main: [{ name: "Plains", count: 60 }],
+        sideboard: [],
+        combo_declaration: declaration,
+      }));
+      renderRoute({ mode: "online", joinCode: "ABC123", formatConfig: config("Commander") });
+      await waitFor(() => expect(recorded.ws).toHaveLength(1));
+      expect(recorded.ws[0].deck.combo_declaration).toEqual(declaration);
     });
 
     it("a fresh P2P host submits its active deck", async () => {

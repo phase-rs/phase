@@ -5,6 +5,7 @@ import {
   bumpProfileReplacementGeneration,
   captureSavedDeck,
   createFolder,
+  DECKS_CHANGED_EVENT,
   deleteFolder,
   DRAFT_WORKSPACE_PREFERENCES_KEY,
   freeDeckName,
@@ -14,15 +15,20 @@ import {
   listSavedDeckNames,
   loadSavedDeck,
   loadSavedDeckBracket,
+  loadSavedDeckComboDeclaration,
   loadSavedDeckFormat,
   migrateDeckMeta,
   PROFILE_REPLACEMENT_KEY,
   profileReplacementGeneration,
+  removeSavedDeckData,
   renameFolder,
   requireSavedDeckUnchanged,
   saveBuilderDeck,
   savedDeckUnchanged,
+  saveDeckOrigins,
+  saveFeedSubscriptions,
   saveSavedDeckBracket,
+  saveSavedDeckComboDeclaration,
   setDeckFolder,
   stampDeckMeta,
   toggleDeckStar,
@@ -247,6 +253,50 @@ describe("saved-deck bracket sidecar", () => {
   it("saveSavedDeckBracket is a no-op when the deck does not exist", () => {
     saveSavedDeckBracket(testSavedDeckTxn, "Missing", 3);
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Missing")).toBeNull();
+  });
+});
+
+describe("saved-deck combo declaration sidecar", () => {
+  it("round-trips an intended early-game declaration", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Combo Deck",
+      JSON.stringify({ main: [], sideboard: [] }),
+    );
+    saveSavedDeckComboDeclaration(testSavedDeckTxn, "Combo Deck", {
+      kind: "intended",
+      window: "early_game",
+    });
+    expect(loadSavedDeckComboDeclaration("Combo Deck")).toEqual({
+      kind: "intended",
+      window: "early_game",
+    });
+  });
+
+  it("defaults missing, corrupt, and garbage declarations to undeclared", () => {
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Corrupt", "{");
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Garbage",
+      JSON.stringify({ combo_declaration: { kind: "intended", window: "soon" } }),
+    );
+    expect(loadSavedDeckComboDeclaration("Missing")).toEqual({ kind: "undeclared" });
+    expect(loadSavedDeckComboDeclaration("Corrupt")).toEqual({ kind: "undeclared" });
+    expect(loadSavedDeckComboDeclaration("Garbage")).toEqual({ kind: "undeclared" });
+  });
+
+  it("saving undeclared writes no field and preserves legacy JSON byte-for-byte", () => {
+    const raw = '{"main":[], "sideboard":[], "format":"Commander"}';
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Legacy", raw);
+    saveSavedDeckComboDeclaration(testSavedDeckTxn, "Legacy", { kind: "undeclared" });
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Legacy")).toBe(raw);
+
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Declared",
+      JSON.stringify({ main: [], combo_declaration: { kind: "none_intended" } }),
+    );
+    saveSavedDeckComboDeclaration(testSavedDeckTxn, "Declared", { kind: "undeclared" });
+    expect(
+      JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Declared")!),
+    ).not.toHaveProperty("combo_declaration");
   });
 });
 
@@ -640,5 +690,24 @@ describe("draft autosave ownership", () => {
 
     expect(getDeckMeta("[Autosave] Sealed")?.autosaveSlot).toBe("Sealed");
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "[Autosave] Sealed")).toBe("sealed-data");
+  });
+});
+
+describe("deck-inventory change notifications", () => {
+  it("emits phase-decks-changed on every inventory write so mounted catalogs rescan", () => {
+    let events = 0;
+    const listener = () => {
+      events += 1;
+    };
+    window.addEventListener(DECKS_CHANGED_EVENT, listener);
+    try {
+      writeSavedDeckData(testSavedDeckTxn, "Deck", JSON.stringify({ main: [], sideboard: [] }));
+      removeSavedDeckData(testSavedDeckTxn, "Deck");
+      saveFeedSubscriptions([]);
+      saveDeckOrigins({});
+    } finally {
+      window.removeEventListener(DECKS_CHANGED_EVENT, listener);
+    }
+    expect(events).toBe(4);
   });
 });

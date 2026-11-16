@@ -17,9 +17,9 @@ import { profileForSeat, useLlmStore } from "../../../stores/llmStore";
 import type { LlmProviderCatalogEntry } from "../../../services/llm/types";
 
 const CATALOG_ROWS = [
-  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [] },
-  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [] },
-  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [] },
+  { provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained", "messageThread"] },
+  { provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null, defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
+  { provider: "OpenAiCompatible", value: "OpenAiCompatible", displayName: "Compatible", defaultBaseUrl: null, defaultModel: "llama3", requiresApiKey: false, apiKeyUrl: "", models: [], decisionContexts: ["selfContained"] },
 ] satisfies LlmProviderCatalogEntry[];
 
 const PROMPT = /use this provider as your default opponent\?/i;
@@ -59,7 +59,7 @@ describe("default-opponent prompt on a provider card", () => {
     fireEvent.click(await screen.findByRole("button", { name: /use as default/i }));
 
     expect(useLlmStore.getState().defaultOpponentProfileId).toBe(id);
-    expect(profileForSeat(useLlmStore.getState(), 0, [{ provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [] }])?.id).toBe(id);
+    expect(profileForSeat(useLlmStore.getState(), 0, [{ provider: "Anthropic", value: "Anthropic", displayName: "Anthropic", defaultBaseUrl: null, defaultModel: "claude-sonnet-5", requiresApiKey: true, apiKeyUrl: "", models: [], decisionContexts: ["selfContained", "messageThread"] }])?.id).toBe(id);
   });
 
   it("collapses to a badge once the provider is the default", async () => {
@@ -132,5 +132,23 @@ describe("default-opponent prompt on a provider card", () => {
 
     await waitFor(() => expect(screen.getByText(CONNECTED_PROMPT)).toBeInTheDocument());
     expect(probe.testLlmEndpoint).toHaveBeenCalledTimes(1);
+  });
+
+  it("displays stored default opponent name and badge even when profile's API key is empty on load", async () => {
+    const id = addProfile({ provider: "Anthropic", model: "claude-sonnet-5", apiKey: "" });
+    useLlmStore.getState().setDefaultOpponentProfileId(id);
+    render(<LlmOpponentsSection />);
+
+    // Shows the default opponent badge on the card even with missing key
+    expect(await screen.findByRole("status", { name: "" })).toHaveTextContent(/default opponent/i);
+
+    // Shows the stored default opponent in the dropdown rather than masking as built-in engine
+    const trigger = screen.getByRole("button", { name: "Default opponent" });
+    expect(trigger).toHaveTextContent("Claude");
+
+    // Switching dropdown back to Built-in engine AI updates the store
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("option", { name: /built-in engine/i }));
+    expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
   });
 });

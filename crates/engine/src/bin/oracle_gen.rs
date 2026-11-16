@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use engine::database::legality::{legalities_to_export_map, normalize_legalities};
 use engine::database::mtgjson::{
-    load_atomic_cards, load_card_types, AtomicCard, Ruling, SetCard, SetFile,
+    load_atomic_cards, load_card_types, AtomicCard, AtomicCardsFile, Ruling, SetCard, SetFile,
 };
 use engine::database::removed_cards::is_removed_offensive_card;
 use engine::database::set_catalog::load_set_catalog;
@@ -17,7 +17,7 @@ use engine::database::synthesis::{
     build_oracle_face, build_oracle_face_multi, layout_faces, map_layout,
     prepare_oracle_parser_input, LayoutKind,
 };
-use engine::database::{set_gating, BracketLists, BracketSignals, CardDatabase};
+use engine::database::{set_gating, BracketCardClass, BracketLists, BracketSignals, CardDatabase};
 use engine::game::coverage::{
     audit_semantic, card_face_has_unimplemented_parts, format_semantic_audit_markdown,
 };
@@ -402,6 +402,17 @@ impl LocalizedFace {
 
 /// Map an MTGJSON `foreignData.language` (full English language name) to the
 /// supported UI locale code, or `None` for languages we don't ship.
+///
+/// MUST stay in lockstep with `LOCALE_MAP` in
+/// `scripts/gen-scryfall-locale-images.sh`, which keys the sibling localized art
+/// maps (`scryfall-images.v2.<lng>.json`). A code present in one and not the
+/// other ships localized art with English text, or the reverse.
+///
+/// `Chinese Simplified` covers the printings Wizards produced in Simplified
+/// Chinese; that run ended at Bloomburrow (2024-02-23 announcement), so sets from
+/// 2024-08 onward contribute nothing here and the frontend's per-field fallback
+/// keeps those cards English. `Chinese Traditional` is deliberately absent: no
+/// Traditional UI catalog ships.
 fn locale_code(language: &str) -> Option<&'static str> {
     match language {
         "Spanish" => Some("es"),
@@ -410,6 +421,7 @@ fn locale_code(language: &str) -> Option<&'static str> {
         "Italian" => Some("it"),
         "Japanese" => Some("ja"),
         "Portuguese (Brazil)" => Some("pt"),
+        "Chinese Simplified" => Some("zh"),
         _ => None,
     }
 }
@@ -549,8 +561,62 @@ fn bracket_signals_for_face(
     source: &AtomicCard,
 ) -> BracketSignals {
     let mut signals = lists.signals_for(&face.name);
-    signals.game_changer = source.is_game_changer;
+    // The curated Game Changers list is authoritative when present. A union
+    // with the bundled MTGJSON snapshot could add names but could never express
+    // a later WotC removal.
+    if lists.has(BracketCardClass::GameChangers) {
+        // Game Changers classify cards, not faces. MTGJSON repeats the flag on
+        // both faces of a modal double-faced card, while WotC prints its front
+        // face name. Use that card-level identity so either exported face gets
+        // the same curated signal.
+        let card_name = source
+            .name
+            .split_once(" // ")
+            .map_or(source.name.as_str(), |(front, _)| front);
+        signals.game_changer = lists.signals_for(card_name).game_changer;
+    } else {
+        signals.game_changer = source.is_game_changer;
+    }
     signals
+}
+
+fn report_game_changer_drift(lists: &BracketLists, atomic: &AtomicCardsFile) {
+    let Some(curated) = lists.get(BracketCardClass::GameChangers) else {
+        return;
+    };
+
+    let mtgjson_names: BTreeSet<String> = atomic
+        .data
+        .iter()
+        .filter(|(_, faces)| faces.iter().any(|face| face.is_game_changer))
+        .map(|(name, _)| name.to_lowercase())
+        .collect();
+    let flagged_faces = atomic
+        .data
+        .values()
+        .flat_map(|faces| faces.iter())
+        .filter(|face| face.is_game_changer)
+        .count();
+    let curated_only: Vec<&str> = curated
+        .names
+        .difference(&mtgjson_names)
+        .map(String::as_str)
+        .collect();
+    let mtgjson_only: Vec<&str> = mtgjson_names
+        .difference(&curated.names)
+        .map(String::as_str)
+        .collect();
+
+    eprintln!(
+        "Game Changers drift: curated={} cards; MTGJSON={} cards/{} flagged faces; curated-only={} {:?}; MTGJSON-only={} {:?}",
+        curated.names.len(),
+        mtgjson_names.len(),
+        flagged_faces,
+        curated_only.len(),
+        curated_only,
+        mtgjson_only.len(),
+        mtgjson_only,
+    );
 }
 
 /// Insert a card face under its short-name key, resolving collisions when
@@ -629,6 +695,24 @@ fn insert_face_with_priority(
              ({new_oracle:?}, {new_printings} printings)"
         );
         insert_hidden_multiface(face_index, &key, entry);
+    }
+}
+
+/// CR 707.13 + CR 709.3c: gap every copy-by-name clause whose names the export
+/// cannot materialize as whole single-faced cards (see
+/// `database::name_copy_gate`). A single-faced export entry carries no `layout`.
+fn gate_unmaterializable_name_copies_in_export(face_index: &mut BTreeMap<String, CardExportEntry>) {
+    let single_faced: HashSet<String> = face_index
+        .iter()
+        .filter(|(_, entry)| entry.layout.is_none())
+        .map(|(key, _)| key.clone())
+        .collect();
+    let is_single_faced_card = |name: &str| single_faced.contains(&name.to_lowercase());
+    for entry in face_index.values_mut() {
+        engine::database::name_copy_gate::gate_unmaterializable_name_copies(
+            &mut entry.face,
+            &is_single_faced_card,
+        );
     }
 }
 
@@ -908,7 +992,7 @@ fn write_oracle_subtypes(
     let list: Vec<String> = build_creature_subtype_vocabulary(card_types, atomic)
         .into_iter()
         .collect();
-    let out_path = PathBuf::from("crates/engine/data/oracle-subtypes.json");
+    let out_path = PathBuf::from("crates/phase-ast/data/oracle-subtypes.json");
     // `serde_json::to_string_pretty` does not emit a trailing newline; append one
     // so the committed generated file stays POSIX-compliant (no "\ No newline at
     // end of file" diff churn on every regeneration).
@@ -1332,7 +1416,7 @@ fn main() {
                 eprintln!("  --output <path>  Write the export to a file instead of stdout");
                 eprintln!(
                     "  --write-subtypes Regenerate the committed creature-subtype vocabulary\n\
-                     \x20                 (crates/engine/data/oracle-subtypes.json). Requires\n\
+                     \x20                 (crates/phase-ast/data/oracle-subtypes.json). Requires\n\
                      \x20                 CardTypes.json alongside AtomicCards.json. Without this\n\
                      \x20                 flag the export never writes to the tracked tree."
                 );
@@ -1344,8 +1428,11 @@ fn main() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "oracle_gen=info,engine=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "oracle_gen=info,engine=info,phase_parser=info"
+                    .parse()
+                    .unwrap()
+            }),
         )
         .init();
 
@@ -1363,7 +1450,7 @@ fn main() {
     };
 
     // The creature-subtype vocabulary is a COMMITTED parser input: the engine
-    // pulls `crates/engine/data/oracle-subtypes.json` in with `include_str!`.
+    // pulls `crates/phase-ast/data/oracle-subtypes.json` in with `include_str!`.
     // Regenerating it is therefore a deliberate data-pipeline act, not a side
     // effect of exporting cards, and it happens only under `--write-subtypes`
     // (passed by `scripts/gen-card-data.sh`, the one caller that fetches the
@@ -1408,9 +1495,8 @@ fn main() {
         .map(|d| load_set_catalog(d))
         .unwrap_or_default();
 
-    // Load non-MTGJSON bracket lists for signal stamping. Game Changers come
-    // directly from MTGJSON `isGameChanger`; this file covers policy axes that
-    // MTGJSON does not expose.
+    // Load curated bracket lists for signal stamping. A present Game Changers
+    // list is authoritative; MTGJSON is its fallback when that list is absent.
     let bracket_lists_path = data_dir
         .as_ref()
         .map(|d| d.join("bracket_lists.json"))
@@ -1418,10 +1504,10 @@ fn main() {
     let bracket_lists = if bracket_lists_path.exists() {
         BracketLists::from_json_path(&bracket_lists_path).unwrap_or_else(|e| {
             eprintln!(
-                "warning: failed to load {}: {e}; non-MTGJSON bracket signals will be all-false",
+                "error: failed to load {}: {e}",
                 bracket_lists_path.display()
             );
-            BracketLists::default()
+            process::exit(1)
         })
     } else {
         eprintln!(
@@ -1548,6 +1634,7 @@ fn main() {
             );
         }
     }
+    report_game_changer_drift(&bracket_lists, &atomic);
 
     // Release-gate (hybrid): keep cards available ONLY through gated sets in
     // card-data so they stay browsable, but mark them Banned in every format so
@@ -1575,6 +1662,25 @@ fn main() {
                 codes.join(",")
             },
             gated_count
+        );
+    }
+
+    gate_unmaterializable_name_copies_in_export(&mut face_index);
+    let misparses = engine::types::confirmed_misparse::ConfirmedMisparses::committed();
+    let stamped = misparses.stamp_all(
+        face_index
+            .iter_mut()
+            .map(|(key, entry)| (key.as_str(), &mut entry.face)),
+    );
+    eprintln!(
+        "Confirmed misparses: marked {} exported face(s)",
+        stamped.marked
+    );
+    if filter_names.is_empty() && !stamped.unmatched_keys.is_empty() {
+        eprintln!(
+            "Confirmed misparses: {} listed key(s) absent from export; sample: {:?}",
+            stamped.unmatched_keys.len(),
+            &stamped.unmatched_keys[..stamped.unmatched_keys.len().min(10)]
         );
     }
 
@@ -1659,8 +1765,11 @@ fn run_semantic_audit(remaining_args: &[String]) {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "oracle_gen=info,engine=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "oracle_gen=info,engine=info,phase_parser=info"
+                    .parse()
+                    .unwrap()
+            }),
         )
         .init();
 
@@ -2178,6 +2287,111 @@ mod tests {
 
     use super::*;
 
+    /// The locale map is duplicated by necessity — this process cannot read the
+    /// shell script, and the shell script cannot read this — so the contract has
+    /// to be pinned on both sides rather than left to a comment.
+    ///
+    /// `scripts/gen-scryfall-locale-images.sh` mirrors this list as `LOCALE_MAP`
+    /// and carries the matching assertion for the codes it can see. The failure
+    /// this prevents is asymmetric and silent: a locale present here but not
+    /// there ships Chinese card *text* with English card *art* for the same card,
+    /// because the two halves are fetched from different files.
+    #[test]
+    fn locale_code_covers_exactly_the_shipped_card_content_locales() {
+        let mapped: Vec<&str> = [
+            "Spanish",
+            "French",
+            "German",
+            "Italian",
+            "Japanese",
+            "Portuguese (Brazil)",
+            "Chinese Simplified",
+        ]
+        .into_iter()
+        .filter_map(locale_code)
+        .collect();
+
+        assert_eq!(
+            mapped,
+            vec!["es", "fr", "de", "it", "ja", "pt", "zh"],
+            "locale_code must map exactly the locales the image map also serves"
+        );
+    }
+
+    /// Wizards stopped printing Simplified Chinese cards at Bloomburrow, so the
+    /// corpus ends there. Pinning the reason keeps a future reader from treating
+    /// the missing recent sets as a bug in this mapping.
+    #[test]
+    fn traditional_chinese_is_not_mapped_because_no_traditional_ui_catalog_ships() {
+        assert_eq!(locale_code("Chinese Traditional"), None);
+        // Polish is the other deliberate absence: MTGJSON carries zero Polish
+        // foreignData records and Scryfall rejects `lang:pl` outright.
+        assert_eq!(locale_code("Polish"), None);
+        assert_eq!(locale_code("Russian"), None);
+        assert_eq!(locale_code("Korean"), None);
+    }
+
+    #[test]
+    fn curated_game_changers_override_the_mtgjson_flag() {
+        let lists = BracketLists::from_pairs(
+            "test",
+            &[(BracketCardClass::GameChangers, &["Curated Card"])],
+        );
+
+        let curated_face = CardFace {
+            name: "Curated Card".into(),
+            ..Default::default()
+        };
+        let curated_source = atomic_single("Curated Card", None);
+        assert!(
+            bracket_signals_for_face(&lists, &curated_face, &curated_source).game_changer,
+            "curated membership must add a signal absent from MTGJSON"
+        );
+
+        let mtgjson_face = CardFace {
+            name: "MTGJSON-only Card".into(),
+            ..Default::default()
+        };
+        let mut mtgjson_source = atomic_single("MTGJSON-only Card", None);
+        mtgjson_source.is_game_changer = true;
+        assert!(
+            !bracket_signals_for_face(&lists, &mtgjson_face, &mtgjson_source).game_changer,
+            "curated absence must express a removal from the MTGJSON snapshot"
+        );
+    }
+
+    #[test]
+    fn mtgjson_flag_is_the_fallback_when_no_curated_list() {
+        let face = CardFace {
+            name: "MTGJSON Game Changer".into(),
+            ..Default::default()
+        };
+        let mut source = atomic_single("MTGJSON Game Changer", None);
+        source.is_game_changer = true;
+        assert!(bracket_signals_for_face(&BracketLists::default(), &face, &source).game_changer);
+    }
+
+    #[test]
+    fn curated_game_changer_applies_to_both_faces_of_an_mdfc() {
+        let lists = BracketLists::from_pairs(
+            "test",
+            &[(BracketCardClass::GameChangers, &["Tergrid, God of Fright"])],
+        );
+        let mut source = atomic_single("Tergrid, God of Fright // Tergrid's Lantern", None);
+        source.is_game_changer = true;
+
+        for name in ["Tergrid, God of Fright", "Tergrid's Lantern"] {
+            let face = CardFace {
+                name: name.into(),
+                ..Default::default()
+            };
+            assert!(
+                bracket_signals_for_face(&lists, &face, &source).game_changer,
+                "card-level curated membership must apply when the deck names {name}"
+            );
+        }
+    }
+
     #[test]
     fn parser_trace_args_require_a_complete_unique_pair() {
         let args = vec![
@@ -2307,6 +2521,226 @@ mod tests {
             bracket_signals: BracketSignals::default(),
             trace_input: None,
         }
+    }
+
+    /// Interrogation Robot's PRINTED Oracle text (card-data.json), verbatim.
+    const ROBOT_ORACLE: &str = "{T}, Discard a card: Choose a card name that hasn't been chosen among Who, What, When, Where, and Why. Create a copy of the card with the chosen name. You may cast the copy. (You still pay its costs. Who//What//When//Where//Why is a split card from Unhinged.)";
+    /// Garth One-Eye's PRINTED Oracle text (card-data.json), verbatim.
+    const GARTH_ORACLE: &str = "{T}: Choose a card name that hasn't been chosen from among Disenchant, Braingeyser, Terror, Shivan Dragon, Regrowth, and Black Lotus. Create a copy of the card with the chosen name. You may cast the copy. (You still pay its costs.)";
+    const ROBOT_NAMES: [&str; 5] = ["who", "what", "when", "where", "why"];
+    const GARTH_NAMES: [&str; 6] = [
+        "disenchant",
+        "braingeyser",
+        "terror",
+        "shivan dragon",
+        "regrowth",
+        "black lotus",
+    ];
+
+    fn export_face_with(text: &str, name: &str) -> CardFace {
+        let parsed = engine::parser::oracle::parse_oracle_text(
+            text,
+            name,
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        CardFace {
+            name: name.to_string(),
+            abilities: parsed.abilities,
+            ..Default::default()
+        }
+    }
+
+    /// Every effect of every ability chain a face carries, in chain order.
+    fn export_chain_effects(face: &CardFace) -> Vec<engine::types::ability::Effect> {
+        let mut out = Vec::new();
+        for ability in &face.abilities {
+            let mut node = Some(ability);
+            while let Some(def) = node {
+                out.push((*def.effect).clone());
+                node = def.sub_ability.as_deref();
+            }
+        }
+        out
+    }
+
+    fn is_name_copy(effect: &engine::types::ability::Effect) -> bool {
+        matches!(
+            effect,
+            engine::types::ability::Effect::CreateCardCopyByName { .. }
+        )
+    }
+
+    fn is_copy_cast(effect: &engine::types::ability::Effect) -> bool {
+        matches!(
+            effect,
+            engine::types::ability::Effect::CastFromZone {
+                target: engine::types::ability::TargetFilter::LastCreated,
+                ..
+            }
+        )
+    }
+
+    /// The specific gap the export gate records for a copy clause or its cast.
+    fn is_name_copy_gap(effect: &engine::types::ability::Effect) -> bool {
+        matches!(
+            effect,
+            engine::types::ability::Effect::Unimplemented { name, .. }
+                if name == engine::database::name_copy_gate::GAP_NAME
+        )
+    }
+
+    /// The whole export-gate regression. `mutate_robot` lets a counter-probe drop a
+    /// Robot node during "parsing"; `robot_names_are_split` makes the Robot's
+    /// domain materializable, so its nodes survive export.
+    ///
+    /// Both Robot nodes (the copy creation and the dependent cast) are asserted
+    /// PRESENT before the gate, so a parser regression that drops either cannot
+    /// leave the post-gate "absent" check vacuously green; after the gate each is
+    /// asserted to be the specific gap, and the full Garth chain must survive.
+    fn check_export_gate(mutate_robot: impl FnOnce(&mut CardFace), robot_names_are_split: bool) {
+        use engine::types::ability::{AbilityCost, ChoiceType, Effect};
+
+        let mut robot = make_entry("o-robot", &["TST"], None);
+        robot.face = export_face_with(ROBOT_ORACLE, "Interrogation Robot");
+        mutate_robot(&mut robot.face);
+        let mut garth = make_entry("o-garth", &["TST"], None);
+        garth.face = export_face_with(GARTH_ORACLE, "Garth One-Eye");
+
+        // The printed activation cost is {T}, Discard a card.
+        let robot_cost = robot
+            .face
+            .abilities
+            .first()
+            .and_then(|ability| ability.cost.as_ref())
+            .expect("the Robot's printed activation has a cost");
+        assert!(
+            matches!(
+                robot_cost,
+                AbilityCost::Composite { costs }
+                    if costs.iter().any(|c| matches!(c, AbilityCost::Tap))
+                        && costs.iter().any(|c| matches!(c, AbilityCost::Discard { .. }))
+            ),
+            "the printed cost is {{T}}, Discard a card: {robot_cost:?}"
+        );
+
+        // Both Robot nodes exist before the gate runs.
+        let robot_before = export_chain_effects(&robot.face);
+        assert_eq!(
+            robot_before.iter().filter(|e| is_name_copy(e)).count(),
+            1,
+            "the Robot parses its copy clause: {robot_before:?}"
+        );
+        assert_eq!(
+            robot_before.iter().filter(|e| is_copy_cast(e)).count(),
+            1,
+            "the Robot parses its dependent cast: {robot_before:?}"
+        );
+        let garth_before = export_chain_effects(&garth.face);
+        assert_eq!(garth_before.iter().filter(|e| is_name_copy(e)).count(), 1);
+        assert_eq!(garth_before.iter().filter(|e| is_copy_cast(e)).count(), 1);
+
+        let robot_layout = robot_names_are_split.then_some("split");
+        let mut face_index = BTreeMap::from([
+            ("interrogation robot".to_string(), robot),
+            ("garth one-eye".to_string(), garth),
+        ]);
+        for name in ROBOT_NAMES {
+            face_index.insert(
+                name.to_string(),
+                make_entry(&format!("o-{name}"), &["TST"], robot_layout),
+            );
+        }
+        for name in GARTH_NAMES {
+            face_index.insert(
+                name.to_string(),
+                make_entry(&format!("o-{name}"), &["TST"], None),
+            );
+        }
+
+        gate_unmaterializable_name_copies_in_export(&mut face_index);
+
+        // CR 707.13 + CR 709.4a: the split-half domain is gapped. The copy clause
+        // and the cast are each the specific gap, and neither original survives.
+        let robot_after = export_chain_effects(&face_index["interrogation robot"].face);
+        assert!(
+            !robot_after
+                .iter()
+                .any(|e| is_name_copy(e) || is_copy_cast(e)),
+            "neither Robot node survives export: {robot_after:?}"
+        );
+        assert_eq!(
+            robot_after.iter().filter(|e| is_name_copy_gap(e)).count(),
+            2,
+            "the copy and its cast are each the specific gap: {robot_after:?}"
+        );
+
+        // A single-faced domain keeps its whole chain: the closed six-name choice,
+        // the copy, and its cast.
+        let garth_after = export_chain_effects(&face_index["garth one-eye"].face);
+        assert_eq!(
+            garth_after, garth_before,
+            "the Garth chain is untouched by the gate"
+        );
+        assert!(
+            garth_after.iter().any(|e| matches!(
+                e,
+                Effect::Choose {
+                    choice_type: ChoiceType::CardName { options, .. },
+                    ..
+                } if options.len() == 6
+            )),
+            "Garth keeps its six-name closed domain: {garth_after:?}"
+        );
+        assert!(garth_after.iter().any(is_name_copy));
+        assert!(garth_after.iter().any(is_copy_cast));
+        assert!(!garth_after.iter().any(is_name_copy_gap));
+    }
+
+    /// Replace the Robot's chain node matching `pick` with a stand-in parse gap, as a
+    /// parser regression that stops recognizing that clause would.
+    fn drop_robot_node(face: &mut CardFace, pick: fn(&engine::types::ability::Effect) -> bool) {
+        let mut node = face.abilities.first_mut();
+        while let Some(def) = node {
+            if pick(&def.effect) {
+                *def.effect =
+                    engine::types::ability::Effect::unimplemented("parser_regression", "");
+            }
+            node = def.sub_ability.as_deref_mut();
+        }
+    }
+
+    /// CR 707.13 + CR 709.4a: the export-side gate. A copy-by-name domain that
+    /// names split halves (`layout: Some("split")`) or names the export does
+    /// not hold is gapped, copy clause and cast clause alike; one naming only
+    /// single-faced entries (`layout: None`) is left supported.
+    #[test]
+    fn export_gate_gaps_copy_by_name_of_split_halves_only() {
+        check_export_gate(|_| {}, true);
+    }
+
+    /// Counter-probe: a parser regression that drops the Robot's copy clause fails
+    /// the pre-gate presence check instead of passing vacuously.
+    #[test]
+    #[should_panic(expected = "the Robot parses its copy clause")]
+    fn export_gate_test_fails_when_the_robot_copy_node_is_dropped() {
+        check_export_gate(|face| drop_robot_node(face, is_name_copy), true);
+    }
+
+    /// Counter-probe: likewise for the dependent cast.
+    #[test]
+    #[should_panic(expected = "the Robot parses its dependent cast")]
+    fn export_gate_test_fails_when_the_robot_cast_node_is_dropped() {
+        check_export_gate(|face| drop_robot_node(face, is_copy_cast), true);
+    }
+
+    /// Counter-probe: a Robot whose nodes SURVIVE export (a materializable domain,
+    /// i.e. the gate not gapping them) fails the post-gate check.
+    #[test]
+    #[should_panic(expected = "neither Robot node survives export")]
+    fn export_gate_test_fails_when_the_robot_nodes_survive_export() {
+        check_export_gate(|_| {}, false);
     }
 
     #[test]

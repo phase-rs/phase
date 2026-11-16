@@ -6,7 +6,7 @@ import userEvent from "@testing-library/user-event";
 
 import { DeckBuilder } from "../DeckBuilder";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
-import { resolveCommander } from "../../../services/deckParser";
+import { resolveCommander } from "../../../services/commanderResolution";
 import { STORAGE_KEY_PREFIX } from "../../../constants/storage";
 import { withSavedDeckLibrary } from "../../../services/savedDeckTransaction";
 import {
@@ -20,10 +20,9 @@ vi.mock("../../../hooks/useDeckCardData", () => ({
   useDeckCardData: () => ({ cardDataCache: new Map(), cacheCards: vi.fn() }),
 }));
 vi.mock("../../../hooks/useDecks", () => ({ loadPreconDeckMap: vi.fn() }));
-vi.mock("../../../services/deckParser", async () => {
-  const actual = await vi.importActual<typeof import("../../../services/deckParser")>("../../../services/deckParser");
-  return { ...actual, resolveCommander: vi.fn(async (deck) => deck) };
-});
+vi.mock("../../../services/commanderResolution", () => ({
+  resolveCommander: vi.fn(async (deck) => deck),
+}));
 vi.mock("../CardSearch", () => ({
   CardSearch: ({ onResults }: { onResults: (cards: unknown[], total: number) => void }) => {
     useEffect(() => { onResults([], 0); }, [onResults]);

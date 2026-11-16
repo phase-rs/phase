@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "FilterProp gains Prepared (CR 722.3a), serialized in GameState trigger conditions and ability/filter definitions, and ResolvedAbility and PendingManaAbility carry the activation's announcement source epoch (CR 400.7 + CR 602.2a + CR 605.3b). Older full-game and P2P peers cannot deserialize the new tagged variant."
+}

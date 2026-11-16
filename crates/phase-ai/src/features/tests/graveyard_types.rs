@@ -101,6 +101,7 @@ fn self_mill_enabler(name: &str) -> CardFace {
             count: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Controller,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         },
     )];
     face
@@ -119,6 +120,7 @@ fn trigger_mill_enabler(name: &str) -> CardFace {
                     count: QuantityExpr::Fixed { value: 3 },
                     target: TargetFilter::Controller,
                     destination: Zone::Graveyard,
+                    position: engine::types::ability::LibraryPosition::Top,
                 },
             )),
         ];
@@ -138,6 +140,7 @@ fn dig_to_graveyard_enabler(name: &str, in_trigger: bool) -> CardFace {
         up_to: false,
         filter: TargetFilter::Any,
         rest_destination: Some(Zone::Graveyard),
+        rest_remainder: engine::types::ability::DigRestRemainder::Route,
         rest_split_top_count: None,
         rest_order: engine::types::ability::DigRestOrder::Preserve,
         reveal: true,
@@ -498,6 +501,7 @@ fn opponent_mill_not_an_enabler() {
                 TypedFilter::creature().controller(ControllerRef::Opponent),
             ),
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         },
     )];
     let feature = detect(&[entry(face, 4)]);
@@ -650,6 +654,7 @@ fn dig_without_graveyard_rest_is_not_an_enabler() {
             up_to: false,
             filter: TargetFilter::Any,
             rest_destination: None,
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             reveal: false,

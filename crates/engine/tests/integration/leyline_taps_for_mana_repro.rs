@@ -140,6 +140,7 @@ fn leyline_bonus_still_fires_on_manual_mana_activation() {
         .act(GameAction::ActivateAbility {
             source_id: beast_id,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating the mana ability must succeed");
 

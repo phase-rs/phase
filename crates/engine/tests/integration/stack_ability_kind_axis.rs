@@ -597,6 +597,7 @@ fn mister_fantastic_activation_binds_only_triggered_ability() {
         .act(GameAction::ActivateAbility {
             source_id: mister,
             ability_index: copy_idx,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Mister Fantastic's {R}{G}{W}{U}, {T} copy ability must be activatable");
     if matches!(
@@ -647,6 +648,7 @@ fn mister_fantastic_activation_binds_only_triggered_ability() {
     let _ = runner.act(GameAction::ActivateAbility {
         source_id: mister,
         ability_index: copy_idx,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         runner.state().stack.iter().all(|entry| entry

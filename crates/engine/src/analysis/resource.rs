@@ -23,13 +23,18 @@ use crate::analysis::decision_template::{
     DecisionTemplate, IterationIndex,
 };
 use crate::game::game_object::GameObject;
+use crate::game::players::{self, PoisonLossScope};
+use crate::game::topology;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityUseTally, ActivationRestriction, CastingPermission,
-    DamageModification, TargetRef,
+    DamageModification, QuantityRef, TargetRef,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::game_state::{loop_states_equal, GameState, StackEntry, StackEntryKind};
+use crate::types::game_state::{
+    active_trigger_ledger_bindings_equal, AbilityUsageKey, DamageEventKey, DamageRecord, GameState,
+    LKISnapshot, StackEntry, StackEntryKind, TrackedMemberOrigin,
+};
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::ManaType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -61,9 +66,7 @@ mod verdict_memo {
     /// therefore still exhausts the budget and refuses fail-closed.
     pub(crate) const PROBE_BUDGET: u32 = 26;
 
-    /// CR 732.2a: cost is a COVERAGE knob, never a soundness knob — an
-    /// unaffordable probe degrades to honest-red (no certificate, no offer),
-    /// never to a wrong certificate and never to an unbounded stall.
+    /// A denied charge makes `probe_resolution` answer `Prompted`, the answer a real prompt gets.
     ///
     /// **Derive list pinned to exactly `#[derive(Debug)]`** — no `Default`, no
     /// `Clone`/`Copy`. A derived constructor recompiles the construction escape
@@ -391,10 +394,10 @@ pub struct LoopDetectCost {
     /// Path D — the bounded-cycle offer mint.
     pub bounded_offer_ns: u64,
     pub bounded_offer_calls: u32,
-    /// Path B — the CR 732.4 draw ring walk, reached only when the loop is mandatory.
+    /// Path B's ring walk under a mandatory verdict.
     pub recurrence_scan_mandatory_ns: u64,
     pub recurrence_scan_mandatory_calls: u32,
-    /// CR 104.4b Path C — the revocable-unbounded ring walk, reached only when it is not.
+    /// Path B and Path C's ring walks under an out verdict.
     pub recurrence_scan_optional_ns: u64,
     pub recurrence_scan_optional_calls: u32,
     /// The recorded road, below the reconcile block.
@@ -403,11 +406,13 @@ pub struct LoopDetectCost {
     /// The sampler's two clone calls, counted rather than timed.
     pub sampler_normalized_clones: u32,
     pub sampler_live_clones: u32,
-    /// The `normalize_for_loop()` that opens `project_out_resources` — the compare side's
-    /// clone budget, minted twice per comparison.
+    /// The sample-form clone (`normalize_for_loop_sample`) that opens
+    /// `project_out_resources` — the compare side's clone budget, minted twice per
+    /// comparison.
     pub projected_clones: u32,
-    /// One field per production function that calls `project_out_resources`, never one
-    /// aggregate: an aggregate cannot tell four live sites from one live and three dead.
+    /// One field per counted comparison population — strict modulo, scoped cover, object
+    /// growth, fodder growth — never one aggregate: an aggregate cannot tell four live
+    /// sites from one live and three dead.
     pub compares_equal_modulo_resources: u32,
     pub compares_cover_modulo_growth_scoped: u32,
     pub compares_cover_modulo_object_growth: u32,
@@ -527,12 +532,12 @@ impl LoopDetectCost {
         )
     }
 
-    /// Every comparison the four production callers of `project_out_resources` performed.
-    /// Each of them projects both sides as a pair, which is what makes
+    /// Every comparison in the four counted populations, each of which projects both sides
+    /// as a pair. That is what makes
     /// `projected_clones <= 2 * resource_compares()` a bound over this closed population —
-    /// a bound and not a parity, because `SharedCurrentFrames::new` projects twice per
+    /// a bound and not a parity, because `SharedCurrentFrames::new` projects once per
     /// ring-walk entry and ticks no compare: the bound needs a ring long enough to pay for
-    /// those two as well, and a short drive breaches it.
+    /// that one as well, and a short drive can breach it.
     pub fn resource_compares(&self) -> u32 {
         self.compares_equal_modulo_resources
             + self.compares_cover_modulo_growth_scoped
@@ -778,8 +783,7 @@ pub struct ResourceVector {
     /// **Event-fed.** NOTE: the scheduled "take an extra turn after this one"
     /// turn-control path (`turns.rs` `grant_extra_turn_after`) pushes onto
     /// `state.extra_turns` WITHOUT emitting `EffectResolved{ExtraTurn}`, so that
-    /// less-common class is not counted on this axis — an honest coverage gap, not
-    /// a regression.
+    /// less-common class is not counted on this axis.
     pub extra_turns: i64,
 
     /// CR 700.4 + CR 603.6c: "dies" (leaves-the-battlefield-to-graveyard)
@@ -844,7 +848,8 @@ mod map_key_pairs {
 
 /// CR 732.2a: the resource signature of ONE repetition of a certified loop — what the
 /// offer publishes so a bounded drive can check that each committed cycle actually
-/// conformed, and so the CR 704 count bound has a per-period magnitude to divide by.
+/// conformed, and so the CR 704 count bound has a per-period magnitude to divide by. An offer
+/// publishes it inside a [`PeriodSignature`], which says which repetitions it states.
 ///
 /// The `Vec` victim term (rather than a `BTreeMap` keyed by [`DecisionSlot`]) is
 /// deliberate: a struct map key hits exactly the `serde_json` restriction
@@ -856,7 +861,9 @@ mod map_key_pairs {
 /// it finds here, the second asks whether the period charges this point's slot — and each binds
 /// the magnitude to `_`. The **magnitude** is read by
 /// [`PeriodicDelta::declared_seat_life_charges`], which charges a seat every slot a declaration
-/// may newly land on it (the AI's bounded-declare veto is its production caller). It is also the
+/// may newly land on it (in production, the engine's `PeriodicDelta::seat_crossing` and the AI's
+/// bounded-declare veto both read those charges through
+/// [`PeriodicDelta::declared_seat_life_crossing`]). It is also the
 /// wire witness of the mint's magnitude derivation, the only place
 /// [`ResourceVector::worst_seat_life_loss`]' output is observable off the certificate, and the
 /// accepted row pinning that derivation asserts against it. Narrowing the shape to a slot list
@@ -945,6 +952,81 @@ pub struct PeriodicDelta {
     pub cleanup: Option<CleanupPair>,
 }
 
+/// CR 732.2a: an offer's published per-period signature, by which repetitions it states. A
+/// reader that multiplies it by a count names the arm it multiplies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "SignatureWire", into = "SignatureWire")]
+pub enum PeriodSignature {
+    /// The threshold authority's period: every repetition moves what it states, so a count's
+    /// consequence is it times the count.
+    EveryRepetition(PeriodicDelta),
+    /// The counting replay's period: what one performed repetition moved; a later one may move a
+    /// different amount, so no multiple of it is a count's consequence.
+    OneRepetition(PeriodicDelta),
+}
+
+impl PeriodSignature {
+    /// The signature a count's consequence is read from; a one-repetition signature has none.
+    pub fn every_repetition(&self) -> Option<&PeriodicDelta> {
+        match self {
+            PeriodSignature::EveryRepetition(period) => Some(period),
+            PeriodSignature::OneRepetition(_) => None,
+        }
+    }
+
+    /// How many retained frames one repetition spans, whichever repetitions the signature states.
+    pub fn frames_per_period(&self) -> u32 {
+        match self {
+            PeriodSignature::EveryRepetition(period) | PeriodSignature::OneRepetition(period) => {
+                period.frames_per_period
+            }
+        }
+    }
+}
+
+/// The wire shape of a [`PeriodSignature`]: the period's own fields, and `scope` only when it
+/// states one repetition, so a signature saved before the scope existed reads as every
+/// repetition's.
+#[derive(Serialize, Deserialize)]
+struct SignatureWire {
+    #[serde(flatten)]
+    period: PeriodicDelta,
+    #[serde(default, skip_serializing_if = "SignatureScope::is_every_repetition")]
+    scope: SignatureScope,
+}
+
+#[derive(Default, PartialEq, Serialize, Deserialize)]
+enum SignatureScope {
+    #[default]
+    EveryRepetition,
+    OneRepetition,
+}
+
+impl SignatureScope {
+    fn is_every_repetition(&self) -> bool {
+        *self == SignatureScope::EveryRepetition
+    }
+}
+
+impl From<SignatureWire> for PeriodSignature {
+    fn from(wire: SignatureWire) -> Self {
+        match wire.scope {
+            SignatureScope::EveryRepetition => PeriodSignature::EveryRepetition(wire.period),
+            SignatureScope::OneRepetition => PeriodSignature::OneRepetition(wire.period),
+        }
+    }
+}
+
+impl From<PeriodSignature> for SignatureWire {
+    fn from(signature: PeriodSignature) -> Self {
+        let (period, scope) = match signature {
+            PeriodSignature::EveryRepetition(period) => (period, SignatureScope::EveryRepetition),
+            PeriodSignature::OneRepetition(period) => (period, SignatureScope::OneRepetition),
+        };
+        SignatureWire { period, scope }
+    }
+}
+
 /// CR 514.1: how a turn-cycle period moves its caster's hand toward the cleanup discard.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CleanupPair {
@@ -980,7 +1062,7 @@ impl CleanupPair {
     fn repetitions(self, state: &GameState, caster: PlayerId) -> Option<i64> {
         let max_hand = crate::game::turns::maximum_hand_size(state, caster)? as i64;
         let hand = state.players.iter().find(|p| p.id == caster)?.hand.len() as i64;
-        ResourceVector::narrowed_repetitions(&[(
+        ResourceVector::narrowed_repetitions([(
             max_hand - (hand + self.to_cleanup) + self.growth,
             self.growth,
         )])
@@ -1000,10 +1082,8 @@ impl PeriodicDelta {
         observed: &ResourceVector,
         pins: &[crate::analysis::decision_template::PinnedDecision],
     ) -> bool {
-        // THE IDENTITY, BY CONSTRUCTION: the union of the two vectors' seat-keyed KEYS retains
-        // every entry on both sides, so this compares exactly what it compared before the
-        // population became a parameter. Said once here, in code, instead of being restated at
-        // each of the callers that leaves unedited.
+        // The population is the union of both vectors' seat-keyed keys, so `conforms_in` drops
+        // no seat-keyed entry from either side.
         //
         // NOT `BTreeSet::new()`. An empty population is not the identity — it is the VACUOUS
         // predicate: `retained_seats` drops every seat-keyed axis on both sides, the two
@@ -1106,12 +1186,17 @@ impl PeriodicDelta {
         // conforming when the lift is undefined, so a period whose two seats simply lose the
         // same amount is not aborted for the tie alone.
         let domain = self.declarable_victims.as_slice();
-        let published = retained_seats(&self.delta, still_in_game);
-        let observed = retained_seats(observed, still_in_game);
-        published == observed
-            || slot_charged_life(&published, slots, domain)
-                .zip(slot_charged_life(&observed, slots, domain))
-                .is_some_and(|(a, b)| a == b)
+        // CR 800.4a + CR 119.3: the charged loss is lifted over every seat BEFORE the re-scope,
+        // because a re-aim can move it off a seat that has since left, and re-scoping first
+        // would drop it from one side only.
+        retained_seats(&self.delta, still_in_game) == retained_seats(observed, still_in_game)
+            || slot_charged_life(&self.delta, slots, domain)
+                .zip(slot_charged_life(observed, slots, domain))
+                .is_some_and(|((published, charged), (observed, observed_charged))| {
+                    charged == observed_charged
+                        && retained_seats(&published, still_in_game)
+                            == retained_seats(&observed, still_in_game)
+                })
     }
 
     /// CR 704.3 + CR 704.5a: the first repetition, at or before `horizon`, at which a stream of
@@ -1122,12 +1207,12 @@ impl PeriodicDelta {
     /// inside `k` reaches `remaining_life`: CR 704.3 checks CR 704.5a whenever a player would get
     /// priority, including the beats INSIDE a repetition, so a repetition that nets nothing can
     /// still take a total to zero on the way — which is why the two terms are not one number.
-    /// There is no division on this axis and therefore no net-versus-dip divisor to choose.
     ///
     /// TAKES THE CHARGE STREAM, NOT ITS INGREDIENTS, and holds no receiver: the charges are
     /// [`PeriodicDelta::declared_seat_life_charges`]' answer and are never re-derived here, so the
-    /// two authorities cannot disagree about what one repetition costs while this one owns when it
-    /// becomes lethal.
+    /// two authorities cannot disagree about what one repetition costs while this one, and
+    /// `first_life_crossing_by_stretch` (its stretch-at-a-time reading, held equal to it by
+    /// `a_life_crossing_read_by_stretch_is_the_stepping_walks`), own when it becomes lethal.
     ///
     /// `horizon` IS MANDATORY, AND IT IS A TERMINATION REQUIREMENT rather than a convenience.
     /// That producer returns a LAZY, UNBOUNDED iterator, and a seat the declaration never charges
@@ -1185,8 +1270,11 @@ impl PeriodicDelta {
     ///   [`ChargeBound::Ceiling`] a leaving slot makes the net term the reserved charge below,
     ///   which bounds every conforming declaration; subtracting the leaving slot's magnitude
     ///   from the reserved charge instead under-charges a two-slot swap with an untargeted loss
-    ///   on the seat, and a re-aimed gain. [`ChargeBound::Attributable`] takes exactly that
-    ///   under-charge, deliberately: the magnitude it drops is one this declaration's own
+    ///   on the seat, and a re-aimed gain. The one exception is a slot that surely leaves a
+    ///   seat whose observed loss was wholly that slot's ([`PeriodicDelta::sole_slot_loss`]):
+    ///   there the magnitude is the seat's whole net and whole reserved charge, so the
+    ///   ceiling relieves it from both instead. [`ChargeBound::Attributable`] takes exactly
+    ///   that under-charge, deliberately: the magnitude it drops is one this declaration's own
     ///   choices do not produce, and an under-charge ADMITS where the ceiling's over-charge
     ///   refuses.
     ///
@@ -1235,25 +1323,26 @@ impl PeriodicDelta {
     /// # The witness and the known over-charges
     ///
     /// `observed` must be the declaration the offer published:
-    /// `game::engine::build_bounded_declaration` pins each slot to the proposer's one answer in
-    /// the certified window, which is the aim the reserved charge subtracted. Another template
-    /// breaks the aim reasoning above.
+    /// `game::engine::build_bounded_declaration` pins each charged slot to the seat its
+    /// announcement that RESOLVED in the certified window aimed at, which is the aim whose loss
+    /// the period measured (CR 608.1, CR 608.2 + CR 119.3). Another template breaks the aim
+    /// reasoning above.
     ///
     /// A withheld slot is charged against EVERY seat in `declarable_victims`, and forces the
     /// net term to the dip for each of them, even when that slot can only name some other seat:
     /// the certificate publishes one reach union, never a per-slot reach, so which seats a
-    /// withheld slot can name is not recoverable here. That is a fail-closed over-charge.
+    /// withheld slot can name is not recoverable here.
     ///
     /// Both templates resolve through [`decision_template::resolve`], the authority the drive
     /// replays a declaration with, once per repetition because a scheduled pin may name a
     /// different seat at each index. `observed` resolves at the repetition's own index, and
     /// `declaration` resolves for each charged slot at that index less the slot's own lead
     /// ([`AnnouncedLead`]). Which slots lead is a fact of the board the caller hands in: a slot
-    /// whose announcement already sits on that board's stack resolves it at the first repetition,
-    /// so `observed` stands in both positions for that slot there, while a slot with none resolves
-    /// `declaration` from the first repetition. When the two are the same template, as on the
-    /// bounded candidate `ai_support::candidates` emits (it carries the offer's own declaration),
-    /// one resolution serves both for every slot that leads by nothing. Everything else is read
+    /// whose announcement already sits on that board's stack resolves, at the first repetition,
+    /// the target its trigger latched when it was put on the stack (CR 603.3d + CR 601.2c),
+    /// which [`AnnouncedLead::aims`] carries; a slot with none resolves `declaration` from the
+    /// first repetition. When the two templates are the same, one resolution serves both for
+    /// every slot that leads by nothing. Everything else is read
     /// once. The magnitudes are the engine's charge model: every charged slot carries
     /// [`ResourceVector::worst_seat_life_loss`] whatever its effect, so a charged slot that deals
     /// no damage is still charged when it lands.
@@ -1268,8 +1357,35 @@ impl PeriodicDelta {
         points: &'a [DecisionPoint],
         state: &'a GameState,
         bound: ChargeBound,
-        lead: AnnouncedLead<'_>,
+        lead: AnnouncedLead<'a>,
     ) -> impl Iterator<Item = DeclaredLifeCharge> + 'a {
+        (0..).map(self.declared_seat_life_charge_at(
+            seat,
+            declaration,
+            observed,
+            points,
+            state,
+            bound,
+            lead,
+        ))
+    }
+
+    /// The charge of [`Self::declared_seat_life_charges`] at one iteration index: repetition
+    /// `index + 1`'s. A function of the index alone, so a caller may read any repetition's charge
+    /// without walking to it.
+    // Each parameter is a separate authority the caller states, for the reason
+    // `PeriodicDelta::seat_crossing` gives.
+    #[allow(clippy::too_many_arguments)]
+    fn declared_seat_life_charge_at<'a>(
+        &'a self,
+        seat: PlayerId,
+        declaration: Option<&'a DecisionTemplate>,
+        observed: Option<&'a DecisionTemplate>,
+        points: &'a [DecisionPoint],
+        state: &'a GameState,
+        bound: ChargeBound,
+        lead: AnnouncedLead<'a>,
+    ) -> impl Fn(IterationIndex) -> DeclaredLifeCharge + 'a {
         let charge_on_seat = |charges: &[(PlayerId, i64)]| {
             charges
                 .iter()
@@ -1282,6 +1398,7 @@ impl PeriodicDelta {
         // them, and `PeriodicDelta::conforms` holds such a seat's loss to the observed one.
         let in_domain = self.declarable_victims.contains(&seat);
         let one_template = declaration.is_some() && declaration == observed;
+        let sole_loss = self.sole_slot_loss();
         // CR 115.2: each charged slot with whether its published legal set holds the seat,
         // `None` for a withheld slot, and the repetitions it leads by.
         let slots: Vec<(&DecisionSlot, i64, Option<bool>, IterationIndex)> = self
@@ -1301,7 +1418,9 @@ impl PeriodicDelta {
         // leads by nothing, one index behind for a slot that leads.
         let resolves_own = !one_template && slots.iter().any(|&(.., leads)| leads == 0);
         let resolves_behind = slots.iter().any(|&(.., leads)| leads > 0);
-        (0..).map(move |iteration: IterationIndex| {
+        move |iteration: IterationIndex| {
+            #[cfg(feature = "test-support")]
+            crate::game::perf_counters::record_declared_life_charge_read();
             // With no charged slot there is no pin to read and every repetition is alike.
             let resolve_at = |template: Option<&DecisionTemplate>, index: IterationIndex| {
                 template
@@ -1331,6 +1450,7 @@ impl PeriodicDelta {
             };
             let mut landing = 0i64;
             let mut leaves = false;
+            let mut relieved = 0i64;
             let mut elsewhere = 0i64;
             // The attributable pair: what THIS declaration's pin announces, and what the
             // observation's may have. Accumulated beside the terms above under both bounds so
@@ -1338,10 +1458,10 @@ impl PeriodicDelta {
             let mut claimed = 0i64;
             let mut leaving = 0i64;
             for &(slot, magnitude, published, leads) in &slots {
-                // CR 601.2c + CR 603.3d: a slot whose target was announced before the shortcut
-                // was proposed resolves the observed aim at its leading repetition.
+                // CR 603.3d + CR 601.2c: a slot whose target was announced before the shortcut
+                // was proposed resolves the target its trigger latched at its leading repetition.
                 let declared = match iteration.checked_sub(leads) {
-                    None => seen.as_deref(),
+                    None => lead.aims(),
                     Some(_) if leads > 0 => behind.as_deref(),
                     Some(_) if one_template => seen.as_deref(),
                     Some(_) => own.as_deref(),
@@ -1360,7 +1480,11 @@ impl PeriodicDelta {
                 if reaches && now != Some(false) && before != Some(true) {
                     landing += magnitude;
                 }
-                if in_domain && now != Some(true) && before != Some(false) {
+                // Relieved only where the slot surely leaves a seat whose whole observed loss was
+                // its own; any other leaving slot keeps the reserved charge (see the doc).
+                if now == Some(false) && before == Some(true) && sole_loss == Some(seat) {
+                    relieved += magnitude;
+                } else if in_domain && now != Some(true) && before != Some(false) {
                     leaves = true;
                 }
                 if published == Some(true) && now == Some(false) && before == Some(false) {
@@ -1380,10 +1504,10 @@ impl PeriodicDelta {
                     leaving += magnitude;
                 }
             }
-            let gross = floor + landing;
+            let gross = (floor - relieved).max(0) + landing;
             match bound {
                 ChargeBound::Ceiling => {
-                    let dip = gross.max(reserved - elsewhere);
+                    let dip = gross.max(reserved - elsewhere - relieved);
                     DeclaredLifeCharge {
                         net: if leaves { dip } else { gross },
                         dip,
@@ -1404,7 +1528,163 @@ impl PeriodicDelta {
                     }
                 }
             }
-        })
+        }
+    }
+
+    /// CR 704.3 + CR 704.5a: [`Self::first_life_crossing`] over
+    /// [`Self::declared_seat_life_charges`], the same answer for every input, computed without
+    /// stepping through repetitions whose charge cannot differ from the one before.
+    ///
+    /// On one board a repetition's charge depends on its index only through the two templates'
+    /// resolutions and, for a slot that leads, the latched aim its first repetition reads and the
+    /// declaration it reads one index behind (CR 603.3d + CR 601.2c); a resolution changes only at
+    /// a pre-declared switch point (`DecisionTemplate::resolution_change_points`). Between two
+    /// such points every repetition carries one charge, so `Self::first_life_crossing_by_stretch`
+    /// reads one charge per stretch where the stepping walk reads one per repetition up to
+    /// `horizon`. A seat the declaration never charges, on a board whose horizon is a life total in
+    /// the billions, is read once per stretch instead of once per point of that total.
+    ///
+    /// A template with no finite list of switch points (a round robin of two or more) is walked
+    /// repetition by repetition, as [`Self::first_life_crossing`] walks any stream. That is a
+    /// stated limit: no engine producer builds such a schedule, and it arrives only in input the
+    /// engine did not write: a hand-written `DeclareShortcut`, a remote client's included (the
+    /// server's payload guard bounds the schedule's length and passes it through), or a restored
+    /// save, whose offer declaration and proposal template deserialize their pins verbatim.
+    ///
+    /// `pub` so `phase-ai`'s proposer veto (`cycles_to_proposer_elimination`) asks this reader as
+    /// `PeriodicDelta::seat_crossing` does, rather than stepping through the charges itself: the
+    /// veto and the cascade's life axis are one reduction.
+    // Each parameter is a separate authority the caller states, for the reason
+    // `PeriodicDelta::seat_crossing` gives.
+    #[allow(clippy::too_many_arguments)]
+    pub fn declared_seat_life_crossing(
+        &self,
+        seat: PlayerId,
+        declaration: Option<&DecisionTemplate>,
+        observed: Option<&DecisionTemplate>,
+        points: &[DecisionPoint],
+        state: &GameState,
+        bound: ChargeBound,
+        lead: AnnouncedLead<'_>,
+        remaining_life: i64,
+        horizon: u32,
+    ) -> Option<u32> {
+        let charge_at = self.declared_seat_life_charge_at(
+            seat,
+            declaration,
+            observed,
+            points,
+            state,
+            bound,
+            lead,
+        );
+        // With no charged slot no template is read, so the stream never changes.
+        let mut changes: BTreeSet<IterationIndex> = BTreeSet::new();
+        if !self.victim_slot.is_empty() {
+            for template in [declaration, observed].into_iter().flatten() {
+                let Some(switches) = template.resolution_change_points() else {
+                    return Self::first_life_crossing(
+                        (0..).map(charge_at),
+                        remaining_life,
+                        horizon,
+                    );
+                };
+                for switch in switches {
+                    // A leading slot reads the declaration one index behind, so its change
+                    // lands one index later. A point too many only splits a stretch in two.
+                    changes.insert(switch);
+                    changes.insert(switch.saturating_add(AnnouncedLead::LEADING));
+                }
+            }
+            // The latched aims answer only the leading repetition.
+            changes.insert(AnnouncedLead::LEADING);
+        }
+        Self::first_life_crossing_by_stretch(charge_at, &changes, remaining_life, horizon)
+    }
+
+    /// CR 704.3 + CR 704.5a: [`Self::first_life_crossing`]'s answer for a stream given by
+    /// `charge_at` (the charge of the repetition after `index` earlier ones) that changes only
+    /// at the indices in `changes`, read one charge per stretch.
+    ///
+    /// Within a stretch that starts after `netted` life is gone, repetition `j` of the stretch
+    /// (from 0) is fatal when `netted + j * net + dip` reaches `remaining_life`. So it is the
+    /// first repetition of the stretch when its dip alone reaches, otherwise the least `j` with
+    /// `j * net >= remaining_life - netted - dip` when the stretch nets anything, and no
+    /// repetition of the stretch otherwise. `changes` may hold indices at which nothing changes:
+    /// a stretch split in two gives the same answer.
+    fn first_life_crossing_by_stretch(
+        charge_at: impl Fn(IterationIndex) -> DeclaredLifeCharge,
+        changes: &BTreeSet<IterationIndex>,
+        remaining_life: i64,
+        horizon: u32,
+    ) -> Option<u32> {
+        let mut netted = 0i64;
+        // The index of the stretch's first repetition, which is also how many came before it.
+        let mut start: IterationIndex = 0;
+        let ends = changes
+            .iter()
+            .copied()
+            .filter(|point| *point > 0)
+            .map(Some)
+            .chain([None]);
+        for end in ends {
+            // Indices `start..end` are repetitions `start + 1 ..= end`.
+            let last = end.map_or(horizon, |end| end.min(horizon));
+            if last <= start {
+                continue;
+            }
+            let charge = charge_at(start);
+            let run = i64::from(last - start);
+            let short = remaining_life
+                .saturating_sub(netted)
+                .saturating_sub(charge.dip);
+            let steps = if short <= 0 {
+                Some(0)
+            } else if charge.net > 0 {
+                // Rounded up: the least `j` with `j * net >= short`.
+                Some((short + charge.net - 1) / charge.net)
+            } else {
+                None
+            };
+            if let Some(steps) = steps.filter(|steps| *steps < run) {
+                return u32::try_from(i64::from(start) + 1 + steps).ok();
+            }
+            netted = netted.saturating_add(run.saturating_mul(charge.net));
+            start = last;
+        }
+        None
+    }
+
+    /// CR 119.3: the one domain seat whose observed loss is wholly the period's single charged
+    /// slot's — exactly one charged slot, exactly one domain seat losing life over the period and
+    /// by exactly that slot's magnitude, and every domain seat reserved exactly that magnitude.
+    ///
+    /// An untargeted loss confined to the aimed seat also reads as the slot's own, because the
+    /// magnitude is [`ResourceVector::worst_seat_life_loss`], so the relief under-charges there;
+    /// [`PeriodicDelta::conforms_in`] stops the drive at the first repetition whose period differs.
+    fn sole_slot_loss(&self) -> Option<PlayerId> {
+        let [(_, magnitude)] = self.victim_slot.as_slice() else {
+            return None;
+        };
+        let floor = self.delta.seat_life_charges(&[]);
+        let on = |charges: &[(PlayerId, i64)], seat: PlayerId| {
+            charges
+                .iter()
+                .find(|(s, _)| *s == seat)
+                .map_or(0, |(_, m)| *m)
+        };
+        let mut losing = self
+            .declarable_victims
+            .iter()
+            .filter(|s| on(&floor, **s) > 0);
+        let seat = *losing.next()?;
+        if losing.next().is_some() || on(&floor, seat) != *magnitude {
+            return None;
+        }
+        self.declarable_victims
+            .iter()
+            .all(|t| on(&self.seat_life_charge, *t) == *magnitude)
+            .then_some(seat)
     }
 
     /// CR 704.5a / CR 704.5c / CR 104.3c + CR 121.4 + CR 800.4a: every CR 704 threshold crossing
@@ -1431,25 +1711,31 @@ impl PeriodicDelta {
     ///
     /// # The arithmetic is the existing arithmetic, per seat, over its own charge stream
     ///
-    /// The life axis has no divisor (there is nothing to divide): the crossing comes from
-    /// [`PeriodicDelta::first_life_crossing`] over
-    /// [`PeriodicDelta::declared_seat_life_charges`], whose `net`/`dip` pair is what CR 704.3's
+    /// The life crossing is [`PeriodicDelta::first_life_crossing`]'s answer over
+    /// [`PeriodicDelta::declared_seat_life_charges`], read by `declared_seat_life_crossing` one
+    /// charge per stretch between the declarations' switch points, with one rounded-up division
+    /// inside the stretch that crosses. The charges' `net`/`dip` pair is what CR 704.3's
     /// per-priority-beat sweep requires. The poison and library axes have a constant per-period
     /// magnitude, so their crossing is [`ResourceVector::narrowed_repetitions`]' strict answer
     /// plus one — the least count PAST the threshold. The seat's crossing is the minimum of the
     /// three.
     ///
-    /// ONE PASS PER SEAT OVER THE WHOLE STREAM, and that IS the per-departure walk rather than a
-    /// short cut around it. `declared_seat_life_charges` resolves the declaration's pin ONCE PER
-    /// REPETITION, at that repetition's index less the lead its caller states for each slot, so a
-    /// declaration that re-aims at a later repetition — the witness below is exactly that shape —
-    /// already charges each seat what that repetition charges it. Spending
-    /// a segment's repetitions out of a seat's headroom and re-dividing the remainder would
-    /// restate the same accumulation with a second rounding step, and the horizon is the seat's
-    /// own remaining headroom for the reason D4 gives: `net` and `dip` are non-negative, so a
-    /// repetition that does not advance the accumulation never brings the crossing nearer. That
-    /// premise survives both [`ChargeBound`]s because the attributable direction clamps its net
-    /// term rather than letting an over-estimated magnitude carry a negative into this walk.
+    /// ONE READING PER SEAT, A STRETCH AT A TIME, and that IS the per-departure walk rather than a
+    /// short cut around it. `declared_seat_life_charges` resolves the declaration's pin at each
+    /// repetition's index less the lead its caller states for each slot, so a declaration that
+    /// re-aims at a later repetition — the witness below is exactly that shape — already charges
+    /// each seat what that repetition charges it. A resolution changes only at a pre-declared
+    /// switch point ([`DecisionTemplate::resolution_change_points`]), so
+    /// `declared_seat_life_crossing` reads one charge per stretch between two of them, carries the
+    /// life netted so far across each switch point exactly as the stepping walk does, and rounds
+    /// only inside the stretch that crosses: one division there, never a second rounding step on a
+    /// remainder. The horizon is the walk's, [`cascade_horizon`]'s sum of the living seats'
+    /// headrooms, not each seat's own: a declaration may defer a seat's charge to a later segment,
+    /// so a seat's own headroom is not an upper bound on the repetition its crossing lands on.
+    /// Both `net` and `dip` are non-negative, so a repetition that does not advance the
+    /// accumulation never brings the crossing nearer. That premise survives both [`ChargeBound`]s
+    /// because the attributable direction clamps its net term rather than letting an
+    /// over-estimated magnitude carry a negative into this walk.
     ///
     /// # The magnitude-constancy premise, stated rather than claimed
     ///
@@ -1465,8 +1751,7 @@ impl PeriodicDelta {
     /// ([`PeriodicDelta::conforms_in`]) refuses a cycle whose observed period moved on a seat
     /// still in the game; the departure verdict refuses a departure at a repetition no entry
     /// names or with a seat set no entry holds; and the live CR 704.3 sweep is what actually
-    /// removes a seat, never this prediction. The engine's own measurement of what the committed
-    /// boards do is in this branch's probe record, not restated here.
+    /// removes a seat, never this prediction.
     // Each parameter is a separate authority the caller states, for the reason
     // `PeriodicDelta::seat_crossing` gives.
     #[allow(clippy::too_many_arguments)]
@@ -1542,9 +1827,10 @@ impl PeriodicDelta {
     /// crosses a CR 704 threshold under `declaration`, or `None` when no axis takes it there.
     ///
     /// The minimum over the three axes, each measured against the headroom its own rule leaves:
-    /// the seat's whole life total (CR 704.5a: 0 or less loses), one short of ten poison
-    /// (CR 704.5c), and the whole remaining library (CR 104.3c + CR 121.4: an empty library is
-    /// lethal at the next DRAW ATTEMPT and not on state alone, so every card left is headroom).
+    /// the seat's whole life total (CR 704.5a: 0 or less loses), one short of the poison-loss
+    /// threshold the SBA applies to this seat ([`ResourceVector::poison_axis`]), and the whole
+    /// remaining library (CR 104.3c + CR 121.4: an empty library is lethal at the next DRAW
+    /// ATTEMPT and not on state alone, so every card left is headroom).
     ///
     /// `horizon` is the WALK's, not this seat's, for the reason
     /// [`PeriodicDelta::elimination_cascade`] states where it derives it.
@@ -1569,32 +1855,26 @@ impl PeriodicDelta {
         // non-negativity holds under both `ChargeBound`s, and under `Attributable` it is the
         // producer's clamp that keeps it.
         let remaining_life = i64::from(p.life);
-        let life = Self::first_life_crossing(
-            self.declared_seat_life_charges(
-                p.id,
-                declaration,
-                observed,
-                points,
-                state,
-                bound,
-                lead,
-            ),
+        let life = self.declared_seat_life_crossing(
+            p.id,
+            declaration,
+            observed,
+            points,
+            state,
+            bound,
+            lead,
             remaining_life,
             horizon,
         );
         // The strict answer is the largest count after which no axis has crossed, so the
         // crossing is the next one — `narrowed_repetitions` is the same division
         // `seat_headroom_bound` performs, over these two axes' own headrooms.
-        let non_life = ResourceVector::narrowed_repetitions(&[
-            (
-                9 - i64::from(p.poison_counters),
-                self.delta.poison.get(&p.id).copied().unwrap_or(0),
-            ),
-            (
+        let non_life = ResourceVector::narrowed_repetitions(
+            self.delta.poison_axis(state, p).into_iter().chain([(
                 state.library_of(p.id).len() as i64,
                 -self.delta.library_delta.get(&p.id).copied().unwrap_or(0),
-            ),
-        ])
+            )]),
+        )
         .and_then(|strict| u32::try_from(strict.saturating_add(1)).ok());
         [life, non_life].into_iter().flatten().min()
     }
@@ -1616,10 +1896,15 @@ impl PeriodicDelta {
     /// and the `ReplayMode` are carried through untouched, so the witness differs from a
     /// declaration the publisher already validated in exactly the aim.
     ///
-    /// Each segment aims at one living reachable seat and the next segment begins one repetition
-    /// after that seat's own crossing, so no segment aims at a seat an earlier segment crossed.
-    /// Seats are taken least-remaining-headroom first, tie-broken by seat — a heuristic, on which
-    /// nothing rests, because the witness's contract is legality and not optimality.
+    /// Each segment aims at one living reachable seat, and the next segment's first announcement
+    /// resolves at the repetition after that seat's own crossing, so no segment aims at a seat an
+    /// earlier segment crossed. With a leading slot ([`AnnouncedLead`]) announcement index `i`
+    /// resolves at repetition `i + 1 + lead`, so the next segment starts `lead` indices before
+    /// the crossing, and a seat that crosses before its own segment's first announcement resolves
+    /// (the in-flight hit alone takes it) gets no segment. Seats are taken in the charged point's
+    /// published `legal_targets` order, the order the declaration dialog lists them in — a
+    /// choice on which nothing rests, because the witness's contract is legality and not
+    /// optimality.
     ///
     /// # The two refusals, and the one over-charge
     ///
@@ -1629,13 +1914,10 @@ impl PeriodicDelta {
     /// greatest start at or below an index and a duplicated start is a segment no drive reads.
     ///
     /// THIS CONSTRUCTION ASKS FOR [`ChargeBound::Ceiling`], because what it backs is a published
-    /// ceiling: its error must lower a count, never raise one. So a SEAT LEAVING a charged slot
-    /// is read fail-closed by [`PeriodicDelta::declared_seat_life_charges`] — it both lands and
-    /// leaves — and a seat this witness aims AWAY from in a later segment is over-charged for the
-    /// segments after its own.
-    /// On the population this was measured over that never moves an answer, because such a seat
-    /// has already crossed by then; it is an over-charge and therefore a LOWER count, which is
-    /// the fail-closed direction, and it is stated rather than claimed unreachable.
+    /// ceiling: its error must lower a count, never raise one. So a segment aiming AWAY from the
+    /// seat the observation aimed at is read by [`PeriodicDelta::declared_seat_life_charges`] as
+    /// leaving it: relieved where the observation is wholly that slot's loss, and otherwise
+    /// charged the seat's reserved charge — an over-charge, and therefore a LOWER count.
     ///
     /// # Why the proposer is excluded
     ///
@@ -1644,15 +1926,16 @@ impl PeriodicDelta {
     /// enforced, in [`PeriodicDelta::elimination_cascade`], over whatever declaration it is
     /// handed.
     ///
-    /// THE WITNESS IS CHARGED, NEVER DRIVEN. It is an input to a ceiling; nothing resolves it
-    /// against a board, and whether a declaration of this shape is one the engine accepts at the
-    /// declaration ingress is a separate question with its own owner.
+    /// The witness bounds the ceiling, and it can also become the suggestion that is declared
+    /// and driven: `bounded_offer_tail` cuts it at the most repetitions the proposer survives
+    /// and publishes it only when it conforms at that count.
     pub(crate) fn piecewise_witness(
         &self,
         state: &GameState,
         proposer: PlayerId,
         observed: &DecisionTemplate,
         points: &[DecisionPoint],
+        lead: AnnouncedLead<'_>,
     ) -> Option<DecisionTemplate> {
         use crate::analysis::decision_template::{
             AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
@@ -1663,11 +1946,26 @@ impl PeriodicDelta {
         let charged: BTreeSet<&DecisionSlot> =
             self.victim_slot.iter().map(|(slot, _)| slot).collect();
         // CR 115.2 + CR 800.4 + CR 102.1: the seats some charged slot can be re-aimed onto that
-        // are still people in the game, least remaining headroom first.
-        let mut order: Vec<(i64, PlayerId)> = self
-            .declarable_victims
+        // are still people in the game, in the charged point's published order.
+        let published_order: Vec<PlayerId> = points
             .iter()
-            .filter(|seat| **seat != proposer)
+            .filter(|point| charged.contains(&point.slot))
+            .find_map(|point| match &point.kind {
+                DecisionPointKind::Targets { legal_targets, .. } => Some(
+                    legal_targets
+                        .iter()
+                        .filter_map(|t| match t {
+                            TargetRef::Player(p) => Some(*p),
+                            TargetRef::Object(_) => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let order: Vec<(i64, PlayerId)> = published_order
+            .iter()
+            .filter(|seat| self.declarable_victims.contains(seat) && **seat != proposer)
             .filter_map(|seat| {
                 state
                     .players
@@ -1676,7 +1974,12 @@ impl PeriodicDelta {
                     .map(|p| (i64::from(p.life), p.id))
             })
             .collect();
-        order.sort_unstable();
+        let leads = self
+            .victim_slot
+            .iter()
+            .map(|(slot, _)| lead.repetitions(slot))
+            .max()
+            .unwrap_or(0);
 
         // Segment by segment, because a segment's own END is the crossing the segments BEFORE it
         // produce — the switch point is not knowable without them.
@@ -1714,19 +2017,22 @@ impl PeriodicDelta {
                 // The witness backs a published CEILING, so its own segment ends are read in the
                 // direction that over-charges: a lower count is the fail-closed answer here.
                 ChargeBound::Ceiling,
-                // Read with no lead, each later segment starts no later than a drive reaches it,
-                // whichever slots lead on that drive's board, so its crossing lands no later and
-                // the ceiling it backs is no higher.
-                AnnouncedLead::None,
+                lead,
             ) else {
                 // A segment that carries its own seat to no threshold ends the witness: it is
                 // the segment after it that the count would come from, and there is none.
                 steps.pop();
                 break;
             };
+            // Crossed before this segment's first announcement resolves: no segment for it.
+            if crossing <= start + leads {
+                steps.pop();
+                continue;
+            }
             // A `Piecewise` start is an ITERATION INDEX and a repetition is counted from 1, so
-            // the segment following a crossing at repetition `r` starts at index `r`.
-            start = crossing;
+            // the segment whose first announcement resolves after a crossing at repetition `r`
+            // starts at index `r - lead`.
+            start = crossing.saturating_sub(leads);
             witness = Some(candidate);
         }
         witness
@@ -1781,8 +2087,10 @@ pub enum ChargeBound {
 /// CR 601.2c + CR 603.3d: which charged slots' first repetition resolves a target announced before
 /// the shortcut was proposed. A triggered ability's targets are chosen as it is put on the stack,
 /// so a charged slot whose trigger already sits on the stack of the board a drive starts from
-/// resolves the aim the offer published at the drive's first repetition, and the declaration under
-/// test governs that slot from the second. A charged slot with no announcement on that stack is
+/// resolves the target that trigger latched (CR 603.3d + CR 601.2c) at the drive's first
+/// repetition, and the declaration under test governs that slot from the second. That latched
+/// target is the in-flight entry's own, which under an alternating answer history is not the
+/// aim the period observed. A charged slot with no announcement on that stack is
 /// announced inside the drive and resolves the declaration under test from the first repetition.
 /// Which slots lead is a fact of that board, slot by slot, and never of the loop.
 ///
@@ -1794,21 +2102,35 @@ pub enum AnnouncedLead<'a> {
     /// No charged slot leads: every repetition resolves the declaration under test at its own
     /// index.
     None,
-    /// The listed charged slots lead by one repetition: each resolves the declaration the offer
-    /// published at the first repetition, and the declaration under test from the second, at its
-    /// index less one. A charged slot not listed leads by nothing.
-    LeadingRepetition(&'a [DecisionSlot]),
+    /// The charged slots with a listed `Targets` aim lead by one repetition: each resolves its
+    /// listed (latched) aim at the first repetition, and the declaration under test from the
+    /// second, at its index less one. A charged slot not listed leads by nothing.
+    LeadingRepetition(&'a [ConcreteDecision]),
 }
 
-impl AnnouncedLead<'_> {
+impl<'a> AnnouncedLead<'a> {
     /// The repetitions a listed slot leads by, which is also how far behind its own index a
     /// leading slot resolves the declaration under test.
     const LEADING: IterationIndex = 1;
 
-    fn repetitions(self, slot: &DecisionSlot) -> IterationIndex {
+    pub(crate) fn repetitions(self, slot: &DecisionSlot) -> IterationIndex {
         match self {
-            AnnouncedLead::LeadingRepetition(slots) if slots.contains(slot) => Self::LEADING,
+            AnnouncedLead::LeadingRepetition(aims)
+                if aims.iter().any(
+                    |d| matches!(d, ConcreteDecision::Targets { slot: s, .. } if s == slot),
+                ) =>
+            {
+                Self::LEADING
+            }
             AnnouncedLead::None | AnnouncedLead::LeadingRepetition(_) => 0,
+        }
+    }
+
+    /// The latched aims the leading repetition resolves.
+    fn aims(self) -> Option<&'a [ConcreteDecision]> {
+        match self {
+            AnnouncedLead::LeadingRepetition(aims) => Some(aims),
+            AnnouncedLead::None => None,
         }
     }
 }
@@ -1961,10 +2283,10 @@ pub(crate) struct SlotCharge {
     /// CR 115.2: the seats this slot's announcement may legally name, sorted and deduped. A
     /// slot announced twice in one window reaches the UNION of its frames' legal sets.
     pub(crate) reaches: Vec<PlayerId>,
-    /// CR 601.2c (reached for a triggered ability via CR 603.3d): the seat the window
-    /// OBSERVED this slot announce, or `None` when the window does not settle it — no
-    /// single-player announcement, a seat outside the announcement's own legal set, or two
-    /// frames of one slot naming different seats.
+    /// CR 608.1 + CR 608.2 + CR 119.3: the seat this slot's announcement that RESOLVED inside
+    /// the window aimed at — the aim whose loss the period measured — or `None` when the window
+    /// does not settle it: no resolved announcement of the slot, no single-player target, a seat
+    /// outside [`SlotCharge::reaches`], or two resolved announcements naming different seats.
     ///
     /// `Option`, never a `bool` beside a seat: "the window saw this slot aim somewhere" and
     /// "where" are one fact. `None` is the fail-CLOSED reading — an unobserved aim is never
@@ -2003,7 +2325,7 @@ impl SlotCharge {
 /// PAIRED RATHER THAN TWO PARALLEL LISTS, for the reason
 /// [`EliminationBound::predicted_departure`] gives: a caller holding a seat set beside a loose
 /// index can compare the wrong one.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PredictedDeparture {
     /// CR 732.2a: which repetition of the period this crossing falls on, counted from 1 — the
     /// same index a drive compares its own loop position against.
@@ -2049,11 +2371,38 @@ pub(crate) struct EliminationCascade {
     /// own repetition, or the lower cleanup hand bound of a turn-cycle period (CR 514.1),
     /// because CR 704.3's sweep at that crossing is itself a place a player has
     /// priority and therefore an ending point CR 732.2a admits.
-    pub(crate) count: u32,
+    count: u32,
     /// Every crossing, in departure order. Empty only when the cleanup's hand bound ends the
     /// count before any crossing (CR 514.1); otherwise a cascade with no entry is the outer
     /// absence ([`PeriodicDelta::elimination_cascade`] returns `None`).
     pub(crate) entries: Vec<PredictedDeparture>,
+}
+
+impl EliminationCascade {
+    /// CR 104.2a + CR 704.5a / CR 704.5b / CR 704.5c: the most repetitions `proposer` survives,
+    /// within `capacity` — the sole producer of every count a bounded offer publishes.
+    pub(crate) fn survived_count(&self, proposer: PlayerId, capacity: u32) -> u32 {
+        // The walk stops at the proposer's crossing, so it can only be the last entry.
+        let survived = match self.entries.last() {
+            Some(entry) if entry.seats.contains(&proposer) => entry.repetition.saturating_sub(1),
+            _ => self.count,
+        };
+        survived.min(capacity)
+    }
+
+    /// The raw count, which may cost the proposer the game — read only by the offer's ceiling.
+    pub(crate) fn capacity_count(&self) -> u32 {
+        self.count
+    }
+
+    /// The cascade cut after entry `last`, its count becoming that entry's repetition.
+    pub(crate) fn truncated_through(mut self, last: usize) -> Self {
+        self.entries.truncate(last + 1);
+        if let Some(entry) = self.entries.last() {
+            self.count = entry.repetition;
+        }
+        self
+    }
 }
 
 /// CR 704.5a + CR 732.2a: everything [`ResourceVector::elimination_bounds`] computes — the
@@ -2097,12 +2446,26 @@ impl ResourceVector {
     /// [`Self::generic_triggers`]) are left at their `Default` (zero/empty); the
     /// harness feeds them from the event stream.
     pub fn snapshot(state: &GameState) -> ResourceVector {
+        Self::snapshot_among(state, |_| true, |_| true)
+    }
+
+    /// [`ResourceVector::snapshot`] with the seat-pooled axes summed over the seats `in_game`
+    /// keeps and the battlefield objects `kept` keeps (CR 800.4a).
+    /// The seat-keyed maps keep every seat, because `conforms_in` re-scopes them after its lift.
+    fn snapshot_among(
+        state: &GameState,
+        in_game: impl Fn(PlayerId) -> bool,
+        kept: impl Fn(&GameObject) -> bool,
+    ) -> ResourceVector {
         let mut v = ResourceVector::default();
 
         // CR 106.1: floating mana, summed across every player's pool.
         for player in &state.players {
-            for (i, color) in MANA_INDEX.iter().enumerate() {
-                v.mana[i] += player.mana_pool.count_color(*color) as i64;
+            let pooled = in_game(player.id);
+            if pooled {
+                for (i, color) in MANA_INDEX.iter().enumerate() {
+                    v.mana[i] += player.mana_pool.count_color(*color) as i64;
+                }
             }
             // CR 119.1: per-player life.
             v.life.insert(player.id, player.life as i64);
@@ -2113,7 +2476,7 @@ impl ResourceVector {
             // player loses) — mirrors the per-player `life`/`library_delta` maps above.
             v.poison.insert(player.id, player.poison_counters as i64);
             // CR 122.1: energy reserve.
-            if player.energy > 0 {
+            if pooled && player.energy > 0 {
                 v.counters.insert(
                     (CounterClass::Energy, ObjectClass::Player),
                     player.energy as i64,
@@ -2124,7 +2487,7 @@ impl ResourceVector {
         // CR 122.1: counters on battlefield objects, keyed by counter kind and
         // the bearer's object class.
         for id in &state.battlefield {
-            let Some(object) = state.objects.get(id) else {
+            let Some(object) = state.objects.get(id).filter(|object| kept(object)) else {
                 continue;
             };
             let class = object_class(object.card_types.core_types.as_slice());
@@ -2205,10 +2568,30 @@ impl ResourceVector {
     /// created and destroyed inside the period is not counted — an under-report, which
     /// understates the preview and leaves the conformance comparison symmetric.
     pub(crate) fn period(before: &GameState, after: &GameState) -> ResourceVector {
-        let mut v = Self::delta(&Self::snapshot(before), &Self::snapshot(after));
+        Self::period_among(before, after, |_| true)
+    }
+
+    /// CR 800.4a: [`ResourceVector::period`] measured over the seats `in_game` keeps, so a
+    /// repetition a seat departs on is compared without what that departure removed.
+    pub(crate) fn period_among(
+        before: &GameState,
+        after: &GameState,
+        in_game: impl Fn(PlayerId) -> bool + Copy,
+    ) -> ResourceVector {
+        // CR 800.4a: an object leaves the comparison iff the departure took it off the
+        // battlefield — its owner left, or a departed seat still controlled it once the control
+        // effects giving it that control ended (it was exiled); a reverted object stays.
+        let kept = |object: &GameObject| {
+            in_game(object.owner)
+                && (in_game(object.controller) || after.battlefield.contains(&object.id))
+        };
+        let mut v = Self::delta(
+            &Self::snapshot_among(before, in_game, kept),
+            &Self::snapshot_among(after, in_game, kept),
+        );
         v.tokens_created = crate::game::engine::minted_battlefield_ids(before, after)
             .into_iter()
-            .filter(|id| after.objects.get(id).is_some_and(|o| o.is_token))
+            .filter(|id| after.objects.get(id).is_some_and(|o| o.is_token && kept(o)))
             .count() as i64;
         v
     }
@@ -2696,11 +3079,36 @@ impl ResourceVector {
     /// ONE STATEMENT OF THE ARITHMETIC, over explicit pairs rather than over a seat, because the
     /// headroom a caller divides is not always the seat's full one — a walk that has already
     /// spent repetitions divides what is LEFT through the same division.
-    fn narrowed_repetitions(axes: &[(i64, i64)]) -> Option<i64> {
-        axes.iter()
-            .filter(|(_, magnitude)| *magnitude > 0)
-            .map(|&(headroom, magnitude)| headroom.max(0) / magnitude)
+    fn narrowed_repetitions(axes: impl IntoIterator<Item = (i64, i64)>) -> Option<i64> {
+        axes.into_iter()
+            .filter(|&(_, magnitude)| magnitude > 0)
+            .map(|(headroom, magnitude)| headroom.max(0) / magnitude)
             .min()
+    }
+
+    /// CR 704.5c / CR 704.6b: `p`'s poison axis as a [`ResourceVector::narrowed_repetitions`]
+    /// pair, measured on the poison-loss rule the SBA applies
+    /// ([`players::poison_loss_measure`]): the headroom one short of that rule's threshold, and
+    /// the per-period gain of the count it measures. `None` when no poison-loss rule applies to
+    /// `p`, so the axis is unarmed.
+    ///
+    /// CR 810.10: poison counters a team shares rise by every member's own gain, so a
+    /// shared-poison seat's magnitude is its team's summed gain, over the same members
+    /// [`players::team_poison_total`] counts.
+    fn poison_axis(&self, state: &GameState, p: &Player) -> Option<(i64, i64)> {
+        let measure = players::poison_loss_measure(state, p)?;
+        let gain = |seat: &PlayerId| self.poison.get(seat).copied().unwrap_or(0);
+        let magnitude = match measure.scope {
+            PoisonLossScope::Player => gain(&p.id),
+            PoisonLossScope::Team => topology::shared_poison_members(state, p.id)
+                .iter()
+                .map(gain)
+                .sum(),
+        };
+        Some((
+            i64::from(measure.threshold) - 1 - i64::from(measure.count),
+            magnitude,
+        ))
     }
 
     /// CR 704.5a / CR 704.5c / CR 104.3c + CR 121.4: ONE seat's strict headroom in whole
@@ -2739,48 +3147,42 @@ impl ResourceVector {
             .iter()
             .find(|(seat, _)| *seat == p.id)
             .map_or(0, |(_, magnitude)| *magnitude);
-        Self::narrowed_repetitions(&[
-            (p.life as i64 - 1, life_magnitude),
-            // CR 704.5c (ten or more poison counters lose): a positive poison delta is the
-            // per-period gain.
-            (
-                9 - p.poison_counters as i64,
-                self.poison.get(&p.id).copied().unwrap_or(0),
-            ),
-            // CR 104.3c + CR 121.4 (drawing from an empty library loses): a negative
-            // library delta is the per-period drain.
-            (
-                state.library_of(p.id).len() as i64,
-                -self.library_delta.get(&p.id).copied().unwrap_or(0),
-            ),
-        ])
+        Self::narrowed_repetitions(
+            [(p.life as i64 - 1, life_magnitude)]
+                .into_iter()
+                // CR 704.5c / CR 704.6b: the poison-loss rule the SBA applies to this seat.
+                .chain(self.poison_axis(state, p))
+                // CR 104.3c + CR 121.4 (drawing from an empty library loses): a negative
+                // library delta is the per-period drain.
+                .chain([(
+                    state.library_of(p.id).len() as i64,
+                    -self.library_delta.get(&p.id).copied().unwrap_or(0),
+                )]),
+        )
     }
 
-    /// CR 732.2a: **controller-scoped** net-progress — the single authority shared
-    /// by Engine A ([`crate::analysis::detect_loop`]) and Engine B
-    /// ([`crate::analysis::candidate_cycles`]). Returns true iff the cycle makes
+    /// CR 732.2a: **controller-scoped** net-progress. Returns true iff the cycle makes
     /// unbounded progress on ≥1 axis without leaving the loop's controller with an
     /// unsustainable net deficit on a *consumed* axis (their own life or mana).
     ///
     /// Distinct from [`Self::is_net_progress`] only in *who* the consumed-axis
     /// constraint applies to: the controller's life going negative is unsustainable
     /// (false), but an *opponent's* life/library going negative is the drain/mill win
-    /// (progress). Engine B layers an `unbounded_production` override on top of this
-    /// base check for dynamic production.
+    /// (progress).
     pub(crate) fn net_progress_for(&self, controller: PlayerId) -> bool {
-        // CR 106.1: a loop that net-spends mana across the whole pool is not
-        // sustainable. Mana is not attributed per player in the summed `mana`
-        // array, so any net-negative color is a controller-side deficit.
-        if self.mana.iter().any(|&n| n < 0) {
-            return false;
-        }
-        // CR 119: the controller losing life across the cycle is unsustainable.
-        for (pid, &n) in &self.life {
-            if *pid == controller && n < 0 {
-                return false;
-            }
-        }
-        !self.unbounded_axes_for(controller).is_empty()
+        self.progress_for(controller) && !self.life_falls_for(controller)
+    }
+
+    /// CR 106.1 + CR 732.2a: no color of mana falls and at least one axis grows without bound.
+    /// Mana is not attributed per player in the summed `mana` array, so any net-negative color
+    /// is a controller-side deficit.
+    pub(crate) fn progress_for(&self, controller: PlayerId) -> bool {
+        self.mana.iter().all(|&n| n >= 0) && !self.unbounded_axes_for(controller).is_empty()
+    }
+
+    /// CR 119.3: `controller`'s own life falls across the cycle.
+    pub(crate) fn life_falls_for(&self, controller: PlayerId) -> bool {
+        self.life.get(&controller).is_some_and(|&n| n < 0)
     }
 
     /// CR 732.2a + CR 704.5a: the unbounded axes of this delta with the
@@ -2791,18 +3193,31 @@ impl ResourceVector {
     /// `unbounded_components` only reports positive life (lifegain), so a pure
     /// drain loop would otherwise name no axis. Single authority shared by Engine
     /// A and Engine B.
-    pub(crate) fn unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
-        let mut out: Vec<ResourceAxis> = self
-            .unbounded_components()
+    pub fn unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
+        self.signed_unbounded_axes_for(controller)
             .into_iter()
             .map(|(axis, _)| axis)
-            .collect();
+            .collect()
+    }
+
+    /// CR 732.2a: the subset of [`Self::unbounded_axes_for`] this delta drives up, from the same
+    /// derivation; the rest (an opponent's drained life, CR 704.5a; a shrinking library) falls.
+    pub fn rising_unbounded_axes_for(&self, controller: PlayerId) -> Vec<ResourceAxis> {
+        self.signed_unbounded_axes_for(controller)
+            .into_iter()
+            .filter(|&(_, n)| n > 0)
+            .map(|(axis, _)| axis)
+            .collect()
+    }
+
+    fn signed_unbounded_axes_for(&self, controller: PlayerId) -> Vec<(ResourceAxis, i64)> {
+        let mut out = self.unbounded_components();
         // CR 704.5a: an opponent's life driven *down* each cycle is the drain win.
         for (pid, &n) in &self.life {
             if n < 0 && *pid != controller {
                 let axis = ResourceAxis::Life(*pid);
-                if !out.contains(&axis) {
-                    out.push(axis);
+                if !out.iter().any(|(a, _)| *a == axis) {
+                    out.push((axis, n));
                 }
             }
         }
@@ -3008,8 +3423,10 @@ fn map_delta<K: Ord + Copy>(
 /// Fail-closed in FOUR places: too few frames for every candidate `k`; a smallest repeating
 /// period whose delta is the zero vector; a certifying window that is not TURN-POSITION
 /// invariant (the CR 703.1 conjunct below); and reading the RING only — never the live
-/// `state` — so every compared frame is a `normalize_for_loop` snapshot taken at
-/// `WaitingFor::Priority{active_player}`, the conjunct both sampler sites gate on.
+/// `state` — so every compared frame is a `normalize_for_loop_sample` snapshot taken at
+/// `WaitingFor::Priority{active_player}`, the conjunct both sampler sites gate on. This
+/// authority reads only rank-insensitive resource axes, so the deferred identity ranks
+/// never affect it.
 pub(crate) fn ring_delta_signature(state: &GameState) -> Option<(u32, ResourceVector)> {
     let frames = state.loop_detect_ring.len();
     // 2k + 1 with k >= 1.
@@ -3050,8 +3467,6 @@ pub(crate) fn ring_delta_signature(state: &GameState) -> Option<(u32, ResourceVe
         // most recent `2k` deltas, which does not establish that the whole ring is periodic
         // with period `k`, so a larger `k'` need not be a multiple of `k` and its per-period
         // delta can be non-zero. Refusing outright costs a missed offer, never a wrong one.
-        // If that missed class ever needs to certify, `continue` is sound here for the same
-        // reason the return is safe: each candidate `k` is validated independently.
         if per_period == ResourceVector::default() {
             return None;
         }
@@ -3093,6 +3508,46 @@ pub(crate) fn ring_delta_signature(state: &GameState) -> Option<(u32, ResourceVe
     None
 }
 
+/// A comparison-only resource projection. Only the factories in this module
+/// construct it; read-only dereferencing cannot mutate its recipient classes.
+/// In particular, raw epoch zero is not this type's projected stale marker.
+#[derive(Clone, Debug)]
+pub(crate) struct ResourceProjectedFrame(GameState);
+
+impl std::ops::Deref for ResourceProjectedFrame {
+    type Target = GameState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// The two cover forms share one post-erasure identity pool. Direct callers
+/// move the projected stack out; shared callers borrow its cached normal form.
+pub(crate) struct CoverProjection<'a> {
+    projected: Cow<'a, ResourceProjectedFrame>,
+    stack: CoverStackSource<'a>,
+}
+
+enum CoverStackSource<'a> {
+    Cached(&'a [NormalizedStackEntry]),
+    Projected {
+        entries: im::Vector<StackEntry>,
+        firings: HashMap<ObjectId, TriggerFiring>,
+    },
+}
+
+impl<'a> CoverStackSource<'a> {
+    fn into_normalized(self) -> Cow<'a, [NormalizedStackEntry]> {
+        match self {
+            Self::Cached(entries) => Cow::Borrowed(entries),
+            Self::Projected { entries, firings } => {
+                Cow::Owned(normalized_stack_entries(&entries, &firings))
+            }
+        }
+    }
+}
+
 /// The current side of a loop comparison: either a raw state, whose projections the
 /// comparison derives itself, or a [`SharedCurrentFrames`] a caller already derived once for a
 /// whole ring walk. The two are distinct TYPES rather than two `&GameState`s, because a
@@ -3104,20 +3559,21 @@ pub(crate) trait CurrentSide<'a>: Copy {
     /// The unprojected state. Every read outside a projected comparand uses it.
     fn state(self) -> &'a GameState;
     /// [`project_out_resources`] of [`CurrentSide::state`].
-    fn projected(self) -> Cow<'a, GameState>;
-    /// [`cover_projection`] of it.
-    fn cover_projected(self) -> Cow<'a, GameState>;
+    fn projected(self) -> Cow<'a, ResourceProjectedFrame>;
+    /// Coherent stack-cleared and retained-stack forms of one resource projection.
+    /// Stack normalization stays deferred until the board gate accepts.
+    fn cover(self) -> CoverProjection<'a>;
 }
 
 impl<'a> CurrentSide<'a> for &'a GameState {
     fn state(self) -> &'a GameState {
         self
     }
-    fn projected(self) -> Cow<'a, GameState> {
+    fn projected(self) -> Cow<'a, ResourceProjectedFrame> {
         Cow::Owned(project_out_resources(self))
     }
-    fn cover_projected(self) -> Cow<'a, GameState> {
-        Cow::Owned(cover_projection(self))
+    fn cover(self) -> CoverProjection<'a> {
+        cover_projection(self)
     }
 }
 
@@ -3130,16 +3586,27 @@ impl<'a> CurrentSide<'a> for &'a GameState {
 /// deriving path calls, so a shared comparison compares the same bytes as the one it replaces.
 pub(crate) struct SharedCurrentFrames<'a> {
     current: &'a GameState,
-    projected: GameState,
-    cover: GameState,
+    projected: ResourceProjectedFrame,
+    cover: ResourceProjectedFrame,
+    cover_stack: Vec<NormalizedStackEntry>,
 }
 
 impl<'a> SharedCurrentFrames<'a> {
     pub(crate) fn new(current: &'a GameState) -> Self {
+        // ONE projection feeds both forms: the cover comparand is the same bytes with the
+        // stack split out, so the walk pays one journal pass instead of two.
+        let mut projected = project_out_resources(current);
+        let entries = std::mem::take(&mut projected.0.stack);
+        let firings = std::mem::take(&mut projected.0.stack_trigger_firings);
+        let cover_stack = normalized_stack_entries(&entries, &firings);
+        let cover = ResourceProjectedFrame(projected.0.clone());
+        projected.0.stack = entries;
+        projected.0.stack_trigger_firings = firings;
         Self {
             current,
-            projected: project_out_resources(current),
-            cover: cover_projection(current),
+            projected,
+            cover,
+            cover_stack,
         }
     }
 
@@ -3154,34 +3621,41 @@ impl<'a> CurrentSide<'a> for &'a SharedCurrentFrames<'a> {
     fn state(self) -> &'a GameState {
         self.current
     }
-    fn projected(self) -> Cow<'a, GameState> {
+    fn projected(self) -> Cow<'a, ResourceProjectedFrame> {
         Cow::Borrowed(&self.projected)
     }
-    fn cover_projected(self) -> Cow<'a, GameState> {
-        Cow::Borrowed(&self.cover)
+    fn cover(self) -> CoverProjection<'a> {
+        CoverProjection {
+            projected: Cow::Borrowed(&self.cover),
+            stack: CoverStackSource::Cached(&self.cover_stack),
+        }
     }
 }
 
-/// [`project_out_resources`] with the stack and its stack-entry-indexed firing sidecar
-/// cleared — the single authority for the comparand
-/// [`loop_states_cover_modulo_growth_scoped`]'s gate (1) needs, whose gate (2) compares the
-/// stack separately.
-fn cover_projection(state: &GameState) -> GameState {
+/// Split both cover forms from the SAME [`project_out_resources`] result.
+/// Moving the stack and its firing sidecar neither clones the state nor allocates
+/// normalized entries for a board rejection. Retained witnesses are not reselected.
+fn cover_projection(state: &GameState) -> CoverProjection<'static> {
     let mut projected = project_out_resources(state);
-    projected.stack.clear();
-    projected.stack_trigger_firings.clear();
-    projected
+    let entries = std::mem::take(&mut projected.0.stack);
+    let firings = std::mem::take(&mut projected.0.stack_trigger_firings);
+    CoverProjection {
+        projected: Cow::Owned(projected),
+        stack: CoverStackSource::Projected { entries, firings },
+    }
 }
 
 /// CR 732.2a vs CR 104.4b: the RELAXED loop equality. The strict comparator
 /// (`types::game_state::loop_states_equal`) is the right question for a *mandatory* loop — a
 /// draw only if the game truly repeats with nothing changing. For a *beneficial* loop
 /// (CR 732.2a, the shortcut) the question asked here is identity in **board, zones and
-/// tap-state on the PROJECTED feed**: `normalize_for_loop`, then [`project_out_resources`],
-/// then that same strict comparator — plus the hand conjunct at the end of
+/// tap-state on the PROJECTED feed**: the transient sample normal form, then
+/// [`project_out_resources`], then the rank-free
+/// [`crate::types::game_state::projected_states_equal`] — plus the hand conjunct at the end of
 /// [`loop_states_equal_modulo_resources_side`], where this gate compensates for an axis the
 /// strict comparator leaves out: [`loyalty_activation_counts_match`] over the per-object
-/// CR 606.3 count (distinct from the per-player `extra_loyalty_activations_this_turn`, which
+/// CR 606.3 count and per-permanent extra-activation grant (distinct from the per-player
+/// `GameState::extra_loyalty_activations_this_turn` map, which
 /// `impl PartialEq for GameState` does compare). It states its own fail-closed argument there.
 ///
 /// What the projection removes is named by its own authorities rather than listed, because a
@@ -3192,10 +3666,14 @@ fn cover_projection(state: &GameState) -> GameState {
 /// colour, card types and abilities.
 ///
 /// INHERITED EXTRAPOLATION ASSUMPTION: this constant-depth path extrapolates the per-cycle
-/// delta over unboundedly many cycles with NO syntactic guard on either fire-time read
-/// surface. A dormant intervening-if / static / replacement reading a projected resource
-/// could arm mid-extrapolation; the shipped 2p drain detection depends on this behaviour
-/// and is regression-pinned. [`loop_states_cover_modulo_growth`] closes both surfaces by
+/// delta over unboundedly many cycles and does not guard every fire-time read surface. The
+/// cost-CONSTANCY half is closed structurally: a live cost modifier whose `dynamic_count`
+/// reads a projected journal that MOVED between the compared frames vetoes the comparison
+/// ([`cost_modifier_reads_changed_projected_resource`]), because such a modifier prices the
+/// next repeat differently from the one it extrapolates. The remaining assumption is a dormant
+/// intervening-if / static / replacement CONDITION reading a projected resource, which could
+/// arm mid-extrapolation; the shipped 2p drain detection depends on this behaviour and is
+/// regression-pinned. [`loop_states_cover_modulo_growth`] closes both surfaces by
 /// construction rather than inheriting the assumption.
 pub fn loop_states_equal_modulo_resources(a: &GameState, b: &GameState) -> bool {
     loop_states_equal_modulo_resources_side(a, b)
@@ -3213,28 +3691,282 @@ pub(crate) fn loop_states_equal_modulo_resources_side<'a, C: CurrentSide<'a>>(
     b: C,
 ) -> bool {
     bump_loop_detect_cost(|cost| cost.compares_equal_modulo_resources += 1);
+    // CR 601.2f + CR 732.2a: a live cost modifier that reads a projected journal (Blaster
+    // Hulk's `EnergyPaidOrLostThisTurn`) prices the next repeat differently even when the
+    // projected-out reserve is restored, so the recurrence is not constant. Reject before
+    // projecting. Check BOTH the prior state and the current state, because a cost modifier
+    // (e.g., a spell on the stack) may only be live in the current state at the priority
+    // window sample point, not in the prior state.
+    if cost_modifier_reads_changed_projected_resource(a, b.state()) {
+        return false;
+    }
     let pa = project_out_resources(a);
     let pb = b.projected();
-    // CR 606.3: the per-object loyalty-activation count is the authoritative
-    // once-per-turn-per-permanent gate, but `objects_content_eq` does NOT compare it
-    // (and `normalize_for_loop` does not zero it), so a loyalty loop is invisible to
-    // `loop_states_equal`. Compare it analysis-locally (do NOT widen the strict
-    // comparator, do NOT zero the field) so a loop that re-activates a loyalty
-    // ability (count k -> k+1) compares UNEQUAL and is not falsely certified.
-    loop_states_equal(&pa, &pb) && loyalty_activation_counts_match(&pa, &pb)
+    // CR 606.3: the per-object loyalty-activation count (and the per-permanent
+    // extra-activation grant that extends it) is the authoritative
+    // once-per-turn-per-permanent gate, but `objects_content_eq` does NOT compare
+    // either (and `normalize_for_loop` does not zero them), so a loyalty loop is
+    // invisible to `loop_states_equal`. Compare them analysis-locally (do NOT
+    // widen the strict comparator, do NOT zero the fields) so a loop that
+    // re-activates a loyalty ability (count k -> k+1) compares UNEQUAL and is not
+    // falsely certified.
+    // Projected frames are already identity-ranked with their stale class masked, so this
+    // comparison must not rank again.
+    crate::types::game_state::projected_states_equal(&pa, &pb)
+        && loyalty_activation_counts_match(&pa, &pb)
 }
 
-/// CR 606.3: per-object `loyalty_activations_this_turn` equality across two
-/// projected states. Transparent for non-loyalty loops (all-zero counts compare
-/// equal); discriminating for loyalty loops (the count grows each activation).
+/// CR 606.3: per-object loyalty-activation equality across two projected
+/// states, over both the count (`loyalty_activations_this_turn`) and the
+/// per-permanent extra-activation grant (`extra_loyalty_activations_this_turn`).
+/// Two states that differ in how many more activations a permanent may make are
+/// not the same position, so a differing grant breaks equality exactly as a
+/// differing count does (fail-closed). Transparent for non-loyalty loops
+/// (all-zero values compare equal); discriminating for loyalty loops (the count
+/// grows each activation).
 /// `loop_states_equal` already requires identical object sets before this runs, so
 /// iterating one side's objects and comparing shared ids is symmetric.
 fn loyalty_activation_counts_match(a: &GameState, b: &GameState) -> bool {
     a.objects.iter().all(|(id, oa)| {
-        b.objects
-            .get(id)
-            .is_none_or(|ob| oa.loyalty_activations_this_turn == ob.loyalty_activations_this_turn)
+        b.objects.get(id).is_none_or(|ob| {
+            oa.loyalty_activations_this_turn == ob.loyalty_activations_this_turn
+                && oa.extra_loyalty_activations_this_turn == ob.extra_loyalty_activations_this_turn
+        })
     })
+}
+
+/// CR 601.2f + CR 732.2a: does a LIVE cost modifier's projected-journal multiplier observe a
+/// DIFFERENT value on the two compared frames?
+///
+/// [`project_out_resources`] zeroes the per-turn journals on BOTH compared frames, so a pair
+/// whose journal moved compares equal and would certify a recurrence whose price is not
+/// constant. This veto is that missing conjunct — but it is a claim about the PERIOD, not about
+/// the modifier's presence in the state: a projected-reading modifier prices the next repeat
+/// differently only when the journal it reads actually MOVED across the compared period.
+///
+/// Presence is not a dependency. CR 601.2f prices the spell actually cast, and CR 732.2a's
+/// "predictable results" are untouched by a value that does not move — so a modifier that
+/// prices an unmoved journal permits the recurrence. That matters because a self-spell
+/// reduction functions OFF the stack as well as on it (CR 113.6; Blaster Hulk's
+/// `self_spell_cost_mod_active_zones` opts into hand and library precisely so the card can
+/// price its own cast): a Hulk nobody casts, sitting in hand with the journal at zero on both
+/// frames, must not refuse to certify an unrelated, energy-free drain recurrence.
+///
+/// The same question covers a BATTLEFIELD reducer that prices ANOTHER spell ("Instant and
+/// sorcery spells you cast cost {1} less …"). No "only its own source's cast counts"
+/// carve-out is applied — and none would be correct for a board-wide reducer — because the
+/// period tie is the journal's observed value, not the source's role.
+///
+/// Fail-closed: a modifier whose source exists on only one frame cannot be priced on both, so
+/// it vetoes.
+pub(crate) fn cost_modifier_reads_changed_projected_resource(
+    prior: &GameState,
+    current: &GameState,
+) -> bool {
+    prior
+        .objects
+        .keys()
+        .chain(current.objects.keys())
+        .any(|id| {
+            let multipliers = projected_cost_multipliers(*id, prior, current);
+            if multipliers.is_empty() {
+                return false;
+            }
+            let (Some(before), Some(after)) = (prior.objects.get(id), current.objects.get(id))
+            else {
+                return true;
+            };
+            multipliers.into_iter().any(|qty| {
+                resolve_cost_multiplier(prior, before.controller, *id, qty)
+                    != resolve_cost_multiplier(current, after.controller, *id, qty)
+            })
+        })
+}
+
+/// CR 601.2f + CR 113.6: the projected-journal multipliers of the LIVE cost-modifier statics
+/// `id` carries on EITHER compared frame. `object_content_eq` omits static definitions, so a
+/// modifier installed only on the current frame is invisible to a prior-only scan while the
+/// journal it reads still moves.
+fn projected_cost_multipliers<'a>(
+    id: ObjectId,
+    prior: &'a GameState,
+    current: &'a GameState,
+) -> Vec<&'a QuantityRef> {
+    let mut multipliers = Vec::new();
+    for state in [prior, current] {
+        let Some(object) = state.objects.get(&id) else {
+            continue;
+        };
+        multipliers.extend(object.static_definitions.iter_all().filter_map(|def| {
+            // CR 113.6: a static that does not function in its source's zone modifies no
+            // cost, so an inert copy (a graveyard it does not function from) is not a live
+            // cost dependency.
+            crate::game::functioning_abilities::static_functions_in_zone(object, def)
+                .then(|| static_mode_projected_count(&def.mode))
+                .flatten()
+        }));
+    }
+    multipliers
+}
+
+/// CR 601.2f: one cost modifier's multiplier, priced on `state` exactly as cost determination
+/// prices it — the source's controller is the payer whose journal the multiplier reads.
+fn resolve_cost_multiplier(
+    state: &GameState,
+    controller: PlayerId,
+    source: ObjectId,
+    qty: &QuantityRef,
+) -> i32 {
+    use crate::game::quantity::{resolve_quantity_with_ctx, QuantityContext};
+    resolve_quantity_with_ctx(
+        state,
+        &crate::types::ability::QuantityExpr::Ref { qty: qty.clone() },
+        controller,
+        QuantityContext::new(source),
+    )
+}
+
+/// CR 601.2f: EXHAUSTIVE projection (no `_` arm) of a `StaticMode`'s cost multiplier — the
+/// `dynamic_count` of `ModifyCost` / `ReduceAbilityCost` when it reads a projected per-turn
+/// journal (e.g. `EnergyPaidOrLostThisTurn`), else `None`. Every non-modifier variant binds
+/// read-free, so a new variant must be classified here before it compiles.
+///
+/// ONE authority for this axis, read by the period-tied veto
+/// ([`cost_modifier_reads_changed_projected_resource`]) at every consumer that extrapolates a
+/// recurrence: the constant-depth equality, the stack-growth cover, the object-growth cover,
+/// and `game::engine::take_route`.
+fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Option<&QuantityRef> {
+    use crate::game::ability_scan::quantity_ref_references_projected_resource as reads_projected;
+    use crate::types::statics::StaticMode;
+    match mode {
+        StaticMode::ModifyCost { dynamic_count, .. }
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count
+            .as_ref()
+            .filter(|dynamic_count| reads_projected(dynamic_count)),
+        // All other variants do not carry a projected-resource-reading dynamic_count.
+        StaticMode::ImposeAdditionalCost { .. }
+        | StaticMode::AlternativeKeywordCost { .. }
+        | StaticMode::CastWithAlternativeCost { .. }
+        | StaticMode::TopOfLibraryCastPermission { .. }
+        | StaticMode::GraveyardCastPermission { .. }
+        | StaticMode::ExileCastPermission { .. }
+        | StaticMode::CastWithKeyword { .. }
+        | StaticMode::MustAttackDefender { .. }
+        | StaticMode::Continuous
+        | StaticMode::DamageNotRemovedDuringCleanup
+        | StaticMode::CantAttack
+        | StaticMode::CantBlock
+        | StaticMode::CantAttackOrBlock
+        | StaticMode::CantBecomeSuspected
+        | StaticMode::MaxAttackersEachCombat { .. }
+        | StaticMode::MaxBlockersEachCombat { .. }
+        | StaticMode::CantBeTargeted { .. }
+        | StaticMode::CantBeCast { .. }
+        | StaticMode::CantBeActivated { .. }
+        | StaticMode::CantSearchLibrary { .. }
+        | StaticMode::RestrictLibrarySearchToTop { .. }
+        | StaticMode::ControlPlayersDuringOwnLibrarySearch { .. }
+        | StaticMode::CantCauseSacrificeOrExile { .. }
+        | StaticMode::CantCauseForcedAction { .. }
+        | StaticMode::CastWithFlash
+        | StaticMode::GrantsExtraVote
+        | StaticMode::GrantsExtraVillainousChoice
+        | StaticMode::ReduceActionCost { .. }
+        | StaticMode::ModifyActivationLimit { .. }
+        | StaticMode::ActivateAsInstant { .. }
+        | StaticMode::CantPayCost { .. }
+        | StaticMode::CantGainLife
+        | StaticMode::CantLoseLife
+        | StaticMode::PlayerProtection(..)
+        | StaticMode::MustAttack
+        | StaticMode::MustBlock
+        | StaticMode::MustBlockAttacker { .. }
+        | StaticMode::CantDraw { .. }
+        | StaticMode::DrawFromBottom { .. }
+        | StaticMode::DoubleTriggers { .. }
+        | StaticMode::IgnoreHexproof
+        | StaticMode::ExtraBlockers { .. }
+        | StaticMode::RevealTopOfLibrary { .. }
+        | StaticMode::RevealHand { .. }
+        | StaticMode::TopOfLibraryHasPlot
+        | StaticMode::TopOfLibraryPlotPermission
+        | StaticMode::CastFromHandFree { .. }
+        | StaticMode::LinkedCollectionCounterPlayPermission
+        | StaticMode::CountersPersistAcrossZones { .. }
+        | StaticMode::CountersCantBeRemoved { .. }
+        | StaticMode::CantBeCountered
+        | StaticMode::CantBeCopied
+        | StaticMode::CantEnterBattlefieldFrom
+        | StaticMode::CantCastFrom { .. }
+        | StaticMode::CantCastDuring { .. }
+        | StaticMode::CantActivateDuring { .. }
+        | StaticMode::PerTurnCastLimit { .. }
+        | StaticMode::PerTurnDrawLimit { .. }
+        | StaticMode::SuppressTriggers { .. }
+        | StaticMode::CantBeBlocked
+        | StaticMode::CantBeBlockedExceptBy { .. }
+        | StaticMode::CantBeBlockedBy { .. }
+        | StaticMode::CantBeBlockedByMoreThan { .. }
+        | StaticMode::CantBeBlockedUnlessAllBlock
+        | StaticMode::AttachmentRestriction { .. }
+        | StaticMode::Protection
+        | StaticMode::Indestructible
+        | StaticMode::CantBeDestroyed
+        | StaticMode::CantBeRegenerated
+        | StaticMode::FlashBack
+        | StaticMode::Shroud
+        | StaticMode::Hexproof
+        | StaticMode::Vigilance
+        | StaticMode::Menace
+        | StaticMode::Reach
+        | StaticMode::Flying
+        | StaticMode::Trample
+        | StaticMode::Deathtouch
+        | StaticMode::Lifelink
+        | StaticMode::CantTap
+        | StaticMode::CantUntap
+        | StaticMode::MustBeBlocked { .. }
+        | StaticMode::MustBeBlockedByAll { .. }
+        | StaticMode::Goaded
+        | StaticMode::MustAttackAwayFromSource
+        | StaticMode::CombatAlone { .. }
+        | StaticMode::CantCrew
+        | StaticMode::CantPhaseIn
+        | StaticMode::CrewContribution { .. }
+        | StaticMode::MayLookAtTopOfLibrary
+        | StaticMode::MayLookAtFaceDown
+        | StaticMode::CantBeTurnedFaceUp
+        | StaticMode::MayChooseNotToUntap
+        | StaticMode::AdditionalLandDrop { .. }
+        | StaticMode::EmblemStatic
+        | StaticMode::BlockRestriction { .. }
+        | StaticMode::NoMaximumHandSize
+        | StaticMode::MaximumHandSize { .. }
+        | StaticMode::MayPlayAdditionalLand
+        | StaticMode::CantHaveKeyword { .. }
+        | StaticMode::CantWinTheGame
+        | StaticMode::CantLoseTheGame
+        | StaticMode::LegendRuleDoesntApply
+        | StaticMode::SpeedCanIncreaseBeyondFour
+        | StaticMode::DefilerCostReduction { .. }
+        | StaticMode::SkipStep { .. }
+        | StaticMode::SpendManaAsAnyColor { .. }
+        | StaticMode::PayLifeAsColoredMana { .. }
+        | StaticMode::StepEndUnspentMana { .. }
+        | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
+        | StaticMode::CanAttackWithDefender
+        | StaticMode::AttackOnlyNeighbor
+        | StaticMode::IgnoreLandwalkForBlocking { .. }
+        | StaticMode::CanActivateAbilitiesAsThoughHaste
+        | StaticMode::CanBlockShadow
+        | StaticMode::AssignNoCombatDamage
+        | StaticMode::UntapsDuringEachOtherPlayersUntapStep
+        | StaticMode::MaxUntapPerType { .. }
+        | StaticMode::EntersWithAdditionalCounters { .. }
+        | StaticMode::CountsAsNamed { .. }
+        | StaticMode::Other(..) => None,
+    }
 }
 
 /// CR 110.1: a permanent is a card or token on the battlefield — this captures one such
@@ -3333,8 +4065,9 @@ pub enum PeriodCertification {
     /// ONLY value under which `frozen_ids` is non-empty.
     BoardCovered,
     /// Basis A, EQUALITY disjunct — the pair passed
-    /// [`loop_states_equal_modulo_resources`]. P2 holds (the stack is compared
-    /// exactly ⇒ constant depth) but P4 does NOT: that predicate has no items
+    /// [`loop_states_equal_modulo_published_answers`]. P2 holds (the stack is
+    /// compared exactly but for the published answers ⇒ constant depth) but P4
+    /// does NOT: [`loop_states_equal_modulo_resources`] has no items
     /// (4)/(5), as its own inherited-assumption section says. A replacement that
     /// arms mid-extrapolation is exactly the route P4 forecloses, so `frozen_ids`
     /// is forced EMPTY here.
@@ -3366,6 +4099,11 @@ pub(crate) struct PeriodTouch<'a> {
     /// against — CR 603.3d announcement choices are a property of the board the
     /// ability was put on the stack against.
     pub(crate) announced: Vec<(&'a GameState, &'a StackEntry)>,
+    /// `(carrying_frame, entry)` for every entry that LEFT the stack inside the window
+    /// (CR 608.1): present on frame `i-1`'s stack, absent from frame `i`'s, carried by frame
+    /// `i-1`. The loss the period measured is these entries' resolution (CR 608.2 + CR 119.3),
+    /// so the aim a charge OBSERVED is read here, never off `announced`.
+    pub(crate) resolved: Vec<(&'a GameState, &'a StackEntry)>,
     /// Entry ids of `current.stack` that the window proves FROZEN: the same id
     /// at the same index in EVERY window frame AND in `current`. CR 608.1: only
     /// the top of the stack resolves, so an entry that held its `(index, id)`
@@ -3396,11 +4134,14 @@ pub(crate) fn certified_period_touch<'a>(
         // which is exactly the snapshot mint this function's alias replaces.
         return PeriodTouch {
             announced: current.stack.iter().map(|e| (current, e)).collect(),
+            resolved: Vec::new(),
             frozen_ids: BTreeSet::new(),
         };
     }
 
     let mut announced: Vec<(&'a GameState, &'a StackEntry)> = Vec::new();
+    let mut resolved: Vec<(&'a GameState, &'a StackEntry)> = Vec::new();
+    let mut prev_frame: &'a GameState = window[0];
     let mut prev_ids: HashSet<ObjectId> = window[0].stack.iter().map(|e| e.id).collect();
     for frame in window
         .iter()
@@ -3413,7 +4154,14 @@ pub(crate) fn certified_period_touch<'a>(
                 announced.push((frame, entry));
             }
         }
-        prev_ids = frame.stack.iter().map(|e| e.id).collect();
+        let ids: HashSet<ObjectId> = frame.stack.iter().map(|e| e.id).collect();
+        for entry in &prev_frame.stack {
+            if !ids.contains(&entry.id) {
+                resolved.push((prev_frame, entry));
+            }
+        }
+        prev_ids = ids;
+        prev_frame = frame;
     }
 
     // The fail-open subtraction, and the ONLY thing the certificate keys. Taken
@@ -3421,6 +4169,7 @@ pub(crate) fn certified_period_touch<'a>(
     if !matches!(cert, PeriodCertification::BoardCovered) {
         return PeriodTouch {
             announced,
+            resolved,
             frozen_ids: BTreeSet::new(),
         };
     }
@@ -3438,6 +4187,7 @@ pub(crate) fn certified_period_touch<'a>(
         .collect();
     PeriodTouch {
         announced,
+        resolved,
         frozen_ids,
     }
 }
@@ -3490,9 +4240,8 @@ fn optional_cleared_classification(
 /// CR 732.2a: the facts a CALLER has PROVED about the loop window it is asking a
 /// window predicate to certify. Every field is a *proof obligation discharged by the
 /// caller*, never a request: a caller that has proved nothing passes
-/// [`LoopWindowScope::unproven`] and gets byte-identical pre-change behaviour, so the
-/// design is FAIL-CLOSED BY CONSTRUCTION — forgetting to thread a proof can only make
-/// a predicate more conservative, never less.
+/// [`LoopWindowScope::unproven`], so forgetting to thread a proof can only make a predicate
+/// refuse more, never less.
 ///
 /// The `_scoped` predicates below stay identity for [`LoopWindowScope::unproven`] because
 /// every guard that reads a field sits inside an `if let Some(..)` / `is_some_and`.
@@ -3547,9 +4296,7 @@ impl LoopWindowScope<'static> {
             phase_invariant: None,
             pinned: None,
             cast_card_ids: None,
-            // DELIBERATE, and it is the whole meaning of this constructor: a
-            // caller that has proved nothing gets byte-identical pre-change
-            // behaviour. `Option<&PeriodTouch>` is const-constructible as
+            // No period proof. `Option<&PeriodTouch>` is const-constructible as
             // `None`, so this stays a `const fn` on `LoopWindowScope<'static>`.
             period: None,
         }
@@ -3609,7 +4356,7 @@ fn window_scope_from_cover_frames<'a>(
 /// enforced HERE. That makes this predicate strictly NARROWER than the mint's, the safe
 /// direction. `frame` must be the pair's CARRYING frame (the board that minted `f`), never a
 /// second one; it is a parameter because `PeriodVerdicts.frames` is private, and dropping it
-/// would COMPILE and be fail-OPEN. Fail-closed in every other branch too.
+/// would COMPILE and be fail-OPEN.
 fn entry_target_choice_is_pinned(
     board: &GameState,
     f: FrameIx,
@@ -3753,16 +4500,10 @@ fn auto_may_choice_relief(
     }
 }
 
-/// Karp–Miller-style ω-acceleration (Karp–Miller 1969; Finkel et al. 2021), sound GIVEN the
-/// in-loop transition relation — the WHOLE beat: top-of-stack resolution (CR 608.1) with its
-/// resolution-time payments (CR 605.3a / CR 608.2g), trigger collection (CR 603.4),
-/// replacement application (CR 614.1), static condition gating (CR 604.1 / CR 613.1), SBA
-/// application (CR 704.3 / CR 704.5) and elimination processing (CR 800.4a) — is invariant
-/// under the projected-out player-level resources. Enforced by construction: object/board
-/// axes are STRICT-COMPARED ([`object_resource_axes_match`]); the remaining projected set is
-/// scanned fail-closed on BOTH read surfaces ([`stack_entry_reads_projected_resource`],
-/// [`fire_time_conditions_read_projected_resource`]); player-life SBAs are the modeled
-/// outcome itself; library/poison drift is firewalled to `None` by the winner predicate.
+/// Karp–Miller-style ω-acceleration (Karp–Miller 1969; Finkel et al. 2021): `current` covers
+/// `prior` only when the object/board axes compare strictly ([`object_resource_axes_match`]) and
+/// no current-stack entry or fire-time condition reads a still-projected resource
+/// ([`stack_entry_reads_projected_resource`], [`fire_time_conditions_read_projected_resource`]).
 /// Depth-independence of top-of-stack resolution: CR 608.1 / CR 405.5. NOTE that the shipped
 /// constant-depth 2p path ([`loop_states_equal_modulo_resources`]) makes the SAME
 /// extrapolation with NONE of these — that assumption is documented there, not claimed as a
@@ -3772,8 +4513,7 @@ pub(crate) fn loop_states_cover_modulo_growth<'a, C: CurrentSide<'a>>(
     current: C,
 ) -> bool {
     // The zero-proof container: frames = `[current]`, no proposer ⇒ nothing published ⇒ no
-    // relief, which is byte-identically what an `unproven()` scope already meant. The four
-    // production callers of this 2-arg entry point are therefore untouched.
+    // relief.
     let mut verdicts = PeriodVerdicts::unproven(current.state());
     loop_states_cover_modulo_growth_scoped(
         prior,
@@ -3936,6 +4676,44 @@ fn resolution_events_are_discharged(
     }
 }
 
+/// CR 732.2a + CR 603.3d + CR 601.2c: [`loop_states_equal_modulo_resources`] with the answers
+/// the offer publishes left out of the compared stack. A shortcut is "a loop that repeats a
+/// specified number of times" over "a sequence of game choices", and a published target answer
+/// is one of those choices, which the declaration specifies per repetition, so it is not part of
+/// what repeats. An entry's answer is cleared when, on that side's LIVE frame (`prior_live` for
+/// `prior`, `current` itself), it announces one of `slots` as the proposer's own choice
+/// ([`crate::game::engine::entry_publishes_pin_slots`]); an answer the proposer does not choose
+/// publishes no slot, so it stays in the identity.
+pub(crate) fn loop_states_equal_modulo_published_answers(
+    prior: &GameState,
+    prior_live: &GameState,
+    current: &GameState,
+    proposer: PlayerId,
+    slots: &[DecisionSlot],
+) -> bool {
+    let without_answers = |compared: &GameState, live: &GameState| -> GameState {
+        let mut out = compared.clone();
+        for (index, entry) in live.stack.iter().enumerate() {
+            let published = crate::game::engine::entry_publishes_pin_slots(live, entry, proposer)
+                .and_then(|pins| pins.target)
+                .is_some_and(|slot| slots.contains(&slot));
+            if !published {
+                continue;
+            }
+            if let Some(StackEntryKind::TriggeredAbility { ability, .. }) =
+                out.stack.get_mut(index).map(|e| &mut e.kind)
+            {
+                ability.targets.clear();
+            }
+        }
+        out
+    };
+    loop_states_equal_modulo_resources(
+        &without_answers(prior, prior_live),
+        &without_answers(current, current),
+    )
+}
+
 /// CR 732.2a: [`loop_states_cover_modulo_growth`] with an OFFER's published pin slots in
 /// scope — the entry point `game::engine`'s bounded-cycle offer uses for both its
 /// certification disjunct and its pin-coverage conjunct.
@@ -4008,24 +4786,35 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
 ) -> bool {
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_growth_scoped += 1);
     // (1) Board equal modulo the NARROWED projection AND modulo the stack, with the
-    // object resource axes STRICT-COMPARED. Project both through the single authority for
-    // this comparand ([`cover_projection`]) — the stack and its entry-indexed firing sidecar
-    // are compared separately in (2) — then require full board equality plus
-    // loyalty-activation parity plus strict object damage/counter equality.
-    let pb = current.cover_projected();
+    // object resource axes STRICT-COMPARED. Both sides are [`cover_projection`]'s comparand —
+    // the stack and its entry-indexed firing sidecar are compared separately in (2) — then
+    // require full board equality plus loyalty-activation parity plus strict object
+    // damage/counter equality. The prior's is cut from the one projection whose stack (2)
+    // reads, so both stacks carry the same ranked incarnations as the current side's.
+    let CoverProjection {
+        projected: pb,
+        stack: current_stack_source,
+    } = current.cover();
     let current = current.state();
-    let pa = cover_projection(prior);
-    if !(loop_states_equal(&pa, &pb)
+    let CoverProjection {
+        projected: pa,
+        stack: prior_stack_source,
+    } = cover_projection(prior);
+    if !(crate::types::game_state::projected_states_equal(&pa, &pb)
         && loyalty_activation_counts_match(&pa, &pb)
-        && object_resource_axes_match(prior, current))
+        && object_resource_axes_match(prior, current)
+        // CR 601.2f + CR 732.2a: a live cost modifier whose projected journal MOVED between
+        // these frames makes the next repeat cost something else, so the covered recurrence is
+        // not constant.
+        && !cost_modifier_reads_changed_projected_resource(prior, current))
     {
         return false;
     }
 
     // (2) Stack coverability: order-preserving bottom-up embedding + strict growth
     // confined to places already occupied in `prior` (CR 608.1 / CR 405.5 LIFO freeze).
-    let prior_stack = normalized_stack_entries(prior);
-    let cur_stack = normalized_stack_entries(current);
+    let prior_stack = prior_stack_source.into_normalized();
+    let cur_stack = current_stack_source.into_normalized();
     if !stack_covers(&prior_stack, &cur_stack) {
         return false;
     }
@@ -4148,7 +4937,7 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
 }
 
 // ===========================================================================
-// Offline object-growth loop detection (soundness core).
+// Offline object-growth loop detection.
 //
 // The object-axis analogue of `loop_states_cover_modulo_growth`: `current`'s
 // battlefield = `prior`'s + a set of INERT grown permanents G (Karp–Miller
@@ -4157,7 +4946,7 @@ pub(crate) fn loop_states_cover_modulo_growth_scoped<'a, C: CurrentSide<'a>>(
 // behavior can depend on |G| or G's members. OFFLINE: this predicate certifies
 // and rejects NOTHING at runtime — it is wired only into the offline classifier
 // `analysis::loop_check::detect_loop`. False-negative acceptable; false-positive
-// (a wrongful CR 104.2a win) is NOT — every gate fails closed.
+// (a wrongful CR 104.2a win) is NOT.
 // ===========================================================================
 
 /// CR 110.1: absolute-ObjectId battlefield membership. Module-level twin of
@@ -4194,7 +4983,10 @@ fn flush_clone(state: &GameState) -> GameState {
 ///     covers ([`eq_except_growable`]);
 /// 2″. every grown object is churn-inert ([`grown_objects_are_inert`]);
 /// 4″. no cost surface references the growing class (CR 732.2a — the EXHAUSTIVE cost scan
-///     plus the cost-keyword keystone rejectors).
+///     plus the cost-keyword keystone rejectors). A cost modifier pricing a PROJECTED per-turn
+///     journal is the one cost surface this scan does not answer: it is period-tied, not
+///     presence-tied, and gate 1″ vetoes it only when the journal actually moved
+///     ([`cost_modifier_reads_changed_projected_resource`]).
 pub(crate) fn loop_states_cover_modulo_object_growth(
     prior: &GameState,
     current: &GameState,
@@ -4202,12 +4994,16 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_object_growth += 1);
     // Flush BOTH clones once, up front, then project out the monotone
     // resources for the board/GameState equality axes.
-    let pf = flush_clone(prior);
-    let cf = flush_clone(current);
+    let mut pf = flush_clone(prior);
+    let mut cf = flush_clone(current);
+    // CR 400.7: the stack is set aside below, so a stack carrier's pins are judged here.
+    if stack_pins_superseded_apart(&mut pf, &mut cf) {
+        return false;
+    }
     let mut pa = project_out_resources(&pf);
     let mut pb = project_out_resources(&cf);
-    pa.stack.clear();
-    pb.stack.clear();
+    pa.0.stack.clear();
+    pb.0.stack.clear();
 
     // Absolute-ObjectId battlefield set-difference. Growth must be PURE —
     // no battlefield object may leave (a shrink is a real board change, not ω-cover).
@@ -4223,12 +5019,27 @@ pub(crate) fn loop_states_cover_modulo_object_growth(
     if grown_ids.is_empty() {
         return false;
     }
+    // CR 400.7 + CR 608.2k: recipient witnesses naming a GROWN object are part of the
+    // growth, so they must not split the remainder. A witness naming any other object
+    // keeps its live/stale relation: the FODDER cover quotients those, and this predicate
+    // must not become a blanket erasure of the sharing it protects.
+    let nominates_grown = |record: &DamageRecord| matches!(&record.target, TargetRef::Object(id) if grown_ids.contains(id));
+    pa.0.damage_dealt_this_turn
+        .retain(|record| !nominates_grown(record));
+    pb.0.damage_dealt_this_turn
+        .retain(|record| !nominates_grown(record));
 
     // (1) Board equal modulo the inert growth set, plus the non-object GameState remainder.
     if !(board_covers(&pa, &pb, &grown_ids)
         && object_resource_axes_match(prior, current)
         && loyalty_activation_counts_match(&pa, &pb)
-        && eq_except_growable(&pa, &pb, &grown_ids))
+        // CR 601.2f + CR 732.2a: a live cost modifier whose projected journal MOVED between
+        // the compared frames prices the next repeat differently, so the covered recurrence is
+        // not constant. Period-tied, not presence-tied — the same authority the constant-depth
+        // equality and the stack-growth cover use, and the reason
+        // `static_mode_references_growing_class` no longer vetoes the projected read alone.
+        && !cost_modifier_reads_changed_projected_resource(prior, current)
+        && eq_except_growable(&pa, &pb, &grown_ids, None))
     {
         return false;
     }
@@ -4270,17 +5081,6 @@ pub(crate) fn fodder_content_eq(a: &GameObject, b: &GameObject) -> bool {
     let mut probe = a.clone();
     probe.tapped = b.tapped;
     crate::types::game_state::object_content_eq(&probe, b)
-}
-
-/// Does `id` name a member of the fodder class in `state`? Content-derived (via
-/// [`fodder_content_eq`]), NOT ObjectId — fodder tokens are not id-stable (a
-/// reproduced token gets a fresh id; a tapped one keeps its id but flips `tapped`).
-#[cfg_attr(not(test), allow(dead_code))] // exercised by this module's unit tests.
-fn is_fodder(state: &GameState, id: &ObjectId, class: &GameObject) -> bool {
-    state
-        .objects
-        .get(id)
-        .is_some_and(|o| fodder_content_eq(o, class))
 }
 
 /// CR 110.1 / CR 732.2a: the winning controller's *tapped* fodder-class members —
@@ -4335,15 +5135,14 @@ fn board_covers_modulo_fodder(
     // in both partitions and unequal on `object_content_eq`'s `zone` conjunct, so a one-sided
     // strip would leave it refusing exactly the departures the certificate exists to admit.
     // An id the certificate does NOT name stays here and is refused as before.
-    let stable =
-        |state: &GameState| -> im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher> {
-            state
-                .objects
-                .iter()
-                .filter(|(id, o)| !growing.contains(id) && !fodder_content_eq(o, fodder_class))
-                .map(|(id, o)| (*id, o.clone()))
-                .collect()
-        };
+    let stable = |state: &GameState| -> crate::types::object_map::ObjectMap {
+        state
+            .objects
+            .iter()
+            .filter(|(id, o)| !growing.contains(id) && !fodder_content_eq(o, fodder_class))
+            .map(|(id, o)| (*id, o.clone()))
+            .collect()
+    };
     if !crate::types::game_state::objects_content_eq(&stable(prior), &stable(current)) {
         return false;
     }
@@ -4399,9 +5198,6 @@ pub(crate) struct CertifiedInstructedDeparture {
 /// EXCLUDING the actions it can tell apart — so what it publishes is the magnitude and the
 /// direction of advantage the whole class shares, never the word *mill*.
 ///
-/// `None` is "nothing certified", which is today's behaviour, so the fail-closed default is
-/// the type's default path.
-///
 /// THIS PREDICATE SCANS NO LIBRARY AND NO HAND, and does not need to: its caller has already
 /// made the frames it compares the proposer's own information set
 /// (`game::visibility::proposer_hidden_view`). The action conjunct does not breach that
@@ -4441,8 +5237,8 @@ pub(crate) struct CertifiedInstructedDeparture {
 /// avoid, and one the cover's own projection clears anyway. So what survives every exclusion
 /// above is an instructed, choiceless, non-caster top-of-library departure that is not a
 /// mill. It publishes the same magnitude and the same direction of advantage as a mill, and
-/// this certificate publishes nothing else, so the relief is sound for it; what is not earned
-/// is the WORD, which is why this function does not use it. RETIREMENT CONDITION: the drive's
+/// this certificate publishes nothing else, which is why this function never names a mill.
+/// RETIREMENT CONDITION: the drive's
 /// `apply_action` results are discarded at every call site; delivering them turns this into a
 /// POSITIVE per-id tie once the mill has a per-card action event that survives a CR 614.6
 /// destination redirect.
@@ -4457,9 +5253,12 @@ pub(crate) struct CertifiedInstructedDeparture {
 /// projected consumable by `driving_resources_non_decreasing`; a battlefield entry by guard
 /// 1's stable-partition compare; a cost or legality change by the drive aborting on the second
 /// cycle. The failure mode is an UNDER-stated bonus, not an over-stated promise.
+///
+/// CR 701.17a: `libraries` are the frames before projection; a departure leaves from the top, so C1b compares their order.
 pub(crate) fn certify_instructed_opponent_library_departure(
     prior: &GameState,
     current: &GameState,
+    libraries: [&GameState; 2],
     caster: PlayerId,
 ) -> Option<CertifiedInstructedDeparture> {
     // C1a, action conjunct. `record_drawn_card` PUSHES, so within one turn each player's
@@ -4541,9 +5340,17 @@ pub(crate) fn certify_instructed_opponent_library_departure(
             .filter(|id| !departed.contains(id))
             .collect()
     };
+    let [prior_order, current_order] = libraries;
+    let library = |frame: &GameState, id: PlayerId| {
+        frame
+            .players
+            .iter()
+            .find(|player| player.id == id)
+            .map(|player| residual(&player.library))
+    };
     for (prior_player, current_player) in prior.players.iter().zip(current.players.iter()) {
         if prior_player.id != current_player.id
-            || residual(&prior_player.library) != residual(&current_player.library)
+            || library(prior_order, prior_player.id) != library(current_order, current_player.id)
             || residual(&prior_player.graveyard) != residual(&current_player.graveyard)
         {
             return None;
@@ -4633,9 +5440,9 @@ pub(crate) fn certify_instructed_opponent_library_departure(
 /// which pays the real convoke+affinity cost on a clone and measures sustainability
 /// empirically, so the offline "models no cost ⇒ reject any board-scaling cost keyword"
 /// rejector does not apply. `detect_loop` keeps that firewall on the object-growth predicate.
-/// LIVE, not tree-scoped: reached from `apply()`'s empty-stack offer hook via
-/// `game::engine`'s `try_offer_object_growth_shortcut`, so a change here can move a SHIPPED
-/// offer verdict. `fodder_class` is a CONTENT authority (a representative `&GameObject`),
+/// The refusals this wraps are LIVE: `game::engine::certify_object_growth_frames` calls
+/// [`fodder_growth_cover_refusals`], so a change there can move a SHIPPED offer verdict.
+/// `fodder_class` is a CONTENT authority (a representative `&GameObject`),
 /// compared LIVE each call via [`fodder_content_eq`] (modulo tapped) — not latched by
 /// ObjectId, because fodder tokens are not id-stable. Covers any inert fungible token class
 /// (Saproling, Elf Warrior, Thopter, …), so it builds for the class not a card.
@@ -4651,6 +5458,125 @@ pub(crate) fn loop_states_cover_modulo_fodder_growth(
         .is_empty()
 }
 
+/// CR 400.7: for each stack entry, bottom first, the entry's id and whether each pin its
+/// ability chain holds still names the live object. A pin on an object that left and
+/// returned, or that is gone, names a new object or none (CR 400.7), so a delayed trigger
+/// "won't affect it" (CR 603.7c) and a target is illegal (CR 608.2b). The pins are the ones
+/// loop normalization ranks, read through the same visitor,
+/// [`ResolvedAbility::for_each_loop_pin_mut`](crate::types::ability::ResolvedAbility::for_each_loop_pin_mut),
+/// which writes nothing here.
+fn stack_pin_liveness(state: &mut GameState) -> Vec<(ObjectId, Vec<bool>)> {
+    let GameState { stack, objects, .. } = state;
+    stack
+        .iter_mut()
+        .map(|entry| {
+            let (id, source_id) = (entry.id, entry.source_id);
+            let mut live = Vec::new();
+            if let Some(ability) = entry.ability_mut() {
+                ability.for_each_loop_pin_mut(source_id, &mut |object_id, incarnation| {
+                    live.push(
+                        objects
+                            .get(&object_id)
+                            .is_some_and(|object| object.incarnation == *incarnation),
+                    );
+                });
+            }
+            (id, live)
+        })
+        .collect()
+}
+
+/// A stack entry as the pin relation sees it: its carrier (the entry id, with an occurrence
+/// number so two entries sharing an id within one frame stay distinct) and the liveness of
+/// each pin it holds.
+type PinnedCarrier = ((ObjectId, usize), Vec<bool>);
+
+/// A stack's [`stack_pin_liveness`] with each entry keyed by carrier.
+fn pinned_carriers(liveness: Vec<(ObjectId, Vec<bool>)>) -> Vec<PinnedCarrier> {
+    let mut seen: HashMap<ObjectId, usize> = HashMap::new();
+    liveness
+        .into_iter()
+        .map(|(id, live)| {
+            let occurrence = seen.entry(id).or_default();
+            *occurrence += 1;
+            ((id, *occurrence), live)
+        })
+        .collect()
+}
+
+/// CR 405.5 + CR 400.7: is `current` the stack `prior` plus growth, as far as pins go?
+///
+/// Both stacks are read bottom to top. A carrier is SHARED when both stacks hold it (the
+/// same stack entry stayed on the stack) and FRESH when only one does. The relation holds
+/// exactly when there is a map from the prior entries to the current entries such that:
+///
+/// 1. it is one to one and ORDER-PRESERVING over all entries, shared and fresh together:
+///    if one prior entry is below another, its image is below the other's image;
+/// 2. a shared prior entry maps to ITSELF, and its pins have the same liveness, pin for pin,
+///    in both stacks;
+/// 3. a fresh prior entry (it resolved or left) maps to a fresh current entry with the same
+///    liveness pattern (the entry put on the stack in its place);
+/// 4. every current entry that is nobody's image is fresh and carries a liveness pattern
+///    some prior entry carries (growth of a kind of carrier already present).
+///
+/// Anything else is not growth: a shared carrier whose pin changed (2), shared carriers in a
+/// different order or a fresh entry that would have to cross a shared one (1), a prior entry
+/// with no counterpart (3), a grown entry of a new pattern (4).
+///
+/// One walk decides it. The shared carriers are anchors; between two consecutive anchors the
+/// prior's fresh entries must be a subsequence of the current's fresh entries, for which the
+/// first match is always a correct choice. Condition 4 does not depend on the map chosen: a
+/// matched current entry carries a prior pattern by 3, so it asks that EVERY fresh current
+/// entry carries a prior pattern.
+fn stack_is_prior_plus_growth(prior: &[PinnedCarrier], current: &[PinnedCarrier]) -> bool {
+    let prior_keys: HashSet<_> = prior.iter().map(|(key, _)| *key).collect();
+    let current_keys: HashSet<_> = current.iter().map(|(key, _)| *key).collect();
+    let mut above = current.iter();
+    let placed = prior.iter().all(|(key, live)| {
+        let shared = current_keys.contains(key);
+        // The next current entry that can be this one's image. A shared current entry on the
+        // way is an anchor: only its own prior entry may map to it, in order.
+        loop {
+            match above.next() {
+                None => break false,
+                Some((candidate, pins)) if prior_keys.contains(candidate) => {
+                    break shared && candidate == key && pins == live;
+                }
+                Some((_, pins)) if !shared && pins == live => break true,
+                Some(_) => {}
+            }
+        }
+    });
+    placed
+        && current
+            .iter()
+            .filter(|(key, _)| !prior_keys.contains(key))
+            .all(|(_, live)| prior.iter().any(|(_, pattern)| pattern == live))
+}
+
+/// CR 400.7 + CR 603.7c + CR 608.2b: whether the two frames disagree about which stack pins
+/// still name their object. The two covers that set the whole stack aside ask this, through
+/// this one function; the other comparators keep the stack, where the ranked pin itself
+/// separates a live carrier from a stale one (the stack-growth cover's buried arm sets aside
+/// only the entries below the replay floor, which the period does not resolve).
+///
+/// A frame pair whose stacks hold no superseded pin is not judged here, as before. Otherwise
+/// the pair is refused unless the current stack is the prior stack plus growth
+/// ([`stack_is_prior_plus_growth`]). Refusing can only miss a cover; accepting a pair that is
+/// not growth would certify a loop across a carrier that resolves differently.
+fn stack_pins_superseded_apart(prior: &mut GameState, current: &mut GameState) -> bool {
+    let (prior, current) = (stack_pin_liveness(prior), stack_pin_liveness(current));
+    // The common case, every pin live, answers here, before any carrier is keyed.
+    if !prior
+        .iter()
+        .chain(current.iter())
+        .any(|(_, live)| live.iter().any(|live| !live))
+    {
+        return false;
+    }
+    !stack_is_prior_plus_growth(&pinned_carriers(prior), &pinned_carriers(current))
+}
+
 /// A condition of [`loop_states_cover_modulo_fodder_growth`] that refused a frame pair, in the
 /// order the cover evaluates them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4660,6 +5586,11 @@ pub enum FodderCoverRefusal {
     StackEntryRead,
     NonObjectRemainder,
     LoyaltyActivationCount,
+    /// CR 400.7 + CR 603.7c + CR 608.2b: the frames disagree about which stack pins still
+    /// name their object (one has left and returned or is gone). This cover sets the stack
+    /// aside, so the ranked pin never reaches its comparand; it refuses the pair instead of
+    /// certifying across a carrier whose resolution differs between them.
+    SupersededStackPin,
 }
 
 /// CR 732.2a: the object-growth producer's verdict on its three settle frames, by the recurrence
@@ -4669,8 +5600,11 @@ pub enum ObjectGrowthVerdict {
     /// One homogeneous class was minted: each frame pair's fodder-cover refusals.
     FodderGrowth([Vec<FodderCoverRefusal>; 2]),
     /// Nothing was minted: the latest arm of the no-mint cover either pair needed, or `None` when
-    /// a pair does not recur.
+    /// a pair does not recur even with its spend set aside.
     ResourceRecurrence(Option<RecurrenceCover>),
+    /// CR 118.3: a pair of the no-mint cover recurs only with what its proposer spent across it
+    /// set aside, so the period is not shown to repeat and this never certifies.
+    Spend,
 }
 
 impl ObjectGrowthVerdict {
@@ -4678,6 +5612,7 @@ impl ObjectGrowthVerdict {
         match self {
             ObjectGrowthVerdict::FodderGrowth(pairs) => pairs.iter().all(Vec::is_empty),
             ObjectGrowthVerdict::ResourceRecurrence(cover) => cover.is_some(),
+            ObjectGrowthVerdict::Spend => false,
         }
     }
 }
@@ -4689,10 +5624,15 @@ pub enum CoveredGrowth {
     /// Objects of the grown class and nothing else, each under the period's controller.
     #[default]
     Mintable,
-    /// CR 702.10b + CR 603.7a + CR 111.2 + CR 701.17b: a grown object carries a keyword, a delayed
-    /// trigger acts on it alone, another player controls it, or a certified instructed departure
-    /// moved it, so only performing the period makes it.
+    /// CR 702.10b + CR 603.7a + CR 111.2 + CR 701.17b: a grown object carries a keyword or a
+    /// trigger, a delayed trigger acts on it alone, another player controls it, or a certified
+    /// instructed departure moved it, so only performing the period makes it.
     PerformedOnly,
+}
+
+impl CoveredGrowth {
+    /// CR 732.2a: equalized history is not made by a mint, so only performing the period makes it.
+    const EQUALIZED_HISTORY: CoveredGrowth = CoveredGrowth::PerformedOnly;
 }
 
 /// Every condition of [`loop_states_cover_modulo_fodder_growth`] that refuses this pair, empty
@@ -4705,21 +5645,70 @@ pub(crate) fn fodder_growth_cover_refusals(
     fodder_class: &GameObject,
     caster: PlayerId,
 ) -> (Vec<FodderCoverRefusal>, CoveredGrowth) {
+    use crate::types::events::GameEvent;
+
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_fodder_growth += 1);
     let mut refusals = Vec::new();
-    let pf = flush_clone(prior);
-    let cf = flush_clone(current);
+    let mut pf = flush_clone(prior);
+    let mut cf = flush_clone(current);
+    // CR 400.7: the stack is set aside below, so a stack carrier's pins are judged here.
+    if stack_pins_superseded_apart(&mut pf, &mut cf) {
+        refusals.push(FodderCoverRefusal::SupersededStackPin);
+    }
     let mut pa = project_out_resources(&pf);
     let mut pb = project_out_resources(&cf);
-    pa.stack.clear();
-    pb.stack.clear();
+    // CR 110.1 + CR 732.2a: compare battlefield permanents through the same
+    // content authority before certifying predictable shortcut results.
+    // The recipient quotient is narrower than `growing`: each present object
+    // must belong to the battlefield class on BOTH feeds.
+    let mut growing = HashSet::new();
+    let mut recipient_cohort = HashSet::new();
+    for id in pa.battlefield.iter().chain(pb.battlefield.iter()).copied() {
+        if growing.contains(&id) {
+            continue;
+        }
+        let prior_object = pa.objects.get(&id);
+        let current_object = pb.objects.get(&id);
+        let prior_member = prior_object.is_some_and(|o| fodder_content_eq(o, fodder_class));
+        let current_member = current_object.is_some_and(|o| fodder_content_eq(o, fodder_class));
+        if prior_member || current_member {
+            growing.insert(id);
+            if prior_object.is_none_or(|o| prior_member && o.zone == Zone::Battlefield)
+                && current_object.is_none_or(|o| current_member && o.zone == Zone::Battlefield)
+            {
+                recipient_cohort.insert(id);
+            }
+        }
+    }
+    // CR 400.7 + CR 608.2k: preserve exact dealer/recipient identity aliases.
+    // Never anonymously rename a recipient that is also a retained damage
+    // dealer: the source/target alias matters. The existing visitor includes
+    // player damage and all parked carriers. Legacy/no-stamp recipients are
+    // NOT refused here: the projection now retains them as a bounded `Legacy`
+    // read class, so the recipient partition below carries their sharing.
+    for frame in [&mut pa.0, &mut pb.0] {
+        frame.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt { source_id, .. } = event {
+                recipient_cohort.remove(&*source_id);
+            }
+            if let GameEvent::CombatDamageDealtToPlayer { source_amounts, .. } = event {
+                for (source, _) in source_amounts.iter() {
+                    recipient_cohort.remove(source);
+                }
+            }
+        });
+    }
+    // The stack is about to disappear; the recipient relation that matters is
+    // already retained in the projected journal.
+    pa.0.stack.clear();
+    pb.0.stack.clear();
 
     // CR 701.17b: an instructed, choiceless, non-caster top-of-library departure this period
     // performed, certified once and consumed by every growth obligation below. Without one
     // authority each obligation would re-derive the set from its own frames and the four could
     // drift, which is the same reason `project_out_player_consumables` and
     // `projected_player_axes` exist as a pair.
-    let certified = certify_instructed_opponent_library_departure(&pa, &pb, caster);
+    let certified = certify_instructed_opponent_library_departure(&pa, &pb, [&pf, &cf], caster);
 
     // The GROWING set = ALL fodder ids in BOTH projected frames (the drifting/growing pile)
     // UNIONED with every id the certificate accounts. Unlike the object-growth
@@ -4730,13 +5719,6 @@ pub(crate) fn fodder_growth_cover_refusals(
     //
     // The name is not `all_fodder`: it stops being all-fodder the moment it holds an accounted
     // id, and every one of the four obligations below reads THIS set.
-    let mut growing: HashSet<ObjectId> = pa
-        .battlefield
-        .iter()
-        .chain(pb.battlefield.iter())
-        .copied()
-        .filter(|id| is_fodder(&pa, id, fodder_class) || is_fodder(&pb, id, fodder_class))
-        .collect();
     if let Some(certified) = certified.as_ref() {
         growing.extend(certified.departed.iter().copied());
     }
@@ -4763,7 +5745,13 @@ pub(crate) fn fodder_growth_cover_refusals(
     // The growth-invariant non-object remainder, grown pile stripped. NOTE:
     // `GameState::PartialEq` compares only `objects.len()`, so stable-engine object CONTENT is
     // covered by `board_covers_modulo_fodder`'s `objects_content_eq` above, not here.
-    if !eq_except_growable(&pa, &pb, &growing) {
+    // CR 608.2h + CR 111.7: last-known records the history authority reads as unread are no
+    // part of the remainder; this comparison drops the stack, so it asks only when none was held.
+    let equalized_history = pf.stack.is_empty()
+        && cf.stack.is_empty()
+        && last_known_records_grow_unread(&pa, &pb)
+        && HistoryMember::LastKnownRecords.equalize(&mut pb.0, &pa);
+    if !eq_except_growable(&pa, &pb, &growing, Some(&recipient_cohort)) {
         refusals.push(FodderCoverRefusal::NonObjectRemainder);
     }
 
@@ -4786,12 +5774,21 @@ pub(crate) fn fodder_growth_cover_refusals(
         .iter()
         .filter_map(|id| cf.objects.get(id))
         .any(|o| o.zone == Zone::Battlefield && o.controller != caster);
+    // A bare minted copy carries no trigger, so a grown object that does is made only by
+    // performing the period.
+    let triggered = growing
+        .iter()
+        .filter_map(|id| cf.objects.get(id))
+        .any(|o| o.trigger_definitions.iter_all().next().is_some());
     // CR 701.17b: no mint makes a certified departure, so only performing the period does.
-    let growth = if keyword || delayed_trigger || other_controller || certified.is_some() {
-        CoveredGrowth::PerformedOnly
-    } else {
-        CoveredGrowth::Mintable
-    };
+    let growth =
+        if keyword || delayed_trigger || other_controller || triggered || certified.is_some() {
+            CoveredGrowth::PerformedOnly
+        } else if equalized_history {
+            CoveredGrowth::EQUALIZED_HISTORY
+        } else {
+            CoveredGrowth::Mintable
+        };
     (refusals, growth)
 }
 
@@ -4825,18 +5822,194 @@ pub enum RecurrenceCover {
     History,
     /// Covered once the caster's own turns and their draws are equalized.
     TurnCycle,
+    /// CR 405.5 + CR 608.1: covered once the entries below each frame's floor, which never
+    /// resolve while the period repeats, are set aside.
+    StackGrowth,
 }
 
-/// CR 732.2a: the no-mint arm's cover of one frame pair, with the growth it admits and the arm
-/// that admitted it. The pair covers when it is equal modulo projected resources or covers
-/// modulo preserved-`Generic` counter growth, or does so once the ids of a certified
-/// instructed departure are stripped from both frames, or once the history it grew that no
-/// live surface reads is equalized, or once the caster's own turns are; the offer is declinable
-/// and never crowns a `GameOver`.
+/// CR 732.2a: what the no-mint cover answers of one frame pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PairCover {
+    /// The pair recurs: the growth it admits and the arm that admitted it.
+    Certified(CoveredGrowth, RecurrenceCover),
+    /// CR 118.3: the pair recurs only with what its proposer spent across it set aside.
+    Spend,
+}
+
+impl PairCover {
+    /// The verdict of a period's two pairs and the growth they admit: a pair that does not recur
+    /// refuses both, and a spend in either is a spend.
+    pub(crate) fn of_pairs(
+        first: Option<Self>,
+        second: Option<Self>,
+    ) -> (ObjectGrowthVerdict, CoveredGrowth) {
+        match (first, second) {
+            (None, _) | (_, None) => (
+                ObjectGrowthVerdict::ResourceRecurrence(None),
+                CoveredGrowth::Mintable,
+            ),
+            (Some(PairCover::Certified(a, a_cover)), Some(PairCover::Certified(b, b_cover))) => (
+                ObjectGrowthVerdict::ResourceRecurrence(Some(a_cover.max(b_cover))),
+                a.max(b),
+            ),
+            (Some(PairCover::Spend), Some(_)) | (Some(_), Some(PairCover::Spend)) => {
+                (ObjectGrowthVerdict::Spend, CoveredGrowth::PerformedOnly)
+            }
+        }
+    }
+}
+
+/// CR 732.2a: the no-mint arm's cover of one frame pair: the certifying arm that admits it, or,
+/// when none does, a spend where one admits it with what `caster` spent across it set aside. The
+/// offer is declinable and never crowns a `GameOver`.
 pub(crate) fn resource_recurrence_covers(
     prior: &GameState,
     current: &GameState,
     caster: PlayerId,
+    floors: Option<(usize, usize)>,
+) -> Option<PairCover> {
+    let buried = floors.map(|(fp, fc)| (buried_ids(prior, fp), buried_ids(current, fc)));
+    let buried = buried.as_ref();
+    if let Some((growth, cover)) = certifying_cover(prior, current, caster, buried) {
+        return Some(PairCover::Certified(growth, cover));
+    }
+    let (prior, current) = without_spend(prior, current, caster)?;
+    certifying_cover(&prior, &current, caster, buried).map(|_| PairCover::Spend)
+}
+
+/// The entries below `floor`, by id, so a later removal from the frame cannot shift which are
+/// buried.
+fn buried_ids(state: &GameState, floor: usize) -> Vec<ObjectId> {
+    state
+        .stack
+        .iter()
+        .take(floor)
+        .map(|entry| entry.id)
+        .collect()
+}
+
+/// CR 405.5 + CR 608.1: the frame with the buried entries set aside; an object a buried spell is
+/// goes with it, and last known information only they named is pruned by the comparand.
+fn without_buried(state: &GameState, buried: &[ObjectId]) -> GameState {
+    let mut frame = frame_without(state, buried);
+    frame.stack.retain(|entry| !buried.contains(&entry.id));
+    // CR 603.3b: a sidecar batch belongs to its stack entry. Pruning the entry alone leaves
+    // an orphan the carrier visitor still walks and the pairing refuses, which both scans
+    // for a buried entry and emits witnesses for a frame that excluded it. Ordinary stack
+    // removal (`game::stack::remove_stack_entry_at_unobserved`) drops the two together.
+    frame
+        .stack_trigger_event_batches
+        .retain(|id, _| !buried.contains(id));
+    frame
+}
+
+/// CR 115.1 + CR 405.1: whether a working entry targets a buried one or reads the stack, or a
+/// functioning trigger's fire-time condition reads it.
+fn above_floor_reads_buried(state: &GameState, buried: &[ObjectId]) -> bool {
+    let working_reads = state
+        .stack
+        .iter()
+        .filter(|entry| !buried.contains(&entry.id))
+        .any(|entry| {
+            entry.ability().is_some_and(|ability| {
+                let targets_buried = crate::game::ability_utils::flatten_targets_in_chain(ability)
+                    .iter()
+                    .any(|target| matches!(target, TargetRef::Object(id) if buried.contains(id)));
+                let mut profile = crate::game::ability_rw::ability_rw_profile(ability);
+                if let StackEntryKind::TriggeredAbility {
+                    condition: Some(condition),
+                    ..
+                } = &entry.kind
+                {
+                    profile.merge(crate::game::ability_rw::trigger_condition_rw_profile(
+                        condition,
+                    ));
+                }
+                targets_buried || profile.reads_stack()
+            })
+        });
+    working_reads
+        || state.objects.values().any(|obj| {
+            crate::game::functioning_abilities::active_trigger_definitions(state, obj).any(
+                |active| {
+                    crate::game::triggers::trigger_definition_functions_in_zone(
+                        active.definition,
+                        obj.zone,
+                    ) && active
+                        .definition
+                        .condition
+                        .as_ref()
+                        .is_some_and(|condition| {
+                            crate::game::ability_rw::trigger_condition_rw_profile(condition)
+                                .reads_stack()
+                        })
+                },
+            )
+        })
+}
+
+/// CR 405.5 + CR 608.1: the pair covers when no fewer entries are buried in `current`, nothing
+/// above them reads them, and the frames compare equal with them set aside.
+fn buried_growth_covers(
+    prior: &GameState,
+    current: &GameState,
+    (bp, bc): &(Vec<ObjectId>, Vec<ObjectId>),
+) -> bool {
+    bp.len() <= bc.len()
+        && !above_floor_reads_buried(prior, bp)
+        && !above_floor_reads_buried(current, bc)
+        && covers_modulo_resources(&without_buried(prior, bp), &without_buried(current, bc))
+}
+
+/// CR 701.21a + CR 701.26a: the pair with what `caster` spent across it set aside: a permanent of
+/// its that left the battlefield, sacrificed or otherwise, is taken out of both frames, and one
+/// that became tapped is tapped in `prior`. `None` when it spent nothing.
+fn without_spend(
+    prior: &GameState,
+    current: &GameState,
+    caster: PlayerId,
+) -> Option<(GameState, GameState)> {
+    let on_battlefield = |state: &GameState, id: &ObjectId| {
+        state
+            .objects
+            .get(id)
+            .filter(|object| object.zone == Zone::Battlefield)
+            .map(|object| object.tapped)
+    };
+    let mine = prior
+        .objects
+        .iter()
+        .filter(|(_, object)| object.zone == Zone::Battlefield && object.controller == caster);
+    let (mut left, mut tapped) = (Vec::new(), Vec::new());
+    for (id, object) in mine {
+        match on_battlefield(current, id) {
+            None => left.push(*id),
+            Some(true) if !object.tapped => tapped.push(*id),
+            Some(_) => {}
+        }
+    }
+    if left.is_empty() && tapped.is_empty() {
+        return None;
+    }
+    let mut prior = frame_without(prior, &left);
+    for id in tapped {
+        if let Some(object) = prior.objects.get_mut(&id) {
+            object.tapped = true;
+        }
+    }
+    Some((prior, frame_without(current, &left)))
+}
+
+/// CR 732.2a: the certifying arm of the no-mint cover that admits a frame pair, with the growth
+/// it admits. The pair covers when it is equal modulo projected resources or covers modulo
+/// preserved-`Generic` counter growth, or does so once the ids of a certified instructed
+/// departure are stripped from both frames, or once the history it grew that no live surface
+/// reads is equalized, or once the caster's own turns are.
+fn certifying_cover(
+    prior: &GameState,
+    current: &GameState,
+    caster: PlayerId,
+    buried: Option<&(Vec<ObjectId>, Vec<ObjectId>)>,
 ) -> Option<(CoveredGrowth, RecurrenceCover)> {
     if loop_states_equal_modulo_resources(prior, current) {
         return Some((CoveredGrowth::Mintable, RecurrenceCover::Equal));
@@ -4846,9 +6019,12 @@ pub(crate) fn resource_recurrence_covers(
     }
     // CR 701.17b: the fodder arm's certificate, asked on the fodder arm's frames.
     let cf = flush_clone(current);
+    let projected_prior = project_out_resources(&flush_clone(prior));
+    let projected_current = project_out_resources(&cf);
     let departure = certify_instructed_opponent_library_departure(
-        &project_out_resources(&flush_clone(prior)),
-        &project_out_resources(&cf),
+        &projected_prior,
+        &projected_current,
+        [prior, current],
         caster,
     )
     .is_some_and(|certified| {
@@ -4861,12 +6037,15 @@ pub(crate) fn resource_recurrence_covers(
     if departure {
         return Some((CoveredGrowth::PerformedOnly, RecurrenceCover::Departure));
     }
-    // CR 732.2a: equalized history is not made by a mint, so only performing the period makes it.
     if history_covers(prior, current) {
-        return Some((CoveredGrowth::PerformedOnly, RecurrenceCover::History));
+        return Some((CoveredGrowth::EQUALIZED_HISTORY, RecurrenceCover::History));
     }
-    turn_cycle_covers(prior, current, caster)
-        .then_some((CoveredGrowth::PerformedOnly, RecurrenceCover::TurnCycle))
+    if turn_cycle_covers(prior, current, caster) {
+        return Some((CoveredGrowth::EQUALIZED_HISTORY, RecurrenceCover::TurnCycle));
+    }
+    buried
+        .filter(|buried| buried_growth_covers(prior, current, buried))
+        .map(|_| (CoveredGrowth::PerformedOnly, RecurrenceCover::StackGrowth))
 }
 
 /// The equality or counter-growth disjunct of the no-mint cover.
@@ -4886,8 +6065,11 @@ macro_rules! history_members {
         pub(crate) enum HistoryMember {
             $($sv,)*
             $($pv,)*
-            /// The tracked object set store (CR 608.2c), with its id counter and member causes.
+            /// The tracked object set store (CR 608.2c), with its id counter,
+            /// member causes, and member departure origins.
             TrackedObjectSets,
+            /// The id-keyed last-known records of objects that left their zone (CR 608.2h).
+            LastKnownRecords,
         }
 
         impl HistoryMember {
@@ -4908,20 +6090,32 @@ macro_rules! history_members {
                             &mut into.tracked_set_member_causes,
                             &from.tracked_set_member_causes,
                         );
+                        let origins = equalize_field(
+                            &mut into.tracked_set_member_origins,
+                            &from.tracked_set_member_origins,
+                        );
                         equalize_field(&mut into.next_tracked_set_id, &from.next_tracked_set_id)
                             || sets
                             || causes
+                            || origins
+                    }
+                    HistoryMember::LastKnownRecords => {
+                        let records = equalize_field(&mut into.lki_cache, &from.lki_cache);
+                        equalize_field(&mut into.lki_copiable_values, &from.lki_copiable_values)
+                            || records
                     }
                 }
             }
 
             /// Whether every read of this member is reached through an AST arm or legality gate the
-            /// scanner attributes to it; an unattributed member's growth always refuses.
+            /// scanner attributes to it; an unattributed member's growth refuses, unless
+            /// `history_covers_reading` judges the member by its own predicate.
             fn is_attributed(self) -> bool {
                 match self {
                     $(HistoryMember::$sv => $sa,)*
                     $(HistoryMember::$pv => $pa,)*
                     HistoryMember::TrackedObjectSets => true,
+                    HistoryMember::LastKnownRecords => false,
                 }
             }
         }
@@ -4945,6 +6139,7 @@ history_members! {
         CreaturesBlockedThisTurn => creatures_blocked_this_turn: false,
         CrewActivatedThisTurn => crew_activated_this_turn: false,
         CrewResolvedThisTurn => crew_resolved_this_turn: false,
+        CrewHistoryThisTurn => crew_history_this_turn: false,
         ExileCastPermissionsUsed => exile_cast_permissions_used: false,
         ExilePlayPermissionsUsed => exile_play_permissions_used: false,
         GraveyardCastPermissionsUsed => graveyard_cast_permissions_used: false,
@@ -4952,15 +6147,13 @@ history_members! {
         HandCastFreePermissionsUsed => hand_cast_free_permissions_used: false,
         LandsPlayedThisTurn => lands_played_this_turn: false,
         LandsPlayedThisTurnByPlayer => lands_played_this_turn_by_player: false,
-        LkiByIncarnation => lki_by_incarnation: false,
-        LkiCache => lki_cache: false,
-        LkiCopiableValues => lki_copiable_values: false,
         ModalModesChosenThisTurn => modal_modes_chosen_this_turn: true,
         PendingSpellCostReductions => pending_spell_cost_reductions: false,
         PlayersAttackedThisTurn => players_attacked_this_turn: true,
         PlayersWhoDiscardedCardThisTurn => players_who_discarded_card_this_turn: true,
         PlayersWhoSearchedLibraryThisTurn => players_who_searched_library_this_turn: false,
         TriggerFireCountsThisTurn => trigger_fire_counts_this_turn: true,
+        TriggerIndicatedActionsThisTurn => trigger_indicated_actions_this_turn: true,
         TriggersFiredThisTurn => triggers_fired_this_turn: true,
         TriggersFiredThisTurnPerOpponent => triggers_fired_this_turn_per_opponent: true,
         CityBlessing => city_blessing: false,
@@ -5056,10 +6249,12 @@ fn history_covers_reading(prior: &GameState, current: &GameState, reads: History
     if grown.is_empty() && !collapsed {
         return false;
     }
-    if grown
-        .iter()
-        .any(|member| !member.is_attributed() || reads.reads(*member))
-    {
+    // A last-known record (CR 608.2h) is read by id from whatever holds the id, so the scanned
+    // reads cannot attribute it; its own predicate judges it below.
+    if grown.iter().any(|member| {
+        *member != HistoryMember::LastKnownRecords
+            && (!member.is_attributed() || reads.reads(*member))
+    }) {
         return false;
     }
     if grown.contains(&HistoryMember::TrackedObjectSets)
@@ -5067,7 +6262,119 @@ fn history_covers_reading(prior: &GameState, current: &GameState, reads: History
     {
         return false;
     }
+    if grown.contains(&HistoryMember::LastKnownRecords)
+        && !last_known_records_grow_unread(prior, current)
+    {
+        return false;
+    }
     covers_modulo_resources(prior, &copy)
+}
+
+/// CR 608.2h + CR 111.7: the period only added last-known records, each of an object that exists
+/// in neither frame, and the floating replacements not yet used up (CR 614.3, CR 615.3) that can
+/// name an object, which no comparison compares and which read a record by the id they hold, are
+/// the same in both frames. A caller whose comparison also drops the stack asks only while both
+/// stacks are empty.
+fn last_known_records_grow_unread(prior: &GameState, current: &GameState) -> bool {
+    let gone = |id: &ObjectId| !prior.objects.contains_key(id) && !current.objects.contains_key(id);
+    // CR 615.5: each frame's definitions are compared as their by-value views, so two frames
+    // whose shields differ only in which arena position names an `==` rider compare equal.
+    let naming = |frame: &GameState| {
+        live_floating_replacement_defs(frame)
+            .map(|(_, def)| def)
+            .filter(|def| floating_replacement_can_name_object(def, [prior, current]))
+            .map(|def| frame.split_replacement_rider(def))
+            .collect::<Vec<_>>()
+    };
+    prior
+        .lki_cache
+        .iter()
+        .all(|(id, record)| current.lki_cache.get(id) == Some(record))
+        && prior
+            .lki_copiable_values
+            .iter()
+            .all(|(id, values)| current.lki_copiable_values.get(id) == Some(values))
+        && current
+            .lki_cache
+            .keys()
+            .all(|id| prior.lki_cache.contains_key(id) || gone(id))
+        && current
+            .lki_copiable_values
+            .keys()
+            .all(|id| prior.lki_copiable_values.contains_key(id) || gone(id))
+        && naming(prior) == naming(current)
+}
+
+/// Whether a floating replacement holds anything that can name an object by id, and so ask for
+/// its last-known information (CR 608.2h): an ability, a cost, an object filter, a condition, a
+/// damage formula, a token template, a granter, or a host missing from a frame. No rest pattern,
+/// so a new field is classified before it compiles.
+fn floating_replacement_can_name_object(
+    def: &crate::types::ability::ReplacementDefinition,
+    frames: [&GameState; 2],
+) -> bool {
+    let crate::types::ability::ReplacementDefinition {
+        execute,
+        runtime_execute,
+        mode,
+        valid_card,
+        triggering_spell,
+        condition,
+        damage_modification,
+        damage_source_filter,
+        redirect_target,
+        additional_token_spec,
+        ensure_token_specs,
+        granting_object,
+        source_object,
+        // Event kinds, zones, players, scopes relative to the host or the event, fixed amounts,
+        // flags and a label.
+        event: _,
+        choice_authority: _,
+        description: _,
+        destination_zone: _,
+        active_zones: _,
+        damage_target_filter: _,
+        target_recipient_incarnation: _,
+        combat_scope: _,
+        draw_scope: _,
+        die_ignore_rule: _,
+        planeswalk_scope: _,
+        shield_kind: _,
+        quantity_modification: _,
+        token_owner_scope: _,
+        token_owner_redirect: _,
+        valid_player: _,
+        consume_on_apply: _,
+        is_consumed: _,
+        expiry: _,
+        mana_modification: _,
+        mana_replacement_scope: _,
+        counter_match: _,
+        enters_under: _,
+        source_controller: _,
+        origin: _,
+        counter_replacement_subject: _,
+        entry_payment_max,
+    } = def;
+    execute.is_some()
+        || runtime_execute.is_some()
+        || !matches!(mode, crate::types::ability::ReplacementMode::Mandatory)
+        || valid_card.is_some()
+        // Conservatively retain object-naming authority carried by the pin.
+        || triggering_spell.is_some()
+        || condition.is_some()
+        || damage_modification.is_some()
+        || damage_source_filter.is_some()
+        || redirect_target.is_some()
+        || additional_token_spec.is_some()
+        || ensure_token_specs.is_some()
+        || granting_object.is_some()
+        // CR 614.12a: a capped entry payment reads the cap live (Nameless Race).
+        || entry_payment_max.is_some()
+        // A host both frames hold is read live, as an object the comparison compares.
+        || source_object
+            .is_some_and(|host| frames.iter().any(|frame| !frame.objects.contains_key(&host)))
 }
 
 /// [`history_covers`] for the integration suite.
@@ -5135,6 +6442,10 @@ pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: 
     let mut library: im::Vector<ObjectId> = drawn.iter().copied().collect();
     library.append(copy.library_of(caster).clone());
     *copy.library_of_mut(caster) = library;
+    // CR 121.1: the caster's draws read its library from the top, so the cycle keeps its order.
+    if copy.library_of(caster) != before_library {
+        return false;
+    }
     for id in &drawn {
         if let Some(object) = copy.objects.get_mut(id) {
             // allow-raw-zone: equalizes the caster's draws in a discarded comparison clone, not a gameplay zone event.
@@ -5192,8 +6503,54 @@ fn turn_stamps_keep_their_relation(prior: &GameState, current: &GameState) -> bo
     })
 }
 
+/// CR 608.2c: what one origin selects for member reads — the fallback kind
+/// on a record gap plus the selected snapshot's content. Incarnation numbers
+/// advance as members re-depart; comparing selection rather than identity
+/// keeps immaterial re-stamps (same characteristics) covered while a changed
+/// snapshot still refuses. Mirrors [`tracked_member_read_authority`]'s
+/// selection exactly (snapshot presence first, zone recording-kind second).
+fn origin_read_key<'s>(
+    state: &'s GameState,
+    member: ObjectId,
+    origin: &TrackedMemberOrigin,
+) -> (bool, Option<&'s LKISnapshot>) {
+    let snapshot = state
+        .lki_by_incarnation
+        .get(&member)
+        .and_then(|history| history.get(&origin.departure_incarnation));
+    (
+        crate::game::quantity::zone_departure_records_lki(origin.departed_from),
+        snapshot,
+    )
+}
+
+/// CR 608.2c: `prior`'s origins read the same in `current` — same key sets,
+/// same selected snapshot content per member. A re-stamp naming an
+/// identical snapshot stays covered; a changed snapshot, a changed fallback
+/// kind, or an asymmetric stamp refuses.
+fn origins_read_same(prior: &GameState, current: &GameState) -> bool {
+    prior
+        .tracked_set_member_origins
+        .iter()
+        .all(|(id, origins)| {
+            current
+                .tracked_set_member_origins
+                .get(id)
+                .is_some_and(|cur| {
+                    cur.len() == origins.len()
+                        && origins.iter().all(|(member, origin)| {
+                            cur.get(member).is_some_and(|candidate| {
+                                origin_read_key(prior, *member, origin)
+                                    == origin_read_key(current, *member, candidate)
+                            })
+                        })
+                })
+        })
+}
+
 /// CR 608.2c: the period only appended tracked sets, and the latest non-empty set, which the
-/// sentinel's fallback reads, holds the same members for the same causes in both frames.
+/// sentinel's fallback reads, holds the same members for the same causes and origin-selected
+/// reads in both frames.
 fn tracked_sets_grow_unread(prior: &GameState, current: &GameState) -> bool {
     let floor = prior.next_tracked_set_id;
     let earlier_unchanged = current
@@ -5209,7 +6566,8 @@ fn tracked_sets_grow_unread(prior: &GameState, current: &GameState) -> bool {
         && prior
             .tracked_set_member_causes
             .iter()
-            .all(|(id, causes)| current.tracked_set_member_causes.get(id) == Some(causes));
+            .all(|(id, causes)| current.tracked_set_member_causes.get(id) == Some(causes))
+        && origins_read_same(prior, current);
     let latest = |state: &GameState| {
         crate::game::targeting::latest_tracked_set_id(state).map(|id| {
             (
@@ -5218,7 +6576,35 @@ fn tracked_sets_grow_unread(prior: &GameState, current: &GameState) -> bool {
             )
         })
     };
-    earlier_unchanged && latest(prior) == latest(current)
+    // The sentinel fallback reads the latest set's member characteristics
+    // through origins: same members and causes plus same selected reads.
+    // Latest sets differ by id across appended periods, so origins compare
+    // by selection (see `origins_read_same`), never by raw incarnation.
+    let latest_origins_same = match (
+        crate::game::targeting::latest_tracked_set_id(prior),
+        crate::game::targeting::latest_tracked_set_id(current),
+    ) {
+        (Some(a), Some(b)) => {
+            let ao = prior.tracked_set_member_origins.get(&a);
+            let bo = current.tracked_set_member_origins.get(&b);
+            match (ao, bo) {
+                (Some(ao), Some(bo)) => {
+                    ao.len() == bo.len()
+                        && ao.iter().all(|(member, origin)| {
+                            bo.get(member).is_some_and(|candidate| {
+                                origin_read_key(prior, *member, origin)
+                                    == origin_read_key(current, *member, candidate)
+                            })
+                        })
+                }
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        (None, None) => true,
+        _ => false,
+    };
+    earlier_unchanged && latest(prior) == latest(current) && latest_origins_same
 }
 
 /// CR 500.8 + CR 500.9 + CR 500.10: when `copy`'s inserted-unit records extend `prior`'s by
@@ -5294,7 +6680,10 @@ fn live_history_reads(state: &GameState) -> HistoryReads {
         }
     }
     for (_source, _idx, def) in loop_window_replacement_defs(state) {
-        reads = reads.or(scan::replacement_definition_history(def));
+        reads = reads.or(scan::replacement_definition_history(
+            def,
+            state.replacement_rider(def),
+        ));
     }
     for effect in &state.transient_continuous_effects {
         reads = reads.or(scan::transient_effect_history(effect));
@@ -5541,9 +6930,8 @@ fn equalize_generic_counters(prior: &GameState, current: &GameState) -> GameStat
 /// EQUALITY), not the object-growth cover's Karp–Miller path, and `equalize_generic_counters`
 /// projects out an axis that base does not — so a dormant condition reading a GROWING `Generic`
 /// counter ("as long as ~ has three or more charge counters, …") is a new projected-axis
-/// observer. Sound by revocability, not parity: both wirings classify `WinKind::Advantage`
-/// (CR 104.4b — an optional loop is not a draw) and never crown a `GameOver`, so a
-/// mis-extrapolation is declinable or revocable; it is wired into no GameOver-capable seam.
+/// observer. Its callers are the offline classifier and offers that name no winner and end
+/// the game only when every player accepts them.
 pub(crate) fn loop_states_cover_modulo_counter_growth(
     prior: &GameState,
     current: &GameState,
@@ -5565,7 +6953,7 @@ fn board_covers(prior: &GameState, current: &GameState, grown: &HashSet<ObjectId
     // id-keyed content equality with `prior`. A stray extra object in ANY zone (or
     // a content drift on a shared object) fails the `objects_content_eq` len/all
     // check — fail-safe.
-    let current_nongrown: im::HashMap<ObjectId, GameObject, rustc_hash::FxBuildHasher> = current
+    let current_nongrown: crate::types::object_map::ObjectMap = current
         .objects
         .iter()
         .filter(|(id, _)| !grown.contains(id))
@@ -5636,34 +7024,70 @@ fn grown_token_is_inert_after_its_entry(o: &GameObject) -> bool {
         && o.trigger_definitions.iter_all().all(|entry| {
             let def = &entry.definition;
             def.mode == crate::types::triggers::TriggerMode::ChangesZone
-                && def.zone_change_clauses.is_empty()
-                && def.destination == Some(Zone::Battlefield)
+                && crate::game::trigger_matchers::trigger_is_an_entry(def)
                 && matches!(def.valid_card, Some(TargetFilter::SelfRef))
+        })
+}
+
+/// CR 603.2: a token on the battlefield whose every trigger acts on itself alone, cannot fire as
+/// it leaves, and reads neither its siblings' mutable state nor the growing class, so another
+/// copy of it changes no other object's behavior. A trigger that can fire as the token leaves
+/// stays live on a token the cover projects out, so it is not relieved here.
+fn grown_token_triggers_only_on_itself(o: &GameObject) -> bool {
+    use crate::types::ability::TargetFilter;
+    o.is_token
+        && o.zone == Zone::Battlefield
+        && object_is_inert_except_triggers(o)
+        && o.trigger_definitions.iter_all().all(|entry| {
+            let def = &entry.definition;
+            matches!(def.valid_card, Some(TargetFilter::SelfRef))
+                && !crate::game::trigger_matchers::trigger_can_fire_as_its_object_leaves(def)
+                && !def
+                    .condition
+                    .as_ref()
+                    .is_some_and(crate::game::ability_scan::trigger_condition_reads_sibling_mutable)
+                && !def.execute.as_deref().is_some_and(
+                    crate::game::ability_scan::ability_definition_reads_growing_class_for_loop,
+                )
         })
 }
 
 /// CR 732.2a: every grown object is churn-inert.
 fn grown_objects_are_inert(current: &GameState, grown: &HashSet<ObjectId>) -> bool {
     grown.iter().all(|id| {
-        current
-            .objects
-            .get(id)
-            .is_some_and(|o| object_is_inert(o) || grown_token_is_inert_after_its_entry(o))
+        current.objects.get(id).is_some_and(|o| {
+            object_is_inert(o)
+                || grown_token_is_inert_after_its_entry(o)
+                || grown_token_triggers_only_on_itself(o)
+        })
     })
 }
 
 /// The growth-invariant non-object remainder of the two projected frames, through
 /// `impl PartialEq for GameState`: strip the grown ids from both object maps and clear the
 /// battlefield ordering + stack, with its per-entry tables and the `lki_by_incarnation` and
-/// departed-spell records only they carry
+/// departed stack records (spells and activated abilities) only they carry
 /// (the grown ids live there, and those axes are covered by `board_covers` / the stack gate), so
 /// what is left for `PartialEq` to answer is
 /// `objects.len()` plus the non-object axes it compares.
 ///
 /// WHICH axes those are is `impl PartialEq for GameState`'s own decision, and
 /// `_gamestate_partition_is_total`'s doc is the single authority on what its totality guard
-/// buys. The two hand conjuncts at the end of this function are where this gate compensates
-/// for an axis that decision left out; each states its own one-sided-safety argument.
+/// buys. The three hand conjuncts at the end of this function are where this gate compensates
+/// for an axis that decision left out; each states its own one-sided-safety argument. The
+/// shield conjunct is `game_state::pending_shields_loop_eq` — the SAME predicate
+/// `loop_states_equal` uses, so the cover adds no second shield semantics. It narrows only:
+/// alongside `PartialEq` it can never turn an unequal pair equal. What it tolerates is
+/// identical LIVE-shield growth, and it ignores spent shields entirely, because a consumed
+/// definition (CR 615.3 + CR 614.3) can never apply to a later damage event and so is not
+/// part of the game position. That is exactly why the pinned cover row
+/// `loop_period_remade_token_source::copy_effects_used_up_inside_each_spawn_period_leave_the_periods_covered`
+/// passes: its periods append only used-up `Mystic Reflection` copies — each naming a
+/// DIFFERENT per-period Spawn token in its inline `execute`
+/// (`Effect::BecomeCopy { target: SpecificObject { id } }`) — so the raw registries grow and
+/// differ while the live position recurs. Its two production callers
+/// (`loop_states_cover_modulo_object_growth`, `fodder_growth_cover_refusals`) therefore both
+/// refuse a period whose frames differ in live shield content.
 ///
 /// Tracked object sets are an append-only arena: each resolution that says "this way" (CR 608.2c)
 /// or "until" (CR 610.3) allocates its own, so the later frame's sets allocated inside the window
@@ -5671,10 +7095,25 @@ fn grown_objects_are_inert(current: &GameState, grown: &HashSet<ObjectId>) -> bo
 /// compared. A reader that takes the highest id rather than a carried one —
 /// `targeting::latest_tracked_set_id` behind `resolve_tracked_set_sentinel`'s legacy fallback — is
 /// not confined to the resolution that produced the set by this code; CR 608.2c confines it.
-fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>) -> bool {
+///
+/// Only the fodder caller supplies `fodder_recipients`: its pair-verified
+/// homogeneous battlefield cohort, excluding retained damage dealers. Other
+/// callers keep exact recipient ids. This is not general object-id renaming.
+fn eq_except_growable(
+    pa: &ResourceProjectedFrame,
+    pb: &ResourceProjectedFrame,
+    grown: &HashSet<ObjectId>,
+    fodder_recipients: Option<&HashSet<ObjectId>>,
+) -> bool {
     // CR 104.4b: the restricted normalization contract — a state holding an
     // unsettled delivery carrier is never loop-comparable.
     if !pa.is_loop_comparable() || !pb.is_loop_comparable() {
+        return false;
+    }
+    // Read common-root provenance BEFORE removing any grown provider. The
+    // final equality cannot recover that current/retired distinction afterward.
+    if !grown.is_empty() && !active_trigger_ledger_bindings_equal(pa, pb, |id| !grown.contains(&id))
+    {
         return false;
     }
     let mut a = pa.clone();
@@ -5693,24 +7132,35 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     let a_sites = sites(pa);
     let b_sites = sites(pb);
     for id in grown {
-        a.objects.remove(id);
-        b.objects.remove(id);
+        a.0.objects.remove(id);
+        b.0.objects.remove(id);
     }
-    a.battlefield.clear(); // allow-raw-zone: clears a discarded comparison CLONE for loop-cover equality (fn takes &GameState, mutates a local clone) - not a gameplay zone event
-    b.battlefield.clear(); // allow-raw-zone: clears a discarded comparison CLONE for loop-cover equality (fn takes &GameState, mutates a local clone) - not a gameplay zone event
+    a.0.battlefield.clear(); // allow-raw-zone: clears a discarded comparison CLONE from read-only projected frames, not a gameplay zone event
+    b.0.battlefield.clear(); // allow-raw-zone: clears a discarded comparison CLONE from read-only projected frames, not a gameplay zone event
 
     // The stack leaves the remainder with its per-entry tables, and the `lki_by_incarnation` and
-    // departed-spell records only they carry go with them; last-known copiable values stay.
+    // departed stack records (spells and activated abilities) only they carry go with them;
+    // last-known copiable values stay.
     // CR 405.5 + CR 608.2h: an entry beneath the recurrence resolves only after it and reads its
     // LKI then.
-    crate::game::stack::clear_stack_with_entry_tables(&mut a);
-    crate::game::stack::clear_stack_with_entry_tables(&mut b);
-    a.retain_carrier_referenced_lki();
-    b.retain_carrier_referenced_lki();
-    a.retain_trigger_referenced_departed_spells();
-    b.retain_trigger_referenced_departed_spells();
-    a.canonicalize_loop_identities();
-    b.canonicalize_loop_identities();
+    crate::game::stack::clear_stack_with_entry_tables(&mut a.0);
+    crate::game::stack::clear_stack_with_entry_tables(&mut b.0);
+    a.0.retain_carrier_referenced_lki();
+    b.0.retain_carrier_referenced_lki();
+    a.0.retain_trigger_referenced_departed_stack_records();
+    b.0.retain_trigger_referenced_departed_stack_records();
+    let stale_a = projected_stale_rows(&a.0);
+    canonicalize_projected_recipient_relations(
+        &mut a,
+        &stale_a,
+        GameState::canonicalize_loop_identities,
+    );
+    let stale_b = projected_stale_rows(&b.0);
+    canonicalize_projected_recipient_relations(
+        &mut b,
+        &stale_b,
+        GameState::canonicalize_loop_identities,
+    );
     // AFTER the battlefield/stack clears, which makes those two arms no-ops by construction —
     // the fodder half of `grown` lives there and needs nothing further. `zones::remove_from_zone`
     // is the shipped single authority for the operation and is exhaustive over `Zone`, so no
@@ -5720,10 +7170,10 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     // command collection. That is fail-closed — a residual id left in a supplementary deck makes
     // `players` compare unequal.
     for (id, zone, owner) in a_sites {
-        crate::game::zones::remove_from_zone(&mut a, id, zone, owner); // allow-raw-zone: strips an accounted id from a discarded comparison CLONE (fn takes &GameState, mutates a local clone) - not a gameplay zone event
+        crate::game::zones::remove_from_zone(&mut a.0, id, zone, owner); // allow-raw-zone: strips an accounted id from a discarded comparison CLONE, not a gameplay zone event
     }
     for (id, zone, owner) in b_sites {
-        crate::game::zones::remove_from_zone(&mut b, id, zone, owner); // allow-raw-zone: strips an accounted id from a discarded comparison CLONE (fn takes &GameState, mutates a local clone) - not a gameplay zone event
+        crate::game::zones::remove_from_zone(&mut b.0, id, zone, owner); // allow-raw-zone: strips an accounted id from a discarded comparison CLONE, not a gameplay zone event
     }
     // ONE-SIDED SAFETY: compare `post_replacement_token_substitution_count` here even though
     // `impl PartialEq for GameState` excludes it. Excluding a COUNT from the cover gate is the
@@ -5735,17 +7185,139 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
     // (`resolution_source_relatch` VARIES per iteration, so it MUST stay excluded.)
     for frame in [&mut a, &mut b] {
         frame
+            .0
             .delayed_triggers
             .retain(|t| !delayed_trigger_acts_only_on_grown(t, grown, pa.phase));
     }
     let window_floor = pa.next_tracked_set_id;
-    b.tracked_object_sets.retain(|id, _| id.0 < window_floor);
-    b.tracked_set_member_causes
+    b.0.tracked_object_sets.retain(|id, _| id.0 < window_floor);
+    b.0.tracked_set_member_causes
         .retain(|id, _| id.0 < window_floor);
-    b.next_tracked_set_id = a.next_tracked_set_id;
-    a == b
+    b.0.tracked_set_member_origins
+        .retain(|id, _| id.0 < window_floor);
+    b.0.next_tracked_set_id = a.next_tracked_set_id;
+    if let Some(cohort) = fodder_recipients {
+        // Quotient only the proven homogeneous recipient cohort. Ineligible
+        // rows stay intact in the ordinary remainder, including legacy rows.
+        if take_fodder_recipient_groups(&mut a, pa, grown, cohort)
+            != take_fodder_recipient_groups(&mut b, pb, grown, cohort)
+        {
+            return false;
+        }
+    }
+    a.0 == b.0
         && a.post_replacement_token_substitution_count
             == b.post_replacement_token_substitution_count
+        // CR 104.4b + CR 615.3: `PartialEq` skips the floating registry, so this gate asks
+        // the same `pending_shields_loop_eq` as `loop_states_equal`; it compares only LIVE
+        // shields (a spent one can never apply again, CR 615.3 + CR 614.3), so identical
+        // live growth covers and any differing live shield does not.
+        && crate::types::game_state::pending_shields_loop_eq(&a, &b)
+        // CR 400.7 + CR 601.2h: `PartialEq` reads `cost_paid_objects` by object id only.
+        && a.loop_paid_record_incarnations() == b.loop_paid_record_incarnations()
+}
+
+/// CR 400.7 + CR 608.2k: whether a damage fact's recipient is still the
+/// original object (live), a superseded stamp (stale), or the runtime's legacy
+/// named-object fallback, which applies when no matching row stamped a
+/// recipient at all. `Legacy` ranks below `Stale` so the established
+/// `Stale < Live` comparison order is preserved.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RecipientReadClass {
+    Legacy,
+    Stale,
+    Live,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct FodderRecipientFact {
+    source_id: ObjectId,
+    source_incarnation: Option<u64>,
+    amount: u32,
+    is_combat: bool,
+    recipient_class: RecipientReadClass,
+    tapped: bool,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct FodderRecipientGroup {
+    facts: smallvec::SmallVec<[FodderRecipientFact; 4]>,
+}
+
+/// CR 400.7 + CR 608.2k + CR 732.2a: preserve original recipient sharing when
+/// certifying predictable shortcut results. Group before forgetting an
+/// interchangeable id; no fake id, source renaming or class reselection.
+/// All ineligible rows remain full records in the remainder.
+fn take_fodder_recipient_groups(
+    frame: &mut ResourceProjectedFrame,
+    original: &ResourceProjectedFrame,
+    grown: &HashSet<ObjectId>,
+    cohort: &HashSet<ObjectId>,
+) -> smallvec::SmallVec<[FodderRecipientGroup; 4]> {
+    if cohort.is_empty() {
+        return smallvec::SmallVec::new();
+    }
+    let mut keyed = smallvec::SmallVec::<[(ObjectId, FodderRecipientFact); 4]>::new();
+    frame.0.damage_dealt_this_turn.retain(|record| {
+        let TargetRef::Object(target) = &record.target else {
+            return true;
+        };
+        if !grown.contains(target) || !cohort.contains(target) {
+            return true;
+        }
+        let Some(object) = original.objects.get(target) else {
+            return true;
+        };
+        if object.zone != Zone::Battlefield {
+            return true;
+        }
+        let DamageEventKey {
+            source_id,
+            source_incarnation,
+            target: _,
+            amount,
+            is_combat,
+        } = record.event_key();
+        keyed.push((
+            *target,
+            FodderRecipientFact {
+                source_id,
+                source_incarnation,
+                amount,
+                is_combat,
+                // CR 608.2k: an unstamped fact still names this live recipient
+                // at runtime, so its sharing relation is part of the quotient.
+                recipient_class: match record.target_incarnation {
+                    None => RecipientReadClass::Legacy,
+                    Some(0) => RecipientReadClass::Stale,
+                    Some(_) => RecipientReadClass::Live,
+                },
+                tapped: object.tapped,
+            },
+        ));
+        false
+    });
+    // Actual ids partition the facts; tuple ordering also sorts each group's
+    // contents. Only the resulting groups, not their raw ids, are compared.
+    keyed.sort_unstable();
+    let mut groups = smallvec::SmallVec::<[FodderRecipientGroup; 4]>::new();
+    let mut recipient = None;
+    for (target, fact) in keyed {
+        if recipient != Some(target) {
+            groups.push(FodderRecipientGroup {
+                facts: smallvec::SmallVec::new(),
+            });
+            recipient = Some(target);
+        }
+        groups
+            .last_mut()
+            .expect("a recipient group is created before adding its facts")
+            .facts
+            .push(fact);
+    }
+    // Preserve both occurrence and distinct-recipient multiplicity. No dedup.
+    groups.sort_unstable();
+    groups
 }
 
 /// CR 603.7a + CR 603.7b: a one-shot delayed trigger for a step after the frame's, whose every
@@ -5861,10 +7433,9 @@ fn fire_time_conditions_read_growing_class(state: &GameState) -> bool {
         {
             return true;
         }
-        if def
-            .runtime_execute
-            .as_ref()
-            .is_some_and(|a| scan::ability_reads_sibling_mutable(a))
+        if state
+            .replacement_rider(def)
+            .is_some_and(scan::ability_reads_sibling_mutable)
         {
             return true;
         }
@@ -5976,8 +7547,10 @@ fn stack_entry_reads_growing_class(entry: &StackEntry) -> bool {
     }
 }
 
-/// CR 601.2f + CR 732.2a: does ANY cost surface reference the growing class? ONE predicate
-/// over EVERY cost surface on the FLUSHED current:
+/// CR 601.2f + CR 732.2a: does ANY cost surface reference the growing class — a board
+/// aggregate or a projected per-turn journal (both halves of
+/// [`crate::game::ability_scan`]'s `reads_growing_class`)? ONE predicate over EVERY cost
+/// surface on the FLUSHED current:
 /// (1) the cost-KEYWORD family — a board/graveyard-referencing cost reducer or
 /// tap/sacrifice aggregate (Affinity/Convoke/Crew/Delve/Emerge/…) on ANY object (a
 /// recast loop's keyword rides an off-battlefield card), printed or granted;
@@ -6070,10 +7643,20 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         // BOTH directions: `Raise`+`ObjectCount` is the false-positive-∞ case, and
         // `Reduce` is the keystone-REJECT case. `amount` (a fixed `ManaCost`) and
         // every other field are read-free.
+        //
+        // A PROJECTED read (a per-turn journal such as Blaster Hulk's
+        // `EnergyPaidOrLostThisTurn`) is deliberately NOT vetoed here: presence is not a
+        // dependency. `project_out_resources` zeroes the journal on BOTH compared frames, so
+        // the only period in which the next repeat costs something else is one where the
+        // journal MOVED. That period-tied question is asked once, by
+        // [`cost_modifier_reads_changed_projected_resource`], at the cover's own gate. Vetoing
+        // on presence would refuse an unrelated, energy-free recurrence merely because an
+        // uncast Blaster Hulk sits in hand, where its self-spell reduction is live (CR 113.6)
+        // but prices nothing.
         StaticMode::ModifyCost { dynamic_count, .. }
-        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => {
-            dynamic_count.as_ref().is_some_and(qty_reads)
-        }
+        | StaticMode::ReduceAbilityCost { dynamic_count, .. } => dynamic_count
+            .as_ref()
+            .is_some_and(qty_reads),
         // CR 118.8 / CR 118.9 / CR 601.2f: variants carrying an `AbilityCost` payment
         // — the additional/alternative cast cost — route it through the exhaustive
         // `AbilityCost` scanner (a `PayLife`/`ManaDynamic`/… reading `ObjectCount`
@@ -6131,7 +7714,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::CantBecomeSuspected
         | StaticMode::MaxAttackersEachCombat { .. }
         | StaticMode::MaxBlockersEachCombat { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantBeActivated { .. }
         | StaticMode::CantSearchLibrary { .. }
@@ -6228,6 +7811,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::PayLifeAsColoredMana { .. }
         | StaticMode::StepEndUnspentMana { .. }
         | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
         | StaticMode::CanAttackWithDefender
         | StaticMode::AttackOnlyNeighbor
         | StaticMode::IgnoreLandwalkForBlocking { .. }
@@ -6307,30 +7891,54 @@ fn object_resource_axes_match(prior: &GameState, current: &GameState) -> bool {
     })
 }
 
+/// CR 120.3e + CR 704.5g + CR 122.1: the axes the relaxed projection drops and
+/// [`ResourceVector::snapshot`] never measures — marked damage, per-object counters
+/// and player counters — strict-compared, so a terminal verdict cannot rest on a
+/// period that changed one of them unseen.
+pub(crate) fn unmeasured_resource_axes_match(prior: &GameState, current: &GameState) -> bool {
+    object_resource_axes_match(prior, current)
+        && prior.players.len() == current.players.len()
+        && prior
+            .players
+            .iter()
+            .zip(current.players.iter())
+            .all(|(a, b)| projected_player_maps(a) == projected_player_maps(b))
+}
+
 /// Normalize a stack into behavioral-identity clones for coverability counting:
 /// zero the volatile top-level `id`/`source_id` and the per-kind inner `source_id`,
 /// strip nested `source_id`s from the embedded ability, and retain the associated
-/// trigger-firing class
-/// ([`crate::game::triggers::normalize_ability_identity`]). KEEP `controller` (an
+/// trigger-firing class. The entries come from an already ranked projection, so the
+/// ability keeps its ranked pins
+/// (`ResolvedAbility::clear_source_provenance_for_loop_recursive`): a cover must not
+/// count an entry pinned to the live object with one pinned to a stale one.
+/// KEEP `controller` (an
 /// opponent's otherwise-identical trigger must never merge with the controller's)
 /// and the entire `kind` payload (`condition`, `trigger_event`,
 /// `subject_match_count`, `die_result`, `description`, `source_name`) — a residual
 /// content difference only SUPPRESSES a match (fail-safe). Two same-controller
-/// entries differing only in `source_id` (two Blight-Priest copies) resolve
-/// identically after the item-4 guard, so identifying them is sound.
-fn normalized_stack_entries(state: &GameState) -> Vec<(StackEntry, Option<TriggerFiring>)> {
-    state
-        .stack
+/// entries differing only in `source_id` (two Blight-Priest copies) normalize to one kind.
+/// A stack entry in the growth covers' comparand: the normalized entry, its trigger-firing
+/// class, and the ranked incarnations its paid-object records name, which the entry's own
+/// `PartialEq` does not compare
+/// ([`ResolvedAbility::paid_record_incarnations_for_loop`](crate::types::ability::ResolvedAbility::paid_record_incarnations_for_loop)).
+type NormalizedStackEntry = (StackEntry, Option<TriggerFiring>, Vec<Option<u64>>);
+
+fn normalized_stack_entries(
+    entries: &im::Vector<StackEntry>,
+    trigger_firings: &HashMap<ObjectId, TriggerFiring>,
+) -> Vec<NormalizedStackEntry> {
+    entries
         .iter()
         .map(|entry| {
-            let firing = state
-                .stack_trigger_firings
+            let firing = trigger_firings
                 .get(&entry.id)
                 .copied()
                 .map(|firing| match firing {
                     TriggerFiring::ReceiptEligible(_) => TriggerFiring::LegacyDelayed,
                     firing => firing,
                 });
+            let carrier_source = entry.source_id;
             let mut norm = entry.clone();
             norm.id = ObjectId(0);
             norm.source_id = ObjectId(0);
@@ -6339,16 +7947,16 @@ fn normalized_stack_entries(state: &GameState) -> Vec<(StackEntry, Option<Trigge
                     source_id, ability, ..
                 } => {
                     *source_id = ObjectId(0);
-                    crate::game::triggers::normalize_ability_identity(ability);
+                    ability.clear_source_provenance_for_loop_recursive(carrier_source);
                 }
                 StackEntryKind::ActivatedAbility { source_id, ability } => {
                     *source_id = ObjectId(0);
-                    crate::game::triggers::normalize_ability_identity(ability);
+                    ability.clear_source_provenance_for_loop_recursive(carrier_source);
                 }
                 StackEntryKind::Spell {
                     ability: Some(ability),
                     ..
-                } => crate::game::triggers::normalize_ability_identity(ability),
+                } => ability.clear_source_provenance_for_loop_recursive(carrier_source),
                 StackEntryKind::Spell { ability: None, .. }
                 | StackEntryKind::KeywordAction { .. } => {}
                 // The payload keeps its `ObjectIncarnationRef`s: `norm.id` /
@@ -6360,7 +7968,11 @@ fn normalized_stack_entries(state: &GameState) -> Vec<(StackEntry, Option<Trigge
                 // live assignments.
                 StackEntryKind::CombatDamage { .. } => {}
             }
-            (norm, firing)
+            let mut paid = Vec::new();
+            if let Some(ability) = norm.ability() {
+                ability.paid_record_incarnations_for_loop(&mut paid);
+            }
+            (norm, firing, paid)
         })
         .collect()
 }
@@ -6373,10 +7985,7 @@ fn normalized_stack_entries(state: &GameState) -> Vec<(StackEntry, Option<Trigge
 ///
 // ponytail: greedy embedding + per-kind linear counts, n = stack depth (small);
 // revisit only if a deep-stack combo profiles hot.
-fn stack_covers(
-    prior: &[(StackEntry, Option<TriggerFiring>)],
-    current: &[(StackEntry, Option<TriggerFiring>)],
-) -> bool {
+fn stack_covers(prior: &[NormalizedStackEntry], current: &[NormalizedStackEntry]) -> bool {
     // (2a) greedy two-pointer subsequence embedding, bottom-up.
     let mut ci = 0usize;
     for pe in prior {
@@ -6660,10 +8269,9 @@ fn fire_time_conditions_read_projected_resource_scoped(
         {
             return true;
         }
-        if def
-            .runtime_execute
-            .as_ref()
-            .is_some_and(|a| crate::game::ability_scan::ability_reads_projected_resource(a))
+        if state
+            .replacement_rider(def)
+            .is_some_and(crate::game::ability_scan::ability_reads_projected_resource)
         {
             return true;
         }
@@ -6837,8 +8445,8 @@ fn board_has_functioning_trigger(state: &GameState, class: BoardTriggerClass) ->
 /// itself. Deliberately NOT folded into it (that predicate also gates the offer firewall, where
 /// this shape is not an observation) and deliberately NOT a registration-cancelling suppressor
 /// (the axis can be MIXED-cause, and the batched `Life` registration is per-player, so dropping
-/// it would under-apply the non-ETB half). A sound OVER-approximation in the same idiom as its
-/// siblings: a true result routes to the discrete N-cycle driver, which is always correct.
+/// it would under-apply the non-ETB half). An OVER-approximation in the same idiom as its
+/// siblings: a true result routes to the discrete N-cycle driver, which performs each period.
 pub(crate) fn board_has_functioning_etb_trigger(state: &GameState) -> bool {
     board_has_functioning_trigger(state, BoardTriggerClass::EnterBattlefield)
 }
@@ -6852,8 +8460,8 @@ pub(crate) fn board_has_functioning_etb_trigger(state: &GameState) -> bool {
 ///
 /// SHAPE-AGNOSTIC, exactly as [`board_has_functioning_etb_trigger`]: the `SpellCast` payload is
 /// DISCARDED, so a trigger narrowed to "whenever you cast a creature spell" still routes a loop
-/// that casts an Instant. A sound OVER-approximation — a true result routes to the discrete
-/// N-cycle driver, which is always correct, only slower. Narrowing it by running the trigger's
+/// that casts an Instant. An OVER-approximation — a true result routes to the discrete
+/// N-cycle driver, which performs each period, only slower. Narrowing it by running the trigger's
 /// own matcher against the captured cast is DEFERRED, gated on an undischarged proof that the
 /// matcher's verdict is invariant across cycles; a false negative there re-opens the fidelity
 /// gap this predicate closes.
@@ -7136,9 +8744,9 @@ pub(crate) fn board_has_active_replacement_among(
 }
 
 /// CR 732.2a + CR 122.1 / CR 701.34a: is the growing COUNTER axis OBSERVED — does any live
-/// trigger, replacement, or count-reader react to a counter placement each cycle? A sound
-/// OVER-approximation: a true result ROUTES the loop to the discrete N-cycle driver (always
-/// safe), never a wrong single-batch. Returns true iff ANY:
+/// trigger, replacement, or count-reader react to a counter placement each cycle? An
+/// OVER-approximation: a true result ROUTES the loop to the discrete N-cycle driver instead of
+/// a single batch. Returns true iff ANY:
 /// - [`fire_time_conditions_read_growing_class`] — counter count-readers (a charge-count static;
 ///   a counter-reading condition / body / cost).
 /// - a battlefield-functioning `CounterAdded` trigger ("whenever a +1/+1 counter is put …").
@@ -7183,13 +8791,13 @@ pub(crate) fn counter_growth_is_observed(state: &GameState) -> bool {
 }
 
 /// CR 732.2a + CR 119.3: is the growing LIFE axis OBSERVED — does any live trigger,
-/// replacement, or projected-life-total reader react to a life gain each cycle? A sound
-/// OVER-approximation (true ⇒ drive, always safe). Returns true iff ANY:
+/// replacement, or projected-life-total reader react to a life gain each cycle? An
+/// OVER-approximation (true ⇒ drive). Returns true iff ANY:
 /// - a player-level projected life-total read off-stack
 ///   ([`fire_time_conditions_read_projected_resource`]) or on-stack
 ///   ([`stack_entry_reads_projected_resource`]).
 /// - a battlefield-functioning `LifeChanged` trigger (Heliod "whenever you gain life …"; also
-///   `LifeLost` via the shared event key — an over-approximation, still safe).
+///   `LifeLost` via the shared event key — an over-approximation).
 /// - an active battlefield/command `GainLife` replacement (Rhox's doubler), MINUS the
 ///   self-scoped ones — see below.
 ///
@@ -7240,9 +8848,9 @@ pub(crate) fn life_growth_is_observed(state: &GameState) -> bool {
 }
 
 /// CR 614.1a + CR 603.6a + CR 111.3 + CR 732.2a: is the growing TOKEN axis OBSERVED — does
-/// anything live re-derive a count from, or react to, the events the batched mint collapses? A
-/// sound OVER-approximation: a true result ROUTES the loop to the discrete N-cycle driver (always
-/// correct, only slower). Third member of the axis-firewall family with
+/// anything live re-derive a count from, or react to, the events the batched mint collapses? An
+/// OVER-approximation: a true result ROUTES the loop to the discrete N-cycle driver (only
+/// slower). Third member of the axis-firewall family with
 /// [`counter_growth_is_observed`] and [`life_growth_is_observed`].
 ///
 /// TWO EVENTS, because the mint emits two. (1) `ProposedEvent::CreateToken` — an active
@@ -7343,8 +8951,11 @@ fn project_out_player_consumables(p: &mut Player) {
         player_counters,
         life_gained_this_turn,
         life_lost_this_turn,
+        energy_paid_or_lost_this_turn,
         cards_drawn_this_turn,
         cards_drawn_this_step,
+        cards_drawn_last_turn,
+        opponent_spells_cast_since_own_last_turn,
         // Strict-equality fields (NOT projected) — bound `_`, NO `..`:
         id: _,
         library: _,
@@ -7355,8 +8966,10 @@ fn project_out_player_consumables(p: &mut Player) {
         contraption_crank_sprocket: _,
         sticker_sheets: _,
         has_drawn_this_turn: _,
+        has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+
         descended_this_turn: _,
         speed: _,
         speed_trigger_used_this_turn: _,
@@ -7368,6 +8981,10 @@ fn project_out_player_consumables(p: &mut Player) {
         status: _,
         companion: _,
         chosen_attributes: _,
+        // Digital-only Alchemy (no CR entry): the noted number is durable
+        // per-player state like `chosen_attributes` — strict equality, not
+        // a projected consumable.
+        noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
     } = p;
@@ -7383,8 +9000,21 @@ fn project_out_player_consumables(p: &mut Player) {
     // loop but do not change the board configuration.
     *life_gained_this_turn = 0;
     *life_lost_this_turn = 0;
+    *energy_paid_or_lost_this_turn = 0;
     *cards_drawn_this_turn = 0;
     *cards_drawn_this_step = 0;
+    // The last-turn draw count is the window-shifted this-turn count: at a
+    // cycle boundary the pre-cycle turn's draws never match the in-cycle
+    // turn's, so strict equality would refuse every draw-bearing recurrence
+    // the hand/library-term covers are built to certify. Project it with the
+    // other draw consumables; the live counter is still read by
+    // intervening-if checks on the real (post-collapse) state.
+    *cards_drawn_last_turn = 0;
+    // CR 601.2i: the since-window grows with every cast inside a loop but
+    // does not change the board configuration; project it out so two cycles
+    // compare as the same state. The live counter is still read by
+    // intervening-if checks on the real (post-collapse) state.
+    *opponent_spells_cast_since_own_last_turn = 0;
 }
 
 /// CR 120 / CR 122.1 / CR 613.4c: project the monotone per-object resources out of one
@@ -7439,21 +9069,259 @@ pub(crate) fn project_object_for_loop(object: &mut crate::game::game_object::Gam
     object.defense = None;
 }
 
-/// Clone a state through `normalize_for_loop`, then apply what the relaxed comparison needs.
+#[cfg(test)]
+thread_local! {
+    // Deterministic per-thread work observation; absent from production builds.
+    pub(crate) static DAMAGE_RECIPIENT_JOURNAL_VISITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// CR 608.2k + CR 400.7: the damage events through which a retained carrier can observe
+/// a recipient, selected by the OWNING ability. `Some(keys)` means every carrier event was
+/// paired with its ability, and `keys` holds only the events of abilities that can evaluate
+/// an exact `EventTarget`: Matsu-Tribe Sniper's "tap that creature" keeps its own event's
+/// key and not the key of a Stuffy Doll trigger beside it, whose "it deals that much damage
+/// to the chosen player" reads no recipient. `None` means some carrier has no paired
+/// ability here, so the caller must keep every key. Fail closed: eliding a stale-versus-live
+/// relation from the comparand could manufacture a false loop win.
+fn loop_reader_owned_recipient_keys(
+    state: &GameState,
+    carrier_events: usize,
+) -> Option<HashSet<DamageEventKey>> {
+    use crate::game::ability_scan::ability_reads_event_target;
+    use crate::types::ability::ResolvedAbility;
+    use crate::types::events::GameEvent;
+    let mut paired = 0usize;
+    let mut keys = HashSet::new();
+    // Classify the owning ability ONCE, then account its own event and every sidecar
+    // batch event (one trigger, several simultaneous events) against that answer.
+    let mut own = |ability: &ResolvedAbility, events: &mut dyn Iterator<Item = &GameEvent>| {
+        let mut reads = None;
+        for event in events {
+            paired += 1;
+            if *reads.get_or_insert_with(|| ability_reads_event_target(ability)) {
+                keys.extend(DamageEventKey::from_event(event));
+            }
+        }
+    };
+    for entry in state.stack.iter().chain(state.resolving_stack_entry.iter()) {
+        if let StackEntryKind::TriggeredAbility {
+            ability,
+            trigger_event,
+            ..
+        } = &entry.kind
+        {
+            let batch = state.stack_trigger_event_batches.get(&entry.id);
+            own(
+                ability,
+                &mut trigger_event.iter().chain(batch.into_iter().flatten()),
+            );
+        }
+    }
+    if let Some(pending) = state.pending_trigger.as_deref() {
+        own(&pending.ability, &mut pending.trigger_event.iter());
+    }
+    let order_contexts = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter());
+    for context in state.deferred_triggers.iter().chain(order_contexts) {
+        let pending = &context.pending;
+        own(
+            &pending.ability,
+            &mut pending
+                .trigger_event
+                .iter()
+                .chain(context.trigger_events.iter()),
+        );
+    }
+    (paired == carrier_events).then_some(keys)
+}
+
+/// CR 400.7 + CR 608.2k + CR 732.2a: reduce full damage history to the one
+/// recipient answer each retained damage carrier can still read — legacy (no
+/// matching stamp), all-stale, or live. Full damage history remains strict
+/// state; this bounded reduction belongs only to the resource projection.
+/// Collect C requested keys, then inspect H journal rows once: expected O(C+H)
+/// hash work and O(C) storage, before the existing final witness sort.
+///
+/// The returned indices are the emitted witnesses classified stale. They are
+/// positions, not a value sentinel: a raw live epoch of `0` is ordinary data,
+/// so only a row this function classified stale may be hidden from a rank pass.
+fn project_damage_recipient_relations_for_loop(
+    state: &mut GameState,
+) -> smallvec::SmallVec<[usize; 4]> {
+    struct RequestedRecipient {
+        live_incarnation: u64,
+        class: RecipientReadClass,
+    }
+
+    let journal = std::mem::take(&mut state.damage_dealt_this_turn);
+    // Missing rows still authorize the runtime's legacy named-object fallback,
+    // so the requested keys are collected even when the journal is empty.
+    // The whole-state carrier visitor needs &mut self, but never writes the
+    // object store. Alias only its persistent root: no GameState/object clone
+    // or per-object COW, and no second requested-key collection.
+    let objects = state.objects.clone();
+    let mut requested = HashMap::new();
+    let mut carrier_events = 0usize;
+    state.for_each_trigger_event_carrier_mut(&mut |event| {
+        carrier_events += 1;
+        let Some(key) = DamageEventKey::from_event(event) else {
+            return;
+        };
+        let TargetRef::Object(target) = &key.target else {
+            return;
+        };
+        let Some(object) = objects.get(target) else {
+            return;
+        };
+        requested.entry(key).or_insert_with(|| RequestedRecipient {
+            live_incarnation: object.incarnation,
+            class: RecipientReadClass::Legacy,
+        });
+    });
+    drop(objects);
+    // No retained carrier names a damaged object: nothing to classify, nothing to scan.
+    if requested.is_empty() {
+        return smallvec::SmallVec::new();
+    }
+    // CR 608.2k: a recipient answer is observable only through an exact top-level
+    // `EventTarget` on the ability that owns the event. When every retained carrier is
+    // paired, keep only the keys a reader owns; with none left no witness can affect the
+    // comparand, and the H-row scan is skipped.
+    if let Some(owned) = loop_reader_owned_recipient_keys(state, carrier_events) {
+        requested.retain(|key, _| owned.contains(key));
+        if requested.is_empty() {
+            return smallvec::SmallVec::new();
+        }
+    }
+    for record in &journal {
+        #[cfg(test)]
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(visits.get() + 1));
+        #[cfg(test)]
+        crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS
+            .with(|visits| visits.set(visits.get() + 1));
+        let Some(epoch) = record.target_incarnation else {
+            continue;
+        };
+        let Some(relation) = requested.get_mut(&record.event_key()) else {
+            continue;
+        };
+        if epoch == relation.live_incarnation {
+            relation.class = RecipientReadClass::Live;
+        } else if relation.class == RecipientReadClass::Legacy {
+            relation.class = RecipientReadClass::Stale;
+        }
+    }
+    let mut stale = smallvec::SmallVec::new();
+    for (key, relation) in requested {
+        let target_incarnation = match relation.class {
+            RecipientReadClass::Legacy => None,
+            RecipientReadClass::Stale => {
+                stale.push(state.damage_dealt_this_turn.len());
+                Some(0)
+            }
+            RecipientReadClass::Live => Some(relation.live_incarnation),
+        };
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: key.source_id,
+            source_incarnation: key.source_incarnation,
+            target: key.target,
+            target_incarnation,
+            amount: key.amount,
+            is_combat: key.is_combat,
+            ..Default::default()
+        });
+    }
+    stale
+}
+
+/// Identity callbacks rename fields without adding/removing journal rows.
+/// `stale` names exactly the witness positions carrying the projection's
+/// non-live class; they are hidden across the callback so they cannot occupy a
+/// rank, then restored. Legacy rows are already `None` and are left alone, and a
+/// raw live epoch of `0` is never mistaken for the stale class.
+fn canonicalize_projected_recipient_relations(
+    frame: &mut ResourceProjectedFrame,
+    stale: &[usize],
+    canonicalize: impl FnOnce(&mut GameState),
+) {
+    for &index in stale {
+        debug_assert_eq!(
+            frame.0.damage_dealt_this_turn[index].target_incarnation,
+            Some(0)
+        );
+        frame.0.damage_dealt_this_turn[index].target_incarnation = None;
+    }
+    canonicalize(&mut frame.0);
+    for &index in stale {
+        frame.0.damage_dealt_this_turn[index].target_incarnation = Some(0);
+    }
+    // Map traversal cannot choose the journal's compared order.
+    fn tuple(record: &DamageRecord) -> (ObjectId, Option<u64>, ObjectId, u32, bool) {
+        let TargetRef::Object(target) = &record.target else {
+            unreachable!("projected witnesses have only object recipients");
+        };
+        (
+            record.source_id,
+            record.source_incarnation,
+            *target,
+            record.amount,
+            record.is_combat,
+        )
+    }
+    frame
+        .0
+        .damage_dealt_this_turn
+        .sort_by(|left, right| tuple(left).cmp(&tuple(right)));
+}
+
+/// The later post-erasure callers cannot carry the selector's positions (growth covers
+/// rewrite the journal), and by then every live epoch has ranked to a positive value, so
+/// the projection-only stale `Some(0)` is unambiguous. Legacy rows stay `None`.
+fn projected_stale_rows(frame: &GameState) -> smallvec::SmallVec<[usize; 4]> {
+    frame
+        .damage_dealt_this_turn
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| record.target_incarnation == Some(0))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Clone a state through the loop sample form (`normalize_for_loop_sample`), reduce
+/// damage history to the bounded recipient classes, rank only those witnesses, then
+/// apply what the relaxed comparison needs.
 /// Three zeroing sources: [`project_out_player_consumables`] for the per-player axes (its own
 /// no-`..` destructure is that set's boundary), [`project_object_for_loop`] for the per-object
-/// ones, and the per-turn tally/journal block below. Then one CANONICALIZATION, which is not a
-/// zeroing and is why the three are not the whole story: the stack's volatile per-entry
-/// `StackEntry::id` is rewritten to that entry's stack POSITION, carrying the
-/// `stack_trigger_firings` sidecar keyed by it — see the block at the end of this function for
-/// what that preserves and why it cannot manufacture a false positive. The result is only ever
-/// a comparand — it is never used as a live game state.
-fn project_out_resources(state: &GameState) -> GameState {
+/// ones, and the per-turn tally/journal block below. The stack's volatile
+/// per-entry id is renamed to its POSITION with its firing sidecar. The journal rank runs
+/// here on the bounded witnesses (a raw live epoch must be ranked before the
+/// projection-only stale class is meaningful) and NOT on the full history; one narrow
+/// re-rank then follows every erasure, including mana receipts. This pass also accepts
+/// already-normalized ring inputs without a second full normalizer.
+/// The result is only a comparand, never a live game state.
+fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
     bump_loop_detect_cost(|cost| cost.projected_clones += 1);
     // Read from the unprojected state: the cost gates judge recorded facts
     // against the live statics, before any object is projected below.
     let observable_journal = crate::game::casting::cost_observable_activation_journal(state);
-    let mut s = state.normalize_for_loop();
+    // CR 104.4b + CR 732.2a: unranked transient form, so the row-unbounded
+    // journal is reduced BEFORE any identity pass can walk it.
+    let mut s = state.normalize_for_loop_sample();
+    let stale_witnesses = project_damage_recipient_relations_for_loop(&mut s);
+    // Rank the bounded witnesses before the axes/objects they may name are
+    // projected away. `canonicalize_loop_identities` is the strict rank pass;
+    // with the journal already reduced it sees only retained relations.
+    let mut projected = ResourceProjectedFrame(s);
+    canonicalize_projected_recipient_relations(
+        &mut projected,
+        &stale_witnesses,
+        GameState::canonicalize_loop_identities,
+    );
+    let mut s = projected.0;
 
     for player in &mut s.players {
         // Single authority for the projected player-consumable set, shared with the
@@ -7466,9 +9334,8 @@ fn project_out_resources(state: &GameState) -> GameState {
     }
 
     // Per-turn / per-game *bookkeeping* accumulators the dynamic Engine-A path perturbs each
-    // cycle. This block runs ONLY in the offline `loop_states_equal_modulo_resources` comparison
-    // and never touches a live game state, so it cannot affect the strict CR 104.4b
-    // mandatory-draw path. The accumulators partition into two classes handled OPPOSITELY:
+    // cycle. This block edits only the projected clone, never a live game state. The
+    // accumulators partition into two classes handled OPPOSITELY:
     //   * repetition-BLOCKING legality gates (per-turn/per-game activation tallies,
     //     once-per-turn/N-times trigger limits, per-object loyalty activation count) —
     //     PRESERVED (or compared analysis-locally) so a GATED loop compares UNEQUAL and is not
@@ -7502,25 +9369,56 @@ fn project_out_resources(state: &GameState) -> GameState {
     //      while `evaluate_condition` answers differently for them. See that
     //      function for why the straddle argument, and not a per-comparator
     //      monotonicity argument, is what governs here.
-    let keep_turn: HashSet<(ObjectId, usize)> = s
+    let keep_turn: HashSet<AbilityUsageKey> = s
         .activated_abilities_this_turn
         .keys()
         .filter(|key| {
             ability_has_per_turn_activation_gate(&s, key)
                 || ability_reads_own_activation_count(&s, key)
         })
-        .copied()
+        .cloned()
         .collect();
     s.activated_abilities_this_turn
         .retain(|key, _| keep_turn.contains(key));
-    let keep_game: HashSet<(ObjectId, usize)> = s
+    let keep_game: HashSet<AbilityUsageKey> = s
         .activated_abilities_this_game
         .keys()
         .filter(|key| ability_has_per_game_activation_gate(&s, key))
-        .copied()
+        .cloned()
         .collect();
     s.activated_abilities_this_game
         .retain(|key, _| keep_game.contains(key));
+    // CR 400.7 + CR 608.2h: the departed-incarnation tallies are the same
+    // ledger class as the live journals, so project them symmetrically: retain
+    // a departed key exactly when its live twin would be retained (a per-turn
+    // or per-game gate, or an own-activation-count reader), and clear the
+    // rest. Without this a loop that parks history in a departed incarnation
+    // (a sacrifice outlet that dies mid-cycle) compares unequal against its
+    // own earlier frames and is never certified; retaining the gated and
+    // count-reading keys keeps the fail-closed discrimination for loops whose
+    // repetition the departed count actually governs. Like the live twins, a
+    // key whose definition no longer resolves in the projected frame is
+    // cleared: the live rule (`is_some_and`) treats unresolvable keys the same
+    // way, so the two populations stay symmetric.
+    let keep_departed_turn: HashSet<(AbilityUsageKey, u64)> = s
+        .departed_activated_abilities_this_turn
+        .keys()
+        .filter(|(key, _)| {
+            ability_has_per_turn_activation_gate(&s, key)
+                || ability_reads_own_activation_count(&s, key)
+        })
+        .cloned()
+        .collect();
+    s.departed_activated_abilities_this_turn
+        .retain(|key, _| keep_departed_turn.contains(key));
+    let keep_departed_game: HashSet<(AbilityUsageKey, u64)> = s
+        .departed_activated_abilities_this_game
+        .keys()
+        .filter(|(key, _)| ability_has_per_game_activation_gate(&s, key))
+        .cloned()
+        .collect();
+    s.departed_activated_abilities_this_game
+        .retain(|key, _| keep_departed_game.contains(key));
     // CR 608.2c: AbilityUseCountThisTurn{n} is a one-shot branch SELECTOR (an effect
     // branch fires when the per-ability resolution count == n), NOT a repetition-
     // blocking legality gate. Clearing it is sound: a board-divergent Nth branch is
@@ -7544,21 +9442,24 @@ fn project_out_resources(state: &GameState) -> GameState {
     s.triggered_abilities_added_mana_this_turn.clear();
     s.loyalty_abilities_activated_this_turn.clear();
     s.extra_loyalty_activations_this_turn.clear();
-    // CR 603.2h: trigger once-per-turn / N-times-per-turn limits. These maps have
-    // EXACTLY ONE writer each — the constraint-keyed `record_trigger_fired`
-    // (triggers.rs), which returns early for an unconstrained trigger:
-    // `triggers_fired_this_turn` is written ONLY for `TriggerConstraint::OncePerTurn`,
-    // `trigger_fire_counts_this_turn` ONLY for `MaxTimesPerTurn`. An UNRESTRICTED
-    // (repeatable) trigger inserts into NEITHER, so a legitimate unrestricted-trigger
-    // loop never touches them and PRESERVING them cannot break legit-loop equality.
-    // For a GATED trigger the key/count is present/grows, so two cycles compare
-    // DIFFERENT — exactly the soundness the gate enforces (a once-per-turn trigger
-    // cannot drive an infinite loop). `triggers_fired_this_turn_per_opponent`
-    // (OncePerOpponentPerTurn) and `triggers_fired_this_game` (OncePerGame) are
-    // likewise NOT cleared here — consistent with the preserved `crew_activated_this_turn`.
+    // CR 603.2 + CR 603.2h: trigger once-per-turn / N-times-per-turn limits. These maps
+    // have EXACTLY ONE writer each. The constraint-keyed `record_trigger_fired`
+    // (triggers.rs) returns early for an unconstrained trigger and writes
+    // `triggers_fired_this_turn` ONLY for `OncePerTurn { spent_by: Triggering }` at
+    // admission, and `trigger_fire_counts_this_turn` ONLY for `MaxTimesPerTurn`.
+    // `trigger_indicated_actions_this_turn` is written ONLY by
+    // `triggers::record_indicated_action`, on acceptance of a non-cast instruction or
+    // when a CR 603.2h resolution cast becomes cast. An UNRESTRICTED (repeatable) trigger, or a CR 603.2h trigger
+    // that is always declined, inserts into NONE of them, so a legitimate
+    // unrestricted-trigger loop never touches them and PRESERVING them cannot break
+    // legit-loop equality. For a GATED trigger the key/count is present/grows, so two
+    // cycles compare DIFFERENT — exactly the soundness the gate enforces (a once-per-turn
+    // trigger cannot drive an infinite loop). `trigger_indicated_actions_this_turn`,
+    // `triggers_fired_this_turn_per_opponent` (OncePerOpponentPerTurn) and
+    // `triggers_fired_this_game` (OncePerGame) are likewise NOT cleared here — consistent
+    // with the preserved `crew_activated_this_turn`.
     // CR 120: who has dealt damage + the per-turn damage event log.
     s.objects_that_dealt_damage.clear();
-    s.damage_dealt_this_turn.clear();
     // CR 601: per-turn / per-game cast journals.
     s.spells_cast_this_turn_by_player.clear();
     s.spells_cast_this_game.clear();
@@ -7574,6 +9475,10 @@ fn project_out_resources(state: &GameState) -> GameState {
     // CR 400 (zones) / CR 603.6a (ETB) / CR 701.21 (sacrifice) / CR 111 (tokens):
     // append-only event journals a loop pumps.
     s.zone_changes_this_turn.clear();
+    s.battlefield_entry_observations.clear();
+    // Indexes the ledger cleared above; a loop that passes an instruction
+    // boundary advances it every period.
+    s.instruction_boundary_marks.clear();
     s.battlefield_entries_this_turn.clear();
     s.created_tokens_this_turn.clear();
     s.players_who_created_token_this_turn.clear();
@@ -7585,8 +9490,9 @@ fn project_out_resources(state: &GameState) -> GameState {
     // CR 500.1 + CR 500.8: the per-step tally an extra-phase loop pumps.
     s.steps_started_this_turn.clear();
 
-    // CR 104.4b / CR 732.2a — MODULO LAYER ONLY. The strict `loop_states_equal` /
-    // `normalize_for_loop` are deliberately NOT changed; they never call this fn.
+    // CR 104.4b / CR 732.2a — MODULO LAYER ONLY. This projection never calls the strict
+    // `loop_states_equal` or `normalize_for_loop`; the strict comparator's semantics are
+    // not widened here (it ranks the candidate pair itself).
     //
     // A triggered/activated ability placed on the stack takes a FRESH
     // `entry_id = ObjectId(next_object_id++)` every time, and `StackEntry`/`GameState`
@@ -7623,7 +9529,14 @@ fn project_out_resources(state: &GameState) -> GameState {
             s.stack_trigger_firings.insert(canonical_id, firing);
         }
     }
-    s
+    let mut projected = ResourceProjectedFrame(s);
+    let stale = projected_stale_rows(&projected.0);
+    canonicalize_projected_recipient_relations(
+        &mut projected,
+        &stale,
+        GameState::canonicalize_lki_incarnations_for_loop,
+    );
+    projected
 }
 
 /// The controller-side raw values of the PROJECTED scalar player consumables, in a
@@ -7642,6 +9555,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         energy,
         life_gained_this_turn,
         life_lost_this_turn,
+        energy_paid_or_lost_this_turn,
         cards_drawn_this_turn,
         cards_drawn_this_step,
         life: _,
@@ -7657,8 +9571,11 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         contraption_crank_sprocket: _,
         sticker_sheets: _,
         has_drawn_this_turn: _,
+        has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        cards_drawn_last_turn: _,
+        opponent_spells_cast_since_own_last_turn: _,
         descended_this_turn: _,
         speed: _,
         speed_trigger_used_this_turn: _,
@@ -7670,6 +9587,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         status: _,
         companion: _,
         chosen_attributes: _,
+        noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
     } = p;
@@ -7678,6 +9596,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         *energy as i64,
         *life_gained_this_turn as i64,
         *life_lost_this_turn as i64,
+        *energy_paid_or_lost_this_turn as i64,
         *cards_drawn_this_turn as i64,
         *cards_drawn_this_step as i64,
     ]
@@ -7690,7 +9609,6 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
 /// per-kind veto too, so a new map consumable can never be zeroed by
 /// [`project_out_player_consumables`] yet silently escape the sign-check. Returns references so
 /// the caller unions keys without cloning.
-#[cfg_attr(not(test), allow(dead_code))] // exercised by this module's unit tests.
 fn projected_player_maps(
     p: &Player,
 ) -> Vec<&HashMap<crate::types::player::PlayerCounterKind, u32>> {
@@ -7703,6 +9621,7 @@ fn projected_player_maps(
         energy: _,
         life_gained_this_turn: _,
         life_lost_this_turn: _,
+        energy_paid_or_lost_this_turn: _,
         cards_drawn_this_turn: _,
         cards_drawn_this_step: _,
         id: _,
@@ -7714,8 +9633,11 @@ fn projected_player_maps(
         contraption_crank_sprocket: _,
         sticker_sheets: _,
         has_drawn_this_turn: _,
+        has_no_life_total: _,
         lands_played_this_turn: _,
         life_lost_last_turn: _,
+        cards_drawn_last_turn: _,
+        opponent_spells_cast_since_own_last_turn: _,
         descended_this_turn: _,
         speed: _,
         speed_trigger_used_this_turn: _,
@@ -7727,6 +9649,7 @@ fn projected_player_maps(
         status: _,
         companion: _,
         chosen_attributes: _,
+        noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
     } = p;
@@ -7750,6 +9673,25 @@ pub(crate) fn driving_resources_non_decreasing(
     current: &GameState,
     controller: PlayerId,
 ) -> bool {
+    driving_resources_non_decreasing_carried(prior, current, controller, None)
+}
+
+/// [`driving_resources_non_decreasing`], with the object clauses (c) and (d) read over only the
+/// permanents on the battlefield in `carried`, `prior` and `current` when `carried` is given: an
+/// object the period minted is growth, not a driving resource the period spends.
+pub(crate) fn driving_resources_non_decreasing_carried(
+    prior: &GameState,
+    current: &GameState,
+    controller: PlayerId,
+    carried: Option<&GameState>,
+) -> bool {
+    let in_population = |id: &ObjectId| {
+        carried.is_none_or(|first| {
+            first.battlefield.contains(id)
+                && prior.battlefield.contains(id)
+                && current.battlefield.contains(id)
+        })
+    };
     // CR 119: no `GameState::player` accessor exists — find by id.
     let (Some(pp), Some(cp)) = (
         prior.players.iter().find(|p| p.id == controller),
@@ -7787,7 +9729,7 @@ pub(crate) fn driving_resources_non_decreasing(
     //     (a decrease is a beneficial heal).
     let totals = |s: &GameState| -> HashMap<CounterType, u64> {
         let mut m: HashMap<CounterType, u64> = HashMap::default();
-        for id in &s.battlefield {
+        for id in s.battlefield.iter().filter(|id| in_population(id)) {
             if let Some(o) = s.objects.get(id) {
                 if o.controller != controller {
                     continue;
@@ -7812,13 +9754,17 @@ pub(crate) fn driving_resources_non_decreasing(
     //     destroyed, so a board-growing loop that ALSO accrues damage on the controller's own
     //     engine each cycle is self-terminating, not a sustainable CR 732.2a shortcut.
     //     `project_out_resources` zeroes `damage_marked` (invisible to strict loop-equality);
-    //     this recovers the sign. Summed across the controller's battlefield (damage is one
-    //     scalar per object, no per-kind split). A DECREASE (heal) is allowed.
+    //     this recovers the sign. Summed across the controller's battlefield permanents that
+    //     lethal damage can destroy (damage is one scalar per object, no per-kind split);
+    //     CR 702.12b: a permanent with indestructible ignores that state-based action. A
+    //     DECREASE (heal) is allowed.
     let damage_total = |s: &GameState| -> u64 {
         s.battlefield
             .iter()
+            .filter(|id| in_population(id))
             .filter_map(|id| s.objects.get(id))
             .filter(|o| o.controller == controller)
+            .filter(|o| !o.has_keyword(&crate::types::keywords::Keyword::Indestructible))
             .map(|o| o.damage_marked as u64)
             .sum()
     };
@@ -7828,25 +9774,54 @@ pub(crate) fn driving_resources_non_decreasing(
     true
 }
 
-/// CR 602.5b: does the ability at `key=(source,index)` carry a PER-TURN activation
-/// gate? Single authority for "is this activated-tally key a per-turn gate?".
-/// Exhaustive-by-listing `matches!` (no wildcard) so a future per-turn restriction
-/// variant forces an explicit keep/drop decision. A key whose source object is
-/// absent (un-activatable, gate moot) is treated as not-gated and projected out.
-fn ability_has_per_turn_activation_gate(state: &GameState, key: &(ObjectId, usize)) -> bool {
+/// CR 602.5c: the ability a usage key names, re-derived by acquisition
+/// (provenance stamp + rules text) — the same derivation the record and check
+/// paths use. A key naming no current ability (stale stamp, synthesized
+/// runtime grant outside `abilities[]`) classifies as not-gated, matching the
+/// old absent-index read.
+fn ability_definition_for_usage_key<'s>(
+    state: &'s GameState,
+    key: &AbilityUsageKey,
+) -> Option<&'s AbilityDefinition> {
+    // CR 602.5b: the fingerprint discriminates same-acquisition twins that
+    // differ only in body (two equip costs, reconfigure attach vs unattach —
+    // all `description: None`). Without it the lookup returns the first twin
+    // and a gated tally is misclassified as unrestricted.
+    //
+    // CR 602.5c + CR 113.2c: the grant chain discriminates same-description
+    // twins that differ only in lineage (a direct grant vs a re-donation
+    // through a carrier — e.g. a capped Locus grant vs its unrestricted
+    // twin). Without it the lookup returns whichever twin sits first in
+    // `abilities[]` and a gated tally is projected out with the unrestricted
+    // twin's fate.
     state
         .objects
-        .get(&key.0)
-        .and_then(|o| o.abilities.get(key.1))
-        .is_some_and(|def| {
-            def.activation_restrictions.iter().any(|r| {
-                matches!(
-                    r,
-                    ActivationRestriction::OnlyOnceEachTurn
-                        | ActivationRestriction::MaxTimesEachTurn { .. }
-                )
-            })
+        .get(&key.source)?
+        .abilities
+        .iter()
+        .find(|def| {
+            def.granting_object == key.provenance
+                && def.description == key.description
+                && crate::game::restrictions::ability_fingerprint(def) == key.fingerprint
+                && def.grant_chain == key.grant_chain
         })
+}
+
+/// CR 602.5b: does the ability at `key` carry a PER-TURN activation
+/// gate? Single authority for "is this activated-tally key a per-turn gate?".
+/// Exhaustive-by-listing `matches!` (no wildcard) so a future per-turn restriction
+/// variant forces an explicit keep/drop decision. A key naming no current
+/// ability (un-activatable, gate moot) is treated as not-gated and projected out.
+fn ability_has_per_turn_activation_gate(state: &GameState, key: &AbilityUsageKey) -> bool {
+    ability_definition_for_usage_key(state, key).is_some_and(|def| {
+        def.activation_restrictions.iter().any(|r| {
+            matches!(
+                r,
+                ActivationRestriction::OnlyOnceEachTurn
+                    | ActivationRestriction::MaxTimesEachTurn { .. }
+            )
+        })
+    })
 }
 
 /// CR 602.2a + CR 608.2c: does the printed ability at `key` gate anything on its
@@ -7863,7 +9838,7 @@ fn ability_has_per_turn_activation_gate(state: &GameState, key: &(ObjectId, usiz
 /// reachable, retain the count for any ability that reads it at all: retention
 /// can only make states compare DIFFERENT, which is the fail-closed direction
 /// (a loop is rejected, never falsely certified).
-fn ability_reads_own_activation_count(state: &GameState, key: &(ObjectId, usize)) -> bool {
+fn ability_reads_own_activation_count(state: &GameState, key: &AbilityUsageKey) -> bool {
     fn condition_reads_activation_tally(condition: &AbilityCondition) -> bool {
         match condition {
             AbilityCondition::AbilityUseCountThisTurn {
@@ -7904,28 +9879,133 @@ fn ability_reads_own_activation_count(state: &GameState, key: &(ObjectId, usize)
                 .any(definition_reads_activation_tally)
     }
 
-    state
-        .objects
-        .get(&key.0)
-        .and_then(|o| o.abilities.get(key.1))
-        .is_some_and(definition_reads_activation_tally)
+    ability_definition_for_usage_key(state, key).is_some_and(definition_reads_activation_tally)
 }
 
 /// CR 602.5b: per-GAME activation gate. Single authority.
-fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usize)) -> bool {
-    state
-        .objects
-        .get(&key.0)
-        .and_then(|o| o.abilities.get(key.1))
-        .is_some_and(|def| {
-            def.activation_restrictions
-                .iter()
-                .any(|r| matches!(r, ActivationRestriction::OnlyOnce))
-        })
+fn ability_has_per_game_activation_gate(state: &GameState, key: &AbilityUsageKey) -> bool {
+    ability_definition_for_usage_key(state, key).is_some_and(|def| {
+        def.activation_restrictions
+            .iter()
+            .any(|r| matches!(r, ActivationRestriction::OnlyOnce))
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::game::game_object::ObjectIncarnationRefExt;
+    use crate::types::events::GameEvent;
+    use std::sync::Arc;
+
+    /// CR 704.3 + CR 704.5a: reading a charge stream one stretch at a time gives the answer of
+    /// stepping through it one repetition at a time
+    /// (`PeriodicDelta::first_life_crossing_by_stretch` against
+    /// `PeriodicDelta::first_life_crossing`), for every stream below, `i64::MIN` and life totals
+    /// from -2 to 45, and every horizon up to 60, with the stream's own change points and with spare points
+    /// at which nothing changes. The streams: a seat never charged, a constant charge, a dip
+    /// above its net, a dip that nets nothing, a charge that starts late, one that stops, and
+    /// two that change three times. The stretch reading reads at most one charge per stretch.
+    /// With a life total and a horizon in the billions, which the stepping walk cannot be asked,
+    /// a seat never charged crosses nowhere and a seat charged 1 a repetition crosses at the
+    /// repetition equal to its life.
+    #[test]
+    fn a_life_crossing_read_by_stretch_is_the_stepping_walks() {
+        use super::{DeclaredLifeCharge, PeriodicDelta};
+        use crate::analysis::decision_template::IterationIndex;
+        use std::cell::Cell;
+        use std::collections::BTreeSet;
+
+        // Each stream as its stretches: (first index, net, dip), the first at index 0.
+        let streams: &[&[(IterationIndex, i64, i64)]] = &[
+            &[(0, 0, 0)],
+            &[(0, 1, 1)],
+            &[(0, 2, 2)],
+            &[(0, 3, 5)],
+            &[(0, 0, 4)],
+            &[(0, 0, 0), (3, 2, 2)],
+            &[(0, 2, 2), (4, 0, 0)],
+            &[(0, 1, 3), (1, 0, 0), (5, 2, 2), (9, 0, 6)],
+            &[(0, 5, 5), (2, 1, 1), (7, 0, 0), (8, 3, 4)],
+        ];
+        let charge_of = |stretches: &[(IterationIndex, i64, i64)], index: IterationIndex| {
+            let &(_, net, dip) = stretches
+                .iter()
+                .rev()
+                .find(|(first, ..)| *first <= index)
+                .expect("index 0 starts a stretch");
+            DeclaredLifeCharge { net, dip }
+        };
+        let (mut crossed, mut survived, mut crossed_after_a_change) = (0, 0, 0);
+        for stretches in streams {
+            let own: BTreeSet<IterationIndex> =
+                stretches.iter().map(|(first, ..)| *first).collect();
+            let spare: BTreeSet<IterationIndex> = own.iter().copied().chain([1, 6, 40]).collect();
+            for remaining_life in (-2..=45).chain([i64::MIN]) {
+                for horizon in 0..=60u32 {
+                    let stepped = PeriodicDelta::first_life_crossing(
+                        (0..).map(|index| charge_of(stretches, index)),
+                        remaining_life,
+                        horizon,
+                    );
+                    for changes in [&own, &spare] {
+                        let reads = Cell::new(0usize);
+                        let by_stretch = PeriodicDelta::first_life_crossing_by_stretch(
+                            |index| {
+                                reads.set(reads.get() + 1);
+                                charge_of(stretches, index)
+                            },
+                            changes,
+                            remaining_life,
+                            horizon,
+                        );
+                        assert_eq!(
+                            by_stretch, stepped,
+                            "stream {stretches:?}, life {remaining_life}, horizon {horizon}, \
+                             change points {changes:?}"
+                        );
+                        assert!(
+                            reads.get() <= changes.len() + 1,
+                            "one read per stretch at most: {} reads over {changes:?}",
+                            reads.get()
+                        );
+                    }
+                    match stepped {
+                        Some(repetition) => {
+                            crossed += 1;
+                            if own.iter().any(|first| *first > 0 && *first < repetition) {
+                                crossed_after_a_change += 1;
+                            }
+                        }
+                        None => survived += 1,
+                    }
+                }
+            }
+        }
+        assert!(
+            crossed > 1000 && survived > 1000 && crossed_after_a_change > 100,
+            "REACH-GUARD: the table holds crossings ({crossed}), survivals ({survived}) and \
+             crossings past a change point ({crossed_after_a_change})"
+        );
+
+        // A horizon the stepping walk cannot be asked: one read answers.
+        let life = i64::from(i32::MAX);
+        let never = |_| DeclaredLifeCharge { net: 0, dip: 0 };
+        let one = |_| DeclaredLifeCharge { net: 1, dip: 1 };
+        let none = BTreeSet::new();
+        assert_eq!(
+            PeriodicDelta::first_life_crossing_by_stretch(never, &none, life, u32::MAX),
+            None
+        );
+        assert_eq!(
+            PeriodicDelta::first_life_crossing_by_stretch(one, &none, life, u32::MAX),
+            Some(i32::MAX as u32)
+        );
+        assert_eq!(
+            PeriodicDelta::first_life_crossing_by_stretch(one, &none, life, i32::MAX as u32 - 1),
+            None,
+            "a crossing one repetition past the horizon is not found"
+        );
+    }
 
     /// CR 508.1d + CR 604.1: only a LIVE required-defender class is a growing-class
     /// read. `Fixed`/`Permanent` are frozen ids and stay read-free; `Matching`
@@ -7974,10 +10054,18 @@ mod tests {
     use super::*;
     use crate::analysis::decision_template::ChoicePoint;
     use crate::game::game_object::GameObject;
-    use crate::types::ability::TriggerDefinitionRef;
+    use crate::types::ability::{AggregateFunction, TriggerDefinitionRef};
+    use crate::types::actions::ReplacementAutoChoice;
+    use crate::types::game_state::loop_states_equal;
+    use crate::types::game_state::{
+        ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
+        ReplacementAutoChoiceRecord, ReplacementChoiceKind,
+    };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ExtraPhaseId,
     };
+    use crate::types::mana::ManaCost;
+    use crate::types::statics::CostModifyMode;
     use crate::types::zones::Zone;
 
     fn pid(n: u8) -> PlayerId {
@@ -7999,6 +10087,2725 @@ mod tests {
         oid
     }
 
+    // Controlled comparison fixtures: object 20 is the Matsu dealer, object 21 the
+    // recipient and also the dealer named by a retained Curse event at incarnation 4.
+    fn relational_recipient_frame(pin: Option<u64>, curse: bool, receipt: bool) -> GameState {
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+        };
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{DamageRecord, StackEntry, StackEntryKind};
+        let mut state = GameState::new_two_player(7);
+        let dealer = battlefield_creature(&mut state, 20, 0);
+        let recipient = battlefield_creature(&mut state, 21, 1);
+        state.objects.get_mut(&dealer).unwrap().incarnation = 7;
+        state.objects.get_mut(&recipient).unwrap().incarnation = 7;
+        let mut events = vec![(dealer, Some(3), TargetRef::Object(recipient))];
+        if curse {
+            events.push((recipient, Some(4), TargetRef::Player(PlayerId(0))));
+        }
+        for (source, incarnation, target) in events {
+            let snapshot = state.objects[&source].snapshot_public_characteristics();
+            state
+                .lki_by_incarnation
+                .entry(source)
+                .or_default()
+                .insert(incarnation.unwrap(), snapshot);
+            state.stack.push_back(StackEntry {
+                id: ObjectId(100 + state.stack.len() as u64),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ResolvedAbility::new(
+                        // CR 608.2k: a REAL recipient consumer ("tap that creature"), so the
+                        // fixture is a carrier the projection must keep a witness for.
+                        Effect::SetTapState {
+                            target: TargetFilter::EventTarget,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
+                        },
+                        vec![],
+                        source,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::DamageDealt {
+                        source_id: source,
+                        source_incarnation: incarnation,
+                        target,
+                        amount: 1,
+                        is_combat: false,
+                        excess: 0,
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+        }
+        state.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: dealer,
+            source_incarnation: Some(3),
+            target: TargetRef::Object(recipient),
+            target_incarnation: pin,
+            amount: 1,
+            ..Default::default()
+        });
+        if receipt {
+            use crate::types::ability::{
+                TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef,
+            };
+            use crate::types::identifiers::ObjectIncarnationRef;
+            state.triggered_abilities_added_mana_this_turn.insert((
+                TriggerDefinitionRef {
+                    source: ObjectIncarnationRef::of(recipient, 5),
+                    occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index: 0,
+                    },
+                },
+                PlayerId(1),
+            ));
+        }
+        state
+    }
+
+    fn relational_projection_feeds(a: &GameState, b: &GameState, expected: bool) {
+        use crate::types::game_state::LoopDetectSample;
+        let sample = LoopDetectSample {
+            normalized: a.normalize_for_loop(),
+            live: a.loop_detect_live_sample(),
+            tally: Default::default(),
+            trace_at: None,
+        };
+        for prior in [a, &sample.normalized] {
+            for current in [b, &b.normalize_for_loop()] {
+                assert_eq!(
+                    loop_states_equal_modulo_resources(prior, current),
+                    expected,
+                    "deriving feed"
+                );
+                let frames = SharedCurrentFrames::new(current);
+                assert_eq!(
+                    loop_states_equal_modulo_resources_side(prior, &frames),
+                    expected,
+                    "shared current / normalized ring feed"
+                );
+            }
+        }
+    }
+
+    // Abstract compatibility fixtures, not printed-card support claims. Comparands
+    // are only read here; neither normalized nor projected states resume gameplay.
+    fn relational_publish_recipient_event(state: &mut GameState) {
+        let StackEntryKind::TriggeredAbility { trigger_event, .. } = &state.stack[0].kind else {
+            panic!("recipient fixture must retain its damage carrier");
+        };
+        state.current_trigger_event = Some(trigger_event.clone().unwrap());
+        assert!(state.current_trigger_events.is_empty());
+    }
+
+    fn relational_recipient_reads(state: &GameState, expected: &[ObjectId]) {
+        use crate::game::targeting::resolve_event_referent_permanents;
+        use crate::types::ability::TargetFilter;
+        let strict = state.normalize_for_loop();
+        let twice = strict.normalize_for_loop();
+        assert!(loop_states_equal(&strict, &twice), "strict idempotence");
+        let projected = project_out_resources(state);
+        let projected_strict = project_out_resources(&strict);
+        let projected_twice = project_out_resources(&twice);
+        for (label, view) in [
+            ("raw", state),
+            ("strict", &strict),
+            ("strict twice", &twice),
+            ("factory raw", &*projected),
+            ("factory strict", &*projected_strict),
+            ("factory strict twice", &*projected_twice),
+        ] {
+            assert_eq!(
+                resolve_event_referent_permanents(view, &TargetFilter::EventTarget, ObjectId(20),),
+                expected,
+                "{label}: published recipient read"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_relational_recipient_many_keys_visit_journal_once() {
+        // Abstract CR 603.2c many-survivor carrier shape, not a printed-card
+        // support claim: each recipient has a distinct retained damage event.
+        const MANY: usize = 64;
+        let mut state = relational_recipient_frame(Some(7), false, false);
+        let template = state.stack.pop_front().unwrap();
+        let row_template = state.damage_dealt_this_turn.pop_front().unwrap();
+        let append =
+            |state: &mut GameState, id: u64, source_stamp: Option<u64>, pins: &[Option<u64>]| {
+                let recipient = battlefield_creature(state, id, 1);
+                state.objects.get_mut(&recipient).unwrap().incarnation = 7;
+                let mut entry = template.clone();
+                entry.id = ObjectId(10_000 + id);
+                let StackEntryKind::TriggeredAbility {
+                    trigger_event:
+                        Some(GameEvent::DamageDealt {
+                            source_incarnation,
+                            target,
+                            amount,
+                            ..
+                        }),
+                    ..
+                } = &mut entry.kind
+                else {
+                    panic!("fixture retains a damage event");
+                };
+                *source_incarnation = source_stamp;
+                *target = TargetRef::Object(recipient);
+                *amount = 2;
+                state.stack.push_back(entry);
+                for pin in pins {
+                    let mut row = row_template.clone();
+                    row.source_incarnation = source_stamp;
+                    row.target = TargetRef::Object(recipient);
+                    row.target_incarnation = *pin;
+                    row.amount = 2;
+                    state.damage_dealt_this_turn.push_back(row);
+                }
+            };
+        for offset in 0..MANY {
+            append(&mut state, 1_000 + offset as u64, Some(3), &[Some(7)]);
+        }
+        append(&mut state, 2_000, Some(3), &[Some(3), None, Some(5)]);
+        append(&mut state, 2_001, Some(3), &[None]);
+        append(&mut state, 2_002, Some(3), &[]);
+        append(&mut state, 2_003, Some(3), &[Some(3), Some(7), None]);
+        append(&mut state, 2_004, None, &[Some(7)]);
+        // Neither a different stamped source nor an absent source stamp may
+        // turn an otherwise unknown Some(3) event into a live journal match.
+        for (target, source_incarnation) in [(2_002, Some(4)), (2_001, None)] {
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: ObjectId(20),
+                source_incarnation,
+                target: TargetRef::Object(ObjectId(target)),
+                target_incarnation: Some(7),
+                amount: 2,
+                ..Default::default()
+            });
+        }
+        let mut duplicate = state.stack[0].clone();
+        duplicate.id = ObjectId(90_000);
+        state.stack.push_back(duplicate);
+        state.damage_dealt_this_turn = state.damage_dealt_this_turn.iter().rev().cloned().collect();
+        // Unread history must not be ranked at each priority sample. It is
+        // deliberately much larger than the retained carrier frontier.
+        for _ in 0..2_048 {
+            let mut row = row_template.clone();
+            row.target = TargetRef::Player(PlayerId(1));
+            row.amount = 99;
+            state.damage_dealt_this_turn.push_back(row);
+        }
+        let journal_rows = state.damage_dealt_this_turn.len();
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        state.waiting_for = crate::types::WaitingFor::Priority {
+            player: state.active_player,
+        };
+        state.record_loop_detect_sample();
+        let projected = project_out_resources(
+            &state
+                .loop_detect_ring
+                .back()
+                .expect("the priority sample must reach the resource path")
+                .normalized,
+        );
+        let visits = DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get);
+        let whole_path_visits =
+            crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            MANY + 5,
+            "one bounded witness per retained key: live/mixed/stale, plus the legacy answer for an unstamped or absent row set"
+        );
+        for entry in &projected.stack {
+            let StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event @ GameEvent::DamageDealt { target, .. }),
+                ..
+            } = &entry.kind
+            else {
+                panic!("fixture retains only damage carriers");
+            };
+            let TargetRef::Object(target) = target else {
+                panic!("fixture has object recipients");
+            };
+            let expected = match target.0 {
+                2_000 => Some(0),
+                2_001 | 2_002 => None,
+                _ => Some(projected.objects[target].incarnation),
+            };
+            let mut rows = projected
+                .damage_dealt_this_turn
+                .iter()
+                .filter(|row| row.matches_damage_event(event));
+            assert_eq!(
+                rows.next().and_then(|row| row.target_incarnation),
+                expected,
+                "recipient {target:?}"
+            );
+            assert!(
+                rows.next().is_none(),
+                "duplicate carrier must not duplicate its witness"
+            );
+        }
+        for (target, accepted) in [
+            (2_000, false),
+            (2_001, true),
+            (2_002, true),
+            (2_003, true),
+            (2_004, true),
+        ] {
+            let mut selected = state.clone();
+            selected.current_trigger_event =
+                selected.stack.iter().find_map(|entry| match &entry.kind {
+                    StackEntryKind::TriggeredAbility {
+                        trigger_event:
+                            Some(
+                                event @ GameEvent::DamageDealt {
+                                    target: TargetRef::Object(id),
+                                    ..
+                                },
+                            ),
+                        ..
+                    } if *id == ObjectId(target) => Some(event.clone()),
+                    _ => None,
+                });
+            let expected = [ObjectId(target)];
+            relational_recipient_reads(&selected, if accepted { &expected } else { &[] });
+        }
+        assert!(
+            visits <= journal_rows,
+            "{visits} journal-row visits for {journal_rows} input rows; requested keys must not multiply the scan"
+        );
+        assert!(
+            whole_path_visits <= journal_rows + 8 * projected.damage_dealt_this_turn.len(),
+            "{whole_path_visits} whole-priority journal visits for {journal_rows} rows and {} retained keys; strict ranking must follow reduction",
+            projected.damage_dealt_this_turn.len()
+        );
+    }
+
+    /// CR 608.2k: a retained damage trigger that never reads the recipient must not make
+    /// the projection scan the whole journal. Stuffy Doll's shape: the event's amount plus
+    /// a chosen player, never `EventTarget`.
+    #[test]
+    fn loop_relational_no_reader_trigger_skips_the_journal_scan() {
+        use crate::types::ability::{QuantityExpr, QuantityRef};
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+
+        fn retarget_to_no_reader(state: &mut GameState) {
+            for entry in state.stack.iter_mut() {
+                let StackEntryKind::TriggeredAbility { ability, .. } = &mut entry.kind else {
+                    unreachable!("fixture keeps only trigger carriers");
+                };
+                **ability = ResolvedAbility::new(
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        },
+                        target: TargetFilter::SpecificPlayer { id: PlayerId(1) },
+                        damage_source: None,
+                        excess: None,
+                    },
+                    vec![],
+                    entry.source_id,
+                    PlayerId(0),
+                );
+            }
+        }
+
+        // No reader: the whole journal stays unread, so no witness and no H-row pass.
+        let mut no_reader = relational_recipient_frame(Some(7), false, false);
+        retarget_to_no_reader(&mut no_reader);
+        let row = no_reader.damage_dealt_this_turn[0].clone();
+        for _ in 0..256 {
+            no_reader.damage_dealt_this_turn.push_back(row.clone());
+        }
+        assert!(no_reader.current_trigger_event.is_none());
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let projected = project_out_resources(&no_reader);
+        assert!(
+            projected.damage_dealt_this_turn.is_empty(),
+            "an unobservable recipient relation needs no witness"
+        );
+        assert_eq!(
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get),
+            0,
+            "a no-reader trigger must not scan the damage journal"
+        );
+
+        // Positive control: the same carrier with a real `EventTarget` consumer keeps its
+        // witness and does the one H-row pass.
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let reading = relational_recipient_frame(Some(7), false, false);
+        let projected = project_out_resources(&reading);
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            1,
+            "an EventTarget consumer keeps its witness"
+        );
+        assert!(
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get) > 0,
+            "the reader path still performs the one journal pass"
+        );
+    }
+
+    /// CR 608.2k: `bind_transient_effect` SPLITS a top-level union and recurses with each
+    /// member as the application filter, so a member `EventTarget` reaches the journal
+    /// reader even though the whole filter is not exactly `EventTarget`. The gate must keep
+    /// the witness for that shape.
+    #[test]
+    fn loop_relational_union_member_recipient_keeps_witness() {
+        use crate::types::ability::{Effect, ResolvedAbility, StaticDefinition, TargetFilter};
+        use crate::types::statics::StaticMode;
+
+        let union = TargetFilter::Or {
+            filters: vec![TargetFilter::Controller, TargetFilter::EventTarget],
+        };
+        let mut frame = relational_recipient_frame(Some(3), false, false);
+        for entry in frame.stack.iter_mut() {
+            let StackEntryKind::TriggeredAbility { ability, .. } = &mut entry.kind else {
+                unreachable!("fixture keeps only trigger carriers");
+            };
+            **ability = ResolvedAbility::new(
+                Effect::GenericEffect {
+                    // A REAL static definition: `bind_transient_effect` SPLITS its `affected`
+                    // union and recurses with each member as the application filter, which is
+                    // the production path the union member reaches.
+                    static_abilities: vec![
+                        StaticDefinition::new(StaticMode::Continuous).affected(union.clone())
+                    ],
+                    duration: None,
+                    target: Some(union.clone()),
+                    end_cost: None,
+                },
+                vec![],
+                entry.source_id,
+                PlayerId(0),
+            );
+        }
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let projected = project_out_resources(&frame);
+        assert!(
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get) > 0,
+            "a union member EventTarget can reach the runtime reader"
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            1,
+            "the stale recipient relation stays observable"
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn[0].target_incarnation,
+            Some(0),
+            "all-stale is still the stale class"
+        );
+    }
+
+    /// CR 608.2k: a stack entry's SIDECAR batch belongs to the same ability. A two-event
+    /// batch for a non-reader trigger (Innocent Bystander's investigate) must not force the
+    /// full journal scan, while an unowned batch still falls back.
+    #[test]
+    fn loop_relational_stack_sidecar_batch_pairs_with_its_ability() {
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter,
+        };
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+
+        fn with_batch(state: &mut GameState, reader: bool) {
+            let entry_id = state.stack[0].id;
+            let source = state.stack[0].source_id;
+            let event = match &state.stack[0].kind {
+                StackEntryKind::TriggeredAbility {
+                    trigger_event: Some(event),
+                    ..
+                } => event.clone(),
+                _ => unreachable!("fixture retains a damage event"),
+            };
+            let StackEntryKind::TriggeredAbility { ability, .. } = &mut state.stack[0].kind else {
+                unreachable!("fixture keeps only trigger carriers");
+            };
+            **ability = ResolvedAbility::new(
+                if reader {
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    }
+                } else {
+                    Effect::Investigate
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            let row = state.damage_dealt_this_turn[0].clone();
+            for _ in 0..64 {
+                state.damage_dealt_this_turn.push_back(row.clone());
+            }
+            state
+                .stack_trigger_event_batches
+                .insert(entry_id, vec![event.clone(), event]);
+        }
+
+        let mut bystander = relational_recipient_frame(Some(7), false, false);
+        with_batch(&mut bystander, false);
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let projected = project_out_resources(&bystander);
+        assert!(
+            projected.damage_dealt_this_turn.is_empty(),
+            "a non-reader batch needs no witness"
+        );
+        assert_eq!(
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get),
+            0,
+            "the sidecar batch belongs to the same non-reader ability; no scan"
+        );
+
+        let mut reader = relational_recipient_frame(Some(7), false, false);
+        with_batch(&mut reader, true);
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        let projected = project_out_resources(&reader);
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            1,
+            "a reader batch keeps its witness"
+        );
+        assert!(
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get) > 0,
+            "the reader path performs the pass"
+        );
+    }
+
+    /// The relaxed comparator in each shape production hands it a frame pair: both raw (the
+    /// deriving callers), both sample forms (fixed settlement and mandatory replay hand it a
+    /// `take_boundary` and a sampled settle frame), and a stored sample-form prior against
+    /// the raw current state through the shared frames (the two ring walks).
+    fn relaxed_in_every_shape(prior: &GameState, current: &GameState) -> [bool; 3] {
+        let sample = GameState::normalize_for_loop_sample;
+        [
+            loop_states_equal_modulo_resources(prior, current),
+            loop_states_equal_modulo_resources(&sample(prior), &sample(current)),
+            loop_states_equal_modulo_resources_side(
+                &sample(prior),
+                &SharedCurrentFrames::new(current),
+            ),
+        ]
+    }
+
+    /// CR 400.7 + CR 608.2k: the prevention reader consults the CAPTURED recipient pin
+    /// (`prevent_damage.rs`, `target_pin_is_current`). The pin stays on the loop comparand
+    /// and is ranked against the live recipient, so with both an old and a current row under
+    /// the same event key, a shield pinned to the current recipient never compares equal to
+    /// one pinned to the old recipient — in any shape the comparator is handed.
+    #[test]
+    fn loop_relational_prevention_captured_pin_keeps_its_relation() {
+        use crate::types::ability::{
+            Effect, EffectScope, PreventionAmount, PreventionScope, ResolvedAbility, TargetFilter,
+        };
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        fn frame(reader: bool, pin_epoch: u64) -> GameState {
+            let mut state = relational_recipient_frame(Some(7), false, false);
+            let recipient = ObjectId(21);
+            let source = state.stack[0].source_id;
+            // Both an old and a current row under the same event key, exactly the shape the
+            // review describes.
+            let mut old = state.damage_dealt_this_turn[0].clone();
+            old.target_incarnation = Some(pin_epoch);
+            state.damage_dealt_this_turn.push_back(old);
+            let StackEntryKind::TriggeredAbility { ability, .. } = &mut state.stack[0].kind else {
+                unreachable!("fixture keeps only trigger carriers");
+            };
+            **ability = ResolvedAbility::new(
+                if reader {
+                    Effect::PreventDamage {
+                        amount: PreventionAmount::Next(1),
+                        amount_dynamic: None,
+                        target: TargetFilter::EventTarget,
+                        recipient_scope: EffectScope::Single,
+                        scope: PreventionScope::AllDamage,
+                        damage_source_filter: None,
+                        prevention_duration: None,
+                    }
+                } else {
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: crate::types::ability::TapStateChange::Tap,
+                    }
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.target_incarnations = vec![ObjectIncarnationRef::of(recipient, pin_epoch)];
+            state.current_trigger_event = None;
+            state
+        }
+
+        // The recipient is live at 7 in this fixture: a pin at 7 is live, 3 and 4 are stale.
+        for reader in [true, false] {
+            assert_eq!(
+                relaxed_in_every_shape(&frame(reader, 7), &frame(reader, 3)),
+                [false; 3],
+                "reader {reader}: a live pin must not compare equal to a stale one"
+            );
+            assert_eq!(
+                relaxed_in_every_shape(&frame(reader, 3), &frame(reader, 7)),
+                [false; 3],
+                "reader {reader}: nor a stale one to a live one"
+            );
+            // Positive control: WHICH superseded incarnation a stale pin names is allocator
+            // history, so the comparison is still reachable and still answers equal.
+            assert_eq!(
+                relaxed_in_every_shape(&frame(reader, 3), &frame(reader, 4)),
+                [true; 3],
+                "reader {reader}: two stale pins are the same position"
+            );
+        }
+    }
+
+    /// The carriers a captured recipient passes through, for both resolver shapes.
+    #[derive(Clone, Copy, Debug)]
+    enum PinCarrier {
+        /// Ohran Viper's delayed trigger as registered: "destroy that creature at end of
+        /// combat" holds the recipient as a captured target plus its keyed pin.
+        RegisteredDestroy,
+        /// The same ability after it fired onto the stack.
+        FiredDestroy,
+        /// Footsteps of the Goryo's "Sacrifice that creature at the beginning of the next
+        /// end step": the Sacrifice-shaped sibling, registered and fired.
+        RegisteredSacrifice,
+        FiredSacrifice,
+        /// A spell on the stack whose announced target carries its positional pin
+        /// (CR 601.2c), the form the old refusal never read.
+        AnnouncedSpellTarget,
+        /// Synthetic: an activated ability on the stack, untargeted, whose cost recorded the
+        /// recipient as a captured `cost_paid_objects` record (CR 601.2h). The runtime reader
+        /// of that record's liveness is `choose_from_zone`, which offers a paid object only
+        /// while the record names the live one; `PartialEq` compares the list by id only.
+        PaidRecord,
+    }
+
+    const PIN_CARRIERS: [PinCarrier; 6] = [
+        PinCarrier::RegisteredDestroy,
+        PinCarrier::FiredDestroy,
+        PinCarrier::RegisteredSacrifice,
+        PinCarrier::FiredSacrifice,
+        PinCarrier::AnnouncedSpellTarget,
+        PinCarrier::PaidRecord,
+    ];
+
+    /// A priority frame whose one carrier pins the recipient at `pin` while the recipient is
+    /// live at `live`. Controlled identity fixture: everything else is the same for every
+    /// `(live, pin)`, so two frames differ in the pin relation alone.
+    fn pinned_frame(carrier: PinCarrier, live: u64, pin: u64) -> GameState {
+        use crate::types::ability::{
+            CostPaidObjectRecord, CostPaidObjectSnapshot, DelayedTriggerCondition, Effect,
+            QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+        };
+        use crate::types::game_state::{DelayedTrigger, StackEntry};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        let mut state = GameState::new_two_player(7);
+        let recipient = battlefield_creature(&mut state, 21, 1);
+        let source = battlefield_creature(&mut state, 20, 0);
+        state.objects.get_mut(&recipient).unwrap().incarnation = live;
+        state.waiting_for = crate::types::WaitingFor::Priority {
+            player: state.active_player,
+        };
+        let reference = ObjectIncarnationRef::of(recipient, pin);
+        let effect = match carrier {
+            PinCarrier::RegisteredDestroy | PinCarrier::FiredDestroy => Effect::Destroy {
+                target: TargetFilter::EventTarget,
+                cant_regenerate: false,
+            },
+            PinCarrier::RegisteredSacrifice | PinCarrier::FiredSacrifice => Effect::Sacrifice {
+                target: TargetFilter::EventTarget,
+                count: QuantityExpr::Fixed { value: 1 },
+                min_count: 0,
+            },
+            PinCarrier::AnnouncedSpellTarget => Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            PinCarrier::PaidRecord => Effect::Investigate,
+        };
+        let targets = match carrier {
+            PinCarrier::PaidRecord => vec![],
+            _ => vec![TargetRef::Object(recipient)],
+        };
+        let mut ability = ResolvedAbility::new(effect, targets, source, PlayerId(0));
+        match carrier {
+            PinCarrier::AnnouncedSpellTarget => ability.target_pins = vec![Some(reference)],
+            PinCarrier::PaidRecord => {
+                ability.cost_paid_objects =
+                    vec![CostPaidObjectRecord::Captured(CostPaidObjectSnapshot {
+                        object_id: recipient,
+                        lki: state.objects[&recipient].snapshot_public_characteristics(),
+                        incarnation: pin,
+                    })]
+            }
+            _ => ability.target_incarnations = vec![reference],
+        }
+        let entry = |kind: StackEntryKind| StackEntry {
+            id: ObjectId(100),
+            source_id: source,
+            controller: PlayerId(0),
+            kind,
+        };
+        match carrier {
+            PinCarrier::RegisteredDestroy | PinCarrier::RegisteredSacrifice => {
+                state.delayed_triggers.push(DelayedTrigger::new(
+                    DelayedTriggerCondition::AtNextPhase {
+                        phase: Phase::EndCombat,
+                    },
+                    Box::new(ability),
+                    PlayerId(0),
+                    source,
+                    true,
+                ));
+            }
+            PinCarrier::FiredDestroy | PinCarrier::FiredSacrifice => {
+                state
+                    .stack
+                    .push_back(entry(StackEntryKind::TriggeredAbility {
+                        source_id: source,
+                        ability: Box::new(ability),
+                        condition: None,
+                        trigger_event: None,
+                        description: None,
+                        source_name: String::new(),
+                        subject_match_count: None,
+                        die_result: None,
+                        provenance: None,
+                    }));
+            }
+            PinCarrier::AnnouncedSpellTarget => {
+                state.stack.push_back(entry(StackEntryKind::Spell {
+                    card_id: CardId(1),
+                    ability: Some(Box::new(ability)),
+                    casting_variant: Default::default(),
+                    actual_mana_spent: 0,
+                }));
+            }
+            PinCarrier::PaidRecord => {
+                state
+                    .stack
+                    .push_back(entry(StackEntryKind::ActivatedAbility {
+                        source_id: source,
+                        ability: Box::new(ability),
+                    }));
+            }
+        }
+        state
+    }
+
+    /// CR 603.7c: "if that object left that zone and then returned, it's a new object and
+    /// thus won't be affected." The resolver drops a STALE pin (`live_object_targets`), so a
+    /// frame whose carrier still names the live recipient is a different position from one
+    /// whose carrier names a recipient that is gone. Each comparator entry point must see
+    /// that through PRODUCTION normalization: the strict comparator on two sample forms, the
+    /// ring walks on a stored sample against the raw current state, and fixed settlement and
+    /// mandatory replay on `take_boundary` against a sampled settle frame. The same relation
+    /// minted later (the recipient re-entered, and the ability was created after that) is
+    /// the same position.
+    #[test]
+    fn loop_captured_pin_relation_reaches_every_comparator_entry_point() {
+        use crate::game::engine::{settle_recurs, take_boundary};
+        let sample = GameState::normalize_for_loop_sample;
+        for carrier in PIN_CARRIERS {
+            let live = pinned_frame(carrier, 5, 5);
+            let later = pinned_frame(carrier, 8, 8);
+            let stale = pinned_frame(carrier, 8, 5);
+            let older = pinned_frame(carrier, 8, 3);
+            // `PartialEq` reads `cost_paid_objects` by id only, so the paid record's frames
+            // differ in the comparand the loop comparators add for it.
+            assert!(
+                live != later
+                    || live.loop_paid_record_incarnations()
+                        != later.loop_paid_record_incarnations(),
+                "{carrier:?}: reach guard, the raw frames differ"
+            );
+
+            // Strict comparator (CR 104.4b, the auto-pass window): two sample forms.
+            assert!(
+                loop_states_equal(&sample(&live), &sample(&later)),
+                "{carrier:?}: strict, live pin across a later mint"
+            );
+            assert!(
+                loop_states_equal(&sample(&stale), &sample(&older)),
+                "{carrier:?}: strict, two stale pins"
+            );
+            assert!(
+                !loop_states_equal(&sample(&later), &sample(&stale)),
+                "{carrier:?}: strict, live against stale"
+            );
+
+            // Relaxed comparator (CR 732.2a): raw, sampled, and the ring-walk shape.
+            assert_eq!(
+                relaxed_in_every_shape(&live, &later),
+                [true; 3],
+                "{carrier:?}: live pin across a later mint"
+            );
+            assert_eq!(
+                relaxed_in_every_shape(&stale, &older),
+                [true; 3],
+                "{carrier:?}: two stale pins"
+            );
+            assert_eq!(
+                relaxed_in_every_shape(&later, &stale),
+                [false; 3],
+                "{carrier:?}: live prior against stale current"
+            );
+            assert_eq!(
+                relaxed_in_every_shape(&stale, &later),
+                [false; 3],
+                "{carrier:?}: stale prior against live current"
+            );
+
+            // Fixed settlement (`drive_one_shortcut_cycle`) and mandatory replay
+            // (`mandatory_period_holds`) both ask exactly this of a boundary and a settle
+            // frame, which also consults the growth cover.
+            assert!(
+                settle_recurs(&take_boundary(&live), &sample(&later)),
+                "{carrier:?}: settlement, live pin across a later mint"
+            );
+            assert!(
+                settle_recurs(&take_boundary(&stale), &sample(&older)),
+                "{carrier:?}: settlement, two stale pins"
+            );
+            assert!(
+                !settle_recurs(&take_boundary(&later), &sample(&stale)),
+                "{carrier:?}: settlement, live boundary against a stale settle frame"
+            );
+            assert!(
+                !settle_recurs(&take_boundary(&stale), &sample(&later)),
+                "{carrier:?}: settlement, stale boundary against a live settle frame"
+            );
+        }
+    }
+
+    /// CR 400.7 + CR 603.7c: the fodder-growth and object-growth covers set the stack aside
+    /// before they compare, so the ranked pin of a stack carrier never reaches their
+    /// comparand. Each judges the stack itself first: a pair in which one frame's stack entry
+    /// is pinned to the live recipient and the other's to a recipient that left and returned
+    /// is refused; the same entry pinned live in both, minted earlier or later, or stale in
+    /// both, is the same position and is not refused on that ground. The pin is read through
+    /// the loop pin visitor, so a pin that is not a target is judged too: the last case holds
+    /// the recipient only as an Attach host binding (CR 701.3a).
+    #[test]
+    fn loop_stack_dropping_covers_refuse_a_stale_fired_carrier() {
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        for (carrier, attach_host) in [
+            (PinCarrier::FiredDestroy, false),
+            (PinCarrier::FiredSacrifice, false),
+            (PinCarrier::AnnouncedSpellTarget, false),
+            (PinCarrier::PaidRecord, false),
+            (PinCarrier::FiredDestroy, true),
+        ] {
+            let pinned_frame = |live: u64, pin: u64| {
+                let mut frame = pinned_frame(carrier, live, pin);
+                if attach_host {
+                    let ability = frame.stack[0].ability_mut().unwrap();
+                    ability.target_incarnations.clear();
+                    ability
+                        .context
+                        .attach_target_bindings
+                        .bind_host(ObjectIncarnationRef::of(ObjectId(21), pin));
+                }
+                frame
+            };
+            let carrier = (carrier, attach_host);
+            let live = pinned_frame(5, 5);
+            let later = pinned_frame(8, 8);
+            let stale = pinned_frame(8, 5);
+            let fodder = live.objects[&ObjectId(20)].clone();
+            let refuses_pin = |prior: &GameState, current: &GameState| {
+                fodder_growth_cover_refusals(prior, current, &fodder, PlayerId(0))
+                    .0
+                    .contains(&FodderCoverRefusal::SupersededStackPin)
+            };
+            assert!(
+                !refuses_pin(&live, &later),
+                "{carrier:?}: fodder cover, live pin across a later mint"
+            );
+            assert!(
+                refuses_pin(&later, &stale) && refuses_pin(&stale, &later),
+                "{carrier:?}: fodder cover, live against stale"
+            );
+            assert!(
+                !refuses_pin(&stale, &stale.clone()),
+                "{carrier:?}: fodder cover, the same stale pin in both frames"
+            );
+            // The object-growth cover needs a pair it admits: a steady inert-token engine
+            // grown by one token, with the fired carrier on the stack of both frames.
+            let grown = |live: u64, pin: u64| {
+                let donor = pinned_frame(live, pin);
+                let (mut prior, mut current) = og_cover_base();
+                for frame in [&mut prior, &mut current] {
+                    for id in [ObjectId(20), ObjectId(21)] {
+                        frame.objects.insert(id, donor.objects[&id].clone());
+                        frame.battlefield.push_back(id);
+                    }
+                    frame.stack.push_back(donor.stack[0].clone());
+                    frame.waiting_for = donor.waiting_for.clone();
+                }
+                (prior, current)
+            };
+            let (live_prior, live_current) = grown(8, 8);
+            let (stale_prior, stale_current) = grown(8, 5);
+            assert!(
+                loop_states_cover_modulo_object_growth(&live_prior, &live_current),
+                "{carrier:?}: reach guard, the object-growth cover admits the grown pair \
+                 with a live fired carrier"
+            );
+            for (prior, current, shape) in [
+                (&live_prior, &stale_current, "live then stale"),
+                (&stale_prior, &live_current, "stale then live"),
+            ] {
+                assert!(
+                    !loop_states_cover_modulo_object_growth(prior, current),
+                    "{carrier:?}: object-growth cover, {shape}"
+                );
+            }
+            assert!(
+                loop_states_cover_modulo_object_growth(&stale_prior, &stale_current),
+                "{carrier:?}: object-growth cover, the same stale pin in both frames"
+            );
+        }
+    }
+
+    /// CR 400.7 + CR 601.2h: the growth covers' remainder compares ability carriers by
+    /// `PartialEq`, which reads `cost_paid_objects` by object id only, so it also compares the
+    /// records' ranked incarnations. Synthetic: the `PaidRecord` ability registered as a
+    /// delayed trigger, in a steady inert-token engine grown by one token. The same record
+    /// live in both frames, or stale in both, covers; live against stale does not.
+    #[test]
+    fn loop_growth_cover_remainder_compares_paid_record_incarnations() {
+        use crate::types::ability::DelayedTriggerCondition;
+        use crate::types::game_state::DelayedTrigger;
+
+        let grown = |live: u64, pin: u64| {
+            let donor = pinned_frame(PinCarrier::PaidRecord, live, pin);
+            let ability = donor.stack[0].ability().unwrap().clone();
+            let (mut prior, mut current) = og_cover_base();
+            for frame in [&mut prior, &mut current] {
+                for id in [ObjectId(20), ObjectId(21)] {
+                    frame.objects.insert(id, donor.objects[&id].clone());
+                    frame.battlefield.push_back(id);
+                }
+                frame.delayed_triggers.push(DelayedTrigger::new(
+                    DelayedTriggerCondition::AtNextPhase {
+                        phase: Phase::EndCombat,
+                    },
+                    Box::new(ability.clone()),
+                    PlayerId(0),
+                    ObjectId(20),
+                    true,
+                ));
+                frame.waiting_for = donor.waiting_for.clone();
+            }
+            (prior, current)
+        };
+        let (live_prior, live_current) = grown(8, 8);
+        let (stale_prior, stale_current) = grown(8, 5);
+        assert!(
+            loop_states_cover_modulo_object_growth(&live_prior, &live_current),
+            "reach guard: the grown pair with a live record covers"
+        );
+        assert!(
+            loop_states_cover_modulo_object_growth(&stale_prior, &stale_current),
+            "the same stale record in both frames covers"
+        );
+        assert!(
+            !loop_states_cover_modulo_object_growth(&live_prior, &stale_current),
+            "live then stale"
+        );
+        assert!(
+            !loop_states_cover_modulo_object_growth(&stale_prior, &live_current),
+            "stale then live"
+        );
+    }
+
+    /// A stack of `FiredDestroy` entries over one recipient live at incarnation 8: each
+    /// `(id, pin)` is an entry with that stack id whose target pin names incarnation `pin`
+    /// (8 is live, 5 is superseded). Synthetic.
+    fn pinned_stack(entries: &[(u64, u64)]) -> GameState {
+        let mut frame = pinned_frame(PinCarrier::FiredDestroy, 8, 8);
+        frame.stack.clear();
+        for &(id, pin) in entries {
+            let mut entry = pinned_frame(PinCarrier::FiredDestroy, 8, pin).stack[0].clone();
+            entry.id = ObjectId(id);
+            frame.stack.push_back(entry);
+        }
+        frame
+    }
+
+    /// CR 400.7 + CR 405.5: the stack-pin veto aligns pins by their carrier. Entries A (id 1)
+    /// and B (id 2) stay on the stack across the pair; C (id 3) is put on it in between.
+    #[test]
+    fn loop_stack_pin_veto_aligns_pins_by_their_carrier() {
+        let apart = |prior: &[(u64, u64)], current: &[(u64, u64)]| {
+            stack_pins_superseded_apart(&mut pinned_stack(prior), &mut pinned_stack(current))
+        };
+        // The review's case: A live, B stale; then A stale, C live, B stale. The liveness
+        // patterns of the prior stack embed in the current one at C and B, yet A changed.
+        assert!(
+            apart(&[(1, 8), (2, 5)], &[(1, 5), (3, 8), (2, 5)]),
+            "A's pin went from live to superseded behind a grown live entry"
+        );
+        assert!(
+            apart(&[(1, 5), (2, 8)], &[(1, 8), (3, 5), (2, 8)]),
+            "the same, the other way round"
+        );
+        assert!(
+            apart(&[(2, 5), (1, 8)], &[(1, 8), (3, 5)]),
+            "the stale entry crossed the surviving carrier A"
+        );
+        assert!(
+            apart(&[(1, 8), (2, 5)], &[(2, 5), (1, 8)]),
+            "two surviving carriers in the other order"
+        );
+        // Positive control: actual growth with unchanged carriers.
+        assert!(
+            !apart(&[(1, 8), (2, 5)], &[(1, 8), (3, 8), (2, 5)]),
+            "A and B unchanged, C live: growth"
+        );
+        assert!(
+            !apart(&[(1, 8), (2, 5)], &[(1, 8), (3, 5), (4, 5), (2, 5)]),
+            "A and B unchanged, grown by two entries of one superseded pattern"
+        );
+        assert!(
+            !apart(&[(1, 5)], &[(1, 5)]),
+            "the same superseded entry in both frames"
+        );
+        // Entries with no carrier in common are different stack objects: their patterns
+        // must embed in order, with growth of a pattern already present.
+        assert!(
+            !apart(&[(1, 5)], &[(2, 5), (3, 5)]),
+            "re-fired entries of one superseded pattern, grown by one"
+        );
+        assert!(
+            apart(&[(1, 8), (2, 5)], &[(3, 5), (4, 8)]),
+            "no carrier in common, the patterns in the other order"
+        );
+        assert!(
+            apart(&[(1, 5)], &[(2, 5), (3, 8)]),
+            "grown by a pattern the prior stack does not hold"
+        );
+        assert!(
+            apart(&[(1, 8)], &[(2, 5)]),
+            "live in one frame, superseded in the other, no carrier in common"
+        );
+    }
+
+    /// The definition of [`stack_is_prior_plus_growth`], written independently of its walk:
+    /// try every order-preserving one-to-one map from the prior entries into the current ones
+    /// and accept if one satisfies conditions 2 to 4 of the relation.
+    fn prior_plus_growth_by_definition(prior: &[PinnedCarrier], current: &[PinnedCarrier]) -> bool {
+        let shared_in = |frame: &[PinnedCarrier], key: &(ObjectId, usize)| {
+            frame.iter().any(|(other, _)| other == key)
+        };
+        // Every increasing choice of `prior.len()` current positions, as a bit mask.
+        (0u32..1 << current.len())
+            .filter(|mask| mask.count_ones() as usize == prior.len())
+            .any(|mask| {
+                let images: Vec<usize> = (0..current.len())
+                    .filter(|index| mask & (1 << index) != 0)
+                    .collect();
+                let mapped = prior.iter().zip(&images).all(|((key, live), &image)| {
+                    let (image_key, image_live) = &current[image];
+                    if shared_in(current, key) {
+                        image_key == key && image_live == live
+                    } else {
+                        !shared_in(prior, image_key) && image_live == live
+                    }
+                });
+                let growth = (0..current.len())
+                    .filter(|index| !images.contains(index))
+                    .all(|index| {
+                        let (key, live) = &current[index];
+                        !shared_in(prior, key) && prior.iter().any(|(_, pattern)| pattern == live)
+                    });
+                mapped && growth
+            })
+    }
+
+    /// Every stack of up to four entries drawn without repetition from four carriers, each
+    /// holding one pin that is live or superseded.
+    fn short_pinned_stacks() -> Vec<Vec<PinnedCarrier>> {
+        let mut stacks: Vec<Vec<PinnedCarrier>> = vec![Vec::new()];
+        let mut frontier = stacks.clone();
+        for _ in 0..4 {
+            let mut longer = Vec::new();
+            for stack in &frontier {
+                for id in 1..=4u64 {
+                    let key = (ObjectId(id), 1);
+                    if stack.iter().any(|(other, _)| *other == key) {
+                        continue;
+                    }
+                    for live in [true, false] {
+                        let mut next = stack.clone();
+                        next.push((key, vec![live]));
+                        longer.push(next);
+                    }
+                }
+            }
+            stacks.extend(longer.iter().cloned());
+            frontier = longer;
+        }
+        stacks
+    }
+
+    /// The walk agrees with the definition on every pair of short stacks: lengths 0 to 4, live
+    /// and superseded pins, carriers shared between the two stacks and carriers fresh in one.
+    /// Exhaustive, 633 stacks and every ordered pair of them.
+    #[test]
+    fn loop_stack_pin_relation_matches_its_definition_on_every_short_stack_pair() {
+        let stacks = short_pinned_stacks();
+        assert_eq!(
+            stacks.len(),
+            633,
+            "reach guard: the enumeration is complete"
+        );
+        let (mut accepted, mut refused) = (0usize, 0usize);
+        for prior in &stacks {
+            for current in &stacks {
+                let by_walk = stack_is_prior_plus_growth(prior, current);
+                assert_eq!(
+                    by_walk,
+                    prior_plus_growth_by_definition(prior, current),
+                    "prior {prior:?} current {current:?}"
+                );
+                if by_walk {
+                    accepted += 1;
+                } else {
+                    refused += 1;
+                }
+            }
+        }
+        assert!(
+            accepted > 1_000 && refused > 1_000,
+            "reach guard: both answers occur ({accepted} accepted, {refused} refused)"
+        );
+    }
+
+    /// The three controls of the stack-pin relation through the boundary of both covers that
+    /// set the stack aside, each on a pair the cover otherwise ADMITS, so the complete verdict
+    /// is asserted: the object-growth cover over a steady inert-token engine grown by one
+    /// token, and the fodder-growth cover over the tapped-split Saproling pair with a Saproling
+    /// as the class representative. Synthetic stacks ([`pinned_stack`]): entries A (id 1) and
+    /// B (id 2) stay on the stack, C (id 3) is put on it in between; a pin of 8 is live, 5 is
+    /// superseded.
+    #[test]
+    fn loop_growth_covers_refuse_a_carrier_whose_pin_changed_behind_a_grown_entry() {
+        // Each base pair with the pinned recipient, its source and `entries` on the stack of
+        // the prior frame (`.0`) and of the current frame (`.1`).
+        let framed = |base: fn() -> (GameState, GameState), entries: &[(u64, u64)]| {
+            let donor = pinned_stack(entries);
+            let (mut prior, mut current) = base();
+            for frame in [&mut prior, &mut current] {
+                for id in [ObjectId(20), ObjectId(21)] {
+                    frame.objects.insert(id, donor.objects[&id].clone());
+                    frame.battlefield.push_back(id);
+                }
+                frame.stack = donor.stack.clone();
+                frame.waiting_for = donor.waiting_for.clone();
+            }
+            (prior, current)
+        };
+        let object_growth = |prior: &[(u64, u64)], current: &[(u64, u64)]| {
+            loop_states_cover_modulo_object_growth(
+                &framed(og_cover_base, prior).0,
+                &framed(og_cover_base, current).1,
+            )
+        };
+        let fodder_refusals = |prior: &[(u64, u64)], current: &[(u64, u64)]| {
+            fodder_growth_cover_refusals(
+                &framed(fodder_cover_base, prior).0,
+                &framed(fodder_cover_base, current).1,
+                &saproling_class(),
+                PlayerId(0),
+            )
+            .0
+        };
+        let refused = vec![FodderCoverRefusal::SupersededStackPin];
+
+        // Unchanged carriers with growth: both covers accept, in full.
+        for (prior, grown) in [
+            (&[(1, 8), (2, 5)][..], &[(1, 8), (3, 8), (2, 5)][..]),
+            (&[(2, 5), (1, 8)][..], &[(2, 5), (1, 8), (3, 5)][..]),
+        ] {
+            assert!(
+                object_growth(prior, grown),
+                "object-growth cover: unchanged carriers with growth, {prior:?} to {grown:?}"
+            );
+            assert_eq!(
+                fodder_refusals(prior, grown),
+                vec![],
+                "fodder cover: unchanged carriers with growth, {prior:?} to {grown:?}"
+            );
+        }
+        // A shared carrier whose pin changed behind a grown entry.
+        let (prior, changed) = (&[(1, 8), (2, 5)][..], &[(1, 5), (3, 8), (2, 5)][..]);
+        assert!(
+            !object_growth(prior, changed),
+            "object-growth cover: A's pin changed behind the grown entry"
+        );
+        assert_eq!(
+            fodder_refusals(prior, changed),
+            refused,
+            "fodder cover: A's pin changed behind the grown entry, and nothing else refuses"
+        );
+        // The cross-anchor case: bottom to top `[B stale, A live]`, then `[A live, C stale]`.
+        // A stays; the stale entry moved from below it to above it, so the next entry to
+        // resolve changed from live A to stale C (CR 405.5).
+        let (prior, crossed) = (&[(2, 5), (1, 8)][..], &[(1, 8), (3, 5)][..]);
+        assert_eq!(
+            fodder_refusals(prior, crossed),
+            refused,
+            "fodder cover: the stale entry crossed the surviving carrier A, and nothing else \
+             refuses"
+        );
+        assert!(
+            !object_growth(prior, crossed),
+            "object-growth cover: the stale entry crossed the surviving carrier A"
+        );
+    }
+
+    /// The growth covers compare the stack apart from the board, through
+    /// `normalized_stack_entries`. That comparand is cut from the ranked projection and must
+    /// keep the ranked pin: it used to strip every pin after the fact. It carries a paid-object
+    /// record's ranked incarnation beside the entry, which the entry's `PartialEq` does not read.
+    #[test]
+    fn loop_cover_stack_comparand_keeps_the_ranked_pin() {
+        let entries = |state: &GameState| {
+            let projected = project_out_resources(state);
+            normalized_stack_entries(&projected.0.stack, &projected.0.stack_trigger_firings)
+        };
+        for carrier in [
+            PinCarrier::FiredDestroy,
+            PinCarrier::FiredSacrifice,
+            PinCarrier::AnnouncedSpellTarget,
+            PinCarrier::PaidRecord,
+        ] {
+            let live = entries(&pinned_frame(carrier, 5, 5));
+            let later = entries(&pinned_frame(carrier, 8, 8));
+            let stale = entries(&pinned_frame(carrier, 8, 5));
+            assert_eq!(
+                live.len(),
+                1,
+                "{carrier:?}: reach guard, the carrier is on the stack"
+            );
+            assert!(live == later, "{carrier:?}: the same relation minted later");
+            assert!(
+                later != stale,
+                "{carrier:?}: a live pin against a stale one"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_bury_floor_drops_the_sidecar_with_its_entry() {
+        let mut state = relational_recipient_frame(Some(7), false, false);
+        let entry_id = state.stack[0].id;
+        let event = match &state.stack[0].kind {
+            StackEntryKind::TriggeredAbility {
+                trigger_event: Some(event),
+                ..
+            } => event.clone(),
+            _ => unreachable!("fixture retains a damage event"),
+        };
+        state
+            .stack_trigger_event_batches
+            .insert(entry_id, vec![event.clone(), event]);
+        let frame = without_buried(&state, &[entry_id]);
+        assert!(frame.stack.is_empty(), "the buried entry is set aside");
+        assert!(
+            frame.stack_trigger_event_batches.is_empty(),
+            "the sidecar batch must be pruned with its owner, not orphaned"
+        );
+    }
+
+    /// The published two-blocker batch, taken from play. Innocent Bystander ("Whenever this
+    /// creature is dealt 3 or more damage, investigate. (Create a Clue token. It's an artifact
+    /// with "{2}, Sacrifice this token: Draw a card.")") attacks and is blocked by a 2/2 and a
+    /// 1/2: ONE trigger for two simultaneous combat damage events, on the stack with its
+    /// sidecar batch and the two journal rows combat wrote. Returns that priority frame.
+    /// (The Bystander is given 0/9 so the attacker assigns no damage and survives; nothing
+    /// else departs from the printed card.)
+    fn two_blocker_bystander_frame() -> GameState {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::GameScenario;
+        use crate::types::actions::GameAction;
+
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bystander = scenario
+            .add_creature_from_oracle(
+                p0,
+                "Innocent Bystander",
+                0,
+                9,
+                "Whenever this creature is dealt 3 or more damage, investigate. (Create a Clue token. It's an artifact with \"{2}, Sacrifice this token: Draw a card.\")",
+            )
+            .id();
+        let first = scenario.add_creature(p1, "Blocker A", 2, 2).id();
+        let second = scenario.add_creature(p1, "Blocker B", 1, 2).id();
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(bystander, AttackTarget::Player(p1))])
+            .expect("declare attackers");
+        for _ in 0..8 {
+            if runner.waiting_for_kind() == "DeclareBlockers" {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass into declare blockers");
+        }
+        runner
+            .declare_blockers(&[(first, bystander), (second, bystander)])
+            .expect("declare blockers");
+        for _ in 0..8 {
+            if !runner.state().stack.is_empty() {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass into combat damage");
+        }
+        let state = runner.state().clone();
+        let entry = state
+            .stack
+            .back()
+            .expect("the Bystander trigger is on the stack");
+        assert_eq!(
+            state
+                .stack_trigger_event_batches
+                .get(&entry.id)
+                .map(Vec::len),
+            Some(2),
+            "reach guard: one trigger published a two-event batch"
+        );
+        assert_eq!(
+            state.damage_dealt_this_turn.len(),
+            2,
+            "reach guard: combat wrote both journal rows"
+        );
+        state
+    }
+
+    /// Floor frames built on [`two_blocker_bystander_frame`]. `buried_bystanders` Bystander
+    /// triggers and `buried_fillers` event-less triggers sit at the bottom of the stack; the
+    /// working entry above them is either the played Bystander trigger with its batch, or a
+    /// recipient reader ("tap that creature") of the first damage event. The first buried
+    /// Bystander trigger is the played one; each further one is that trigger again with the
+    /// first blocker's damage raised by one, standing for a later combat, so that no two
+    /// sidecar batches hold the same events.
+    fn bystander_floor_frame(
+        buried_bystanders: u64,
+        buried_fillers: u64,
+        working_bystander: bool,
+    ) -> GameState {
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter,
+        };
+        use crate::types::events::GameEvent;
+
+        let mut state = two_blocker_bystander_frame();
+        let played = state.stack.back().unwrap().clone();
+        let batch = state
+            .stack_trigger_event_batches
+            .remove(&played.id)
+            .unwrap();
+        state.stack.clear();
+        // The played trigger under a new id, with its batch's first event raised by `extra`.
+        let bystander_trigger = |id: u64, extra: u32| {
+            let mut events = batch.clone();
+            if let Some(GameEvent::DamageDealt { amount, .. }) = events.first_mut() {
+                *amount += extra;
+            }
+            let mut entry = played.clone();
+            entry.id = ObjectId(id);
+            if let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut entry.kind {
+                *trigger_event = events.first().cloned();
+            }
+            (entry, events)
+        };
+        let mut filler = played.clone();
+        if let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut filler.kind {
+            *trigger_event = None;
+        }
+        if working_bystander {
+            let (entry, events) = bystander_trigger(400, 0);
+            state.stack_trigger_event_batches.insert(entry.id, events);
+            state.stack.push_back(entry);
+        } else {
+            let mut reader = played.clone();
+            reader.id = ObjectId(100);
+            if let StackEntryKind::TriggeredAbility { ability, .. } = &mut reader.kind {
+                **ability = ResolvedAbility::new(
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                    vec![],
+                    played.source_id,
+                    played.controller,
+                );
+            }
+            state.stack.push_back(reader);
+        }
+        for index in 0..buried_bystanders {
+            let (entry, events) = bystander_trigger(200 + index, index as u32);
+            state.stack_trigger_event_batches.insert(entry.id, events);
+            state.stack.push_front(entry);
+        }
+        for index in 0..buried_fillers {
+            let mut entry = filler.clone();
+            entry.id = ObjectId(300 + index);
+            state.stack.push_front(entry);
+        }
+        state
+    }
+
+    /// CR 405.5 + CR 603.3b: a Bystander batch BELOW the replay floor is buried with its
+    /// entry. The two frames differ by one more buried Bystander trigger, so no earlier arm
+    /// answers and the pair is covered only by buried `StackGrowth`, which compares the
+    /// frames with the buried entries set aside. An orphaned sidecar would survive that:
+    /// its events are still walked as carriers nobody owns, so the newly buried trigger's
+    /// batch would request recipient keys the prior frame never held and refuse the cover.
+    #[test]
+    fn loop_bystander_batch_below_the_floor_is_buried_with_its_sidecar() {
+        let prior = bystander_floor_frame(1, 0, false);
+        let current = bystander_floor_frame(2, 0, false);
+        assert!(
+            !loop_states_equal_modulo_resources(&prior, &current),
+            "reach guard: the frames differ, so the equality arm cannot answer first"
+        );
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, PlayerId(0), Some((1, 2))),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::StackGrowth
+            )),
+            "one more buried Bystander trigger is buried stack growth"
+        );
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            None,
+            "control: without a floor nothing covers the pair, so the floor did the work"
+        );
+    }
+
+    /// CR 608.2k: a Bystander batch ABOVE the floor is owned by its one non-reader ability,
+    /// so the buried-growth comparison it takes part in walks no damage history.
+    #[test]
+    fn loop_bystander_batch_above_the_floor_is_owned_and_unread() {
+        let prior = bystander_floor_frame(0, 1, true);
+        let current = bystander_floor_frame(0, 2, true);
+        assert!(
+            !loop_states_equal_modulo_resources(&prior, &current),
+            "reach guard: the frames differ, so the equality arm cannot answer first"
+        );
+        crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+        DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, PlayerId(0), Some((1, 2))),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::StackGrowth
+            )),
+            "growth buried under a working Bystander batch is buried stack growth"
+        );
+        assert_eq!(
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get),
+            0,
+            "a non-reader Bystander batch requests no recipient key, so no row is read"
+        );
+    }
+
+    /// CR 608.2k: recipient keys follow the ability that OWNS the event. Matsu-Tribe Sniper
+    /// ("Whenever this creature deals damage to a creature, tap that creature and it doesn't
+    /// untap during its controller's next untap step.") reads the recipient of its own event.
+    /// A Stuffy Doll trigger beside it ("Whenever this creature is dealt damage, it deals that
+    /// much damage to the chosen player."), parsed from the card's Oracle text, reads the
+    /// event's amount and the chosen player, never the recipient. The Sniper must not keep the
+    /// Doll's key: two frames that differ only in whether the Doll's recorded recipient epoch
+    /// is still live are the same position for every ability that can read anything.
+    #[test]
+    fn loop_recipient_keys_follow_the_owning_reader() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::scenario::GameScenario;
+        use crate::types::ability::{Effect, TargetRef};
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{DamageRecord, StackEntry};
+
+        // Stuffy Doll's damage trigger as the Oracle parser produces it.
+        let doll_trigger = {
+            let mut scenario = GameScenario::new();
+            let doll = scenario
+                .add_creature_from_oracle(
+                    PlayerId(1),
+                    "Stuffy Doll",
+                    0,
+                    1,
+                    "Indestructible\nAs this creature enters, choose a player.\nWhenever this creature is dealt damage, it deals that much damage to the chosen player.\n{T}: This creature deals 1 damage to itself.",
+                )
+                .id();
+            let runner = scenario.build();
+            let execute = runner.state().objects[&doll]
+                .trigger_definitions
+                .iter_all()
+                .find_map(|entry| entry.definition.execute.clone())
+                .expect("the Doll's damage trigger parsed");
+            assert!(
+                matches!(execute.effect.as_ref(), Effect::DealDamage { .. }),
+                "reach guard: the Doll's trigger deals damage, {:?}",
+                execute.effect
+            );
+            execute
+        };
+
+        // `sniper` / `doll_epoch`: the recipient epoch each damage row recorded. Both
+        // recipients are live at 7. `unowned` adds a carrier with no paired ability.
+        let mixed = |sniper: u64, doll_epoch: u64, unowned: bool| -> GameState {
+            // stack[0]: the fixture's reader, dealer 20 -> recipient 21.
+            let mut state = relational_recipient_frame(Some(sniper), false, false);
+            let dealer = ObjectId(20);
+            let doll = battlefield_creature(&mut state, 22, 1);
+            state.objects.get_mut(&doll).unwrap().incarnation = 7;
+            let event = GameEvent::DamageDealt {
+                source_id: dealer,
+                source_incarnation: Some(3),
+                target: TargetRef::Object(doll),
+                amount: 3,
+                is_combat: false,
+                excess: 0,
+            };
+            state.stack.push_back(StackEntry {
+                id: ObjectId(101),
+                source_id: doll,
+                controller: PlayerId(1),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: doll,
+                    ability: Box::new(build_resolved_from_def(&doll_trigger, doll, PlayerId(1))),
+                    condition: None,
+                    trigger_event: Some(event.clone()),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: dealer,
+                source_incarnation: Some(3),
+                target: TargetRef::Object(doll),
+                target_incarnation: Some(doll_epoch),
+                amount: 3,
+                ..Default::default()
+            });
+            state.current_trigger_event = unowned.then_some(event);
+            state
+        };
+
+        let both_live = mixed(7, 7, false);
+        assert_eq!(
+            relaxed_in_every_shape(&both_live, &mixed(7, 3, false)),
+            [true; 3],
+            "only the unread key's recipient epoch changed"
+        );
+        assert_eq!(
+            relaxed_in_every_shape(&both_live, &mixed(3, 7, false)),
+            [false; 3],
+            "the reader's own recipient went stale"
+        );
+        // Conservative fallback: a carrier with no paired ability may read anything, so
+        // every key is kept and the unread epoch counts again.
+        assert_eq!(
+            relaxed_in_every_shape(&mixed(7, 7, true), &mixed(7, 3, true)),
+            [false; 3],
+            "an unowned carrier keeps the full key set"
+        );
+        // One pass over the damage history, whoever owns the keys.
+        for frame in [&both_live, &mixed(7, 7, true)] {
+            DAMAGE_RECIPIENT_JOURNAL_VISITS.with(|visits| visits.set(0));
+            let projected = project_out_resources(frame);
+            assert_eq!(
+                DAMAGE_RECIPIENT_JOURNAL_VISITS.with(std::cell::Cell::get),
+                frame.damage_dealt_this_turn.len(),
+                "the journal is read once"
+            );
+            assert!(
+                !projected.0.damage_dealt_this_turn.is_empty(),
+                "reach guard: the reader's witness survives"
+            );
+        }
+        assert_eq!(
+            project_out_resources(&both_live)
+                .0
+                .damage_dealt_this_turn
+                .len(),
+            1,
+            "owned: only the Sniper's key keeps a witness"
+        );
+        assert_eq!(
+            project_out_resources(&mixed(7, 7, true))
+                .0
+                .damage_dealt_this_turn
+                .len(),
+            2,
+            "unowned: both keys keep a witness"
+        );
+    }
+
+    #[test]
+    fn loop_relational_priority_sampling_does_not_rank_unread_damage_history() {
+        use crate::types::game_state::LOOP_DAMAGE_JOURNAL_VISITS;
+        let mut state = relational_recipient_frame(Some(7), false, false);
+        state.stack.clear();
+        state.waiting_for = crate::types::WaitingFor::Priority {
+            player: state.active_player,
+        };
+        state.record_loop_detect_sample();
+        let row = state.damage_dealt_this_turn[0].clone();
+        for _ in 0..8 {
+            let prior = state
+                .loop_detect_ring
+                .back()
+                .expect("the preceding priority sample exists")
+                .clone();
+            for _ in 0..32 {
+                state.damage_dealt_this_turn.push_back(row.clone());
+            }
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+            state.record_loop_detect_sample();
+            let sample = &state
+                .loop_detect_ring
+                .back()
+                .expect("record the actual priority boundary")
+                .normalized;
+            assert!(
+                !loop_states_equal(&prior.normalized, sample),
+                "growing full history excludes a strict candidate before ranking"
+            );
+            assert!(
+                loop_states_equal_modulo_resources(&prior.normalized, sample),
+                "no retained damage reader changes the resource position"
+            );
+            let sampled_visits = LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get);
+            // Positive liveness control: full strict confirmation retains the
+            // journal payload and the counter covers its real rank/rewrite work.
+            LOOP_DAMAGE_JOURNAL_VISITS.with(|visits| visits.set(0));
+            let strict = state.normalize_for_loop();
+            let mut different = strict.clone();
+            different.damage_dealt_this_turn.back_mut().unwrap().amount += 1;
+            assert!(
+                !loop_states_equal(&strict, &different),
+                "strict confirmation must still distinguish damage payload"
+            );
+            assert!(
+                LOOP_DAMAGE_JOURNAL_VISITS.with(std::cell::Cell::get)
+                    >= 2 * state.damage_dealt_this_turn.len(),
+                "the work observation includes strict collection and rewrite"
+            );
+            assert_eq!(
+                sampled_visits, 0,
+                "priority sampling/resource comparison must not walk unread damage history"
+            );
+        }
+    }
+
+    #[test]
+    fn loop_relational_recipient_reader_any_and_optional_identity_views() {
+        for source_incarnation in [Some(3), None] {
+            for live_epoch in [7, 0] {
+                let mut live = relational_recipient_frame(Some(live_epoch), false, false);
+                live.objects.get_mut(&ObjectId(21)).unwrap().incarnation = live_epoch;
+                relational_publish_recipient_event(&mut live);
+                live.for_each_trigger_event_carrier_mut(&mut |event| {
+                    if let GameEvent::DamageDealt {
+                        source_incarnation: stamp,
+                        ..
+                    } = event
+                    {
+                        *stamp = source_incarnation;
+                    }
+                });
+                live.damage_dealt_this_turn[0].source_incarnation = source_incarnation;
+                let event = live.current_trigger_event.as_ref().unwrap();
+                assert!(live.damage_dealt_this_turn[0].matches_damage_event(event));
+                relational_recipient_reads(&live, &[ObjectId(21)]);
+                let projected = project_out_resources(&live);
+                assert_eq!(projected.damage_dealt_this_turn.len(), 1);
+                assert_eq!(
+                    projected.damage_dealt_this_turn[0]
+                        .source_incarnation
+                        .is_none(),
+                    source_incarnation.is_none(),
+                    "source None is optional identity, not a projected marker"
+                );
+                assert_ne!(
+                    projected.damage_dealt_this_turn[0].target_incarnation,
+                    Some(0),
+                    "ordinary raw epoch zero ranks to a live witness before projection"
+                );
+                let mut cases = vec![
+                    (vec![], true),
+                    (vec![None], true),
+                    (vec![None, None], true),
+                    (vec![Some(live_epoch)], true),
+                    (vec![None, Some(live_epoch)], true),
+                    (vec![Some(live_epoch), None], true),
+                ];
+                // A live epoch zero has no earlier incarnation. Keep its
+                // legitimate live/legacy controls separate from past-pin cases.
+                if live_epoch != 0 {
+                    cases.extend([
+                        (vec![Some(3), Some(live_epoch)], true),
+                        (vec![Some(live_epoch), Some(3)], true),
+                        (vec![None, Some(0)], false),
+                        (vec![Some(0), None], false),
+                        (vec![None, Some(3)], false),
+                        (vec![Some(3), None], false),
+                        (vec![Some(3), Some(5), None], false),
+                    ]);
+                }
+                for (pins, accepted) in cases {
+                    let mut frame = live.clone();
+                    frame.damage_dealt_this_turn = pins
+                        .iter()
+                        .map(|pin| {
+                            let mut row = live.damage_dealt_this_turn[0].clone();
+                            row.target_incarnation = *pin;
+                            row
+                        })
+                        .collect();
+                    assert!(frame.damage_dealt_this_turn.iter().all(|row| {
+                        row.matches_damage_event(frame.current_trigger_event.as_ref().unwrap())
+                    }));
+                    relational_recipient_reads(
+                        &frame,
+                        if accepted { &[ObjectId(21)] } else { &[] },
+                    );
+                    let projected = project_out_resources(&frame);
+                    assert_eq!(
+                        projected.damage_dealt_this_turn.len(),
+                        1,
+                        "one bounded witness for the reader's answer, including the legacy \
+                         fallback an absent or all-None row set leaves"
+                    );
+                    if !accepted {
+                        assert_eq!(
+                            projected.damage_dealt_this_turn[0].target_incarnation,
+                            Some(0),
+                            "None cannot erase the all-stale result"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn loop_relational_recipient_reader_exact_join_and_excess_views() {
+        for source_incarnation in [Some(3), None] {
+            let mut live = relational_recipient_frame(Some(7), false, false);
+            relational_publish_recipient_event(&mut live);
+            live.for_each_trigger_event_carrier_mut(&mut |event| {
+                if let GameEvent::DamageDealt {
+                    source_incarnation: stamp,
+                    excess,
+                    ..
+                } = event
+                {
+                    *stamp = source_incarnation;
+                    *excess = 17;
+                }
+            });
+            live.damage_dealt_this_turn[0].source_incarnation = source_incarnation;
+            let matching_live = live.damage_dealt_this_turn[0].clone();
+            let mut matching_stale = matching_live.clone();
+            matching_stale.target_incarnation = Some(5);
+            let event = live.current_trigger_event.as_ref().unwrap();
+            assert!(matching_live.matches_damage_event(event));
+            assert!(matching_stale.matches_damage_event(event));
+            relational_recipient_reads(&live, &[ObjectId(21)]);
+            let mut wrong_rows = Vec::new();
+            let mut wrong = matching_live.clone();
+            wrong.source_id = ObjectId(21);
+            wrong_rows.push(("dealer", wrong));
+            let mut wrong = matching_live.clone();
+            wrong.source_incarnation = if source_incarnation.is_some() {
+                None
+            } else {
+                Some(3)
+            };
+            wrong_rows.push(("source Option", wrong));
+            let mut wrong = matching_live.clone();
+            wrong.source_incarnation = Some(4);
+            wrong_rows.push(("source epoch", wrong));
+            let mut wrong = matching_live.clone();
+            wrong.target = TargetRef::Object(ObjectId(20));
+            wrong_rows.push(("target", wrong));
+            let mut wrong = matching_live.clone();
+            wrong.amount = 2;
+            wrong_rows.push(("amount", wrong));
+            let mut wrong = matching_live.clone();
+            wrong.is_combat = true;
+            wrong_rows.push(("combat", wrong));
+            for (field, wrong_live) in wrong_rows {
+                assert!(!wrong_live.matches_damage_event(event), "{field}");
+                assert_eq!(wrong_live.target_incarnation, Some(7));
+                for reversed in [false, true] {
+                    let mut frame = live.clone();
+                    let mut rows = vec![matching_stale.clone(), wrong_live.clone()];
+                    if reversed {
+                        rows.reverse();
+                    }
+                    frame.damage_dealt_this_turn = rows.into_iter().collect();
+                    relational_recipient_reads(&frame, &[]);
+                    frame
+                        .damage_dealt_this_turn
+                        .push_back(matching_live.clone());
+                    relational_recipient_reads(&frame, &[ObjectId(21)]);
+                }
+                let mut unmatched_only = live.clone();
+                unmatched_only.damage_dealt_this_turn = [wrong_live].into_iter().collect();
+                relational_recipient_reads(&unmatched_only, &[ObjectId(21)]);
+            }
+            let mut excess_live = matching_live;
+            excess_live.excess = 42;
+            assert!(excess_live.matches_damage_event(event));
+            live.damage_dealt_this_turn = [matching_stale, excess_live].into_iter().collect();
+            relational_recipient_reads(&live, &[ObjectId(21)]);
+        }
+    }
+
+    #[test]
+    fn loop_relational_recipient_reader_missing_and_nonobject_views() {
+        let mut live = relational_recipient_frame(Some(7), false, false);
+        relational_publish_recipient_event(&mut live);
+        relational_recipient_reads(&live, &[ObjectId(21)]);
+        let mut player = live.clone();
+        player.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt { target, .. } = event {
+                *target = TargetRef::Player(PlayerId(1));
+            }
+        });
+        player.damage_dealt_this_turn[0].target = TargetRef::Player(PlayerId(1));
+        player.damage_dealt_this_turn[0].target_incarnation = None;
+        relational_recipient_reads(&player, &[]);
+        assert!(project_out_resources(&player)
+            .damage_dealt_this_turn
+            .is_empty());
+        let mut unpublished = live.clone();
+        unpublished.current_trigger_event = None;
+        assert!(
+            !unpublished.stack.is_empty(),
+            "carrier is not a published event"
+        );
+        relational_recipient_reads(&unpublished, &[]);
+        let mut missing = live.clone();
+        missing.objects.remove(&ObjectId(21));
+        missing.battlefield.retain(|id| *id != ObjectId(21));
+        assert!(missing.current_trigger_event.is_some());
+        assert!(!missing.damage_dealt_this_turn.is_empty());
+        relational_recipient_reads(&missing, &[]);
+        assert!(project_out_resources(&missing)
+            .damage_dealt_this_turn
+            .is_empty());
+    }
+
+    #[test]
+    fn loop_relational_projected_multiple_recipient_witnesses_and_order() {
+        let mut frame = relational_recipient_frame(Some(100), false, false);
+        frame.objects.get_mut(&ObjectId(21)).unwrap().incarnation = 100;
+        let other = battlefield_creature(&mut frame, 22, 1);
+        frame.objects.get_mut(&other).unwrap().incarnation = 100;
+        relational_publish_recipient_event(&mut frame);
+        let mut second = frame.stack[0].clone();
+        second.id = ObjectId(101);
+        let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut second.kind else {
+            panic!("recipient fixture must retain its damage carrier");
+        };
+        let second_event = GameEvent::DamageDealt {
+            source_id: ObjectId(20),
+            source_incarnation: Some(3),
+            target: TargetRef::Object(other),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        };
+        *trigger_event = Some(second_event.clone());
+        frame.stack.push_back(second);
+        frame.current_trigger_events = vec![
+            frame.current_trigger_event.clone().unwrap(),
+            second_event.clone(),
+        ];
+        let mut stale_row = frame.damage_dealt_this_turn[0].clone();
+        stale_row.target = TargetRef::Object(other);
+        stale_row.target_incarnation = Some(3);
+        stale_row.amount = 2;
+        stale_row.is_combat = true;
+        assert!(stale_row.matches_damage_event(&second_event));
+        frame.damage_dealt_this_turn.push_back(stale_row);
+        relational_recipient_reads(&frame, &[ObjectId(21)]);
+        let projected = project_out_resources(&frame);
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            2,
+            "one witness per tuple, not one total"
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn[0].target,
+            TargetRef::Object(ObjectId(21))
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn[1].target,
+            TargetRef::Object(other)
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn[0].target_incarnation,
+            Some(projected.objects[&ObjectId(21)].incarnation)
+        );
+        assert_eq!(
+            projected.damage_dealt_this_turn[1].target_incarnation,
+            Some(0)
+        );
+        let mut reversed_rows = frame.clone();
+        reversed_rows.damage_dealt_this_turn =
+            frame.damage_dealt_this_turn.iter().cloned().rev().collect();
+        relational_projection_feeds(&frame, &reversed_rows, true);
+        let mut reversed_carriers = reversed_rows.clone();
+        reversed_carriers.stack = frame.stack.iter().cloned().rev().collect();
+        reversed_carriers.current_trigger_events.reverse();
+        relational_recipient_reads(&reversed_carriers, &[ObjectId(21)]);
+        for input in [&reversed_rows, &reversed_carriers] {
+            for view in [input, &input.normalize_for_loop()] {
+                assert_eq!(
+                    projected.damage_dealt_this_turn,
+                    project_out_resources(view).damage_dealt_this_turn,
+                    "witness tuple sort ignores journal and carrier order"
+                );
+            }
+        }
+        // Stack order remains significant state; only its selected relation and
+        // pure recipient answers are asserted invariant under carrier reversal.
+        let mut pumped = frame.clone();
+        pumped.resolving_stack_entry = Some(frame.stack[0].clone());
+        for row in frame.damage_dealt_this_turn.iter() {
+            let mut unknown = row.clone();
+            unknown.target_incarnation = None;
+            pumped.damage_dealt_this_turn.push_back(unknown);
+            for epoch in 10..42 {
+                assert!(epoch < frame.objects[&ObjectId(21)].incarnation);
+                assert!(epoch < frame.objects[&other].incarnation);
+                let mut old = row.clone();
+                old.target_incarnation = Some(epoch);
+                old.source_name = format!("discarded tuple history {epoch}");
+                pumped.damage_dealt_this_turn.push_back(old.clone());
+                pumped.damage_dealt_this_turn.push_back(old);
+            }
+        }
+        let mut same_carriers = frame.clone();
+        same_carriers.resolving_stack_entry = Some(frame.stack[0].clone());
+        assert!(
+            !loop_states_equal(
+                &same_carriers.normalize_for_loop(),
+                &pumped.normalize_for_loop()
+            ),
+            "strict history is not bounded"
+        );
+        relational_projection_feeds(&same_carriers, &pumped, true);
+        relational_recipient_reads(&pumped, &[ObjectId(21)]);
+        let bounded = project_out_resources(&pumped);
+        assert_eq!(bounded.damage_dealt_this_turn.len(), 2);
+        assert_eq!(
+            bounded.damage_dealt_this_turn,
+            projected.damage_dealt_this_turn
+        );
+        assert!(crate::types::game_state::projected_states_equal(
+            &bounded,
+            &project_out_resources(&bounded)
+        ));
+        let mut both_live = frame.clone();
+        both_live.damage_dealt_this_turn[1].target_incarnation = Some(100);
+        relational_recipient_reads(&both_live, &[ObjectId(21), other]);
+        relational_projection_feeds(&frame, &both_live, false);
+        let mut no_carrier = frame;
+        no_carrier.stack.clear();
+        no_carrier.current_trigger_event = None;
+        no_carrier.current_trigger_events.clear();
+        assert_eq!(no_carrier.damage_dealt_this_turn.len(), 2);
+        assert!(no_carrier.objects.contains_key(&ObjectId(21)));
+        assert!(no_carrier.objects.contains_key(&other));
+        relational_recipient_reads(&no_carrier, &[]);
+        assert!(project_out_resources(&no_carrier)
+            .damage_dealt_this_turn
+            .is_empty());
+    }
+
+    /// CR 400.7 + CR 608.2k: stale, live and unknown recipients are three different futures.
+    #[test]
+    fn loop_relational_projected_recipient_read_classes() {
+        let live = relational_recipient_frame(Some(7), false, false);
+        let stale = relational_recipient_frame(Some(3), false, false);
+        let unknown = relational_recipient_frame(None, false, false);
+        relational_projection_feeds(&live, &live, true);
+        relational_projection_feeds(
+            &stale,
+            &relational_recipient_frame(Some(5), false, false),
+            true,
+        );
+        relational_projection_feeds(&live, &stale, false);
+        relational_projection_feeds(&unknown, &live, false);
+        relational_projection_feeds(&unknown, &stale, false);
+        let raw_zero = relational_recipient_frame(Some(0), false, false);
+        relational_projection_feeds(&raw_zero, &stale, true);
+        let mut zero_live = raw_zero.clone();
+        zero_live
+            .objects
+            .get_mut(&ObjectId(21))
+            .unwrap()
+            .incarnation = 0;
+        relational_projection_feeds(&zero_live, &raw_zero, false);
+        let projected = project_out_resources(&raw_zero);
+        assert!(
+            crate::types::game_state::projected_states_equal(
+                &projected,
+                &project_out_resources(&projected),
+            ),
+            "P(P(raw0)) keeps stale read-class rather than interpreting a raw sentinel"
+        );
+        let mut player = unknown.clone();
+        player.damage_dealt_this_turn[0].target =
+            crate::types::ability::TargetRef::Player(PlayerId(1));
+        let legacy = project_out_resources(&player);
+        assert_eq!(
+            legacy.damage_dealt_this_turn.len(),
+            1,
+            "the retained object reader keeps one legacy answer; a player row does not match it"
+        );
+        assert_eq!(
+            legacy.damage_dealt_this_turn[0].target_incarnation, None,
+            "an unmatched player row leaves the legacy fallback, not a target epoch"
+        );
+        player.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt { target, .. } = event {
+                *target = crate::types::ability::TargetRef::Player(PlayerId(1));
+            }
+        });
+        assert!(
+            project_out_resources(&player)
+                .damage_dealt_this_turn
+                .is_empty(),
+            "player damage without a retained object reader needs no witness"
+        );
+    }
+
+    /// CR 608.2i: strict history differs while the bounded retained reader relation is identical.
+    #[test]
+    fn loop_relational_projected_recipient_bounded_mixed_curse() {
+        let a = relational_recipient_frame(Some(3), true, false);
+        let b = relational_recipient_frame(Some(5), true, false);
+        assert!(!loop_states_equal(
+            &a.normalize_for_loop(),
+            &b.normalize_for_loop()
+        ));
+        assert_eq!(
+            a.lki_by_incarnation, b.lki_by_incarnation,
+            "identical Curse-selected snapshots"
+        );
+        relational_projection_feeds(&a, &b, true);
+        let mut pumped = a.clone();
+        let mut same_carriers = a.clone();
+        for frame in [&mut same_carriers, &mut pumped] {
+            frame.objects.get_mut(&ObjectId(21)).unwrap().incarnation = 100;
+        }
+        for epoch in 10..74 {
+            assert!(
+                epoch < pumped.objects[&ObjectId(21)].incarnation,
+                "history is strictly past the live recipient"
+            );
+            let mut row = a.damage_dealt_this_turn[0].clone();
+            row.target_incarnation = Some(epoch);
+            row.source_name = format!("discarded history {epoch}");
+            row.source_power = Some(epoch as i32);
+            pumped.damage_dealt_this_turn.push_back(row.clone());
+            pumped.damage_dealt_this_turn.push_back(row);
+        }
+        let duplicate = pumped.stack[0].clone();
+        pumped.resolving_stack_entry = Some(duplicate);
+        // A second publication does not multiply journal witnesses; compare the same
+        // carrier population on both sides so this is not a stack-equality assertion.
+        same_carriers.resolving_stack_entry = Some(same_carriers.stack[0].clone());
+        relational_projection_feeds(&same_carriers, &pumped, true);
+        let projected = project_out_resources(&pumped);
+        assert_eq!(
+            projected.damage_dealt_this_turn.len(),
+            1,
+            "one object-reader tuple, not history size"
+        );
+        assert!(
+            crate::types::game_state::projected_states_equal(
+                &projected,
+                &project_out_resources(&projected)
+            ),
+            "P(P(x)) must keep the projected stale class without a re-rank"
+        );
+        relational_projection_feeds(&a, &relational_recipient_frame(Some(7), true, false), false);
+        assert!(
+            eq_except_growable(
+                &cover_projection(&a).projected,
+                &cover_projection(&b).projected,
+                &HashSet::new(),
+                None,
+            ),
+            "cover's post-stack rekey preserves the same stale class beside Curse pin4/live7"
+        );
+    }
+
+    #[test]
+    fn loop_relational_projected_mana_receipt_noise_raw_and_ring() {
+        let clean = relational_recipient_frame(Some(3), true, false);
+        let receipt = relational_recipient_frame(Some(3), true, true);
+        assert_eq!(receipt.triggered_abilities_added_mana_this_turn.len(), 1);
+        assert!(
+            !loop_states_equal(&clean.normalize_for_loop(), &receipt.normalize_for_loop()),
+            "strict receipt history remains meaningful"
+        );
+        assert_eq!(clean.lki_by_incarnation, receipt.lki_by_incarnation);
+        relational_projection_feeds(&clean, &receipt, true);
+        let projected = project_out_resources(&receipt);
+        assert!(projected
+            .triggered_abilities_added_mana_this_turn
+            .is_empty());
+        assert!(
+            crate::types::game_state::projected_states_equal(
+                &projected,
+                &project_out_resources(&projected)
+            ),
+            "P(P(x)) must keep the projected stale class without a re-rank"
+        );
+    }
+
+    /// CR 104.4b: removing an accounted recipient does not excuse its retained event's live/stale relation.
+    #[test]
+    fn loop_relational_growth_recipient_live_stale_and_positive_controls() {
+        let stale = relational_recipient_frame(Some(3), false, false);
+        let live = relational_recipient_frame(Some(7), false, false);
+        let grown = HashSet::from([ObjectId(21)]);
+        let a = project_out_resources(&stale);
+        let b = project_out_resources(&live);
+        assert!(
+            eq_except_growable(&a, &a, &grown, None),
+            "identical grown-root journal is permitted"
+        );
+        let mut no_journal = stale.clone();
+        no_journal.damage_dealt_this_turn.clear();
+        let mut taller = no_journal.clone();
+        taller.objects.get_mut(&ObjectId(21)).unwrap().power = Some(99);
+        assert!(
+            eq_except_growable(
+                &project_out_resources(&no_journal),
+                &project_out_resources(&taller),
+                &grown,
+                None,
+            ),
+            "ordinary no-journal growth remains permitted"
+        );
+        assert!(
+            !eq_except_growable(&a, &b, &grown, None),
+            "the recipient is removed, but the previously selected read class must still refuse"
+        );
+    }
+
+    #[test]
+    fn loop_relational_fodder_recipient_churn_keeps_classes_taps_and_dealer_aliases() {
+        // Abstract growth-comparison fixture; actual Polyraptor gameplay is
+        // exercised by the unchanged mandatory_loop_draws integration cases.
+        let prior = relational_recipient_frame(Some(7), false, false);
+        let mut current = prior.clone();
+        let mut fresh = prior.objects[&ObjectId(21)].clone();
+        fresh.id = ObjectId(22);
+        current.objects.insert(fresh.id, fresh);
+        current.battlefield.push_back(ObjectId(22));
+        current.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt { target, .. } = event {
+                *target = TargetRef::Object(ObjectId(22));
+            }
+        });
+        current.damage_dealt_this_turn[0].target = TargetRef::Object(ObjectId(22));
+        let mut class = prior.objects[&ObjectId(21)].clone();
+        project_object_for_loop(&mut class);
+        let refusals = fodder_growth_cover_refusals(&prior, &current, &class, PlayerId(0)).0;
+        assert!(
+            refusals.is_empty(),
+            "live same-class fresh recipient must cover: {refusals:?}"
+        );
+
+        let mut stale = current.clone();
+        stale.damage_dealt_this_turn[0].target_incarnation = Some(3);
+        let mut unknown = current.clone();
+        unknown.damage_dealt_this_turn[0].target_incarnation = None;
+        let mut tapped = current.clone();
+        tapped.objects.get_mut(&ObjectId(22)).unwrap().tapped = true;
+        let mut outside_class = current.clone();
+        let outside_object = outside_class.objects.get_mut(&ObjectId(22)).unwrap();
+        outside_object.controller = PlayerId(0);
+        outside_object.base_controller = Some(PlayerId(0));
+        assert_eq!(
+            flush_clone(&outside_class).objects[&ObjectId(22)].controller,
+            PlayerId(0),
+            "the outside-class controller must survive the actual layer flush"
+        );
+        let mut two_occurrences = current.clone();
+        let mut second = prior.objects[&ObjectId(21)].clone();
+        second.id = ObjectId(23);
+        two_occurrences.objects.insert(second.id, second);
+        two_occurrences.battlefield.push_back(ObjectId(23));
+        let mut entry = two_occurrences.stack[0].clone();
+        entry.id = ObjectId(200);
+        let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(GameEvent::DamageDealt { target, .. }),
+            ..
+        } = &mut entry.kind
+        else {
+            panic!("fixture keeps its damage carrier");
+        };
+        *target = TargetRef::Object(ObjectId(23));
+        two_occurrences.stack.push_back(entry);
+        let mut second_row = two_occurrences.damage_dealt_this_turn[0].clone();
+        second_row.target = TargetRef::Object(ObjectId(23));
+        two_occurrences.damage_dealt_this_turn.push_back(second_row);
+        for (label, changed) in [
+            ("all-stale", stale),
+            ("legacy unknown", unknown),
+            ("different tapped recipient", tapped),
+            ("outside the homogeneous class", outside_class),
+            ("two distinct retained occurrences", two_occurrences),
+        ] {
+            let refusals = fodder_growth_cover_refusals(&prior, &changed, &class, PlayerId(0)).0;
+            assert!(
+                refusals.contains(&FodderCoverRefusal::NonObjectRemainder),
+                "{label}: {refusals:?}"
+            );
+        }
+
+        let mut alias_prior = prior.clone();
+        let mut alias_current = current.clone();
+        for frame in [&mut alias_prior, &mut alias_current] {
+            frame.for_each_trigger_event_carrier_mut(&mut |event| {
+                if let GameEvent::DamageDealt {
+                    source_id,
+                    source_incarnation,
+                    ..
+                } = event
+                {
+                    *source_id = ObjectId(21);
+                    *source_incarnation = Some(7);
+                }
+            });
+            for row in frame.damage_dealt_this_turn.iter_mut() {
+                row.source_id = ObjectId(21);
+                row.source_incarnation = Some(7);
+            }
+        }
+        let refusals =
+            fodder_growth_cover_refusals(&alias_prior, &alias_current, &class, PlayerId(0)).0;
+        assert!(
+            refusals.contains(&FodderCoverRefusal::NonObjectRemainder),
+            "a recipient that is also the exact dealer cannot be anonymously renamed: {refusals:?}"
+        );
+    }
+
+    #[test]
+    fn loop_relational_fodder_recipient_groups_survive_consistent_renaming() {
+        use crate::game::targeting::resolve_event_referent_permanents;
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter,
+        };
+
+        // Controlled comparison states with actual event-target tap consumers;
+        // normalized/projected comparands are read, never resumed as gameplay.
+        let mut shared = relational_recipient_frame(Some(7), false, false);
+        let other_dealer = battlefield_creature(&mut shared, 24, 0);
+        shared.objects.get_mut(&other_dealer).unwrap().incarnation = 7;
+        let snapshot = shared.objects[&other_dealer].snapshot_public_characteristics();
+        shared
+            .lki_by_incarnation
+            .entry(other_dealer)
+            .or_default()
+            .insert(3, snapshot);
+        let mut second_entry = shared.stack[0].clone();
+        second_entry.id = ObjectId(101);
+        second_entry.source_id = other_dealer;
+        shared.stack.push_back(second_entry);
+        for entry in shared.stack.iter_mut() {
+            let dealer = entry.source_id;
+            let StackEntryKind::TriggeredAbility {
+                source_id,
+                ability,
+                trigger_event,
+                ..
+            } = &mut entry.kind
+            else {
+                panic!("fixture keeps two pending damage triggers");
+            };
+            *source_id = dealer;
+            **ability = ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::EventTarget,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                },
+                vec![],
+                dealer,
+                PlayerId(0),
+            );
+            let Some(GameEvent::DamageDealt { source_id, .. }) = trigger_event else {
+                panic!("fixture retains a damage event");
+            };
+            *source_id = dealer;
+        }
+        let mut second_row = shared.damage_dealt_this_turn[0].clone();
+        second_row.source_id = other_dealer;
+        shared.damage_dealt_this_turn.push_back(second_row);
+
+        let mut renamed = shared.clone();
+        let mut fresh = shared.objects[&ObjectId(21)].clone();
+        fresh.id = ObjectId(22);
+        renamed.objects.insert(fresh.id, fresh);
+        renamed.battlefield.push_back(ObjectId(22));
+        renamed.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt { target, .. } = event {
+                *target = TargetRef::Object(ObjectId(22));
+            }
+        });
+        for row in renamed.damage_dealt_this_turn.iter_mut() {
+            row.target = TargetRef::Object(ObjectId(22));
+        }
+        let mut split = renamed.clone();
+        split.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt {
+                source_id, target, ..
+            } = event
+            {
+                if *source_id == ObjectId(20) {
+                    *target = TargetRef::Object(ObjectId(21));
+                }
+            }
+        });
+        for row in split.damage_dealt_this_turn.iter_mut() {
+            if row.source_id == ObjectId(20) {
+                row.target = TargetRef::Object(ObjectId(21));
+            }
+        }
+        // A two-group renaming reverses raw-id order. Group order is not
+        // position either; compare the same recipient partition, not ids.
+        let mut permuted = split.clone();
+        for id in [23, 25] {
+            let mut fresh = shared.objects[&ObjectId(21)].clone();
+            fresh.id = ObjectId(id);
+            permuted.objects.insert(fresh.id, fresh);
+            permuted.battlefield.push_back(ObjectId(id));
+        }
+        permuted.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::DamageDealt {
+                source_id, target, ..
+            } = event
+            {
+                *target = TargetRef::Object(if *source_id == ObjectId(20) {
+                    ObjectId(25)
+                } else {
+                    ObjectId(23)
+                });
+            }
+        });
+        for row in permuted.damage_dealt_this_turn.iter_mut() {
+            row.target = TargetRef::Object(if row.source_id == ObjectId(20) {
+                ObjectId(25)
+            } else {
+                ObjectId(23)
+            });
+        }
+
+        fn recipients(state: &GameState) -> BTreeSet<ObjectId> {
+            let mut receivers = BTreeSet::new();
+            let mut context = state.clone();
+            for entry in &state.stack {
+                let StackEntryKind::TriggeredAbility {
+                    trigger_event: Some(event),
+                    ..
+                } = &entry.kind
+                else {
+                    panic!("fixture keeps its pending event");
+                };
+                context.current_trigger_event = Some(event.clone());
+                receivers.extend(resolve_event_referent_permanents(
+                    &context,
+                    &TargetFilter::EventTarget,
+                    entry.source_id,
+                ));
+            }
+            receivers
+        }
+        let shared_projection = project_out_resources(&shared);
+        let renamed_projection = project_out_resources(&renamed);
+        let split_projection = project_out_resources(&split);
+        let permuted_projection = project_out_resources(&permuted);
+        for (raw, projected, expected) in [
+            (&shared, &shared_projection, BTreeSet::from([ObjectId(21)])),
+            (
+                &renamed,
+                &renamed_projection,
+                BTreeSet::from([ObjectId(22)]),
+            ),
+            (
+                &split,
+                &split_projection,
+                BTreeSet::from([ObjectId(21), ObjectId(22)]),
+            ),
+            (
+                &permuted,
+                &permuted_projection,
+                BTreeSet::from([ObjectId(23), ObjectId(25)]),
+            ),
+        ] {
+            assert_eq!(recipients(raw), expected, "raw event-target consumer");
+            assert_eq!(
+                recipients(projected),
+                expected,
+                "projected event-target consumer"
+            );
+            assert_eq!(
+                projected.damage_dealt_this_turn.len(),
+                2,
+                "the hostile pair changes sharing, not fact count"
+            );
+        }
+        let mut class = shared.objects[&ObjectId(21)].clone();
+        project_object_for_loop(&mut class);
+        let positive = fodder_growth_cover_refusals(&shared, &renamed, &class, PlayerId(0)).0;
+        assert!(
+            positive.is_empty(),
+            "consistently renaming the shared recipient must cover: {positive:?}"
+        );
+        let permuted_positive =
+            fodder_growth_cover_refusals(&split, &permuted, &class, PlayerId(0)).0;
+        assert!(
+            permuted_positive.is_empty(),
+            "consistently renaming multiple groups must ignore raw-id order: {permuted_positive:?}"
+        );
+        let negative = fodder_growth_cover_refusals(&shared, &split, &class, PlayerId(0)).0;
+        assert!(
+            negative.contains(&FodderCoverRefusal::NonObjectRemainder),
+            "the same two damage keys split across two recipients must refuse: {negative:?}"
+        );
+
+        fn tapped_after_pending_triggers(raw: &GameState) -> BTreeSet<ObjectId> {
+            let mut future = raw.clone();
+            let mut events = Vec::new();
+            assert_eq!(future.stack.len(), 2, "two actual pending consumers");
+            assert!(
+                future
+                    .battlefield
+                    .iter()
+                    .all(|id| !future.objects[id].tapped),
+                "the pending consumers must cause the observed taps"
+            );
+            for remaining in [1, 0] {
+                crate::game::stack::resolve_top(&mut future, &mut events);
+                assert_eq!(future.stack.len(), remaining, "each trigger resolves");
+            }
+            future
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| future.objects[id].tapped)
+                .collect()
+        }
+
+        // Legacy compatibility states have the same pending consumers but no
+        // recipient stamp authority. Runtime accepts the named live recipient;
+        // the cover must retain recipient sharing while allowing consistent renaming.
+        // Exercise both raw futures before checking cover, so a projected
+        // witness-count assertion cannot hide the semantic regression.
+        let mut legacy_covers = Vec::new();
+        for missing_rows in [false, true] {
+            let label = if missing_rows {
+                "missing-row"
+            } else {
+                "no-stamp"
+            };
+            let mut legacy_shared = shared.clone();
+            let mut legacy_renamed = renamed.clone();
+            let mut legacy_split = split.clone();
+            let mut legacy_permuted = permuted.clone();
+            for frame in [
+                &mut legacy_shared,
+                &mut legacy_renamed,
+                &mut legacy_split,
+                &mut legacy_permuted,
+            ] {
+                if missing_rows {
+                    frame.damage_dealt_this_turn.clear();
+                } else {
+                    for row in frame.damage_dealt_this_turn.iter_mut() {
+                        row.target_incarnation = None;
+                    }
+                    assert_eq!(frame.damage_dealt_this_turn.len(), 2, "{label}");
+                }
+                assert!(
+                    frame
+                        .damage_dealt_this_turn
+                        .iter()
+                        .all(|row| row.target_incarnation.is_none()),
+                    "{label}: no stamped recipient authority"
+                );
+                assert_eq!(
+                    frame
+                        .stack
+                        .iter()
+                        .map(|entry| entry.source_id)
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([ObjectId(20), ObjectId(24)]),
+                    "{label}: two distinct stable dealers retain their consumers"
+                );
+            }
+            for (raw, expected) in [
+                (&legacy_shared, BTreeSet::from([ObjectId(21)])),
+                (&legacy_renamed, BTreeSet::from([ObjectId(22)])),
+                (&legacy_split, BTreeSet::from([ObjectId(21), ObjectId(22)])),
+                (
+                    &legacy_permuted,
+                    BTreeSet::from([ObjectId(23), ObjectId(25)]),
+                ),
+            ] {
+                assert_eq!(
+                    recipients(raw),
+                    expected,
+                    "{label}: raw EventTarget consumer"
+                );
+                assert_eq!(
+                    tapped_after_pending_triggers(raw),
+                    expected,
+                    "{label}: actual raw trigger resolutions tap the named recipients"
+                );
+            }
+            // Keep both recipient ids stable on BOTH boards. Only an independent
+            // inert token class grows; its membership cannot account for losing
+            // which stable recipient each pending legacy consumer names.
+            let mut stable_prior = legacy_renamed.clone();
+            let fodder = battlefield_creature(&mut stable_prior, 30, 0);
+            stable_prior.objects.get_mut(&fodder).unwrap().is_token = true;
+            let mut independent_class = stable_prior.objects[&fodder].clone();
+            project_object_for_loop(&mut independent_class);
+            let mut stable_shared = stable_prior.clone();
+            let mut fresh = stable_prior.objects[&fodder].clone();
+            fresh.id = ObjectId(31);
+            stable_shared.objects.insert(fresh.id, fresh);
+            stable_shared.battlefield.push_back(ObjectId(31));
+            let mut stable_split = stable_shared.clone();
+            stable_split.stack = legacy_split.stack.clone();
+            stable_split.damage_dealt_this_turn = legacy_split.damage_dealt_this_turn.clone();
+            for frame in [&stable_prior, &stable_shared, &stable_split] {
+                for id in [ObjectId(21), ObjectId(22)] {
+                    assert!(
+                        frame.battlefield.contains(&id),
+                        "{label}: both stable recipients are present"
+                    );
+                    assert!(
+                        crate::types::game_state::object_content_eq(
+                            &stable_prior.objects[&id],
+                            &frame.objects[&id],
+                        ),
+                        "{label}: stable recipient content is unchanged"
+                    );
+                    let mut recipient = frame.objects[&id].clone();
+                    project_object_for_loop(&mut recipient);
+                    assert!(
+                        !fodder_content_eq(&recipient, &independent_class),
+                        "{label}: recipients are outside the independently growing class"
+                    );
+                }
+            }
+            for (raw, expected) in [
+                (&stable_prior, BTreeSet::from([ObjectId(22)])),
+                (&stable_shared, BTreeSet::from([ObjectId(22)])),
+                (&stable_split, BTreeSet::from([ObjectId(21), ObjectId(22)])),
+            ] {
+                assert_eq!(recipients(raw), expected, "{label}: stable raw consumer");
+                assert_eq!(
+                    tapped_after_pending_triggers(raw),
+                    expected,
+                    "{label}: stable raw futures differ only when recipients split"
+                );
+            }
+            for (shape, current, should_cover) in [
+                ("noncohort split", &stable_split, false),
+                ("noncohort shared", &stable_shared, true),
+            ] {
+                let refusals = fodder_growth_cover_refusals(
+                    &stable_prior,
+                    current,
+                    &independent_class,
+                    PlayerId(0),
+                )
+                .0;
+                assert!(
+                    refusals
+                        .iter()
+                        .all(|refusal| *refusal == FodderCoverRefusal::NonObjectRemainder),
+                    "{label}/{shape}: independent growth must pass other gates: {refusals:?}"
+                );
+                legacy_covers.push((label, shape, should_cover, refusals));
+            }
+            for (shape, prior, current, should_cover) in [
+                ("split", &legacy_shared, &legacy_split, false),
+                ("renamed", &legacy_shared, &legacy_renamed, true),
+                ("two-group renamed", &legacy_split, &legacy_permuted, true),
+            ] {
+                let refusals = fodder_growth_cover_refusals(prior, current, &class, PlayerId(0)).0;
+                assert!(
+                    refusals
+                        .iter()
+                        .all(|refusal| *refusal == FodderCoverRefusal::NonObjectRemainder),
+                    "{label}/{shape}: other cover gates must admit the fixture: {refusals:?}"
+                );
+                legacy_covers.push((label, shape, should_cover, refusals));
+            }
+        }
+        for (label, shape, should_cover, refusals) in legacy_covers {
+            if should_cover {
+                assert!(
+                    refusals.is_empty(),
+                    "{label}/{shape}: consistent legacy recipient groups must cover: {refusals:?}"
+                );
+            } else {
+                assert!(
+                    refusals.contains(&FodderCoverRefusal::NonObjectRemainder),
+                    "{label}/{shape}: split legacy recipient groups must refuse: {refusals:?}"
+                );
+            }
+        }
+    }
+
+    fn relational_resource_grants(wr: u64, ss: u64, spent: &[u64]) -> GameState {
+        use crate::types::ability::{
+            TriggerDefinitionOccurrenceRef, TriggerGrantInstanceRef, TriggerGrantProducerKey,
+            TriggerProducerOrigin,
+        };
+        use crate::types::identifiers::ObjectIncarnationRef;
+        let mut state = GameState::new_two_player(7);
+        let host = battlefield_creature(&mut state, 20, 0);
+        let provider = battlefield_creature(&mut state, 22, 0);
+        state.objects.get_mut(&host).unwrap().incarnation = 7;
+        state.objects.get_mut(&provider).unwrap().incarnation = 7;
+        let grants = &mut state
+            .objects
+            .get_mut(&host)
+            .unwrap()
+            .trigger_occurrence_state;
+        for generation in 1..=wr.max(ss) {
+            if generation == wr || generation == ss {
+                let actual = grants
+                    .grant_instance_for(TriggerGrantProducerKey::Granted {
+                        origin: TriggerProducerOrigin::Static {
+                            source: ObjectIncarnationRef::of(provider, 7),
+                            definition_index: if generation == wr { 0 } else { 1 },
+                            modification_index: 0,
+                        },
+                        output_index: 0,
+                    })
+                    .unwrap();
+                assert_eq!(actual.0, generation);
+            } else {
+                grants.allocate_trigger_grant_instance().unwrap();
+            }
+        }
+        assert_eq!(grants.active_grants().count(), 2);
+        for &generation in spent {
+            state.triggers_fired_this_turn.insert(TriggerDefinitionRef {
+                source: ObjectIncarnationRef::of(host, 7),
+                occurrence: TriggerDefinitionOccurrenceRef::Granted {
+                    grant_instance: TriggerGrantInstanceRef(generation),
+                },
+            });
+        }
+        state
+    }
+
+    /// CR 113.2c: projection and cover retain the common host's current producer binding.
+    #[test]
+    fn loop_relational_projected_grant_current_spent_and_allocation_controls() {
+        let live = relational_resource_grants(10, 11, &[10]);
+        let shifted = relational_resource_grants(30, 31, &[30]);
+        relational_projection_feeds(&live, &shifted, true);
+        relational_projection_feeds(
+            &relational_resource_grants(10, 11, &[]),
+            &relational_resource_grants(31, 30, &[]),
+            true,
+        );
+        relational_projection_feeds(
+            &relational_resource_grants(10, 11, &[10, 11]),
+            &relational_resource_grants(31, 30, &[30, 31]),
+            true,
+        );
+        for retired in [
+            relational_resource_grants(13, 9, &[12]),
+            relational_resource_grants(11, 9, &[10]),
+        ] {
+            relational_projection_feeds(&live, &retired, false);
+        }
+    }
+
+    /// CR 104.4b: the cover scopes ledger roots, not providers consulted by a common root.
+    #[test]
+    fn loop_relational_growth_grant_common_root_grown_provider() {
+        let live = relational_resource_grants(10, 11, &[10]);
+        let retired = relational_resource_grants(13, 9, &[12]);
+        let provider = HashSet::from([ObjectId(22)]);
+        let a = project_out_resources(&live);
+        let same = project_out_resources(&relational_resource_grants(30, 31, &[30]));
+        assert!(
+            eq_except_growable(&a, &same, &provider, None),
+            "identical common-root fact, shifted allocation"
+        );
+        assert!(
+            !eq_except_growable(&a, &project_out_resources(&retired), &provider, None),
+            "common host remains constrained even though its provider is stripped"
+        );
+        assert!(eq_except_growable(&a, &a, &HashSet::from([ObjectId(20)]), None),
+            "identical grown-root ledger remains subject to the existing raw conjunct, not blanket rejection");
+        let empty = project_out_resources(&relational_resource_grants(10, 11, &[]));
+        assert!(
+            !eq_except_growable(&a, &empty, &HashSet::from([ObjectId(20)]), None),
+            "the old raw ledger conjunct is not weakened for removed roots"
+        );
+    }
+
     /// Inflate one of the real 4p dumps through the PRODUCTION decoder — the same
     /// chokepoint the server's `from_persisted` and WASM's `decode_restored_game_state`
     /// funnel through, never a bare `GameState` decode.
@@ -8008,8 +12815,10 @@ mod tests {
         flate2::read::GzDecoder::new(gz)
             .read_to_string(&mut json)
             .expect("fixture .json.gz must inflate to UTF-8 JSON");
-        let envelope: serde_json::Value =
+        let mut envelope: serde_json::Value =
             serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        crate::types::game_state::record_captured_onsets(&mut envelope);
         serde_json::from_value::<crate::types::game_state::PersistedGameState>(
             envelope["gameState"].clone(),
         )
@@ -8768,6 +13577,120 @@ mod tests {
         );
     }
 
+    fn plus_one_total(v: &ResourceVector) -> i64 {
+        v.counters
+            .iter()
+            .filter(|((class, _), _)| *class == CounterClass::Plus1Plus1)
+            .map(|(_, n)| *n)
+            .sum()
+    }
+
+    /// CR 800.4a: a seat's departure takes its counters with it, so the scoped period drops
+    /// them and keeps a surviving seat's.
+    #[test]
+    fn period_among_drops_a_departed_seats_objects() {
+        let mut before = GameState::new_two_player(7);
+        let kept = battlefield_creature(&mut before, 500, 0);
+        let gone = battlefield_creature(&mut before, 501, 1);
+        before
+            .objects
+            .get_mut(&gone)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        let mut after = before.clone();
+        after
+            .objects
+            .get_mut(&kept)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        after.battlefield.retain(|id| *id != gone);
+        let full = ResourceVector::period(&before, &after);
+        let scoped = ResourceVector::period_among(&before, &after, |seat| seat != PlayerId(1));
+        assert_eq!(plus_one_total(&full), 0);
+        assert_eq!(plus_one_total(&scoped), 1);
+    }
+
+    /// CR 800.4a, through the real `eliminate_player`: a survivor's object the leaver stole
+    /// reverts and stays, and a survivor's object that entered under the leaver is exiled, so
+    /// neither moves the scoped +1/+1 total.
+    #[test]
+    fn period_among_follows_the_departures_own_order() {
+        use crate::types::ability::{ContinuousModification, Duration, TargetFilter};
+        let depart = |before: &GameState| {
+            let mut after = before.clone();
+            crate::game::elimination::eliminate_player(&mut after, PlayerId(1), &mut Vec::new());
+            after
+        };
+        let survivor_object = |state: &mut GameState, name: &str| {
+            let id = crate::game::zones::create_object(
+                state,
+                CardId(1),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Creature];
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .insert(CounterType::Plus1Plus1, 1);
+            id
+        };
+        let scoped = |before: &GameState, after: &GameState| {
+            plus_one_total(&ResourceVector::period_among(before, after, |seat| {
+                seat != PlayerId(1)
+            }))
+        };
+
+        let mut stolen = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 7);
+        let id = survivor_object(&mut stolen, "Stolen Bear");
+        stolen.add_transient_continuous_effect(
+            id,
+            PlayerId(1),
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        crate::game::layers::mark_layers_full(&mut stolen);
+        crate::game::layers::evaluate_layers(&mut stolen);
+        assert_eq!(stolen.objects[&id].controller, PlayerId(1));
+        let after = depart(&stolen);
+        assert!(after.battlefield.contains(&id) && after.objects[&id].controller == PlayerId(0));
+        assert_eq!(
+            scoped(&stolen, &after),
+            0,
+            "a reverted object stays on both sides"
+        );
+
+        let mut entered = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 7);
+        let id = survivor_object(&mut entered, "Entered Under P1");
+        crate::game::zones::apply_battlefield_entry_controller_override(
+            &mut entered,
+            &mut Vec::new(),
+            id,
+            PlayerId(1),
+        );
+        crate::game::layers::mark_layers_full(&mut entered);
+        crate::game::layers::evaluate_layers(&mut entered);
+        assert_eq!(entered.objects[&id].controller, PlayerId(1));
+        let after = depart(&entered);
+        assert!(after.exile.contains(&id));
+        assert_eq!(
+            plus_one_total(&ResourceVector::period(&entered, &after)),
+            -1
+        );
+        assert_eq!(
+            scoped(&entered, &after),
+            0,
+            "an exiled object leaves both sides"
+        );
+    }
+
     /// CR 122.1c: a CONSUMED non-monotone counter (shield, 2 -> 1)
     /// plus a projected-out resource gain must keep two boards modulo-UNEQUAL —
     /// the finite counter makes the cycle non-repeatable. PAIRED positive control:
@@ -9268,7 +14191,10 @@ mod tests {
             vec![ActivationRestriction::OnlyOnceEachTurn],
         );
         let mut b = a.clone();
-        b.activated_abilities_this_turn.insert((oid, 0), 1); // gate progressed
+        // CR 602.5c: the gate tally is keyed by the resolved acquisition.
+        let usage = crate::game::restrictions::ability_usage_key(&b, oid, 0)
+            .expect("the gated ability resolves");
+        b.activated_abilities_this_turn.insert(usage, 1); // gate progressed
         b.players[1].life -= 1; // projected-out resource gain
         assert!(
             !loop_states_equal_modulo_resources(&a, &b),
@@ -9279,7 +14205,10 @@ mod tests {
         let mut c = GameState::new_two_player(7);
         let oid2 = battlefield_creature_with_restrictions(&mut c, 701, 0, Vec::new());
         let mut d = c.clone();
-        d.activated_abilities_this_turn.insert((oid2, 0), 1);
+        // CR 602.5c: keyed by the resolved acquisition, not the index.
+        let usage2 = crate::game::restrictions::ability_usage_key(&d, oid2, 0)
+            .expect("the ungated ability resolves");
+        d.activated_abilities_this_turn.insert(usage2, 1);
         d.players[1].life -= 1;
         assert!(
             loop_states_equal_modulo_resources(&c, &d),
@@ -9414,6 +14343,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -9519,6 +14449,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -9629,6 +14560,7 @@ mod tests {
             r.act(GameAction::ActivateAbility {
                 source_id: src,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation");
             r.act(GameAction::SelectTargets {
@@ -9655,7 +14587,10 @@ mod tests {
             vec![ActivationRestriction::OnlyOnce],
         );
         let mut b = a.clone();
-        b.activated_abilities_this_game.insert((oid, 0), 1);
+        // CR 602.5c: the gate tally is keyed by the resolved acquisition.
+        let usage = crate::game::restrictions::ability_usage_key(&b, oid, 0)
+            .expect("the gated ability resolves");
+        b.activated_abilities_this_game.insert(usage, 1);
         b.players[1].life -= 1;
         assert!(
             !loop_states_equal_modulo_resources(&a, &b),
@@ -9665,7 +14600,10 @@ mod tests {
         let mut c = GameState::new_two_player(7);
         let oid2 = battlefield_creature_with_restrictions(&mut c, 711, 0, Vec::new());
         let mut d = c.clone();
-        d.activated_abilities_this_game.insert((oid2, 0), 1);
+        // CR 602.5c: keyed by the resolved acquisition, not the index.
+        let usage2 = crate::game::restrictions::ability_usage_key(&d, oid2, 0)
+            .expect("the ungated ability resolves");
+        d.activated_abilities_this_game.insert(usage2, 1);
         d.players[1].life -= 1;
         assert!(
             loop_states_equal_modulo_resources(&c, &d),
@@ -9762,6 +14700,49 @@ mod tests {
         );
     }
 
+    /// CR 606.3 + CR 101.1: the per-permanent extra-activation grant is part of
+    /// the same analysis-local equality: two states equal except for the grant
+    /// (one permanent may activate more often) are NOT a repeat. The control
+    /// with equal grants is EQUAL, which is the reach-guard that the comparison
+    /// ran and was not unequal for another reason.
+    #[test]
+    fn permanent_loyalty_grant_breaks_modulo_equality() {
+        let mut a = GameState::new_two_player(7);
+        let oid = battlefield_creature(&mut a, 742, 0);
+        a.objects.get_mut(&oid).unwrap().card_types.core_types = vec![CoreType::Planeswalker];
+        let mut equal_grant = a.clone();
+        equal_grant
+            .objects
+            .get_mut(&oid)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 0;
+        assert!(
+            loop_states_equal_modulo_resources(&a, &equal_grant),
+            "equal grants (both 0) must stay modulo-EQUAL"
+        );
+
+        let mut b = a.clone();
+        b.objects
+            .get_mut(&oid)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 2;
+        assert!(
+            !loop_states_equal_modulo_resources(&a, &b),
+            "CR 606.3: states differing only in a permanent's extra loyalty-activation grant \
+             must compare UNEQUAL"
+        );
+
+        let mut c = a.clone();
+        c.objects
+            .get_mut(&oid)
+            .unwrap()
+            .extra_loyalty_activations_this_turn = 2;
+        assert!(
+            loop_states_equal_modulo_resources(&b, &c),
+            "equal non-zero grants compare EQUAL"
+        );
+    }
+
     /// CR 602.5b: the gate-predicate partition. `AsSorcery` is a real
     /// non-gate restriction variant (it constrains timing, not repetition), so it
     /// must read as NOT a per-turn gate — proving the predicates classify by the
@@ -9795,42 +14776,37 @@ mod tests {
             vec![ActivationRestriction::AsSorcery],
         );
 
+        // CR 602.5c: predicates classify the re-derived acquisition.
+        let usage_key = |id: ObjectId| {
+            crate::game::restrictions::ability_usage_key(&state, id, 0)
+                .expect("the fixture ability resolves")
+        };
+        let per_turn_key = usage_key(per_turn);
+        let max_turn_key = usage_key(max_turn);
+        let per_game_key = usage_key(per_game);
+        let non_gate_key = usage_key(non_gate);
         // Per-turn predicate: true for the two per-turn limits, false otherwise.
-        assert!(ability_has_per_turn_activation_gate(&state, &(per_turn, 0)));
-        assert!(ability_has_per_turn_activation_gate(&state, &(max_turn, 0)));
-        assert!(!ability_has_per_turn_activation_gate(
-            &state,
-            &(per_game, 0)
-        ));
-        assert!(!ability_has_per_turn_activation_gate(
-            &state,
-            &(non_gate, 0)
-        ));
+        assert!(ability_has_per_turn_activation_gate(&state, &per_turn_key));
+        assert!(ability_has_per_turn_activation_gate(&state, &max_turn_key));
+        assert!(!ability_has_per_turn_activation_gate(&state, &per_game_key));
+        assert!(!ability_has_per_turn_activation_gate(&state, &non_gate_key));
 
         // Per-game predicate: true ONLY for OnlyOnce.
-        assert!(ability_has_per_game_activation_gate(&state, &(per_game, 0)));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(per_turn, 0)
-        ));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(max_turn, 0)
-        ));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(non_gate, 0)
-        ));
+        assert!(ability_has_per_game_activation_gate(&state, &per_game_key));
+        assert!(!ability_has_per_game_activation_gate(&state, &per_turn_key));
+        assert!(!ability_has_per_game_activation_gate(&state, &max_turn_key));
+        assert!(!ability_has_per_game_activation_gate(&state, &non_gate_key));
 
         // A missing source object is not-gated (gate moot).
-        assert!(!ability_has_per_turn_activation_gate(
-            &state,
-            &(ObjectId(9999), 0)
-        ));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(ObjectId(9999), 0)
-        ));
+        let absent = AbilityUsageKey {
+            source: ObjectId(9999),
+            provenance: None,
+            description: None,
+            fingerprint: "test".to_string(),
+            grant_chain: Vec::new(),
+        };
+        assert!(!ability_has_per_turn_activation_gate(&state, &absent));
+        assert!(!ability_has_per_game_activation_gate(&state, &absent));
     }
 
     /// Build a `TriggeredAbility` stack entry from `source`/`controller` with the
@@ -9976,10 +14952,11 @@ mod tests {
     // ===================================================================
 
     use crate::types::ability::{
-        AbilityCondition, Comparator, ControllerRef, CountScope, Effect, FilterProp, PlayerScope,
-        PtStat, PtValueScope, QuantityExpr, QuantityRef, ReplacementCondition,
-        ReplacementDefinition, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter,
-        TargetRef, TriggerCondition, TriggerDefinition, TypedFilter,
+        AbilityCondition, Comparator, ControllerRef, CopyRecipient, CountScope, Effect, FilterProp,
+        PlayerScope, PreventionAmount, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+        ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
+        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TriggerCondition,
+        TriggerDefinition, TypedFilter,
     };
     use crate::types::counter::CounterMatch;
     use crate::types::player::PlayerCounterKind;
@@ -10230,6 +15207,128 @@ mod tests {
     fn n1_p1_homogeneous_cover_true() {
         let (prior, current) = cover_base();
         assert!(loop_states_cover_modulo_growth(&prior, &current));
+    }
+
+    #[test]
+    fn loop_relational_growing_stack_cover_uses_projected_event_ranks() {
+        use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        // Controlled cover fixture: the retained damage-source/receipt shape
+        // comes from the real Kinnan/Curse regression. The occupied mandatory
+        // GainLife growth is the existing cover rig, not a new card-support claim.
+        let mut prior = GameState::new_two_player(7);
+        let dealer = battlefield_creature(&mut prior, 20, 0);
+        {
+            let object = prior.objects.get_mut(&dealer).unwrap();
+            object.incarnation = 7;
+            object.power = Some(2);
+            object.toughness = Some(2);
+            object.base_power = Some(2);
+            object.base_toughness = Some(2);
+            object.base_card_types = object.card_types.clone();
+        }
+        let snapshot = prior.objects[&dealer].snapshot_public_characteristics();
+        prior
+            .lki_by_incarnation
+            .entry(dealer)
+            .or_default()
+            .insert(3, snapshot);
+        let mut frozen = churn_entry(100, 0, gain_ability(2), None);
+        let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut frozen.kind else {
+            unreachable!("the cover rig builds triggered entries");
+        };
+        *trigger_event = Some(GameEvent::DamageDealt {
+            source_id: dealer,
+            source_incarnation: Some(3),
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: true,
+            excess: 0,
+        });
+        prior.stack.push_back(frozen.clone());
+        prior.stack.push_back(g(101));
+        let mut current = prior.clone();
+        current.stack.push_back(g(102));
+        let receipt = TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(dealer, 5),
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 0,
+            },
+        };
+        current
+            .triggered_abilities_added_mana_this_turn
+            .insert((receipt.clone(), PlayerId(0)));
+        assert!(3 < receipt.source.incarnation);
+        assert!(receipt.source.incarnation < current.objects[&dealer].incarnation);
+        assert_eq!(prior.stack.len(), 2);
+        assert_eq!(current.stack.len(), 3);
+        assert_eq!(
+            current.stack[0], frozen,
+            "the retained entry is frozen, not the growing kind"
+        );
+        assert_eq!(prior.lki_by_incarnation, current.lki_by_incarnation);
+
+        // Both entry points must first reach a genuine occupied mandatory
+        // growth cover without the unrelated receipt; equal false is not parity.
+        let mut receipt_free = current.clone();
+        receipt_free
+            .triggered_abilities_added_mana_this_turn
+            .clear();
+        reset_loop_detect_cost();
+        assert!(loop_states_cover_modulo_growth(&prior, &receipt_free));
+        let direct_cost = loop_detect_cost();
+        assert!(
+            direct_cost.projected_clones <= 2 * direct_cost.resource_compares(),
+            "direct cover must retain the existing two-projection-per-comparison budget"
+        );
+        let clean_shared = SharedCurrentFrames::new(&receipt_free);
+        assert!(loop_states_cover_modulo_growth(&prior, &clean_shared));
+
+        let normalized_prior = prior.normalize_for_loop();
+        let normalized_current = current.normalize_for_loop();
+        for old in [&prior, &normalized_prior] {
+            for now in [&current, &normalized_current] {
+                let frames = SharedCurrentFrames::new(now);
+                assert!(
+                    loop_states_cover_modulo_growth(old, &frames),
+                    "post-erasure shared stack reaches the same occupied growth"
+                );
+                assert!(
+                    loop_states_cover_modulo_growth(old, now),
+                    "direct growing-stack cover must use the same projected retained-event ranks"
+                );
+            }
+        }
+
+        let mut no_growth = current.clone();
+        no_growth.stack.pop_back();
+        let mut changed_event = current.clone();
+        let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(event),
+            ..
+        } = &mut changed_event.stack[0].kind
+        else {
+            unreachable!("the frozen entry retains its damage event");
+        };
+        let GameEvent::DamageDealt { amount, .. } = event else {
+            unreachable!("the retained event is damage");
+        };
+        *amount = 3;
+        let mut changed_lki = current.clone();
+        changed_lki
+            .lki_by_incarnation
+            .get_mut(&dealer)
+            .unwrap()
+            .get_mut(&3)
+            .unwrap()
+            .controller = PlayerId(1);
+        for hostile in [&no_growth, &changed_event, &changed_lki] {
+            assert!(!loop_states_cover_modulo_growth(&prior, hostile));
+            let frames = SharedCurrentFrames::new(hostile);
+            assert!(!loop_states_cover_modulo_growth(&prior, &frames));
+        }
     }
 
     /// Stack growth compares trigger-firing semantics, not the fresh IDs that
@@ -10489,7 +15588,7 @@ mod tests {
 
         // ── (b) ZERO announcement choices, two ways. `Effect::target_filter()` returns
         // `Some` for both, but the SLOT BUILDER surfaces no stack slot: CR 701.21a
-        // `Sacrifice` is carved out of `triggers::extract_target_filter_from_effect` (the
+        // `Sacrifice` is carved out of `types::ability::extract_target_filter_from_effect` (the
         // accessor the builder actually uses), and a CR 601.2c choice made at resolution
         // (`TargetChoiceTiming::Resolution`) is not announced at all.
         let zero_slot_cases: [(&str, ResolvedAbility); 2] = [
@@ -11014,11 +16113,15 @@ mod tests {
         use std::cmp::Ordering;
 
         /// Step (7)'s own derivation, verbatim — the charged announcements, each carrying its
-        /// reach, its `worst_seat_life_loss` magnitude and the aim the window observed. One
-        /// function, so neither arm can compute them a different way.
+        /// reach, its `worst_seat_life_loss` magnitude and the aim of the announcement that
+        /// resolved in the window. One function, so neither arm can compute them a different way.
         fn step_seven(state: &GameState, delta: &ResourceVector) -> Vec<SlotCharge> {
-            let touch =
-                certified_period_touch(&[], state, PeriodCertification::ResourceSignatureOnly);
+            let earlier = earlier_resolving_frame(state);
+            let touch = certified_period_touch(
+                &[&earlier],
+                state,
+                PeriodCertification::ResourceSignatureOnly,
+            );
             bounded_cycle_charged_targets_for_window(
                 &touch,
                 PlayerId(0),
@@ -11112,8 +16215,8 @@ mod tests {
             assert_eq!(
                 (forced_charges[0].aimed_at, chosen_charges[0].aimed_at),
                 (Some(PlayerId(1)), Some(PlayerId(1))),
-                "{label}: CR 601.2c — both boards' announcements NAME P1, so the aim the two \
-                 bounds are computed with is the observed one and not a default"
+                "{label}: CR 608.1 — both boards' resolved announcements NAME P1, so the aim the \
+                 two bounds are computed with is the observed one and not a default"
             );
 
             let forced_bound = bound_with(&delta, &forced, &forced_charges);
@@ -11144,6 +16247,16 @@ mod tests {
                  declared relation drifts from the two values it names"
             );
         }
+    }
+
+    /// `state` one beat earlier, every stack entry under a fresh id: the window `[&earlier]` sees
+    /// each of those announcements RESOLVE (CR 608.1) and its successor announce on `state`.
+    fn earlier_resolving_frame(state: &GameState) -> GameState {
+        let mut earlier = state.clone();
+        for entry in earlier.stack.iter_mut() {
+            entry.id = ObjectId(entry.id.0 + 1000);
+        }
+        earlier
     }
 
     /// The shared head of the CR 702.11c repeat window: a 3p drain board with P1 parked at 40
@@ -11241,21 +16354,20 @@ mod tests {
     ///
     /// # The AIM fold, on the same window
     ///
-    /// CR 601.2c: the charge also carries the seat the window OBSERVED the announcement name,
-    /// and a repeat folds it "agree or nothing". Both arms are asserted here because a fold
-    /// has two of them: the shared window announces P1 in both frames and keeps `Some(P1)`,
-    /// while the divergent window — frame 1 at P1, frame 2 at P2, each inside its OWN frame's
-    /// reach — withdraws to `None` while the reach still unions.
+    /// CR 608.1 + CR 119.3: the charge also carries the seat the slot's RESOLVED announcements
+    /// named, folded "agree or nothing". Both arms are asserted here because a fold has two of
+    /// them: the shared window resolves two announcements at P1 and keeps `Some(P1)`, while the
+    /// divergent window — frame 1 at P1, frame 2 at P2, each inside its OWN frame's reach, both
+    /// resolving before the live board — withdraws to `None` while the reach still unions.
     ///
     /// REVERT-PROBE: replace the union arm
     /// with `if charged.iter().any(|charge| charge.slot == target.slot) { continue; }`. The
     /// charged reach reads `[PlayerId(1)]` and the row FLIPS TO FAILING at the union
     /// assertion; the bound assertion below then reads 6 where 3 is required.
     ///
-    /// REVERT-PROBE (AIM): first-wins the aim — delete the
-    /// `if charged[i].aimed_at != aimed_at { charged[i].aimed_at = None; }` withdrawal. The
-    /// agreeing arm is unmoved (both frames already name P1) and the divergent arm FLIPS,
-    /// reading `Some(PlayerId(1))` where `None` is required. The two arms are what make the
+    /// REVERT-PROBE (AIM): first-wins the aim — make the fold's disagreeing arm keep `prev`. The
+    /// agreeing arm is unmoved (both resolved announcements name P1) and the divergent arm
+    /// FLIPS, reading `Some(PlayerId(1))` where `None` is required. The two arms are what make the
     /// withdrawal separately attributable from the union.
     #[test]
     fn a_repeated_slots_victim_lists_are_unioned_not_first_wins() {
@@ -11267,10 +16379,12 @@ mod tests {
 
         // Window head: nothing on the stack, so frame 1's entry counts as ANNOUNCED there.
         let head = hexproof_window_head();
-        // Frame 1 — the grantor board, so the announcement is forced to P1 alone; frame 2 —
-        // the live board, where both opponents are legal again. Both announce P1.
+        // Frame 1 — the grantor board, so the announcement is forced to P1 alone; frame 2 and
+        // the live board — where both opponents are legal again. All announce P1, and frames
+        // 1 and 2's announcements resolve inside the window.
         let narrow = hexproof_window_frame(true, 10, PlayerId(1));
-        let current = hexproof_window_frame(false, 20, PlayerId(1));
+        let wide = hexproof_window_frame(false, 20, PlayerId(1));
+        let current = hexproof_window_frame(false, 30, PlayerId(1));
 
         let legal = |state: &GameState, entry: usize| {
             build_target_slots(state, state.stack[entry].ability().unwrap())
@@ -11305,7 +16419,7 @@ mod tests {
         );
 
         let touch = certified_period_touch(
-            &[&head, &narrow],
+            &[&head, &narrow, &wide],
             &current,
             PeriodCertification::ResourceSignatureOnly,
         );
@@ -11315,9 +16429,9 @@ mod tests {
                 .iter()
                 .map(|(_, e)| e.id)
                 .collect::<Vec<_>>(),
-            vec![ObjectId(10), ObjectId(20)],
-            "REACH-GUARD: exactly two announcements, NARROW FIRST — first-wins keeps the \
-             narrow one, which is the whole shape under test"
+            vec![ObjectId(10), ObjectId(20), ObjectId(30)],
+            "REACH-GUARD: three announcements, NARROW FIRST — first-wins keeps the narrow \
+             one, which is the whole shape under test"
         );
 
         // ── The publication half: ONE point, carrying the WIDE legal set ────────────────
@@ -11375,8 +16489,8 @@ mod tests {
         assert_eq!(
             charged[0].aimed_at,
             Some(PlayerId(1)),
-            "CR 601.2c: both frames NAME P1, so the AGREEING arm of the fold keeps the aim — \
-             the arm the divergent one below is measured against"
+            "CR 608.1: both resolved announcements NAME P1, so the AGREEING arm of the fold \
+             keeps the aim — the arm the divergent one below is measured against"
         );
 
         // ── And the bound really moves, so the union is not a cosmetic set difference ───
@@ -11408,11 +16522,11 @@ mod tests {
         // seat is the degenerate neighbour: frame 1 refuses on its own, a first-wins fold
         // keeps that refusal, and the arm would stay green under the mutation it exists to
         // catch. That refusal is `a_charge_refuses_an_aim_outside_its_own_legal_set`'s
-        // subject, on a ONE-frame window where nothing else can produce the `None`.
-        let divergent_current = hexproof_window_frame(false, 20, PlayerId(2));
+        // subject, with ONE resolved announcement, where nothing else can produce the `None`.
+        let divergent_wide = hexproof_window_frame(false, 20, PlayerId(2));
         let divergent_touch = certified_period_touch(
-            &[&head, &narrow],
-            &divergent_current,
+            &[&head, &narrow, &divergent_wide],
+            &current,
             PeriodCertification::ResourceSignatureOnly,
         );
         let divergent = bounded_cycle_charged_targets_for_window(
@@ -11433,10 +16547,10 @@ mod tests {
         );
         assert_eq!(
             divergent[0].aimed_at, None,
-            "CR 601.2c: frame 1 announces P1 and frame 2 announces P2, so the window does \
-             not settle which seat this slot aims at and the aim is WITHDRAWN. A first-wins \
-             fold keeps `Some(P1)` and would then subtract an unobserved aim from P1's own \
-             observed loss"
+            "CR 608.1: frame 1's announcement resolves at P1 and frame 2's at P2, so the \
+             window does not settle which seat this slot's loss was measured on and the aim is \
+             WITHDRAWN. A first-wins fold keeps `Some(P1)` and would then subtract an \
+             unobserved aim from P1's own observed loss"
         );
     }
 
@@ -11450,10 +16564,11 @@ mod tests {
     /// named. Subtracting such a seat's magnitude from its observed loss would credit it for a
     /// drain this slot cannot cause.
     ///
-    /// ONE FRAME, deliberately: on a two-frame window a correct `None` is ALSO what the
+    /// ONE RESOLVED ANNOUNCEMENT, deliberately: with two a correct `None` is ALSO what the
     /// withdrawal fold produces, so a later change to how that fold treats a recorded `None`
-    /// would red this row for the wrong reason. With one frame the `None` comes straight from
-    /// the `reaches.contains` conjunct the probe below deletes.
+    /// would red this row for the wrong reason. With one the `None` comes straight from the
+    /// `reaches.contains` conjunct the probe below deletes. Frame 1's announcement resolves
+    /// before the live board, which announces the same seat again.
     ///
     /// REVERT-PROBE: drop the `reaches.contains(seat)` conjunct from
     /// `game::engine::bounded_cycle_charged_targets_for_window`'s aim read ⇒ the refusing arm
@@ -11466,9 +16581,10 @@ mod tests {
         let head = hexproof_window_head();
         let charges = |aim: PlayerId| {
             let frame = hexproof_window_frame(true, 10, aim);
+            let current = hexproof_window_frame(true, 20, aim);
             let touch = certified_period_touch(
-                &[&head],
-                &frame,
+                &[&head, &frame],
+                &current,
                 PeriodCertification::ResourceSignatureOnly,
             );
             bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
@@ -11482,7 +16598,7 @@ mod tests {
         assert_eq!(
             charges(PlayerId(1)),
             vec![(vec![PlayerId(1)], Some(PlayerId(1)))],
-            "CR 601.2c: an announcement naming a seat its own legal set admits IS the \
+            "CR 608.1: a resolved announcement naming a seat its own legal set admits IS the \
              observed aim"
         );
         assert_eq!(
@@ -11491,6 +16607,113 @@ mod tests {
             "CR 115.2 + CR 702.11c: P2 cannot be the target of this opponent-controlled \
              source, so an entry recording P2 is not an attribution the bound may subtract; \
              the reach is unchanged and the aim is refused"
+        );
+    }
+
+    /// CR 732.2a + CR 603.3d: **the period identity leaves out the answers the offer publishes,
+    /// and only those.** Two boards whose one drain differs in its target alone are the same
+    /// period when that target is the proposer's published choice; an answer the proposer does
+    /// not choose (random selection) and a non-target difference keep them apart.
+    #[test]
+    fn the_period_identity_leaves_out_only_the_proposers_published_answers() {
+        use crate::game::engine::entry_publishes_pin_slots;
+        use crate::types::ability::TargetSelectionMode;
+
+        let board = |target: u8, selection: TargetSelectionMode, amount: QuantityExpr| {
+            let mut ability = lose_life_targeting(amount, opp_typed(vec![]));
+            ability.targets = vec![TargetRef::Player(PlayerId(target))];
+            ability.target_selection_mode = selection;
+            let mut state = drain_state(3);
+            state.stack.push_back(churn_entry(10, 0, ability, None));
+            state
+        };
+        let published_slots = |state: &GameState| -> Vec<DecisionSlot> {
+            entry_publishes_pin_slots(state, &state.stack[0], PlayerId(0))
+                .and_then(|pins| pins.target)
+                .into_iter()
+                .collect()
+        };
+
+        let at_p1 = board(1, TargetSelectionMode::default(), event_amount());
+        let at_p2 = board(2, TargetSelectionMode::default(), event_amount());
+        let slots = published_slots(&at_p1);
+        assert_eq!(
+            slots.len(),
+            1,
+            "reach-guard: the chosen announcement publishes its slot"
+        );
+        let same = |a: &GameState, b: &GameState| {
+            loop_states_equal_modulo_published_answers(a, a, b, PlayerId(0), &slots)
+        };
+
+        assert!(
+            same(&at_p1, &at_p2),
+            "CR 732.2a: the published answer is a choice the declaration specifies per \
+             repetition, not part of what repeats"
+        );
+        assert!(
+            !loop_states_equal_modulo_resources(&at_p1, &at_p2),
+            "control: the plain identity tells the two boards apart"
+        );
+
+        let random_p1 = board(1, TargetSelectionMode::Random, event_amount());
+        let random_p2 = board(2, TargetSelectionMode::Random, event_amount());
+        assert!(
+            published_slots(&random_p1).is_empty(),
+            "reach-guard: a randomly selected target is no proposer choice and publishes no slot"
+        );
+        assert!(
+            !same(&random_p1, &random_p2),
+            "an answer the proposer does not choose stays in the identity"
+        );
+        assert!(
+            same(&random_p1, &random_p1.clone()),
+            "paired control: the same random board is the same period"
+        );
+
+        let other_amount = board(
+            2,
+            TargetSelectionMode::default(),
+            QuantityExpr::Fixed { value: 1 },
+        );
+        assert!(
+            !same(&at_p1, &other_amount),
+            "a difference beside the published answer keeps the boards apart"
+        );
+    }
+
+    /// CR 608.1 + CR 608.2 + CR 119.3: **a charge's observed aim is the seat its RESOLVED
+    /// announcement named**, never the announcement still in flight at the window's end, and a
+    /// slot none of whose announcements resolved inside the window observed no aim.
+    #[test]
+    fn a_charges_observed_aim_is_the_announcement_that_resolved_in_the_window() {
+        use crate::game::engine::bounded_cycle_charged_targets_for_window;
+
+        let head = hexproof_window_head();
+        let resolved_at_p2 = hexproof_window_frame(false, 10, PlayerId(2));
+        let current = hexproof_window_frame(false, 20, PlayerId(1));
+        let charges = |window: &[&GameState]| {
+            let touch = certified_period_touch(
+                window,
+                &current,
+                PeriodCertification::ResourceSignatureOnly,
+            );
+            bounded_cycle_charged_targets_for_window(&touch, PlayerId(0), 1)
+                .into_iter()
+                .map(|charge| (charge.reaches, charge.aimed_at))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            charges(&[&head, &resolved_at_p2]),
+            vec![(vec![PlayerId(1), PlayerId(2)], Some(PlayerId(2)))],
+            "the loss the window measured is the P2 announcement's, which resolved; the P1 \
+             announcement is still on the stack"
+        );
+        assert_eq!(
+            charges(&[&head]),
+            vec![(vec![PlayerId(1), PlayerId(2)], None)],
+            "with nothing of the slot resolving in the window, no aim was observed"
         );
     }
 
@@ -11778,6 +17001,7 @@ mod tests {
         let per_cycle = certificate
             .per_cycle
             .as_ref()
+            .and_then(crate::analysis::resource::PeriodSignature::every_repetition)
             .expect("a bounded offer publishes the per-period signature its bound was divided by");
 
         assert!(
@@ -12669,10 +17893,10 @@ mod tests {
         // Sanity: the projection hides it (the 2p equality path would still match).
         let mut pa = project_out_resources(&prior);
         let mut pb = project_out_resources(&current);
-        pa.stack.clear();
-        pb.stack.clear();
+        pa.0.stack.clear();
+        pb.0.stack.clear();
         assert!(
-            loop_states_equal(&pa, &pb),
+            crate::types::game_state::projected_states_equal(&pa, &pb),
             "fixture: the -1/-1 counter drift is projection-invisible (isolates B1)"
         );
         assert!(!loop_states_cover_modulo_growth(&prior, &current));
@@ -12918,9 +18142,17 @@ mod tests {
             // (which scans `runtime_execute` only for projected reads) lets the def
             // through — only clause (b) rejects.
             assert!(!crate::game::ability_scan::ability_reads_projected_resource(&runtime_body));
-            let def = ReplacementDefinition::new(ReplacementEvent::GainLife)
-                .runtime_execute(runtime_body);
-            let (prior, current) = with_object_def(def);
+            let handle = crate::types::identifiers::ReplacementContinuationId(0);
+            let def =
+                ReplacementDefinition::new(ReplacementEvent::GainLife).runtime_execute(handle);
+            let (mut prior, mut current) = with_object_def(def);
+            for state in [&mut prior, &mut current] {
+                assert_eq!(
+                    state.install_replacement_continuation(runtime_body.clone()),
+                    handle,
+                    "reach guard: each frame's arena names the body at the def's handle"
+                );
+            }
             assert!(
                 !loop_states_cover_modulo_growth(&prior, &current),
                 "arm4 mandatory GainLife with runtime_execute body"
@@ -13077,6 +18309,137 @@ mod tests {
         assert!(
             cover(&prior, &current),
             "pure inert single-token growth of an existing class must COVER"
+        );
+    }
+
+    /// A retained damage carrier naming the freshly grown token is part of the growth,
+    /// not a board difference: the object-growth cover still certifies. Its obligation is
+    /// pure inert board growth; recipient relations are the FODDER cover's quotient.
+    #[test]
+    fn object_growth_ignores_retained_damage_witnesses() {
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+        };
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{DamageRecord, StackEntry, StackEntryKind};
+
+        let (prior, mut current) = og_cover_base();
+        let grown = ObjectId(702);
+        let incarnation = current.objects[&grown].incarnation;
+        let event = GameEvent::DamageDealt {
+            source_id: grown,
+            source_incarnation: Some(incarnation),
+            target: TargetRef::Object(grown),
+            amount: 1,
+            is_combat: false,
+            excess: 0,
+        };
+        current.stack.push_back(StackEntry {
+            id: ObjectId(900),
+            source_id: grown,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: grown,
+                ability: Box::new(ResolvedAbility::new(
+                    // CR 608.2k: a recipient reader, so the relation is observable at all.
+                    Effect::SetTapState {
+                        target: TargetFilter::EventTarget,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Tap,
+                    },
+                    vec![],
+                    grown,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: Some(event),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        current.damage_dealt_this_turn.push_back(DamageRecord {
+            source_id: grown,
+            source_incarnation: Some(incarnation),
+            target: TargetRef::Object(grown),
+            target_incarnation: Some(incarnation),
+            amount: 1,
+            ..Default::default()
+        });
+        assert!(
+            cover(&prior, &current),
+            "retained damage history naming the grown token is part of the growth"
+        );
+    }
+
+    /// The narrowed erasure must not become blanket history removal: a pending damage
+    /// carrier naming a NON-grown recipient keeps its live/stale relation, so a blink of
+    /// that recipient across the period still refuses the growth cover.
+    #[test]
+    fn object_growth_keeps_non_grown_recipient_relation() {
+        use crate::types::ability::{
+            Effect, EffectScope, ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+        };
+        use crate::types::events::GameEvent;
+        use crate::types::game_state::{DamageRecord, StackEntry, StackEntryKind};
+
+        fn with_carrier(state: &mut GameState, target: ObjectId, stamp: u64) {
+            state.stack.push_back(StackEntry {
+                id: ObjectId(901),
+                source_id: target,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: target,
+                    ability: Box::new(ResolvedAbility::new(
+                        // CR 608.2k: a recipient reader, so the live/stale relation is
+                        // observable and the cover must judge it.
+                        Effect::SetTapState {
+                            target: TargetFilter::EventTarget,
+                            scope: EffectScope::Single,
+                            state: TapStateChange::Tap,
+                        },
+                        vec![],
+                        target,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::DamageDealt {
+                        source_id: target,
+                        source_incarnation: Some(stamp),
+                        target: TargetRef::Object(target),
+                        amount: 1,
+                        is_combat: false,
+                        excess: 0,
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: target,
+                source_incarnation: Some(stamp),
+                target: TargetRef::Object(target),
+                target_incarnation: Some(stamp),
+                amount: 1,
+                ..Default::default()
+            });
+        }
+
+        let (mut prior, mut current) = og_cover_base();
+        let recipient = ObjectId(700);
+        let live = prior.objects[&recipient].incarnation;
+        let stale = live + 1_000;
+        with_carrier(&mut prior, recipient, live);
+        with_carrier(&mut current, recipient, stale);
+        assert!(
+            !cover(&prior, &current),
+            "a non-grown recipient that is live in the prior frame and stale in the current \
+             frame must refuse the growth cover"
         );
     }
 
@@ -13385,6 +18748,62 @@ mod tests {
         );
     }
 
+    /// A `ModifyCost { dynamic_count: Some(<projected per-turn journal>) }` static on
+    /// a STABLE object over a growing board is PERIOD-TIED, exactly as the constant-depth
+    /// equality is: `project_out_resources` zeroes `EnergyPaidOrLostThisTurn` (Blaster Hulk's
+    /// multiplier) on BOTH frames, so the cover must reject only when the journal actually
+    /// MOVED between them — that is the one period in which the next repeat costs something
+    /// else. Non-vacuous in BOTH directions on the SAME board and the SAME static: held journal
+    /// ⇒ COVER, moved journal ⇒ REJECT. The fixed control (`dynamic_count: None`) covers with
+    /// the journal moved, proving the dynamic-multiplier read is the differentiator rather than
+    /// the journal delta alone. Reverting to the presence scan flips the first assertion (an
+    /// uncast Hulk in hand would refuse an energy-free recurrence, CR 113.6).
+    #[test]
+    fn object_growth_r_e2_modifycost_projected_dynamic_is_period_tied() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let modify = |dynamic_count| StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::default(),
+            spell_filter: None,
+            dynamic_count,
+            reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+        };
+        // `cover_with_static_on_stable`'s board with the period's energy journal as the only
+        // variable: the source stays put, one inert fodder token is minted, and the CURRENT
+        // frame carries the journal one repeat's payment left behind.
+        let cover_with_journal = |mode: StaticMode, energy_paid: u32| -> bool {
+            let mut prior = GameState::new_two_player(7);
+            let sid = inert_token(&mut prior, 600, 0, "StaticSource");
+            inert_token(&mut prior, 700, 0, "Saproling");
+            inert_token(&mut prior, 701, 0, "Saproling");
+            prior
+                .objects
+                .get_mut(&sid)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(mode));
+            let mut current = prior.clone();
+            inert_token(&mut current, 702, 0, "Saproling");
+            current.players[0].energy_paid_or_lost_this_turn = energy_paid;
+            cover(&prior, &current)
+        };
+        let projected = || modify(Some(QuantityRef::EnergyPaidOrLostThisTurn));
+        assert!(
+            cover_with_journal(projected(), 0),
+            "R-e2-projected: an UNMOVED journal prices both frames the same ⇒ COVER"
+        );
+        assert!(
+            !cover_with_journal(projected(), 2),
+            "R-e2-projected: a MOVED journal changes the reduction every repeat ⇒ REJECT"
+        );
+        assert!(
+            cover_with_journal(modify(None), 2),
+            "R-e2-projected control: a fixed (dynamic_count = None) reduction covers \
+             regardless of the journal"
+        );
+    }
+
     /// An `ImposeAdditionalCost` whose
     /// `AbilityCost` reads `ObjectCount(|G|)` (a `PayLife` scaling with the board)
     /// REJECTs; the same static with a FIXED `PayLife` COVERS.
@@ -13434,6 +18853,266 @@ mod tests {
         assert!(
             cover_with_static_on_stable(reduce(None)),
             "R-e2-reduceability control: a fixed ReduceAbilityCost must COVER"
+        );
+    }
+
+    /// A cost modifier reading a PROJECTED journal (`EnergyPaidOrLostThisTurn`) REJECTs the
+    /// constant-depth recurrence: the loop can pay {E} and restore the same reserve while the
+    /// cumulative journal grows, and the projection zeroes the journal out of both frames, so
+    /// without the veto the pair certifies a recurrence whose reduction changes every repeat.
+    /// Non-vacuous: the SAME static with `dynamic_count: None` (a fixed reduction) leaves the
+    /// pair EQUAL, proving the dynamic-multiplier scan — not the mere presence of a cost
+    /// static — is the differentiator.
+    #[test]
+    fn constant_depth_projected_cost_modifier_rejects() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let board = |dynamic_count| {
+            let mut state = GameState::new_two_player(7);
+            let sid = inert_token(&mut state, 600, 0, "StaticSource");
+            state
+                .objects
+                .get_mut(&sid)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                    spell_filter: None,
+                    dynamic_count,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            state
+        };
+        // One cycle's payment: the journal grows, the reserve is what the projection zeroes.
+        let paid_two = |state: &GameState| {
+            let mut next = state.clone();
+            next.players[0].energy_paid_or_lost_this_turn = 2;
+            next
+        };
+        let fixed = board(None);
+        assert!(
+            loop_states_equal_modulo_resources(&fixed, &paid_two(&fixed)),
+            "control: with no journal reader the per-turn journal is pure history ⇒ EQUAL"
+        );
+        let projected = board(Some(QuantityRef::EnergyPaidOrLostThisTurn));
+        assert!(
+            !loop_states_equal_modulo_resources(&projected, &paid_two(&projected)),
+            "a cost modifier reading the projected journal changes price every repeat ⇒ REJECT"
+        );
+    }
+
+    /// CR 113.6: the veto reads only a cost modifier that FUNCTIONS in its source's zone. The
+    /// SAME projected-journal `ModifyCost` on a hand card — `StaticDefinition::new` leaves
+    /// `active_zones` empty, i.e. "battlefield only" — prices nothing, so it must not veto a
+    /// recurrence it cannot price. Precision control for
+    /// `constant_depth_projected_cost_modifier_rejects`, which pins the battlefield half: both
+    /// halves carry the identical static and the identical journal delta.
+    #[test]
+    fn constant_depth_inert_projected_cost_modifier_does_not_reject() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let board = |zone: Zone| {
+            let oid = ObjectId(600);
+            let mut object =
+                GameObject::new(oid, CardId(600), PlayerId(0), "StaticSource".into(), zone);
+            object
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                    spell_filter: None,
+                    dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            let mut state = GameState::new_two_player(7);
+            state.objects.insert(oid, object);
+            if zone == Zone::Battlefield {
+                state.battlefield.push_back(oid);
+            }
+            state
+        };
+        let paid_two = |state: &GameState| {
+            let mut next = state.clone();
+            next.players[0].energy_paid_or_lost_this_turn = 2;
+            next
+        };
+        let hand = board(Zone::Hand);
+        assert!(
+            loop_states_equal_modulo_resources(&hand, &paid_two(&hand)),
+            "an inert modifier prices nothing ⇒ the projected journal stays pure history"
+        );
+        // Reach guard: the identical static on the battlefield IS live and vetoes.
+        let battlefield = board(Zone::Battlefield);
+        assert!(
+            !loop_states_equal_modulo_resources(&battlefield, &paid_two(&battlefield)),
+            "reach guard: a live modifier reading the projected journal ⇒ REJECT"
+        );
+    }
+
+    /// CR 601.2f + CR 732.2a: the veto inspects BOTH compared frames. `object_content_eq`
+    /// OMITS static definitions, so a projected-reading cost modifier installed only on the
+    /// CURRENT frame — the shape a modifier that lands on the settled board after the prior
+    /// sample takes — is invisible to a prior-only scan while the cumulative journal still
+    /// grows. The fixed control proves the static's presence is not what rejects: only the
+    /// projected read is.
+    #[test]
+    fn constant_depth_projected_cost_modifier_only_in_current_rejects() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        let prior = || {
+            let mut state = GameState::new_two_player(7);
+            inert_token(&mut state, 600, 0, "StaticSource");
+            state
+        };
+        // One cycle's payment: the reserve is identical in both frames (the projection
+        // zeroes it), while the cumulative journal advances.
+        let current = |dynamic_count| {
+            let mut state = prior();
+            state
+                .objects
+                .get_mut(&ObjectId(600))
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::default(),
+                    spell_filter: None,
+                    dynamic_count,
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            state.players[0].energy_paid_or_lost_this_turn = 2;
+            state
+        };
+        assert!(
+            !loop_states_equal_modulo_resources(
+                &prior(),
+                &current(Some(QuantityRef::EnergyPaidOrLostThisTurn))
+            ),
+            "a modifier reading the projected journal only in the current frame ⇒ REJECT"
+        );
+        assert!(
+            loop_states_equal_modulo_resources(&prior(), &current(None)),
+            "control: a fixed reduction present only in the current frame ⇒ EQUAL"
+        );
+    }
+
+    /// CR 601.2f + CR 732.2a: the veto is the OBSERVED journal value, not the modifier's
+    /// presence. A real Blaster Hulk's self-spell reduction opts into Hand and Library
+    /// (`self_spell_cost_mod_active_zones`), so it FUNCTIONS while its card sits uncast in hand
+    /// (CR 113.6). A period that pays no energy reads the same journal on both frames, so its
+    /// price cannot differ between repeats and the recurrence IS certified. Reverting to a
+    /// presence scan (the shape this replaced) flips the first assertion: an unrelated,
+    /// energy-free loop would be refused because of a Hulk nobody casts.
+    #[test]
+    fn constant_depth_projected_cost_modifier_is_period_tied() {
+        use crate::types::mana::ManaCost;
+        use crate::types::statics::CostModifyMode;
+        use crate::types::TargetFilter;
+        let hand = || {
+            let oid = ObjectId(600);
+            let mut object = GameObject::new(
+                oid,
+                CardId(600),
+                PlayerId(0),
+                "Blaster Hulk".into(),
+                Zone::Hand,
+            );
+            // CR 601.2f: the printed card's shape — a SELF-SPELL reduction whose zone opt-in
+            // keeps it live from hand/library, exactly as the production parser emits it.
+            let mut def = StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::default(),
+                spell_filter: None,
+                dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+            })
+            .affected(TargetFilter::SelfRef);
+            def.active_zones = crate::types::zones::self_spell_cost_mod_active_zones();
+            object.static_definitions.push(def);
+            let mut state = GameState::new_two_player(7);
+            state.objects.insert(oid, object);
+            state
+        };
+        let before = hand();
+        // Reach guard: the hand-resident self-spell modifier IS live, so the veto's scan
+        // reaches it — the assertion below is not vacuous.
+        {
+            let object = &before.objects[&ObjectId(600)];
+            let def = object.static_definitions.iter_all().next().unwrap();
+            assert!(
+                crate::game::functioning_abilities::static_functions_in_zone(object, def),
+                "CR 113.6: the self-spell reduction functions from hand"
+            );
+        }
+        // Control: a period that moves only projected HISTORY (life gained) and pays no energy
+        // ⇒ the journal the modifier prices on is identical on both frames ⇒ EQUAL.
+        let mut no_energy_paid = before.clone();
+        no_energy_paid.players[0].life_gained_this_turn = 1;
+        assert!(
+            loop_states_equal_modulo_resources(&before, &no_energy_paid),
+            "CR 601.2f: an uncast hand Hulk whose journal did not move prices both frames the \
+             same ⇒ an energy-free recurrence is certified"
+        );
+        // Reject: one cycle pays {E}{E} ⇒ the live modifier prices the next repeat lower.
+        let mut energy_paid = before.clone();
+        energy_paid.players[0].energy_paid_or_lost_this_turn = 2;
+        assert!(
+            !loop_states_equal_modulo_resources(&before, &energy_paid),
+            "CR 107.14 + CR 601.2f: the journal the live modifier reads MOVED ⇒ REJECT"
+        );
+    }
+
+    /// CR 601.2f + CR 732.2a: the period tie is NOT a "the source must cast itself" carve-out.
+    /// Rakdos, Lord of Riots — "Creature spells you cast cost {1} less to cast for each 1 life
+    /// your opponents have lost this turn." — is a PRINTED battlefield reducer that prices
+    /// ANOTHER spell off a projected per-turn journal (`LifeLostThisTurn { Opponent, Sum }`,
+    /// the same `projected` axis class as the Hulk's energy journal). It is asked the same
+    /// question: an unmoved journal certifies, a moved one rejects. This is the half a
+    /// self-spell-only exclusion would lose. The static below is Rakdos's printed shape —
+    /// `{1}` generic, creature spells you cast, summed opponent life lost — asserted through
+    /// the production parser by `life_changed_this_turn_quantity::rakdos_reduces_creature_spells_by_the_opponents_life_loss`.
+    #[test]
+    fn constant_depth_board_wide_projected_cost_modifier_is_period_tied() {
+        let board = || {
+            let mut state = GameState::new_two_player(7);
+            let sid = inert_token(&mut state, 600, 0, "Rakdos, Lord of Riots");
+            state
+                .objects
+                .get_mut(&sid)
+                .unwrap()
+                .static_definitions
+                .push(StaticDefinition::new(StaticMode::ModifyCost {
+                    mode: CostModifyMode::Reduce,
+                    amount: ManaCost::Cost {
+                        shards: Vec::new(),
+                        generic: 1,
+                    },
+                    spell_filter: Some(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    )),
+                    dynamic_count: Some(QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Sum,
+                        },
+                    }),
+                    reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
+                }));
+            state
+        };
+        let before = board();
+        assert!(
+            loop_states_equal_modulo_resources(&before, &before.clone()),
+            "control: an unmoved journal prices both frames the same ⇒ EQUAL"
+        );
+        // One cycle in which an opponent loses 2 life ⇒ the printed reducer prices the next
+        // creature spell 2 less than the one it extrapolates.
+        let mut life_lost = before.clone();
+        life_lost.players[1].life_lost_this_turn = 2;
+        assert!(
+            !loop_states_equal_modulo_resources(&before, &life_lost),
+            "CR 601.2f: a board-wide reducer pricing another spell still vetoes once the \
+             journal it reads moves"
         );
     }
 
@@ -13761,15 +19440,22 @@ mod tests {
             inert(),
         )]);
 
-        state.activated_abilities_this_turn.insert((gated, 0), 3);
-        state.activated_abilities_this_turn.insert((plain, 0), 3);
+        // CR 602.5c: tallies are keyed by the resolved acquisition.
+        let gated_key = crate::game::restrictions::ability_usage_key(&state, gated, 0)
+            .expect("the gated ability resolves");
+        let plain_key = crate::game::restrictions::ability_usage_key(&state, plain, 0)
+            .expect("the plain ability resolves");
+        state
+            .activated_abilities_this_turn
+            .insert(gated_key.clone(), 3);
+        state.activated_abilities_this_turn.insert(plain_key, 3);
 
         let projected = project_out_resources(&state);
 
         assert_eq!(
             projected
                 .activated_abilities_this_turn
-                .get(&(gated, 0))
+                .get(&gated_key)
                 .copied(),
             Some(3),
             "a count the ability's own condition reads must survive projection"
@@ -13777,12 +19463,293 @@ mod tests {
         assert_eq!(
             projected
                 .activated_abilities_this_turn
-                .get(&(plain, 0))
+                .get(
+                    &crate::game::restrictions::ability_usage_key(&projected, plain, 0)
+                        .expect("the plain ability resolves after projection")
+                )
                 .copied(),
             None,
             "an ability that neither gates nor reads the count keeps the existing \
              pumped-history projection"
         );
+    }
+
+    /// CR 602.5c + CR 602.2a: same-source, same-provenance, same-description
+    /// twins that differ only in body must NOT share a loop-projection fate.
+    /// The usage-key lookup binds the full key (fingerprint included), so the
+    /// gated twin's tally survives `project_out_resources` while the
+    /// unrestricted twin's is projected out. Reverting the fingerprint
+    /// conjunct returns the FIRST twin for the gated key, so the gated tally
+    /// is misclassified as unrestricted and dropped (RED).
+    ///
+    /// Synthetic twins: no printed card exhibits two same-description
+    /// abilities on one source differing only in body (per F2); the nearest
+    /// printed shape is reconfigure's attach vs unattach pair (both
+    /// undescribed). Both the per-turn (`OnlyOnceEachTurn`) and the per-game
+    /// (`OnlyOnce`) mirrors are pinned here.
+    #[test]
+    fn projection_retains_only_the_gated_twin_of_same_description_pair() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ActivationRestriction, Effect, EffectScope,
+            QuantityExpr, TapStateChange, TargetFilter, TypedFilter,
+        };
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+
+        let holder = inert_token(&mut state, 903, 0, "Twin Holder");
+
+        // Twin 0: unrestricted untap. Twin 1: the same description, a
+        // different body (life gain), gated once per turn / once per game.
+        // Same source, same (absent) provenance, same description — the
+        // fingerprints alone tell them apart.
+        let untap = || Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        };
+        let mut plain = AbilityDefinition::new(AbilityKind::Activated, untap());
+        plain.description = Some("Twin ability".to_string());
+        let mut gated = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        gated.description = Some("Twin ability".to_string());
+        gated.activation_restrictions = vec![ActivationRestriction::OnlyOnceEachTurn];
+        let mut game_open = AbilityDefinition::new(AbilityKind::Activated, untap());
+        game_open.description = Some("Twin game ability".to_string());
+        let mut game_once = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        game_once.description = Some("Twin game ability".to_string());
+        game_once.activation_restrictions = vec![ActivationRestriction::OnlyOnce];
+        state.objects.get_mut(&holder).unwrap().abilities =
+            Arc::new(vec![plain, gated, game_open, game_once]);
+
+        // CR 602.5c: tallies are keyed by the resolved acquisition.
+        let key = |index: usize| {
+            crate::game::restrictions::ability_usage_key(&state, holder, index)
+                .expect("the twin ability resolves")
+        };
+        let plain_key = key(0);
+        let gated_key = key(1);
+        let game_open_key = key(2);
+        let game_once_key = key(3);
+        // The twins share everything but the fingerprint.
+        assert_eq!(plain_key.source, gated_key.source);
+        assert_eq!(plain_key.provenance, gated_key.provenance);
+        assert_eq!(plain_key.description, gated_key.description);
+        assert_ne!(
+            plain_key.fingerprint, gated_key.fingerprint,
+            "the twins must differ in body for the fingerprint to discriminate"
+        );
+        assert_eq!(game_open_key.description, game_once_key.description);
+        assert_ne!(
+            game_open_key.fingerprint, game_once_key.fingerprint,
+            "the per-game twins must differ in body too"
+        );
+
+        // Reach-guard: both tallies are present before projection.
+        state
+            .activated_abilities_this_turn
+            .insert(plain_key.clone(), 1);
+        state
+            .activated_abilities_this_turn
+            .insert(gated_key.clone(), 1);
+        state
+            .activated_abilities_this_game
+            .insert(game_open_key.clone(), 1);
+        state
+            .activated_abilities_this_game
+            .insert(game_once_key.clone(), 1);
+        assert_eq!(state.activated_abilities_this_turn.len(), 2);
+        assert_eq!(state.activated_abilities_this_game.len(), 2);
+
+        let projected = project_out_resources(&state);
+
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&gated_key)
+                .copied(),
+            Some(1),
+            "the gated twin's per-turn tally must survive projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&plain_key)
+                .copied(),
+            None,
+            "the unrestricted twin's per-turn tally keeps the pumped-history projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_game
+                .get(&game_once_key)
+                .copied(),
+            Some(1),
+            "the gated twin's per-game tally must survive projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_game
+                .get(&game_open_key)
+                .copied(),
+            None,
+            "the unrestricted twin's per-game tally keeps the pumped-history projection"
+        );
+    }
+
+    /// CR 602.5c + CR 113.2c: same-source, same-description, same-body twins
+    /// that differ ONLY in `grant_chain` must not share a loop-projection
+    /// fate. The direct twin carries no lineage; the re-donated twin carries
+    /// the carrier hop through which it was re-donated (the F4 class: a capped
+    /// Locus-style re-donation vs its unrestricted twin). Without the lineage
+    /// conjunct the lookup returns whichever twin sits first in `abilities[]`
+    /// — here the unrestricted one — so the capped twin's tally is
+    /// misclassified as unrestricted and projected out (RED). Reverting the
+    /// `grant_chain` conjunct flips the retention assertion below.
+    ///
+    /// Synthetic twins: no printed card exhibits two same-description
+    /// abilities on one source differing only in lineage; the nearest printed
+    /// shape is the Locus-capped re-donation through an animated carrier.
+    /// The per-game gate twin (`OnlyOnce`) is covered by the same fixed
+    /// predicate through `ability_has_per_game_activation_gate`, so only the
+    /// per-turn axis is pinned here.
+    #[test]
+    fn projection_retains_capped_twin_of_same_lineage_pair() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ActivationRestriction, Effect, EffectScope,
+            TapStateChange, TargetFilter, TypedFilter,
+        };
+        use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+
+        let holder = inert_token(&mut state, 904, 0, "Lineage Holder");
+        let carrier = inert_token(&mut state, 905, 0, "Carrier");
+
+        let untap = || Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        };
+        // The same provider acquisition for both twins; only the re-donated
+        // twin carries the carrier hop.
+        let provider_stamp = ObjectIncarnationRef::of(ObjectId(906), 1);
+        let carrier_hop = ObjectIncarnationRef::of(carrier, 2);
+        let mut direct = AbilityDefinition::new(AbilityKind::Activated, untap());
+        direct.description = Some("Twin lineage ability".to_string());
+        direct.granting_object = Some(provider_stamp);
+        let mut redonated = AbilityDefinition::new(AbilityKind::Activated, untap());
+        redonated.description = Some("Twin lineage ability".to_string());
+        redonated.granting_object = Some(provider_stamp);
+        redonated.grant_chain = vec![carrier_hop];
+        redonated.activation_restrictions = vec![ActivationRestriction::OnlyOnceEachTurn];
+        // Unrestricted twin FIRST in `abilities[]`: pre-fix, the capped key
+        // resolves to it.
+        state.objects.get_mut(&holder).unwrap().abilities = Arc::new(vec![direct, redonated]);
+
+        // Reach-guards: identical in everything the pre-fix predicate
+        // compared, differing only in lineage.
+        let key = |index: usize| {
+            crate::game::restrictions::ability_usage_key(&state, holder, index)
+                .expect("the lineage twin resolves")
+        };
+        let direct_key = key(0);
+        let capped_key = key(1);
+        assert_eq!(direct_key.provenance, capped_key.provenance);
+        assert_eq!(direct_key.description, capped_key.description);
+        assert_eq!(
+            direct_key.fingerprint, capped_key.fingerprint,
+            "identical bodies must fingerprint apart from nothing: the chain, \
+             not the body, discriminates"
+        );
+        assert!(
+            direct_key.grant_chain.is_empty(),
+            "the direct twin carries no lineage"
+        );
+        assert_eq!(
+            capped_key.grant_chain,
+            vec![carrier_hop],
+            "the re-donated twin carries the carrier hop"
+        );
+
+        state
+            .activated_abilities_this_turn
+            .insert(direct_key.clone(), 1);
+        state
+            .activated_abilities_this_turn
+            .insert(capped_key.clone(), 1);
+        assert_eq!(state.activated_abilities_this_turn.len(), 2);
+
+        let projected = project_out_resources(&state);
+
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&capped_key)
+                .copied(),
+            Some(1),
+            "the re-donated (capped-lineage) twin's tally must survive projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&direct_key)
+                .copied(),
+            None,
+            "the direct (unrestricted-lineage) twin's tally keeps the pumped-history projection"
+        );
+    }
+
+    /// U4 — the battlefield-entry observation table is keyed by the `zone_changes_this_turn`
+    /// index space, so the loop projection clears it with the ledger.
+    #[test]
+    fn project_out_resources_clears_battlefield_entry_observations() {
+        let mut state = GameState::new_two_player(7);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Observed".to_string(),
+            Zone::Battlefield,
+        );
+        let observation =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&id]);
+        state.battlefield_entry_observations.insert(0, observation);
+        assert!(
+            !state.battlefield_entry_observations.is_empty(),
+            "precondition"
+        );
+
+        let projected = project_out_resources(&state);
+
+        assert!(projected.battlefield_entry_observations.is_empty());
+    }
+
+    /// The instruction-boundary marks index the zone-change ledger, which the
+    /// projection clears; two periods of a loop that passes an instruction
+    /// boundary differ only in them (CR 732.2a).
+    #[test]
+    fn project_out_resources_clears_instruction_boundary_marks() {
+        let mut state = GameState::new_two_player(7);
+        state.instruction_boundary_marks = vec![1, 3];
+
+        let projected = project_out_resources(&state);
+
+        assert!(projected.instruction_boundary_marks.is_empty());
     }
 
     /// The cover admits growth beside a non-grown permanent with a spell-kind class-reading pump;
@@ -13953,6 +19920,30 @@ mod tests {
         (prior, current)
     }
 
+    /// The fodder base with every Saproling, and the class, a token carrying one
+    /// `DamageReceived` trigger whose subject is `valid_card`.
+    fn damage_triggered_token_fodder(
+        valid_card: Option<TargetFilter>,
+    ) -> (GameState, GameState, GameObject) {
+        let (mut prior, mut current) = fodder_cover_base();
+        let mut class = saproling_class();
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageReceived);
+        trigger.valid_card = valid_card;
+        let arm = |object: &mut GameObject| {
+            if object.name == "Saproling" {
+                object.is_token = true;
+                object.trigger_definitions = vec![trigger.clone()].into();
+            }
+        };
+        for state in [&mut prior, &mut current] {
+            for id in state.battlefield.clone() {
+                arm(state.objects.get_mut(&id).unwrap());
+            }
+        }
+        arm(&mut class);
+        (prior, current, class)
+    }
+
     /// F+ COVER (tapped-split, NO cost keyword). Revert-failing: swapping
     /// `fodder_cover` to `loop_states_cover_modulo_object_growth` (absolute-ObjectId)
     /// rejects — 700's untapped→tapped drift fails `board_covers`' non-grown eq.
@@ -13972,8 +19963,9 @@ mod tests {
     }
 
     /// CR 732.1b: a certifying cover reports growth only performing makes when a grown object
-    /// carries a keyword, a delayed trigger acts on a grown object alone, another player controls a
-    /// grown object, or a certified departure moved one, and mintable growth otherwise.
+    /// carries a keyword or a trigger, a delayed trigger acts on a grown object alone, another
+    /// player controls a grown object, or a certified departure moved one, and mintable growth
+    /// otherwise.
     #[test]
     fn the_fodder_cover_reports_whether_a_mint_makes_its_growth() {
         use crate::types::ability::{
@@ -14056,6 +20048,12 @@ mod tests {
             report(&prior, &sacrificed, &saproling_class()),
             (vec![], CoveredGrowth::PerformedOnly)
         );
+
+        let (prior, current, class) = damage_triggered_token_fodder(Some(TargetFilter::SelfRef));
+        assert_eq!(
+            report(&prior, &current, &class),
+            (vec![], CoveredGrowth::PerformedOnly)
+        );
     }
 
     /// F-B1 (untapped ↓): total STILL grows (5→6) but untapped DROPS (4→3) — a
@@ -14124,6 +20122,35 @@ mod tests {
             fodder_cover(&p, &c),
             "reach-guard: inert fodder growth ⇒ COVER"
         );
+
+        // CR 603.2: a token whose trigger acts on itself alone is relieved; one whose trigger
+        // reads any creature is not.
+        let refusals = |valid_card| {
+            let (prior, current, class) = damage_triggered_token_fodder(valid_card);
+            fodder_growth_cover_refusals(&prior, &current, &class, PlayerId(0)).0
+        };
+        assert_eq!(refusals(Some(TargetFilter::SelfRef)), vec![]);
+        assert_eq!(refusals(None), vec![FodderCoverRefusal::GrownNotInert]);
+
+        // CR 603.6c + CR 603.10a: a self trigger that can fire as the token leaves is not
+        // relieved, nor is a zone-change shape outside the entry shape.
+        let s = |mode| TriggerDefinition::new(mode).valid_card(TargetFilter::SelfRef);
+        assert!(grown_with(true, s(TriggerMode::DamageReceived)));
+        assert_eq!(
+            [
+                s(TriggerMode::LeavesBattlefield),
+                s(TriggerMode::ChangesZone)
+                    .origin(Zone::Battlefield)
+                    .destination(Zone::Graveyard),
+                s(TriggerMode::Exiled),
+                s(TriggerMode::Destroyed),
+                s(TriggerMode::ChangesZone).destination(Zone::Graveyard),
+                s(TriggerMode::Evolve).origin(Zone::Battlefield),
+                s(TriggerMode::EntersOrAttacks).origin(Zone::Battlefield),
+            ]
+            .map(|trigger| grown_with(true, trigger)),
+            [false; 7]
+        );
     }
 
     // =======================================================================
@@ -14135,6 +20162,39 @@ mod tests {
 
     fn sign_check(prior: &GameState, current: &GameState) -> bool {
         driving_resources_non_decreasing(prior, current, PlayerId(0))
+    }
+
+    /// CR 704.5g: with the period's first frame carried, damage on a permanent the period minted
+    /// is growth, while damage on a permanent present throughout still falls on a driving
+    /// resource.
+    #[test]
+    fn driving_resources_follow_the_carried_population() {
+        let mut first = GameState::new_two_player(7);
+        inert_token(&mut first, 800, 0, "Engine");
+        let mut prior = first.clone();
+        inert_token(&mut prior, 801, 0, "Copy");
+        let damaged = |id: u64| {
+            let mut current = prior.clone();
+            current
+                .objects
+                .get_mut(&ObjectId(id))
+                .unwrap()
+                .damage_marked = 2;
+            current
+        };
+        let read = |current: &GameState| {
+            (
+                driving_resources_non_decreasing_carried(
+                    &prior,
+                    current,
+                    PlayerId(0),
+                    Some(&first),
+                ),
+                driving_resources_non_decreasing_carried(&prior, current, PlayerId(0), None),
+            )
+        };
+        assert_eq!(read(&damaged(801)), (true, false));
+        assert_eq!(read(&damaged(800)), (false, false));
     }
 
     /// S+ (positive reach-guard for every S- below): no consumable decreases.
@@ -14279,12 +20339,12 @@ mod tests {
     }
 
     /// `_projected_player_axes_is_total` (compiler-total guard): `Player::default()`
-    /// has empty `player_counters` ⇒ 6 scalar axes. Breaks if a projected scalar is
+    /// has empty `player_counters` ⇒ 7 scalar axes. Breaks if a projected scalar is
     /// added to `project_out_player_consumables` without a matching `vec![]` entry.
     /// Mirror of `_gamestate_partition_is_total`'s convention.
     #[test]
     fn _projected_player_axes_is_total() {
-        assert_eq!(projected_player_axes(&Player::default()).len(), 6);
+        assert_eq!(projected_player_axes(&Player::default()).len(), 7);
     }
 
     /// carry a (`_projected_player_maps_is_total`, compiler-total guard): `Player::default()`
@@ -14321,6 +20381,27 @@ mod tests {
             sign_check(&prior, &healed),
             "reach-guard: a damage_marked DECREASE (2→0 heal) must still PASS"
         );
+    }
+
+    /// CR 702.12b + CR 704.5g: damage marked on an indestructible permanent never destroys it,
+    /// so its growth is not a consumed engine.
+    #[test]
+    fn sign_check_damage_marked_on_indestructible_not_vetoed() {
+        let mut prior = GameState::new_two_player(7);
+        let oid = inert_token(&mut prior, 620, 0, "Engine");
+        prior.objects.get_mut(&oid).unwrap().damage_marked = 2;
+        let mut current = prior.clone();
+        current.objects.get_mut(&oid).unwrap().damage_marked = 3;
+        assert!(!sign_check(&prior, &current));
+        for frame in [&mut prior, &mut current] {
+            frame
+                .objects
+                .get_mut(&oid)
+                .unwrap()
+                .keywords
+                .push(crate::types::keywords::Keyword::Indestructible);
+        }
+        assert!(sign_check(&prior, &current));
     }
 
     /// carry b controller-scoping: an OPPONENT's damage_marked increase is NOT vetoed (the
@@ -14463,8 +20544,7 @@ mod tests {
     /// and vice-versa (an incidental board observer of one axis never mis-routes a disjoint-axis
     /// loop). Matched pairs: a benign board is UNOBSERVED on both axes; adding a per-event observer
     /// of ONE class (Heliod-like `LifeGained` / `CounterAdded` trigger, or a `GainLife`/`AddCounter`
-    /// replacement) FLIPS ONLY that axis. This is the CORRECTNESS gate — the batched apply fires a
-    /// lump observer once, not N×.
+    /// replacement) FLIPS ONLY that axis. The batched apply fires a lump observer once, not N×.
     ///
     /// REVERT-PROBE (discriminating): delete the per-event trigger scan (block 2) ⇒ the
     /// `LifeGained` / `CounterAdded` rows flip to false; delete the replacement scan (block 3) ⇒
@@ -14665,6 +20745,7 @@ mod tests {
         on_board: [ObjectId; 2],
         in_hand: ObjectId,
         attacker: ObjectId,
+        exert_permission: TriggerDefinitionRef,
     ) -> Vec<(&'static str, crate::types::game_state::WaitingFor, bool)> {
         use crate::types::game_state::WaitingFor;
         vec![
@@ -14875,6 +20956,7 @@ mod tests {
                     player: PlayerId(0),
                     // CR 701.43d exerts an ATTACKING permanent.
                     attacker: on_board[0],
+                    permission: exert_permission,
                     remaining: Vec::new(),
                 },
                 true,
@@ -14925,7 +21007,39 @@ mod tests {
                 },
                 true,
             ),
+            (
+                "RevealChoice, non-optional with one eligible card (CR 608.2d)",
+                reveal_choice(vec![in_hand], false),
+                true,
+            ),
+            (
+                "RevealChoice, optional with one card — declining is a real choice",
+                reveal_choice(vec![in_hand], true),
+                false,
+            ),
+            (
+                "RevealChoice, non-optional with two cards (CR 608.2d — the ring survives the choice)",
+                reveal_choice(vec![in_hand, on_board[0]], false),
+                true,
+            ),
+            (
+                "RevealChoice, non-optional with no card",
+                reveal_choice(Vec::new(), false),
+                false,
+            ),
         ]
+    }
+
+    fn reveal_choice(cards: Vec<ObjectId>, optional: bool) -> crate::types::game_state::WaitingFor {
+        crate::types::game_state::WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards,
+            filter: crate::types::ability::default_target_filter_any(),
+            optional,
+            decline_runs_continuation: false,
+            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
+        }
     }
 
     /// The `cast_card_ids: Some(&[])` proof, pinned as a row.
@@ -14947,9 +21061,8 @@ mod tests {
     /// the candidate list through `is_forced_cascade_window` — the predicate under test — is
     /// itself a hole, because deleting a member just shrinks the loop. Each candidate
     /// therefore carries its EXPECTED membership and that expectation is asserted before the
-    /// cast proof runs, so DELETING a member fails its `true` row and ADDING one of the
-    /// enumerated non-members (`Priority` either seat, `RedistributeLifeTotals`,
-    /// `AssignCombatDamage`, `CombatTaxPayment`) fails its `false` row.
+    /// cast proof runs, so DELETING a member fails its `true` row and ADDING any
+    /// enumerated non-member fails its `false` row.
     ///
     /// ponytail: a brand-new `WaitingFor` variant added to the predicate but to no list
     /// is still silent. Closing that needs an exhaustive 127-arm `WaitingFor` destructure;
@@ -15152,7 +21265,39 @@ mod tests {
         // CLASS-DRIFT GATE, run before the cast proof: every candidate's membership must
         // be what the list says it is. A deleted member reds its `true` row here; an
         // added non-member reds its `false` row.
-        let candidates = cast_proof_candidate_windows(on_board, in_hand, attacker);
+        // CR 508.1g: This optional-cost control needs an actual functioning
+        // permission on an attacking source, rather than an arbitrary object ID.
+        state
+            .objects
+            .get_mut(&on_board[0])
+            .unwrap()
+            .install_trigger_base_definitions(Arc::new(vec![TriggerDefinition::new(
+                crate::types::triggers::TriggerMode::Exerted,
+            )
+            .valid_card(TargetFilter::SelfRef)]))
+            .expect("materialize the permission before binding its occurrence");
+        state.combat.as_mut().unwrap().attackers.push(
+            crate::game::combat::AttackerInfo::attacking_player(on_board[0], PlayerId(1)),
+        );
+        let exert_permission = crate::game::functioning_abilities::active_trigger_definitions(
+            &state,
+            &state.objects[&on_board[0]],
+        )
+        .next()
+        .expect("functioning attack permission")
+        .definition_ref;
+        assert_eq!(
+            exert_permission.source,
+            crate::types::identifiers::ObjectIncarnationRef::from_object(
+                &state.objects[&on_board[0]]
+            )
+        );
+        assert!(!matches!(
+            &exert_permission.occurrence,
+            crate::types::ability::TriggerDefinitionOccurrenceRef::Unmaterialized
+        ));
+        let candidates =
+            cast_proof_candidate_windows(on_board, in_hand, attacker, exert_permission);
         for (why, window, expected_member) in &candidates {
             assert_eq!(
                 window.is_forced_cascade_window(),
@@ -15176,6 +21321,13 @@ mod tests {
             if !expected_member {
                 continue;
             }
+            state.phase = match &window {
+                WaitingFor::DeclareAttackers { .. }
+                | WaitingFor::ExertChoice { .. }
+                | WaitingFor::EnlistChoice { .. } => Phase::DeclareAttackers,
+                WaitingFor::DeclareBlockers { .. } => Phase::DeclareBlockers,
+                _ => Phase::PreCombatMain,
+            };
             state.waiting_for = window;
             // PER-WINDOW REACH-GUARD. The zero below is only evidence if the enumerator
             // is live AT THIS WINDOW. A member whose fixture is under-populated (a
@@ -15937,6 +22089,201 @@ mod tests {
             .expect("the per-repetition charges are unbounded")
     }
 
+    /// CR 704.3 + CR 704.5a: [`PeriodicDelta::declared_seat_life_crossing`] answers as the
+    /// stepping walk does over the same stream ([`PeriodicDelta::first_life_crossing`] over
+    /// [`PeriodicDelta::declared_seat_life_charges`]), for both seats, both [`ChargeBound`]s,
+    /// every life total from 0 to 24 and every horizon up to 30. One board, one slot: P0's
+    /// trigger announces a player-target slot that may name P0 or P1, and the period was observed
+    /// draining P1 by 2. The declarations keep that aim, move it to P0, switch between the two
+    /// seats at one and at two pre-declared points, and alternate them in a round robin, which
+    /// has no finite list of change points and is stepped. Each is read with no leading
+    /// repetition and with the slot's first repetition latched onto either seat (CR 603.3d), and
+    /// under two observations: the observed aim on P1, and one that switches from P1 to P0 at
+    /// index 3, which on a declaration that changes nowhere is the only pre-declared switch point.
+    ///
+    /// REVERT-PROBES: drop the change points a leading slot adds (the latched first repetition,
+    /// and each switch point read one index behind) ⇒ a latched row answers differently from the
+    /// stepping walk ⇒ FAILS. Read a round robin as changing nowhere ⇒ its rows FAIL. Gather the
+    /// change points from the declaration alone ⇒ a row under the switching observation on a
+    /// declaration that changes nowhere answers differently from the stepping walk ⇒ FAILS.
+    #[test]
+    fn a_declared_life_crossing_is_the_stepping_walks_across_switch_points_and_a_lead() {
+        use crate::analysis::decision_template::{
+            AnnouncementSubject, ConcreteTarget, DecisionGroupKey, DecisionKind, IterationCount,
+            PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
+        };
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut board = bound_board(&[18, 20]);
+        let slot = announced_target_slot(&mut board, 500);
+        let charges = vec![SlotCharge {
+            slot: slot.clone(),
+            magnitude: 2,
+            reaches: vec![p0, p1],
+            aimed_at: Some(p1),
+        }];
+        let delta = life_loss_delta(&[(1, 2)]);
+        let published = delta.seat_life_charges(&charges);
+        let period = PeriodicDelta {
+            frames_per_period: 1,
+            delta,
+            victim_slot: vec![(slot.clone(), 2)],
+            declarable_victims: SlotCharge::declarable_victims(&charges),
+            seat_life_charge: published,
+            cleanup: None,
+        };
+        let points = [seat_point(&slot, &[0, 1])];
+        let observed = seat_schedule_declaration(&[(&slot, &[1])]);
+        let piecewise = |steps: &[(u32, u8)]| DecisionTemplate {
+            owner: p0,
+            decisions: vec![PinnedDecision::Targets {
+                slot: slot.clone(),
+                targets: vec![TargetPin::Scheduled(TargetSchedule::Piecewise(
+                    steps
+                        .iter()
+                        .map(|&(start, seat)| {
+                            (
+                                start,
+                                Ranking::one(AnnouncementSubject::Seat(PlayerId(seat))),
+                            )
+                        })
+                        .collect(),
+                ))],
+            }],
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(9),
+            },
+            key: DecisionGroupKey::from_sources(
+                std::slice::from_ref(&slot.source),
+                DecisionKind::LoopChoice,
+            ),
+        };
+        let observations = [
+            ("observed on P1", observed.clone()),
+            (
+                "observed on P1, then on P0 from index 3",
+                piecewise(&[(0, 1), (3, 0)]),
+            ),
+        ];
+        let declarations = [
+            ("aimed at P1", observed),
+            ("aimed at P0", seat_schedule_declaration(&[(&slot, &[0])])),
+            ("P1, then P0 from index 3", piecewise(&[(0, 1), (3, 0)])),
+            ("P0, then P1 from index 4", piecewise(&[(0, 0), (4, 1)])),
+            (
+                "P1, P0 from index 2, P1 from index 6",
+                piecewise(&[(0, 1), (2, 0), (6, 1)]),
+            ),
+            (
+                "a round robin of P0 and P1",
+                seat_schedule_declaration(&[(&slot, &[0, 1])]),
+            ),
+        ];
+        let latched = |seat: PlayerId| {
+            vec![ConcreteDecision::Targets {
+                slot: slot.clone(),
+                targets: vec![ConcreteTarget::Player(seat)],
+            }]
+        };
+        let (onto_p0, onto_p1) = (latched(p0), latched(p1));
+        let leads = [
+            ("no lead", AnnouncedLead::None),
+            (
+                "latched onto P0",
+                AnnouncedLead::LeadingRepetition(&onto_p0),
+            ),
+            (
+                "latched onto P1",
+                AnnouncedLead::LeadingRepetition(&onto_p1),
+            ),
+        ];
+        let (mut crossed_past_a_switch, mut moved_by_the_lead) = (0, 0);
+        let mut moved_by_the_observed_switch = 0;
+        for (name, declaration) in &declarations {
+            let switches = declaration.resolution_change_points();
+            let changes_nowhere = switches
+                .as_ref()
+                .is_some_and(|switches| switches.is_empty());
+            for seat in [p0, p1] {
+                for bound in [ChargeBound::Ceiling, ChargeBound::Attributable] {
+                    for remaining_life in 0..=24i64 {
+                        for horizon in 0..=30u32 {
+                            let mut unled = None;
+                            for (lead_name, lead) in leads {
+                                // The stepping walk's answer under each observation, held equal
+                                // to the stretch reading's under the same one.
+                                let [stepped, switched] =
+                                    observations.each_ref().map(|(seen_name, seen)| {
+                                        let stepped = PeriodicDelta::first_life_crossing(
+                                            period.declared_seat_life_charges(
+                                                seat,
+                                                Some(declaration),
+                                                Some(seen),
+                                                &points,
+                                                &board,
+                                                bound,
+                                                lead,
+                                            ),
+                                            remaining_life,
+                                            horizon,
+                                        );
+                                        assert_eq!(
+                                            period.declared_seat_life_crossing(
+                                                seat,
+                                                Some(declaration),
+                                                Some(seen),
+                                                &points,
+                                                &board,
+                                                bound,
+                                                lead,
+                                                remaining_life,
+                                                horizon,
+                                            ),
+                                            stepped,
+                                            "{name}, {seen_name}, {lead_name}, {seat:?}, \
+                                             {bound:?}, life {remaining_life}, horizon {horizon}"
+                                        );
+                                        stepped
+                                    });
+                                // The two observations resolve alike before index 3, so an answer
+                                // they disagree on is one the observation's switch moved.
+                                if changes_nowhere && switched != stepped {
+                                    moved_by_the_observed_switch += 1;
+                                }
+                                if matches!(lead, AnnouncedLead::None) {
+                                    unled = stepped;
+                                } else if stepped != unled {
+                                    moved_by_the_lead += 1;
+                                }
+                                let past_a_switch = switches.as_ref().is_some_and(|switches| {
+                                    stepped.is_some_and(|repetition| {
+                                        switches.iter().any(|at| *at > 0 && *at < repetition)
+                                    })
+                                });
+                                if past_a_switch {
+                                    crossed_past_a_switch += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            declarations[5].1.resolution_change_points().is_none(),
+            "REACH-GUARD: the round robin row has no finite list of change points"
+        );
+        assert!(
+            crossed_past_a_switch > 100 && moved_by_the_lead > 100,
+            "REACH-GUARD: crossings past a switch point ({crossed_past_a_switch}) and answers \
+             the latched repetition moves ({moved_by_the_lead})"
+        );
+        assert!(
+            moved_by_the_observed_switch > 100,
+            "REACH-GUARD: answers on a declaration that changes nowhere that the observation's \
+             switch at index 3 moves ({moved_by_the_observed_switch})"
+        );
+    }
+
     /// CR 119.3 + CR 704.5a: **a declaration charges a seat a slot only where its pin moves
     /// it, measured against the allocation the period was observed under.** One board, one
     /// slot: P0's trigger announces a player-target slot that may name P0 or P1, and the
@@ -16005,10 +22352,10 @@ mod tests {
         assert_eq!(charge(p1, Some(&observed), Some(&observed), 0), (2, 2));
 
         // ⓑ RE-AIMED ONTO P0: the slot lands on P0 although the observed period drained only
-        //   P1. P1 is not credited for the slot leaving it.
+        //   P1. P1's whole observed loss was the slot's, so the slot leaving it relieves it.
         let onto_p0 = seat_schedule_declaration(&[(&slot, &[0])]);
         assert_eq!(charge(p0, Some(&onto_p0), Some(&observed), 0), (2, 2));
-        assert_eq!(charge(p1, Some(&onto_p0), Some(&observed), 0), (2, 2));
+        assert_eq!(charge(p1, Some(&onto_p0), Some(&observed), 0), (0, 0));
 
         // ⓒ NO DECLARATION: an unpinned slot may land on any seat it reaches.
         assert_eq!(charge(p0, None, Some(&observed), 0), (2, 2));
@@ -16092,6 +22439,65 @@ mod tests {
             ),
             DeclaredLifeCharge { net: 5, dip: 8 },
             "CR 704.3: an unpinned slot may land on P0 at that same beat"
+        );
+    }
+
+    /// CR 119.3: **at [`ChargeBound::Ceiling`] a slot that surely leaves a seat relieves it only
+    /// where the seat's observed loss was wholly that slot's** (`PeriodicDelta::sole_slot_loss`).
+    /// One slot reaching P0 and P1, observed on P1 and re-aimed onto P0. Each leg below breaks
+    /// exactly one conjunct, and P1 keeps its reserved charge there.
+    #[test]
+    fn a_leaving_slot_is_relieved_only_where_the_observation_is_wholly_its_loss() {
+        let (p0, p1) = (PlayerId(0), PlayerId(1));
+        let mut board = bound_board(&[18, 20]);
+        let slot = announced_target_slot(&mut board, 500);
+        let points = [seat_point(&slot, &[0, 1])];
+        let observed = seat_schedule_declaration(&[(&slot, &[1])]);
+        let onto_p0 = seat_schedule_declaration(&[(&slot, &[0])]);
+        let p1_charge = |losses: &[(u8, i64)], reserved: &[(u8, i64)]| {
+            let period = PeriodicDelta {
+                frames_per_period: 1,
+                delta: life_loss_delta(losses),
+                victim_slot: vec![(slot.clone(), 2)],
+                declarable_victims: vec![p0, p1],
+                seat_life_charge: reserved
+                    .iter()
+                    .map(|&(seat, magnitude)| (PlayerId(seat), magnitude))
+                    .collect(),
+                cleanup: None,
+            };
+            let DeclaredLifeCharge { net, dip } = nth_charge(
+                &period,
+                p1,
+                Some(&onto_p0),
+                Some(&observed),
+                &points,
+                0,
+                &board,
+                ChargeBound::Ceiling,
+            );
+            (net, dip)
+        };
+
+        assert_eq!(
+            p1_charge(&[(1, 2)], &[(0, 2), (1, 2)]),
+            (0, 0),
+            "(i) P1's whole loss was the slot's, and the slot leaves it"
+        );
+        assert_eq!(
+            p1_charge(&[(0, 1), (1, 2)], &[(0, 2), (1, 2)]),
+            (2, 2),
+            "(ii) another domain seat also lost life over the period"
+        );
+        assert_eq!(
+            p1_charge(&[(1, 2)], &[(0, 3), (1, 2)]),
+            (2, 2),
+            "(iii) another seat was reserved more than the slot's magnitude"
+        );
+        assert_eq!(
+            p1_charge(&[(1, 3)], &[(0, 2), (1, 2)]),
+            (3, 3),
+            "(iv) P1's loss is not the slot's magnitude"
         );
     }
 
@@ -16652,9 +23058,9 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────────────────
 
     /// A ring whose frame `i` gives seat `s` the life `lives[i][s]`, everything else held
-    /// identical, so the frame-deltas are exactly the successive differences. Both halves are
-    /// built the way `record_loop_detect_sample` builds them, so the fixture cannot diverge
-    /// from production's construction.
+    /// identical, so the frame-deltas are exactly the successive differences. Samples are
+    /// captured in the strict form (this fixture only feeds rank-insensitive consumers);
+    /// production records the sample form, and that deferred path has its own regression.
     fn c1_ring(lives: &[&[i32]]) -> GameState {
         let mut state = bound_board(lives[0]);
         for frame_lives in lives {
@@ -16664,6 +23070,8 @@ mod tests {
                 .push_back(std::sync::Arc::new(crate::types::LoopDetectSample {
                     normalized: frame.normalize_for_loop(),
                     live: frame.loop_detect_live_sample(),
+                    tally: Default::default(),
+                    trace_at: None,
                 }));
         }
         state
@@ -17476,8 +23884,10 @@ mod tests {
         flate2::read::GzDecoder::new(&gz[..])
             .read_to_string(&mut json)
             .expect("fixture .json.gz must inflate to UTF-8 JSON");
-        let envelope: serde_json::Value =
+        let mut envelope: serde_json::Value =
             serde_json::from_str(&json).expect("dump envelope parses as JSON");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        crate::types::game_state::record_captured_onsets(&mut envelope);
         // Cross the dump through the PRODUCTION decoder rather than a bare `GameState`
         // decode wrapped in `Raw`: `PersistedGameState`'s own `Deserialize` runs
         // `reject_legacy_raw_prompt_authority` and `decode_persisted_resolution_state`
@@ -18572,12 +24982,14 @@ mod tests {
             for &life in lives {
                 let mut frame = GameState::new_two_player(0);
                 frame.players[1].life = life;
-                // Both halves built exactly as `record_loop_detect_sample` builds them, so
-                // the fixture cannot diverge from production's construction.
+                // Ring content captured in the strict form; production records the sample
+                // form and the deferred confirmation path has its own regression.
                 state.loop_detect_ring.push_back(std::sync::Arc::new(
                     crate::types::LoopDetectSample {
                         normalized: frame.normalize_for_loop(),
                         live: frame.loop_detect_live_sample(),
+                        tally: Default::default(),
+                        trace_at: None,
                     },
                 ));
             }
@@ -18925,10 +25337,12 @@ mod tests {
         // The ACTUAL wire payload: the `WaitingFor` variant that carries it.
         let cert = LoopCertificate {
             unbounded: vec![],
-            win_kind: WinKind::LethalDamage,
+            rising: vec![],
+            win_kind: Some(WinKind::LethalDamage),
+            win_kind_at: None,
             mandatory: false,
             residual_board_delta: BoardDelta::default(),
-            per_cycle: Some(populated),
+            per_cycle: Some(PeriodSignature::EveryRepetition(populated.clone())),
         };
         let offer = WaitingFor::LoopShortcut {
             proposer: PlayerId(0),
@@ -18937,6 +25351,7 @@ mod tests {
             schema: ShortcutDecisionSchema::default(),
             declaration: None,
             road: crate::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         let offer_json =
@@ -18958,6 +25373,7 @@ mod tests {
             schema: ShortcutDecisionSchema::default(),
             declaration: None,
             road: crate::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         let shipped_json = serde_json::to_string(&shipped).expect("serializes");
@@ -18965,6 +25381,27 @@ mod tests {
             !shipped_json.contains("per_cycle"),
             "an offer stating no per-period signature must be byte-identical to BASE; got \
              {shipped_json}"
+        );
+
+        // CR 732.2a: a signature's scope rides beside the period's own fields, named only for
+        // one repetition, so a signature saved before the scope reads as every repetition's.
+        let period_json = serde_json::to_value(&populated).expect("serializes");
+        let every = PeriodSignature::EveryRepetition(populated.clone());
+        assert_eq!(
+            serde_json::to_value(&every).expect("serializes"),
+            period_json
+        );
+        assert_eq!(
+            serde_json::from_value::<PeriodSignature>(period_json.clone()).expect("decodes"),
+            every
+        );
+        let one = PeriodSignature::OneRepetition(populated);
+        let one_json = serde_json::to_value(&one).expect("serializes");
+        assert_eq!(one_json["scope"], "OneRepetition");
+        assert_eq!(one_json["delta"], period_json["delta"]);
+        assert_eq!(
+            serde_json::from_value::<PeriodSignature>(one_json).expect("decodes"),
+            one
         );
     }
 
@@ -19085,19 +25522,23 @@ mod tests {
             predicted_winner: Some(PlayerId(0)),
             count: IterationCount::UntilLethal,
             unbounded: vec![],
-            win_kind: WinKind::LethalDamage,
+            rising: vec![],
+            win_kind: Some(WinKind::LethalDamage),
+            win_kind_at: None,
             template: None,
-            per_cycle: Some(PeriodicDelta {
+            per_cycle: Some(PeriodSignature::EveryRepetition(PeriodicDelta {
                 frames_per_period: 2,
                 delta,
                 victim_slot: vec![],
                 declarable_victims: vec![],
                 seat_life_charge: vec![],
                 cleanup: None,
-            }),
+            })),
             shortened_by: None,
             published_declaration: None,
+            leading_aims: Vec::new(),
             road: crate::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         let wait = WaitingFor::RespondToShortcut {
@@ -19573,9 +26014,8 @@ mod tests {
         // zero-payload classes: every counter/damage/draw resolver short-circuits
         // above the pipeline at zero. So no zero-payload `ProposedEvent` is reachable
         // through the six allow-listed classes and the refusal below is arm 3
-        // (`is_empty`), not the zero-payload accounting guard. Fail-CLOSED either way.
-        // That guard remains correct defence-in-depth for events proposed by
-        // non-allow-listed routes and is pinned directly on the partition in BOTH
+        // (`is_empty`), not the zero-payload accounting guard. That guard serves events
+        // proposed by non-allow-listed routes and is pinned directly on the partition in BOTH
         // directions by
         // `resolution_prompt::tests::an_unaccounted_derived_event_is_prompted_in_the_resolver`.
         let zero_entry = counter_entry(0);
@@ -19886,7 +26326,20 @@ mod tests {
         use crate::game::engine::entry_publishes_pin_slots;
         use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter};
 
-        let (state, src) = u2_relief_board();
+        let (board, src) = u2_relief_board();
+        // CR 118.3 + CR 608.2d: fund the proposer's pool with {1} on the
+        // test-local clone (the shared `u2_relief_board` fixture stays
+        // read-only) so the fixed-Mana offer is genuinely payable and the
+        // `may` slot mints through the state-reading branch again.
+        let mut state = board.clone();
+        state.players[0]
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                ManaType::Colorless,
+                src,
+                false,
+                Vec::new(),
+            ));
         let mana = || AbilityCost::Mana {
             cost: crate::types::mana::ManaCost::Cost {
                 shards: vec![],
@@ -19980,6 +26433,51 @@ mod tests {
                  slot minted through a state-reading branch can never reach a published offer"
             );
         }
+    }
+
+    /// F1 relief negative (CR 118.3 + CR 608.2d): the (a) arm two tests up
+    /// mints a `may` slot for a *funded* fixed-{1} `PayCost`. This matched
+    /// row differs in exactly the funding: on the unfunded shared fixture
+    /// the same shape-(B) entry mints NOTHING at the analysis layer. The
+    /// reach-guards prove the refusal is the feasibility gate, not routing —
+    /// the branch still resolves the payer to the proposer.
+    #[test]
+    fn unfunded_fixed_mana_may_offer_mints_no_relief_slot() {
+        use crate::game::engine::entry_publishes_pin_slots;
+        use crate::types::ability::{AbilityCost, Effect, TargetFilter};
+
+        let (board, src) = u2_relief_board();
+        assert!(
+            board.players[0].mana_pool.is_empty(),
+            "reach-guard: the shared fixture funds nothing, so the {{1}} offer is infeasible"
+        );
+        let entry = u2_shape_b_entry(
+            src,
+            990,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![],
+                        generic: 1,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            |_| {},
+        );
+        let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+            panic!("the fixture is a triggered ability");
+        };
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&board, ability),
+            Some(PlayerId(0)),
+            "reach-guard: routing still returns the proposer — only the mint is withheld"
+        );
+        assert!(
+            entry_publishes_pin_slots(&board, &entry, PlayerId(0)).is_none(),
+            "CR 608.2d: an infeasible fixed-mana `may` offer mints no relief slot"
+        );
     }
 
     /// R33 arms (a) / (b) / (a′1) / (c) — THE FROZEN EXEMPTION IS KEYED TO THE CERTIFYING
@@ -20272,8 +26770,7 @@ mod tests {
     /// the extent, so a skip placed there raises the count to 2.
     ///
     /// COMMENT LINES ARE EXCLUDED: a comment reads nothing, and counting
-    /// one would make the tripwire fire on prose. (The extent carries exactly one such line —
-    /// item (4)'s "`frozen_ids` is deliberately not read here".)
+    /// one would make the tripwire fire on prose.
     ///
     /// REVERT-PROBE: add a `frozen_ids.contains(&e.id)` skip to item (4)'s closure ⇒ the read
     /// count goes 1 → 2 ⇒ FLIPS.
@@ -21534,7 +28031,20 @@ mod tests {
         use crate::game::engine::entry_publishes_pin_slots;
         use crate::types::ability::{AbilityCost, Effect, TargetFilter};
 
-        let (frame, src) = u2_relief_board();
+        let (board, src) = u2_relief_board();
+        // CR 118.3 + CR 608.2d: fund the proposer's pool with {1} on the
+        // test-local clone (the shared `u2_relief_board` fixture stays
+        // read-only) so the fixed-Mana offer is genuinely payable and the
+        // fixture reaches the mint again.
+        let mut frame = board.clone();
+        frame.players[0]
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                ManaType::Colorless,
+                src,
+                false,
+                Vec::new(),
+            ));
         let entry = u2_shape_b_entry(
             src,
             9310,
@@ -21810,6 +28320,7 @@ mod tests {
         // …and the CONSUMER refuses on it, fail-closed.
         let foreign_touch = PeriodTouch {
             announced: vec![(&foreign, &entry)],
+            resolved: Vec::new(),
             frozen_ids: BTreeSet::new(),
         };
         let mut v_foreign = PeriodVerdicts::for_period(&ring, &current, PlayerId(0));
@@ -21996,11 +28507,10 @@ mod tests {
     /// Certification is basis A's EQUALITY disjunct, and that is a construction property
     /// rather than a hope: `setup` runs BEFORE any frame is snapshotted, so `ring[1]`
     /// (the certifying prior at `span == 1`) and `current` agree on everything, and only
-    /// `ring[2]` — which the equality disjunct never compares — is widened. Both halves of
-    /// every sample are built exactly as `record_loop_detect_sample` builds them, so the
-    /// fixture cannot diverge from production's construction; in particular the `.normalized`
-    /// half really is `normalize_for_loop`d, which is what the instrument-liveness controls
-    /// below depend on.
+    /// `ring[2]` — which the equality disjunct never compares — is widened. These samples
+    /// are captured in the STRICT form; production records the sample form
+    /// (`normalize_for_loop_sample`), which defers identity ranks to confirmation, and that
+    /// path is covered directly by `loop_relational_sample_confirmation_ranks_pins`.
     ///
     /// The per-frame life step is `game::engine`'s `drain_ring` orientation — frame `i` sits
     /// `FRAMES - i` life above the live board — so the certified period moves a real CR 704.5a
@@ -22045,6 +28555,8 @@ mod tests {
                 .push_back(std::sync::Arc::new(LoopDetectSample {
                     normalized: frame.normalize_for_loop(),
                     live: frame.loop_detect_live_sample(),
+                    tally: Default::default(),
+                    trace_at: None,
                 }));
         }
         state
@@ -22338,7 +28850,7 @@ mod tests {
     /// THE INSTRUMENT-LIVENESS CONTROL IS THE ARM THAT MAKES THE EQUALITY MEAN ANYTHING. The
     /// derivation diverges earlier than the ALLOCATOR (`create_object` handing out
     /// `ObjectId(0)` over a live object) and more directly — `normalize_for_loop` runs
-    /// `clear_trigger_identity_recursive`, which sets `ability.source_id = ObjectId(0)`, and
+    /// `clear_source_provenance_for_loop_recursive`, which sets `ability.source_id = ObjectId(0)`, and
     /// the resolver carries that straight into `TokenSpec.source_id`. So a normalized carrier
     /// proposes a token whose CR 111.1 source is the null object, and the two sets differ.
     ///
@@ -22350,7 +28862,7 @@ mod tests {
     /// `r27_c_an_intervening_if_binds_with_the_retained_samples_trigger_source` below, and
     /// structurally by `game::engine`'s `the_period_touch_window_is_carried_by_the_live_half`.
     /// This arm's own flipping site is the control's: delete
-    /// `ResolvedAbility::clear_trigger_identity_recursive`'s `self.source_id = ObjectId(0)`
+    /// `ResolvedAbility::clear_source_provenance_for_loop_recursive`'s `self.source_id = ObjectId(0)`
     /// ⇒ the two halves stop differing ⇒ the control FAILS.
     #[test]
     fn r27_a3_a_retained_sample_derives_the_live_boards_event_set() {
@@ -22379,6 +28891,8 @@ mod tests {
                         owner: TargetFilter::Controller,
                         attach_to: None,
                         enters_attacking: false,
+                        attack_destination:
+                            crate::types::ability::TokenAttackDestination::ControllerChooses,
                         supertypes: vec![],
                         static_abilities: vec![],
                         enter_with_counters: vec![],
@@ -22459,7 +28973,7 @@ mod tests {
             (token_source(&from_sample), token_source(&from_normalized)),
             (Some(SRC), Some(ObjectId(0))),
             "(a3) CONTROL — CR 400.7 + CR 111.1: `normalize_for_loop` runs \
-             `clear_trigger_identity_recursive`, which zeroes `ability.source_id`, and the \
+             `clear_source_provenance_for_loop_recursive`, which zeroes `ability.source_id`, and the \
              resolver carries that into `TokenSpec.source_id`. The normalized half therefore \
              proposes a token whose source is the NULL object. Without this arm the equality \
              above would be true of any two boards and would prove nothing"
@@ -22499,7 +29013,7 @@ mod tests {
     /// REVERT-PROBE (the shared carrier revert): point
     /// `game::engine::bounded_cycle_offer`'s `ring_live` at `&f.normalized` ⇒ the carrying
     /// frame becomes a comparand whose `ability.source_id` is `ObjectId(0)`
-    /// (`clear_trigger_identity_recursive`) ⇒ the `MayTriggerAutoChoiceKey` misses ⇒ the `may`
+    /// (`clear_source_provenance_for_loop_recursive`) ⇒ the `MayTriggerAutoChoiceKey` misses ⇒ the `may`
     /// slot IS minted ⇒ the negative arm OFFERS. A row that builds its own window is blind to
     /// the mint's carrier; a row driven through the mint is not.
     #[test]
@@ -22840,6 +29354,7 @@ mod tests {
                 counter_type: Some(CounterType::Plus1Plus1),
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::SelfRef,
+                scope: crate::types::ability::EffectScope::Single,
             })
         };
 
@@ -22941,8 +29456,6 @@ mod tests {
     /// | (I) infeasible optional `RemoveCounter` | zero matching counters | **`None`** |
     /// | (I-pos) the SAME entry, feasible | one counter on the source | **`Some`** |
     ///
-    /// Direction: strictly FEWER offers, never more.
-    ///
     /// REVERT-PROBE: delete `optional_for.is_some() ⇒ None` from the authority ⇒ (O) publishes
     /// ⇒ FLIPS. Delete the feasibility conjunct ⇒ (I) publishes ⇒ FLIPS. (P) and (I-pos) are
     /// the paired positives that keep both negatives out of "the mint publishes nothing".
@@ -23015,6 +29528,7 @@ mod tests {
                     counter_type: Some(CounterType::Plus1Plus1),
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
                 },
                 vec![],
                 src,
@@ -23144,7 +29658,7 @@ mod tests {
                 &mut control_budget
             ),
             ResolutionChoiceFreedom::MayPrompt,
-            "(c) CONTROL — CR 603.4 + CR 400.7: `clear_trigger_identity_recursive` sets \
+            "(c) CONTROL — CR 603.4 + CR 400.7: `clear_source_provenance_for_loop_recursive` sets \
              `trigger_source = None`, so `check_trigger_condition_with_source` takes the \
              absent-context path, `bind_resolution_scope` returns false and the classifier is \
              fail-closed `MayPrompt`. Without this the equality above would hold on any board"
@@ -23237,15 +29751,16 @@ mod tests {
                 // pipeline debug-asserts on one that declares neither.
                 definition.draw_scope = Some(DrawReplacementScope::IndividualDraw);
                 if with_body {
-                    definition.runtime_execute = Some(Box::new(ResolvedAbility::new(
-                        Effect::LoseLife {
-                            amount: QuantityExpr::Fixed { value: 1 },
-                            target: None,
-                        },
-                        vec![],
-                        DEF_SRC,
-                        PlayerId(0),
-                    )));
+                    definition.runtime_execute =
+                        Some(board.install_replacement_continuation(ResolvedAbility::new(
+                            Effect::LoseLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                target: None,
+                            },
+                            vec![],
+                            DEF_SRC,
+                            PlayerId(0),
+                        )));
                 }
                 let mut object = GameObject::new(
                     DEF_SRC,
@@ -23595,8 +30110,8 @@ mod tests {
     fn board_trigger_class_matches_reads_its_class_argument() {
         use crate::types::triggers::TriggerEventKey;
 
-        // The payload is DISCARDED by design (a sound over-approximation — see each wrapper's
-        // doc), so a payload-bearing key must still match its own class.
+        // The payload is DISCARDED by design, so a payload-bearing key must still match its own
+        // class.
         let etb = TriggerEventKey::EnterBattlefield(None);
         let cast = TriggerEventKey::SpellCast(None);
 
@@ -24081,7 +30596,7 @@ mod tests {
     }
 
     fn certify(prior: &GameState, current: &GameState) -> Option<CertifiedInstructedDeparture> {
-        certify_instructed_opponent_library_departure(prior, current, CERT_CASTER)
+        certify_instructed_opponent_library_departure(prior, current, [prior, current], CERT_CASTER)
     }
 
     /// Put one battlefield permanent carrying exactly `def` on `current`, so the C2 walk has
@@ -24766,6 +31281,58 @@ mod tests {
         );
     }
 
+    /// CR 701.17a: a departure leaves from the top, so beside a reordered victim library it is
+    /// refused through both projected-frame callers, though their projections compare equal.
+    #[test]
+    fn a_departure_beside_a_reordered_victim_library_is_refused() {
+        fn beside(pair: (GameState, GameState)) -> (GameState, GameState, GameState) {
+            let (mut prior, mut current) = pair;
+            for state in [&mut prior, &mut current] {
+                cover_library_card(state, 901, PlayerId(1));
+                cover_library_card(state, 902, PlayerId(1));
+            }
+            let mut reordered = current.clone();
+            reordered.players[1].library = im::vector![ObjectId(902), ObjectId(901)];
+            (prior, current, reordered)
+        }
+        let only_the_projection_hides_the_order = |current: &GameState, reordered: &GameState| {
+            current.players[1].library != reordered.players[1].library
+                && project_out_resources(current).players[1].library
+                    == project_out_resources(reordered).players[1].library
+        };
+
+        let (prior, current, reordered) =
+            beside(no_mint_pair_with_departure(PlayerId(1), Zone::Graveyard));
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::Departure
+            )),
+            "reach: the in-order pair certifies"
+        );
+        assert!(
+            only_the_projection_hides_the_order(&current, &reordered),
+            "reach: the no-mint frames differ only before projection"
+        );
+        assert_eq!(
+            resource_recurrence_covers(&prior, &reordered, PlayerId(0), None),
+            None
+        );
+
+        let (prior, current, reordered) =
+            beside(fodder_cover_with_departure(PlayerId(1), Zone::Graveyard));
+        assert!(
+            fodder_cover(&prior, &current),
+            "reach: the in-order fodder pair covers"
+        );
+        assert!(
+            only_the_projection_hides_the_order(&current, &reordered),
+            "reach: the fodder frames differ only before projection"
+        );
+        assert!(!fodder_cover(&prior, &reordered));
+    }
+
     /// Two otherwise identical frames holding card 900 in `owner`'s library, departed to `to` in
     /// `current` only.
     fn no_mint_pair_with_departure(owner: PlayerId, to: Zone) -> (GameState, GameState) {
@@ -24783,20 +31350,26 @@ mod tests {
         let mut prior = GameState::new_two_player(42);
         cover_library_card(&mut prior, 900, PlayerId(1));
         assert_eq!(
-            resource_recurrence_covers(&prior, &prior.clone(), PlayerId(0)),
-            Some((CoveredGrowth::Mintable, RecurrenceCover::Equal)),
+            resource_recurrence_covers(&prior, &prior.clone(), PlayerId(0), None),
+            Some(PairCover::Certified(
+                CoveredGrowth::Mintable,
+                RecurrenceCover::Equal
+            )),
             "reach: the departure-free pair covers"
         );
 
         let (prior, current) = no_mint_pair_with_departure(PlayerId(1), Zone::Graveyard);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0)),
-            Some((CoveredGrowth::PerformedOnly, RecurrenceCover::Departure))
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::Departure
+            ))
         );
 
         let (prior, current) = no_mint_pair_with_departure(PlayerId(0), Zone::Graveyard);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0)),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
             None
         );
 
@@ -24808,7 +31381,7 @@ mod tests {
             .counters
             .insert(CounterType::Plus1Plus1, 1);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0)),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
             None,
             "an arrival carrying a counter is not inert"
         );
@@ -24817,8 +31390,11 @@ mod tests {
         cover_library_card(&mut prior, 901, PlayerId(1));
         cover_library_card(&mut current, 901, PlayerId(1));
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0)),
-            Some((CoveredGrowth::PerformedOnly, RecurrenceCover::Departure)),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::Departure
+            )),
             "reach: a second, motionless library card does not disturb the cover"
         );
         current
@@ -24828,10 +31404,194 @@ mod tests {
             .counters
             .insert(CounterType::Stun, 1);
         assert_eq!(
-            resource_recurrence_covers(&prior, &current, PlayerId(0)),
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
             None,
             "the strip relieves only the certified ids"
         );
+    }
+
+    /// Two equal frames holding P0's untapped card 800 and untapped token 802, and P1's untapped
+    /// card 801.
+    fn spend_pair() -> (GameState, GameState) {
+        let mut prior = GameState::new_two_player(42);
+        battlefield_creature(&mut prior, 800, 0);
+        battlefield_creature(&mut prior, 801, 1);
+        token_on_battlefield(&mut prior, 802, true);
+        let current = prior.clone();
+        (prior, current)
+    }
+
+    fn set_tapped(state: &mut GameState, id: u64, tapped: bool) {
+        state
+            .objects
+            .get_mut(&ObjectId(id))
+            .expect("the permanent is live")
+            .tapped = tapped;
+    }
+
+    /// Moves P0's permanent `id` off the battlefield to `to`, or, with `to` `None`, out of the
+    /// game as a token that ceased to exist (CR 111.7).
+    fn leave_battlefield(state: &mut GameState, id: u64, to: Option<Zone>) {
+        use crate::game::zones::{add_to_zone, remove_from_zone};
+        let id = ObjectId(id);
+        remove_from_zone(state, id, Zone::Battlefield, PlayerId(0));
+        match to {
+            Some(zone) => {
+                add_to_zone(state, id, zone, PlayerId(0));
+                state.objects.get_mut(&id).expect("the card is live").zone = zone;
+            }
+            None => {
+                state.objects.remove(&id);
+            }
+        }
+    }
+
+    /// CR 118.3 + CR 701.21a + CR 701.26a: a pair no certifying arm admits is a spend when it
+    /// recurs once the caster's permanents that left the battlefield or became tapped are set
+    /// aside, whatever moved them; another player's permanent, an untap, or any other difference
+    /// leaves it refused.
+    #[test]
+    fn the_pair_question_answers_a_spend_only_for_the_casters_departed_or_tapped_permanents() {
+        let caster = PlayerId(0);
+        let (prior, current) = spend_pair();
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster, None),
+            Some(PairCover::Certified(
+                CoveredGrowth::Mintable,
+                RecurrenceCover::Equal
+            )),
+            "reach: the unspent pair covers"
+        );
+
+        type SpendMove = fn(&mut GameState);
+        let spent: [(&str, SpendMove); 4] = [
+            ("card tapped", |current| set_tapped(current, 800, true)),
+            ("card put into a graveyard", |current| {
+                leave_battlefield(current, 800, Some(Zone::Graveyard))
+            }),
+            ("token that ceased to exist", |current| {
+                leave_battlefield(current, 802, None)
+            }),
+            ("card tapped, beside its token exiled", |current| {
+                set_tapped(current, 800, true);
+                leave_battlefield(current, 802, Some(Zone::Exile));
+            }),
+        ];
+        for (how, spend) in spent {
+            let (prior, mut current) = spend_pair();
+            spend(&mut current);
+            assert_eq!(
+                resource_recurrence_covers(&prior, &current, caster, None),
+                Some(PairCover::Spend),
+                "the caster's permanent {how}"
+            );
+        }
+
+        let (prior, mut current) = spend_pair();
+        set_tapped(&mut current, 801, true);
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster, None),
+            None,
+            "another player's permanent became tapped"
+        );
+
+        let (mut prior, current) = spend_pair();
+        set_tapped(&mut prior, 800, true);
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster, None),
+            None,
+            "the caster's permanent became untapped"
+        );
+
+        let (prior, mut current) = spend_pair();
+        set_tapped(&mut current, 800, true);
+        current
+            .objects
+            .get_mut(&ObjectId(801))
+            .expect("the other permanent is live")
+            .counters
+            .insert(CounterType::Stun, 1);
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster, None),
+            None,
+            "the remainder still differs"
+        );
+
+        // The remainder is put to every certifying arm, not to equality alone.
+        let (mut prior, mut current) = no_mint_pair_with_departure(PlayerId(1), Zone::Graveyard);
+        for frame in [&mut prior, &mut current] {
+            battlefield_creature(frame, 800, 0);
+        }
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster, None),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::Departure
+            )),
+            "reach: the departure arm admits the unspent pair"
+        );
+        set_tapped(&mut current, 800, true);
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, caster, None),
+            Some(PairCover::Spend),
+            "the departure arm admits the remainder"
+        );
+    }
+
+    /// CR 732.2a + CR 118.3: a period's two pairs are refused when either does not recur, a spend
+    /// when either recurs only with a spend set aside, and otherwise covered by the latest arm and
+    /// the larger growth either needed.
+    #[test]
+    fn two_pairs_combine_a_refusal_over_a_spend_over_a_certified_cover() {
+        use RecurrenceCover::{Equal, History};
+        let performed = PairCover::Certified(CoveredGrowth::PerformedOnly, Equal);
+        let history = PairCover::Certified(CoveredGrowth::Mintable, History);
+        let answers = [None, Some(performed), Some(history), Some(PairCover::Spend)];
+        let refused = || {
+            (
+                ObjectGrowthVerdict::ResourceRecurrence(None),
+                CoveredGrowth::Mintable,
+            )
+        };
+        let spend = || (ObjectGrowthVerdict::Spend, CoveredGrowth::PerformedOnly);
+        let covered =
+            |cover, growth| (ObjectGrowthVerdict::ResourceRecurrence(Some(cover)), growth);
+        // A row is the first pair's answer and a column the second's, each in `answers` order.
+        let expected = [
+            [refused(), refused(), refused(), refused()],
+            [
+                refused(),
+                covered(Equal, CoveredGrowth::PerformedOnly),
+                covered(History, CoveredGrowth::PerformedOnly),
+                spend(),
+            ],
+            [
+                refused(),
+                covered(History, CoveredGrowth::PerformedOnly),
+                covered(History, CoveredGrowth::Mintable),
+                spend(),
+            ],
+            [refused(), spend(), spend(), spend()],
+        ];
+        for (first, row) in answers.iter().zip(&expected) {
+            for (second, want) in answers.iter().zip(row) {
+                assert_eq!(
+                    &PairCover::of_pairs(*first, *second),
+                    want,
+                    "{first:?} then {second:?}"
+                );
+            }
+        }
+    }
+
+    /// CR 118.3: a spend verdict does not certify, beside a covered verdict that does.
+    #[test]
+    fn a_spend_verdict_does_not_certify() {
+        assert!(
+            ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::Equal)).certifies(),
+            "reach: a covered verdict certifies"
+        );
+        assert!(!ObjectGrowthVerdict::Spend.certifies());
     }
 
     /// Two frames a turn of `caster`'s apart, with `caster` drawing the library card at `drawn`.
@@ -24963,6 +31723,601 @@ mod tests {
         ));
     }
 
+    /// CR 608.2c: cover compares origins by what they select for member reads,
+    /// not by incarnation identity. A re-stamp naming an identical snapshot
+    /// (a blink with no characteristic change) stays covered; a changed
+    /// snapshot, a changed fallback kind, or an asymmetric stamp refuses.
+    #[test]
+    fn origins_read_same_ignores_immaterial_restamps_but_catches_changed_reads() {
+        use crate::types::game_state::TrackedMemberOrigin;
+        use crate::types::identifiers::TrackedSetId;
+        use crate::types::zones::Zone;
+
+        fn snapshot(power: i32) -> LKISnapshot {
+            LKISnapshot {
+                name: "Member".to_string(),
+                token_image_ref: None,
+                power: Some(power),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            }
+        }
+
+        fn staged(incarnation: u64, power: Option<i32>, zone: Zone) -> GameState {
+            let mut state = GameState::new_two_player(42);
+            let member = ObjectId(50);
+            state
+                .tracked_object_sets
+                .insert(TrackedSetId(1), vec![member]);
+            if let Some(power) = power {
+                state
+                    .lki_by_incarnation
+                    .entry(member)
+                    .or_default()
+                    .insert(incarnation, snapshot(power));
+            }
+            state
+                .tracked_set_member_origins
+                .entry(TrackedSetId(1))
+                .or_default()
+                .insert(
+                    member,
+                    TrackedMemberOrigin {
+                        departed_from: zone,
+                        departure_incarnation: incarnation,
+                    },
+                );
+            state
+        }
+
+        let prior = staged(7, Some(5), Zone::Battlefield);
+        // Same characteristics under a new incarnation: covered.
+        assert!(origins_read_same(
+            &prior,
+            &staged(9, Some(5), Zone::Battlefield)
+        ));
+        // Changed snapshot content: refuses.
+        assert!(!origins_read_same(
+            &prior,
+            &staged(9, Some(2), Zone::Battlefield)
+        ));
+        // Changed fallback kind (recording to non-recording): refuses.
+        assert!(!origins_read_same(&prior, &staged(9, Some(5), Zone::Hand)));
+        // Asymmetric stamp (no origins at all): refuses.
+        let mut unstamped = GameState::new_two_player(42);
+        unstamped
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![ObjectId(50)]);
+        assert!(!origins_read_same(&prior, &unstamped));
+    }
+
+    /// B2 — FRESH-SET accumulation: a blink board appends one tracked set per
+    /// cycle, each stamping the same member's newest departure (Board A:
+    /// set 2 names M@2, set 4 names M@4, all even departures reading
+    /// identically). The growth-invariant remainder must cover the pair:
+    /// older sets' superseded stamps are history, not position, so loop
+    /// normalization must not accumulate every stamp's snapshot across
+    /// periods (prior retaining {M@2} while current retains {M@2, M@4}
+    /// compares artefactually unequal maps). Fails while retention keeps
+    /// every set's stamps.
+    #[test]
+    fn growth_remainder_covers_fresh_set_restamps_without_accumulating_snapshots() {
+        use crate::types::ability::ThisWayCause;
+        use crate::types::game_state::TrackedMemberOrigin;
+        use crate::types::identifiers::TrackedSetId;
+        use crate::types::zones::Zone;
+
+        fn snapshot(name: &str, power: i32) -> LKISnapshot {
+            LKISnapshot {
+                name: name.to_string(),
+                token_image_ref: None,
+                power: Some(power),
+                toughness: Some(2),
+                base_power: Some(2),
+                base_toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: Vec::new(),
+                supertypes: Vec::new(),
+                keywords: Vec::new(),
+                colors: Vec::new(),
+                chosen_attributes: Vec::new(),
+                counters: HashMap::new(),
+                tapped: false,
+                is_suspected: false,
+                was_prepared: false,
+                attachments: Vec::new(),
+                intensity: 0,
+            }
+        }
+
+        // Set ids 2, 4, ... each naming the member's departure incarnation,
+        // with that departure's snapshot in history. Every staged departure
+        // reads identically (Board A's every aura departure).
+        fn staged(stamps: &[(u64, u64)]) -> GameState {
+            let mut state = GameState::new_two_player(42);
+            let member = ObjectId(50);
+            for (set, incarnation) in stamps {
+                let set = TrackedSetId(*set);
+                state.tracked_object_sets.insert(set, vec![member]);
+                state.tracked_set_member_causes.insert(
+                    set,
+                    [(member, ThisWayCause::Discarded)].into_iter().collect(),
+                );
+                state
+                    .tracked_set_member_origins
+                    .entry(set)
+                    .or_default()
+                    .insert(
+                        member,
+                        TrackedMemberOrigin {
+                            departed_from: Zone::Battlefield,
+                            departure_incarnation: *incarnation,
+                        },
+                    );
+                state.next_tracked_set_id = state.next_tracked_set_id.max(set.0 + 1);
+                let even = incarnation % 2 == 0;
+                state
+                    .lki_by_incarnation
+                    .entry(member)
+                    .or_default()
+                    .insert(*incarnation, snapshot("Member", if even { 5 } else { 2 }));
+            }
+            state
+        }
+
+        let prior = staged(&[(2, 2)]);
+        let current = staged(&[(2, 2), (4, 4)]);
+        assert!(
+            eq_except_growable(
+                &project_out_resources(&prior),
+                &project_out_resources(&current),
+                &HashSet::new(),
+                None,
+            ),
+            "a fresh set re-stamping the same member's identical departure must stay covered"
+        );
+    }
+
+    fn live_graveyard_object(state: &mut GameState, name: &str, incarnation: u64) -> ObjectId {
+        let id = crate::game::zones::create_object(
+            state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            name.to_string(),
+            crate::types::zones::Zone::Graveyard,
+        );
+        state.objects.get_mut(&id).unwrap().incarnation = incarnation;
+        id
+    }
+
+    // A hand departure records no snapshot.
+    fn stamp_hand_departure(state: &mut GameState, set: u64, member: ObjectId, incarnation: u64) {
+        stamp_departure(
+            state,
+            set,
+            member,
+            incarnation,
+            crate::types::zones::Zone::Hand,
+            None,
+        );
+    }
+
+    /// Adds `member` to set `set` with an origin at `incarnation` departing `zone`, recording a
+    /// departure snapshot of power `power` when given.
+    fn stamp_departure(
+        state: &mut GameState,
+        set: u64,
+        member: ObjectId,
+        incarnation: u64,
+        zone: crate::types::zones::Zone,
+        power: Option<i32>,
+    ) {
+        use crate::types::ability::ThisWayCause;
+        use crate::types::game_state::TrackedMemberOrigin;
+        use crate::types::identifiers::TrackedSetId;
+
+        let set = TrackedSetId(set);
+        state
+            .tracked_object_sets
+            .entry(set)
+            .or_default()
+            .push(member);
+        state
+            .tracked_set_member_causes
+            .entry(set)
+            .or_default()
+            .insert(member, ThisWayCause::Discarded);
+        state
+            .tracked_set_member_origins
+            .entry(set)
+            .or_default()
+            .insert(
+                member,
+                TrackedMemberOrigin {
+                    departed_from: zone,
+                    departure_incarnation: incarnation,
+                },
+            );
+        state.next_tracked_set_id = state.next_tracked_set_id.max(set.0 + 1);
+        if let Some(power) = power {
+            let mut departed = state.objects[&member].clone();
+            departed.power = Some(power);
+            departed.toughness = Some(2);
+            state
+                .lki_by_incarnation
+                .entry(member)
+                .or_default()
+                .insert(incarnation, departed.snapshot_public_characteristics());
+        }
+    }
+
+    /// Compare factory projections derived from raw and already-normalized feeds.
+    fn growth_covers(prior: &GameState, current: &GameState) -> (bool, bool) {
+        let none = HashSet::new();
+        (
+            eq_except_growable(
+                &project_out_resources(prior),
+                &project_out_resources(current),
+                &none,
+                None,
+            ),
+            eq_except_growable(
+                &project_out_resources(&prior.normalize_for_loop()),
+                &project_out_resources(&current.normalize_for_loop()),
+                &none,
+                None,
+            ),
+        )
+    }
+
+    fn block_history_naming(state: &mut GameState, member: ObjectId, incarnation: u64) {
+        use crate::game::combat::BlockHistoryPair;
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        state.creature_blocked_attackers_this_turn.clear();
+        state
+            .creature_blocked_attackers_this_turn
+            .insert(BlockHistoryPair {
+                blocker: ObjectIncarnationRef::of(member, incarnation),
+                attacker: ObjectIncarnationRef::of(ObjectId(99), 0),
+            });
+    }
+
+    /// A deferred trigger whose event is the tap of `member@incarnation`.
+    fn deferred_tap_naming(state: &mut GameState, member: ObjectId, incarnation: u64) {
+        use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
+        use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+
+        let mut pending = PendingTrigger::ordinary(
+            ObjectId(77),
+            PlayerId(0),
+            None,
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                Vec::new(),
+                ObjectId(77),
+                PlayerId(0),
+            )),
+            0,
+        );
+        pending.trigger_event = Some(crate::types::events::GameEvent::PermanentTapped {
+            object_id: member,
+            caused_by: None,
+            incarnation: Some(incarnation),
+        });
+        state.deferred_triggers.clear();
+        state
+            .deferred_triggers
+            .push(PendingTriggerContext::single(pending));
+    }
+
+    /// The copiable values of `member@incarnation`, and optionally the own-copy ability on the
+    /// stack (`CopyTokenOf SelfRef`) that keeps them.
+    fn copy_source(state: &mut GameState, member: ObjectId, incarnation: u64, on_stack: bool) {
+        use crate::types::ability::{
+            Effect, QuantityExpr, ResolvedAbility, TargetFilter, TokenAttackDestination,
+        };
+
+        let values = crate::game::printed_cards::intrinsic_copiable_values(&state.objects[&member]);
+        state.lki_copiable_values_by_incarnation.remove(&member);
+        state
+            .lki_copiable_values_by_incarnation
+            .entry(member)
+            .or_default()
+            .insert(incarnation, values);
+        state.stack.clear();
+        if on_stack {
+            let mut ability = ResolvedAbility::new(
+                Effect::CopyTokenOf {
+                    target: TargetFilter::SelfRef,
+                    owner: TargetFilter::Controller,
+                    source_filter: None,
+                    enters_attacking: false,
+                    attack_destination: TokenAttackDestination::ControllerChooses,
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    extra_keywords: vec![],
+                    additional_modifications: vec![],
+                },
+                vec![],
+                member,
+                PlayerId(0),
+            );
+            ability.source_incarnation = Some(incarnation);
+            state.stack.push_back(StackEntry {
+                id: ObjectId(20),
+                source_id: member,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: member,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+        }
+    }
+
+    /// CR 608.2c: a fresh set naming a different member leaves the prior set's live member
+    /// unstamped; its superseded origin keeps the rank it held while resolved.
+    #[test]
+    fn growth_remainder_covers_fresh_set_naming_a_different_live_member() {
+        let mut prior = GameState::new_two_player(42);
+        let m = live_graveyard_object(&mut prior, "M", 3);
+        let n = live_graveyard_object(&mut prior, "N", 6);
+        stamp_hand_departure(&mut prior, 2, m, 2);
+        let mut current = prior.clone();
+        stamp_hand_departure(&mut current, 4, n, 5);
+        assert!(
+            eq_except_growable(
+                &project_out_resources(&prior),
+                &project_out_resources(&current),
+                &HashSet::new(),
+                None,
+            ),
+            "a fresh set naming another member must leave the live member's stamp covered"
+        );
+    }
+
+    /// CR 608.2c + CR 400.7: a fresh set re-stamping the live member, in place or after a move
+    /// past a block-history carrier naming its old stamp, leaves the superseded origin covered,
+    /// whether or not the departures record snapshots.
+    #[test]
+    fn growth_remainder_covers_fresh_set_restamping_the_live_member() {
+        use crate::types::zones::Zone;
+
+        let covers = |after: u64, carrier: bool, zone: Zone, power: Option<i32>| {
+            let mut prior = GameState::new_two_player(42);
+            let m = live_graveyard_object(&mut prior, "M", 3);
+            if carrier {
+                block_history_naming(&mut prior, m, 2);
+            }
+            stamp_departure(&mut prior, 2, m, 2, zone, power);
+            let mut current = prior.clone();
+            stamp_departure(&mut current, 4, m, 3, zone, power);
+            current.objects.get_mut(&m).unwrap().incarnation = after;
+            growth_covers(&prior, &current)
+        };
+        assert_eq!(
+            [
+                covers(3, false, Zone::Hand, None),
+                covers(4, true, Zone::Hand, None),
+                covers(4, true, Zone::Battlefield, Some(5)),
+            ],
+            [(true, true); 3],
+            "(in place, moved past a carrier at the old stamp, the same with snapshots) must stay \
+             covered on raw and normalized frames"
+        );
+    }
+
+    /// CR 608.2c: a fresh set re-stamping a member whose copiable values are kept leaves the
+    /// superseded origin covered, with or without the own-copy ability on the stack.
+    #[test]
+    fn growth_remainder_covers_fresh_set_restamping_a_copy_source_member() {
+        use crate::types::zones::Zone;
+
+        let covers = |zone: Zone, power: Option<i32>, on_stack: bool| {
+            let mut prior = GameState::new_two_player(42);
+            let m = live_graveyard_object(&mut prior, "M", 3);
+            stamp_departure(&mut prior, 2, m, 2, zone, power);
+            copy_source(&mut prior, m, 2, on_stack);
+            let mut current = prior.clone();
+            stamp_departure(&mut current, 4, m, 3, zone, power);
+            current.objects.get_mut(&m).unwrap().incarnation = 4;
+            copy_source(&mut current, m, 3, on_stack);
+            growth_covers(&prior, &current)
+        };
+        let results: Vec<_> = [(Zone::Hand, None), (Zone::Battlefield, Some(5))]
+            .into_iter()
+            .flat_map(|(zone, power)| [false, true].map(|on_stack| covers(zone, power, on_stack)))
+            .collect();
+        assert_eq!(
+            results,
+            vec![(true, true); 4],
+            "(hand, battlefield) x (copy key, plus the own-copy ability) must stay covered"
+        );
+    }
+
+    /// CR 608.2c + CR 400.7: a carrier naming the member's latest departure (a deferred trigger's
+    /// tap event, a block-history pair) moves with the re-stamp a turn later, and the superseded
+    /// origin stays covered.
+    #[test]
+    fn growth_remainder_covers_a_carrier_naming_the_latest_departure_a_turn_later() {
+        let covers = |carrier: fn(&mut GameState, ObjectId, u64)| {
+            let mut prior = GameState::new_two_player(42);
+            let m = live_graveyard_object(&mut prior, "M", 3);
+            carrier(&mut prior, m, 2);
+            stamp_hand_departure(&mut prior, 2, m, 2);
+            let mut current = prior.clone();
+            stamp_hand_departure(&mut current, 4, m, 3);
+            current.objects.get_mut(&m).unwrap().incarnation = 4;
+            carrier(&mut current, m, 3);
+            growth_covers(&prior, &current)
+        };
+        assert_eq!(
+            [covers(deferred_tap_naming), covers(block_history_naming)],
+            [(true, true); 2],
+            "(tap event, block-history pair) carriers must stay covered"
+        );
+    }
+
+    /// CR 608.2c: a blink re-stamping the live member across a step, where only the newest
+    /// departure's snapshot survives, leaves the superseded origin covered.
+    #[test]
+    fn growth_remainder_covers_fresh_set_restamps_across_a_step() {
+        use crate::types::zones::Zone;
+
+        let mut prior = GameState::new_two_player(42);
+        let m = live_graveyard_object(&mut prior, "M", 3);
+        stamp_departure(&mut prior, 2, m, 2, Zone::Battlefield, Some(5));
+        let mut current = prior.clone();
+        current.lki_by_incarnation.clear();
+        stamp_departure(&mut current, 4, m, 4, Zone::Battlefield, Some(5));
+        current.objects.get_mut(&m).unwrap().incarnation = 5;
+        assert_eq!(growth_covers(&prior, &current), (true, true));
+    }
+
+    /// CR 608.2c + CR 400.7: a trigger's tap event tracking the member's latest snapshot within a
+    /// step leaves the superseded origin covered.
+    #[test]
+    fn growth_remainder_covers_a_trigger_carrier_tracking_the_latest_snapshot() {
+        use crate::types::zones::Zone;
+
+        let mut prior = GameState::new_two_player(42);
+        let m = live_graveyard_object(&mut prior, "M", 3);
+        deferred_tap_naming(&mut prior, m, 2);
+        stamp_departure(&mut prior, 2, m, 2, Zone::Battlefield, Some(5));
+        let mut current = prior.clone();
+        stamp_departure(&mut current, 4, m, 4, Zone::Battlefield, Some(5));
+        current.objects.get_mut(&m).unwrap().incarnation = 5;
+        deferred_tap_naming(&mut current, m, 4);
+        assert_eq!(growth_covers(&prior, &current), (true, true));
+    }
+
+    /// CR 608.2c + CR 608.2h: a fresh set whose resolved read differs from the prior's refuses: a
+    /// changed snapshot (alone, with a tap carrier moving, or on a second member), or a snapshot
+    /// where the prior's recording origin had none.
+    #[test]
+    fn growth_remainder_refuses_a_fresh_set_reading_a_changed_snapshot() {
+        use crate::types::zones::Zone;
+
+        let restamp = |prior_power: Option<i32>, power: i32, tap: bool| {
+            let mut prior = GameState::new_two_player(42);
+            let m = live_graveyard_object(&mut prior, "M", 3);
+            if tap {
+                deferred_tap_naming(&mut prior, m, 2);
+            }
+            stamp_departure(&mut prior, 2, m, 2, Zone::Battlefield, prior_power);
+            let mut current = prior.clone();
+            stamp_departure(&mut current, 4, m, 4, Zone::Battlefield, Some(power));
+            current.objects.get_mut(&m).unwrap().incarnation = 5;
+            if tap {
+                deferred_tap_naming(&mut current, m, 4);
+            }
+            growth_covers(&prior, &current)
+        };
+        let two_members = |second_power: i32| {
+            let mut prior = GameState::new_two_player(42);
+            let m = live_graveyard_object(&mut prior, "M", 3);
+            let n = live_graveyard_object(&mut prior, "N", 6);
+            stamp_departure(&mut prior, 2, m, 2, Zone::Battlefield, Some(5));
+            stamp_departure(&mut prior, 2, n, 5, Zone::Battlefield, Some(5));
+            let mut current = prior.clone();
+            stamp_departure(&mut current, 4, m, 3, Zone::Battlefield, Some(5));
+            stamp_departure(&mut current, 4, n, 6, Zone::Battlefield, Some(second_power));
+            current.objects.get_mut(&m).unwrap().incarnation = 4;
+            current.objects.get_mut(&n).unwrap().incarnation = 7;
+            growth_covers(&prior, &current)
+        };
+        assert_eq!(
+            [
+                restamp(Some(5), 5, false),
+                restamp(Some(5), 5, true),
+                two_members(5)
+            ],
+            [(true, true); 3],
+            "reach guard: (plain, tap carrier, two members) reading alike stay covered"
+        );
+        assert_eq!(
+            [
+                restamp(Some(5), 2, false),
+                restamp(Some(5), 2, true),
+                two_members(2),
+                restamp(None, 5, false),
+            ],
+            [(false, false); 4],
+            "(plain, tap carrier, second member) changed snapshots and a snapshot after a \
+             recording-origin gap must refuse"
+        );
+    }
+
+    /// CR 608.2c + CR 400.7: a graveyard departure records no snapshot, so a resolved origin
+    /// naming the member's live incarnation in place stays covered after the member moves and a
+    /// fresh set stamps that move.
+    #[test]
+    fn growth_remainder_covers_an_in_place_graveyard_stamp_after_the_member_moves() {
+        use crate::types::zones::Zone;
+
+        let mut prior = GameState::new_two_player(42);
+        let m = live_graveyard_object(&mut prior, "M", 3);
+        stamp_departure(&mut prior, 2, m, 3, Zone::Graveyard, None);
+        let mut current = prior.clone();
+        stamp_departure(&mut current, 4, m, 3, Zone::Graveyard, None);
+        current.objects.get_mut(&m).unwrap().incarnation = 4;
+        assert_eq!(growth_covers(&prior, &current), (true, true));
+    }
+
+    /// CR 608.2c + CR 400.7: a superseded in-place exile origin reads the live incarnation the
+    /// resolved set's in-place re-stamp anchors, so it stays covered once a step clears the LKI;
+    /// a re-stamp at the stale incarnation, with or without a snapshot, must refuse.
+    #[test]
+    fn growth_remainder_covers_an_in_place_exile_restamp_past_a_step() {
+        use crate::types::zones::Zone;
+
+        let restamp = |incarnation: u64, power: Option<i32>| {
+            let mut prior = GameState::new_two_player(42);
+            let m = live_graveyard_object(&mut prior, "M", 3);
+            stamp_departure(&mut prior, 2, m, 3, Zone::Exile, None);
+            let mut current = prior.clone();
+            stamp_departure(&mut current, 4, m, incarnation, Zone::Exile, power);
+            current.objects.get_mut(&m).unwrap().incarnation = 4;
+            growth_covers(&prior, &current)
+        };
+        assert_eq!(restamp(4, None), (true, true));
+        assert_eq!(
+            [restamp(3, None), restamp(3, Some(5))],
+            [(false, false); 2],
+            "(exile_inplace_then_unrecorded_move, exile_inplace_then_recorded_move) must refuse"
+        );
+    }
+
     /// CR 500.8: a run of identical self-resuming inserted units unwinds to the same step at any
     /// depth, so the history disjunct collapses the deeper run; a unit resuming elsewhere stays.
     #[test]
@@ -25080,7 +32435,9 @@ mod tests {
                 counters: HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
         );
         s
@@ -25092,7 +32449,7 @@ mod tests {
     fn eq_except_growable_drops_the_stack_with_its_entry_tables_and_the_lki_only_they_carry() {
         let entrant = ObjectId(50);
         let normalized_pair = |carrier| {
-            let pa = accumulated_entry_frame(7, Some(carrier)).normalize_for_loop();
+            let pa = project_out_resources(&accumulated_entry_frame(7, Some(carrier)));
             // Incarnation numerals canonicalize away (CR 104.4b), so the frames differ in the
             // snapshot's content instead.
             let mut b = accumulated_entry_frame(9, Some(carrier));
@@ -25102,7 +32459,7 @@ mod tests {
                 .get_mut(&9)
                 .unwrap()
                 .power = Some(3);
-            let pb = b.normalize_for_loop();
+            let pb = project_out_resources(&b);
             assert!(
                 pa.lki_by_incarnation.contains_key(&entrant)
                     && pb.lki_by_incarnation.contains_key(&entrant)
@@ -25111,13 +32468,13 @@ mod tests {
         };
 
         let (pa, pb) = normalized_pair(LkiCarrier::StackEntryEvent);
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
 
         let (pa, pb) = normalized_pair(LkiCarrier::PendingTriggerEventBatch);
-        assert!(!eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(!eq_except_growable(&pa, &pb, &HashSet::new(), None));
 
         let (pa, pb) = normalized_pair(LkiCarrier::StackTriggerEventBatch);
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
     }
 
     /// CR 104.4b + CR 608.2h: a departed-spell record only a stack entry's spell-cast trigger names
@@ -25187,21 +32544,89 @@ mod tests {
                     },
                 )]),
             );
-            s.normalize_for_loop()
+            project_out_resources(&s)
         };
         let (pa, pb) = (frame(2), frame(4));
         assert_ne!(pa.departed_stack_spells, pb.departed_stack_spells);
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
+    }
+
+    /// CR 104.4b + CR 602.2a + CR 608.2h: a departed activated ability only a stack entry's
+    /// activation trigger names leaves `eq_except_growable`'s remainder with the stack.
+    #[test]
+    fn eq_except_growable_drops_a_departed_activation_record_only_a_stack_entry_names() {
+        use crate::types::ability::{Effect, ResolvedAbility};
+        use crate::types::events::{
+            ActivatedAbilityKind, ActivationTriggerState, BoundActivationCost, GameEvent,
+        };
+        use crate::types::game_state::StackEntryKind;
+        let activation_source = ObjectId(30);
+        let trigger_source = ObjectId(31);
+        let activation = ObjectId(41);
+        let frame = |x: u32| {
+            let mut s = GameState::new_two_player(7);
+            s.stack.push_back(StackEntry {
+                id: ObjectId(40),
+                source_id: trigger_source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: trigger_source,
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::NoOp,
+                        vec![],
+                        trigger_source,
+                        PlayerId(0),
+                    )),
+                    condition: None,
+                    trigger_event: Some(GameEvent::AbilityActivated {
+                        player_id: PlayerId(0),
+                        source_id: activation_source,
+                        kind: ActivatedAbilityKind::Normal,
+                        departed_source_lki: None,
+                        trigger_state: ActivationTriggerState::Pending,
+                        stack_entry: Some(activation),
+                        activation_cost: BoundActivationCost::Unknown,
+                    }),
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            let mut ability =
+                ResolvedAbility::new(Effect::NoOp, vec![], activation_source, PlayerId(0));
+            ability.chosen_x = Some(x);
+            s.departed_activated_abilities.insert(
+                activation,
+                StackEntry {
+                    id: activation,
+                    source_id: activation_source,
+                    controller: PlayerId(0),
+                    kind: StackEntryKind::ActivatedAbility {
+                        source_id: activation_source,
+                        ability: Box::new(ability),
+                    },
+                },
+            );
+            project_out_resources(&s)
+        };
+        let (pa, pb) = (frame(2), frame(4));
+        assert_ne!(
+            pa.departed_activated_abilities, pb.departed_activated_abilities,
+            "reach-guard: the named record survives normalization and differs"
+        );
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
     }
 
     #[test]
     fn eq_except_growable_drops_a_departed_entrys_paid_facts_row() {
         let mut a = accumulated_entry_frame(7, None);
         a.stack_paid_facts.insert(ObjectId(20), Default::default());
-        let pa = a.normalize_for_loop();
-        let pb = accumulated_entry_frame(7, None).normalize_for_loop();
+        let pa = project_out_resources(&a);
+        let pb = project_out_resources(&accumulated_entry_frame(7, None));
         assert_ne!(pa.stack_paid_facts, pb.stack_paid_facts);
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
     }
 
     /// CR 104.4b: an incarnation only a stack entry named leaves `eq_except_growable`'s remainder
@@ -25210,12 +32635,14 @@ mod tests {
     fn eq_except_growable_reranks_incarnations_after_the_stack_leaves() {
         use crate::types::game_state::{StackEntryKind, ZoneChangeRecord};
         let entrant = ObjectId(50);
-        let pb = accumulated_entry_frame(9, Some(LkiCarrier::PendingTriggerEventBatch))
-            .normalize_for_loop();
+        let pb = project_out_resources(&accumulated_entry_frame(
+            9,
+            Some(LkiCarrier::PendingTriggerEventBatch),
+        ));
         let mut a = accumulated_entry_frame(9, Some(LkiCarrier::PendingTriggerEventBatch));
         let mut record =
             ZoneChangeRecord::test_minimal(entrant, Some(Zone::Exile), Zone::Battlefield);
-        record.entered_incarnation = Some(7);
+        record.entered_incarnation = Some(11);
         let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut a.stack[0].kind else {
             unreachable!("the frame's stack entry is a triggered ability");
         };
@@ -25227,14 +32654,14 @@ mod tests {
         });
         let history = a.lki_by_incarnation.get_mut(&entrant).unwrap();
         let earlier = history.get(&9).unwrap().clone();
-        history.insert(7, earlier);
-        let pa = a.normalize_for_loop();
+        history.insert(11, earlier);
+        let pa = project_out_resources(&a);
         assert_eq!(pa.lki_by_incarnation[&entrant].len(), 2);
         assert_ne!(
             pa.pending_trigger_event_batch, pb.pending_trigger_event_batch,
             "reach guard: the stack's incarnation shifts the batch's rank"
         );
-        assert!(eq_except_growable(&pa, &pb, &HashSet::new()));
+        assert!(eq_except_growable(&pa, &pb, &HashSet::new(), None));
     }
 
     /// **`eq_except_growable` strips an accounted id from the per-player zone COLLECTION its
@@ -25253,25 +32680,35 @@ mod tests {
         cover_depart(&mut current, ObjectId(900), Zone::Graveyard);
 
         assert!(
-            !eq_except_growable(&prior, &current, &HashSet::new()),
+            !eq_except_growable(
+                &project_out_resources(&prior),
+                &project_out_resources(&current),
+                &HashSet::new(),
+                None,
+            ),
             "control: unaccounted, the library/graveyard vectors compare unequal"
         );
         assert!(
-            eq_except_growable(&prior, &current, &HashSet::from([ObjectId(900)])),
+            eq_except_growable(
+                &project_out_resources(&prior),
+                &project_out_resources(&current),
+                &HashSet::from([ObjectId(900)]),
+                None,
+            ),
             "accounted, the id leaves BOTH frames' zone collections and the rest compares equal"
         );
-
-        // The strip is not a blanket accept of `players`: an unrelated drift on the same
-        // player still refuses.
+        // The strip must not become a blanket accept of `players`: the projection does NOT
+        // erase per-player land plays, so an unrelated drift on that axis still refuses
+        // under the same accounted id.
         let mut drifted = current.clone();
-        drifted
-            .players
-            .iter_mut()
-            .find(|p| p.id == PlayerId(1))
-            .expect("victim exists")
-            .life -= 1;
+        drifted.players[1].lands_played_this_turn += 1;
         assert!(
-            !eq_except_growable(&prior, &drifted, &HashSet::from([ObjectId(900)])),
+            !eq_except_growable(
+                &project_out_resources(&prior),
+                &project_out_resources(&drifted),
+                &HashSet::from([ObjectId(900)]),
+                None,
+            ),
             "stripping the id does not excuse an unrelated `players` drift"
         );
     }
@@ -25960,6 +33397,98 @@ mod tests {
         );
     }
 
+    /// CR 704.5c + CR 732.2a: the cascade's poison crossing is measured against the poison-loss
+    /// rule the SBA applies (`players::poison_loss_measure`), so the count a bounded shortcut
+    /// offers moves with the format's configured threshold, and a format with no individual
+    /// threshold arms no poison axis at all.
+    ///
+    /// CR 704.6b + CR 810.10: a shared-poison seat is measured on its team's total against
+    /// fifteen, and the team's total rises by every member's per-period gain.
+    ///
+    /// # Discrimination
+    ///
+    /// Restore the literal ten-counter headroom and every leg answers 10: the 15 and 5 legs fire,
+    /// the `None` leg finds a crossing where no rule makes one, and the Two-Headed Giant leg
+    /// answers 10 where the team crosses at 8. Measure the shared team's count but divide by one
+    /// member's gain and that leg answers 15.
+    #[test]
+    fn the_cascades_poison_crossing_reads_the_configured_loss_threshold() {
+        // One poison counter per period on each victim and nothing else, so poison is the only
+        // axis.
+        let poisoned = |victims: &[u8]| {
+            let mut delta = ResourceVector::default();
+            for &seat in victims {
+                delta.poison.insert(PlayerId(seat), 1);
+            }
+            charged_signature(delta, &[], &[])
+        };
+        let cascade = |state: &GameState, victims: &[u8]| {
+            poisoned(victims)
+                .elimination_cascade(
+                    state,
+                    PlayerId(0),
+                    None,
+                    None,
+                    &[],
+                    ChargeBound::Ceiling,
+                    AnnouncedLead::None,
+                )
+                .map(|cascade| (cascade.count, cascade.entries))
+        };
+        let departs = |repetition: u32, seats: &[u8]| {
+            vec![PredictedDeparture {
+                repetition,
+                seats: seats.iter().copied().map(PlayerId).collect(),
+            }]
+        };
+        let with_threshold = |threshold: Option<u8>| {
+            let mut state = bound_board(&[40, 40]);
+            state.format_config.poison_counter_threshold = threshold;
+            state
+        };
+
+        assert_eq!(
+            bound_board(&[40, 40])
+                .format_config
+                .poison_counter_threshold,
+            Some(10),
+            "REACH-GUARD: the default board carries the CR 704.5c threshold of ten"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(10)), &[1]),
+            Some((10, departs(10, &[1]))),
+            "CR 704.5c: the tenth counter arrives on the tenth repetition"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(15)), &[1]),
+            Some((15, departs(15, &[1]))),
+            "a fifteen-counter house threshold keeps P1 in the game until the fifteenth"
+        );
+        assert_eq!(
+            cascade(&with_threshold(Some(5)), &[1]),
+            Some((5, departs(5, &[1]))),
+            "a five-counter house threshold takes P1 out on the fifth"
+        );
+        assert_eq!(
+            cascade(&with_threshold(None), &[1]),
+            None,
+            "no individual poison-loss rule, so poison is no CR 704 axis and nothing is measured"
+        );
+
+        // CR 704.6b + CR 810.10: each opponent gets a counter, so the opposing team's shared
+        // total rises by two a period: 14 of headroom under fifteen is 7 strict, crossing on 8.
+        let giant = GameState::new(crate::types::format::FormatConfig::two_headed_giant(), 4, 7);
+        assert_eq!(
+            giant.format_config.poison_counter_threshold, None,
+            "REACH-GUARD: the shared-poison format has no individual threshold"
+        );
+        assert_eq!(
+            cascade(&giant, &[2, 3]),
+            Some((8, departs(8, &[2, 3]))),
+            "the opposing team crosses together when its shared total reaches fifteen"
+        );
+    }
+
     /// **T5** — the subtraction is inert unless the declaration pinned a charged slot with a
     /// `Targets` pin.
     ///
@@ -26467,6 +33996,8 @@ mod tests {
     fn a_stack_entry_is_scanned_under_the_loop_firewall() {
         use crate::types::ability::{Effect, TargetFilter, TypedFilter};
         let particular_move = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Exile),
             destination: Zone::Battlefield,
             target: TargetFilter::ParentTarget,
@@ -26520,21 +34051,322 @@ mod tests {
     /// CR 603.6a + CR 111.8: a grown token whose only trigger is its own entry is inert once it
     /// has entered; a card can re-enter, and a leaves-the-battlefield trigger can still fire.
     ///
-    /// REVERT-PROBE: drop the `grown_token_is_inert_after_its_entry` disjunct ⇒ the relieved
-    /// leg **FAILS**; drop its `is_token` conjunct ⇒ the card leg **FAILS**.
+    /// REVERT-PROBE: drop the `is_token` conjunct of `grown_token_is_inert_after_its_entry` ⇒ the
+    /// card leg **FAILS**.
     #[test]
     fn only_a_spent_token_entry_is_inert() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, Effect, TargetFilter, TypedFilter,
+        };
         use crate::types::triggers::TriggerMode;
         let entry = || self_trigger(TriggerMode::ChangesZone, Zone::Battlefield, true);
         let leaves = self_trigger(TriggerMode::ChangesZone, Zone::Battlefield, false);
+        let sweeping_entry = entry().execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        ));
         assert_eq!(
             (
                 grown_with(true, entry()),
                 grown_with(false, entry()),
                 grown_with(true, leaves),
+                grown_with(true, sweeping_entry),
             ),
-            (true, false, false)
+            (true, false, false, true)
         );
+    }
+
+    fn named_entry(
+        entry_id: u64,
+        source_name: &str,
+        ability: Option<ResolvedAbility>,
+    ) -> StackEntry {
+        let mut entry = trigger_entry(entry_id, 500, 0);
+        if let crate::types::game_state::StackEntryKind::TriggeredAbility {
+            source_name: name,
+            ability: body,
+            ..
+        } = &mut entry.kind
+        {
+            *name = source_name.to_string();
+            if let Some(ability) = ability {
+                **body = ability;
+            }
+        }
+        entry
+    }
+
+    fn buried(entry_id: u64) -> StackEntry {
+        named_entry(entry_id, "Buried", None)
+    }
+
+    fn working(entry_id: u64) -> StackEntry {
+        named_entry(entry_id, "Working", None)
+    }
+
+    /// A frame holding `entries`, each with the firing row the scheduler gives a triggered entry.
+    fn stacked(entries: Vec<StackEntry>) -> GameState {
+        let mut state = GameState::new_two_player(7);
+        for entry in &entries {
+            state.stack_trigger_firings.insert(
+                entry.id,
+                crate::types::identifiers::TriggerFiring::UnknownLegacy,
+            );
+        }
+        state.stack.extend(entries);
+        state
+    }
+
+    fn covers_at(prior: &GameState, current: &GameState, (fp, fc): (usize, usize)) -> bool {
+        buried_growth_covers(
+            prior,
+            current,
+            &(buried_ids(prior, fp), buried_ids(current, fc)),
+        )
+    }
+
+    /// CR 405.5 + CR 608.1: a floor that rises by the entries the period buried, with the
+    /// working stacks matching, is covered; a floor that falls is not.
+    #[test]
+    fn buried_growth_is_covered_only_below_a_rising_floor() {
+        let prior = stacked(vec![buried(1), working(2)]);
+        let current = stacked(vec![buried(1), buried(3), working(4)]);
+        assert_eq!(
+            (
+                covers_at(&prior, &current, (1, 2)),
+                covers_at(&current, &prior, (2, 1)),
+            ),
+            (true, false)
+        );
+    }
+
+    /// The spend retry sets aside the entries the floors named, though the spent permanent's own
+    /// entry has left its frame.
+    #[test]
+    fn the_spend_retry_sets_aside_the_entries_the_floors_named() {
+        let x = ObjectId(1);
+        let spell_x = || StackEntry {
+            id: x,
+            source_id: x,
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: crate::types::identifiers::CardId(9),
+                ability: None,
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        };
+        let with_x = |entries: Vec<StackEntry>, zone: Zone| {
+            let mut state = stacked(entries);
+            state.stack_trigger_firings.remove(&x);
+            state.objects.insert(
+                x,
+                crate::game::game_object::GameObject::new(
+                    x,
+                    crate::types::identifiers::CardId(9),
+                    PlayerId(0),
+                    "X".to_string(),
+                    zone,
+                ),
+            );
+            if zone == Zone::Battlefield {
+                state.battlefield.push_back(x);
+            }
+            state
+        };
+        let taller = resource_recurrence_covers(
+            &with_x(vec![buried(10), working(2)], Zone::Battlefield),
+            &with_x(
+                vec![buried(10), spell_x(), buried(3), working(4), working(5)],
+                Zone::Stack,
+            ),
+            PlayerId(0),
+            Some((1, 3)),
+        );
+        let exact = resource_recurrence_covers(
+            &with_x(vec![buried(10)], Zone::Battlefield),
+            &with_x(vec![buried(10), spell_x(), buried(3)], Zone::Stack),
+            PlayerId(0),
+            Some((1, 3)),
+        );
+        assert_eq!((taller, exact), (None, Some(PairCover::Spend)));
+    }
+
+    /// CR 405.5: working stacks that differ in height or kind, a floor that rises by more or less
+    /// than the entries buried, and the same kind growing above the floor are not covered.
+    #[test]
+    fn working_stacks_that_differ_are_not_covered() {
+        let prior = stacked(vec![buried(1), working(2)]);
+        let current = stacked(vec![buried(1), buried(3), working(4)]);
+        let taller = stacked(vec![buried(1), buried(3), working(4), working(5)]);
+        let other_kind = stacked(vec![buried(1), buried(3), buried(4)]);
+        let spell = || StackEntry {
+            id: ObjectId(1),
+            source_id: ObjectId(1),
+            controller: PlayerId(1),
+            kind: crate::types::game_state::StackEntryKind::Spell {
+                card_id: crate::types::identifiers::CardId(9),
+                ability: None,
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        };
+        let over_a_spell = |entries: Vec<StackEntry>| {
+            let mut state = stacked(entries);
+            state.stack_trigger_firings.remove(&ObjectId(1));
+            state.objects.insert(
+                ObjectId(1),
+                crate::game::game_object::GameObject::new(
+                    ObjectId(1),
+                    crate::types::identifiers::CardId(9),
+                    PlayerId(1),
+                    "Buried Spell".to_string(),
+                    Zone::Stack,
+                ),
+            );
+            state
+        };
+        let spell_prior = over_a_spell(vec![spell(), working(2)]);
+        assert_eq!(
+            (
+                covers_at(&prior, &current, (1, 2)),
+                covers_at(&prior, &current, (1, 3)),
+                covers_at(&prior, &current, (1, 1)),
+                covers_at(&prior, &taller, (1, 2)),
+                covers_at(&prior, &other_kind, (1, 2)),
+                covers_at(
+                    &spell_prior,
+                    &over_a_spell(vec![spell(), buried(3), working(4)]),
+                    (1, 2)
+                ),
+                covers_at(
+                    &spell_prior,
+                    &over_a_spell(vec![spell(), buried(3), buried(4)]),
+                    (1, 2)
+                ),
+            ),
+            (true, false, false, false, false, true, false)
+        );
+    }
+
+    /// CR 115.1 + CR 405.1: a working entry aimed at a buried entry anywhere in its chain, or
+    /// reading the stack's shape, keeps the buried entries in the comparand.
+    #[test]
+    fn an_above_floor_reader_of_the_buried_entries_is_not_covered() {
+        use crate::types::ability::{Effect, TargetFilter, TargetRef};
+        let aimed = |entry_id: u64, at: u64| {
+            let mut ability = gain_ability(1);
+            ability.targets = vec![TargetRef::Object(ObjectId(at))];
+            named_entry(entry_id, "Working", Some(ability))
+        };
+        let aimed_down_chain = |entry_id: u64, link: fn(&mut ResolvedAbility, ResolvedAbility)| {
+            let mut linked = gain_ability(1);
+            linked.targets = vec![TargetRef::Object(ObjectId(1))];
+            let mut root = gain_ability(1);
+            link(&mut root, linked);
+            named_entry(entry_id, "Working", Some(root))
+        };
+        let copier = |entry_id: u64| {
+            let ability = ResolvedAbility::new(
+                Effect::CopySpell {
+                    target: TargetFilter::Any,
+                    retarget: crate::types::ability::CopyRetargetPermission::KeepOriginalTargets,
+                    copier: None,
+                    additional_modifications: vec![],
+                    starting_loyalty_from_casualty_sacrifice: false,
+                },
+                vec![],
+                ObjectId(500),
+                PlayerId(0),
+            );
+            named_entry(entry_id, "Working", Some(ability))
+        };
+        let pair = |top: &dyn Fn(u64) -> StackEntry| {
+            covers_at(
+                &stacked(vec![buried(1), top(2)]),
+                &stacked(vec![buried(1), buried(3), top(4)]),
+                (1, 2),
+            )
+        };
+        let watched = |condition: crate::types::ability::TriggerCondition| {
+            let watcher = |mut state: GameState| {
+                let id = inert_token(&mut state, 800, 0, "Watcher");
+                state.objects.get_mut(&id).unwrap().trigger_definitions =
+                    vec![crate::types::ability::TriggerDefinition::new(
+                        crate::types::triggers::TriggerMode::ChangesZone,
+                    )
+                    .condition(condition.clone())]
+                    .into();
+                state
+            };
+            covers_at(
+                &watcher(stacked(vec![buried(1), working(2)])),
+                &watcher(stacked(vec![buried(1), buried(3), working(4)])),
+                (1, 2),
+            )
+        };
+        let stack_reading = crate::types::ability::TriggerCondition::DuringPlayersTurn {
+            player: crate::types::ability::PlayerFilter::OpponentDealtDamage {
+                kind: crate::types::ability::DamageKindFilter::Any,
+                source: Some(Box::new(TargetFilter::SourceController)),
+                min_sources: 1,
+            },
+        };
+        assert_eq!(
+            (
+                pair(&working),
+                pair(&|id| aimed(id, 1)),
+                pair(&|id| aimed_down_chain(id, |root, sub| {
+                    root.sub_ability = Some(Box::new(sub))
+                })),
+                pair(&|id| aimed_down_chain(id, |root, otherwise| {
+                    root.else_ability = Some(Box::new(otherwise))
+                })),
+                pair(&copier),
+                watched(crate::types::ability::TriggerCondition::SourceIsTapped),
+                watched(stack_reading),
+            ),
+            (true, false, false, false, false, true, false)
+        );
+    }
+
+    /// CR 608.2h: last known information a working entry names stays compared; what only buried
+    /// entries name is set aside.
+    #[test]
+    fn last_known_information_a_working_entry_names_stays_compared() {
+        let entrant = ObjectId(50);
+        let template = accumulated_entry_frame(7, Some(LkiCarrier::StackEntryEvent));
+        let naming = |entry_id: u64| {
+            let mut entry = template.stack[0].clone();
+            entry.id = ObjectId(entry_id);
+            entry
+        };
+        let frame = |stack: Vec<StackEntry>, power: i32| {
+            let mut state = stacked(stack);
+            state.lki_by_incarnation = template.lki_by_incarnation.clone();
+            state
+                .lki_by_incarnation
+                .get_mut(&entrant)
+                .unwrap()
+                .get_mut(&7)
+                .unwrap()
+                .power = Some(power);
+            state
+        };
+        let only_buried_name = covers_at(
+            &frame(vec![naming(1), working(2)], 2),
+            &frame(vec![naming(1), naming(3), working(4)], 3),
+            (1, 2),
+        );
+        let working_names = covers_at(
+            &frame(vec![buried(1), naming(2)], 2),
+            &frame(vec![buried(1), buried(3), naming(4)], 3),
+            (1, 2),
+        );
+        assert_eq!((only_buried_name, working_names), (true, false));
     }
 
     fn belt_with(edit: impl FnOnce(&mut GameState)) -> bool {
@@ -26667,15 +34499,24 @@ mod tests {
     #[test]
     fn window_new_tracked_sets_are_bookkeeping_growth() {
         let grown = HashSet::new();
-        let prior = with_tracked_sets(&[(0, vec![500])], Some(0));
-        let relieved = with_tracked_sets(&[(0, vec![500]), (1, vec![501])], Some(0));
-        let carrier_moved = with_tracked_sets(&[(0, vec![500]), (1, vec![501])], Some(1));
-        let prior_mutated = with_tracked_sets(&[(0, vec![500, 502]), (1, vec![501])], Some(0));
+        let prior = project_out_resources(&with_tracked_sets(&[(0, vec![500])], Some(0)));
+        let relieved = project_out_resources(&with_tracked_sets(
+            &[(0, vec![500]), (1, vec![501])],
+            Some(0),
+        ));
+        let carrier_moved = project_out_resources(&with_tracked_sets(
+            &[(0, vec![500]), (1, vec![501])],
+            Some(1),
+        ));
+        let prior_mutated = project_out_resources(&with_tracked_sets(
+            &[(0, vec![500, 502]), (1, vec![501])],
+            Some(0),
+        ));
         assert_eq!(
             (
-                eq_except_growable(&prior, &relieved, &grown),
-                eq_except_growable(&prior, &carrier_moved, &grown),
-                eq_except_growable(&prior, &prior_mutated, &grown),
+                eq_except_growable(&prior, &relieved, &grown, None),
+                eq_except_growable(&prior, &carrier_moved, &grown, None),
+                eq_except_growable(&prior, &prior_mutated, &grown, None),
             ),
             (true, false, false)
         );
@@ -26813,5 +34654,481 @@ mod tests {
             certify(&prior, &stray).is_none(),
             "a stray id in the non-holder container refuses"
         );
+    }
+
+    /// CR 615.5: the `GainLife` rider the floating shields in this section name.
+    fn gain_life_rider(amount: i32) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        )
+    }
+
+    /// CR 615.5: a floating prevention shield naming `rider` through a freshly
+    /// installed arena entry, after `padding` earlier entries.
+    fn floating_rider_frame(padding: usize, rider_amount: i32) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        for _ in 0..padding {
+            state.install_replacement_continuation(gain_life_rider(rider_amount));
+        }
+        let id = state.install_replacement_continuation(gain_life_rider(rider_amount));
+        state.pending_damage_replacements.push(
+            ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
+                .runtime_execute(id),
+        );
+        state
+    }
+
+    /// CR 615.5: [`floating_rider_frame`] plus `extra` further shields of the same content,
+    /// each naming a FRESH arena position — so two frames hold the same shields by value at
+    /// different allocation history.
+    fn floating_rider_growth(padding: usize, rider_amount: i32, extra: usize) -> GameState {
+        let mut state = floating_rider_frame(padding, rider_amount);
+        for _ in 0..extra {
+            let id = state.install_replacement_continuation(gain_life_rider(rider_amount));
+            state.pending_damage_replacements.push(
+                ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::DamageDone,
+                )
+                .runtime_execute(id),
+            );
+        }
+        state
+    }
+
+    /// CR 615.7: the class printed amount-shield cards install — a floating `Next(n)`
+    /// prevention for the rest of the turn, unconsumed, with no rider.
+    fn prevention_shield(amount: u32) -> ReplacementDefinition {
+        ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::Next(amount))
+            .expiry(RestrictionExpiry::EndOfTurn)
+    }
+
+    /// A frame whose ENTIRE floating replacement registry is `defs`: `new_two_player` is
+    /// otherwise empty, so a difference between two such frames is the registry's alone.
+    fn shield_frames(defs: &[ReplacementDefinition]) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.pending_damage_replacements = defs.to_vec();
+        state
+    }
+
+    /// CR 104.4b + CR 732.2a: both comparators refuse the pair. The `PartialEq` reach-guard
+    /// proves the refusal is the shield conjunct's — `PartialEq` skips the whole registry — and
+    /// the registry `assert_ne!` proves the rows are not degenerate.
+    fn assert_shield_frames_differ(a: &GameState, b: &GameState) {
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the registries really differ"
+        );
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "`loop_states_equal` must refuse a differing LIVE floating shield"
+        );
+        assert!(
+            !eq_except_growable(
+                &project_out_resources(a),
+                &project_out_resources(b),
+                &HashSet::new(),
+                None,
+            ),
+            "`eq_except_growable` must refuse a differing LIVE floating shield"
+        );
+    }
+
+    /// CR 104.4b: both comparators accept the pair.
+    fn assert_shield_frames_match(a: &GameState, b: &GameState) {
+        assert!(
+            loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "`loop_states_equal` must accept equal floating shields"
+        );
+        assert!(
+            eq_except_growable(
+                &project_out_resources(a),
+                &project_out_resources(b),
+                &HashSet::new(),
+                None,
+            ),
+            "`eq_except_growable` must accept equal floating shields"
+        );
+    }
+
+    /// CR 614.3 + CR 732.2a: synthetic spent-entry fixture with an inline `execute` naming
+    /// `id`. It isolates the differing inline-payload axis of the Mystic Reflection cover
+    /// regression, not that card's event/filter definition. The caller marks each definition
+    /// consumed before comparison; the fixture is never applied to an event.
+    fn copy_effect_naming(id: ObjectId) -> ReplacementDefinition {
+        ReplacementDefinition::new(crate::types::replacements::ReplacementEvent::DamageDone)
+            .execute(AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target: TargetFilter::SpecificObject { id },
+                    recipient: CopyRecipient::Source,
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: Vec::new(),
+                },
+            ))
+    }
+
+    /// CR 615.3 + CR 614.3: the same definition, USED UP — `find_applicable_replacements`
+    /// skips it, so it is not part of the position either comparator reads.
+    fn spent(mut def: ReplacementDefinition) -> ReplacementDefinition {
+        def.is_consumed = true;
+        def
+    }
+
+    /// CR 615.7: a shield's AMOUNT is content — "the next 5 damage" and "the next
+    /// 3 damage" are different loop positions.
+    #[test]
+    fn loop_comparators_refuse_a_differing_floating_shield_amount() {
+        let a = shield_frames(&[prevention_shield(5)]);
+        let b = shield_frames(&[prevention_shield(3)]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// CR 615.3 + CR 614.3: a SPENT shield is not part of the position. Both comparators
+    /// ignore consumed entries — the live-only reading `analysis::resource::replacement_def_is_live`
+    /// gives the loop firewall — so two registries whose spent entries differ in content are
+    /// the same loop point, and so is a spent entry against an empty registry. `PartialEq`
+    /// skips the registry entirely, and the `assert_ne!` proves the raw registries really
+    /// differ, so the verdict cannot pass vacuously.
+    #[test]
+    fn loop_comparators_ignore_a_spent_floating_shield() {
+        let a = shield_frames(&[spent(prevention_shield(5))]);
+        let b = shield_frames(&[spent(prevention_shield(3))]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the spent entries differ in content"
+        );
+        assert_shield_frames_match(&a, &b);
+
+        let empty = shield_frames(&[]);
+        assert_eq!(empty, a, "reach-guard: `PartialEq` skips the registry");
+        assert_shield_frames_match(&empty, &a);
+    }
+
+    /// CR 615.3 + CR 614.3: mixed registries compare as if only their LIVE entries existed.
+    /// A spent entry beside live ones is invisible; a differing LIVE entry still refuses
+    /// through the common-prefix compare. The two comparators share the predicate, so both
+    /// verdicts are pinned by the shared helpers.
+    #[test]
+    fn loop_comparators_compare_mixed_registries_by_their_live_shields() {
+        let live = prevention_shield(5);
+        let a = shield_frames(std::slice::from_ref(&live));
+        let b = shield_frames(&[
+            spent(prevention_shield(3)),
+            live,
+            spent(prevention_shield(7)),
+        ]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the registries really differ"
+        );
+        assert_shield_frames_match(&a, &b);
+
+        // The live half is still content: same live count, differing amount.
+        let a = shield_frames(&[prevention_shield(5), spent(prevention_shield(5))]);
+        let b = shield_frames(&[spent(prevention_shield(5)), prevention_shield(3)]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: the fail-closed
+    /// lone-install rule reads the LIVE sequence, so one live shield against a registry whose
+    /// entries are all spent still refuses (the live registry is
+    /// empty on one side), while two identical live instalments accept.
+    #[test]
+    fn loop_comparators_refuse_a_live_floating_shield_against_a_spent_only_registry() {
+        let spent_only = shield_frames(&[spent(prevention_shield(5))]);
+        let once = shield_frames(&[prevention_shield(5)]);
+        let twice = shield_frames(&[
+            spent(prevention_shield(5)),
+            prevention_shield(5),
+            prevention_shield(5),
+        ]);
+        assert_shield_frames_differ(&spent_only, &once);
+        assert_shield_frames_match(&spent_only, &twice);
+    }
+
+    /// CR 514.2 + CR 611.2a: "this turn" versus no expiry is content.
+    #[test]
+    fn loop_comparators_refuse_a_differing_floating_shield_expiry() {
+        let mut persistent = prevention_shield(5);
+        persistent.expiry = None;
+        let a = shield_frames(&[prevention_shield(5)]);
+        let b = shield_frames(&[persistent]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// Loop-comparison policy: the installing source anchors the shield's attribution, so it is
+    /// compared as content (no single rule requires the anchor; CR 615.5 keeps the rider with it).
+    #[test]
+    fn loop_comparators_refuse_a_differing_floating_shield_source() {
+        let mut from_first = prevention_shield(5);
+        from_first.source_object = Some(ObjectId(3));
+        let mut from_second = prevention_shield(5);
+        from_second.source_object = Some(ObjectId(4));
+        let a = shield_frames(&[from_first]);
+        let b = shield_frames(&[from_second]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// CR 615.5 + CR 614.6: "that many" / follow-up riders are content. Both shields name arena
+    /// position 0, so the difference cannot be blamed on allocation history — only on the
+    /// resolved riders (`GainLife{3}` vs `GainLife{5}`).
+    #[test]
+    fn loop_comparators_refuse_floating_shields_whose_riders_differ() {
+        let a = floating_rider_frame(0, 3);
+        let b = floating_rider_frame(0, 5);
+        assert_eq!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: both shields name arena position 0"
+        );
+        assert_ne!(
+            a.replacement_rider(&a.pending_damage_replacements[0]),
+            b.replacement_rider(&b.pending_damage_replacements[0]),
+            "reach-guard: the resolved riders differ by value (GainLife 3 vs GainLife 5)"
+        );
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert!(
+            !loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop()),
+            "`loop_states_equal` must refuse differing riders"
+        );
+        assert!(
+            !eq_except_growable(
+                &project_out_resources(&a),
+                &project_out_resources(&b),
+                &HashSet::new(),
+                None,
+            ),
+            "`eq_except_growable` must refuse differing riders"
+        );
+    }
+
+    /// CR 104.4b: re-installing an identical shield is allocation history, not content, even
+    /// when the fresh copy names a new arena position.
+    #[test]
+    fn loop_comparators_accept_floating_shields_whose_riders_differ_only_in_arena_position() {
+        let a = floating_rider_frame(1, 5);
+        let b = floating_rider_growth(0, 5, 1);
+        assert_eq!(a.pending_damage_replacements.len(), 1);
+        assert_eq!(b.pending_damage_replacements.len(), 2);
+        assert_ne!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: the first shields name different arena positions"
+        );
+        assert_eq!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[1].runtime_execute,
+            "reach-guard: the appended shield names the arena position the single one names"
+        );
+        assert_shield_frames_match(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: one identical
+    /// live shield growing into two is accepted by the loop comparator's multiplicity policy.
+    /// Both comparators must accept it, and `PartialEq` (blind to the whole registry) already does.
+    #[test]
+    fn loop_comparators_accept_an_identical_floating_shield_multiplicity() {
+        let shield = prevention_shield(5);
+        let a = shield_frames(std::slice::from_ref(&shield));
+        let b = shield_frames(&[shield.clone(), shield]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_eq!(a.pending_damage_replacements.len(), 1);
+        assert_eq!(b.pending_damage_replacements.len(), 2);
+        assert_shield_frames_match(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: an appended LIVE
+    /// shield of a DIFFERENT class breaks the recurrence — the tail rule only tolerates repeats
+    /// of the class the shorter live registry ended on.
+    #[test]
+    fn loop_comparators_refuse_an_appended_differing_floating_shield() {
+        let a = shield_frames(&[prevention_shield(5)]);
+        let b = shield_frames(&[prevention_shield(5), prevention_shield(3)]);
+        assert_shield_frames_differ(&a, &b);
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: with no live
+    /// shield observed yet the comparator cannot infer a class, so a single install is refused
+    /// (fail-closed, delays a draw by at most one cycle) while two identical installs are accepted.
+    /// Empty versus empty is the regression row for the
+    /// short-circuit: without it every shield-free loop in the engine would stop drawing.
+    #[test]
+    fn loop_comparators_refuse_a_lone_floating_shield_against_an_empty_registry() {
+        let empty = shield_frames(&[]);
+        let once = shield_frames(&[prevention_shield(5)]);
+        let twice = shield_frames(&[prevention_shield(5), prevention_shield(5)]);
+        assert_shield_frames_differ(&empty, &once);
+        assert_shield_frames_match(&empty, &twice);
+        assert_shield_frames_match(&empty, &shield_frames(&[]));
+    }
+
+    /// Engine comparison policy for CR 104.4b, not a CR 615.7 equivalence rule: the comparator
+    /// conservatively preserves live registry order. Growth that repeats the last class is
+    /// still accepted.
+    #[test]
+    fn loop_comparators_refuse_reordered_floating_shields() {
+        let a = shield_frames(&[prevention_shield(5), prevention_shield(3)]);
+        let b = shield_frames(&[prevention_shield(3), prevention_shield(5)]);
+        assert_shield_frames_differ(&a, &b);
+        let grown = shield_frames(&[
+            prevention_shield(5),
+            prevention_shield(3),
+            prevention_shield(3),
+        ]);
+        assert_shield_frames_match(&a, &grown);
+    }
+
+    /// CR 614.3 + CR 615.3 + CR 732.2a: the differing spent-payload axis of the pinned
+    /// `Mystic Reflection` regression — each period appends one more USED-UP copy effect whose
+    /// inline `execute` names a DIFFERENT per-period Spawn token, so the raw registries grow in
+    /// length AND differ in content.
+    /// Neither difference is part of the position: the appended definitions are spent
+    /// (CR 615.3 + CR 614.3), so the live sequences are empty on both sides and both
+    /// comparators accept. This is the unit-level discriminator for the pinned integration
+    /// row `loop_period_remade_token_source::copy_effects_used_up_inside_each_spawn_period_leave_the_periods_covered`.
+    #[test]
+    fn loop_comparators_ignore_growth_of_spent_floating_copy_effects() {
+        let a = shield_frames(&[spent(copy_effect_naming(ObjectId(10)))]);
+        let b = shield_frames(&[
+            spent(copy_effect_naming(ObjectId(10))),
+            spent(copy_effect_naming(ObjectId(11))),
+        ]);
+        assert_eq!(a, b, "reach-guard: `PartialEq` skips the registry");
+        assert_ne!(
+            a.pending_damage_replacements[0].execute, b.pending_damage_replacements[1].execute,
+            "reach-guard: the appended effect names a different per-period object"
+        );
+        assert_ne!(
+            a.pending_damage_replacements, b.pending_damage_replacements,
+            "reach-guard: the raw registries grow and differ"
+        );
+        assert_shield_frames_match(&a, &b);
+    }
+
+    /// CR 104.4b: two loop samples taken after 3 and 4 iterations, each of which
+    /// installed an `==` rider and re-pointed the pending shield at it, are the same
+    /// game position: the arena is allocation history and is not compared, at loop
+    /// equality or at the CR 732.2a cover gate. Positive control: a remembered CR 616.1
+    /// choice whose rider differs is still compared, and makes the samples unequal.
+    #[test]
+    fn loop_samples_differing_only_in_continuation_allocation_compare_equal() {
+        let a = floating_rider_frame(2, 5);
+        let b = floating_rider_frame(3, 5);
+        assert_ne!(
+            a.pending_damage_replacements[0].runtime_execute,
+            b.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: the samples' shields name different arena positions"
+        );
+        assert_eq!(
+            a.replacement_rider(&a.pending_damage_replacements[0]),
+            b.replacement_rider(&b.pending_damage_replacements[0]),
+            "reach-guard: the named riders are equal"
+        );
+        let (na, nb) = (a.normalize_for_loop(), b.normalize_for_loop());
+        assert!(loop_states_equal(&na, &nb));
+        assert!(eq_except_growable(
+            &project_out_resources(&na),
+            &project_out_resources(&nb),
+            &HashSet::new(),
+            None,
+        ));
+
+        let remembered = |state: &mut GameState, amount: i32| {
+            let (definition, rider) = {
+                let mut frame = floating_rider_frame(0, amount);
+                let def = frame.pending_damage_replacements.remove(0);
+                frame.split_replacement_rider(&def)
+            };
+            state
+                .replacement_auto_choices
+                .push(ReplacementAutoChoiceRecord {
+                    id: ReplacementAutoChoiceId("r0".to_string()),
+                    key: ReplacementAutoChoiceKey {
+                        player: PlayerId(0),
+                        event: crate::types::replacements::ReplacementEvent::DamageDone,
+                        kind: ReplacementChoiceKind::Order,
+                        candidates: vec![ReplacementAutoChoiceIdentity::Definition {
+                            source: crate::types::identifiers::ObjectIncarnationRef::of(
+                                ObjectId(5),
+                                0,
+                            ),
+                            index: 0,
+                            definition: Box::new(definition),
+                            rider,
+                        }],
+                    },
+                    choice: ReplacementAutoChoice::Order { order: vec![0] },
+                    descriptions: vec![],
+                });
+        };
+        let (mut ra, mut rb) = (a.clone(), b.clone());
+        remembered(&mut ra, 5);
+        remembered(&mut rb, 7);
+        let (ra, rb) = (ra.normalize_for_loop(), rb.normalize_for_loop());
+        assert!(!loop_states_equal(&ra, &rb));
+        assert!(!eq_except_growable(
+            &project_out_resources(&ra),
+            &project_out_resources(&rb),
+            &HashSet::new(),
+            None,
+        ));
+    }
+
+    /// CR 608.2h + CR 615.5: two frames whose live floating shields differ only in which
+    /// arena position names an `==` rider read the same last-known information, so the
+    /// "records grow unread" verdict is the one for identical frames. Control: frames
+    /// whose riders differ are not the same.
+    #[test]
+    fn floating_shields_differing_only_in_continuation_allocation_grow_unread() {
+        let prior = floating_rider_frame(0, 5);
+        let current = floating_rider_frame(1, 5);
+        assert_ne!(
+            prior.pending_damage_replacements[0].runtime_execute,
+            current.pending_damage_replacements[0].runtime_execute,
+            "reach-guard: the frames' shields name different arena positions"
+        );
+        assert!(last_known_records_grow_unread(&prior, &current));
+        assert!(!last_known_records_grow_unread(
+            &prior,
+            &floating_rider_frame(1, 9)
+        ));
+    }
+
+    /// CR 732.2a + CR 615.5: a live shield's history reads include those of the runtime
+    /// continuation its handle names. The scanner walks the rider it is passed, and
+    /// `live_history_reads` resolves the handle to that rider. Control: the same shield
+    /// naming no continuation reads nothing.
+    #[test]
+    fn replacement_history_reads_the_named_continuation() {
+        let mut state = GameState::new_two_player(42);
+        state
+            .pending_damage_replacements
+            .push(ReplacementDefinition::new(ReplacementEvent::DamageDone));
+        assert!(!live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
+        let id = state.install_replacement_continuation(ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::TurnsTaken,
+                },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        ));
+        state.pending_damage_replacements[0] =
+            ReplacementDefinition::new(ReplacementEvent::DamageDone).runtime_execute(id);
+        assert!(live_history_reads(&state).reads(HistoryMember::PlayerTurnsTaken));
     }
 }

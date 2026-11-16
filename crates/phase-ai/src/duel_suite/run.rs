@@ -25,7 +25,7 @@ use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::layer::SubscriberExt;
 
-use crate::auto_play::run_ai_actions;
+use crate::auto_play::run_ai_actions_headless;
 use crate::config::{create_config_for_players, AiConfig, AiDifficulty, Platform};
 
 use super::attribution::{aggregate_events, CaptureLayer, MatchupAttribution};
@@ -798,7 +798,12 @@ fn build_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPayload, S
         },
         ..Default::default()
     };
-    Ok(resolve_deck_list(db, &deck_list))
+    // Duel decks carry no commander, so the estimator returns None on this path regardless of the table.
+    Ok(resolve_deck_list(
+        db,
+        &engine::database::ComboTable::default(),
+        &deck_list,
+    ))
 }
 
 fn failed_result(spec: &MatchupSpec, reason: &str) -> MatchupResult {
@@ -973,7 +978,7 @@ pub(crate) fn drive_game_observed(
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = crate::session::AiSession::arc_from_game(&state);
     loop {
-        let results = run_ai_actions(
+        let results = run_ai_actions_headless(
             &mut state,
             &ai_players,
             &ai_configs,

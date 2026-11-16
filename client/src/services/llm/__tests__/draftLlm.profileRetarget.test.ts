@@ -29,7 +29,7 @@ vi.mock("../../../adapter/draft-adapter", () => ({
 vi.mock("../llmClient", () => ({ executeLlmRequest: vi.fn() }));
 vi.mock("../../../game/debugLog", () => ({ debugLog: vi.fn() }));
 
-import { cancelLlmDraftRun, collectLlmDraftResponses, resetLlmDraftBreaker } from "../draftLlm";
+import { cancelLlmDraftRun, collectLlmDraftResponses } from "../draftLlm";
 import { useLlmStore } from "../../../stores/llmStore";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore";
 import type { LlmEndpointConfig, LlmProfile } from "../types";
@@ -45,7 +45,6 @@ function openCatalogGate(): void {
 beforeEach(() => {
   gates.endpoints = [];
   openCatalogGate();
-  resetLlmDraftBreaker();
   cancelLlmDraftRun();
   useLlmStore.setState({ profiles: [] });
   useMultiplayerStore.setState({ hostingServer: "wss://a.example/ws" });

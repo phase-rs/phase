@@ -15,24 +15,35 @@ vi.mock("idb-keyval", () => ({
   createStore: vi.fn(() => ({})),
   del: vi.fn().mockResolvedValue(undefined),
   get: vi.fn().mockResolvedValue(undefined),
+  keys: vi.fn().mockResolvedValue([]),
   set: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { del as idbDel, get as idbGet, set as idbSet } from "idb-keyval";
+import { del as idbDel, get as idbGet, keys as idbKeys, set as idbSet } from "idb-keyval";
 import {
+  clearFullTerminalCleanupStrict,
   clearGame,
   clearGameStrict,
+  clearNativeSoloSession,
+  clearOnlineSession,
+  listFullTerminalCleanupStrict,
+  markNativeSoloSessionTerminal,
   loadGame,
+  loadFullTerminalCleanupStrict,
   loadGameStrict,
   loadCheckpoints,
   loadP2PHostSession,
   migratePersistedGameState,
   saveAuthoritativeGame,
   saveAuthoritativeGameStrict,
+  saveFullTerminalCleanupStrict,
   saveGame,
   saveResumableGameStrict,
+  saveP2PHostSession,
   saveActiveGame,
 } from "../gamePersistence";
+import { saveWsSession, type WsSessionData } from "../multiplayerSession";
+import type { FullTerminalCleanupObligation } from "../gamePersistence";
 
 function fixtureState(): GameState {
   return buildGameState({
@@ -83,6 +94,8 @@ describe("game persistence", () => {
     vi.mocked(idbDel).mockResolvedValue(undefined);
     vi.mocked(idbGet).mockReset();
     vi.mocked(idbGet).mockResolvedValue(undefined);
+    vi.mocked(idbKeys).mockReset();
+    vi.mocked(idbKeys).mockResolvedValue([]);
     vi.mocked(idbSet).mockReset();
     vi.mocked(idbSet).mockResolvedValue(undefined);
   });
@@ -368,6 +381,64 @@ describe("game persistence", () => {
     expect(idbSet).not.toHaveBeenCalled();
   });
 
+  it("keeps resumable records when the cleanup owner cannot be written", async () => {
+    const owner = cleanupObligation("owner-write-failure");
+    const gameKey = GAME_KEY_PREFIX + owner.gameId;
+    vi.mocked(idbGet).mockImplementation(async (key) =>
+      String(key) === gameKey ? fixtureState() : undefined,
+    );
+    vi.mocked(idbSet).mockRejectedValueOnce(new Error("IndexedDB unavailable"));
+
+    await expect(saveFullTerminalCleanupStrict(owner)).rejects.toThrow("IndexedDB unavailable");
+    expect(idbDel).not.toHaveBeenCalled();
+    await expect(loadGameStrict(owner.gameId)).resolves.toBeTruthy();
+  });
+
+  it("retains a discoverable cleanup-only owner after resume deletion and blocks late saves", async () => {
+    const owner = cleanupObligation("cleanup-restart");
+    const cleanupKey = "phase-full-terminal-cleanup:" + owner.gameId;
+    const records = new Map<string, unknown>([
+      [GAME_KEY_PREFIX + owner.gameId, fixtureState()],
+      ["phase-p2p-host:" + owner.gameId, { gameStarted: true }],
+      ["phase-game-checkpoints:" + owner.gameId, [fixtureState()]],
+    ]);
+    vi.mocked(idbGet).mockImplementation(async (key) => records.get(String(key)));
+    vi.mocked(idbKeys).mockImplementation(async () => [...records.keys()]);
+    vi.mocked(idbSet).mockImplementation(async (key, value) => {
+      records.set(String(key), value);
+    });
+    vi.mocked(idbDel).mockImplementation(async (key) => {
+      records.delete(String(key));
+    });
+    saveActiveGame({ id: owner.gameId, mode: "p2p-host", difficulty: "" });
+
+    await saveFullTerminalCleanupStrict(owner);
+    await clearGameStrict(owner.gameId);
+    expect(records.has(cleanupKey)).toBe(true);
+    expect(records.has(GAME_KEY_PREFIX + owner.gameId)).toBe(false);
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).not.toBeNull();
+    await expect(loadFullTerminalCleanupStrict(owner.gameId)).resolves.toEqual(owner);
+    await expect(listFullTerminalCleanupStrict()).resolves.toEqual([owner]);
+
+    await saveGame(owner.gameId, fixtureState());
+    await saveP2PHostSession(owner.gameId, { gameId: owner.gameId } as never);
+    await expect(saveResumableGameStrict(owner.gameId, fixtureState())).rejects.toThrow(
+      "Terminal cleanup is pending",
+    );
+    expect(idbSet).toHaveBeenCalledTimes(1);
+
+    vi.mocked(idbDel).mockRejectedValueOnce(new Error("final owner delete failed"));
+    await expect(clearFullTerminalCleanupStrict(owner.gameId)).rejects.toThrow("final owner delete failed");
+    expect(records.has(cleanupKey)).toBe(true);
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).not.toBeNull();
+    vi.mocked(idbDel).mockImplementation(async (key) => {
+      records.delete(String(key));
+    });
+    await clearFullTerminalCleanupStrict(owner.gameId);
+    expect(records.has(cleanupKey)).toBe(false);
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).toBeNull();
+  });
+
   it("propagates a strict resumable-write failure", async () => {
     vi.mocked(idbSet).mockRejectedValueOnce(new Error("IndexedDB unavailable"));
 
@@ -384,4 +455,166 @@ describe("game persistence", () => {
 
     await expect(loadP2PHostSession("legacy-p2p")).resolves.toBeNull();
   });
+
+  describe("native solo recovery pointer", () => {
+    const session = {
+      gameCode: "NATIVE", playerId: 0, playerToken: "pre-terminal-token",
+      fullKey: { game_code: "NATIVE", generation: 3 },
+    };
+    const pointer = { id: "native-game", mode: "ai" as const, difficulty: "Medium", nativeSession: session };
+    const stored = () => JSON.parse(localStorage.getItem(ACTIVE_GAME_KEY) ?? "null");
+
+    const clears = [["clearGame", clearGame], ["clearGameStrict", clearGameStrict]] as const;
+
+    it.each(clears)("%s keeps a pointer saved for another game while it awaits IndexedDB", async (_name, clear) => {
+      saveActiveGame(pointer);
+      let release!: () => void;
+      vi.mocked(idbDel).mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(); }));
+      const pending = clear("native-game");
+      const replacement = { id: "rematch-game", mode: "ai" as const, difficulty: "Medium" };
+      saveActiveGame(replacement);
+      release();
+      await pending;
+      expect(stored()).toEqual(replacement);
+    });
+
+    it.each(clears)("%s keeps a same-ID replacement pointer saved while it awaits IndexedDB", async (_name, clear) => {
+      saveActiveGame(pointer);
+      let release!: () => void;
+      vi.mocked(idbDel).mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(); }));
+      const pending = clear("native-game");
+      const replacement = {
+        id: "native-game",
+        mode: "ai" as const,
+        difficulty: "Medium",
+        nativeSession: { ...session, gameCode: "REPLACEMENT", playerToken: "replacement-token" },
+      };
+      saveActiveGame(replacement);
+      release();
+      await pending;
+      expect(stored()).toEqual(replacement);
+    });
+
+    it.each(clears)("%s keeps a same-ID pointer first written while it awaits IndexedDB", async (_name, clear) => {
+      let release!: () => void;
+      vi.mocked(idbDel).mockImplementationOnce(() => new Promise((resolve) => { release = () => resolve(); }));
+      const pending = clear("native-game");
+      const fresh = { id: "native-game", mode: "ai" as const, difficulty: "Medium" };
+      saveActiveGame(fresh);
+      release();
+      await pending;
+      expect(stored()).toEqual(fresh);
+    });
+
+    it.each(clears)("%s preserves IndexedDB cleanup and resolves when pointer storage is denied", async (_name, clear) => {
+      vi.mocked(idbDel).mockClear();
+      const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+        throw new DOMException("Access denied", "SecurityError");
+      });
+      try {
+        await expect(clear("native-game")).resolves.toBeUndefined();
+        expect(idbDel).toHaveBeenCalled();
+      } finally {
+        getItemSpy.mockRestore();
+      }
+    });
+
+    it.each(clears)("%s releases its own unchanged pointer", async (_name, clear) => {
+      // Positive control for the replacement cases above.
+      const own = { id: "native-game", mode: "ai" as const, difficulty: "Medium" };
+      saveActiveGame(own);
+      await clear("native-game");
+      expect(stored()).toBeNull();
+    });
+
+    it.each(clears)("%s leaves any native session pointer to native terminal persistence", async (_name, clear) => {
+      saveActiveGame(pointer);
+      markNativeSoloSessionTerminal("native-game", session);
+      expect(stored()).toEqual({ ...pointer, nativeSession: { ...session, terminalOnly: true } });
+      await clear("native-game");
+      expect(stored()).toEqual({ ...pointer, nativeSession: { ...session, terminalOnly: true } });
+      // Playable native pointer is also preserved: native persistence owns identity-checked release.
+      saveActiveGame(pointer);
+      await clear("native-game");
+      expect(stored()).toEqual(pointer);
+    });
+
+    it("marks and clears only the pointer holding the same game and session", () => {
+      const replacements = [
+        { ...pointer, id: "other-game" },
+        { ...pointer, nativeSession: { ...session, playerToken: "other-token" } },
+        { ...pointer, nativeSession: { ...session, fullKey: { game_code: "NATIVE", generation: 4 } } },
+        { id: "native-game", mode: "ai" as const, difficulty: "Medium" },
+      ];
+      for (const replacement of replacements) {
+        saveActiveGame(replacement);
+        markNativeSoloSessionTerminal("native-game", session);
+        expect(stored()).toEqual(replacement);
+        clearNativeSoloSession("native-game", session);
+        expect(stored()).toEqual(replacement);
+      }
+      saveActiveGame(pointer);
+      markNativeSoloSessionTerminal("native-game", session);
+      clearNativeSoloSession("native-game", session);
+      expect(stored()).toBeNull();
+    });
+
+    it.each(clears)("%s leaves an online session pointer to online session persistence", async (_name, clear) => {
+      const onlinePointer = { id: "online-game", mode: "online" as const, difficulty: "" };
+      saveActiveGame(onlinePointer);
+      await clear("online-game");
+      expect(stored()).toEqual(onlinePointer);
+    });
+
+    it("clears an online session and its pointer only when matching identity", () => {
+      const wsSession: WsSessionData = {
+        gameCode: "ONLINE",
+        playerId: 1,
+        playerToken: "token-1",
+        fullKey: { game_code: "ONLINE", generation: 1 },
+        serverUrl: "wss://example.test/ws",
+        timestamp: Date.now(),
+        terminalOnly: true,
+      };
+      saveWsSession(wsSession);
+      const onlinePointer = { id: "ONLINE", mode: "online" as const, difficulty: "" };
+      saveActiveGame(onlinePointer);
+
+      // Mismatched session identity does not clear the pointer or stored wsSession
+      clearOnlineSession("ONLINE", {
+        serverUrl: "wss://other.test/ws",
+        playerToken: "token-1",
+        fullKey: { game_code: "ONLINE", generation: 1 },
+      });
+      expect(stored()).toEqual(onlinePointer);
+
+      // Matching identity clears both
+      clearOnlineSession("ONLINE", wsSession);
+      expect(stored()).toBeNull();
+    });
+  });
 });
+
+function cleanupObligation(gameId: string): FullTerminalCleanupObligation {
+  const p2pResult = {
+    key: "p2p-session",
+    lease: { sessionKey: "p2p-session", hostIncarnation: "host-incarnation" },
+    recipient: 0,
+    revision: 12,
+    terminalId: "terminal-result-id",
+    finalStateCommitment: "sha256:committed-state",
+    display: { winner: 0, reason: "Game complete" },
+  };
+  return {
+    gameId,
+    p2pSessionKey: p2pResult.key,
+    p2pTerminalId: p2pResult.terminalId,
+    p2pResult,
+    fullKey: { game_code: "ABCDE", generation: 4 },
+    terminalRevision: 12,
+    deliveries: [
+      { recipient: 0, deliveryId: "host-delivery", credential: "host-credential" },
+      { recipient: 1, deliveryId: "guest-delivery", credential: "guest-credential" },
+    ],
+  };
+}

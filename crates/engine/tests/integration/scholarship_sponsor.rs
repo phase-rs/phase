@@ -187,6 +187,16 @@ fn scholarship_sponsor_cast_collects_three_player_searches_before_tapped_deliver
     assert_eq!(*count, 2, "P2 is two lands behind the five-land leader");
     assert!(*up_to);
     assert!(cards.contains(&p2_forest_a) && cards.contains(&p2_forest_b));
+    // CR 701.23a + CR 608.2d: neither a repeated object nor another
+    // searcher's private card can be announced as two found cards.
+    for chosen in [vec![p2_forest_a, p2_forest_a], vec![p2_forest_a, p1_forest]] {
+        let before = serde_json::to_value(runner.state()).unwrap();
+        assert!(matches!(
+            runner.act(GameAction::SelectCards { cards: chosen }),
+            Err(engine::game::engine::EngineError::InvalidAction(_))
+        ));
+        assert_eq!(serde_json::to_value(runner.state()).unwrap(), before);
+    }
 
     let zone_changes_before_delivery = runner.state().zone_changes_this_turn.len();
     let delivery = runner
@@ -241,6 +251,7 @@ fn scholarship_sponsor_cast_collects_three_player_searches_before_tapped_deliver
         vec![P1, P2],
         "only players who searched this way shuffle once after the shared delivery"
     );
+    assert_scoped_complete(&runner);
 }
 
 #[test]
@@ -274,6 +285,230 @@ fn scholarship_sponsor_tied_land_counts_open_no_search() {
     assert!(libraries
         .iter()
         .all(|id| runner.state().objects[id].zone == Zone::Library));
+    assert_scoped_complete(&runner);
+}
+
+fn assert_scoped_complete(runner: &GameRunner) {
+    assert!(runner.state().pending_scoped_library_search.is_none());
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().active_ability_continuation().is_none());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+#[test]
+fn scholarship_sponsor_partial_and_empty_choices_still_deliver_and_shuffle() {
+    // CR 701.23b: a basic-land search may find fewer cards, including none.
+    for selected_count in [0, 1] {
+        let (mut scenario, sponsor) = sponsor_scenario();
+        for (player, count) in [(P0, 5), (P1, 4), (P2, 3)] {
+            for _ in 0..count {
+                scenario.add_basic_land(player, ManaColor::Green);
+            }
+        }
+        let mut runner = scenario.build();
+        let p1 = add_basic_land_to_library(runner.state_mut(), P1);
+        let p2 = [
+            add_basic_land_to_library(runner.state_mut(), P2),
+            add_basic_land_to_library(runner.state_mut(), P2),
+        ];
+        runner.cast(sponsor).resolve();
+        assert!(matches!(&runner.state().waiting_for,
+            WaitingFor::SearchChoice { player: P1, cards, count: 1, .. } if cards == &vec![p1]));
+        runner
+            .act(GameAction::SelectCards { cards: vec![p1] })
+            .unwrap();
+        assert!(matches!(&runner.state().waiting_for,
+            WaitingFor::SearchChoice { player: P2, cards, count: 2, .. }
+                if cards.len() == 2 && p2.iter().all(|id| cards.contains(id))));
+        assert_eq!(runner.state().objects[&p1].zone, Zone::Library);
+        let result = runner
+            .act(GameAction::SelectCards {
+                cards: p2[..selected_count].to_vec(),
+            })
+            .unwrap();
+        for (id, controller) in
+            std::iter::once((p1, P1)).chain(p2[..selected_count].iter().map(|id| (*id, P2)))
+        {
+            let object = &runner.state().objects[&id];
+            assert_eq!(object.zone, Zone::Battlefield);
+            assert_eq!(object.controller, controller);
+            assert!(object.tapped);
+        }
+        for id in &p2[selected_count..] {
+            assert_eq!(runner.state().objects[id].zone, Zone::Library);
+        }
+        let shufflers: Vec<_> = result
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } => Some(*player_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(shufflers, vec![P1, P2]);
+        assert_scoped_complete(&runner);
+    }
+}
+
+#[test]
+fn scholarship_sponsor_reads_land_difference_when_effect_applies() {
+    let (mut scenario, sponsor) = sponsor_scenario();
+    for (player, count) in [(P0, 5), (P1, 4), (P2, 5)] {
+        for _ in 0..count {
+            scenario.add_basic_land(player, ManaColor::Green);
+        }
+    }
+    let mut runner = scenario.build();
+    // Four candidates keep the offered-count cap from masking a stale count.
+    let offered: Vec<_> = (0..4)
+        .map(|_| add_basic_land_to_library(runner.state_mut(), P1))
+        .collect();
+    let mut cast = runner.cast(sponsor).commit();
+    for index in 0..2 {
+        let id = create_object(
+            cast.state_mut(),
+            CardId(800 + index),
+            P0,
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        let object = cast.state_mut().objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Land);
+        object.base_card_types = object.card_types.clone();
+    }
+    cast.resolve();
+    // CR 608.2h: the live leader now has seven lands, so P1 may find three.
+    assert!(matches!(&runner.state().waiting_for,
+        WaitingFor::SearchChoice { player: P1, cards, count: 3, .. }
+            if cards.len() == 4 && offered.iter().all(|id| cards.contains(id))));
+    runner
+        .act(GameAction::SelectCards {
+            cards: offered[..3].to_vec(),
+        })
+        .unwrap();
+    // P2 is now also behind the seven-land leader, but has no candidates.
+    for id in &offered[..3] {
+        assert_eq!(runner.state().objects[id].zone, Zone::Battlefield);
+        assert!(runner.state().objects[id].tapped);
+    }
+    assert_eq!(runner.state().objects[&offered[3]].zone, Zone::Library);
+    assert_scoped_complete(&runner);
+}
+
+fn sponsor_with_published_trigger() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let (mut scenario, sponsor) = sponsor_scenario();
+    for (player, count) in [(P0, 5), (P1, 4), (P2, 3)] {
+        for _ in 0..count {
+            scenario.add_basic_land(player, ManaColor::Green);
+        }
+    }
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    let p1 = add_basic_land_to_library(runner.state_mut(), P1);
+    let p2 = add_basic_land_to_library(runner.state_mut(), P2);
+    {
+        let mut cast = runner.cast(sponsor).commit();
+        for _ in 0..3 {
+            cast.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(cast.state().objects[&sponsor].zone, Zone::Battlefield);
+        let trigger = cast
+            .state()
+            .stack
+            .last()
+            .expect("ETB published by the cast");
+        assert_eq!(trigger.source_id, sponsor);
+        assert_eq!(trigger.controller, P0);
+        assert!(matches!(
+            trigger.kind,
+            engine::types::game_state::StackEntryKind::TriggeredAbility { .. }
+        ));
+    }
+    (runner, sponsor, bolt, p1, p2)
+}
+
+fn complete_source_independent_search(runner: &mut GameRunner, p1: ObjectId, p2: ObjectId) {
+    assert!(matches!(&runner.state().waiting_for,
+        WaitingFor::SearchChoice { player: P1, cards, .. } if cards == &vec![p1]));
+    runner
+        .act(GameAction::SelectCards { cards: vec![p1] })
+        .unwrap();
+    assert!(matches!(&runner.state().waiting_for,
+        WaitingFor::SearchChoice { player: P2, cards, .. } if cards == &vec![p2]));
+    let result = runner
+        .act(GameAction::SelectCards { cards: vec![p2] })
+        .unwrap();
+    for (id, player) in [(p1, P1), (p2, P2)] {
+        let object = &runner.state().objects[&id];
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert_eq!(object.controller, player);
+        assert!(object.tapped);
+        assert!(result.events.iter().any(|event| matches!(event,
+            GameEvent::PlayerPerformedAction { player_id, action: PlayerActionKind::ShuffledLibrary, .. }
+                if *player_id == player)));
+    }
+    assert_scoped_complete(runner);
+}
+
+#[test]
+fn scholarship_sponsor_trigger_survives_source_departure() {
+    let (mut runner, sponsor, bolt, p1, p2) = sponsor_with_published_trigger();
+    runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+        ManaType::Red,
+        ObjectId(0),
+        false,
+        vec![],
+    ));
+    {
+        let mut response = runner.cast(bolt).target_object(sponsor).commit();
+        for _ in 0..3 {
+            response.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(response.state().objects[&sponsor].zone, Zone::Graveyard);
+        assert_eq!(response.state().objects[&bolt].zone, Zone::Graveyard);
+        assert_eq!(response.state().stack.len(), 1);
+        assert_eq!(response.state().stack[0].source_id, sponsor);
+    }
+    // CR 113.7a: removal of the source does not remove its published ETB.
+    for _ in 0..3 {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    complete_source_independent_search(&mut runner, p1, p2);
+    assert_eq!(runner.state().objects[&sponsor].zone, Zone::Graveyard);
+}
+
+#[test]
+fn scholarship_sponsor_trigger_retains_controller_after_source_control_changes() {
+    let (mut runner, sponsor, _, p1, p2) = sponsor_with_published_trigger();
+    let source = runner.state_mut().objects.get_mut(&sponsor).unwrap();
+    source.base_controller = Some(P2);
+    source.controller = P2;
+    // CR 603.3a: changing source control does not rebind the stack trigger.
+    assert_eq!(runner.state().stack[0].controller, P0);
+    for _ in 0..3 {
+        runner.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(runner.state().objects[&sponsor].controller, P2);
+    complete_source_independent_search(&mut runner, p1, p2);
+    assert_eq!(runner.state().objects[&sponsor].controller, P2);
 }
 
 /// Enigma Ridges uses the same scoped resolver as Scholarship Sponsor but has

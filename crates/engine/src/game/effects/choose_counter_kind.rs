@@ -159,6 +159,7 @@ pub fn resolve(
     // CR 608.2d: two or more kinds → surface the shared interactive choice seam.
     let options: Vec<String> = kinds.iter().map(|k| k.as_str().into_owned()).collect();
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         player: ability.controller,
         free_entry: choice_type.free_entry(),
         choice_type,
@@ -655,6 +656,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate the Caves chapter ability");
 
@@ -747,6 +749,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate the Caves chapter ability");
 
@@ -858,6 +861,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate the Caves chapter ability");
 

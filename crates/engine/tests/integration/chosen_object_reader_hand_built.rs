@@ -118,6 +118,7 @@ fn drive_choice(
         .act(GameAction::ActivateAbility {
             source_id: host,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the choice chain");
     runner.advance_until_stack_empty();
@@ -342,6 +343,7 @@ fn no_legal_choice_still_pumps_and_remembers_nothing() {
         .act(GameAction::ActivateAbility {
             source_id: host,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate the choice chain");
     runner.advance_until_stack_empty();

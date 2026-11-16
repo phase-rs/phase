@@ -18,9 +18,10 @@
 
 use crate::game::ability_utils::{append_to_sub_chain, build_resolved_from_def};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, EffectError, EffectKind,
-    EffectResolutionResult, FilterProp, MultiTargetSpec, PlayerFilter, QuantityExpr,
-    ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypedFilter,
+    AbilityDefinition, AbilityKind, ChooseOneOfKind, Comparator, ControllerRef, Effect,
+    EffectError, EffectKind, EffectResolutionResult, FilterProp, MultiTargetSpec, PlayerFilter,
+    QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause,
+    TypedFilter,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
@@ -87,6 +88,8 @@ fn exile_three_branch() -> AbilityDefinition {
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Owned {
@@ -188,6 +191,7 @@ pub(crate) fn resolve(
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches,
+                    kind: ChooseOneOfKind::Ordinary,
                 },
                 vec![TargetRef::Player(controller)],
                 ability.source_id,

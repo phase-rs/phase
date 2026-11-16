@@ -1,13 +1,203 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
-    ContinuousModification, Duration, Effect, EffectError, EffectKind, ResolvedAbility,
-    TargetFilter, TargetRef,
+    ChoiceAssignmentSide, ContinuousModification, Duration, Effect, EffectError, EffectKind,
+    ObjectPlayerAssignment, ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::events::GameEvent;
+use crate::types::events::{
+    ControlChangeEvidence, ControlChangeInstructionCapture, ControlChangeObservation, GameEvent,
+};
 use crate::types::game_state::{GameState, TransientContinuousEffectBindings};
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
+use std::sync::Arc;
 
+/// CR 603.10 + CR 603.10d + CR 608.2e: the single writer of control-change
+/// evidence. Latches every look-back control-change watcher and every
+/// functioning trigger doubler, and snapshots every candidate subject, as the
+/// board stands NOW.
+///
+/// Callers own the boundary: they settle layers once at the instruction's
+/// entrance, determine the instruction's whole population, call this, and
+/// only then install any control effect. The capture is therefore immutable
+/// for the rest of the instruction: later installs, and the per-install
+/// settles a "for as long as" duration performs, can't reach it.
+pub(crate) fn capture_control_change_instruction(
+    state: &GameState,
+    population: impl IntoIterator<Item = ObjectId>,
+) -> Arc<ControlChangeInstructionCapture> {
+    Arc::new(ControlChangeInstructionCapture {
+        watchers: Arc::new(crate::game::triggers::latch_control_change_watchers(state)),
+        doublers: Arc::new(crate::game::triggers::active_trigger_doublers(state)),
+        subjects: population
+            .into_iter()
+            .filter_map(|object_id| state.capture_event_object_snapshot(object_id))
+            .collect(),
+    })
+}
+
+/// The boundary one control-change resolution publishes against.
+pub(crate) enum InstructionBoundary {
+    /// The resolver's own capture, taken at its entrance: every member is
+    /// published once, by this resolution.
+    Own(Arc<ControlChangeInstructionCapture>),
+    /// A player-scope link's pre-seat capture, keyed in
+    /// `GameState::control_change_captures`.
+    Carried(u64),
+    /// `ControlChangeInstructionCarrier::Unobservable`, or a carried id whose
+    /// capture is gone: publish `Unrecorded`, never a capture taken at some
+    /// other point.
+    Unobservable,
+}
+
+/// The boundary a control-change resolver publishes against: the one its
+/// fan-out driver carried in (CR 608.2e: captured before the first seat), or
+/// its own, captured at its entrance after one settle. Returns the
+/// instruction's population with it.
+fn instruction_boundary(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    population: impl FnOnce(&GameState) -> Vec<ObjectId>,
+) -> (InstructionBoundary, Vec<ObjectId>) {
+    // CR 702.26b: a phased-out permanent can't be affected, so it is never a member.
+    let eligible = |state: &GameState| {
+        let mut members = population(state);
+        members.retain(|id| {
+            !state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.is_phased_out_permanent())
+        });
+        members
+    };
+    match carried_boundary(state, ability) {
+        Some(boundary) => (boundary, eligible(state)),
+        None => {
+            crate::game::layers::flush_layers(state);
+            let members = eligible(state);
+            let capture = capture_control_change_instruction(state, members.iter().copied());
+            (InstructionBoundary::Own(capture), members)
+        }
+    }
+}
+
+fn carried_boundary(state: &GameState, ability: &ResolvedAbility) -> Option<InstructionBoundary> {
+    use crate::types::events::ControlChangeInstructionCarrier;
+    match &ability.control_change_instruction {
+        Some(ControlChangeInstructionCarrier::Captured(id)) => {
+            Some(if state.control_change_captures.contains_key(id) {
+                InstructionBoundary::Carried(*id)
+            } else {
+                InstructionBoundary::Unobservable
+            })
+        }
+        Some(ControlChangeInstructionCarrier::Unobservable) => {
+            Some(InstructionBoundary::Unobservable)
+        }
+        None => None,
+    }
+}
+
+/// CR 701.12b: an exchange's boundary. `exchange_control::resolve` settles at
+/// its own entrance (before its no-op guards read the two controllers), so an
+/// uncarried exchange captures here without a second settle.
+pub(crate) fn exchange_boundary(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    members: [ObjectId; 2],
+) -> InstructionBoundary {
+    carried_boundary(state, ability).unwrap_or_else(|| {
+        InstructionBoundary::Own(capture_control_change_instruction(state, members))
+    })
+}
+
+/// One member's pre-change controller and the observation its event records.
+pub(crate) struct MemberEvidence {
+    object_id: ObjectId,
+    old_controller: PlayerId,
+    observation: Option<ControlChangeObservation>,
+    /// The carried link to mark this member published in.
+    link: Option<u64>,
+}
+
+/// One member's evidence, read before its install.
+///
+/// A captured member publishes its observation, and its observed controller is
+/// the loser, so the event and its evidence agree by construction. It's
+/// `Unrecorded` (the live controller is the loser) when the capture doesn't
+/// hold it (an object that didn't exist when the instruction began), when it is
+/// no longer the incarnation the capture observed (CR 400.7), when its link has
+/// already published it (an earlier seat moved the same member), or when the
+/// boundary is `Unobservable`. No other observation is ever substituted for the
+/// instruction's boundary.
+///
+/// A carried member whose live controller moved only as a consequence of an
+/// earlier seat (an Aura that changed hands now controls its creature) is still
+/// the captured board's change: one action, processed simultaneously (CR
+/// 608.2e), so it publishes its captured observation.
+pub(crate) fn instruction_member(
+    state: &GameState,
+    boundary: &InstructionBoundary,
+    object_id: ObjectId,
+) -> Option<MemberEvidence> {
+    let live = state.objects.get(&object_id)?;
+    let live_identity = ObjectIncarnationRef::from_object(live);
+    let (capture, link) = match boundary {
+        InstructionBoundary::Own(capture) => (Some(capture), None),
+        InstructionBoundary::Carried(id) => match state.control_change_captures.get(id) {
+            Some(entry) if !entry.published.contains(&object_id) => {
+                (Some(&entry.capture), Some(*id))
+            }
+            Some(_) => (None, Some(*id)),
+            // A carried id whose capture is gone publishes `Unrecorded`
+            // (`InstructionBoundary::Unobservable`'s contract).
+            None => (None, None),
+        },
+        InstructionBoundary::Unobservable => (None, None),
+    };
+    let observation = capture
+        .and_then(|capture| capture.observation_for(object_id))
+        .filter(|observation| observation.subject.identity == live_identity);
+    Some(MemberEvidence {
+        object_id,
+        old_controller: observation.as_ref().map_or(live.controller, |observation| {
+            observation.subject.controller
+        }),
+        observation,
+        link,
+    })
+}
+
+/// CR 613.1b + CR 603.10d: publish one member's control change, recording its
+/// observation (the event carries only the key). A no-op self-handoff
+/// publishes nothing.
+pub(crate) fn publish_controller_changed(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    member: MemberEvidence,
+    new_controller: PlayerId,
+) {
+    if member.old_controller == new_controller {
+        return;
+    }
+    if let Some(link) = member
+        .link
+        .and_then(|id| state.control_change_captures.get_mut(&id))
+    {
+        link.published.insert(member.object_id);
+    }
+    let evidence = match member.observation {
+        Some(observation) => state.record_control_change_observation(observation),
+        None => ControlChangeEvidence::Unrecorded,
+    };
+    events.push(GameEvent::ControllerChanged {
+        object_id: member.object_id,
+        old_controller: member.old_controller,
+        new_controller,
+        evidence,
+    });
+}
 /// CR 613.3: GainControl creates a transient continuous effect that changes the
 /// target permanent's controller through the layer system (Layer 2).
 ///
@@ -29,19 +219,20 @@ pub fn resolve(
     };
 
     let new_controller = gain_control_controller(ability, target);
-    let object_ids = gain_control_object_targets(state, ability, target);
 
-    // Settle first so the captured prior controllers are post-layer values.
-    if duration.is_for_as_long_as() {
-        crate::game::layers::flush_layers(state);
-    }
+    // CR 608.2e + CR 603.10d: the instruction's boundary. Settle once at its
+    // entrance (so the captured prior controllers are post-layer values), fix
+    // its population, and capture before any member's install.
+    let (boundary, object_ids) = instruction_boundary(state, ability, |state| {
+        gain_control_object_targets(state, ability, target)
+    });
 
     for obj_id in object_ids {
         let Some(object) = state.objects.get(&obj_id) else {
             return Err(EffectError::ObjectNotFound(obj_id));
         };
-        let old_controller = object.controller;
         let recipient = ObjectIncarnationRef::from_object(object);
+        let member = instruction_member(state, &boundary, obj_id);
         // CR 611.2c + CR 400.7: state durations track this exact recipient.
         // CR 400.7a: other control effects retain spell-to-permanent continuity.
         // CR 611.2b: a duration that never starts installs nothing, so no
@@ -69,12 +260,8 @@ pub fn resolve(
         // CR 613.1b: emit the control-change event so "when you lose control"
         // triggers on the *previous* controller observe the loss (mirrors
         // `GainControlAll` and `GiveControl`). Skip no-op self-handoffs.
-        if old_controller != new_controller {
-            events.push(GameEvent::ControllerChanged {
-                object_id: obj_id,
-                old_controller,
-                new_controller,
-            });
+        if let Some(member) = member {
+            publish_controller_changed(state, events, member, new_controller);
         }
     }
 
@@ -94,7 +281,10 @@ pub(crate) fn apply_permanent_control_change(
     new_controller: PlayerId,
     events: &mut Vec<GameEvent>,
 ) {
-    let old_controller = state.objects.get(&object_id).map(|obj| obj.controller);
+    // CR 603.10d: a one-member instruction; settle, capture, then install.
+    crate::game::layers::flush_layers(state);
+    let boundary = InstructionBoundary::Own(capture_control_change_instruction(state, [object_id]));
+    let member = instruction_member(state, &boundary, object_id);
     state.add_transient_continuous_effect(
         source_id,
         new_controller,
@@ -104,12 +294,8 @@ pub(crate) fn apply_permanent_control_change(
         None,
     );
     mark_echo_due_for_new_controller(state, object_id);
-    if let Some(old_controller) = old_controller.filter(|old| *old != new_controller) {
-        events.push(GameEvent::ControllerChanged {
-            object_id,
-            old_controller,
-            new_controller,
-        });
+    if let Some(member) = member {
+        publish_controller_changed(state, events, member, new_controller);
     }
 }
 
@@ -137,28 +323,28 @@ pub fn resolve_all(
     // "you gain control" — the ability's controller takes control.
     let new_controller = ability.controller;
 
-    // Settle first so matching and the captured prior controllers read
-    // post-layer values.
-    if duration.is_for_as_long_as() {
-        crate::game::layers::flush_layers(state);
-    }
-
+    // CR 608.2e + CR 603.10d: the instruction's boundary. Settle once at its
+    // entrance so matching and the captured prior controllers read post-layer
+    // values, fix the population, and capture before any install.
+    //
     // Ability-context filter evaluation, identical to `destroy::resolve_all`:
     // `resolved_object_filter` binds anaphoric scopes (e.g. `controller:
     // TargetPlayer`) from the ability before matching.
-    let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
-    let ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let matching: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .filter(|id| {
-            crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
-        })
-        .copied()
-        .collect();
+    let (boundary, matching) = instruction_boundary(state, ability, |state| {
+        let effective_filter = crate::game::effects::resolved_object_filter(state, ability, target);
+        let ctx = crate::game::filter::FilterContext::from_ability(ability);
+        state
+            .battlefield
+            .iter()
+            .filter(|id| {
+                crate::game::filter::matches_target_filter(state, **id, &effective_filter, &ctx)
+            })
+            .copied()
+            .collect()
+    });
 
     for obj_id in matching {
-        let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
+        let member = instruction_member(state, &boundary, obj_id);
         // CR 613.1b: register a Layer 2 (Control) transient continuous effect.
         // CR 611.2b: one whose duration never starts (The Wretched after its
         // controller lost it) installs nothing and emits no side effect.
@@ -174,12 +360,8 @@ pub fn resolve_all(
             continue;
         }
         mark_echo_due_for_new_controller(state, obj_id);
-        if let Some(old_controller) = old_controller.filter(|old| *old != new_controller) {
-            events.push(GameEvent::ControllerChanged {
-                object_id: obj_id,
-                old_controller,
-                new_controller,
-            });
+        if let Some(member) = member {
+            publish_controller_changed(state, events, member, new_controller);
         }
     }
 
@@ -272,19 +454,53 @@ fn gain_control_object_targets(
         .collect()
 }
 
-/// CR 110.2: Give control of target permanent to a specified recipient player.
-/// Unlike `resolve` (controller takes), this transfers to a different player
-/// specified by the recipient target.
-pub fn resolve_give(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
-    let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
+/// CR 110.2 + CR 608.2c: who receives control of each object a `GiveControl`
+/// hands.
+enum ControlRecipient<'a> {
+    /// One player receives every handed object (every pre-existing recipient form).
+    Single(PlayerId),
+    /// CR 608.2c + CR 608.2d: each object goes to the player this ability chose
+    /// for it ("… gains control of the permanent for which they were chosen").
+    PerObject(&'a [ObjectPlayerAssignment]),
+}
 
-    let Effect::GiveControl { target, recipient } = &ability.effect else {
-        return Err(EffectError::MissingParam("GiveControl".to_string()));
-    };
+impl ControlRecipient<'_> {
+    /// The player who receives `object`. CR 609.3 + CR 800.4b: none when no
+    /// player was chosen for it, or when the chosen player has left the game —
+    /// that object doesn't change control and no effect is installed for it,
+    /// while the other entries still apply.
+    fn for_object(&self, state: &GameState, object: ObjectId) -> Option<PlayerId> {
+        match self {
+            Self::Single(player) => Some(*player),
+            Self::PerObject(entries) => entries
+                .iter()
+                .find(|entry| entry.object == object)
+                .map(|entry| entry.player)
+                .filter(|player| crate::game::players::is_alive(state, *player)),
+        }
+    }
+}
+
+/// CR 110.2 + CR 608.2c: the recipient authority of `GiveControl`.
+///
+/// The per-object reference (`ChoiceAssignment { side: PlayerForObject }`) is
+/// answered first and alone: each handed object's recipient is the player this
+/// ability's own assignment recorded for it, so a stray player in
+/// `ability.targets` must not override it. Every other recipient form resolves
+/// to one player before any object is handed, exactly as before.
+fn give_control_recipient<'a>(
+    state: &GameState,
+    ability: &'a ResolvedAbility,
+    recipient: &TargetFilter,
+) -> Result<ControlRecipient<'a>, EffectError> {
+    if let TargetFilter::ChoiceAssignment {
+        side: ChoiceAssignmentSide::PlayerForObject,
+    } = recipient
+    {
+        return Ok(ControlRecipient::PerObject(
+            &ability.context.object_player_assignment,
+        ));
+    }
 
     // CR 110.2 + CR 613.3: The recipient is the player target when one is
     // explicitly in ability.targets (normal targeting path). When no player
@@ -304,15 +520,49 @@ pub fn resolve_give(
     } else {
         unique_recipient_from_filter(state, recipient, ability)?
     };
+    Ok(ControlRecipient::Single(recipient_id))
+}
 
-    let object_ids = give_control_object_targets(state, ability, target);
+/// CR 110.2: Give control of target permanent to a specified recipient player.
+/// Unlike `resolve` (controller takes), this transfers to a different player
+/// specified by the recipient target: one player for every handed object
+/// (`ControlRecipient::Single`), or, for the per-object reference, the player
+/// this ability chose for each object (`ControlRecipient::PerObject`).
+pub fn resolve_give(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let duration = ability.duration.clone().unwrap_or(Duration::Permanent);
 
+    let Effect::GiveControl { target, recipient } = &ability.effect else {
+        return Err(EffectError::MissingParam("GiveControl".to_string()));
+    };
+
+    let recipient = give_control_recipient(state, ability, recipient)?;
+
+    let (boundary, object_ids) = instruction_boundary(state, ability, |state| {
+        give_control_object_targets(state, ability, target)
+    });
+
+    // CR 608.2e + CR 608.2f: one application processes every handed object;
+    // each change applies in layer 2 (CR 613.1b) and lasts as stated, else
+    // indefinitely (CR 611.2a). CR 613.7b: each effect is timestamped as it is
+    // created; the objects are distinct, so their order is immaterial.
+    let mut installed_subject = None;
     for obj_id in object_ids {
         if !state.objects.contains_key(&obj_id) {
             return Err(EffectError::ObjectNotFound(obj_id));
         }
 
-        let old_controller = state.objects.get(&obj_id).map(|obj| obj.controller);
+        // CR 609.3 + CR 800.4b: no player chosen for this object, or the
+        // chosen player has left the game — it stays with its controller and
+        // no effect is installed for it; the other objects still change.
+        let Some(recipient_id) = recipient.for_object(state, obj_id) else {
+            continue;
+        };
+
+        let member = instruction_member(state, &boundary, obj_id);
 
         // CR 613.3: Create a transient continuous effect at Layer 2 (Control)
         // with the recipient as the new controller. CR 611.2b: one whose
@@ -328,23 +578,22 @@ pub fn resolve_give(
         if installed.is_none() {
             continue;
         }
+        // CR 118.12 + CR 613.1b: an installed control effect is the instruction performed, even for a recipient who already controls the object.
+        if installed_subject.is_none() {
+            installed_subject = state.capture_event_object_snapshot(obj_id);
+        }
         mark_echo_due_for_new_controller(state, obj_id);
 
-        // CR 110.2: Record the handoff for downstream "if they do" riders and
-        // `ControllerChanged` triggers (mirrors `resolve_all`).
-        if old_controller.is_some_and(|old| old != recipient_id) {
-            events.push(GameEvent::ControllerChanged {
-                object_id: obj_id,
-                old_controller: old_controller.unwrap(),
-                new_controller: recipient_id,
-            });
+        // CR 603.2: publish the handoff for `ControllerChanged` triggers (mirrors `resolve_all`).
+        if let Some(member) = member {
+            publish_controller_changed(state, events, member, recipient_id);
         }
     }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::GiveControl,
         source_id: ability.source_id,
-        subject: None,
+        subject: installed_subject.map(Box::new),
     });
 
     Ok(())
@@ -353,14 +602,17 @@ pub fn resolve_give(
 /// CR 611.2c: the objects whose controller this effect changes, fixed when the
 /// control-change continuous effect begins.
 ///
-/// SINGLE AUTHORITY: `resolve_give` hands control over exactly this list, and
+/// SINGLE AUTHORITY: `resolve_give` hands control over this list less any
+/// phased-out permanent (CR 702.26b), and
 /// `effects::affected_objects_from_events` publishes exactly this list as the
 /// chain tracked set. The `ControllerChanged` event is deliberately NOT the
 /// authority: `resolve_give` emits it only when the controller actually changed,
 /// while CR 608.2c makes "those creatures" name the objects the earlier text
 /// named — Domineering Will's "up to three target nonattacking creatures … Untap
 /// those creatures" must untap a target the recipient already controlled, which
-/// produces no event.
+/// produces no event. The per-object assignment's objects
+/// (`ChoiceAssignment { side: Objects }`) are answered here too, from the
+/// resolving ability's own record.
 pub(crate) fn give_control_object_targets(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -370,6 +622,17 @@ pub(crate) fn give_control_object_targets(
     // when target propagation has populated `ability.targets`.
     if matches!(filter, TargetFilter::SelfRef) {
         return ability.self_ref_binding(state).into_iter().collect();
+    }
+
+    // CR 608.2c + CR 608.2d: "the permanent for which they were chosen" — the
+    // objects this ability's own object→player assignment pairs with a player, in
+    // assignment order. CR 400.7: an object no longer on the battlefield is a new
+    // object and is not handed. A player projection names no object.
+    if let TargetFilter::ChoiceAssignment { side } = filter {
+        return match side {
+            ChoiceAssignmentSide::Objects => assigned_battlefield_objects(state, ability),
+            ChoiceAssignmentSide::PlayerForObject => Vec::new(),
+        };
     }
 
     // CR 400.7 + CR 603.7c: identical shape to `gain_control_object_targets`
@@ -407,6 +670,24 @@ pub(crate) fn give_control_object_targets(
         .collect()
 }
 
+/// CR 608.2c + CR 608.2d: the objects the resolving ability's object→player
+/// assignment pairs with a player, in assignment order, each once. CR 400.7:
+/// an assigned object that has left the battlefield is a new object, so it is
+/// not one of them.
+fn assigned_battlefield_objects(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
+    let mut objects: Vec<ObjectId> = Vec::new();
+    for entry in &ability.context.object_player_assignment {
+        let on_battlefield = state
+            .objects
+            .get(&entry.object)
+            .is_some_and(|obj| obj.zone == Zone::Battlefield);
+        if on_battlefield && !objects.contains(&entry.object) {
+            objects.push(entry.object);
+        }
+    }
+    objects
+}
+
 fn unique_recipient_from_filter(
     state: &GameState,
     filter: &TargetFilter,
@@ -416,6 +697,15 @@ fn unique_recipient_from_filter(
         return ability
             .scoped_player
             .ok_or_else(|| EffectError::MissingParam("GiveControl scoped recipient".to_string()));
+    }
+
+    // CR 608.2c + CR 608.2d: a resolution-time chosen player ("that opponent"
+    // after "choose … an opponent") is read from this resolution's chosen
+    // players. The generic scan below cannot resolve it: the stateless player
+    // matcher fails closed on `ControllerRef::ChosenPlayer`.
+    if filter.chosen_player_index().is_some() {
+        return crate::game::targeting::resolve_effect_player_ref(state, ability, filter)
+            .ok_or_else(|| EffectError::MissingParam("GiveControl recipient".to_string()));
     }
 
     let source_controller = ability.controller;
@@ -524,6 +814,76 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 608.2e + CR 603.10d + CR 400.7: a carried link's member keeps its
+    /// captured observation when its live controller moved only as a
+    /// consequence of an earlier seat (one action, processed simultaneously).
+    /// It publishes `Unrecorded` once the link already published it (a second
+    /// change of one member within one action), or when it's no longer the
+    /// captured incarnation.
+    #[test]
+    fn carried_member_keeps_its_capture_until_published_once() {
+        let mut state = GameState::new_two_player(7);
+        let member = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Member".to_string(),
+            Zone::Battlefield,
+        );
+        let capture = capture_control_change_instruction(&state, [member]);
+        state.control_change_captures.insert(
+            0,
+            crate::types::events::ControlChangeLink {
+                capture,
+                published: Default::default(),
+            },
+        );
+        let boundary = InstructionBoundary::Carried(0);
+
+        // An earlier seat's layered consequence moved the member's controller.
+        state.objects.get_mut(&member).unwrap().controller = PlayerId(1);
+        let first = instruction_member(&state, &boundary, member).unwrap();
+        assert!(
+            first.observation.is_some(),
+            "the captured observation stands for the moved member"
+        );
+        assert_eq!(first.old_controller, PlayerId(0), "the captured loser");
+
+        let mut events = Vec::new();
+        publish_controller_changed(&mut state, &mut events, first, PlayerId(1));
+        assert!(
+            matches!(
+                events.as_slice(),
+                [GameEvent::ControllerChanged {
+                    evidence: ControlChangeEvidence::Observed(_),
+                    ..
+                }]
+            ),
+            "REACH: the first change published observed evidence"
+        );
+        let second = instruction_member(&state, &boundary, member).unwrap();
+        assert!(
+            second.observation.is_none(),
+            "a second change of one member within one action is unrecorded"
+        );
+        assert_eq!(second.old_controller, PlayerId(1), "the live loser");
+
+        state
+            .control_change_captures
+            .get_mut(&0)
+            .unwrap()
+            .published
+            .clear();
+        state.objects.get_mut(&member).unwrap().incarnation += 1;
+        assert!(
+            instruction_member(&state, &boundary, member)
+                .unwrap()
+                .observation
+                .is_none(),
+            "a different incarnation is a different object (CR 400.7)"
+        );
     }
 
     /// CR 611.2b + CR 122.1c: Shield Broker — "put a shield counter on target
@@ -1112,6 +1472,127 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 608.2d (U-F1): a `GiveControl` whose recipient is the Nth
+    /// player chosen earlier in the resolution ("that opponent" after "choose a
+    /// creature you control and an opponent") hands the object to exactly that
+    /// player, and does nothing when no player was chosen.
+    #[test]
+    fn give_control_recipient_reads_the_chosen_player() {
+        // A three-player game holding one creature of P0's, given by an ability
+        // whose resolution chose `chosen_players`.
+        let give_with_chosen = |chosen_players: Vec<PlayerId>| {
+            let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+            let creature = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            );
+            let mut ability = ResolvedAbility::new(
+                Effect::GiveControl {
+                    target: TargetFilter::SpecificObject { id: creature },
+                    recipient: TargetFilter::Typed(
+                        TypedFilter::default().controller(ControllerRef::ChosenPlayer { index: 0 }),
+                    ),
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            ability.chosen_players = chosen_players;
+            let mut events = Vec::new();
+            let result = resolve_give(&mut state, &ability, &mut events);
+            crate::game::layers::evaluate_layers(&mut state);
+            let controller = state.objects.get(&creature).unwrap().controller;
+            let changed = events
+                .iter()
+                .any(|event| matches!(event, GameEvent::ControllerChanged { .. }));
+            (result, controller, changed)
+        };
+
+        // Reach guard: with a chosen player the same ability transfers control
+        // to exactly that player, so the empty-list case below is a refusal and
+        // not a vacuous no-op.
+        let (result, controller, changed) = give_with_chosen(vec![PlayerId(2)]);
+        assert!(result.is_ok());
+        assert_eq!(
+            controller,
+            PlayerId(2),
+            "the recipient is the chosen player, not another opponent"
+        );
+        assert!(changed);
+
+        let (result, controller, changed) = give_with_chosen(Vec::new());
+        assert!(matches!(
+            result,
+            Err(EffectError::MissingParam(message)) if message == "GiveControl recipient"
+        ));
+        assert_eq!(controller, PlayerId(0));
+        assert!(!changed);
+    }
+
+    /// CR 800.4b + CR 701.12a: a control effect for a player who has left the game installs
+    /// nothing, and a simultaneous batch with such a member installs no member.
+    #[test]
+    fn control_effect_for_a_departed_player_installs_nothing() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        let creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        state.players[1].is_eliminated = true;
+        let install = |state: &mut GameState, recipient: PlayerId| {
+            state.add_transient_continuous_effect(
+                ObjectId(100),
+                recipient,
+                Duration::Permanent,
+                TargetFilter::SpecificObject { id: creature },
+                vec![ContinuousModification::ChangeController],
+                None,
+            )
+        };
+
+        assert_eq!(install(&mut state, PlayerId(1)), None);
+        assert!(state.transient_continuous_effects.is_empty());
+        assert!(install(&mut state, PlayerId(2)).is_some());
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let exchange = |state: &mut GameState, second_recipient: PlayerId| {
+            state.add_simultaneous_transient_continuous_effects(
+                ObjectId(100),
+                Duration::Permanent,
+                vec![
+                    (
+                        PlayerId(2),
+                        TargetFilter::SpecificObject { id: creature },
+                        vec![ContinuousModification::ChangeController],
+                    ),
+                    (
+                        second_recipient,
+                        TargetFilter::SpecificObject { id: other },
+                        vec![ContinuousModification::ChangeController],
+                    ),
+                ],
+            )
+        };
+
+        assert!(!exchange(&mut state, PlayerId(1)));
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        assert!(exchange(&mut state, PlayerId(0)));
+        assert_eq!(state.transient_continuous_effects.len(), 3);
+    }
+
     /// CR 706.2 + CR 102.1 + CR 103.1 + CR 613.3: End-to-end resolution of
     /// Bucknard's Everfull Purse's activated ability
     /// (`{1}, {T}: Roll a d4 and create a number of Treasure tokens equal to
@@ -1187,6 +1668,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -1659,6 +2142,619 @@ then lose that much life.";
             &TargetFilter::Neighbor {
                 direction: SeatDirection::Right
             }
+        );
+    }
+
+    // ── The per-object handoff: `GiveControl` over this ability's own
+    // object→player assignment ("Each opponent gains control of the permanent
+    // for which they were chosen"). The assignment is built through Phase 3a's
+    // record type, not through prompts. ──
+
+    const P1: PlayerId = PlayerId(1);
+    const P2: PlayerId = PlayerId(2);
+    const P3: PlayerId = PlayerId(3);
+
+    /// Four players. P0 controls the battlefield objects `a`, `b` and `c`;
+    /// `g` is in P0's graveyard; `source` is the resolving spell.
+    struct HandoffBoard {
+        state: GameState,
+        a: ObjectId,
+        b: ObjectId,
+        c: ObjectId,
+        g: ObjectId,
+        source: ObjectId,
+    }
+
+    fn handoff_board() -> HandoffBoard {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 4, 42);
+        let mut add = |id: u64, name: &str, zone: Zone| {
+            create_object(&mut state, CardId(id), PlayerId(0), name.to_string(), zone)
+        };
+        let a = add(1, "Object A", Zone::Battlefield);
+        let b = add(2, "Object B", Zone::Battlefield);
+        let c = add(3, "Object C", Zone::Battlefield);
+        let g = add(4, "Object G", Zone::Graveyard);
+        let source = add(5, "Handoff Spell", Zone::Stack);
+        HandoffBoard {
+            state,
+            a,
+            b,
+            c,
+            g,
+            source,
+        }
+    }
+
+    fn entry(object: ObjectId, player: PlayerId) -> ObjectPlayerAssignment {
+        ObjectPlayerAssignment { object, player }
+    }
+
+    fn assignment(side: ChoiceAssignmentSide) -> TargetFilter {
+        TargetFilter::ChoiceAssignment { side }
+    }
+
+    /// The handoff Phase 3c lowers to: the assignment's objects, each to the
+    /// player chosen for it.
+    fn handoff_effect() -> Effect {
+        Effect::GiveControl {
+            target: assignment(ChoiceAssignmentSide::Objects),
+            recipient: assignment(ChoiceAssignmentSide::PlayerForObject),
+        }
+    }
+
+    fn with_assignment(
+        effect: Effect,
+        targets: Vec<TargetRef>,
+        source: ObjectId,
+        entries: Vec<ObjectPlayerAssignment>,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(effect, targets, source, PlayerId(0));
+        ability.context.object_player_assignment = entries;
+        ability
+    }
+
+    fn handoff_ability(
+        source: ObjectId,
+        entries: Vec<ObjectPlayerAssignment>,
+        targets: Vec<TargetRef>,
+    ) -> ResolvedAbility {
+        with_assignment(handoff_effect(), targets, source, entries)
+    }
+
+    /// `(object, old, new)` of every control-change event.
+    fn control_changes(events: &[GameEvent]) -> Vec<(ObjectId, PlayerId, PlayerId)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::ControllerChanged {
+                    object_id,
+                    old_controller,
+                    new_controller,
+                    ..
+                } => Some((*object_id, *old_controller, *new_controller)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn give_control_resolutions(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::GiveControl,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// `(controller, duration)` of every control effect affecting `object`.
+    fn control_effects_on(state: &GameState, object: ObjectId) -> Vec<(PlayerId, Duration)> {
+        state
+            .transient_continuous_effects
+            .iter()
+            .filter(|tce| tce.affected == TargetFilter::SpecificObject { id: object })
+            .map(|tce| {
+                assert_eq!(
+                    tce.modifications,
+                    vec![ContinuousModification::ChangeController]
+                );
+                (tce.controller, tce.duration.clone())
+            })
+            .collect()
+    }
+
+    fn controller_of(state: &mut GameState, object: ObjectId) -> PlayerId {
+        crate::game::layers::evaluate_layers(state);
+        state.objects[&object].controller
+    }
+
+    /// V3b.1 (A3.6 handoff leg): one application gives each assigned object to
+    /// exactly its assigned player through layer 2 — the control changes are
+    /// processed together (CR 608.2e + CR 608.2f), last indefinitely (CR 611.2a)
+    /// and apply in layer 2 (CR 613.1b) — and every control-change event comes
+    /// from that one application.
+    #[test]
+    fn per_object_handoff_gives_each_object_to_its_assigned_player() {
+        let HandoffBoard {
+            mut state,
+            a,
+            b,
+            c,
+            source,
+            ..
+        } = handoff_board();
+        let ability = handoff_ability(source, vec![entry(a, P1), entry(b, P2)], vec![]);
+        let mut events = Vec::new();
+        resolve_give(&mut state, &ability, &mut events).expect("the handoff resolves");
+
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            2,
+            "one control effect per assigned object"
+        );
+        assert_eq!(control_effects_on(&state, a), [(P1, Duration::Permanent)]);
+        assert_eq!(control_effects_on(&state, b), [(P2, Duration::Permanent)]);
+        assert_eq!(
+            control_changes(&events),
+            [(a, PlayerId(0), P1), (b, PlayerId(0), P2)]
+        );
+        assert_eq!(give_control_resolutions(&events), 1, "one application");
+        assert_eq!(controller_of(&mut state, a), P1);
+        assert_eq!(controller_of(&mut state, b), P2);
+        assert_eq!(
+            controller_of(&mut state, c),
+            PlayerId(0),
+            "an object with no entry is untouched"
+        );
+    }
+
+    /// V3b.1(b) (labelled guard for the class): the reference does not assume
+    /// distinct players — two objects assigned to one player both go to them.
+    #[test]
+    fn per_object_handoff_admits_one_player_for_several_objects() {
+        let HandoffBoard {
+            mut state,
+            a,
+            b,
+            source,
+            ..
+        } = handoff_board();
+        let ability = handoff_ability(source, vec![entry(a, P1), entry(b, P1)], vec![]);
+        let mut events = Vec::new();
+        resolve_give(&mut state, &ability, &mut events).expect("the handoff resolves");
+
+        assert_eq!(state.transient_continuous_effects.len(), 2);
+        assert_eq!(
+            control_changes(&events),
+            [(a, PlayerId(0), P1), (b, PlayerId(0), P1)]
+        );
+        assert_eq!(controller_of(&mut state, a), P1);
+        assert_eq!(controller_of(&mut state, b), P1);
+    }
+
+    /// V3b.1(c) (CR 110.2; existing rule): an entry naming the object's current
+    /// controller installs its control effect but emits no control-change event.
+    #[test]
+    fn per_object_handoff_to_the_current_controller_emits_no_event() {
+        let HandoffBoard {
+            mut state,
+            a,
+            source,
+            ..
+        } = handoff_board();
+        let ability = handoff_ability(source, vec![entry(a, PlayerId(0))], vec![]);
+        let mut events = Vec::new();
+        resolve_give(&mut state, &ability, &mut events).expect("the handoff resolves");
+
+        assert_eq!(
+            control_effects_on(&state, a),
+            [(PlayerId(0), Duration::Permanent)]
+        );
+        assert!(control_changes(&events).is_empty());
+        assert_eq!(give_control_resolutions(&events), 1);
+    }
+
+    /// V3b.2 (A3.6 (ii), C3.11; revert-failing — the single-recipient form
+    /// refuses the whole effect when its recipient has left the game): a player
+    /// who has left the game gets nothing for their object and no effect is
+    /// installed for it, while the other entries still apply (CR 800.4b +
+    /// CR 609.3). The refusal does not depend on the entry's position.
+    #[test]
+    fn per_object_handoff_skips_only_a_departed_players_object() {
+        for departed_first in [false, true] {
+            let HandoffBoard {
+                mut state,
+                a,
+                b,
+                source,
+                ..
+            } = handoff_board();
+            state.players[2].is_eliminated = true;
+            let entries = if departed_first {
+                vec![entry(b, P2), entry(a, P1)]
+            } else {
+                vec![entry(a, P1), entry(b, P2)]
+            };
+            let ability = handoff_ability(source, entries, vec![]);
+            let mut events = Vec::new();
+            resolve_give(&mut state, &ability, &mut events)
+                .expect("a departed player's entry does not refuse the effect");
+
+            assert_eq!(
+                control_effects_on(&state, a),
+                [(P1, Duration::Permanent)],
+                "reach-guard: the other entry applied (departed first: {departed_first})"
+            );
+            assert!(
+                control_effects_on(&state, b).is_empty(),
+                "CR 800.4b: no effect is installed for the departed player's object"
+            );
+            assert_eq!(
+                control_changes(&events),
+                [(a, PlayerId(0), P1)],
+                "no control-change event for the departed player's object"
+            );
+            assert_eq!(controller_of(&mut state, a), P1);
+            assert_eq!(controller_of(&mut state, b), PlayerId(0));
+        }
+    }
+
+    /// V3b.3 (A3.6 (iii)): an empty assignment hands nothing.
+    #[test]
+    fn per_object_handoff_with_an_empty_assignment_hands_nothing() {
+        let HandoffBoard {
+            mut state,
+            a,
+            b,
+            source,
+            ..
+        } = handoff_board();
+        let ability = handoff_ability(source, vec![], vec![]);
+        let mut events = Vec::new();
+        resolve_give(&mut state, &ability, &mut events).expect("the handoff resolves");
+
+        assert_eq!(
+            give_control_resolutions(&events),
+            1,
+            "reach-guard: the application ran to completion"
+        );
+        assert!(state.transient_continuous_effects.is_empty());
+        assert!(control_changes(&events).is_empty());
+        assert_eq!(controller_of(&mut state, a), PlayerId(0));
+        assert_eq!(controller_of(&mut state, b), PlayerId(0));
+    }
+
+    /// V3b.4 (multi-authority): a stray player in `ability.targets` does not
+    /// override the per-object recipient; every other recipient form keeps the
+    /// declared player target's precedence (Donate form, CR 115.1 + CR 608.2c).
+    #[test]
+    fn per_object_recipient_is_not_overridden_by_a_player_target() {
+        let HandoffBoard {
+            mut state,
+            a,
+            b,
+            source,
+            ..
+        } = handoff_board();
+        let ability = handoff_ability(
+            source,
+            vec![entry(a, P1), entry(b, P2)],
+            vec![TargetRef::Player(P3)],
+        );
+        let mut events = Vec::new();
+        resolve_give(&mut state, &ability, &mut events).expect("the handoff resolves");
+
+        assert_eq!(state.transient_continuous_effects.len(), 2);
+        assert!(
+            state
+                .transient_continuous_effects
+                .iter()
+                .all(|tce| tce.controller != P3),
+            "the stray player target receives nothing"
+        );
+        assert_eq!(controller_of(&mut state, a), P1);
+        assert_eq!(controller_of(&mut state, b), P2);
+
+        // Single-form sibling: the declared player target is the recipient.
+        let HandoffBoard {
+            mut state,
+            a,
+            source,
+            ..
+        } = handoff_board();
+        let donate = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::Any,
+                recipient: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(a), TargetRef::Player(P3)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_give(&mut state, &donate, &mut events).expect("Donate form resolves");
+        assert_eq!(controller_of(&mut state, a), P3);
+    }
+
+    /// V3b.5: the objects projection names only assigned objects still on the
+    /// battlefield (CR 400.7) — the single authority `resolve_give` hands and
+    /// `affected_objects_from_events` publishes (CR 611.2c).
+    #[test]
+    fn per_object_handoff_hands_only_assigned_battlefield_objects() {
+        let HandoffBoard {
+            mut state,
+            a,
+            c,
+            g,
+            source,
+            ..
+        } = handoff_board();
+        let ability = handoff_ability(source, vec![entry(a, P1), entry(g, P3)], vec![]);
+        assert_eq!(
+            give_control_object_targets(
+                &state,
+                &ability,
+                &assignment(ChoiceAssignmentSide::Objects)
+            ),
+            [a],
+            "the published set is the assigned battlefield objects"
+        );
+        let mut events = Vec::new();
+        resolve_give(&mut state, &ability, &mut events).expect("the handoff resolves");
+
+        assert_eq!(
+            control_effects_on(&state, a),
+            [(P1, Duration::Permanent)],
+            "reach-guard: the battlefield entry is handed"
+        );
+        assert!(
+            control_effects_on(&state, g).is_empty(),
+            "CR 400.7: an assigned object that left the battlefield is not handed"
+        );
+        assert!(
+            control_effects_on(&state, c).is_empty(),
+            "an unassigned battlefield object is untouched"
+        );
+        assert_eq!(control_changes(&events), [(a, PlayerId(0), P1)]);
+    }
+
+    /// V3b.6: a projection used on the wrong side fails closed, and a declared
+    /// object with no entry gets no recipient (CR 609.3).
+    #[test]
+    fn misused_projections_fail_closed() {
+        // A player projection names no object.
+        let HandoffBoard {
+            mut state,
+            a,
+            b,
+            source,
+            ..
+        } = handoff_board();
+        let both_players = with_assignment(
+            Effect::GiveControl {
+                target: assignment(ChoiceAssignmentSide::PlayerForObject),
+                recipient: assignment(ChoiceAssignmentSide::PlayerForObject),
+            },
+            vec![],
+            source,
+            vec![entry(a, P1), entry(b, P2)],
+        );
+        let mut events = Vec::new();
+        assert!(resolve_give(&mut state, &both_players, &mut events).is_ok());
+        assert!(state.transient_continuous_effects.is_empty());
+
+        // The objects projection names no player.
+        let HandoffBoard {
+            mut state,
+            a,
+            b,
+            source,
+            ..
+        } = handoff_board();
+        let both_objects = with_assignment(
+            Effect::GiveControl {
+                target: assignment(ChoiceAssignmentSide::Objects),
+                recipient: assignment(ChoiceAssignmentSide::Objects),
+            },
+            vec![],
+            source,
+            vec![entry(a, P1), entry(b, P2)],
+        );
+        let mut events = Vec::new();
+        assert!(matches!(
+            resolve_give(&mut state, &both_objects, &mut events),
+            Err(EffectError::MissingParam(_))
+        ));
+        assert!(state.transient_continuous_effects.is_empty());
+
+        // A declared object with no entry: no player was chosen for it.
+        let HandoffBoard {
+            mut state,
+            a,
+            b,
+            source,
+            ..
+        } = handoff_board();
+        let declared = with_assignment(
+            Effect::GiveControl {
+                target: TargetFilter::Any,
+                recipient: assignment(ChoiceAssignmentSide::PlayerForObject),
+            },
+            vec![TargetRef::Object(a), TargetRef::Object(b)],
+            source,
+            vec![entry(a, P1)],
+        );
+        let mut events = Vec::new();
+        resolve_give(&mut state, &declared, &mut events).expect("the handoff resolves");
+        assert_eq!(
+            control_effects_on(&state, a),
+            [(P1, Duration::Permanent)],
+            "reach-guard: the entry's object is handed"
+        );
+        assert!(control_effects_on(&state, b).is_empty());
+        assert_eq!(control_changes(&events), [(a, PlayerId(0), P1)]);
+        assert_eq!(controller_of(&mut state, b), PlayerId(0));
+    }
+
+    /// V3b.7 (§3 classification pins): the reference is never a target
+    /// (CR 115.10a), is member-bound on the fail-closed side (CR 603.10a), and
+    /// reads no event, sibling or projected state.
+    #[test]
+    fn choice_assignment_classification() {
+        use crate::game::ability_rw::ability_rw_profile;
+        use crate::game::ability_scan::{
+            ability_reads_projected_resource, ability_reads_sibling_mutable,
+            ability_uses_event_context,
+        };
+        use crate::types::identifiers::TrackedSetId;
+
+        let destroy = |target: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::Destroy {
+                    target,
+                    cant_regenerate: false,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        // Positive and negative controls: the instrument fires and is not
+        // constant.
+        assert!(ability_rw_profile(&destroy(TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        }))
+        .reads_member_bound());
+        assert!(!ability_rw_profile(&destroy(TargetFilter::SelfRef)).reads_member_bound());
+        for side in [
+            ChoiceAssignmentSide::Objects,
+            ChoiceAssignmentSide::PlayerForObject,
+        ] {
+            assert!(
+                ability_rw_profile(&destroy(assignment(side))).reads_member_bound(),
+                "{side:?}: fail-closed member-bound"
+            );
+            assert!(
+                assignment(side).is_context_ref(),
+                "{side:?}: never a target"
+            );
+        }
+
+        let event_reader = ResolvedAbility::new(
+            Effect::GiveControl {
+                target: TargetFilter::SelfRef,
+                recipient: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert!(
+            ability_uses_event_context(&event_reader),
+            "positive control: the event axis fires"
+        );
+
+        let HandoffBoard { a, b, source, .. } = handoff_board();
+        let handoff = handoff_ability(source, vec![entry(a, P1), entry(b, P2)], vec![]);
+        assert!(!ability_uses_event_context(&handoff));
+        assert!(!ability_reads_projected_resource(&handoff));
+        assert!(!ability_reads_sibling_mutable(&handoff));
+        let profile = ability_rw_profile(&handoff);
+        assert!(!profile.reads_and_writes_event_object());
+        // CR 603.10a: the handoff itself is member-bound, through BOTH of its
+        // filters — either reference alone is enough.
+        assert!(
+            profile.reads_member_bound(),
+            "the assignment handoff is member-bound"
+        );
+        let give = |target: TargetFilter, recipient: TargetFilter| {
+            ability_rw_profile(&ResolvedAbility::new(
+                Effect::GiveControl { target, recipient },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            ))
+        };
+        assert!(
+            give(
+                assignment(ChoiceAssignmentSide::Objects),
+                TargetFilter::Controller
+            )
+            .reads_member_bound(),
+            "the object filter alone makes the handoff member-bound"
+        );
+        assert!(
+            give(
+                TargetFilter::Typed(TypedFilter::creature()),
+                assignment(ChoiceAssignmentSide::PlayerForObject)
+            )
+            .reads_member_bound(),
+            "the recipient filter alone makes the handoff member-bound"
+        );
+        assert!(
+            !give(
+                TargetFilter::Typed(TypedFilter::creature()),
+                TargetFilter::Controller
+            )
+            .reads_member_bound(),
+            "control: a handoff that names no per-member record is not member-bound"
+        );
+    }
+
+    /// V3b.7 (ordering): CR 603.3b + CR 603.10a — a group of same-event
+    /// handoffs from distinct sources cannot take the auto-order path when the
+    /// handoff reads its own per-member assignment: each source's record
+    /// differs, so the identical-function proof is unavailable and the group
+    /// prompts. The control is the same group shape over a handoff that reads
+    /// no per-member record, which the ordering authority orders without
+    /// asking; and the member-bound group is auto-ordered when every member
+    /// shares one source, where one shared record makes the function identical.
+    #[test]
+    fn assignment_handoff_prompts_a_same_event_group_of_distinct_sources() {
+        use crate::game::ability_rw::{
+            ability_rw_profile, profiles_conflict, ControllerUniformity, GroupStructure,
+            SourceCensus,
+        };
+
+        let group = |all_same_source: bool| GroupStructure {
+            same_event: true,
+            all_same_source,
+            all_sources_self_departed: false,
+            event_object_excludes_sources: false,
+            event_object_present: false,
+            source_census: SourceCensus::unknown(),
+            controller_uniformity: ControllerUniformity::Mixed,
+        };
+        let give = |target: TargetFilter, recipient: TargetFilter| {
+            ability_rw_profile(&ResolvedAbility::new(
+                Effect::GiveControl { target, recipient },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            ))
+        };
+        let handoff = give(
+            assignment(ChoiceAssignmentSide::Objects),
+            assignment(ChoiceAssignmentSide::PlayerForObject),
+        );
+        let plain = give(TargetFilter::SelfRef, TargetFilter::Controller);
+
+        assert!(
+            profiles_conflict(&handoff, &group(false)),
+            "distinct sources over per-member records must prompt"
+        );
+        assert!(
+            !profiles_conflict(&plain, &group(false)),
+            "control: a source-independent handoff over distinct sources is auto-ordered"
+        );
+        assert!(
+            !profiles_conflict(&handoff, &group(true)),
+            "control: one shared source shares one record, so the handoff is auto-ordered"
         );
     }
 }

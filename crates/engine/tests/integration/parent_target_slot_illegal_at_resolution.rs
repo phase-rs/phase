@@ -221,6 +221,7 @@ fn goblin_welder_does_not_return_an_artifact_card_exiled_in_response() {
         GameAction::ActivateAbility {
             source_id: welder,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
         &[relic, scrap],
         Some(PriorityResponse {

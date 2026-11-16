@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "full"
+  ],
+  "reason": "Add negotiated state-codec resync to the native full-game protocol"
+}

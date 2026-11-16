@@ -432,7 +432,7 @@ rg -q "fn resolve_ability_chain" crates/engine/src/game/effects/mod.rs && \
 rg -q "struct PendingCast" crates/engine/src/types/game_state.rs && \
 rg -q "struct StackEntry" crates/engine/src/types/game_state.rs && \
 rg -q "enum StackEntryKind" crates/engine/src/types/game_state.rs && \
-rg -q "enum TriggerCondition" crates/engine/src/types/ability.rs && \
+rg -q "enum TriggerCondition" crates/phase-ast/src/types/ability.rs && \
 rg -q "enum WaitingFor" crates/engine/src/types/game_state.rs && \
 echo "✓ casting-stack-conditions skill references valid" || \
 echo "✗ STALE — update skill references"

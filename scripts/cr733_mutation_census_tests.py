@@ -159,6 +159,34 @@ class WriteSiteTests(unittest.TestCase):
         self.assertEqual(patterns_of(sites, "write"), ["assign", "assign"])
         self.assertEqual(fields_of(sites, "write"), ["life", "turn_number"])
 
+    def test_every_compound_assignment_operator_is_a_write(self) -> None:
+        # CR 733 census: the write family is every compound assignment, not just
+        # `+=`/`-=`. `state.layers_read_current_step |= read;` in
+        # `flush_layers_with_retirement_owner` is the reported miss (#10403).
+        for op in ("+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="):
+            with self.subTest(op=op):
+                sites, _e, _u = scan(
+                    f"fn f() {{ state.layers_read_current_step {op} read; }}",
+                    fields=("layers_read_current_step",),
+                )
+                self.assertEqual(
+                    patterns_of(sites, "write"),
+                    ["assign"],
+                    f"{op} must register as an assignment write",
+                )
+                self.assertEqual(fields_of(sites, "write"), ["layers_read_current_step"])
+
+    def test_shift_comparisons_are_not_writes(self) -> None:
+        # `<<=`/`>>=` are writes; `<<`/`>>`/`<=`/`>=` are not. Guards the
+        # longest-first alternation against a bare `<`/`>` leaking in.
+        for op in ("<<", ">>", "<=", ">="):
+            with self.subTest(op=op):
+                sites, _e, _u = scan(
+                    f"fn f() {{ if state.layers_read_current_step {op} 3 {{}} }}",
+                    fields=("layers_read_current_step",),
+                )
+                self.assertEqual([s for s in sites if s.family == "write"], [])
+
     def test_comparisons_are_not_writes(self) -> None:
         # `==`, `!=`, `<=`, `>=` must NOT register as assignments.
         for op in ("==", "!=", "<=", ">="):

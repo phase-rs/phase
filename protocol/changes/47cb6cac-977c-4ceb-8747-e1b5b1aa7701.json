@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "WardCost::Discard { count, filter, selection } replaces the WardCost::DiscardCard tag in GameState keyword payloads. A previous full-game or P2P peer cannot decode the new tag, and its formatter recognizes only DiscardCard, so it would silently hide the ward cost; first contact must refuse the skew."
+}

@@ -5,7 +5,7 @@
 //! "{T}: Add {R} or {G}.")"
 //!
 //! Before this change the Heartwood token had no registry entry
-//! (`crates/engine/data/known-tokens.toml`), so the whole ability parsed to
+//! (`crates/phase-ast/data/known-tokens.toml`), so the whole ability parsed to
 //! `Effect::Unimplemented { name: "create", .. }` (`supported: false`,
 //! `gap_count: 1` in the coverage report). This is a pure data-addition case:
 //! the token registry / `predefined_token_abilities` mechanism used by every
@@ -124,6 +124,7 @@ fn soul_tether_creates_a_heartwood_token_with_a_two_color_mana_ability() {
         .act(GameAction::ActivateAbility {
             source_id: token_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Heartwood's tap ability must be accepted");
 

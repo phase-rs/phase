@@ -237,7 +237,7 @@ mod tests {
     use lobby_broker::{Broker, BrokerEnv};
     use server_core::draft_session::DraftSessionManager;
     use server_core::session::SessionManager;
-    use tokio::sync::{mpsc, Mutex};
+    use tokio::sync::Mutex;
 
     use crate::{draft_pools, persistence, AppState, PlayerId, ServerContext, ServerMode};
 
@@ -256,6 +256,9 @@ mod tests {
 
     fn draft_config() -> DraftConfig {
         DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -285,6 +288,7 @@ mod tests {
             draft_pools: Arc::new(draft_pools::DraftPools::default()),
             connections: Arc::new(Mutex::new(HashMap::new())),
             db: Arc::new(engine::database::CardDatabase::default()),
+            combos: Arc::new(engine::database::ComboTable::default()),
             lobby: Arc::new(Mutex::new(Broker::new())),
             lobby_subscribers: Arc::new(Mutex::new(Vec::new())),
             player_count: Arc::new(AtomicU32::new(0)),
@@ -319,7 +323,7 @@ mod tests {
             draft_code
         };
 
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, _rx) = crate::socket_mailbox::channel();
         state.connections.lock().await.insert(
             draft_code.clone(),
             HashMap::from([(PlayerId(0), tx.clone())]),
@@ -364,7 +368,7 @@ mod tests {
         assert!(state.lobby.lock().await.lobby_mut().has_game(&draft_code));
         let snapshot = {
             let mut drafts = state.draft_sessions.lock().await;
-            drafts.handle_disconnect(&draft_code, 0);
+            drafts.handle_disconnect(&draft_code, 0, std::time::Instant::now());
             assert!(drafts.reconnect.is_disconnected(&draft_code, PlayerId(0)));
             drafts.sessions[&draft_code].to_persisted()
         };
@@ -431,7 +435,7 @@ mod tests {
                 let (b, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
                 let (c, _, _) = drafts.create_draft(draft_config(), "Host".to_string());
                 drafts.reconnect.grace_period = std::time::Duration::ZERO;
-                drafts.handle_disconnect(&c, 0);
+                drafts.handle_disconnect(&c, 0, std::time::Instant::now());
                 (a, b, c)
             };
             let (gate_tx, gate_rx) = std::sync::mpsc::channel::<()>();
@@ -476,5 +480,146 @@ mod tests {
             assert!(!rows.contains(&deleted));
             assert!(!rows.contains(&reaped));
         });
+    }
+
+    /// Contract with the P2P draft host client (`hostDraftCode` in
+    /// client/src/adapter/p2p-draft-host.ts). `G37RUJ` is what the client's
+    /// code draw yields for the pinned draw 0xbbbbbbbb
+    /// (p2pDraftHostPublicCode.test.ts asserts the same literal); `draft-bbbbbbbb`
+    /// is the `draft-` + 8 hex identifier the host sent before that fix. The
+    /// production handler must store the first and reject the second before
+    /// storage (HTTP 400).
+    #[tokio::test]
+    async fn p2p_backup_store_accepts_client_draft_code_and_rejects_legacy_shape() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = app_state(&temp_dir);
+        let request = |draft_code: &str| super::P2pBackupRequest {
+            draft_code: draft_code.to_string(),
+            host_peer_id: "host-peer-abc".to_string(),
+            snapshot_json: r#"{"draftStarted":true}"#.to_string(),
+        };
+
+        let accepted = super::p2p_backup_store(State(state.clone()), axum::Json(request("G37RUJ")))
+            .await
+            .into_response();
+        assert_eq!(accepted.status(), axum::http::StatusCode::OK);
+        assert!(state
+            .game_db
+            .load_p2p_backup("G37RUJ")
+            .expect("load")
+            .is_some());
+
+        let rejected =
+            super::p2p_backup_store(State(state.clone()), axum::Json(request("draft-bbbbbbbb")))
+                .await
+                .into_response();
+        assert_eq!(rejected.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(state
+            .game_db
+            .load_p2p_backup("draft-bbbbbbbb")
+            .expect("load")
+            .is_none());
+    }
+
+    /// A submitted deck is private to its seat until its match launches it, and
+    /// the backup row is readable by any pod guest who can derive the host peer
+    /// id. Posts a snapshot that carries EVERY retained copy of a deck (as an
+    /// older or hostile client would send it, unredacted) through the production
+    /// store handler, then reads it back through the production GET handler:
+    /// neither the stored row nor the response may contain a deck marker. The
+    /// client projection half is `p2pDraftHostBackupDeckPrivacy.test.ts`.
+    /// Synthetic marker card names; no printed card's text is involved.
+    #[tokio::test]
+    async fn p2p_backup_get_never_returns_submitted_decks() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = app_state(&temp_dir);
+        let markers = [
+            "Marker Submitted",
+            "Marker Sideboard",
+            "Marker Launch",
+            "Marker Guest Launch",
+            "Marker Bo3",
+            "Marker Command",
+            "Marker Workspace",
+            "Marker Fingerprint",
+            "dmarker0001",
+            "dmarker0002",
+            "dmarker0003",
+        ];
+        let session = serde_json::json!({
+            "submitted_decks": { "1": { "seat": 1, "main_deck": [markers[0]], "commanders": [] } },
+            "pools": [[]],
+        });
+        let launch_decks = serde_json::json!({
+            "player": { "main_deck": [markers[2]], "sideboard": [markers[1]], "commander": [] },
+            "opponent": { "main_deck": [markers[2]], "sideboard": [], "commander": [] },
+            "ai_decks": [],
+        });
+        let snapshot = serde_json::json!({
+            "draftStarted": true,
+            "draftSessionJson": session.to_string(),
+            "deckSubmissionReceipts": [
+                { "seat": 1, "submissionId": "s1", "payloadFingerprint": markers[7] }
+            ],
+            "matchLaunches": [
+                { "matchId": "m1", "seat": 0, "launch": { "type": "HumanHost", "deckPayload": launch_decks } },
+                { "matchId": "m1", "seat": 1, "launch": { "type": "HumanGuest", "localDeck": { "main_deck": [markers[3]] } } }
+            ],
+            "bo3State": [
+                { "matchId": "m1", "gameNumber": 1, "decks": [{ "seat": 1, "main": [{ "name": markers[4], "count": 4 }], "sideboard": [] }] }
+            ],
+            "intergameCommands": [{
+                "commandId": "c1",
+                "payload": { "type": "SubmitSideboard", "main": [{ "name": markers[5], "count": 4 }], "sideboard": [] },
+                "launchPayload": { "deckPayload": launch_decks },
+                "launchDigest": markers[8],
+                "payloadDigest": markers[9],
+            }],
+            "launchDigests": [{ "matchId": "m1", "seat": 1, "digest": markers[10] }],
+            "perSeatWorkspaceSnapshots": { "1": { "virtualBasics": [{ "name": markers[6] }] } },
+        });
+
+        let stored = super::p2p_backup_store(
+            State(state.clone()),
+            axum::Json(super::P2pBackupRequest {
+                draft_code: "G37RUJ".to_string(),
+                host_peer_id: "host-peer-abc".to_string(),
+                snapshot_json: snapshot.to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stored.status(), axum::http::StatusCode::OK);
+
+        let (_, row, _) = state
+            .game_db
+            .load_p2p_backup("G37RUJ")
+            .expect("load")
+            .expect("row stored");
+        for marker in markers {
+            assert!(!row.contains(marker), "stored row leaks {marker}");
+        }
+
+        // A pod guest knows the host peer id and the draft code.
+        let response = super::p2p_backup_get(
+            State(state.clone()),
+            Path("G37RUJ".to_string()),
+            axum::extract::Query(super::P2pBackupGetQuery {
+                host_peer_id: "host-peer-abc".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let body = String::from_utf8(body.to_vec()).expect("utf8");
+        // Reach guard: a real snapshot came back.
+        assert!(body.contains("draftStarted"));
+        for marker in markers {
+            assert!(!body.contains(marker), "GET response leaks {marker}");
+        }
+        assert!(!body.contains("payloadFingerprint"));
     }
 }

@@ -349,6 +349,8 @@ fn illegal_declared_payer_is_not_prompted() {
 
 fn exile_head() -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: None,
         destination: Zone::Exile,
         target: TargetFilter::Typed(TypedFilter::creature()),
@@ -480,8 +482,16 @@ fn curse_token(attach_to: TargetFilter) -> Effect {
         owner: TargetFilter::Controller,
         attach_to: Some(attach_to),
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
-        static_abilities: vec![],
+        // CR 111.3 + CR 702.5a: "The token has enchant player", as the export
+        // carries it — without an enchant restriction the Aura cannot legally
+        // enchant a player.
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::Player),
+            }])],
         enter_with_counters: vec![],
     }
 }
@@ -511,6 +521,7 @@ fn soldier_token(owner: TargetFilter) -> Effect {
         owner,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],

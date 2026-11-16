@@ -83,7 +83,14 @@ const hostListeners: Array<(event: unknown) => void> = [];
  * did not.
  */
 const sendCommanderLaunches = vi.fn(
-  (view: DraftPlayerView, gameId: string, roomCode: string, decks: CommanderSeatDecks) => {
+  async (view: DraftPlayerView, gameId: string, roomCode: string, decks: CommanderSeatDecks,
+    installEngineSeat: (seat: number, deck: CommanderSeatDecks["hostDeck"]) => Promise<void>,
+    signal: AbortSignal) => {
+    signal.throwIfAborted();
+    for (const { seat, deck } of decks.engineSeatDecks) {
+      await installEngineSeat(seat, deck);
+      signal.throwIfAborted();
+    }
     for (const listener of [...hostListeners]) {
       listener({
         type: "commanderLaunch",

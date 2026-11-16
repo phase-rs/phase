@@ -143,6 +143,7 @@ fn install_competing_counter_addition_replacements(state: &mut GameState) {
 
 fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility {
     ResolvedAbility {
+        coin_branches: None,
         detached_remainder: engine::types::ability::DetachedRemainder::NoProducer,
         effect: Effect::GrantExtraLoyaltyActivations {
             amount: QuantityExpr::Fixed { value: 1 },
@@ -155,6 +156,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         source_id: source,
         cast_occurrence: None,
         source_incarnation: None,
+        announced_source_incarnation: None,
         trigger_source: None,
         trigger_definition_ref: None,
         delayed_origin: None,
@@ -162,6 +164,7 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         target_incarnations: Vec::new(),
         target_pins: Vec::new(),
         legacy_selected_target_incarnations: Vec::new(),
+        chosen_target_slots: Default::default(),
         illegal_target_slots: Vec::new(),
         unjudged_target_slots: Vec::new(),
         illegal_local_target_slots: Vec::new(),
@@ -212,12 +215,15 @@ fn make_grant_ability(controller: PlayerId, source: ObjectId) -> ResolvedAbility
         repeat_until: None,
         sub_link: SubAbilityLink::ContinuationStep,
         target_reads: Default::default(),
+        entry_onset: Default::default(),
         sibling_condition: SiblingCondition::Dependent,
         modal: None,
         mode_abilities: vec![],
         parent_target_missing_reason: None,
         activation_cost_reduction: None,
         activation_record: None,
+        announced_usage_key: None,
+        control_change_instruction: None,
     }
 }
 
