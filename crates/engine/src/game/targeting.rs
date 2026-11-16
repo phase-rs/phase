@@ -1051,6 +1051,12 @@ pub(crate) fn event_source_is_live_incarnation(
         | GameEvent::DamageDealt {
             source_incarnation: Some(incarnation),
             ..
+        }
+        // CR 509.3c + CR 509.3e: the attacker-side becomes-blocked occurrence
+        // stamps the attacker's incarnation.
+        | GameEvent::AttackerBecameBlocked {
+            attacker_incarnation: Some(incarnation),
+            ..
         } => obj.incarnation == *incarnation,
         GameEvent::ZoneChanged {
             to: Zone::Battlefield,
@@ -1119,6 +1125,11 @@ pub(crate) fn event_context_incarnation(
                 source_incarnation: Some(incarnation),
                 ..
             } => Some(ObjectIncarnationRef::of(id, *incarnation)),
+            // CR 509.3c + CR 509.3e: the blocked attacker's stamped incarnation.
+            GameEvent::AttackerBecameBlocked {
+                attacker,
+                attacker_incarnation: Some(incarnation),
+            } if *attacker == id => Some(ObjectIncarnationRef::of(id, *incarnation)),
             _ => None,
         },
         TargetFilter::EventTarget => match event {
@@ -1262,6 +1273,41 @@ pub(crate) fn resolve_event_referent_permanents(
         .into_iter()
         .filter(|&id| is_phased_in_battlefield_permanent(state, id))
         .collect()
+}
+
+/// CR 400.7 + CR 608.2k: the object a resolving ability may MUTATE through a
+/// singular `TriggeringSource` reference ("that attacking creature gains
+/// deathtouch"). It must be the incarnation the trigger event recorded for that
+/// role ([`event_source_is_live_incarnation`]), whatever zone it is in now: an
+/// object that left and returned (or left at all, for an event that stamped a
+/// permanent) is a new object. A battlefield referent that is phased out can't
+/// be affected (CR 702.26b). Events that record no incarnation (a cast spell, a
+/// block declaration, …) cannot discriminate, so the live object stands.
+///
+/// Exception, scoped to the event role and preserving base behaviour verbatim:
+/// for a `ZoneChanged` to a non-battlefield zone this returns the event's
+/// referent id with no identity or phasing check, exactly as the resolver
+/// always has. That is NOT a claim that the binding is right in every case:
+/// CR 400.7e/400.7j license only the findable arrival or the effect's own move.
+/// It is a scope fence for the "return it … it's a Zombie" class (Dread Slaver).
+pub(crate) fn triggering_source_mutation_referent(
+    state: &GameState,
+    source_id: ObjectId,
+) -> Option<ObjectId> {
+    let TargetRef::Object(id) =
+        resolve_event_context_target(state, &TargetFilter::TriggeringSource, source_id)?
+    else {
+        return None;
+    };
+    let Some(event) = state.current_trigger_event.as_ref() else {
+        return Some(id);
+    };
+    if matches!(event, GameEvent::ZoneChanged { to, .. } if *to != Zone::Battlefield) {
+        return Some(id);
+    }
+    let obj = state.objects.get(&id)?;
+    let phased_out_permanent = obj.zone == Zone::Battlefield && !obj.is_phased_in();
+    (event_source_is_live_incarnation(event, obj) && !phased_out_permanent).then_some(id)
 }
 
 /// CR 608.2c + CR 603.10a: Resolve the effective targets for a resolving
@@ -2917,7 +2963,7 @@ fn blocked_attacker_from_event(
     }
     // CR 509.3c: an effect-driven "becomes blocked" carries only the attacker
     // (the blocked creature); "that creature" resolves to that attacker.
-    if let crate::types::events::GameEvent::AttackerBecameBlockedByEffect { attacker } = event {
+    if let crate::types::events::GameEvent::AttackerBecameBlocked { attacker, .. } = event {
         return Some(*attacker);
     }
     let crate::types::events::GameEvent::BlockersDeclared { assignments } = event else {
@@ -3221,7 +3267,7 @@ pub(crate) fn extract_source_from_event(
         }
         // CR 509.3c: an effect-driven "becomes blocked" trigger's source is the
         // attacker that became blocked.
-        GameEvent::AttackerBecameBlockedByEffect { attacker } => Some(*attacker),
+        GameEvent::AttackerBecameBlocked { attacker, .. } => Some(*attacker),
         // CR 509.3d: a per-blocker filtered `BecomesBlocked`/`Blocks` firing
         // resolves its `TriggeringSource`-routed "that creature"/"it" reference to
         // the single blocker carried by the narrowed event (mirrors what the
@@ -3365,7 +3411,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }

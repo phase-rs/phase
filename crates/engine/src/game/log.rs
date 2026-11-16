@@ -473,7 +473,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         | GameEvent::ContinuousEffectEnded { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
@@ -571,7 +571,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::KeywordAbilityActivated { .. }
         | GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
@@ -968,7 +968,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CreatureExerted { .. }
         | GameEvent::CreatureEnlisted { .. }
@@ -1608,7 +1608,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         }
 
         // CR 509.1h + CR 509.3c: an effect first made the attacker become blocked.
-        GameEvent::AttackerBecameBlockedByEffect { attacker } => {
+        GameEvent::AttackerBecameBlocked { attacker, .. } => {
             vec![card_seg(state, *attacker), text(" becomes blocked")]
         }
 

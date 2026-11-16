@@ -6840,6 +6840,27 @@ where
     serde_json::from_value(raw).map_err(serde::de::Error::custom)
 }
 
+/// Reads the former bare draw-replacement effect and the current full definition.
+/// Serialization continues to emit only the full definition. The effect's `type`
+/// tag selects the legacy decoder, even when that effect has `kind`/`effect` fields.
+fn deserialize_draw_replacement_effect_compat<'de, D>(
+    d: D,
+) -> Result<Box<AbilityDefinition>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(d)?;
+    if raw.get("type").is_some() {
+        serde_json::from_value::<Effect>(raw)
+            .map(|effect| Box::new(AbilityDefinition::new(AbilityKind::Spell, effect)))
+            .map_err(serde::de::Error::custom)
+    } else {
+        serde_json::from_value::<AbilityDefinition>(raw)
+            .map(Box::new)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// Controller reference for filter matching.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControllerRef {
@@ -7771,6 +7792,10 @@ pub enum FilterProp {
     /// CR 509.1a: Creature was declared as a blocker this turn.
     /// Checks `creatures_blocked_this_turn` tracking set on GameState.
     BlockedThisTurn,
+    /// CR 701.14a + CR 701.14b: Creature fought this turn (a fight that didn't
+    /// happen doesn't count). Checks the incarnation-keyed
+    /// `creatures_fought_this_turn` set on GameState.
+    FoughtThisTurn,
     /// CR 508.1a + CR 509.1a: Creature attacked or blocked this turn.
     /// Compound check used by "that attacked or blocked this turn" Oracle text.
     AttackedOrBlockedThisTurn,
@@ -8043,6 +8068,7 @@ impl FilterProp {
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -9248,6 +9274,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -9505,6 +9532,7 @@ pub fn filter_prop_contains(prop: &FilterProp, leaf: &dyn Fn(&TargetFilter) -> b
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -9801,6 +9829,7 @@ pub fn filter_prop_grammar_any(
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -10462,6 +10491,7 @@ pub fn rewrite_filter_prop<C>(
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -12845,6 +12875,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -25527,11 +25558,20 @@ pub enum Effect {
     },
     /// CR 614.1a + CR 614.6 + CR 514.2 + CR 121.1: install a one-shot, this-turn
     /// "the next time you would draw a card this turn, [effect] instead" draw
-    /// replacement (Words of Worship/Wilding). Mirrors CreateDamageReplacement for
-    /// the Draw event class; the substitute is a heterogeneous Effect resolved via
-    /// the post-replacement continuation. RUNTIME: create_draw_replacement::resolve.
+    /// replacement (the Words cycle). Mirrors CreateDamageReplacement for the
+    /// Draw event class; the substitute is resolved via the post-replacement
+    /// continuation. RUNTIME: create_draw_replacement::resolve.
+    ///
+    /// The substitute is a full `AbilityDefinition` (mirroring
+    /// `CreateDelayedTrigger::effect`) so it carries a player iteration scope
+    /// ("each player returns…" — Words of Wind; "each opponent discards…" —
+    /// Words of Waste) and sub-ability chains. CR 115.1c + CR 602.2b: a
+    /// "target" in the substitute's head effect (Words of War's "any target")
+    /// is chosen as the creating ability is activated and carried into the
+    /// installed shield.
     CreateDrawReplacement {
-        replacement_effect: Box<Effect>,
+        #[serde(deserialize_with = "deserialize_draw_replacement_effect_compat")]
+        replacement_effect: Box<AbilityDefinition>,
     },
     /// CR 614.1a + CR 611.2 + CR 901.9c: Install a floating "if a player would
     /// planeswalk as a result of rolling the planar die, [replacement_effect]
@@ -27293,6 +27333,15 @@ pub fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
 }
 
 pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
+    // CR 115.1c + CR 602.2b: a one-shot draw replacement's substitute that uses
+    // "target" (Words of War: "deals 2 damage to any target instead") makes the
+    // creating ability targeted — the target is chosen as that ability is
+    // activated and carried into the shield — so its slot is the substitute
+    // head's slot. Unlike `CreateDelayedTrigger`, no later stack object exists
+    // to choose it: a replacement effect never uses the stack (CR 614.1).
+    if let Effect::CreateDrawReplacement { replacement_effect } = effect {
+        return extract_target_filter_from_effect(&replacement_effect.effect);
+    }
     // CR 701.21a: Sacrifice does not target — the controller chooses permanents
     // at resolution time via EffectZoneChoice. Returning a filter here would
     // cause collect_target_slots to create target selection slots, routing
@@ -29173,6 +29222,7 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -29210,6 +29260,7 @@ pub enum NestedDefinitionEdge {
     ExileTopCardContestWinner,
     RevealFromHandOnDecline,
     CreateDelayedTriggerEffect,
+    CreateDrawReplacementEffect,
     CreateBoonTrigger,
     RollDieResult,
     FlipCoinsWin,
@@ -32400,8 +32451,11 @@ impl Effect {
             // snapshot its handle names, not in a top-level `target` field.
             | Effect::EpicCopy { .. }
             | Effect::CreateDamageReplacement { .. }
-            // CR 614.11: CreateDrawReplacement is non-targeted — "you would
-            // draw" scopes via the shield's source-player default, no slot.
+            // The resolver scopes "you would draw" with source_controller and
+            // valid_player: You, so the carrier itself names no target. A
+            // "target" in its substitute (Words of War) is surfaced by
+            // `extract_target_filter_from_effect`'s delegation to the
+            // substitute head (CR 115.1c).
             | Effect::CreateDrawReplacement { .. }
             // CR 614.1a: CreatePlaneswalkReplacement is non-targeted — "a player
             // would planeswalk" scopes via the shield's player scope, no slot.
@@ -33938,8 +33992,7 @@ macro_rules! define_effect_quantity_walk {
     /// `Dig::keep_count_expr`, `PutSticker::max_ticket_cost`, dynamic
     /// `PtValue::Quantity` power/toughness, and `ChangeZone`'s
     /// (conditional) entry counters — and recurses through variants that
-    /// embed another `Effect` (`CreateDrawReplacement`,
-    /// `CreatePlaneswalkReplacement`).
+    /// embed another `Effect` (`CreatePlaneswalkReplacement`).
     ///
     /// Nested domain types that carry their own quantities are walked
     /// through composed exhaustive sub-visitors (each a no-wildcard match on
@@ -34214,11 +34267,6 @@ macro_rules! define_effect_quantity_walk {
                 if let Some(q) = amount_dynamic {
                     f(q);
                 }
-            }
-            Effect::CreateDrawReplacement {
-                replacement_effect, ..
-            } => {
-                replacement_effect.$name(f);
             }
             Effect::CreatePlaneswalkReplacement {
                 replacement_effect, ..
@@ -34510,6 +34558,9 @@ macro_rules! define_effect_quantity_walk {
             | Effect::BecomeSaddled { .. }
             | Effect::SetClassLevel { .. }
             | Effect::CreateDelayedTrigger { .. }
+            // CR 614.6: the substitute is a nested `AbilityDefinition`,
+            // evaluated when the shield applies, not in this resolution.
+            | Effect::CreateDrawReplacement { .. }
             | Effect::AddTargetReplacement { .. }
             | Effect::AddRestriction { .. }
             | Effect::ReduceNextSpellCost { .. }
@@ -34682,6 +34733,12 @@ impl Effect {
             Effect::CreateDelayedTrigger { effect, .. } => {
                 f(NestedDefinitionEdge::CreateDelayedTriggerEffect, effect)
             }
+            // CR 614.6: the substitute a one-shot draw replacement performs
+            // in place of the replaced draw.
+            Effect::CreateDrawReplacement { replacement_effect } => f(
+                NestedDefinitionEdge::CreateDrawReplacementEffect,
+                replacement_effect,
+            ),
             // Digital-only Alchemy (no CR entry): the boon's granted trigger
             // body. Visited so guard resolution, description rendering, and
             // unimplemented detection see through the boon wrapper exactly as
@@ -34849,7 +34906,6 @@ impl Effect {
             | Effect::ExileResolvingSpellInsteadOfGraveyard { .. }
             | Effect::PreventDamage { .. }
             | Effect::CreateDamageReplacement { .. }
-            | Effect::CreateDrawReplacement { .. }
             | Effect::CreatePlaneswalkReplacement { .. }
             | Effect::LoseTheGame { .. }
             | Effect::WinTheGame { .. }
@@ -41112,6 +41168,20 @@ impl CoinFlipRun {
     }
 }
 
+/// CR 509.3e: "becomes blocked by `minimum` or more <blocker>" — the threshold
+/// of [`TriggerDefinition::blocker_count`]. Only the "at least N" form is
+/// representable: every printed card uses it, and an "exactly"/"or fewer" form
+/// would need blocker-removal crossings. `minimum == 0` is never produced by
+/// the parser, and the matcher treats it as never firing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockerCountThreshold {
+    pub minimum: u32,
+    /// The blockers that count. `None` counts every blocker (all blockers are
+    /// creatures, CR 509.1a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<TargetFilter>,
+}
+
 /// CR 706.2: Typed result-face filter for "Whenever you roll a [result]" die-roll
 /// triggers. `Exact` covers single faces ("roll a 1") AND disjunctions ("roll a 1
 /// or 2") — a set, which no single Comparator can express; `AtLeast` is the GE
@@ -41249,6 +41319,14 @@ pub struct TriggerDefinition {
     /// CR 508.3a: Filter for attack target type ("attacks a planeswalker").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attack_target_filter: Option<crate::types::triggers::AttackTargetFilter>,
+    /// CR 509.3e: the attacker-side "becomes blocked by N or more <noun>"
+    /// blocker-count threshold. Read only by `TriggerMode::BecomesBlocked`.
+    /// When `Some`, the trigger fires once for an attacker whose matching
+    /// blockers reach the threshold: when blockers are declared, or (for an
+    /// unfiltered threshold only) when an effect adds a blocker. Matched at the
+    /// event, never rechecked on resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker_count: Option<BlockerCountThreshold>,
     /// Typed player actions for PlayerPerformedAction trigger mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_actions: Option<Vec<PlayerActionKind>>,
@@ -42176,6 +42254,7 @@ impl TriggerDefinition {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,
             damage_amount: None,
@@ -44948,6 +45027,233 @@ mod tests {
             TargetFilter::Typed(TypedFilter::default()),
         ] {
             assert!(!other.names_one_player(), "{other:?}");
+        }
+    }
+
+    fn legacy_worship_draw_replacement() -> serde_json::Value {
+        // Witnessed in integration_cards.json.gz at the original PR base.
+        serde_json::json!({
+            "type": "CreateDrawReplacement",
+            "replacement_effect": { "type": "GainLife", "amount": { "type": "Fixed", "value": 5 } }
+        })
+    }
+
+    fn worship_replacement_definition() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: TargetFilter::Controller,
+            },
+        )
+    }
+
+    #[test]
+    fn draw_replacement_reads_legacy_effect_and_emits_full_definition() {
+        let effect: Effect = serde_json::from_value(legacy_worship_draw_replacement())
+            .expect("legacy Worship payload must decode at the Effect boundary");
+        let Effect::CreateDrawReplacement { replacement_effect } = &effect else {
+            panic!("expected a draw replacement");
+        };
+        assert_eq!(**replacement_effect, worship_replacement_definition());
+        assert_eq!(replacement_effect.kind, AbilityKind::Spell);
+        assert_eq!(replacement_effect.player_scope, None);
+        assert!(replacement_effect.sub_ability.is_none());
+        assert!(replacement_effect.else_ability.is_none());
+        let modern = serde_json::to_value(&effect).unwrap();
+        assert_eq!(modern["replacement_effect"]["kind"], "Spell");
+        assert_eq!(modern["replacement_effect"]["effect"]["amount"]["value"], 5);
+        assert!(modern["replacement_effect"].get("type").is_none());
+        assert_eq!(serde_json::from_value::<Effect>(modern).unwrap(), effect);
+    }
+
+    #[test]
+    fn draw_replacement_preserves_current_definition_metadata() {
+        for scope in [PlayerFilter::All, PlayerFilter::Opponent] {
+            let definition = worship_replacement_definition()
+                .player_scope(scope.clone())
+                .condition(AbilityCondition::IsYourTurn)
+                .optional()
+                .optional_targeting()
+                .target_choice_timing(TargetChoiceTiming::Resolution)
+                .target_constraint(TargetSelectionConstraint::DifferentTargetPlayers)
+                .sub_ability(worship_replacement_definition().description("sub".to_string()))
+                .with_else_ability(worship_replacement_definition().description("else".to_string()))
+                .with_modal(
+                    ModalChoice {
+                        min_choices: 1,
+                        max_choices: 1,
+                        mode_count: 1,
+                        mode_descriptions: vec!["mode".to_string()],
+                        ..Default::default()
+                    },
+                    vec![worship_replacement_definition().description("mode".to_string())],
+                );
+            let effect = Effect::CreateDrawReplacement {
+                replacement_effect: Box::new(definition),
+            };
+            let decoded: Effect =
+                serde_json::from_value(serde_json::to_value(&effect).unwrap()).unwrap();
+            let Effect::CreateDrawReplacement { replacement_effect } = &decoded else {
+                panic!("expected a draw replacement");
+            };
+            assert_eq!(replacement_effect.player_scope, Some(scope));
+            assert_eq!(
+                replacement_effect.condition,
+                Some(AbilityCondition::IsYourTurn)
+            );
+            assert!(replacement_effect.optional && replacement_effect.optional_targeting);
+            assert_eq!(
+                replacement_effect.target_choice_timing,
+                TargetChoiceTiming::Resolution
+            );
+            assert_eq!(
+                replacement_effect.target_constraints,
+                vec![TargetSelectionConstraint::DifferentTargetPlayers]
+            );
+            assert_eq!(
+                replacement_effect
+                    .sub_ability
+                    .as_ref()
+                    .unwrap()
+                    .description
+                    .as_deref(),
+                Some("sub")
+            );
+            assert_eq!(
+                replacement_effect
+                    .else_ability
+                    .as_ref()
+                    .unwrap()
+                    .description
+                    .as_deref(),
+                Some("else")
+            );
+            assert_eq!(replacement_effect.modal.as_ref().unwrap().mode_count, 1);
+            assert_eq!(replacement_effect.mode_abilities.len(), 1);
+            assert_eq!(
+                replacement_effect.mode_abilities[0].description.as_deref(),
+                Some("mode")
+            );
+            assert_eq!(
+                decoded, effect,
+                "all current metadata must survive the selected decoder"
+            );
+        }
+    }
+
+    #[test]
+    fn draw_replacement_legacy_decode_recurses_through_definitions_and_tagged_effects() {
+        let mut parent = serde_json::to_value(worship_replacement_definition()).unwrap();
+        let nested =
+            serde_json::json!({"kind": "Spell", "effect": legacy_worship_draw_replacement()});
+        parent["sub_ability"] = nested.clone();
+        parent["else_ability"] = nested.clone();
+        parent["modal"] = serde_json::to_value(ModalChoice {
+            min_choices: 1,
+            max_choices: 1,
+            mode_count: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        parent["mode_abilities"] = serde_json::json!([nested]);
+        let decoded: AbilityDefinition = serde_json::from_value(parent).unwrap();
+        assert!(matches!(*decoded.effect, Effect::GainLife { .. }));
+        assert_eq!(decoded.modal.as_ref().unwrap().mode_count, 1);
+        assert_eq!(decoded.mode_abilities.len(), 1);
+        for child in [
+            decoded.sub_ability.as_deref().unwrap(),
+            decoded.else_ability.as_deref().unwrap(),
+            &decoded.mode_abilities[0],
+        ] {
+            let Effect::CreateDrawReplacement { replacement_effect } = &*child.effect else {
+                panic!("nested definition must reach the draw replacement");
+            };
+            assert_eq!(**replacement_effect, worship_replacement_definition());
+        }
+
+        // CreateDelayedTrigger has its own `effect` field; it is still a legacy Effect.
+        let mut delayed = legacy_worship_draw_replacement();
+        delayed["replacement_effect"] = serde_json::json!({
+            "type": "CreateDelayedTrigger",
+            "condition": (DelayedTriggerCondition::AtNextPhase { phase: Phase::End }),
+            "effect": { "kind": "Spell", "effect": legacy_worship_draw_replacement() }
+        });
+        let effect: Effect = serde_json::from_value(delayed).unwrap();
+        let Effect::CreateDrawReplacement { replacement_effect } = effect else {
+            panic!("expected outer replacement")
+        };
+        assert_eq!(replacement_effect.kind, AbilityKind::Spell);
+        assert_eq!(replacement_effect.player_scope, None);
+        let Effect::CreateDelayedTrigger { effect: child, .. } = *replacement_effect.effect else {
+            panic!("legacy tagged effect must select Effect decoding")
+        };
+        let Effect::CreateDrawReplacement { replacement_effect } = *child.effect else {
+            panic!("expected inner replacement")
+        };
+        assert_eq!(*replacement_effect, worship_replacement_definition());
+    }
+
+    #[test]
+    fn draw_replacement_preserves_defaults_and_propagates_selected_decoder_errors() {
+        let mut defaulted = legacy_worship_draw_replacement();
+        defaulted["replacement_effect"] = serde_json::json!({ "type": "GainLife" });
+        let decoded: Effect = serde_json::from_value(defaulted)
+            .expect("the established missing amount default remains valid");
+        let Effect::CreateDrawReplacement { replacement_effect } = decoded else {
+            panic!("expected draw replacement")
+        };
+        assert!(matches!(
+            *replacement_effect.effect,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller
+            }
+        ));
+
+        let modern = serde_json::to_value(worship_replacement_definition()).unwrap();
+        let legacy = legacy_worship_draw_replacement()["replacement_effect"].clone();
+        let malformed = [
+            (serde_json::Value::Null, modern.clone()),
+            (serde_json::json!({"kind": "Spell"}), modern.clone()),
+            (serde_json::json!({"effect": legacy}), modern.clone()),
+            (
+                serde_json::json!({"kind": "Unknown", "effect": {"type": "GainLife"}}),
+                modern.clone(),
+            ),
+            (
+                serde_json::json!({"kind": "Spell", "effect": {"type": "Unknown"}}),
+                modern,
+            ),
+            (serde_json::json!({"type": "Unknown"}), legacy.clone()),
+            (
+                serde_json::json!({"type": "GainLife", "amount": {"type": "Fixed"}}),
+                legacy,
+            ),
+        ];
+        for (bad, good) in malformed {
+            let mut valid = legacy_worship_draw_replacement();
+            valid["replacement_effect"] = good;
+            assert!(
+                serde_json::from_value::<Effect>(valid.clone()).is_ok(),
+                "same-family positive reaches the field decoder"
+            );
+            let nested_valid = serde_json::json!({"kind": "Spell", "effect": {"type": "GainLife"}, "sub_ability": {"kind": "Spell", "effect": valid}});
+            assert!(
+                serde_json::from_value::<AbilityDefinition>(nested_valid).is_ok(),
+                "same-family positive reaches the nested field decoder"
+            );
+            let mut invalid = legacy_worship_draw_replacement();
+            invalid["replacement_effect"] = bad.clone();
+            assert!(
+                serde_json::from_value::<Effect>(invalid.clone()).is_err(),
+                "selected decoder must reject {bad}"
+            );
+            let nested = serde_json::json!({"kind": "Spell", "effect": {"type": "GainLife"}, "sub_ability": {"kind": "Spell", "effect": invalid}});
+            assert!(
+                serde_json::from_value::<AbilityDefinition>(nested).is_err(),
+                "nested malformed payload must reject its containing definition"
+            );
         }
     }
 
@@ -48594,6 +48900,7 @@ mod tests {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,
             damage_amount: None,

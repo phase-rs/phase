@@ -1279,6 +1279,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 Some(_) => parts.push("attacked scoped player this turn".into()),
             },
             FilterProp::BlockedThisTurn => parts.push("blocked this turn".into()),
+            FilterProp::FoughtThisTurn => parts.push("fought this turn".into()),
             FilterProp::AttackedOrBlockedThisTurn => {
                 parts.push("attacked or blocked this turn".into());
             }
@@ -4080,8 +4081,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::CreateDrawReplacement { replacement_effect } => {
             d.push((
                 "replacement_effect".into(),
-                crate::types::ability::effect_variant_name(replacement_effect).to_string(),
+                crate::types::ability::effect_variant_name(&replacement_effect.effect).to_string(),
             ));
+            if let Some(scope) = &replacement_effect.player_scope {
+                d.push(("replacement_player_scope".into(), fmt_player_filter(scope)));
+            }
         }
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             d.push((
@@ -4843,6 +4847,18 @@ fn trigger_details(trig: &TriggerDefinition) -> Vec<(String, String)> {
     // (CR 508.3a narrowing of the attack declaration, not CR 115.1 targeting).
     if let Some(atf) = &trig.attack_target_filter {
         d.push(("attack target".into(), fmt_attack_target_filter(atf).into()));
+    }
+    // CR 509.3e: the blocker-count threshold decides whether a becomes-blocked
+    // trigger fires at all, so it belongs in the parse-diff signature.
+    if let Some(threshold) = &trig.blocker_count {
+        let blockers = threshold
+            .blocker
+            .as_ref()
+            .map_or_else(|| "creatures".to_string(), fmt_target);
+        d.push((
+            "blocked by".into(),
+            format!("{} or more {blockers}", threshold.minimum),
+        ));
     }
     if let Some(constraint) = &trig.constraint {
         d.push(("constraint".into(), fmt_trigger_constraint(constraint)));
@@ -16573,6 +16589,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn draw_replacement_details_distinguish_substitute_player_scope() {
+        let make = |scope| Effect::CreateDrawReplacement {
+            replacement_effect: Box::new(
+                AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp).player_scope(scope),
+            ),
+        };
+        let each_player = make(PlayerFilter::All);
+        let each_opponent = make(PlayerFilter::Opponent);
+        assert_ne!(effect_details(&each_player), effect_details(&each_opponent));
     }
 
     /// CR 102.1 + CR 608.2c: a `player_scope` union is supported only when every
