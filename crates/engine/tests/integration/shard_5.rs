@@ -7,6 +7,8 @@
 
 pub mod support;
 
+mod titanoth_rex_cycling_trample;
+
 mod reflexive_body_token_referent;
 mod reflexive_discard_this_way;
 mod reflexive_if_rider;

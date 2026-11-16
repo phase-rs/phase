@@ -7,6 +7,8 @@
 
 pub mod support;
 
+mod anzrag_must_be_blocked;
+
 mod a_killer_among_us;
 mod aang_compound_tail;
 mod aang_journey_partial_fail_to_find_2722;

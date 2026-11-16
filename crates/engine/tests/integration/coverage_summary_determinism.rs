@@ -591,162 +591,27 @@ fn jermane_face() -> serde_json::Value {
     })
 }
 
-const RAM_THROUGH: &str = "ram through";
+const SYNTHETIC_TWO_GAPS: &str = "synthetic two gaps";
 
-/// Ram Through's exported face; its two real warnings are two different gaps.
-fn ram_through_face() -> serde_json::Value {
+/// Synthetic fixture: the diagnostics are explicit coverage inputs, independent
+/// of improvements to the parser's support for any printed card.
+fn synthetic_two_gaps_face() -> serde_json::Value {
     serde_json::json!({
-        "name": "Ram Through",
-        "mana_cost": {
-            "generic": 1,
-            "shards": [
-                "Green"
-            ],
-            "type": "Cost"
-        },
-        "card_type": {
-            "core_types": [
-                "Instant"
-            ],
-            "subtypes": [],
-            "supertypes": []
-        },
-        "power": null,
-        "toughness": null,
-        "loyalty": null,
-        "defense": null,
-        "oracle_text": "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, excess damage is dealt to that creature's controller instead.",
-        "non_ability_text": null,
-        "flavor_name": null,
+        "name": "Synthetic Two Gaps",
+        "mana_cost": {"type": "Cost", "generic": 0, "shards": []},
+        "triggers": [], "static_abilities": [], "replacements": [], "color_override": null,
+        "card_type": {"core_types": ["Instant"], "subtypes": [], "supertypes": []},
+        "oracle_text": "Draw a card.",
         "keywords": [],
-        "abilities": [
-            {
-                "condition": null,
-                "cost": null,
-                "declares_chosen_group": 0,
-                "description": "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, excess damage is dealt to that creature's controller instead.",
-                "duration": null,
-                "effect": {
-                    "target": {
-                        "controller": "You",
-                        "properties": [],
-                        "type": "Typed",
-                        "type_filters": [
-                            "Creature"
-                        ]
-                    },
-                    "type": "TargetOnly"
-                },
-                "forward_result": false,
-                "kind": "Spell",
-                "optional": false,
-                "optional_targeting": false,
-                "sub_ability": {
-                    "condition": null,
-                    "cost": null,
-                    "description": null,
-                    "duration": null,
-                    "effect": {
-                        "amount": {
-                            "qty": {
-                                "scope": {
-                                    "type": "Target"
-                                },
-                                "type": "Power"
-                            },
-                            "type": "Ref"
-                        },
-                        "damage_source": "Target",
-                        "excess": {
-                            "source_keyword": "Trample",
-                            "type": "TargetController"
-                        },
-                        "target": {
-                            "controller": "Opponent",
-                            "properties": [],
-                            "type": "Typed",
-                            "type_filters": [
-                                "Creature"
-                            ]
-                        },
-                        "type": "DealDamage"
-                    },
-                    "forward_result": false,
-                    "kind": "Spell",
-                    "optional": false,
-                    "optional_targeting": false,
-                    "sub_ability": null,
-                    "target_prompt": null
-                },
-                "target_prompt": null
-            }
-        ],
-        "triggers": [],
-        "static_abilities": [],
-        "replacements": [],
-        "color_override": null,
-        "scryfall_oracle_id": "4b1befff-48fa-47a3-832e-bdaf43495c02",
-        "legalities": {
-            "brawl": "legal",
-            "commander": "legal",
-            "duel": "legal",
-            "historic": "legal",
-            "legacy": "legal",
-            "modern": "legal",
-            "oathbreaker": "legal",
-            "pauper": "legal",
-            "paupercommander": "legal",
-            "pioneer": "legal",
-            "timeless": "legal",
-            "vintage": "legal"
-        },
-        "printings": [
-            "CMM",
-            "FDC",
-            "GN3",
-            "IKO",
-            "J22",
-            "PLST"
-        ],
+        "abilities": [{
+            "kind": "Spell", "effect": {"type": "Draw", "count": {"type": "Fixed", "value": 1}, "target": {"type": "Controller"}},
+            "cost": null, "sub_ability": null, "duration": null, "description": "Draw a card.",
+            "target_prompt": null, "condition": null, "optional_targeting": false,
+            "optional": false, "forward_result": false
+        }],
         "parse_warnings": [
-            {
-                "description": "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, e",
-                "detector": "Replacement_Instead",
-                "items": [
-                    0
-                ],
-                "line_index": 0,
-                "type": "SwallowedClause",
-                "unit_span": {
-                    "end_byte": 200,
-                    "first_line": 0,
-                    "last_line": 0,
-                    "ordinal_within_span": 0,
-                    "precision": "Exact",
-                    "start_byte": 0
-                }
-            },
-            {
-                "description": "Target creature you control deals damage equal to its power to target creature you don't control. If the creature you control has trample, e",
-                "detector": "Condition_If",
-                "gap": {
-                    "guard": "the creature you control has trample",
-                    "kind": "unparsed_condition"
-                },
-                "items": [
-                    0
-                ],
-                "line_index": 0,
-                "type": "SwallowedClause",
-                "unit_span": {
-                    "end_byte": 200,
-                    "first_line": 0,
-                    "last_line": 0,
-                    "ordinal_within_span": 0,
-                    "precision": "Exact",
-                    "start_byte": 0
-                }
-            }
+            {"type": "SwallowedClause", "detector": "Replacement_Instead", "description": "synthetic replacement gap", "line_index": 0},
+            {"type": "SwallowedClause", "detector": "Condition_If", "description": "synthetic condition gap", "line_index": 0}
         ]
     })
 }
@@ -842,18 +707,18 @@ fn otherwise_supported_counts_a_face_gapped_only_by_its_warnings() {
     let export = serde_json::Value::Object(serde_json::Map::from_iter(
         jump_faces()
             .into_iter()
-            .chain([(RAM_THROUGH.to_string(), ram_through_face())]),
+            .chain([(SYNTHETIC_TWO_GAPS.to_string(), synthetic_two_gaps_face())]),
     ))
     .to_string();
     let db = CardDatabase::from_json_str(&export).expect("test export deserializes");
     let summary = analyze_coverage(&db);
 
-    let ram_through = summary
+    let synthetic = summary
         .cards
         .iter()
-        .find(|card| card.card_face_key.as_deref() == Some(RAM_THROUGH))
-        .expect("Ram Through is scanned");
-    assert_eq!(ram_through.gap_count, 2);
+        .find(|card| card.card_face_key.as_deref() == Some(SYNTHETIC_TWO_GAPS))
+        .expect("synthetic face is scanned");
+    assert_eq!(synthetic.gap_count, 2);
     for prefix in ["Condition_If:", "Replacement_Instead:"] {
         let patterns = patterns_starting_with(&summary.parse_warning_patterns, prefix);
         assert_eq!(patterns.len(), 1, "{prefix}");
