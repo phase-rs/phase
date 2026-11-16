@@ -382,6 +382,11 @@ fn run_post_action_pipeline_core(
         if skip_trigger_scan {
             filtered_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
             delayed_trigger_events.retain(|event| matches!(event, GameEvent::SpellCast { .. }));
+        } else {
+            // CR 603.6a + CR 611.3c: entries of an entering instruction that is
+            // still suspended wait for it; entries held from earlier answers of
+            // one that has completed join this scan ahead of this action's own.
+            filtered_events = triggers::settle_entry_batch_scan(state, filtered_events);
         }
         // CR 603.3b: If the resolution step that just ran paused for a player
         // resolution-choice (Scry/Surveil/Dig/Search/...), the triggered
@@ -690,7 +695,16 @@ fn run_post_action_pipeline_core(
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         // CR 603.2c + CR 603.7b: a further canonical prompt retains fresh
         // delayed occurrences now; its later answer has a different buffer.
-        if (delayed_event_start.is_some() || payment_owned) && state.game_end.is_none() {
+        // CR 603.2 + CR 603.7: so does a resolution paused on its untargeted
+        // object choice ("Destroy any number of target planeswalkers. Choose a
+        // planeswalker you control."): the instructions before the choice already
+        // happened, and a delayed trigger watching them ("When the permanent you
+        // don't control dies this turn") triggers now.
+        if (delayed_event_start.is_some()
+            || payment_owned
+            || super::effects::resolution_object_choice_is_open(state))
+            && state.game_end.is_none()
+        {
             let delayed_input = unclaimed_delayed_trigger_input(
                 state,
                 events,
@@ -884,6 +898,31 @@ fn place_priority_batch(
     outcome
         .prompt
         .filter(|wf| !matches!(wf, WaitingFor::Priority { .. }))
+}
+
+/// CR 603.2 + CR 603.3: queue a batch of triggered abilities that an action
+/// collected itself, staged so it could be admitted or refused whole, with the
+/// batch the current wait parks. At a priority boundary that is the boundary's
+/// own batch, placed by the pass that follows; during any other decision the
+/// batch waits until a player would next receive priority, exactly as that
+/// wait's own triggers would.
+///
+/// CR 603.2c: `events` were collected once, here, so they are claimed for the
+/// ordinary collector: neither the following priority pass nor a paused
+/// announcement's carrier collects them again. `events` is the action's whole
+/// event buffer, so its indices are the occurrences the claim records.
+pub(crate) fn queue_collected_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    collection: triggers::PendingActivationTriggerCollection,
+) {
+    let origin = parked_batch_origin(&state.waiting_for);
+    let mut contexts = Vec::new();
+    collection.commit_into(state, &mut contexts);
+    let first_new_context = state.deferred_triggers.len();
+    state.deferred_triggers.extend(contexts);
+    triggers::stamp_deferred_triggers_from(state, first_new_context, origin);
+    super::announcement_triggers::claim_ordinary_collected_span(state, events, 0, events.len());
 }
 
 /// The origin a boundary batch parks with behind `waiting_for`: SBA-owned

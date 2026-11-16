@@ -35,20 +35,19 @@
 //! scores high there while scoring ~0 here (no poison sources).
 
 use engine::game::DeckEntry;
-use engine::types::ability::{AbilityDefinition, ControllerRef, Effect, TargetFilter};
+use engine::types::ability::{
+    AbilityDefinition, ControllerRef, Effect, PlayerFilter, PlayerRelation, TargetFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerCounterKind;
 
-use crate::ability_chain::{collect_scoped_effects, AbilityScope};
+use crate::ability_chain::{collect_scoped_effects, collect_scoped_nodes, AbilityScope};
 use crate::features::commitment;
 
 /// Commitment at or above which the poison clock is a real plan for this deck
 /// rather than an incidental splash. Gates `PoisonClockPolicy::activation`.
 pub const POISON_CLOCK_FLOOR: f32 = 0.35;
-
-/// CR 104.3d: a player with ten or more poison counters loses the game.
-pub const LETHAL_POISON: u32 = 10;
 
 /// CR 104.3d + CR 122.1f: per-deck poison-clock classification.
 ///
@@ -94,7 +93,7 @@ pub fn detect(deck: &[DeckEntry]) -> PoisonFeature {
         if is_poison_source_parts(&face.card_type.core_types, &face.keywords) {
             source_count = source_count.saturating_add(entry.count);
         }
-        if gives_opponents_poison_parts(&face.abilities, AbilityScope::Potential) {
+        if opponent_poison_recipients_parts(&face.abilities, AbilityScope::Potential).is_some() {
             direct_count = direct_count.saturating_add(entry.count);
         }
         if proliferates_parts(&face.abilities, AbilityScope::Potential) {
@@ -195,28 +194,96 @@ pub(crate) fn poison_yield_parts(core_types: &[CoreType], keywords: &[Keyword], 
     from_infect.saturating_add(flat)
 }
 
-/// CR 122.1f: an ability tree that gives poison counters to a player who can
-/// be an opponent, walked at `scope`.
+/// CR 102.3 + CR 810.10: which opponents a direct-poison effect is guaranteed to reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum PoisonRecipients {
+    /// One opponent: a target, or a scope that may pass over some opponents.
+    One,
+    /// CR 810.10: every opponent, each getting its own counters.
+    EachOpponent,
+}
+
+/// CR 102.3: the widest opponent reach of the poison counters an ability tree
+/// gives, walked at `scope`; `None` when no recipient can be an opponent.
 ///
-/// A `TargetFilter::Controller` / `SelfRef` scope is rejected — a card that
-/// poisons ITS OWN controller (a drawback clause, e.g. Phyrexian Vatmother) is
-/// not a poison payoff.
-pub(crate) fn gives_opponents_poison_parts<'a>(
+/// Under a `player_scope` the resolver rebinds `Controller` to each scoped
+/// player, so "each opponent gets a poison counter" counts. An unscoped
+/// `Controller` / `SelfRef` recipient is a drawback, not a payoff (Phyrexian
+/// Vatmother).
+pub(crate) fn opponent_poison_recipients_parts<'a>(
     abilities: impl IntoIterator<Item = &'a AbilityDefinition>,
     scope: AbilityScope,
-) -> bool {
-    abilities.into_iter().any(|ability| {
-        collect_scoped_effects(ability, scope).iter().any(|effect| {
-            matches!(
-                effect,
-                Effect::GivePlayerCounter {
-                    counter_kind: PlayerCounterKind::Poison,
-                    target,
-                    ..
-                } if filter_can_hit_opponent(target)
-            )
+) -> Option<PoisonRecipients> {
+    abilities
+        .into_iter()
+        .flat_map(|ability| collect_scoped_nodes(ability, scope))
+        .filter_map(|node| match &*node.effect {
+            Effect::GivePlayerCounter {
+                counter_kind: PlayerCounterKind::Poison,
+                target,
+                ..
+            } => poison_recipients(target, node.player_scope.as_ref()),
+            _ => None,
         })
-    })
+        .max()
+}
+
+fn poison_recipients(
+    target: &TargetFilter,
+    scope: Option<&PlayerFilter>,
+) -> Option<PoisonRecipients> {
+    match (target, scope) {
+        (TargetFilter::Controller, Some(PlayerFilter::Opponent)) => {
+            Some(PoisonRecipients::EachOpponent)
+        }
+        (TargetFilter::Controller, Some(scope)) => {
+            scope_reaches_only_opponents(scope).then_some(PoisonRecipients::One)
+        }
+        _ => filter_can_hit_opponent(target).then_some(PoisonRecipients::One),
+    }
+}
+
+/// CR 102.3: whether a `player_scope` reaches only opponents of the
+/// controller; a scope that can include the controller is not credited, because
+/// the AI does not weigh poison it gives itself.
+fn scope_reaches_only_opponents(scope: &PlayerFilter) -> bool {
+    match scope {
+        PlayerFilter::Opponent
+        | PlayerFilter::OpponentLostLife
+        | PlayerFilter::OpponentGainedLife
+        | PlayerFilter::OpponentDealtDamage { .. }
+        | PlayerFilter::OpponentAttacked { .. }
+        | PlayerFilter::OpponentAttackingEnchantedPlayer
+        | PlayerFilter::OpponentOtherThanTriggering
+        | PlayerFilter::DefendingPlayer => true,
+        // These narrow the `relation` population, so an `Opponent` base stays opponent-only.
+        PlayerFilter::AllExcept { relation, .. }
+        | PlayerFilter::PerformedActionThisWay { relation, .. }
+        | PlayerFilter::ControlsCount { relation, .. }
+        | PlayerFilter::PlayerAttribute { relation, .. }
+        | PlayerFilter::TrackedSetPossessor { relation, .. } => {
+            matches!(relation, PlayerRelation::Opponent)
+        }
+        PlayerFilter::AnyOf { filters } => {
+            !filters.is_empty() && filters.iter().all(scope_reaches_only_opponents)
+        }
+        // Each can name the controller, e.g. an opponent of a triggering opponent.
+        PlayerFilter::Controller
+        | PlayerFilter::All
+        | PlayerFilter::HasLostTheGame
+        | PlayerFilter::HighestSpeed
+        | PlayerFilter::ZoneChangedThisWay
+        | PlayerFilter::OwnersOfCardsExiledBySource
+        | PlayerFilter::TriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayer
+        | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+        | PlayerFilter::VotedFor { .. }
+        | PlayerFilter::ParentObjectTargetController
+        | PlayerFilter::ChosenPlayer { .. }
+        | PlayerFilter::ParentObjectTargetOwner
+        | PlayerFilter::GrantingObjectCaster
+        | PlayerFilter::TargetPlayer => false,
+    }
 }
 
 /// True when a `TargetFilter` can resolve to a player other than the ability's

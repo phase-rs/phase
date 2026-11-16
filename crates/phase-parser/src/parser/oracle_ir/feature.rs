@@ -44,7 +44,9 @@
 //! recognizer bring-up plan's job.
 
 use super::doc::{OracleItemId, OracleItemIr, OracleNodeIr, OracleSourceSpan};
+use super::history_provenance::{DocumentHistory, HistoryAudit, HistoryRoot, HistoryTransport};
 use crate::parser::oracle::ParsedAbilities;
+use crate::types::ability::AbilityDefinition;
 
 /// A semantic that Oracle text can raise an expectation for, and that the parsed
 /// output can be checked to represent.
@@ -123,6 +125,10 @@ pub(crate) enum OracleSemanticFeature {
     /// parse that leaves the relative clause unrepresented has widened the
     /// effect to every object of the type.
     CombatPairingRelation,
+    /// CR 106.3 + CR 601.2h: a cast trigger's "using mana produced by <source>"
+    /// qualifier — a parse that leaves it unrepresented fires on every matching
+    /// spell, whichever source's mana paid for it.
+    CastManaSourceQualifier,
 }
 
 impl OracleSemanticFeature {
@@ -158,6 +164,7 @@ impl OracleSemanticFeature {
             Self::DamageSubjectConjunction => "DamageSubjectConjunction",
             Self::CombatHistoryRelation => "CombatHistoryRelation",
             Self::CombatPairingRelation => "CombatPairingRelation",
+            Self::CastManaSourceQualifier => "CastManaSourceQualifier",
         }
     }
 }
@@ -499,6 +506,93 @@ pub(crate) fn scope_to_unit(
     scoped
 }
 
+/// Resolve history producers against final definitions without pooling their operands.
+pub(crate) fn history_for_unit<'a>(
+    history: &'a [super::history_provenance::DocumentHistory],
+    unit: &AuditUnit<'_>,
+    parsed: &'a ParsedAbilities,
+    tracks: &ItemIdTracks<'_>,
+) -> Vec<super::history_provenance::HistoryAudit<'a>> {
+    let ids = unit.item_ids();
+    history
+        .iter()
+        .filter(|entry| ids.contains(&entry.item))
+        .map(|entry| {
+            let root = history_root(entry, parsed, tracks);
+            HistoryAudit {
+                document_root: Some((entry.item, entry.root)),
+                record: &entry.record,
+                instruction: root.and_then(|root| {
+                    entry
+                        .record
+                        .locator
+                        .as_ref()
+                        .and_then(|path| path.resolve(root))
+                }),
+            }
+        })
+        .collect()
+}
+
+fn history_root<'a>(
+    entry: &DocumentHistory,
+    parsed: &'a ParsedAbilities,
+    tracks: &ItemIdTracks<'_>,
+) -> Option<&'a AbilityDefinition> {
+    match entry.root {
+        HistoryRoot::Ability => tracks
+            .abilities
+            .iter()
+            .position(|id| *id == entry.item)
+            .and_then(|index| parsed.abilities.get(index)),
+        HistoryRoot::ReplacementExecute => tracks
+            .replacements
+            .iter()
+            .position(|id| *id == entry.item)
+            .and_then(|index| parsed.replacements.get(index))
+            .and_then(|replacement| replacement.execute.as_deref()),
+        HistoryRoot::TriggerExecute => tracks
+            .triggers
+            .iter()
+            .position(|id| *id == entry.item)
+            .and_then(|index| parsed.triggers.get(index))
+            .and_then(|trigger| trigger.execute.as_deref()),
+    }
+}
+
+/// Pin each logical producer before document relations can move its definition.
+pub(crate) fn capture_document_history(
+    history: &[DocumentHistory],
+    parsed: &ParsedAbilities,
+    tracks: &ItemIdTracks<'_>,
+) -> Vec<HistoryTransport> {
+    history
+        .iter()
+        .map(|entry| match history_root(entry, parsed, tracks) {
+            Some(root) => HistoryTransport::from_lowered(root, vec![entry.record.clone()]),
+            None => {
+                let mut transport = HistoryTransport::default();
+                transport.capture(entry.record.clone(), None);
+                transport
+            }
+        })
+        .collect()
+}
+
+pub(crate) fn finish_document_history(
+    history: &mut [DocumentHistory],
+    transports: Vec<HistoryTransport>,
+    parsed: &ParsedAbilities,
+    tracks: &ItemIdTracks<'_>,
+) {
+    for (entry, transport) in history.iter_mut().zip(transports) {
+        entry.record = transport
+            .finish_history(history_root(entry, parsed, tracks))
+            .pop()
+            .expect("a document transport owns exactly one declared occurrence");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -536,6 +630,7 @@ mod tests {
         let span = OracleSourceSpan::exact(line, line, 0, fragment.len(), 0);
         let slot = b.begin_item(span, Some(fragment));
         OracleItemIr {
+            ability_history: Vec::new(),
             id: slot.id(),
             source: slot.source().clone(),
             node,
@@ -631,6 +726,7 @@ mod tests {
             (F::DamageSubjectConjunction, "DamageSubjectConjunction"),
             (F::CombatHistoryRelation, "CombatHistoryRelation"),
             (F::CombatPairingRelation, "CombatPairingRelation"),
+            (F::CastManaSourceQualifier, "CastManaSourceQualifier"),
         ];
         for (feature, label) in expected {
             assert_eq!(feature.detector_label(), label);

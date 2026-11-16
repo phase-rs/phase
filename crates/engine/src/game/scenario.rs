@@ -588,6 +588,27 @@ impl GameScenario {
         }
     }
 
+    /// Add an artifact card to a player's graveyard (CR 404), without
+    /// introducing a creature or spell type that the printed card lacks.
+    pub fn add_artifact_to_graveyard(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Graveyard,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.base_card_types = obj.card_types.clone();
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
     /// Add a creature card to a player's exile. Returns a `CardBuilder` for
     /// fluent chaining. Used to stage cards tracked by source-linked exile
     /// effects.
@@ -1746,6 +1767,14 @@ impl GameRunner {
     /// Bounded loop: a turn has 12 phases/steps (CR 500.1), so a generous cap
     /// guards against an unexpectedly stuck transition rather than spinning.
     pub fn advance_to_phase(&mut self, phase: Phase) {
+        let _ = self.advance_to_phase_collecting_events(phase);
+    }
+
+    /// Advance the same production turn structure as [`Self::advance_to_phase`]
+    /// while retaining events emitted by automatic phase actions and public
+    /// priority passes. This is useful when a test's claim depends on those
+    /// events; it deliberately shares the single advancement loop.
+    pub fn advance_to_phase_collecting_events(&mut self, phase: Phase) -> Vec<GameEvent> {
         let mut events = Vec::new();
         let mut waiting = crate::game::turns::auto_advance(&mut self.state, &mut events);
         for _ in 0..32 {
@@ -1758,10 +1787,15 @@ impl GameRunner {
             let r1 = apply_as_current(&mut self.state, GameAction::PassPriority);
             let r2 = apply_as_current(&mut self.state, GameAction::PassPriority);
             match (r1, r2) {
-                (Ok(_), Ok(result)) => waiting = result.waiting_for,
+                (Ok(first), Ok(result)) => {
+                    events.extend(first.events);
+                    events.extend(result.events);
+                    waiting = result.waiting_for;
+                }
                 _ => break,
             }
         }
+        events
     }
 
     /// Advance to the declare-attackers step (CR 508). The engine surfaces
@@ -2072,6 +2106,7 @@ impl GameRunner {
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
+            WaitingFor::DigBottomOrder { .. } => "DigBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -2090,12 +2125,14 @@ impl GameRunner {
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+            WaitingFor::HeroEventChoice { .. } => "HeroEventChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
             WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
             WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
             WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
+            WaitingFor::ChooseStartingPlayer { .. } => "ChooseStartingPlayer",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
             WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
@@ -2182,6 +2219,7 @@ impl GameRunner {
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
+            WaitingFor::SecretAgendaChoice { .. } => "SecretAgendaChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
             WaitingFor::ChooseRoomDoor { .. } => "ChooseRoomDoor",
@@ -2795,8 +2833,10 @@ impl<'a> SpellCast<'a> {
                     };
                     act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
                 }
-                // CR 702.174a: after promising Gift with ≥2 opponents, pick a recipient.
-                // Sole-opponent games auto-latch and never raise this prompt.
+                // Cast-time opponent choice (Gift recipient, CR 702.174a, or
+                // effect-cost player, CR 601.2h) — the driver picks the first
+                // candidate; tests that must observe the pick drive it manually.
+                // A sole candidate auto-binds and never raises this prompt.
                 WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                     let opponent = candidates.first().copied().unwrap_or_else(|| {
                         panic!("ChooseGiftRecipient raised with empty candidates")
@@ -3228,6 +3268,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::NamedChoice { .. } => "NamedChoice",
         WaitingFor::TributeChoice { .. } => "TributeChoice",
         WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+        WaitingFor::HeroEventChoice { .. } => "HeroEventChoice",
         WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
         WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
         WaitingFor::CopyRetarget { .. } => "CopyRetarget",
@@ -3722,7 +3763,8 @@ fn drive_resolution(
                 act_collect(runner, GameAction::SelectCards { cards: keep }, &mut events)?;
             }
             WaitingFor::RippleBottomOrder { cards, .. }
-            | WaitingFor::RevealUntilBottomOrder { cards, .. } => {
+            | WaitingFor::RevealUntilBottomOrder { cards, .. }
+            | WaitingFor::DigBottomOrder { cards, .. } => {
                 let cards = cards.clone();
                 act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
             }
@@ -3900,6 +3942,9 @@ fn drive_resolution(
                 };
                 act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
             }
+            // Cast-time opponent choice (Gift recipient, CR 702.174a, or effect-cost
+            // player, CR 601.2h) — the driver picks the first candidate; tests that
+            // must observe the pick drive it manually.
             WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                 let opponent = candidates
                     .first()
@@ -5699,6 +5744,8 @@ mod tests {
 
     fn move_zone_effect(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin,
             destination,
             target,

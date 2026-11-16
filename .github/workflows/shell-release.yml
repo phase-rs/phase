@@ -29,7 +29,7 @@ jobs:
       release_sha: ${{ steps.resolve.outputs.release_sha }}
       shell_version: ${{ steps.resolve.outputs.shell_version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -71,7 +71,7 @@ jobs:
       RELEASE_SHA: ${{ needs.resolve-shell-ref.outputs.release_sha }}
       SHELL_VERSION: ${{ needs.resolve-shell-ref.outputs.shell_version }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_SHA }}
 
@@ -187,7 +187,7 @@ jobs:
             runner: windows-latest
             artifact: shell-tauri-windows
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.RELEASE_SHA }}
 
@@ -313,7 +313,7 @@ jobs:
           done
 
       - name: Build shell
-        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           # beforeBuildCommand runs only pnpm build:bootstrap. SHELL_REMOTE_ORIGIN
           # is intentionally unset so release shells use https://phase-rs.dev.
@@ -402,7 +402,7 @@ jobs:
           fi
           echo 'available=true' >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.android-signing.outputs.available == 'true'
         with:
           ref: ${{ env.RELEASE_SHA }}

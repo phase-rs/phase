@@ -2,6 +2,7 @@
 //! window (CR 605.3a + CR 117.1d + CR 601.2g via CR 602.2b), driven through `apply()` on
 //! Grand Architect + Pili-Pala.
 use engine::ai_support::{legal_actions, legal_actions_full};
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -13,7 +14,7 @@ use engine::types::game_state::{
     CastPaymentMode, GameState, LoopDetectionMode, ManaAbilityResume, ManaChoice, PayCostKind,
     WaitingFor,
 };
-use engine::types::identifiers::ObjectId;
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -2055,11 +2056,15 @@ fn an_inner_cancel_reverses_an_outer_activation_it_leaves_unpayable() {
 
 /// The index among `holder`'s abilities of its copy of `of`'s first ability.
 fn granted(state: &GameState, holder: ObjectId, of: ObjectId) -> usize {
-    let ability = &state.objects[&of].abilities[0];
+    // CR 113.2c + CR 201.5a: the donated copy carries the provider's
+    // incarnation stamp, so stamp the donor's printed ability before resolving
+    // the index. The payment-window state machine itself is untouched.
+    let mut ability = state.objects[&of].abilities[0].clone();
+    ability.granting_object = Some(ObjectIncarnationRef::from_object(&state.objects[&of]));
     state.objects[&holder]
         .abilities
         .iter()
-        .position(|held| held == ability)
+        .position(|held| held == &ability)
         .expect("the granted ability")
 }
 

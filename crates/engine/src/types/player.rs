@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::ability::is_false;
 use super::card_printing::SharedPrinting;
 use super::display_only::DisplayOnly;
 use super::event_kinds::BendingType;
@@ -76,6 +77,21 @@ pub struct CompanionInfo {
 pub struct Player {
     pub id: PlayerId,
     pub life: i32,
+    /// This seat has NO life total, so `life` is meaningless for it and must not
+    /// be presented as a resource. Damage and life loss it would take are
+    /// redirected into milling its library, and it is exempt from the CR 704.5a
+    /// "0 or less life" state-based action.
+    ///
+    /// True only for the Horde seat in a `GameFormat::Horde` game (a casual
+    /// variant, hence no CR number — see `horde::player_has_no_life_total`). Set
+    /// once at deck load, since the Horde seat is fixed for the whole game.
+    ///
+    /// Engine-derived and serialized so clients can render the seat truthfully
+    /// (showing its library — the Horde's real clock, as it loses by decking out)
+    /// instead of a frozen life total, WITHOUT re-deriving "which seat is the
+    /// Horde" on the frontend.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_no_life_total: bool,
     pub mana_pool: ManaPool,
 
     // Per-player zones
@@ -108,6 +124,12 @@ pub struct Player {
     pub life_gained_this_turn: u32,
     #[serde(default)]
     pub life_lost_this_turn: u32,
+    /// CR 107.14 + CR 122.1: Energy counters this player has paid or otherwise
+    /// lost this turn. Bumped on every energy decrement in
+    /// `GameState::apply_resolved_player_edit` and reset at turn start. Read by
+    /// `QuantityRef::EnergyPaidOrLostThisTurn` (Blaster Hulk).
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub energy_paid_or_lost_this_turn: u32,
     /// CR 603.4: Amount of life lost during the previous turn, snapshotted at turn start.
     /// Used by "if an opponent lost life during their last turn" intervening-if conditions.
     #[serde(default)]
@@ -224,6 +246,7 @@ impl Default for Player {
         Player {
             id: PlayerId(0),
             life: 20,
+            has_no_life_total: false,
             mana_pool: ManaPool::default(),
             library: im::Vector::new(),
             hand: im::Vector::new(),
@@ -238,6 +261,7 @@ impl Default for Player {
             energy: 0,
             life_gained_this_turn: 0,
             life_lost_this_turn: 0,
+            energy_paid_or_lost_this_turn: 0,
             life_lost_last_turn: 0,
             descended_this_turn: false,
             cards_drawn_this_turn: 0,

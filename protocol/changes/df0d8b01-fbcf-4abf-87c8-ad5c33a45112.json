@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "DerivedViews gains viewer_play_draw, the engine-owned side-relative play/draw position (CR 103.1 + CR 103.1a) for two-sided games; the opening-hand panel renders it only from this field, so an older server or P2P host that omits it silently loses the badge. turn_order and viewer_turn_number are also withheld until the starting player is determined. Full-game and P2P move in lockstep"
+}

@@ -1812,12 +1812,12 @@ fn next_main_with_p0_priority(runner: &mut GameRunner) {
     panic!("the next main phase was never reached");
 }
 
-/// Round 3, verifier board V4: a remembered decline prunes an optional
-/// once-per-turn trigger's context, but its admission still spent the limit
-/// (CR 603.2, CR 603.5). The observation is bound at match time, so the tap is
-/// not undoable even though no context is queued.
+/// Round 3, verifier board V4: a remembered decline does not keep an optional
+/// once-per-turn trigger off the stack (CR 603.5 — the choice is made on
+/// resolution), and its admission spent the limit (CR 603.2). The observation
+/// is bound at match time, so the tap is not undoable.
 #[test]
-fn a_pruned_once_per_turn_observation_still_refuses_undo() {
+fn a_remembered_decline_once_per_turn_observation_still_refuses_undo() {
     let mut scenario = main_phase();
     let watcher = scenario
         .add_creature(P0, "Once Watcher", 1, 3)
@@ -1869,8 +1869,98 @@ fn a_pruned_once_per_turn_observation_still_refuses_undo() {
     );
     assert_eq!(
         triggers_on_stack_from(&runner, watcher),
+        1,
+        "CR 603.5: the remembered decline still puts the trigger on the stack"
+    );
+    assert!(runner.state().deferred_triggers.is_empty());
+    assert!(!undo_tracked(&runner, land), "undo is not offered");
+    assert!(
+        runner
+            .act(GameAction::UntapLandForMana { object_id: land })
+            .is_err(),
+        "a submitted undo is refused"
+    );
+}
+
+/// Synthetic combination: no printed card has this optional, targeted, once-per-turn
+/// activation trigger. The nearest activation/limit precedent is Elrond, Moon-Reader
+/// ("Whenever you activate an ability of a creature, draw a card. This ability triggers
+/// only once each turn."); Soul's Attendant supplies the optional-trigger precedent.
+/// Combining them with a target exercises the remaining CR 603.3d pruning branch
+/// while preserving the activation-admission/undo invariant.
+const ONCE_OPTIONAL_TARGETED: &str = "Whenever you activate an ability of a creature, you may tap target creature an opponent controls. This ability triggers only once each turn.";
+
+/// A remembered accept whose trigger has no legal target is pruned before the
+/// stack (CR 603.3d), but its admission still spent the once-per-turn limit
+/// (CR 603.2). The observation is bound at match time, so the tap is not
+/// undoable even though no context is queued.
+#[test]
+fn a_pruned_once_per_turn_observation_still_refuses_undo() {
+    let mut scenario = main_phase();
+    let watcher = scenario
+        .add_creature(P0, "Once Watcher", 1, 3)
+        .from_oracle_text(ONCE_OPTIONAL_TARGETED)
+        .id();
+    let victim = scenario.add_vanilla(P1, 2, 2);
+    let land = add_mana_land_creature(&mut scenario, "Elemental");
+    let bootstrap = scenario
+        .add_creature(P0, "Bootstrap", 1, 3)
+        .from_oracle_text("{0}: You gain 1 life.")
+        .id();
+    let mut runner = scenario.build();
+    // Remember an accept through the real optional prompt, while a legal
+    // target exists.
+    activate(&mut runner, bootstrap, 0);
+    for _ in 0..20 {
+        settle_trigger_order(&mut runner);
+        match runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice {
+                may_trigger_key: Some(_),
+                ..
+            } => break,
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .choose_first_legal_target()
+                    .expect("the opponent's creature is a legal target");
+            }
+            _ => {
+                runner.act(GameAction::PassPriority).expect("resolve");
+            }
+        }
+    }
+    runner
+        .act(GameAction::DecideOptionalEffectAndRemember {
+            choice: AutoMayChoice::Accept,
+            scope: MayTriggerAutoChoiceScope::ExactInstance,
+        })
+        .expect("remember the accept");
+    assert!(
+        runner.state().objects[&victim].tapped,
+        "reach: the remembered accept tapped the target"
+    );
+    resolve_stack(&mut runner);
+    // Leave the trigger with no legal target.
+    move_to_zone(runner.state_mut(), victim, Zone::Graveyard, &mut Vec::new());
+    next_main_with_p0_priority(&mut runner);
+    assert!(
+        runner.state().triggers_fired_this_turn.is_empty(),
+        "reach: a fresh turn"
+    );
+
+    let tap = tap_land_selection(&runner, land);
+    let events = runner.act(tap).expect("tap the land").events;
+    settle_trigger_order(&mut runner);
+    assert_eq!(pool(&runner, P0), 1, "reach: mana produced");
+    assert_eq!(activations_of_kind(&events, ActivatedAbilityKind::Mana), 1);
+    assert_eq!(
+        runner.state().triggers_fired_this_turn.len(),
+        1,
+        "reach: the once-per-turn limit is spent"
+    );
+    assert_eq!(
+        triggers_on_stack_from(&runner, watcher),
         0,
-        "reach: the declined context was pruned"
+        "CR 603.3d: the targetless accepted context was pruned"
     );
     assert!(runner.state().deferred_triggers.is_empty());
     assert!(!undo_tracked(&runner, land), "undo is not offered");

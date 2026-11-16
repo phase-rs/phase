@@ -528,6 +528,7 @@ fn seed_records(state: &mut GameState) {
         .push_back(engine::types::game_state::CounterAddedRecord {
             actor: P1,
             object_id: bear,
+            incarnation: Some(0),
             counter_type: CounterType::Plus1Plus1,
             count: 1,
             name: "Bear".into(),
@@ -881,8 +882,15 @@ fn run_on(
                 players
             })
             .unwrap(),
+            // CR 701.20a: a transient reveal ends with its resolution; what the
+            // table keeps is the public identity the reveal published.
             {
-                let mut revealed: Vec<_> = state.revealed_cards.iter().copied().collect();
+                let mut revealed: Vec<_> = state
+                    .revealed_cards
+                    .iter()
+                    .chain(state.public_revealed_cards.iter())
+                    .copied()
+                    .collect();
                 revealed.sort();
                 revealed
             },

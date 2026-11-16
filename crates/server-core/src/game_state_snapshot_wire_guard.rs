@@ -118,6 +118,7 @@ mod tests {
     fn sample_log_entry(seq: u32) -> GameLogEntry {
         GameLogEntry {
             seq,
+            game_number: 1,
             turn: 1,
             phase: Phase::PreCombatMain,
             category: LogCategory::Game,

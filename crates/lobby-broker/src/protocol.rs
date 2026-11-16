@@ -1867,6 +1867,12 @@ impl From<&crate::tournament::TournamentMeta> for TournamentView {
 /// `serde_json::from_str` — that routes unknown tags to the reject path.
 /// (No `PartialEq`: `DeckData` is not `PartialEq`, matching the canonical
 /// `ClientMessage`, which is also not `PartialEq`.)
+// clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
+// enum is a short-lived per-frame deserialize target that is matched and
+// destructured at once, never stored or queued, so boxing that variant's fields
+// buys nothing but call-site churn. (Same allow as the canonical
+// `ClientMessage`; this subset's variant balance trips the lint on its own.)
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum LobbyClientMessage {
@@ -1894,7 +1900,11 @@ pub enum LobbyClientMessage {
         player_count: u8,
         #[serde(default)]
         match_config: MatchConfig,
-        #[serde(default)]
+        /// Relayed to the host's build only, so decoded as the host's engine wrote it.
+        #[serde(
+            default,
+            deserialize_with = "FormatConfig::deserialize_recorded_option"
+        )]
         format_config: Option<FormatConfig>,
         #[serde(default)]
         room_name: Option<String>,
@@ -3488,6 +3498,47 @@ mod tests {
                 other => panic!("expected CreateGameWithSettings, got {other:?}"),
             },
             other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    /// The deck carriers' `bracket_tier` is nullable from lobby protocol 17: an
+    /// explicit `null` and an omitted field both decode as undeclared, never as a
+    /// declared Core, and a named tier still decodes as declared. The lobby moved
+    /// because `DeckData`'s field type changed. A broker below 17 would reject a
+    /// `null` frame, but no client sends one: `brokerClient` registers and joins
+    /// with an empty, tier-less deck.
+    #[test]
+    fn deck_carriers_decode_a_null_or_omitted_bracket_tier_as_undeclared() {
+        use engine::game::bracket_estimate::CommanderBracketTier;
+
+        let deck_tier = |frame: &str| match parse_lobby_client_message(frame) {
+            ParsedFrame::Message(msg) => match *msg {
+                LobbyClientMessage::CreateGameWithSettings { deck, .. }
+                | LobbyClientMessage::JoinGameWithPassword { deck, .. } => deck.bracket_tier,
+                other => panic!("expected a deck carrier, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        };
+        for (deck, expected) in [
+            (r#"{"main_deck":[],"bracket_tier":null}"#, None),
+            (r#"{"main_deck":[]}"#, None),
+            (
+                r#"{"main_deck":[],"bracket_tier":"core"}"#,
+                Some(CommanderBracketTier::Core),
+            ),
+        ] {
+            let create = format!(
+                r#"{{"type":"CreateGameWithSettings","data":{{"deck":{deck},"display_name":"Host","public":true,"password":null,"timer_seconds":null}}}}"#
+            );
+            let join = format!(
+                r#"{{"type":"JoinGameWithPassword","data":{{"game_code":"ABC123","deck":{deck},"display_name":"Guest","password":null}}}}"#
+            );
+            assert_eq!(
+                deck_tier(&create),
+                expected,
+                "CreateGameWithSettings {deck}"
+            );
+            assert_eq!(deck_tier(&join), expected, "JoinGameWithPassword {deck}");
         }
     }
 

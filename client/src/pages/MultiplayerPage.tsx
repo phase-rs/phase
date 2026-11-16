@@ -31,6 +31,7 @@ import {
   ACTIVE_DECK_KEY,
   loadActiveDeck,
   loadActiveDeckBracket,
+  loadActiveDeckComboDeclaration,
   loadSavedDeck,
   touchDeckPlayed,
 } from "../constants/storage";
@@ -471,8 +472,11 @@ function MultiplayerPageContent({
     }
     const deck = loadActiveDeck();
     if (!deck) return null;
-    const bracket = bracketToEngineTier(loadActiveDeckBracket());
-    return { ...await submitParsedDeck(deck), bracket_tier: bracket };
+    return {
+      ...await submitParsedDeck(deck),
+      bracket_tier: bracketToEngineTier(loadActiveDeckBracket()),
+      combo_declaration: loadActiveDeckComboDeclaration(),
+    };
   }, []);
 
   const resolveGuestFromStore = useMultiplayerStore((s) => s.resolveGuest);
@@ -881,10 +885,14 @@ function MultiplayerPageContent({
         case "superseded":
           return;
         case "failed":
+          // A guest's compatibility refusal carries its code and shows the
+          // translated message; its English stays in the outcome's error.
           showToast(
-            outcome.error !== null && outcome.error !== DRAFT_OFFLINE_ERROR
-              ? outcome.error
-              : t("page.failedToJoinDraft"),
+            outcome.code !== undefined
+              ? t("podError.incompatible", { ns: "draft" })
+              : outcome.error !== null && outcome.error !== DRAFT_OFFLINE_ERROR
+                ? outcome.error
+                : t("page.failedToJoinDraft"),
           );
           return;
         default:

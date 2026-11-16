@@ -7,7 +7,7 @@ import {
 } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
-import type { ChosenAttribute, GameObject, Keyword, ManaCost, Zone } from "../../adapter/types.ts";
+import type { AttackTarget, ChosenAttribute, GameObject, Keyword, ManaCost, PlayerId, Zone } from "../../adapter/types.ts";
 import { ABILITY_BLOCK_REASON_KEY } from "../../viewmodel/abilityBlockReason.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { abilityLabel, loyaltyBadge, spellCostDisplay, stripLoyaltyCostPrefix } from "../../viewmodel/costLabel.ts";
@@ -22,6 +22,9 @@ import { faceDownMarkerRef } from "./faceDownMarker.ts";
 import { shouldRenderCardBack } from "../../viewmodel/cardProps.ts";
 import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { useBackFaceSpellCost } from "../../hooks/useBackFaceSpellCost.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore, type MobileHandGesture } from "../../stores/uiStore.ts";
@@ -1422,6 +1425,43 @@ function CardInfoPanel({
   const keywordSources = buildGrantedKeywordSources(attribution, obj.id, deref);
   const ptSources = buildPTSources(attribution, obj.id, deref);
   const chosenAttributes = obj.chosen_attributes ?? [];
+  // CR 506.3 + CR 508.1b: this creature's attack declaration, if it is attacking.
+  const attacker = useGameStore((s) =>
+    s.gameState?.combat?.attackers.find((a) => a.object_id === obj.id),
+  );
+  // CR 506.4c: the engine's current target of this creature's attack; absent once that relation
+  // has ended, while the creature is still attacking.
+  const attackTarget = useGameStore((s) => s.gameState?.derived?.attack_targets?.[String(obj.id)]);
+  const myId = usePlayerId();
+  // `usePlayerId()` answers seat 0 in spectate mode, so the second-person arms are gated on
+  // `useSpectatorMode()`: a spectator reads the third-person copy, never "you".
+  const spectating = useSpectatorMode();
+
+  const formatAttackTarget = (target: AttackTarget | undefined, defendingPlayer: PlayerId): string => {
+    if (!target) return t("preview.attacking.nothing");
+    switch (target.type) {
+      case "Player":
+        return !spectating && target.data === myId
+          ? t("preview.attacking.you")
+          : t("preview.attacking.player", { player: getOpponentDisplayName(target.data) });
+      case "Planeswalker": {
+        const name = objects?.[String(target.data)]?.name;
+        // CR 506.2: the planeswalker's controller is the defending player the engine recorded.
+        return !spectating && defendingPlayer === myId
+          ? t("preview.attacking.yourPlaneswalker", { name })
+          : t("preview.attacking.planeswalker", {
+              name,
+              player: getOpponentDisplayName(defendingPlayer),
+            });
+      }
+      case "Battle":
+        return t("preview.attacking.battle", { name: objects?.[String(target.data)]?.name });
+      default: {
+        const _exhaustive: never = target;
+        return _exhaustive;
+      }
+    }
+  };
 
   const formatChosenAttribute = (attribute: ChosenAttribute): { label: string; value: string } => {
     switch (attribute.type) {
@@ -1485,6 +1525,9 @@ function CardInfoPanel({
       <div className="font-semibold text-gray-300">
         <RichLabel text={formatTypeLine(obj.card_types, obj.keywords)} size="xs" />
       </div>
+      {attacker && (
+        <div className="mt-1 font-semibold text-red-300">⚔ {formatAttackTarget(attackTarget, attacker.defending_player)}</div>
+      )}
 
       {activateLabels.length > 0 && (
         <div className="mt-1 text-cyan-300/90">
