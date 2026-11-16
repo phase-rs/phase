@@ -14349,13 +14349,17 @@ mod tests {
             .sub_ability
             .as_deref()
             .expect("reach guard: the damage instruction follows the mass tap");
-        // Debug rendering: a typed walk over every filter-bearing field of the
-        // damage effect would duplicate the effect's own visitor for one assertion.
-        assert!(
-            // allow-noncombinator: test assertion over a parsed result, not parsing dispatch
-            !format!("{:?}", rider.effect).contains("ParentTarget"),
-            "(d) the damage source keeps its own binding; {:?}",
-            rider.effect
+        // `DamageEachPlayer` has no source or recipient slot that could name the
+        // mass selection: the resolver deals the damage from `ability.source_id`.
+        // The exact effect is therefore the damage source keeping its own binding,
+        // and it fails if the rider is `Unimplemented` or any other effect.
+        assert_eq!(
+            *rider.effect,
+            Effect::DamageEachPlayer {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player_filter: PlayerFilter::Opponent,
+            },
+            "(d) \"It deals 1 damage to each opponent\" parses as the spell's own damage"
         );
     }
 }
