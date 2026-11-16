@@ -5596,14 +5596,15 @@ pub(crate) fn strip_for_each_prefix_with_difference(
                 .is_ok_and(|(clause_rest, _)| clause_rest.is_empty())
                 && nom_primitives::scan_contains(remainder, "that card")
             {
-                let offset = text.len() - remainder.len();
-                return (
-                    Some(QuantityExpr::Ref {
-                        qty: QuantityRef::TrackedSetSize,
-                    }),
-                    None,
-                    text[offset..].to_string(),
-                );
+                if let Some(body) = TextPair::new(text, &lower).original_remainder(remainder) {
+                    return (
+                        Some(QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize,
+                        }),
+                        None,
+                        body.to_string(),
+                    );
+                }
             }
             let parsed_comparison = nom_quantity::parse_for_each_clause_ref_with_difference(clause)
                 .ok()
