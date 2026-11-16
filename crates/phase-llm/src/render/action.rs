@@ -171,6 +171,18 @@ fn is_empty_value(value: &Value) -> bool {
 /// Render one payload field. Object-id fields become card names; player fields
 /// become `Player N`; everything else falls through to a compact JSON-ish form.
 fn render_value(state: &GameState, field: &str, value: &Value) -> String {
+    if let Some(rendered) = render_target_ref(state, value) {
+        return rendered;
+    }
+    // A list may hold tagged `TargetRef`s (`SelectTargets`), which the scalar
+    // mapping below cannot read, so resolve element by element.
+    if let Value::Array(items) = value {
+        return items
+            .iter()
+            .map(|item| render_value(state, field, item))
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
     if names_players(field) {
         return map_scalars(value, |number| format!("Player {number}"));
     }
@@ -200,6 +212,22 @@ fn render_value(state: &GameState, field: &str, value: &Value) -> String {
             })
             .collect::<Vec<_>>()
             .join(", "),
+    }
+}
+
+/// A serialized `TargetRef` (`{"Object": 2}` / `{"Player": 1}`): an object id
+/// becomes its card name, a player id becomes `Player N`. Independent of the
+/// field name, since `ChooseTarget` carries it under the singular `target`.
+fn render_target_ref(state: &GameState, value: &Value) -> Option<String> {
+    let fields = value.as_object().filter(|fields| fields.len() == 1)?;
+    let (tag, id) = fields.iter().next()?;
+    let number = id.as_u64()?;
+    match tag.as_str() {
+        "Object" => Some(
+            object_name(state, ObjectId(number)).unwrap_or_else(|| format!("object #{number}")),
+        ),
+        "Player" => Some(format!("Player {number}")),
+        _ => None,
     }
 }
 
@@ -329,6 +357,51 @@ mod tests {
         assert_eq!(
             describe_tagged(&state, &serde_json::json!("EndOfTurn")),
             "End Of Turn"
+        );
+    }
+
+    #[test]
+    fn target_refs_render_as_card_names_and_players() {
+        use engine::game::create_object;
+        use engine::types::ability::TargetRef;
+        use engine::types::player::PlayerId;
+        use engine::types::zones::Zone;
+
+        let mut state = empty_state();
+        let visitor = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Asylum Visitor".to_string(),
+            Zone::Battlefield,
+        );
+        let single = describe_action(
+            &state,
+            &GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(visitor)),
+            },
+        );
+        assert!(single.contains("Target: Asylum Visitor"), "{single}");
+        let player = describe_action(
+            &state,
+            &GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(PlayerId(1))),
+            },
+        );
+        assert!(player.contains("Target: Player 1"), "{player}");
+        let many = describe_action(
+            &state,
+            &GameAction::SelectTargets {
+                targets: vec![
+                    TargetRef::Object(visitor),
+                    TargetRef::Player(PlayerId(0)),
+                    TargetRef::Object(ObjectId(999)),
+                ],
+            },
+        );
+        assert!(
+            many.contains("Asylum Visitor, Player 0, object #999"),
+            "{many}"
         );
     }
 
