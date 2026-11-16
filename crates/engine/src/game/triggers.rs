@@ -3984,13 +3984,9 @@ fn collect_matching_triggers_inner(
             // fire, and on `is_triggered_mana_ability` so non-mana `TapsForMana`
             // triggers still fire (CR 603.3).
             //
-            // CR 608.2d exemption: a multi-type mana-echo trigger is never
-            // skipped by this marker — Pass 1 deliberately leaves exactly that
-            // shape unresolved (it owes a SingleColor choice the bare loop
-            // cannot pause for), so skipping it here would drop the trigger
-            // instead of merely de-duplicating it. `echo_body_owes_type_choice`
-            // is the single authority both sites share, so the skip and the
-            // exemption cannot drift apart.
+            // CR 608.2d: an unselected mixed echo still owes a choice.
+            // A selected echo already resolved under its exact causal mana
+            // node; retain the exemption only for the unresolved occurrence.
             if matches!(
                 (trig_def.mode.clone(), event),
                 (
@@ -4008,7 +4004,8 @@ fn collect_matching_triggers_inner(
                     }
                 )
             ) && super::mana_abilities::is_triggered_mana_ability(&ability, Some(event))
-                && !super::mana_abilities::echo_body_owes_type_choice(&ability, Some(event))
+                && (!super::mana_abilities::echo_body_owes_type_choice(&ability, Some(event))
+                    || inline_echo_already_resolved(state, &ability, event))
             {
                 continue;
             }
@@ -5021,6 +5018,48 @@ pub(super) fn inline_tap_mana_trigger_abilities(
     coupled
 }
 
+/// CR 605.4a: a marked mixed echo is complete only when its exact trigger
+/// occurrence has resolved under the activation that produced this tap. Mana
+/// nodes and pip provenance are recorded even without a play trace (including
+/// disposable affordability states); no optional observer history is consulted.
+fn inline_echo_already_resolved(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    event: &GameEvent,
+) -> bool {
+    // Only TapsForMana choices are preselected by the source provider.
+    // ManaAbilityProduced echoes retain their existing unselected route.
+    let GameEvent::TappedForMana { source_id, .. } = event else {
+        return false;
+    };
+    let Some(definition) = ability.trigger_definition_ref.as_ref() else {
+        return false;
+    };
+    let nodes = state.resolved_rules_journal.nodes();
+    let Some(activation) = nodes.iter().rev().find(|node| {
+        matches!(
+            &node.kind,
+            crate::types::resolved_commands::RulesExecutionNodeKind::ActivatedMana { source }
+                if source.object_id == *source_id
+        )
+    }) else {
+        return false;
+    };
+    nodes
+        .iter()
+        .rev()
+        .take_while(|node| node.identity != activation.identity)
+        .any(|node| {
+            node.bundle_parent == Some(activation.identity)
+                && matches!(
+                    &node.kind,
+                    crate::types::resolved_commands::RulesExecutionNodeKind::TriggeredMana {
+                        trigger: Some(trigger), ..
+                    } if trigger == definition
+                )
+        })
+}
+
 /// CR 605.4a: Resolve `TapsForMana` triggered mana abilities inline, immediately
 /// after the mana abilities that triggered them.
 ///
@@ -5117,21 +5156,26 @@ pub(super) fn resolve_tap_mana_triggers_inline(
         }
         for (definition_ref, ability) in coupled {
             // CR 608.2d + CR 106.12a: a mana-echo body resolving from a
-            // multi-type tap event owes the player a choice of exactly one
-            // type, and this bare loop has no pause/resume step — resolving
-            // those here would strand the prompt with no continuation (and
-            // cost-payment previews must never prompt). Leave them for the
-            // frame batch: the resolved-marker guard below exempts exactly
-            // this shape from the marker, and the fixed-point authority pauses
-            // for and resumes the choice there. Single-type echo still
-            // resolves here with no choice to make.
+            // multi-type tap event owes exactly one type. Resolve a valid
+            // preselection here; otherwise leave this occurrence for the
+            // fixed-point authority, which owns its real pause and resume.
+            // Other selected producers still resolve with their own choices.
             if super::mana_abilities::echo_body_owes_type_choice(&ability, Some(&tap_event)) {
-                continue;
+                let valid_selection = state
+                    .pending_taps_for_mana_overrides
+                    .get(&definition_ref)
+                    .is_some_and(|selection| match selection {
+                        ProductionOverride::SingleColor(color) => {
+                            super::mana_abilities::echo_distinct_types(&tap_event).contains(color)
+                        }
+                        ProductionOverride::Combination(_) => false,
+                    });
+                if !valid_selection {
+                    continue;
+                }
             }
-            // Look up the color override the auto-tap planner chose for this aura's
-            // triggered mana ability. Only non-None for AnyOneColor bonus triggers
-            // (Fertile Ground) when called from the auto-tap path; None for manual
-            // play and Fixed bonus triggers (Wild Growth already has no choice).
+            // Reuse the exact live occurrence's selected production, including
+            // a validated echo type. Unselected producers retain normal resolution.
             let color_override = state
                 .pending_taps_for_mana_overrides
                 .get(&definition_ref)

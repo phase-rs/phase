@@ -229,10 +229,25 @@ pub fn resolve(
     // below) without a stack entry, so the inline gate must not swallow it.
     // Single-type echo yields no prompt here and falls through to the normal
     // gate, resolving with no interaction.
-    let echo_pause = crate::game::mana_abilities::echo_body_owes_type_choice(
-        ability,
-        state.current_trigger_event.as_ref(),
-    )
+    // CR 106.12a + CR 608.2d: a preselected echo type is usable only if
+    // the actual event produced it. A stale selection owes the normal choice.
+    let selected_echo = match (&state.current_triggered_mana_override, produced) {
+        (
+            Some(crate::types::game_state::ProductionOverride::SingleColor(color)),
+            ManaProduction::TriggerEventManaType,
+        ) if is_triggered_mana_inline => state
+            .current_trigger_event
+            .as_ref()
+            .map(crate::game::mana_abilities::echo_distinct_types)
+            .filter(|options| options.contains(color))
+            .map(|options| (options, *color)),
+        _ => None,
+    };
+    let echo_pause = (selected_echo.is_none()
+        && crate::game::mana_abilities::echo_body_owes_type_choice(
+            ability,
+            state.current_trigger_event.as_ref(),
+        ))
     .then(|| {
         crate::game::mana_abilities::mana_choice_prompt(
             &ability.effect,
@@ -303,7 +318,22 @@ pub fn resolve(
     // (Fertile Ground, Utopia Sprawl AnyOneColor), the auto-tap planner may have
     // stored a `current_triggered_mana_override` so the resolver produces the
     // planned color rather than defaulting to the first listed option.
-    let mana_types = if is_triggered_mana_inline {
+    let mana_types = if let Some((options, color)) = selected_echo {
+        // The public choice-completion authority also owns preselected echoes:
+        // exactly one unit, even when the triggering ability produced G/U.
+        chosen_mana_types_for_prompt(
+            state,
+            count_ability,
+            produced,
+            &ManaChoicePrompt::SingleColor { options },
+            ManaChoice::SingleColor(color),
+        )
+        .map_err(|error| EffectError::InvalidParam(error.to_string()))?
+    } else if matches!(produced, ManaProduction::TriggerEventManaType) {
+        // CR 106.5: an absent/invalid selection never manufactures a type.
+        // A multi-type event already paused above; one type resolves normally.
+        resolve_mana_types_with_ability(produced, &*state, count_ability)
+    } else if is_triggered_mana_inline {
         match state.current_triggered_mana_override.clone() {
             Some(crate::types::game_state::ProductionOverride::SingleColor(color)) => {
                 // Resolve the count from the production descriptor, then produce

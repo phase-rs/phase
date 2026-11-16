@@ -61,6 +61,606 @@ const REST_IN_PEACE: &str = "When this enchantment enters, exile all graveyards.
 const LEYLINE_VOID: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.";
 const EXPERIMENT_FIVE: &str = "{1}{Z}: Put a +1/+2 counter on Experiment Five. ({Z} is paid with one mana from any source that could produce two or more colors of mana.)";
 
+const HEARTBEAT: &str = "Whenever a player taps a land for mana, that player adds one mana of any type that land produced.";
+const DICTATE: &str = "Flash\nWhenever a player taps a land for mana, that player adds one mana of any type that land produced.";
+const ASTROLABE: &str = "({S} can be paid with one mana from a snow source.)\nWhen this artifact enters, draw a card.\n{1}, {T}: Add one mana of any color.";
+const CHAMBER: &str = "This land enters tapped.\nWhen this land enters, return a land you control to its owner's hand.\n{T}: Add {G}{U}.";
+const EMERALD_CHARM: &str = "Choose one —\n• Untap target permanent.\n• Destroy target non-Aura enchantment.\n• Target creature loses flying until end of turn.";
+
+fn snow_mana_echo_initial_metadata(r: &mut GameRunner, owl: ObjectId, basics: &[ObjectId]) {
+    let object = r.state_mut().objects.get_mut(&owl).unwrap();
+    object.base_power = None;
+    object.base_toughness = None;
+    for id in basics {
+        let object = r.state_mut().objects.get_mut(id).unwrap();
+        object.card_types.supertypes.push(Supertype::Basic);
+        object.base_card_types.supertypes.push(Supertype::Basic);
+    }
+}
+
+fn snow_mana_echo_fixture(
+    name: &str,
+    text: &str,
+    cost: &str,
+    controller: engine::types::player::PlayerId,
+    mixed: bool,
+    snow_echo: bool,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let mut s = board();
+    let owl = owl(&mut s);
+    let echo = s
+        .add_enchantment_from_oracle(controller, name, text)
+        .with_mana_cost(parse_mtgjson_mana_cost(cost))
+        .id();
+    let island = s
+        .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+        .as_snow()
+        .with_subtypes(vec!["Island"])
+        .id();
+    let land = if mixed {
+        s.add_land_from_oracle(P0, "Simic Growth Chamber", CHAMBER)
+            .id()
+    } else {
+        s.add_land_from_oracle(P0, "Forest", "({T}: Add {G}.)")
+            .with_subtypes(vec!["Forest"])
+            .id()
+    };
+    let astrolabe = s
+        .add_artifact_to_hand_from_oracle(P0, "Arcum's Astrolabe", ASTROLABE)
+        .as_snow()
+        .with_mana_cost(parse_mtgjson_mana_cost("{S}"))
+        .id();
+    let charm = spell(&mut s, "Emerald Charm", true, EMERALD_CHARM, "{G}");
+    let mut r = s.build();
+    // Initial fixture metadata: Owl is printed */*, with its full real CDA;
+    // Chamber is an established permanent after its entry/bounce work.
+    let basics = [island, land];
+    snow_mana_echo_initial_metadata(&mut r, owl, &basics[..if mixed { 1 } else { 2 }]);
+    r.state_mut().objects.get_mut(&land).unwrap().tapped = false;
+    evaluate_layers(r.state_mut());
+    assert_eq!(r.state().objects[&owl].power, Some(2));
+    assert!(!r.state().objects[&echo]
+        .card_types
+        .supertypes
+        .contains(&Supertype::Snow));
+    let floated = float_land(&mut r, island, ManaType::Blue);
+    assert_eq!(production_count(&floated, island, ManaType::Blue), 1);
+    assert_eq!(production_count(&floated, echo, ManaType::Blue), 1);
+    let units: Vec<_> = r.state().players[0].mana_pool.units().collect();
+    assert_eq!(units.len(), 2);
+    assert_eq!(
+        units
+            .iter()
+            .filter(|unit| unit.source_id == island && unit.supertype == Some(ManaSupertype::Snow))
+            .count(),
+        1
+    );
+    assert_eq!(
+        units
+            .iter()
+            .filter(|unit| unit.source_id == echo && unit.supertype.is_none())
+            .count(),
+        1
+    );
+    // CR 107.4h: the base Snow U pays S and the ordinary echo U pays 1.
+    r.activate(owl, 0)
+        .target_object(if snow_echo { echo } else { owl })
+        .resolve();
+    let target = if snow_echo { echo } else { owl };
+    assert_eq!(
+        r.state().objects[&target]
+            .counters
+            .get(&CounterType::Generic("ice".into())),
+        Some(&1)
+    );
+    // CR 205.4g: only the real ice-counter effect changes the enchantment.
+    assert_eq!(
+        r.state().objects[&echo]
+            .card_types
+            .supertypes
+            .contains(&Supertype::Snow),
+        snow_echo
+    );
+    assert!(r.state().objects[&island].tapped);
+    assert!(!r.state().objects[&land].tapped);
+    assert!(!r.state().objects[&land]
+        .card_types
+        .supertypes
+        .contains(&Supertype::Snow));
+    assert!(activatable_land_mana_options(r.state(), land, P0)
+        .iter()
+        .any(|row| row.object_id == land && row.mana_type == ManaType::Green));
+    assert!(activatable_mana_source_selections(r.state(), P0)
+        .iter()
+        .all(|selection| selection.source.object_id == land));
+    assert_complete(&r, 0);
+    (r, echo, land, astrolabe, charm)
+}
+
+fn snow_mana_echo_assert_paid(r: &GameRunner, echo: ObjectId, astrolabe: ObjectId) {
+    // CR 106.3 + CR 107.4h: the exact spent pip came from the Snow
+    // enchantment, not the ordinary land or the already spent Snow Island.
+    assert_eq!(r.state().objects[&astrolabe].mana_spent_to_cast_amount, 1);
+    let snapshots = &r.state().objects[&astrolabe].mana_spent_source_snapshots;
+    assert_eq!(snapshots.len(), 1);
+    assert_eq!(snapshots[0].source_id, echo);
+    let spent: Vec<_> = r
+        .state()
+        .resolved_rules_journal
+        .spent_mana()
+        .iter()
+        .filter(|spent| {
+            spent.unit.source_id == echo && spent.unit.supertype == Some(ManaSupertype::Snow)
+        })
+        .collect();
+    assert_eq!(spent.len(), 1);
+    assert!(r
+        .state()
+        .resolved_rules_journal
+        .produced_mana()
+        .iter()
+        .any(|produced| produced.unit.pip_id == spent[0].unit.pip_id
+            && produced.unit.source_id == echo
+            && produced.unit.supertype == Some(ManaSupertype::Snow)));
+}
+
+fn snow_mana_echo_auto(name: &str, text: &str, cost: &str) {
+    for controller in [P0, P1] {
+        let (mut r, echo, forest, astrolabe, _) =
+            snow_mana_echo_fixture(name, text, cost, controller, false, true);
+        let paid = r.cast(astrolabe).commit();
+        assert_eq!(production_count(paid.events(), forest, ManaType::Green), 1);
+        assert_eq!(production_count(paid.events(), echo, ManaType::Green), 1);
+        assert_eq!(paid.state().objects[&astrolabe].zone, Zone::Stack);
+        paid.resolve().assert_hand_drawn(P0, 1);
+        assert_eq!(r.state().objects[&astrolabe].zone, Zone::Battlefield);
+        assert!(r.state().objects[&forest].tapped);
+        snow_mana_echo_assert_paid(&r, echo, astrolabe);
+        assert_complete(&r, 1);
+        assert!(r.state().players[0]
+            .mana_pool
+            .units()
+            .all(|unit| unit.source_id == forest
+                && unit.color == ManaType::Green
+                && unit.supertype.is_none()));
+    }
+}
+
+#[test]
+fn snow_mana_echo_heartbeat_pays_printed_astrolabe() {
+    snow_mana_echo_auto("Heartbeat of Spring", HEARTBEAT, "{2}{G}");
+}
+
+#[test]
+fn snow_mana_echo_dictate_pays_printed_astrolabe() {
+    snow_mana_echo_auto("Dictate of Karametra", DICTATE, "{3}{G}{G}");
+}
+
+#[test]
+fn snow_mana_echo_nonsnow_bonus_cannot_pay_printed_astrolabe() {
+    for (name, text, cost) in [
+        ("Heartbeat of Spring", HEARTBEAT, "{2}{G}"),
+        ("Dictate of Karametra", DICTATE, "{3}{G}{G}"),
+    ] {
+        let (mut r, echo, forest, astrolabe, _) =
+            snow_mana_echo_fixture(name, text, cost, P0, false, false);
+        let events = float_land(&mut r, forest, ManaType::Green);
+        assert_eq!(production_count(&events, forest, ManaType::Green), 1);
+        assert_eq!(production_count(&events, echo, ManaType::Green), 1);
+        assert_eq!(r.state().players[0].mana_pool.total(), 2);
+        assert!(r.state().players[0]
+            .mana_pool
+            .units()
+            .all(|unit| unit.supertype.is_none()));
+        // CR 107.4h: real ordinary bonus mana is present but cannot pay S.
+        assert!(r.cast(astrolabe).try_resolve().is_err());
+        assert_eq!(r.state().objects[&astrolabe].zone, Zone::Hand);
+        assert_complete(&r, 2);
+    }
+}
+
+#[test]
+fn snow_mana_echo_selected_mixed_output_pays_once_in_fresh_journal_clone() {
+    for (name, text, cost) in [
+        ("Heartbeat of Spring", HEARTBEAT, "{2}{G}"),
+        ("Dictate of Karametra", DICTATE, "{3}{G}{G}"),
+    ] {
+        let (r, echo, chamber, astrolabe, _) =
+            snow_mana_echo_fixture(name, text, cost, P0, true, true);
+        // A disposable caller-owned state need not retain any earlier journal.
+        // Fresh production must establish all provenance it needs itself.
+        let mut cloned = r.state().clone();
+        cloned.resolved_rules_journal = Default::default();
+        let mut r = GameRunner::from_state(cloned);
+        let paid = r.cast(astrolabe).commit();
+        assert_eq!(paid.state().objects[&astrolabe].zone, Zone::Stack);
+        assert_eq!(production_count(paid.events(), chamber, ManaType::Green), 1);
+        assert_eq!(production_count(paid.events(), chamber, ManaType::Blue), 1);
+        assert_eq!(
+            production_count(paid.events(), echo, ManaType::Green)
+                + production_count(paid.events(), echo, ManaType::Blue),
+            1
+        );
+        assert!(matches!(
+            paid.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        paid.resolve().assert_hand_drawn(P0, 1);
+        snow_mana_echo_assert_paid(&r, echo, astrolabe);
+        assert_complete(&r, 2);
+        assert!(r.state().players[0]
+            .mana_pool
+            .units()
+            .all(|unit| unit.source_id == chamber && unit.supertype.is_none()));
+    }
+}
+
+#[test]
+fn snow_mana_echo_unselected_mixed_output_prompts_and_repeated_source_resolves_once() {
+    for chosen in [ManaType::Green, ManaType::Blue] {
+        let (mut r, echo, chamber, astrolabe, charm) =
+            snow_mana_echo_fixture("Heartbeat of Spring", HEARTBEAT, "{2}{G}", P1, true, true);
+        for round in 0..2 {
+            let index = r.state().objects[&chamber]
+                .abilities
+                .iter()
+                .position(|ability| matches!(&*ability.effect, Effect::Mana { .. }))
+                .unwrap();
+            let tap = r
+                .act(GameAction::ActivateAbility {
+                    source_id: chamber,
+                    ability_index: index,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .unwrap();
+            assert_eq!(production_count(&tap.events, chamber, ManaType::Green), 1);
+            assert_eq!(production_count(&tap.events, chamber, ManaType::Blue), 1);
+            assert_eq!(production_count(&tap.events, echo, chosen), 0);
+            let WaitingFor::ChooseManaColor {
+                player,
+                choice: ManaChoicePrompt::SingleColor { options },
+                ..
+            } = &r.state().waiting_for
+            else {
+                panic!("the unselected mixed echo must owe its real type choice");
+            };
+            assert_eq!(*player, P0);
+            assert_eq!(options.len(), 2);
+            assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
+            let saved = serde_json::to_string(r.state()).unwrap();
+            r = GameRunner::from_state(serde_json::from_str(&saved).unwrap());
+            assert!(matches!(
+                r.state().waiting_for,
+                WaitingFor::ChooseManaColor { player: P0, .. }
+            ));
+            let answered = r
+                .act(GameAction::ChooseManaColor {
+                    choice: ManaChoice::SingleColor(chosen),
+                    count: 1,
+                })
+                .unwrap();
+            assert_eq!(production_count(&answered.events, echo, chosen), 1);
+            assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+            assert!(r.state().stack.is_empty());
+            if round == 0 {
+                r.cast(astrolabe).resolve().assert_hand_drawn(P0, 1);
+                snow_mana_echo_assert_paid(&r, echo, astrolabe);
+                assert_complete(&r, 2);
+                r.cast(charm).modes(&[0]).target_object(chamber).resolve();
+                assert!(!r.state().objects[&chamber].tapped);
+                assert_complete(&r, 1);
+            } else {
+                assert_complete(&r, 4);
+                assert_eq!(
+                    r.state().players[0]
+                        .mana_pool
+                        .units()
+                        .filter(|unit| unit.source_id == echo
+                            && unit.color == chosen
+                            && unit.supertype == Some(ManaSupertype::Snow))
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn snow_mana_echo_zero_output_cannot_supply_a_snow_bonus() {
+    let mut s = board();
+    let owl = owl(&mut s);
+    let echo = s
+        .add_enchantment_from_oracle(P0, "Heartbeat of Spring", HEARTBEAT)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{G}"))
+        .id();
+    let island = s
+        .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+        .as_snow()
+        .with_subtypes(vec!["Island"])
+        .id();
+    let academy = s
+        .add_land_from_oracle(
+            P0,
+            "Tolarian Academy",
+            "{T}: Add {U} for each artifact you control.",
+        )
+        .as_legendary()
+        .id();
+    let astrolabe = s
+        .add_artifact_to_hand_from_oracle(P0, "Arcum's Astrolabe", ASTROLABE)
+        .as_snow()
+        .with_mana_cost(parse_mtgjson_mana_cost("{S}"))
+        .id();
+    let mut r = s.build();
+    snow_mana_echo_initial_metadata(&mut r, owl, &[island]);
+    evaluate_layers(r.state_mut());
+    let setup = float_land(&mut r, island, ManaType::Blue);
+    assert_eq!(production_count(&setup, echo, ManaType::Blue), 1);
+    assert_eq!(r.state().players[0].mana_pool.total(), 2);
+    r.activate(owl, 0).target_object(echo).resolve();
+    assert!(r.state().objects[&echo]
+        .card_types
+        .supertypes
+        .contains(&Supertype::Snow));
+    assert_complete(&r, 0);
+    assert!(r.cast(astrolabe).try_resolve().is_err());
+    assert!(!r.state().objects[&academy].tapped);
+    let activated = r
+        .act(GameAction::ActivateAbility {
+            source_id: academy,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("zero output does not prohibit the printed tap activation");
+    assert!(r.state().objects[&academy].tapped);
+    assert!(activated.events.iter().any(|event| matches!(event,
+        engine::types::events::GameEvent::AbilityActivated { source_id, .. } if *source_id == academy)));
+    // CR 106.12a: zero base mana cannot earn even a Snow echo unit.
+    assert_eq!(
+        production_count(&activated.events, academy, ManaType::Blue),
+        0
+    );
+    assert_eq!(production_count(&activated.events, echo, ManaType::Blue), 0);
+    assert_eq!(r.state().objects[&astrolabe].zone, Zone::Hand);
+    assert_complete(&r, 0);
+}
+
+#[test]
+fn snow_mana_echo_nonland_kinnan_keeps_its_own_producer() {
+    snow_mana_echo_kinnan(false);
+    snow_mana_echo_kinnan(true);
+}
+
+fn snow_mana_echo_kinnan(manual: bool) {
+    const KINNAN: &str = "Whenever you tap a nonland permanent for mana, add one mana of any type that permanent produced.\n{5}{G}{U}: Look at the top five cards of your library. You may put a non-Human creature card from among them onto the battlefield. Put the rest on the bottom of your library in a random order.";
+    let mut s = board();
+    let owl = owl(&mut s);
+    let kinnan = s
+        .add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Druid"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{G}{U}"))
+        .id();
+    let island = s
+        .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+        .as_snow()
+        .with_subtypes(vec!["Island"])
+        .id();
+    let wastes = s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id();
+    let lotus = s
+        .add_artifact_from_oracle(P0, "Gilded Lotus", LOTUS)
+        .with_mana_cost(parse_mtgjson_mana_cost("{5}"))
+        .id();
+    let astrolabe = s
+        .add_artifact_to_hand_from_oracle(P0, "Arcum's Astrolabe", ASTROLABE)
+        .as_snow()
+        .with_mana_cost(parse_mtgjson_mana_cost("{S}"))
+        .id();
+    let mut r = s.build();
+    snow_mana_echo_initial_metadata(&mut r, owl, &[island, wastes]);
+    evaluate_layers(r.state_mut());
+    float_land(&mut r, island, ManaType::Blue);
+    float_land(&mut r, wastes, ManaType::Colorless);
+    assert_eq!(r.state().players[0].mana_pool.total(), 2);
+    r.activate(owl, 0).target_object(kinnan).resolve();
+    assert_eq!(
+        r.state().objects[&kinnan]
+            .counters
+            .get(&CounterType::Generic("ice".into())),
+        Some(&1)
+    );
+    assert!(r.state().objects[&kinnan]
+        .card_types
+        .supertypes
+        .contains(&Supertype::Snow));
+    assert_complete(&r, 0);
+    assert_any_one(&r, lotus);
+    assert!(activatable_mana_options(r.state(), lotus, P0)
+        .iter()
+        .any(|row| row
+            .atomic_combination
+            .as_ref()
+            .is_some_and(|units| units.len() == 3)));
+    let mut manual_events = Vec::new();
+    if manual {
+        let selection = activatable_mana_source_selections(r.state(), P0)
+            .into_iter()
+            .find(|selection| {
+                selection.source.object_id == lotus
+                    && matches!(
+                        selection.output,
+                        ManaSourceOutput::DeferredColorChoice { .. }
+                    )
+                    && selection.taps_for_mana.iter().any(|choice| {
+                        choice.source.object_id == kinnan
+                            && choice.production_override
+                                == engine::types::game_state::ProductionOverride::SingleColor(
+                                    ManaType::White,
+                                )
+                    })
+            })
+            .expect("the semantic capability defers the base choice and retains its selected echo");
+        r.act(GameAction::ActivateManaSource { selection }).unwrap();
+        let WaitingFor::ChooseManaColor {
+            player,
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } = &r.state().waiting_for
+        else {
+            panic!("the manually deferred Lotus must ask for its actual base color");
+        };
+        assert_eq!(*player, P0);
+        assert!(options.contains(&ManaType::Blue));
+        let saved = serde_json::to_string(r.state()).unwrap();
+        r = GameRunner::from_state(serde_json::from_str(&saved).unwrap());
+        manual_events = r
+            .act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Blue),
+                count: 1,
+            })
+            .unwrap()
+            .events;
+        // CR 106.12a: choosing base U invalidates the earlier echo W.
+        // The actual single-type event supplies U; W must not be manufactured.
+        assert_eq!(production_count(&manual_events, lotus, ManaType::Blue), 3);
+        assert_eq!(production_count(&manual_events, kinnan, ManaType::Blue), 1);
+        assert_eq!(production_count(&manual_events, kinnan, ManaType::White), 0);
+    }
+    let paid = r.cast(astrolabe).commit();
+    let production_events = if manual {
+        manual_events.as_slice()
+    } else {
+        paid.events()
+    };
+    let produced = [
+        ManaType::White,
+        ManaType::Blue,
+        ManaType::Black,
+        ManaType::Red,
+        ManaType::Green,
+    ];
+    let color = produced
+        .into_iter()
+        .find(|color| production_count(production_events, lotus, *color) > 0)
+        .unwrap();
+    assert_eq!(production_count(production_events, lotus, color), 3);
+    assert_eq!(production_count(production_events, kinnan, color), 1);
+    paid.resolve().assert_hand_drawn(P0, 1);
+    snow_mana_echo_assert_paid(&r, kinnan, astrolabe);
+    assert_complete(&r, 3);
+    assert!(r.state().players[0]
+        .mana_pool
+        .units()
+        .all(|unit| unit.source_id == lotus
+            && unit.color == color
+            && unit.supertype.is_none()
+            && unit.source_could_produce_two_or_more_colors));
+}
+
+#[test]
+fn snow_mana_echo_multiple_occurrences_keep_selected_aura_and_ordinary_observer() {
+    let mut s = board();
+    let owl = owl(&mut s);
+    let heartbeat = s
+        .add_enchantment_from_oracle(P0, "Heartbeat of Spring", HEARTBEAT)
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{G}"))
+        .id();
+    let dictate = s
+        .add_enchantment_from_oracle(P1, "Dictate of Karametra", DICTATE)
+        .with_mana_cost(parse_mtgjson_mana_cost("{3}{G}{G}"))
+        .id();
+    let island = s
+        .add_land_from_oracle(P0, "Snow-Covered Island", "({T}: Add {U}.)")
+        .as_snow()
+        .with_subtypes(vec!["Island"])
+        .id();
+    let chamber = s
+        .add_land_from_oracle(P0, "Simic Growth Chamber", CHAMBER)
+        .id();
+    let fertile = s
+        .add_enchantment_from_oracle(P1, "Fertile Ground", FERTILE_GROUND)
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}"))
+        .id();
+    let barbs = s.add_enchantment_from_oracle(P0, "Manabarbs",
+        "Whenever a player taps a land for mana, this enchantment deals 1 damage to that player.")
+        .with_mana_cost(parse_mtgjson_mana_cost("{3}{R}")).id();
+    let opt = spell(&mut s, "Opt", true,
+        "Scry 1. (Look at the top card of your library. You may put that card on the bottom.)\nDraw a card.", "{U}");
+    let astrolabe = s
+        .add_artifact_to_hand_from_oracle(P0, "Arcum's Astrolabe", ASTROLABE)
+        .as_snow()
+        .with_mana_cost(parse_mtgjson_mana_cost("{S}"))
+        .id();
+    let mut r = s.build();
+    snow_mana_echo_initial_metadata(&mut r, owl, &[island]);
+    r.state_mut().objects.get_mut(&chamber).unwrap().tapped = false;
+    engine::game::effects::attach::attach_to(r.state_mut(), fertile, chamber);
+    evaluate_layers(r.state_mut());
+    let setup = float_land(&mut r, island, ManaType::Blue);
+    assert_eq!(production_count(&setup, heartbeat, ManaType::Blue), 1);
+    assert_eq!(production_count(&setup, dictate, ManaType::Blue), 1);
+    assert_eq!(r.state().players[0].mana_pool.total(), 3);
+    r.advance_until_stack_empty();
+    r.activate(owl, 0).target_object(heartbeat).resolve();
+    assert!(r.state().objects[&heartbeat]
+        .card_types
+        .supertypes
+        .contains(&Supertype::Snow));
+    assert!(!r.state().objects[&dictate]
+        .card_types
+        .supertypes
+        .contains(&Supertype::Snow));
+    r.cast(opt).resolve().assert_hand_drawn(P0, 1);
+    assert_complete(&r, 0);
+    assert_eq!(r.state().players[0].life, 19);
+    let (_, _, grouped) = legal_actions_full(r.state());
+    let selected = grouped[&chamber]
+        .iter()
+        .find(|action| {
+            matches!(action,
+        GameAction::TapLandForMana { selection } if [
+            (heartbeat, ManaType::Blue), (dictate, ManaType::Green), (fertile, ManaType::Red)
+        ].iter().all(|(source, color)| selection.taps_for_mana.iter().any(|choice|
+            choice.source.object_id == *source && choice.production_override ==
+                engine::types::game_state::ProductionOverride::SingleColor(*color))))
+        })
+        .expect("the live row retains each independent selected producer")
+        .clone();
+    let actual = r.act(selected).unwrap();
+    // CR 106.3 + CR 608.2d: two echoes choose different actual base types;
+    // the Aura independently chooses R, which the base did not produce.
+    for (source, color) in [
+        (chamber, ManaType::Green),
+        (chamber, ManaType::Blue),
+        (heartbeat, ManaType::Blue),
+        (dictate, ManaType::Green),
+        (fertile, ManaType::Red),
+    ] {
+        assert_eq!(production_count(&actual.events, source, color), 1);
+    }
+    assert_eq!(r.state().players[0].mana_pool.total(), 5);
+    assert_eq!(
+        r.state().players[0]
+            .mana_pool
+            .units()
+            .filter(
+                |unit| unit.supertype == Some(ManaSupertype::Snow) && unit.source_id == heartbeat
+            )
+            .count(),
+        1
+    );
+    assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
+    assert_eq!(r.state().stack.len(), 1);
+    assert_eq!(r.state().stack[0].source_id, barbs);
+    r.advance_until_stack_empty();
+    assert_eq!(r.state().players[0].life, 18);
+    r.cast(astrolabe).resolve().assert_hand_drawn(P0, 1);
+    snow_mana_echo_assert_paid(&r, heartbeat, astrolabe);
+    assert_complete(&r, 4);
+}
+
 fn pay_glint_eye_with_an_enchanted_land(land_name: &str, land_text: &str, count: usize) {
     for (aura_name, aura_text) in [
         ("Wild Growth", "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional {G}."),

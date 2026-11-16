@@ -1029,6 +1029,13 @@ fn live_mana_output_units(
     source_could_produce_two_or_more_colors: bool,
 ) -> Vec<LiveManaOutputUnit> {
     let mana_types = match production_override {
+        Some(ProductionOverride::SingleColor(color))
+            if matches!(produced, ManaProduction::TriggerEventManaType) =>
+        {
+            // CR 106.12a + CR 608.2d: the selected echo repeats exactly one
+            // actual base-produced type, independently of the base quantity.
+            vec![*color]
+        }
         Some(ProductionOverride::SingleColor(color)) => {
             // Match activation's override semantics: resolve the production
             // count through the effect, then replace every produced unit's
@@ -2307,14 +2314,32 @@ pub(crate) fn auto_tap_mana_options_gated(
     {
         return Vec::new();
     }
-    scan_mana_abilities(
+    let options = scan_mana_abilities(
         state,
         obj,
         object_id,
         controller,
         ManaPayabilityMode::Planning,
         gates,
-    )
+    );
+    if options.is_empty() {
+        return options;
+    }
+    // The land sweep already carries its shared source list. Nonland rows
+    // reuse the existing post-layer mode index rather than adding a full
+    // battlefield scan per ordinary scalar source. Restored/unbuilt states
+    // retain the authoritative scan fallback.
+    let sources = match state.trigger_index.readiness {
+        crate::types::game_state::DerivedIndexReadiness::Built => state
+            .trigger_index
+            .by_key
+            .get(&crate::types::triggers::TriggerEventKey::TapsForMana)
+            .map_or_else(Vec::new, |sources| sources.iter().copied().collect()),
+        crate::types::game_state::DerivedIndexReadiness::Unbuilt => {
+            taps_for_mana_trigger_sources(state)
+        }
+    };
+    with_taps_for_mana_echo_options(state, controller, options, &sources)
 }
 
 /// CR 107.1b + CR 601.2f: Maximum *net* mana a single battlefield object can
@@ -3847,10 +3872,15 @@ fn land_mana_options(
     // marker per Aura, not its produced quantity; live grouped output supplies
     // the planner's complete units. `production_override_for_option`
     // caps it to the land's own portion when dispatching the land's own ability.
-    let aura_bonus = match aura_sources {
-        Some(sources) => taps_for_mana_aura_bonus_indexed(state, object_id, controller, sources),
-        None => taps_for_mana_aura_bonus(state, object_id, controller),
+    let local_sources;
+    let sources = match aura_sources {
+        Some(sources) => sources,
+        None => {
+            local_sources = taps_for_mana_trigger_sources(state);
+            &local_sources
+        }
     };
+    let aura_bonus = taps_for_mana_aura_bonus_indexed(state, object_id, controller, sources);
     for (trigger_ref, aura_choices) in aura_bonus {
         // aura_choices: [ManaType; N] where N=1 for Fixed, N=5 for any-color.
         // Cross-product: replace each option with N options (one per choice).
@@ -3892,7 +3922,78 @@ fn land_mana_options(
         options.dedup();
     }
 
+    with_taps_for_mana_echo_options(state, controller, options, sources)
+}
+
+/// CR 106.3 + CR 106.12a + CR 608.2d: each firing echo chooses one of the
+/// base ability's actual types. Keep alternatives in separate source rows and
+/// carry the exact trigger selection to immediate resolution, as for Auras.
+fn with_taps_for_mana_echo_options(
+    state: &GameState,
+    controller: PlayerId,
+    options: Vec<ManaSourceOption>,
+    sources: &[ObjectId],
+) -> Vec<ManaSourceOption> {
+    let Some(first) = options.first() else {
+        return options;
+    };
+    let tapped_id = first.object_id;
+    let echoes: Vec<_> = sources
+        .iter()
+        .filter_map(|source| state.objects.get(source))
+        .filter(|source| source.zone == Zone::Battlefield)
+        .flat_map(|source| firing_taps_for_mana_triggers(state, source, tapped_id, controller))
+        .filter(|(_, trigger)| is_repeated_type_mana_trigger(trigger))
+        .map(|(definition, _)| definition)
+        .collect();
+    if echoes.is_empty() {
+        return options;
+    }
     options
+        .into_iter()
+        .flat_map(|option| {
+            // CR 106.12: a tapless sacrifice is not tapping a source for mana.
+            if option.ability_index.is_some_and(|index| {
+                !has_tap_component(&state.objects[&tapped_id].abilities[index].cost)
+            }) {
+                return vec![option];
+            }
+            let mut types: Vec<_> = live_base_mana_output(state, controller, &option)
+                .into_iter()
+                .map(|unit| unit.mana_type)
+                .collect();
+            types.sort();
+            types.dedup();
+            // CR 106.12a: zero output cannot earn a tap-for-mana bonus.
+            if types.is_empty() {
+                return vec![option];
+            }
+            let mut rows = vec![option];
+            for definition in &echoes {
+                rows = rows
+                    .into_iter()
+                    .flat_map(|row| {
+                        types
+                            .iter()
+                            .map(|mana_type| {
+                                let mut selected = row.clone();
+                                selected
+                                    .atomic_combination
+                                    .get_or_insert_with(|| vec![row.mana_type])
+                                    .push(*mana_type);
+                                selected.taps_for_mana_overrides.push((
+                                    definition.clone(),
+                                    ProductionOverride::SingleColor(*mana_type),
+                                ));
+                                selected
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect();
+            }
+            rows
+        })
+        .collect()
 }
 
 /// CR 605.1a + CR 605.3a: Predicate for "this is an activated mana ability
@@ -4608,6 +4709,18 @@ fn firing_taps_for_mana_triggers<'a>(
         .collect()
 }
 
+fn is_repeated_type_mana_trigger(trigger: &TriggerDefinition) -> bool {
+    trigger.execute.as_deref().is_some_and(|execute| {
+        matches!(
+            &*execute.effect,
+            Effect::Mana {
+                produced: ManaProduction::TriggerEventManaType,
+                ..
+            }
+        )
+    })
+}
+
 /// CR 605.4a + CR 106.12a: mana a triggered mana ability adds, one unit per
 /// firing, when `tapped_id` is tapped for mana by `controller` and the added
 /// mana repeats the type that tap produced (Kinnan, Bonder Prodigy;
@@ -4623,17 +4736,7 @@ pub(crate) fn taps_for_mana_repeated_type_bonus(
         .into_iter()
         .filter_map(|source_id| state.objects.get(&source_id))
         .flat_map(|obj| firing_taps_for_mana_triggers(state, obj, tapped_id, controller))
-        .filter(|(_, trigger)| {
-            trigger.execute.as_deref().is_some_and(|execute| {
-                matches!(
-                    &*execute.effect,
-                    Effect::Mana {
-                        produced: ManaProduction::TriggerEventManaType,
-                        ..
-                    }
-                )
-            })
-        })
+        .filter(|(_, trigger)| is_repeated_type_mana_trigger(trigger))
         .count() as u32
 }
 
