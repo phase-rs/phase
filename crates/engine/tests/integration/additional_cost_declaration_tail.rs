@@ -1611,3 +1611,52 @@ fn cost_increase_applies_to_a_life_alternative_cost() {
     assert_eq!(life(&runner), 16);
     assert_eq!(pool(&runner), 3);
 }
+
+/// Verbatim Oracle text (Scryfall).
+const SADISTIC_SKYMARCHER: &str = "As an additional cost to cast this spell, reveal a Vampire card from your hand or pay {1}.\nFlying, lifelink";
+
+/// CR 601.2b + CR 601.2f + CR 601.2h: with no Vampire to reveal, Sadistic
+/// Skymarcher's {1} branch is its only payable alternative, and {2}{B} + {1}
+/// is affordable from three colorless mana only with Defiler of Flesh's {B}
+/// reduction. The castability gate and the declaration judge the branch with
+/// the same Defiler-aware authority, so the spell is offered and the cast pays
+/// exactly {3} and 2 life.
+#[test]
+fn choice_branch_affordable_only_with_the_defiler_is_castable() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
+    add_defiler_of_flesh(&mut scenario);
+    let not_a_vampire = scenario
+        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let skymarcher = scenario
+        .add_creature_to_hand_from_oracle(P0, "Sadistic Skymarcher", 3, 2, SADISTIC_SKYMARCHER)
+        .with_mana_cost(cost(2, &[ManaCostShard::Black]))
+        .with_color(vec![ManaColor::Black])
+        .with_subtypes(vec!["Vampire", "Soldier"])
+        .id();
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 3)]));
+    let mut runner = scenario.build();
+
+    assert!(
+        engine::game::casting::can_cast_object_now(runner.state(), P0, skymarcher),
+        "the {{1}} branch is affordable with the Defiler's reduction"
+    );
+
+    let trail = cast(
+        &mut runner,
+        skymarcher,
+        &Answers {
+            defiler: true,
+            ..Answers::default()
+        },
+    );
+
+    assert_cast_completes(&runner, skymarcher, &trail);
+    assert_eq!(trail.count("OptionalCostChoice"), 0, "{:?}", trail.prompts);
+    assert_eq!(trail.count("DefilerPayment"), 1, "{:?}", trail.prompts);
+    assert_eq!(zone(&runner, not_a_vampire), Zone::Hand);
+    assert_eq!(life(&runner), 18, "the Defiler's 2 life");
+    assert_eq!(pool(&runner), 0, "{{2}}{{B}} + {{1}} less {{B}}");
+}

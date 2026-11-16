@@ -967,8 +967,8 @@ pub(crate) fn handle_decide_additional_cost(
                     // already carries. Option 1 only names that cost for the
                     // prompt; paying it as an additional cost would charge it
                     // twice. Re-derive the total from the unchanged base so
-                    // additional costs declared alongside the offer
-                    // (CR 118.9d) are still counted once.
+                    // additional costs declared alongside the offer are still
+                    // counted once.
                     recompute_declined_alternative_cost = true;
                     None
                 }
@@ -11011,7 +11011,7 @@ fn defiler_offer_alongside<'a>(
 /// the spell's other costs (`continue_cost_declarations` offers it next), so its
 /// reduction is part of the total the declaration commits to, judged against the
 /// same committed life the offer reads (CR 601.2h + CR 119.4).
-fn required_declaration_offerable(
+pub(super) fn required_declaration_offerable(
     state: &GameState,
     player: PlayerId,
     pending: &PendingCast,
