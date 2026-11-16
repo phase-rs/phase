@@ -670,6 +670,195 @@ fn fractured_identity_each_player_other_than_controller_copies_exiled_permanent(
     );
 }
 
+/// CR 115.1a + CR 601.2c + CR 608.2c: Death by Dragons — "Each player other
+/// than target player creates a 5/5 red Dragon creature token with flying."
+/// The exclusion anchor DECLARES a cast-time player target, so the clause
+/// lowers to a `TargetOnly { Player }` head over a `Token` body scoped to
+/// `AllExcept { TargetPlayer, All }`. Zero `Effect::Unimplemented`. The full
+/// head-plus-scoped-sub shape asserted here pins that the head survives the
+/// chunk-loop middle section byte-exact.
+#[test]
+fn death_by_dragons_declares_target_and_scopes_token_to_all_except_target() {
+    use crate::types::ability::{
+        Effect, PlayerFilter, PlayerRelation, PtValue, QuantityExpr, TargetFilter,
+    };
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
+
+    let p = parse_oracle_text(
+        "Each player other than target player creates a 5/5 red Dragon creature token with flying.",
+        "Death by Dragons",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    assert_eq!(
+        p.abilities.len(),
+        1,
+        "Death by Dragons has one ability, got {:?}",
+        p.abilities.len()
+    );
+    let spell = &p.abilities[0];
+    assert!(
+        !has_unimplemented(spell),
+        "no Unimplemented in Death by Dragons, got {:?}",
+        spell
+    );
+
+    // Head: the anchor declares the player target (CR 115.1a).
+    assert!(
+        matches!(
+            &*spell.effect,
+            Effect::TargetOnly { target } if *target == TargetFilter::Player
+        ),
+        "head must declare TargetOnly {{ Player }}, got {:?}",
+        spell.effect
+    );
+
+    // Body: the scoped token creation.
+    let sub = spell
+        .sub_ability
+        .as_ref()
+        .expect("Death by Dragons has a scoped token sub-ability");
+    assert_eq!(
+        sub.player_scope,
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::All,
+        }),
+        "body player_scope must exclude the declared target",
+    );
+    let Effect::Token {
+        power,
+        toughness,
+        types,
+        colors,
+        keywords,
+        count,
+        owner,
+        ..
+    } = &*sub.effect
+    else {
+        panic!("body must be a Token effect, got {:?}", sub.effect);
+    };
+    assert_eq!(*power, PtValue::Fixed(5), "Dragon power must be 5");
+    assert_eq!(*toughness, PtValue::Fixed(5), "Dragon toughness must be 5");
+    assert!(
+        types.iter().any(|t| t == "Creature") && types.iter().any(|t| t == "Dragon"),
+        "types must include Creature and Dragon, got {types:?}"
+    );
+    assert_eq!(*colors, vec![ManaColor::Red], "Dragon must be red");
+    assert!(
+        keywords.contains(&Keyword::Flying),
+        "Dragon must have flying, got {keywords:?}"
+    );
+    assert_eq!(
+        *count,
+        QuantityExpr::Fixed { value: 1 },
+        "each non-target player creates one token"
+    );
+    assert_eq!(
+        *owner,
+        TargetFilter::ScopedPlayer,
+        "owner must be the iterating seat"
+    );
+}
+
+/// Building-block grammar row (SYNTHETIC — no printed card carries this
+/// anchor; nearest printed: Death by Dragons): "Each player other than target
+/// opponent creates a 1/1 white Soldier creature token." The `target opponent`
+/// anchor declares the opponent-typed slot with the same exclusion scope.
+/// Legality stays in the declaring slot — there is no `TargetOpponent` scope
+/// sibling (see the `PlayerFilter::TargetPlayer` docs).
+#[test]
+fn each_player_other_than_target_opponent_declares_opponent_typed_target() {
+    use crate::types::ability::{
+        ControllerRef, Effect, PlayerFilter, PlayerRelation, TargetFilter, TypedFilter,
+    };
+
+    let p = parse_oracle_text(
+        "Each player other than target opponent creates a 1/1 white Soldier creature token.",
+        "Synthetic Exclusion Probe",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    let spell = &p.abilities[0];
+    assert!(
+        !has_unimplemented(spell),
+        "no Unimplemented in the target-opponent exclusion, got {:?}",
+        spell
+    );
+    assert!(
+        matches!(
+            &*spell.effect,
+            Effect::TargetOnly { target: TargetFilter::Typed(filter) }
+                if *filter == TypedFilter::default().controller(ControllerRef::Opponent)
+        ),
+        "head must declare the opponent-typed target slot, got {:?}",
+        spell.effect
+    );
+    let sub = spell
+        .sub_ability
+        .as_ref()
+        .expect("exclusion has a scoped body");
+    assert_eq!(
+        sub.player_scope,
+        Some(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::All,
+        }),
+        "body player_scope must exclude the declared target",
+    );
+    assert!(
+        matches!(&*sub.effect, Effect::Token { .. }),
+        "body must be a Token effect, got {:?}",
+        sub.effect
+    );
+}
+
+/// Shadowing guard (SYNTHETIC — no printed multi-sentence shape exists;
+/// nearest printed: Death by Dragons): "Target player draws a card. Each
+/// player other than target player creates a 1/1 white Soldier creature
+/// token." `TargetPlayer` reads the FIRST declared player slot, so the second
+/// clause's exclusion would bind the first sentence's target. The interceptor
+/// fails closed with the named gap `excluded_target_player_shadowed`; the
+/// first sentence still parses to a clean player-targeted `Draw`
+/// (reach-guard: the input cleared upstream parses).
+#[test]
+fn each_player_other_than_target_after_prior_player_slot_fails_closed() {
+    use crate::types::ability::{Effect, TargetFilter};
+
+    let p = parse_oracle_text(
+        "Target player draws a card. Each player other than target player creates a 1/1 white Soldier creature token.",
+        "Synthetic Shadowing Probe",
+        &[],
+        &["Sorcery".into()],
+        &[],
+    );
+    let first = &p.abilities[0];
+    assert!(
+        matches!(
+            &*first.effect,
+            Effect::Draw { target, .. } if *target == TargetFilter::Player
+        ),
+        "reach: first sentence parses to a clean player-targeted Draw, got {:?}",
+        first.effect
+    );
+    let sub = first
+        .sub_ability
+        .as_ref()
+        .expect("second sentence chains as a sub-ability");
+    assert!(
+        matches!(
+            &*sub.effect,
+            Effect::Unimplemented { name, .. } if name == "excluded_target_player_shadowed"
+        ),
+        "second sentence must fail closed with the shadowing gap, got {:?}",
+        sub.effect
+    );
+}
+
 /// CR 120.1 + CR 122.1 + CR 115.4: Red Hulk — the Enrage trigger puts a
 /// +1/+1 counter on the source, then a reflexive "when you do" deals damage
 /// equal to the number of +1/+1 counters on the source to any other target.
