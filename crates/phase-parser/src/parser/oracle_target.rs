@@ -12055,13 +12055,11 @@ fn noun_phrase_ownership(properties: &[FilterProp]) -> NounPhraseOwnership {
 }
 
 /// The owner a zone-list qualifier would apply to, when it names one.
-fn zone_qualifier_owner(qual: ZoneQual) -> Option<ControllerRef> {
+fn zone_qualifier_owner(qual: &ZoneQual) -> Option<ControllerRef> {
     match qual {
-        ZoneQual::Opponent => Some(ControllerRef::Opponent),
+        ZoneQual::Owner(owner) => Some(owner.clone()),
         ZoneQual::You => Some(ControllerRef::You),
         ZoneQual::ChosenPlayer => Some(ControllerRef::SourceChosenPlayer),
-        ZoneQual::TargetPlayer => Some(ControllerRef::TargetPlayer),
-        ZoneQual::Their => Some(ControllerRef::ScopedPlayer),
         // "its owner's" / "that player's" / "each player's" do not bind one
         // concrete ControllerRef, so a mixed list cannot prove the noun phrase
         // and the qualifier name the same player.
@@ -12277,36 +12275,17 @@ fn parse_zone_phrase_entry(
 /// predicate `filter::is_owner_scoped_zone` reads at runtime.
 fn reduce_zone_quals(entries: &[(ZoneQual, Zone)]) -> Option<ZoneQual> {
     let mut reduced: Option<ZoneQual> = None;
-    for &(qual, zone) in entries {
-        if qual == ZoneQual::Plain && !zone.is_per_player() {
+    for (qual, zone) in entries {
+        if *qual == ZoneQual::Plain && !zone.is_per_player() {
             continue;
         }
-        match reduced {
-            None => reduced = Some(qual),
+        match reduced.as_ref() {
+            None => reduced = Some(qual.clone()),
             Some(existing) if existing == qual => {}
             Some(_) => return None,
         }
     }
     Some(reduced.unwrap_or(ZoneQual::Plain))
-}
-
-/// CR 400.1 + CR 400.3 + CR 108.4a: how a "your" / "the chosen player's"
-/// possessive binds on an ALL-PER-PLAYER multi-zone population.
-///
-/// CR 108.4a makes the OWNER the player axis for a card with no controller, and
-/// CR 400.3 keys membership in a per-player zone to the owner. The house
-/// encoding for a possessive over such a zone is `TypedFilter.controller`, which
-/// `filter::typed_filter_is_owner_scoped` re-reads as ownership when every zone
-/// in the population is per-player. A mixed per-player/shared list cannot use
-/// that encoding for the whole union; `parse_zone_suffix_nom` accepts it only
-/// when the noun phrase already established ownership and then contributes the
-/// bare `InAnyZone` (the noun phrase's `Owned` prop supplies the owner).
-fn possessive_zone_list_props(
-    controller: ControllerRef,
-    zones: Vec<Zone>,
-) -> (Vec<FilterProp>, Option<ControllerRef>) {
-    debug_assert!(zones.iter().copied().all(Zone::is_per_player));
-    (vec![FilterProp::InAnyZone { zones }], Some(controller))
 }
 
 fn parse_zone_suffix_nom(
@@ -12401,7 +12380,7 @@ fn parse_zone_suffix_nom(
             // SAME player; otherwise the shared leg would silently inherit a
             // different owner ("card you own in an opponent's graveyard or in
             // exile" must not become "cards you own anywhere").
-            let Some(zone_owner) = zone_qualifier_owner(qual) else {
+            let Some(zone_owner) = zone_qualifier_owner(&qual) else {
                 return Err(nom::Err::Error(nom::error::Error::new(
                     i,
                     nom::error::ErrorKind::Fail,

@@ -600,6 +600,7 @@ fn set_scoped_bounce_waiting_for(
         enters_modified_if: None,
         duration: None,
         performed_by: None,
+        privacy_zones: None,
     };
 }
 
