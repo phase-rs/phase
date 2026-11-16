@@ -36346,3 +36346,129 @@ fn ltb_return_promotion_keeps_the_actor() {
     assert_eq!(*target, TargetFilter::ExiledBySource);
     assert!(ltb_return_of_exiled_by_source(&promoted).is_none());
 }
+
+/// CR 202.3 + CR 608.2c + CR 603.2: the mana-value referent gate of the S2a members, one verbatim
+/// Oracle text per row. Each gate is a `TargetMatchesFilter { Cmc }` whose `subject` names the object
+/// the clause means — the announced target in a resolving spell ("that spell" after "Counter target
+/// spell"; "that permanent" after "Destroy/Exile target ..."), the trigger event's spell in a
+/// triggered ability ("Whenever you cast a creature spell, ... that spell has mana value 5 or
+/// greater") — and whose tense decides the basis (past "was" reads last known information). The
+/// gate sits on the instruction the printed text conditions and on nothing else.
+#[test]
+fn mana_value_referent_gate_binds_the_object_the_clause_names() {
+    use crate::types::ability::{Comparator, ObjectScope};
+
+    /// `(gated effect, subject, use_lki, comparator, threshold)` of every `Cmc` referent gate
+    /// reachable from `def` (abilities, sub-abilities and trigger bodies).
+    fn gates(def: &AbilityDefinition, out: &mut Vec<(String, ObjectScope, bool, Comparator, i32)>) {
+        if let Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(typed),
+            use_lki,
+            subject_slot: None,
+            subject,
+        }) = &def.condition
+        {
+            if let [FilterProp::Cmc {
+                comparator,
+                value: QuantityExpr::Fixed { value },
+            }] = typed.properties.as_slice()
+            {
+                let name = format!(
+                    "{:?}",
+                    crate::types::ability::EffectKind::from(&*def.effect)
+                );
+                out.push((name, *subject, *use_lki, *comparator, *value));
+            }
+        }
+        if let Some(sub) = def.sub_ability.as_deref() {
+            gates(sub, out);
+        }
+    }
+    fn gates_of(
+        text: &str,
+        name: &str,
+        types: &[&str],
+    ) -> Vec<(String, ObjectScope, bool, Comparator, i32)> {
+        let r = parse(text, name, &[], types, &[]);
+        let mut out = Vec::new();
+        for def in r
+            .abilities
+            .iter()
+            .chain(r.triggers.iter().filter_map(|t| t.execute.as_deref()))
+        {
+            gates(def, &mut out);
+        }
+        out
+    }
+
+    for (name, text, types, expected) in [
+        (
+            "Reject Imperfection",
+            "Counter target spell. If that spell's mana value was 3 or less, proliferate.",
+            &["Instant"][..],
+            ("Proliferate", ObjectScope::Target, true, Comparator::LE, 3),
+        ),
+        (
+            "Sound the Trumpets",
+            "Counter target spell. If that spell's mana value was 2 or less, recruit.",
+            &["Instant"][..],
+            ("Draw", ObjectScope::Target, true, Comparator::LE, 2),
+        ),
+        (
+            "Carnivorous Canopy",
+            "Destroy target artifact, enchantment, or creature with flying. If that permanent's mana value was 3 or less, proliferate.",
+            &["Instant"][..],
+            ("Proliferate", ObjectScope::Target, true, Comparator::LE, 3),
+        ),
+        (
+            "Vindictive Triumph",
+            "Exile target creature or planeswalker. If that permanent's mana value was 3 or less, return it to the battlefield tapped under your control. Exile it at the beginning of the next end step.",
+            &["Instant"][..],
+            ("ChangeZone", ObjectScope::Target, true, Comparator::LE, 3),
+        ),
+        (
+            "Prismari Apprentice",
+            "Magecraft — Whenever you cast or copy an instant or sorcery spell, this creature can't be blocked this turn. If that spell has mana value 5 or greater, put a +1/+1 counter on this creature.",
+            &["Creature"][..],
+            ("PutCounter", ObjectScope::EventSource, false, Comparator::GE, 5),
+        ),
+        (
+            "Herald of Ilharg",
+            "Whenever you cast a creature spell, put two +1/+1 counters on this creature. If that spell has mana value 5 or greater, this creature deals damage equal to the number of counters on it to each opponent.",
+            &["Creature"][..],
+            ("DamageEachPlayer", ObjectScope::EventSource, false, Comparator::GE, 5),
+        ),
+    ] {
+        let found = gates_of(text, name, types);
+        let (effect, subject, use_lki, comparator, threshold) = expected;
+        assert_eq!(
+            found,
+            vec![(effect.to_string(), subject, use_lki, comparator, threshold)],
+            "{name}: exactly one mana-value gate, on the conditioned instruction"
+        );
+    }
+
+    // The same words bind by context, not by card: "that spell" in a resolving spell's body is the
+    // announced target, under a cast trigger it is the event's spell, and "that permanent" is
+    // always the declared target. A gate with no antecedent in scope is not invented.
+    let resolving = gates_of(
+        "Counter target spell. If that spell has mana value 5 or greater, draw a card.",
+        "Fixture",
+        &["Instant"],
+    );
+    assert_eq!(
+        resolving.iter().map(|g| g.1).collect::<Vec<_>>(),
+        vec![ObjectScope::Target],
+        "resolving spell: the announced spell target"
+    );
+    let triggered = gates_of(
+        "Whenever you cast an instant or sorcery spell, draw a card. If that spell's mana value is 5 or greater, scry 1.",
+        "Fixture",
+        &["Creature"],
+    );
+    assert_eq!(
+        triggered.iter().map(|g| (g.1, g.2)).collect::<Vec<_>>(),
+        vec![(ObjectScope::EventSource, false)],
+        "cast trigger: the event's spell, present tense reads the live object"
+    );
+}
