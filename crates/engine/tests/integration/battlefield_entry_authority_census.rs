@@ -1061,12 +1061,16 @@ fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
         .map(|hit| hit.file.as_str())
         .collect();
     battlefield_files.sort_unstable();
+    // The authority derives its destination from the zone the entrant was CREATED in (the
+    // battlefield, or the zone an applied replacement sent a token to instead — CR 614.6), so
+    // it no longer spells the literal. A window that does spell `to: Zone::Battlefield` is
+    // therefore a hard-coded battlefield-entry writer written beside the authority.
     assert_eq!(
         battlefield_files,
-        vec!["engine/src/game/zones.rs"],
-        "exactly one production window may name `to: Zone::Battlefield` literally — the \
-         authority. `log.rs` binds a bare `to,` in a \
-         pattern, and `merge.rs` uses the variable `dest`; either production survivor gaining the \
+        Vec::<&str>::new(),
+        "no production window may name `to: Zone::Battlefield` literally — the authority \
+         reads the entrant's creation zone. `log.rs` binds a bare `to,` in a \
+         pattern, and `merge.rs` uses the variable `dest`; a window gaining the \
          literal is a new battlefield-entry writer.{ADJUDICATED_SURVIVORS}"
     );
 }

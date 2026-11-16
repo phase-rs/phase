@@ -1891,15 +1891,8 @@ pub(crate) fn publish_redirected_token_creation(
     events: &mut Vec<GameEvent>,
 ) {
     crate::game::restrictions::record_token_created_into(state, object_id, zone);
-    if crate::game::zones::record_and_emit_placement_from_no_zone(state, object_id, zone, events)
-        .is_some()
-    {
-        events.push(GameEvent::TokenCreated {
-            object_id,
-            name,
-            source_id,
-        });
-    }
+    // The single emitter reads the zone the token was created in off the object.
+    push_committed_token_entry_events(state, object_id, name, source_id, events);
 }
 
 /// Materializes one already-resolved CR 111.1 token creation verbatim.
