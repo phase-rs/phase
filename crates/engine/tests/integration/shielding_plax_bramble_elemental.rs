@@ -2003,10 +2003,13 @@ fn settle_mirrorworks_copy(runner: &mut GameRunner) {
 /// Historical-filter treatment (chosen, asserted here): the persisted `affected`
 /// filter is NOT re-derived, so the restored rule binds exactly what the
 /// released engine bound (the copy itself); cards in graveyards stay
-/// targetable by Raise Dead, as they were in the saved game. Rationale (the
-/// decoder in `phase-ast` `deserialize_static_mode_fwd`): a saved token's
-/// characteristics are serialized copiable values (CR 707.2), so migration
-/// restores the executable mode without rewriting the subject.
+/// targetable by Raise Dead, as they were in the saved game. Keeping that
+/// subject is an application save-compatibility decision (the decoder in
+/// `phase-ast` `deserialize_static_mode_fwd`): the migration repairs only the
+/// mode the released writer could not round-trip and leaves the rest of the
+/// saved game as it was. No CR rule requires keeping the released parser's
+/// erroneous `SelfRef` subject; Silent Gravestone's Oracle text protects
+/// "Cards in graveyards".
 #[test]
 fn released_save_of_mirrorworks_copy_restores_executable_restriction() {
     let db = crate::support::shared_card_db().expect("the checked-in fixture contains the cards");

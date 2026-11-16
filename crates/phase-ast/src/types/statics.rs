@@ -4668,10 +4668,13 @@ where
             // blanket (`AllPlayers`) prohibition it always meant so a saved
             // copy token keeps an executable restriction instead of an inert
             // `Other`. The persisted `affected` filter is deliberately NOT
-            // re-derived: a saved token's characteristics are serialized
-            // copiable values (CR 707.2), so the restored rule binds exactly
-            // the subject the released engine bound (an old copy of Silent
-            // Gravestone therefore protects only itself, as it did when saved).
+            // re-derived. That is an application save-compatibility decision:
+            // the migration repairs only the mode the released writer could not
+            // round-trip and leaves the rest of the saved game as it was, so an
+            // old copy of Silent Gravestone still protects only itself, as it
+            // did when saved. No CR rule requires keeping the released parser's
+            // erroneous subject; the card's Oracle text protects "Cards in
+            // graveyards".
             if s == "CantBeTargeted" {
                 return Ok(StaticMode::CantBeTargeted {
                     who: ProhibitionScope::AllPlayers,
