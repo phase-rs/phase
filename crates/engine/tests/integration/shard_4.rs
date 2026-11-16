@@ -338,6 +338,7 @@ mod martyr_reveal_x_cost;
 mod marvin_hidden_zone_provider_grant;
 mod mass_counter_removal;
 mod mass_library_order_restore;
+mod mass_manipulation_x_target_count_7862;
 mod mass_phase_out_1792_repro;
 mod mass_unsuspect_701_60a;
 mod master_of_ceremonies;

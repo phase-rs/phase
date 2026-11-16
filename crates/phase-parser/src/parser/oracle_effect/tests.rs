@@ -35633,6 +35633,26 @@ fn strip_exact_target_prefix_x() {
     );
 }
 
+/// Issue #7862: printed Oracle text carries an uppercase `X` ("Gain control of
+/// X target creatures and/or planeswalkers"), and the verb branches dispatch on
+/// original-case text. The count must still be recognized, and the remainder
+/// must keep the caller's casing.
+#[test]
+fn strip_exact_target_prefix_uppercase_x_keeps_original_remainder() {
+    let result = strip_exact_target_prefix("X target creatures and/or planeswalkers");
+    assert_eq!(
+        result,
+        Some((
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            },
+            "target creatures and/or planeswalkers"
+        ))
+    );
+}
+
 #[test]
 fn strip_exact_target_prefix_no_match() {
     assert!(strip_exact_target_prefix("target creature").is_none());

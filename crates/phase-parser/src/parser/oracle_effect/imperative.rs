@@ -2780,12 +2780,16 @@ pub(super) fn parse_targeted_action_ast(
             .parse(input)
         })
         .is_some();
-        // CR 115.1d + CR 601.2c: Preserve the "up to N target" count instead of discarding
-        // it. `strip_optional_target_prefix` already parses the quantifier; the
-        // spec was previously dropped here, so "gain control of up to two target
-        // creatures" collapsed to a single optional slot and only one creature
-        // could be chosen (issue #6205).
-        let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
+        // CR 115.1d + CR 601.2c: Preserve the target count instead of discarding
+        // it. Exact counts ("X target", "two target") must be tried before the
+        // optional prefixes, because an exact count makes every slot mandatory:
+        // "gain control of X target creatures" collapsed to a single target slot
+        // when the exact prefix was dropped (issue #7862). "up to N target" and
+        // "any number of target" keep their count through the optional prefix
+        // (issue #6205).
+        let (target_text, multi_target) = super::strip_exact_target_prefix(rest)
+            .map(|(count, rest)| (rest, Some(MultiTargetSpec::exact(count))))
+            .unwrap_or_else(|| super::strip_optional_target_prefix(rest));
         // CR 608.2k: A singular bare object pronoun ("gains control of it") in a subject-bearing
         // clause is an anaphor, not a parent-target chain. Route it through
         // `resolve_it_pronoun` — identical to the tap/sacrifice/counter clauses — so
@@ -23188,6 +23192,57 @@ mod tests {
             "Expected GainControl, got {effect:?}"
         );
         let _ = (text, lower);
+    }
+
+    /// CR 115.1d + CR 601.2c: Mass Manipulation's printed text carries an
+    /// uppercase `X` ("Gain control of X target creatures and/or
+    /// planeswalkers."). The gain-control branch dispatches through
+    /// `nom_on_lower`, which returns original-case text, so the exact-count
+    /// prefix must match case-insensitively — otherwise the count is dropped
+    /// and the engine offers one target slot instead of X (issue #7862).
+    #[test]
+    fn parse_gain_control_of_x_target_creatures_from_printed_case() {
+        use crate::types::ability::{MultiTargetSpec, QuantityExpr, QuantityRef, TypeFilter};
+        let text = "Gain control of X target creatures and/or planeswalkers";
+        let lower = text.to_lowercase();
+        let ast = parse_targeted_action_ast(text, &lower, &mut ParseContext::default())
+            .expect("Mass Manipulation's printed text should parse");
+        match ast {
+            TargetedImperativeAst::GainControl {
+                multi_target,
+                target,
+                ..
+            } => {
+                assert_eq!(
+                    multi_target,
+                    Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string()
+                        }
+                    })),
+                    "printed uppercase X must still yield an exact(X) count"
+                );
+                let TargetFilter::Or { filters } = target else {
+                    panic!("expected Or filter for and/or, got {target:?}");
+                };
+                assert_eq!(filters.len(), 2);
+                assert!(
+                    filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)
+                    )),
+                    "filter must include Creature"
+                );
+                assert!(
+                    filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Planeswalker)
+                    )),
+                    "filter must include Planeswalker"
+                );
+            }
+            other => panic!("Expected GainControl AST, got {other:?}"),
+        }
     }
 
     /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player
