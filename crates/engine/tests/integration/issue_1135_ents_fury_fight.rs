@@ -9,6 +9,10 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
+
+use engine::types::ability::TargetRef;
+use engine::types::events::GameEvent;
 
 const ENTS_FURY_ORACLE: &str = "Put a +1/+1 counter on target creature you control if its power is 4 or greater. Then that creature gets +1/+1 until end of turn and fights target creature you don't control.";
 
@@ -38,22 +42,60 @@ fn ents_fury_fights_boosted_creature_against_opponent_creature() {
 
     let mut runner = scenario.build();
 
-    runner
+    let outcome = runner
         .cast(spell)
         .target_objects(&[bear, wolf])
         .commit()
         .resolve();
 
+    let damage_events: Vec<_> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                source_id,
+                target,
+                amount,
+                is_combat,
+                ..
+            } => Some((*source_id, target.clone(), *amount, *is_combat)),
+            _ => None,
+        })
+        .collect();
+
     assert!(
-        runner.state().objects[&wolf].damage_marked >= 6,
-        "boosted bear must deal fight damage to wolf, got {}",
-        runner.state().objects[&wolf].damage_marked
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 7,
+                is_combat: false,
+                ..
+            } if *source_id == bear && *target == wolf
+        )),
+        "the boosted bear deals 7 noncombat fight damage to the wolf; observed damage events: {damage_events:?}"
+    );
+    assert_eq!(outcome.zone_of(wolf), Zone::Graveyard);
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 2,
+                is_combat: false,
+                ..
+            } if *source_id == wolf && *target == bear
+        )),
+        "the wolf deals 2 noncombat fight damage back to the bear; observed damage events: {damage_events:?}"
     );
     assert_eq!(
-        runner.state().objects[&bear].damage_marked,
+        outcome.state().objects[&bear].damage_marked,
         2,
         "wolf must deal its power in fight damage back to bear"
     );
+    assert_eq!(outcome.zone_of(bear), Zone::Battlefield);
 }
 
 #[test]
