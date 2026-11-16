@@ -4953,6 +4953,27 @@ impl ResolvedAbility {
         }
     }
 
+    /// [`Self::clear_source_provenance_for_loop_recursive`] for a chain that
+    /// still needs one fact of a departed source: `carry` maps each node's own
+    /// source context (read before it is cleared) to the identity-free context
+    /// that node keeps instead of `None`.
+    pub(crate) fn clear_source_provenance_for_loop_carrying_source(
+        &mut self,
+        carrier_source: ObjectId,
+        carry: &impl Fn(&TriggerSourceContext) -> Option<TriggerSourceContext>,
+    ) {
+        let carried = self.trigger_source.as_ref().and_then(carry);
+        let kept = (self.source_id == carrier_source || self.source_id == ObjectId(0))
+            .then_some(self.source_incarnation)
+            .flatten();
+        self.clear_source_provenance();
+        self.source_incarnation = kept;
+        self.trigger_source = carried;
+        for (_, child) in self.child_links_mut() {
+            child.clear_source_provenance_for_loop_carrying_source(carrier_source, carry);
+        }
+    }
+
     /// CR 400.7: every incarnation this chain captured for an object, as
     /// `(object, incarnation)`, for loop normalization to rank with the other
     /// carriers:

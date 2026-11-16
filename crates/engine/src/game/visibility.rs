@@ -5113,6 +5113,7 @@ fn redact_counter_added_record(record: &mut crate::types::game_state::CounterAdd
     let crate::types::game_state::CounterAddedRecord {
         actor: _,
         object_id: _,
+        incarnation: _,
         counter_type: _,
         count: _,
         name,
@@ -5926,6 +5927,7 @@ mod tests {
         let counter_record = |object_id: ObjectId, name: &str| CounterAddedRecord {
             actor: owner,
             object_id,
+            incarnation: Some(0),
             counter_type: CounterType::Plus1Plus1,
             count: 1,
             name: name.to_string(),
