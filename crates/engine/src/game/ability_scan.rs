@@ -5124,6 +5124,9 @@ fn scan_trigger_definition(
         valid_subject_player,
         valid_source,
         zone_change_clauses,
+        // CR 509.3e: the blocker-count threshold's blocker filter is an event
+        // matcher like `valid_target` (scanned below); `minimum` is a literal.
+        blocker_count,
 
         // ---- read-free: the Room-half (door) STAMP — a matcher key like the
         //      filters above, at its most inert end. `RoomDoor` is a fieldless two-variant
@@ -5224,6 +5227,11 @@ fn scan_trigger_definition(
     for f in [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()
         .flatten()
+        .chain(
+            blocker_count
+                .as_ref()
+                .and_then(|threshold| threshold.blocker.as_ref()),
+        )
     {
         matcher = matcher.or(scan_target_filter(
             f,

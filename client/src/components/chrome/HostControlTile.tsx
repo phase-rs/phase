@@ -10,13 +10,18 @@ import {
   type SeatMutation,
   type SeatKind,
 } from "../../stores/multiplayerStore";
-import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import {
+  candidateSeatDeck,
+  submitCandidateSeatDeck,
+  useAiDeckCatalog,
+  type AiDeckCandidate,
+} from "../../services/aiDeckCatalog";
 import { applyPoolSelection, withCatalogSavedNames } from "../../services/randomPoolSelection";
 import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { formatJoinShare } from "../../services/serverDetection";
-import { expandParsedDeck, type ParsedDeck } from "../../services/deckParser";
-import { captureSubmissionArtPreferences, submitParsedDeck } from "../../services/deckSubmission";
+import { expandParsedDeck } from "../../services/deckParser";
+import { captureSubmissionArtPreferences } from "../../services/deckSubmission";
 import { deckListIdentityKey } from "../../multiplayer/deckListData";
 import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { suppliedAiDeckChoice } from "../../services/pileSource";
@@ -26,7 +31,7 @@ import { copyText } from "../../services/copyText";
 const AI_DIFFICULTIES = ["Easy", "Medium", "Hard", "VeryHard"] as const;
 const RANDOM_DECK: DeckChoice = { type: "Random" };
 
-type DeckOption = { id: string; label: string; choice: DeckChoice; source?: ParsedDeck };
+type DeckOption = { id: string; label: string; choice: DeckChoice; source?: AiDeckCandidate };
 /** `expectedKind` is the seat kind the server must still find when the assignment lands (upstream #10448):
  *  set for the host's Add AI and Fill With AI so a human who joined while the deck was prepared is kept. */
 type AiAssignment = { slot: PlayerSlot; option: DeckOption; difficulty: string; expectedKind?: SeatKind };
@@ -335,8 +340,11 @@ export function HostControlTile() {
         : aiDeckCatalog.candidates.map((candidate) => ({
             id: candidate.id,
             label: candidate.name,
-            choice: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
-            source: candidate.deck,
+            choice: {
+              type: "DeckList" as const,
+              data: candidateSeatDeck(candidate, expandParsedDeck(candidate.deck)),
+            },
+            source: candidate,
           })),
     [suppliedFormat, aiDeckCatalog.candidates],
   );
@@ -406,7 +414,7 @@ export function HostControlTile() {
               data: {
                 difficulty,
                 deck: option.source
-                  ? { type: "DeckList" as const, data: await submitParsedDeck(option.source, snapshot) }
+                  ? { type: "DeckList" as const, data: await submitCandidateSeatDeck(option.source, snapshot) }
                   : option.choice,
               },
             },
