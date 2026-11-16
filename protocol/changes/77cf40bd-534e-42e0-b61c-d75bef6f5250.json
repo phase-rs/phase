@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "lobby"
+  ],
+  "reason": "GameFormat gains ArchenemyCommander; lobby frames naming it hard-error on older builds"
+}

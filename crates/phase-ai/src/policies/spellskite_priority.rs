@@ -15,9 +15,9 @@ use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
-use super::context::{collect_ability_effects, PolicyContext};
-use super::effect_classify::{effect_polarity, EffectPolarity};
+use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use super::stack_awareness::{can_be_destroyed, is_harmful, judged_reaches};
 use crate::features::DeckFeatures;
 
 fn reject(kind: &'static str) -> PolicyVerdict {
@@ -59,20 +59,19 @@ fn stack_has_redirectable_threat(
         let Some(ability) = entry.ability() else {
             return false;
         };
-        if !collect_ability_effects(ability)
+        let harms_ai = judged_reaches(state, entry, is_harmful)
             .iter()
-            .any(|e| matches!(effect_polarity(e), EffectPolarity::Harmful))
-        {
-            return false;
-        }
-        let targets_ai = ability.targets.iter().any(|t| match t {
-            TargetRef::Player(pid) => *pid == ai_player,
-            TargetRef::Object(obj_id) => state
-                .objects
-                .get(obj_id)
-                .is_some_and(|o| o.controller == ai_player),
-        });
-        if !targets_ai {
+            .any(|reach| {
+                reach.acted_on.iter().any(|t| match t {
+                    TargetRef::Player(pid) => *pid == ai_player,
+                    TargetRef::Object(obj_id) => state.objects.get(obj_id).is_some_and(|o| {
+                        o.controller == ai_player
+                            && (!matches!(reach.node.effect, Effect::Destroy { .. })
+                                || can_be_destroyed(o))
+                    }),
+                })
+            });
+        if !harms_ai {
             return false;
         }
         if !legal_new_targets_for_stack_entry(state, entry_index).contains(&spellskite_target) {
@@ -240,6 +239,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: spellskite_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
@@ -310,6 +310,48 @@ mod tests {
     }
 
     #[test]
+    fn a_redirectable_threat_is_found_among_landfall_triggers_without_reading_their_reach() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        let mut state = GameState::new_two_player(42);
+        let sk = spellskite(&mut state);
+        let bear = ai_creature(&mut state);
+        push_opp_destroy_spell(&mut state, bear);
+        // The opponent's landfall triggers below and above the destroy spell.
+        let landfall = with_landfall_triggers(&state, OPP);
+        let (found, builds) =
+            reading_with_reach_count(|| stack_has_redirectable_threat(&state, AI, sk));
+        assert!(
+            found,
+            "reach guard: the destroy spell is a redirectable threat"
+        );
+        assert!(builds > 0, "reach guard: its reach is read");
+        assert_eq!(
+            reading_with_reach_count(|| stack_has_redirectable_threat(&landfall, AI, sk)),
+            (true, builds),
+            "the same answer, without reading the triggers' reach"
+        );
+        assert_score(
+            policy_verdict(&landfall, sk),
+            "spellskite_redirect_available",
+        );
+
+        // A harmful spell that cannot be redirected to Spellskite.
+        let mut state = GameState::new_two_player(42);
+        let sk = spellskite(&mut state);
+        push_opp_player_life_loss(&mut state);
+        let landfall = with_landfall_triggers(&state, OPP);
+        let (found, builds) =
+            reading_with_reach_count(|| stack_has_redirectable_threat(&state, AI, sk));
+        assert!(!found);
+        assert!(builds > 0, "reach guard: the life loss's reach is read");
+        assert_eq!(
+            reading_with_reach_count(|| stack_has_redirectable_threat(&landfall, AI, sk)),
+            (false, builds),
+            "the same answer, without reading the triggers' reach"
+        );
+    }
+
+    #[test]
     fn reject_when_harmful_player_spell_cannot_target_spellskite() {
         let mut state = GameState::new_two_player(42);
         let sk = spellskite(&mut state);
@@ -330,5 +372,96 @@ mod tests {
             policy_verdict(&state, sk),
             "spellskite_no_redirectable_threat",
         );
+    }
+
+    #[test]
+    fn a_boon_on_an_ai_creature_is_not_a_redirectable_threat() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        use engine::types::phase::Phase;
+        const BOON_OF_EREBOS: &str =
+            "Target creature gets +2/+0 until end of turn. Regenerate it. You lose 2 life.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let ai_creature = scenario.add_creature(P0, "Bear", 2, 2).id();
+        let skite = scenario.add_creature(P0, "Spellskite", 0, 4).id();
+        let boon = scenario
+            .add_spell_to_hand_from_oracle(P1, "Boon of Erebos", true, BOON_OF_EREBOS)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 0,
+            })
+            .id();
+        scenario.add_basic_land(P1, ManaColor::Black);
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+        runner.cast(boon).target_object(ai_creature).commit();
+        let state = runner.state();
+        assert_eq!(
+            state
+                .stack
+                .back()
+                .and_then(|e| e.ability())
+                .map(|root| root.targets.clone()),
+            Some(vec![TargetRef::Object(ai_creature)]),
+            "reach guard: the Boon targets the AI's creature"
+        );
+        assert!(
+            legal_new_targets_for_stack_entry(state, state.stack.len() - 1)
+                .contains(&TargetRef::Object(skite)),
+            "reach guard: Spellskite is a legal new target"
+        );
+        assert!(!stack_has_redirectable_threat(state, P0, skite));
+    }
+
+    #[test]
+    fn a_destroy_aimed_at_an_indestructible_creature_is_not_a_redirectable_threat() {
+        use engine::game::scenario::{GameScenario, P0, P1};
+        use engine::types::game_state::WaitingFor;
+        use engine::types::keywords::Keyword;
+        use engine::types::mana::{ManaColor, ManaCost};
+        use engine::types::phase::Phase;
+        const MURDER: &str = "Destroy target creature.";
+        for indestructible in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let ai_creature = {
+                let mut builder = scenario.add_creature(P0, "Ai", 2, 2);
+                if indestructible {
+                    builder.with_keyword(Keyword::Indestructible);
+                }
+                builder.id()
+            };
+            let skite = scenario.add_creature(P0, "Spellskite", 0, 4).id();
+            let murder = scenario
+                .add_spell_to_hand_from_oracle(P1, "Murder", true, MURDER)
+                .with_mana_cost(ManaCost::generic(1))
+                .id();
+            scenario.add_basic_land(P1, ManaColor::Black);
+            let mut runner = scenario.build();
+            {
+                let state = runner.state_mut();
+                state.active_player = P1;
+                state.priority_player = P1;
+                state.waiting_for = WaitingFor::Priority { player: P1 };
+            }
+            runner.cast(murder).target_object(ai_creature).commit();
+            let state = runner.state();
+            assert!(
+                legal_new_targets_for_stack_entry(state, state.stack.len() - 1)
+                    .contains(&TargetRef::Object(skite)),
+                "reach guard: Spellskite is a legal new target"
+            );
+            assert_eq!(
+                stack_has_redirectable_threat(state, P0, skite),
+                !indestructible
+            );
+        }
     }
 }

@@ -316,3 +316,124 @@ fn mana_leak_in_response_prompts_target_controller_then_counters() {
         Some(Zone::Graveyard)
     );
 }
+
+const RUNE_SNAG: &str = "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard.";
+
+fn put_card_in_graveyard(
+    runner: &mut engine::game::scenario::GameRunner,
+    owner: engine::types::player::PlayerId,
+    card_id: u64,
+    name: &str,
+) {
+    engine::game::zones::create_object(
+        runner.state_mut(),
+        CardId(card_id),
+        owner,
+        name.to_string(),
+        Zone::Graveyard,
+    );
+}
+
+/// Casts Rune Snag (P0) at a Shock on the stack (P1, holding `lands` Islands),
+/// after seeding the graveyards with `snags_p0` / `snags_p1` copies of Rune Snag
+/// and one differently named decoy. Returns the runner paused on P1's prompt
+/// together with P1's lands.
+fn cast_rune_snag(
+    snags_p0: u64,
+    snags_p1: u64,
+    lands: usize,
+) -> (
+    engine::game::scenario::GameRunner,
+    Vec<engine::types::identifiers::ObjectId>,
+) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut snag = scenario.add_spell_to_hand_from_oracle(P0, "Rune Snag", true, RUNE_SNAG);
+    snag.with_mana_cost(ManaCost::Cost {
+        generic: 0,
+        shards: vec![ManaCostShard::Blue],
+    });
+    let rune_snag = snag.id();
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    let p1_lands: Vec<_> = (0..lands)
+        .map(|_| scenario.add_basic_land(P1, ManaColor::Blue))
+        .collect();
+
+    let mut runner = scenario.build();
+    for n in 0..snags_p0 {
+        put_card_in_graveyard(&mut runner, P0, 700 + n, "Rune Snag");
+    }
+    for n in 0..snags_p1 {
+        put_card_in_graveyard(&mut runner, P1, 800 + n, "Rune Snag");
+    }
+    // Decoy: a differently named card must not be counted.
+    put_card_in_graveyard(&mut runner, P1, 900, "Rune Stag");
+
+    let opponent_spell = put_instant_on_stack(&mut runner, P1);
+    runner
+        .cast(rune_snag)
+        .target_objects(&[opponent_spell])
+        .resolve();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::UnlessPayment { player: P1, .. }
+        ),
+        "Rune Snag must prompt the countered spell's controller, got {:?}",
+        runner.state().waiting_for
+    );
+    (runner, p1_lands)
+}
+
+fn tapped_count(
+    runner: &engine::game::scenario::GameRunner,
+    lands: &[engine::types::identifiers::ObjectId],
+) -> usize {
+    lands
+        .iter()
+        .filter(|id| runner.state().objects[id].tapped)
+        .count()
+}
+
+/// Rune Snag parses to a real Counter (it used to fail closed and counter
+/// nothing). With no copy in a graveyard the unless cost is the flat {2}; one
+/// copy in EACH graveyard raises it to {2} + 2 × 2 = {6} (CR 201.2 + CR 400.1).
+#[test]
+fn rune_snag_counts_copies_in_every_graveyard() {
+    // Zero copies: {2} is payable with two lands, and exactly two are spent.
+    let (mut runner, lands) = cast_rune_snag(0, 0, 2);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("{2} is payable with two Islands");
+    assert_eq!(tapped_count(&runner, &lands), 2, "paid exactly {{2}}");
+
+    // One copy in each player's graveyard: cost {6}; five lands cannot pay it, so nothing is tapped.
+    let (mut runner, lands) = cast_rune_snag(1, 1, 5);
+    // The engine resolves an unaffordable payment as a failed payment.
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("attempt to pay");
+    assert_eq!(tapped_count(&runner, &lands), 0, "nothing was paid");
+
+    // Same graveyards, six lands: {6} is payable and all six are spent.
+    let (mut runner, lands) = cast_rune_snag(1, 1, 6);
+    runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("{6} is payable with six Islands");
+    assert_eq!(tapped_count(&runner, &lands), 6, "paid exactly {{6}}");
+}
+
+/// Declining the Rune Snag payment counters the spell.
+#[test]
+fn rune_snag_counters_spell_when_payment_declined() {
+    let (mut runner, _) = cast_rune_snag(2, 0, 1);
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("decline");
+    assert!(runner.state().stack.is_empty());
+    assert!(runner
+        .state()
+        .objects
+        .values()
+        .any(|o| o.name == "Shock" && o.zone == Zone::Graveyard));
+}

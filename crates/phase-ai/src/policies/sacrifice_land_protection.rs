@@ -99,11 +99,7 @@ fn activation_ability(
     engine::types::identifiers::ObjectId,
     engine::types::ability::AbilityDefinition,
 )> {
-    let GameAction::ActivateAbility {
-        source_id,
-        ability_index: _,
-    } = &ctx.candidate.action
-    else {
+    let GameAction::ActivateAbility { source_id, .. } = &ctx.candidate.action else {
         return None;
     };
     ctx.effective_activated_ability()
@@ -204,6 +200,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
@@ -486,6 +483,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
@@ -512,6 +510,267 @@ mod tests {
             PolicyVerdict::Score { .. } => {
                 panic!("ReactiveSelfProtection must reject parsed Safekeeper")
             }
+        }
+    }
+
+    const SYLVAN_SAFEKEEPER: &str = "Sacrifice a land: Target creature you control gains shroud until end of turn. (It can't be the target of spells or abilities.)";
+    const SHOCK: &str = "Shock deals 2 damage to any target.";
+    const SCAVENGING_OOZE: &str = "{G}: Exile target card from a graveyard. If it was a creature card, put a +1/+1 counter on this creature and you gain 1 life.";
+    const CREMATE: &str = "Exile target card from a graveyard.\nDraw a card.";
+
+    /// Which `PolicyVerdict` variant a policy returned.
+    #[derive(Debug, PartialEq)]
+    enum VerdictVariant {
+        Reject,
+        Score,
+    }
+
+    /// The verdict variant and reason kind of this policy's and
+    /// `ReactiveSelfProtectionPolicy`'s verdicts on activating `source_id`'s
+    /// first ability.
+    fn verdict_kinds(
+        state: &GameState,
+        source_id: ObjectId,
+    ) -> [(VerdictVariant, &'static str); 2] {
+        use super::super::reactive_self_protection::ReactiveSelfProtectionPolicy;
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority { player: AI },
+            candidates: Vec::new(),
+        };
+        let config = AiConfig::default();
+        let context = AiContext::empty(&config.weights);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        [
+            SacrificeLandProtectionPolicy.verdict(&ctx),
+            ReactiveSelfProtectionPolicy.verdict(&ctx),
+        ]
+        .map(|verdict| match verdict {
+            PolicyVerdict::Reject { reason } => (VerdictVariant::Reject, reason.kind),
+            PolicyVerdict::Score { reason, .. } => (VerdictVariant::Score, reason.kind),
+        })
+    }
+
+    /// P0 controls a 2/2, Sylvan Safekeeper and five Forests.
+    fn safekeeper_board() -> (engine::game::scenario::GameScenario, ObjectId, ObjectId) {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::types::mana::ManaColor;
+        use engine::types::phase::Phase;
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+        let safekeeper = scenario
+            .add_creature_from_oracle(P0, "Sylvan Safekeeper", 1, 1, SYLVAN_SAFEKEEPER)
+            .id();
+        for _ in 0..5 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        (scenario, bear, safekeeper)
+    }
+
+    #[test]
+    fn safekeeper_allowed_when_a_cast_spell_targets_ai_creature() {
+        use engine::game::scenario::P1;
+        use engine::types::mana::ManaCost;
+        let (mut scenario, bear, safekeeper) = safekeeper_board();
+        let murder = scenario
+            .add_spell_to_hand_from_oracle(P1, "Murder", true, "Destroy target creature.")
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+        runner.cast(murder).target_objects(&[bear]).commit();
+        assert_eq!(
+            verdict_kinds(runner.state(), safekeeper),
+            [
+                (
+                    VerdictVariant::Score,
+                    "sacrifice_land_protection_answerable_threat"
+                ),
+                (
+                    VerdictVariant::Score,
+                    "reactive_self_protection_exact_payoff"
+                )
+            ]
+        );
+    }
+
+    #[test]
+    fn safekeeper_rejected_against_an_attack_trigger_that_targets_nothing() {
+        use engine::game::ability_utils::flatten_targets_in_chain;
+        use engine::game::combat::AttackTarget;
+        use engine::game::scenario::P1;
+        use engine::types::ability::TargetRef;
+        const SABOTAGE_STRATEGIST: &str = "Flying, vigilance\nWhenever one or more creatures attack you, those creatures get -1/-0 until end of turn.\nExhaust — {5}{U}{U}: Put three +1/+1 counters on this creature. (Activate each exhaust ability only once.)";
+        let (mut scenario, bear, safekeeper) = safekeeper_board();
+        let strategist = {
+            let mut builder = scenario.add_creature(P1, "Sabotage Strategist", 2, 2);
+            builder.from_oracle_text_with_keywords(
+                &["Exhaust", "Flying", "Vigilance"],
+                SABOTAGE_STRATEGIST,
+            );
+            builder.id()
+        };
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(bear, AttackTarget::Player(P1))])
+            .expect("declare attackers");
+        for _ in 0..4 {
+            if runner
+                .state()
+                .stack
+                .iter()
+                .any(|e| e.source_id == strategist)
+            {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == strategist
+                    && entry.ability().is_some_and(|root| {
+                        flatten_targets_in_chain(root) == vec![TargetRef::Object(bear)]
+                    })),
+            "reach guard: P1's trigger holds the attacking 2/2"
+        );
+        assert_eq!(
+            verdict_kinds(runner.state(), safekeeper),
+            [
+                (
+                    VerdictVariant::Reject,
+                    "sacrifice_land_protection_no_payoff"
+                ),
+                (VerdictVariant::Reject, "reactive_self_protection_no_payoff")
+            ]
+        );
+    }
+
+    #[test]
+    fn safekeeper_rejected_when_an_opponent_exiles_the_card_of_a_creature_that_died() {
+        use crate::policies::stack_awareness::{chain_has_effect, is_harmful};
+        use engine::game::effects::stack_reach::stack_entry_node_reach;
+        use engine::game::scenario::{GameRunner, P1};
+        use engine::types::ability::TargetRef;
+        use engine::types::card_type::CoreType;
+        use engine::types::mana::{ManaColor, ManaCost};
+        let p1_priority = |runner: &mut GameRunner| {
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        };
+        // The Ooze's "if it was a creature card" node leaves the exact payoff
+        // undecided, so the fallback decides; the Cremate is decided exactly.
+        for (exiler, exact_payoff) in [("Scavenging Ooze", None), ("Cremate", Some(false))] {
+            // P1's Shock kills P0's 2/2, then P1's Scavenging Ooze or Cremate
+            // aims at its card in P0's graveyard.
+            let (mut scenario, bear, safekeeper) = safekeeper_board();
+            let shock = scenario
+                .add_spell_to_hand_from_oracle(P1, "Shock", true, SHOCK)
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let ooze = scenario
+                .add_creature_from_oracle(P1, "Scavenging Ooze", 2, 2, SCAVENGING_OOZE)
+                .id();
+            let cremate = scenario
+                .add_spell_to_hand_from_oracle(P1, "Cremate", true, CREMATE)
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            scenario.add_basic_land(P1, ManaColor::Green);
+            let mut runner = scenario.build();
+            p1_priority(&mut runner);
+            runner.cast(shock).target_objects(&[bear]).commit();
+            runner.advance_until_stack_empty();
+            let card = runner
+                .state()
+                .objects
+                .values()
+                .find(|object| {
+                    object.name == "Bear" && object.owner == AI && object.zone == Zone::Graveyard
+                })
+                .map(|object| object.id)
+                .expect("the 2/2 died to the Shock");
+            p1_priority(&mut runner);
+            if exiler == "Scavenging Ooze" {
+                runner
+                    .act(GameAction::ActivateAbility {
+                        source_id: ooze,
+                        ability_index: 0,
+                        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                    })
+                    .expect("activate the Ooze");
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(card)),
+                    })
+                    .expect("aim at the card");
+            } else {
+                runner.cast(cremate).target_objects(&[card]).commit();
+            }
+            let state = runner.state();
+            let entry = state.stack.back().expect("the entry aimed at the card");
+            let dead = &state.objects[&card];
+            assert!(
+                dead.zone == Zone::Graveyard
+                    && dead.controller == AI
+                    && dead.card_types.core_types.contains(&CoreType::Creature),
+                "reach guard: the AI's creature card"
+            );
+            assert!(
+                entry.controller == P1
+                    && chain_has_effect(entry, is_harmful)
+                    && stack_entry_node_reach(state, entry)
+                        .iter()
+                        .any(|reach| reach.acted_on.contains(&TargetRef::Object(card))),
+                "reach guard: P1's harmful {exiler} acts on the card"
+            );
+            let ability = &state.objects[&safekeeper].abilities[0];
+            assert_eq!(
+                self_protection_activation_payoff(state, AI, safekeeper, ability),
+                exact_payoff,
+                "reach guard: {exiler}"
+            );
+            // CR 109.2 + CR 400.7: Sylvan Safekeeper's "target creature you
+            // control" is a creature permanent, and the card is a new object,
+            // so shroud cannot stop the exile.
+            assert!(
+                !any_land_sacrifice_protection_payoff(state, AI, ability),
+                "{exiler}"
+            );
+            assert_eq!(
+                verdict_kinds(state, safekeeper)[0],
+                (
+                    VerdictVariant::Reject,
+                    "sacrifice_land_protection_no_payoff"
+                ),
+                "{exiler}"
+            );
         }
     }
 }

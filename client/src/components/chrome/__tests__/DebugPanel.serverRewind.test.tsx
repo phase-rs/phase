@@ -4,7 +4,7 @@
  * The Turn Checkpoints section has two independent sources now:
  *
  *   1. Server-published boundaries (`rewindTargets`), offered only when the
- *      installed adapter declares `ServerRewindCapability`. This is the desktop
+ *      installed adapter declares `TurnRewindCapability`. This is the desktop
  *      solo-vs-AI path, where the sidecar owns the state and a local restore
  *      would desync.
  *   2. The pre-existing browser-local `turnCheckpoints`, restored through
@@ -26,12 +26,17 @@ const sendRequestTakeback = vi.fn();
 
 /** A stub shaped exactly like `WebSocketAdapter`'s capability surface. */
 function rewindCapableAdapter() {
-  return { supportsServerRewind: true, sendRequestTakeback };
+  return { supportsTakeback: true, supportsTurnRewind: true, sendRequestTakeback };
 }
 
-/** A P2P-shaped stub: wire-authoritative, but no rollback capability. */
+/** A P2P-shaped stub: a takeback transport that cannot address a turn. */
 function rewindIncapableAdapter() {
-  return { supportsMatchConcede: true, sendMatchConcede: vi.fn() };
+  return {
+    supportsTakeback: true,
+    sendRequestTakeback,
+    sendRespondTakeback: vi.fn(),
+    sendCancelTakeback: vi.fn(),
+  };
 }
 
 const storeState = {
@@ -73,7 +78,9 @@ vi.mock("../../../game/dispatch", () => ({ restoreGameState: vi.fn(async () => n
 vi.mock("../../../audio/AudioManager", () => ({
   audioManager: { play: vi.fn(), diagnostics: () => "" },
 }));
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({ t: (k: string, o?: { detail?: string }) => (o?.detail ? `${k}|${o.detail}` : k) }),
+}));
 vi.mock("../../../services/cardNames", () => ({ getCardNames: async () => [] }));
 vi.mock("../../../services/gameStateExport", () => ({
   copyGameStateDebugSnapshot: vi.fn(),
@@ -105,7 +112,9 @@ describe("DebugPanel — server-published turn rewind", () => {
     render(<DebugPanel />);
     fireEvent.click(screen.getByRole("button", { name: "debug.exportAuthoritative" }));
 
-    expect(await screen.findByText(/key must be a string/)).toBeInTheDocument();
+    expect(await screen.findByText(
+      "help.status.exportFailedDetail|Failed to serialize authoritative game state: key must be a string",
+    )).toBeInTheDocument();
     expect(exportAuthoritativeGameStateZip).toHaveBeenCalledWith(storeState.adapter);
   });
 

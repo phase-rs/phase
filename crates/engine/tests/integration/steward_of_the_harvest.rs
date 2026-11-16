@@ -240,16 +240,16 @@ fn steward_grants_exiled_land_abilities_to_creatures() {
     assert_eq!(zone_of(&b.runner, b.steward), Zone::Battlefield);
 
     // (b) Forest {T}: Add {G}, Strip Mine {T}: Add {C} and its destroy ability,
-    // Breeding Pool {T}: Add {U} and {T}: Add {G}. The layer-6 grant dedups
-    // structurally identical abilities (Forest's and Breeding Pool's green
-    // abilities), leaving 4 distinct activated abilities on a creature with no
-    // printed abilities.
-    assert_eq!(activated_count(&b.runner, b.own_creature), 4);
+    // Breeding Pool {T}: Add {U} and {T}: Add {G}. CR 113.2c keeps one copy
+    // per granter, so Forest's green ability and Breeding Pool's green ability
+    // coexist via their distinct provider stamps, leaving 5 activated
+    // abilities on a creature with no printed abilities.
+    assert_eq!(activated_count(&b.runner, b.own_creature), 5);
     assert!(mana_ability_index(&b.runner, b.own_creature, ManaColor::Green).is_some());
     assert!(mana_ability_index(&b.runner, b.own_creature, ManaColor::Blue).is_some());
     assert!(has_destroy_ability(&b.runner, b.own_creature));
     // Steward is itself a creature you control.
-    assert_eq!(activated_count(&b.runner, b.steward), 4);
+    assert_eq!(activated_count(&b.runner, b.steward), 5);
 
     // The Maze of Ith stayed in the graveyard: its ability is not granted.
     assert!(!b.runner.state().objects[&b.own_creature]
@@ -288,6 +288,7 @@ fn granted_mana_ability_activates_on_a_ready_creature() {
         .act(GameAction::ActivateAbility {
             source_id: b.own_creature,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("a ready creature may tap for the granted mana ability");
     assert_eq!(green_in_pool(&b.runner), 1);
@@ -311,6 +312,7 @@ fn summoning_sick_steward_cannot_use_granted_mana_ability() {
         .act(GameAction::ActivateAbility {
             source_id: b.steward,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect_err("summoning-sick Steward must not activate a granted mana ability");
     assert!(
@@ -326,6 +328,7 @@ fn summoning_sick_steward_cannot_use_granted_mana_ability() {
         .act(GameAction::ActivateAbility {
             source_id: b.own_creature,
             ability_index: ready_idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("ready recipient may use the same granted mana ability");
     assert!(b.runner.state().objects[&b.own_creature].tapped);
@@ -354,6 +357,7 @@ fn newly_cast_hasty_creature_can_activate_mana_ability() {
         .act(GameAction::ActivateAbility {
             source_id: creature,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("haste permits tapping the newly cast mana creature");
     assert!(runner.state().objects[&creature].tapped);
@@ -377,6 +381,7 @@ fn noncreature_land_mana_activation_ignores_summoning_sickness() {
         .act(GameAction::ActivateAbility {
             source_id: land,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("a noncreature land may tap immediately");
     assert!(runner.state().objects[&land].tapped);
@@ -402,6 +407,7 @@ fn summoning_sick_steward_cannot_use_granted_tap_ability() {
     let result = b.runner.act(GameAction::ActivateAbility {
         source_id: b.steward,
         ability_index: sick_idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     let err = result.expect_err("summoning-sick creature must be refused");
     assert!(
@@ -415,6 +421,7 @@ fn summoning_sick_steward_cannot_use_granted_tap_ability() {
         .act(GameAction::ActivateAbility {
             source_id: b.own_creature,
             ability_index: ready_idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("a ready creature may activate the granted {T} ability");
 }

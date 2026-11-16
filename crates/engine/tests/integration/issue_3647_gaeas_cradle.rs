@@ -27,6 +27,7 @@ fn gaeas_cradle_adds_green_for_each_creature_you_control() {
         .act(GameAction::ActivateAbility {
             source_id: cradle,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Gaea's Cradle");
 

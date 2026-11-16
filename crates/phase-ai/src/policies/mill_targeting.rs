@@ -167,6 +167,7 @@ mod tests {
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Player,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         }
     }
 
@@ -180,6 +181,7 @@ mod tests {
             chooser: Chooser::Controller.into(),
             candidate_source: ZoneChoiceCandidateSource::Legacy,
             reciprocal_role: None,
+            gather_role: None,
             up_to: false,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             constraint: None,
@@ -283,6 +285,8 @@ mod tests {
 
     fn change_zone_from_graveyard_effect() -> Effect {
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Graveyard),
             destination: Zone::Hand,
             target: TargetFilter::Any,

@@ -327,6 +327,7 @@ fn activate_on_shrouded_host(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CR 115.10a: an ability naming the host without 'target' can be activated");
     runner.advance_until_stack_empty();
@@ -399,6 +400,7 @@ fn junk_jet_doubles_its_shrouded_equipped_creatures_power() {
         .act(GameAction::ActivateAbility {
             source_id: jet,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CR 115.10a: 'double equipped creature's power' does not target");
     for _ in 0..8 {
@@ -669,6 +671,7 @@ fn pemmins_aura_flickered_onto_another_creature_untaps_its_original_host() {
         .act(GameAction::ActivateAbility {
             source_id: aura,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the untap ability is activated");
     assert_eq!(
@@ -759,6 +762,7 @@ fn stamina_sacrificed_as_cost_regenerates_nothing() {
         .act(GameAction::ActivateAbility {
             source_id: aura,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Stamina's ability is activated");
     if let WaitingFor::PayCost { choices, .. } = runner.state().waiting_for.clone() {
@@ -865,6 +869,7 @@ fn cloak_destroyed_in_response(history: CloakHistory) -> bool {
         .act(GameAction::ActivateAbility {
             source_id: cloak,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the untap ability is activated");
     // Disenchant on the Cloak, in response.
@@ -1004,6 +1009,7 @@ fn choking_restraints_sacrificed_as_cost_exiles_nothing() {
         .act(GameAction::ActivateAbility {
             source_id: aura,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the ability is activated");
     for _ in 0..4 {
@@ -1066,6 +1072,7 @@ fn krasis_incubation_returned_as_cost_counters_nothing() {
         .act(GameAction::ActivateAbility {
             source_id: aura,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the ability is activated");
     for _ in 0..4 {
@@ -1335,6 +1342,7 @@ fn pemmins_aura_untaps_a_shrouded_host() {
         .act(GameAction::ActivateAbility {
             source_id: aura,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CR 115.10a: 'untap enchanted creature' does not target, so shroud cannot stop it");
     runner.advance_until_stack_empty();
@@ -1392,6 +1400,7 @@ fn cloak_of_the_philosopher_untaps_a_shrouded_equipped_creature() {
         .act(GameAction::ActivateAbility {
             source_id: cloak,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("CR 115.10a: 'untap equipped creature' does not target");
     runner.advance_until_stack_empty();
@@ -1417,6 +1426,7 @@ fn unattached_cloak_untaps_nothing() {
         .act(GameAction::ActivateAbility {
             source_id: cloak,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the ability names no target, so it can be activated");
     runner.advance_until_stack_empty();
@@ -1507,6 +1517,7 @@ fn nurturing_licid_case(start: AttachmentStart) -> (bool, bool) {
         .act(GameAction::ActivateAbility {
             source_id: licid,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("'regenerate enchanted creature' names no target, so it can be activated");
     runner.advance_until_stack_empty();
@@ -1748,6 +1759,7 @@ fn hostless_phase_out_affects_no_unrelated_enchanted_creature() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the ability names no target, so it can be activated");
     runner.advance_until_stack_empty();

@@ -140,6 +140,7 @@ fn roar_chapter_two_creature_taps_for_granted_mana_via_saga_pipeline() {
         .act(GameAction::ActivateAbility {
             source_id: creature,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Roar chapter II granted tap mana ability");
 

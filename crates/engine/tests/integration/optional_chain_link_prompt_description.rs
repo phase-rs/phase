@@ -72,6 +72,7 @@ fn imprinted_scepter(
         .act(GameAction::ActivateAbility {
             source_id: scepter,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Isochron activation is legal with an imprint and {2} available");
 

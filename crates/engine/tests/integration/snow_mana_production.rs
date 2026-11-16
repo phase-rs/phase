@@ -58,6 +58,7 @@ fn snow_source_produces_snow_mana() {
         .act(GameAction::ActivateAbility {
             source_id: land,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating the snow land's mana ability must succeed");
 
@@ -97,6 +98,7 @@ fn snow_mana_pays_snow_cost_in_cast() {
         .act(GameAction::ActivateAbility {
             source_id: land,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating the snow land's mana ability must succeed");
 
@@ -134,6 +136,7 @@ fn nonsnow_source_produces_nonsnow_mana_and_cannot_pay_snow() {
         .act(GameAction::ActivateAbility {
             source_id: land,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating the plain land's mana ability must succeed");
 

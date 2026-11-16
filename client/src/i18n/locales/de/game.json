@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"Warten","value":"{{ms}} ms","description":"Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "Warten",
+    "value": "{{ms}} ms",
+    "description": "Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."
+  },
   "abilityBlock": {
     "badge": "Blockiert",
     "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -198,6 +204,14 @@
         "label": "Label",
         "fallback": "Auswahl"
       }
+    },
+    "attacking": {
+      "you": "Greift dich an",
+      "player": "Greift {{player}} an",
+      "yourPlaneswalker": "Greift deinen Planeswalker {{name}} an",
+      "planeswalker": "Greift den Planeswalker {{name}} von {{player}} an",
+      "battle": "Greift die Schlacht {{name}} an",
+      "nothing": "Greift an, aber keinen Spieler, keinen Planeswalker und keine Schlacht"
     }
   },
   "actionButton": {
@@ -340,7 +354,6 @@
     "pickNone": "Keine",
     "underAttack_one": "Von {{count}} Kreatur angegriffen",
     "underAttack_other": "Von {{count}} Kreaturen angegriffen",
-    "target": "Ziel",
     "token": "Spielstein",
     "tokenTooltip": "Spielstein-Kopie einer echten Karte",
     "copy": "Kopie",
@@ -430,7 +443,12 @@
     "assignRemaining_other": "Noch {{count}} zuweisen",
     "confirmDistribute_one": "{{count}} Angreifer erklären",
     "confirmDistribute_other": "{{count}} Angreifer erklären",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Angriffssummen",
+    "targetTotal_few": "{{count}} Angreifer · {{damage}} Schaden",
+    "targetTotal_many": "{{count}} Angreifer · {{damage}} Schaden",
+    "targetTotal_one": "{{count}} Angreifer · {{damage}} Schaden",
+    "targetTotal_other": "{{count}} Angreifer · {{damage}} Schaden"
   },
   "fullControl": {
     "label": "Kontrolle",
@@ -443,7 +461,9 @@
     "done": "Fertig"
   },
   "lifeTotal": {
-    "playerLabel": "S{{seat}}"
+    "playerLabel": "S{{seat}}",
+    "libraryLabel": "KARTEN",
+    "libraryTooltip": "Die Horde hat keine Lebenspunkte. Schaden und Lebensverlust lassen sie stattdessen Karten von ihrer Bibliothek auf den Friedhof legen – sie ist besiegt, wenn ihre Bibliothek leer ist. Diese Zahl ist ihre echte Uhr."
   },
   "phaseStop": {
     "untapLabel": "Enttappschritt",
@@ -534,12 +554,17 @@
     }
   },
   "badges": {
+    "hordeRulesAriaLabel": "Horde-Deck-Regeln",
     "monarch": "Monarch",
     "monarchTooltip": "Der Monarch — zieht am Zugende eine zusätzliche Karte",
     "initiative": "Initiative",
     "initiativeTooltip": "Hat die Initiative — wagt sich zu Beginn der Versorgung in die Unterstadt vor",
     "cityBlessing": "Segen der Stadt",
     "cityBlessingTooltip": "Segen der Stadt — kontrolliert zehn oder mehr bleibende Karten (Aufstieg)",
+    "day": "Tag",
+    "dayTooltip": "Es ist Tag — bleibende Karten kommen taggebunden ins Spiel; wirkt ein Spieler in seinem Zug keine Zaubersprüche, wird es im nächsten Zug Nacht",
+    "night": "Nacht",
+    "nightTooltip": "Es ist Nacht — bleibende Karten kommen nachtgebunden ins Spiel; wirkt ein Spieler in seinem Zug zwei oder mehr Zaubersprüche, wird es im nächsten Zug Tag",
     "enduringStory": "Bleibende Geschichte",
     "enduringStoryTooltip": "Bleibende Geschichte — erhalten, wenn du eine Storied bleibende Karte und drei oder mehr Artefakte, legendäre bleibende Karten und/oder Sagen kontrollierst; bleibt für den Rest der Partie bestehen",
     "dungeonAriaLabel": "Wagt sich in {{name}} vor, {{roomName}}, Raum {{room}} von {{total}}",
@@ -549,7 +574,9 @@
     "dungeonTooltip": "Wagt sich in {{name}} vor",
     "poisonAriaLabel_one": "{{count}} Giftmarke",
     "poisonAriaLabel_other": "{{count}} Giftmarken",
-    "poisonTooltip": "Giftmarken: {{count}}\nEin Spieler mit zehn oder mehr Giftmarken verliert das Spiel.",
+    "poisonTooltip": "Giftmarken: {{count}}",
+    "poisonLossPlayer": "Ein Spieler mit {{threshold}} oder mehr Giftmarken verliert das Spiel.",
+    "poisonLossTeam": "Ein Team mit {{threshold}} oder mehr Giftmarken verliert das Spiel.",
     "energyAriaLabel_one": "{{count}} Energiemarke",
     "energyAriaLabel_other": "{{count}} Energiemarken",
     "energyTooltip": "Energiemarken: {{count}}\nEnergiemarken sind eine spielerbezogene Ressource, die von Kartenfähigkeiten ausgegeben wird.",
@@ -638,11 +665,16 @@
   },
   "zone": {
     "commandZone": "Kommandozone",
+    "conspiracy": "Verschwörung",
+    "conspiracyTitle": "Verschwörung: {{name}}",
+    "turnFaceUp": "{{name}} aufdecken",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Kommandeur",
     "commanderTitle": "Kommandeur: {{name}}",
     "commanderTitleTax": "Kommandeur: {{name}} (Steuer: +{{tax}})",
+    "boss": "Boss",
+    "bossTitle": "Boss: {{name}}",
     "castCommander": "{{name}} wirken — Doppelklick oder ziehen zum Spielen",
     "castCommanderTax": "{{name}} wirken (Steuer: +{{tax}}) — Doppelklick oder ziehen zum Spielen",
     "ninjutsuCommander": "Kommandeur-Ninjutsu: {{name}} — klicken, um einen ungeblockten Angreifer auf die Hand zurückzunehmen und diesen Kommandeur getappt und angreifend ins Spiel zu bringen",
@@ -806,9 +838,23 @@
     "lethalBadge": "Tödlich",
     "planeswalkerLoyalty": "Planeswalker (Loyalität: {{loyalty}})",
     "defendingPlayerTrample": "Verteidigender Spieler (Trampelschaden)",
-    "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)"
+    "pwControllerTrample": "PW-Beherrscher (Trampelschaden über PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
+    "assignRemainingTo_many": "Die verbleibenden {{count}} Schaden {{target}} zuteilen",
+    "assignRemainingTo_one": "Den verbleibenden {{count}} Schaden {{target}} zuteilen",
+    "assignRemainingTo_other": "Die verbleibenden {{count}} Schaden {{target}} zuteilen"
+  },
+  "cardTextReference": {
+    "title": "Printed card text (reference)",
+    "hint": "Full printed card text. It may differ from current Oracle text or this ability.",
+    "originalAbility": "Original ability text"
   },
   "stack": {
+    "activatedAbility": "Activated ability",
+    "activatedAbilityNumber": "Activated ability {{number}}",
+    "triggeredAbility": "Triggered ability",
+    "readAbility": "Read ability and printed card text",
     "title": "Stapel",
     "collapsePanel": "Stapelleiste einklappen",
     "expandPanel": "Stapelleiste ausklappen",
@@ -827,7 +873,7 @@
     "targetingLabel": "Visiert {{label}} an",
     "titleTargets": "Ziele: {{targets}}",
     "titlePaid": "Bezahlt: {{paid}}",
-    "titleContext": "Kontext: {{context}}",
+    "titleContext": "Kontext: {{items}}",
     "revealedCards": "Aufgedeckt: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} Mana",
@@ -863,6 +909,9 @@
     "chooseCreatureToEquip": "Wähle eine Kreatur zum Ausrüsten",
     "chooseCreatureTokenToPopulate": "Wähle einen Kreaturspielstein zum Populieren",
     "chooseReturnAsAuraTarget": "Wähle eine bleibende Karte zum Verzaubern",
+    "chooseTokenHost": "Wähle, woran der Spielstein angelegt wird",
+    "chooseOneHighlighted": "Wähle eine der hervorgehobenen Optionen",
+    "chooseUpToOneHighlighted": "Wähle bis zu eine der hervorgehobenen Optionen",
     "tapUntappedCreatures_one": "Tappe {{count}} ungetappte Kreatur",
     "tapUntappedCreatures_other": "Tappe {{count}} ungetappte Kreaturen",
     "chooseTargetOf": "Wähle Ziel {{current}} von {{total}}",
@@ -1139,6 +1188,11 @@
       "drawFirst": "Zuerst ziehen",
       "drawFirstDescription": "Nimm den zusätzlichen Zug in deinem ersten Zug"
     },
+    "startingPlayer": {
+      "title": "Wähle, wer beginnt",
+      "playerPlaysFirst": "{{name}} beginnt",
+      "opponentChoosing": "{{name}} wählt, wer beginnt…"
+    },
     "mulligan": {
       "opponentDeciding": "Der Gegner entscheidet über seine Starthand…",
       "londonTitle": "London-Mulligan ({{count}} genommen)",
@@ -1161,7 +1215,10 @@
       "subtitleKeepWithBottom": "Behalte diese Hand (du legst {{count}} unter die Bibliothek) oder nimm einen weiteren Mulligan für frische 7.",
       "subtitleKeepFree": "Behalte diese Hand (Gratis-Mulligan — keine Karten unter die Bibliothek) oder nimm einen weiteren Mulligan für frische 7.",
       "subtitleOpeningFree": "Behalte diese Hand oder nimm einen Gratis-Mulligan (keine Karten unter die Bibliothek).",
-      "subtitleOpeningOne": "Behalte diese Hand oder nimm einen Mulligan für frische 7 (du legst beim Behalten 1 unter die Bibliothek)."
+      "subtitleOpeningOne": "Behalte diese Hand oder nimm einen Mulligan für frische 7 (du legst beim Behalten 1 unter die Bibliothek).",
+      "onThePlay": "Du spielst zuerst",
+      "onTheDraw": "Du ziehst zuerst",
+      "takeTurn": "Du bist in Zug {{turn}} dran"
     },
     "companion": {
       "eyebrow": "Vorspiel",
@@ -1186,6 +1243,7 @@
       "draw": "UNENTSCHIEDEN",
       "victory": "SIEG",
       "defeat": "NIEDERLAGE",
+      "complete": "SPIEL VORBEI",
       "lifeSummary": "Du: <player>{{playerLife}}</player> <sep>/</sep> Gegner: <opponent>{{opponentLife}}</opponent>",
       "turns": "Züge: {{count}}",
       "duration": "Dauer: {{time}}",
@@ -1282,7 +1340,10 @@
         "Ticket": "Ticket"
       },
       "generic": "Kosten",
-      "pay": "{{cost}} bezahlen"
+      "pay": "{{cost}} bezahlen",
+      "draw": "ziehe eine Karte",
+      "drawCount_one": "ziehe {{count}} Karte",
+      "drawCount_other": "ziehe {{count}} Karten"
     },
     "unlessPayment": {
       "defaultEffect": "Neutralisieren, sofern du nicht bezahlst",
@@ -1319,7 +1380,8 @@
     "passwordPrompt": "Dieser Raum erfordert ein Passwort:",
     "toasts": {
       "connectionFailed": "Verbindung fehlgeschlagen. Versuche es erneut oder ändere den Server in den Einstellungen.",
-      "eliminatedSpectating": "Du bist ausgeschieden. Du schaust jetzt zu."
+      "eliminatedSpectating": "Du bist ausgeschieden. Du schaust jetzt zu.",
+      "retainedTerminalUnreadable": "Die gespeicherte Zustellung des Endergebnisses konnte nicht gelesen werden"
     },
     "resumeReset": {
       "appUpdated": "Die App wurde aktualisiert und dein gespeichertes Spiel ist mit der neuen Version inkompatibel.",
@@ -1372,6 +1434,8 @@
     },
     "config": {
       "startingLife": "Startleben",
+      "commanderDamage": "Kommandeurschaden",
+      "poisonCounters": "Giftmarken",
       "players": "Spieler",
       "whoGoesFirst": "Wer beginnt",
       "firstPlayer": {
@@ -1383,6 +1447,11 @@
     "noLegalAiDecks": {
       "withFormat": "Füge ein in {{format}} legales Deck hinzu oder importiere es, damit die KI es nutzen kann.",
       "generic": "Füge ein in diesem Format legales Deck hinzu oder importiere es, damit die KI es nutzen kann."
+    },
+    "hordeDeck": {
+      "title": "Horde-Deck",
+      "subtitle": "Das selbstspielende Deck, dem euer Team gegenübersteht. Die Engine stellt es bereit – du brauchst kein KI-Deck.",
+      "selected": "Ausgewählt"
     }
   },
   "cardChoice": {
@@ -1413,9 +1482,11 @@
       "untap": "Enttappen",
       "tap": "Tappen",
       "attach": "Attach",
+      "cast": "Wirken",
       "crew": "Bemannen ({{power}})",
       "saddle": "Satteln ({{power}})",
-      "station": "Stationieren (+{{power}})"
+      "station": "Stationieren (+{{power}})",
+      "destroy": "Destroy"
     },
     "buttons": {
       "confirm": "Bestätigen",
@@ -1478,7 +1549,9 @@
       "titleReveal": "Von der Hand aufdecken",
       "titleOpponentHand": "Hand des Gegners",
       "subtitleReveal": "Wähle eine Karte zum Aufdecken oder lehne ab",
-      "subtitleChoose": "Wähle eine Karte"
+      "subtitleChoose": "Wähle eine Karte",
+      "subtitleRevealAnyNumber": "Wähle beliebig viele Karten zum Aufdecken",
+      "subtitleChooseCount": "Wähle {{count}} Karten"
     },
     "search": {
       "title": "Bibliothek durchsuchen",
@@ -1534,12 +1607,14 @@
     "effectZone": {
       "titleSacrifice": "Opfern",
       "titleTopdeck": "Auf die Bibliothek legen",
+      "titleBottomdeck": "Auf die Bibliothek legen",
       "titleBattlefield": "Auf das Schlachtfeld legen",
       "titleHand": "Zurückgeben",
       "titleExile": "Ins Exil schicken",
       "titleUntap": "Enttappen",
       "titleTap": "Tappen",
       "titleAttach": "Attach",
+      "titleCast": "Wirken",
       "subtitleSacrificeExact_one": "Wähle {{count}} bleibende Karte zum Opfern",
       "subtitleSacrificeExact_other": "Wähle {{count}} bleibende Karten zum Opfern",
       "subtitleSacrificeUpTo_one": "Wähle bis zu {{count}} bleibende Karte zum Opfern",
@@ -1552,6 +1627,12 @@
       "subtitleTopdeckUpTo_other": "Wähle bis zu {{count}} Karten, um sie oben auf deine Bibliothek zu legen",
       "subtitleTopdeckRange_one": "Wähle {{min}}-{{count}} Karte, um sie oben auf deine Bibliothek zu legen",
       "subtitleTopdeckRange_other": "Wähle {{min}}-{{count}} Karten, um sie oben auf deine Bibliothek zu legen",
+      "subtitleBottomdeckExact_one": "Wähle {{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckExact_other": "Wähle {{count}} Karten, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckUpTo_one": "Wähle bis zu {{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckUpTo_other": "Wähle bis zu {{count}} Karten, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckRange_one": "Wähle {{min}}-{{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckRange_other": "Wähle {{min}}-{{count}} Karten, um sie unter deine Bibliothek zu legen",
       "subtitleBattlefieldExact_one": "Wähle {{count}} Karte, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldExact_other": "Wähle {{count}} Karten, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldUpTo_one": "Wähle bis zu {{count}} Karte, um sie auf das Schlachtfeld zu legen",
@@ -1588,16 +1669,26 @@
       "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
       "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
       "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleCastExact_one": "Wähle {{count}} Karte zum Wirken",
+      "subtitleCastExact_other": "Wähle {{count}} Karten zum Wirken",
+      "subtitleCastUpTo_one": "Wähle bis zu {{count}} Karte zum Wirken",
+      "subtitleCastUpTo_other": "Wähle bis zu {{count}} Karten zum Wirken",
+      "subtitleCastRange_one": "Wähle {{min}}-{{count}} Karte zum Wirken",
+      "subtitleCastRange_other": "Wähle {{min}}-{{count}} Karten zum Wirken",
       "labelSkip": "Überspringen",
       "labelDecline": "Ablehnen",
       "labelPutOnTop": "Oben drauflegen ({{order}})",
+      "labelPutOnBottom": "Nach unten legen ({{order}})",
       "labelConfirm": "Bestätigen ({{selected}}/{{count}})",
       "labelTop": "Oben ({{selected}}/{{count}})",
+      "labelBottom": "Unten ({{selected}}/{{count}})",
       "labelPut": "Legen ({{selected}}/{{count}})",
       "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
       "labelExile": "Ins Exil ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
+      "labelCast": "Wirken ({{selected}}/{{count}})",
       "orderTop": "Oben",
+      "orderBottom": "Unten",
       "orderSecond": "2.",
       "orderThird": "3.",
       "orderFourth": "4.",
@@ -1751,7 +1842,8 @@
       "counterDiscard": "{{selected}} von {{cap}} abwerfen",
       "counterKeep": "{{selected}} von {{cap}} behalten",
       "keepInstead": "Stattdessen behalten",
-      "discardInstead": "Stattdessen abwerfen"
+      "discardInstead": "Stattdessen abwerfen",
+      "counterChoose": "Choose {{selected}} of {{cap}}"
     },
     "discard": {
       "title": "Abwerfen",
@@ -1850,6 +1942,42 @@
       "hint": "Ziehen zum Neuordnen · Position 1 landet oben auf diesem Stapel",
       "moveLeft": "Nach links verschieben",
       "moveRight": "Nach rechts verschieben"
+    },
+    "heroEvent": {
+      "chromeOverload": {
+        "title": "Chrome Dome's Overload",
+        "subtitle": "Choose a tapped creature you control to sacrifice"
+      },
+      "krangStratagem": {
+        "title": "Krang's Stratagem",
+        "subtitleUpTo_one": "Choose up to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleUpTo_other": "Choose up to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleMin_one": "Choose {{min}} to {{count}} card to discard (team owes {{remaining}} total)",
+        "subtitleMin_other": "Choose {{min}} to {{count}} cards to discard (team owes {{remaining}} total)",
+        "subtitleExact_one": "Choose {{count}} card to discard",
+        "subtitleExact_other": "Choose {{count}} cards to discard"
+      },
+      "smackdown": {
+        "title": "Leatherhead's Smackdown",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "ratKingRevolution": {
+        "title": "Rat King's Revolution",
+        "subtitle": "Choose a creature you control to tap and stun"
+      },
+      "savantiCurse": {
+        "title": "Savanti Romero's Curse",
+        "subtitle_one": "Choose {{count}} creature you control to return to its owner's hand",
+        "subtitle_other": "Choose {{count}} creatures you control to return to their owners' hands"
+      },
+      "infiltration": {
+        "title": "Villain Infiltration",
+        "subtitle": "As a team, choose a creature with the greatest power to destroy it"
+      },
+      "villainMayhem": {
+        "title": "Villain Mayhem!",
+        "subtitle": "As a team, choose {{count}} creatures to spare — every other creature is destroyed"
+      }
     }
   },
   "specializeColor": {
@@ -2010,6 +2138,10 @@
     "title": "Geschenk-Empfänger wählen",
     "subtitle": "Wähle, welcher Gegner das versprochene Geschenk erhält."
   },
+  "costRecipient": {
+    "title": "Gegner wählen",
+    "subtitle": "Wähle den Gegner für diese Kosten: {{cost}}."
+  },
   "entryController": {
     "title": "Kontrolleur beim Eintreten wählen",
     "subtitle": "Wähle, welcher Gegner diese bleibende Karte beim Eintreten kontrolliert."
@@ -2090,13 +2222,18 @@
   "freeCastWindow": {
     "eyebrow": "Kostenlos wirken",
     "title": "Wirke einen Zauberspruch kostenlos",
+    "titlePlay": "Karten kostenlos spielen",
     "subtitle": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
     "subtitleNoBudget": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
+    "subtitlePlay": "Wähle ein Land zum Spielen oder einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
+    "subtitleNoBudgetPlay": "Wähle ein Land zum Spielen oder einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
     "remainingAny": "beliebig viele",
     "castNamed": "{{name}} wirken",
+    "playNamed": "{{name}} spielen",
     "castSuffix": "(ohne seine Manakosten zu bezahlen)",
     "done": "Fertig",
-    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)"
+    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)",
+    "doneSuffixPlay": "(keine weiteren Karten auf diese Weise spielen)"
   },
   "castingVariant": {
     "eyebrow": "Wirken",
@@ -2179,7 +2316,8 @@
     "unitDamage": "Schaden",
     "unitLife": "Leben",
     "title": "{{total}} {{unit}} verteilen",
-    "subtitle": "Teile jedem Ziel mindestens 1 {{unit}} zu. Verbleibend: {{remaining}}"
+    "subtitle": "Teile jedem Ziel mindestens 1 {{unit}} zu. Verbleibend: {{remaining}}",
+    "subtitleAnyNumber": "Teile jedem gewählten Ziel mindestens 1 {{unit}} zu, beliebig viele davon. Verbleibend: {{remaining}}"
   },
   "dungeonChoice": {
     "title": "Wähle einen Dungeon",
@@ -2265,6 +2403,8 @@
       "fallback": "Triff eine Wahl"
     },
     "searchSubtitle": "Tippe, um alle Karten zu durchsuchen",
+    "secretAgendaTitle": "Nenne heimlich eine Karte ({{current}} von {{total}})",
+    "secretAgendaSubtitle": "Verborgen, bis du diese Verschwörung aufdeckst",
     "searchPlaceholder": "Nach Name suchen...",
     "noCardsFound": "Keine Karten gefunden",
     "buttonSubtitle": "Wähle eine Option",
@@ -2312,7 +2452,31 @@
     "selfManaCost": "seine Manakosten",
     "selfManaValue": "sein Manawert",
     "manaCostReduced": "seine Manakosten, verringert um {{reduction}}",
-    "spliceOnto": "auf {{subtype}} {{cost}}"
+    "spliceOnto": "auf {{subtype}} {{cost}}",
+    "sacrificeArtifact_few": "{{count}} Artefakte opfern",
+    "sacrificeArtifact_many": "{{count}} Artefakte opfern",
+    "sacrificeArtifact_one": "Ein Artefakt opfern",
+    "sacrificeArtifact_other": "{{count}} Artefakte opfern",
+    "sacrificeCreature_few": "{{count}} Kreaturen opfern",
+    "sacrificeCreature_many": "{{count}} Kreaturen opfern",
+    "sacrificeCreature_one": "Eine Kreatur opfern",
+    "sacrificeCreature_other": "{{count}} Kreaturen opfern",
+    "sacrificeLand_few": "{{count}} Länder opfern",
+    "sacrificeLand_many": "{{count}} Länder opfern",
+    "sacrificeLand_one": "Ein Land opfern",
+    "sacrificeLand_other": "{{count}} Länder opfern",
+    "sacrificePermanent_few": "{{count}} bleibende Karten opfern",
+    "sacrificePermanent_many": "{{count}} bleibende Karten opfern",
+    "sacrificePermanent_one": "Eine bleibende Karte opfern",
+    "sacrificePermanent_other": "{{count}} bleibende Karten opfern",
+    "wardDiscardAtRandom_few": "{{count}} Karten nach Zufallsprinzip abwerfen",
+    "wardDiscardAtRandom_many": "{{count}} Karten nach Zufallsprinzip abwerfen",
+    "wardDiscardAtRandom_one": "eine Karte nach Zufallsprinzip abwerfen",
+    "wardDiscardAtRandom_other": "{{count}} Karten nach Zufallsprinzip abwerfen",
+    "wardDiscard_few": "{{count}} Karten abwerfen",
+    "wardDiscard_many": "{{count}} Karten abwerfen",
+    "wardDiscard_one": "eine Karte abwerfen",
+    "wardDiscard_other": "{{count}} Karten abwerfen"
   },
   "resolutionOptionalPayment": {
     "title": "Optionale Zahlung wählen",
@@ -2332,6 +2496,8 @@
       "zoneHand": "deiner Hand",
       "discard": "Wirf {{count}} {{cards}} ab",
       "exile": "Schicke {{count}} {{cards}} aus {{zone}} ins Exil",
+      "haveOpponentGainLife": "Lass einen Gegner {{amount}} Lebenspunkte dazugewinnen",
+      "haveEachOtherPlayerGainLife": "Lass jeden anderen Spieler {{amount}} Lebenspunkte dazugewinnen",
       "reveal": "Zeige {{count}} {{cards}} aus {{zone}} vor"
     }
   },
@@ -2339,6 +2505,7 @@
     "cardFallback": "Card",
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Bottom of library"
   },
   "mutateMerge": {
@@ -2451,6 +2618,7 @@
     "triggerFallback": "Trigger {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Angekündigte Hybrid-Zahlungen",
     "eyebrow": "Reihenfolge der Kostenreduzierungen",
     "title": "Ordne deine Kostenreduzierungen",
     "subtitle": "Je nach Reihenfolge, in der du diese Reduzierungen anwendest, werden andere Gesamtkosten festgelegt (CR 601.2f). Das oberste dieser Liste wird zuerst angewendet.",
@@ -2495,6 +2663,7 @@
   },
   "outsideGame": {
     "fromExile": "Aus dem Exil",
+    "fromCompanion": "Als Gefährte",
     "fromSideboard": "Aus dem Sideboard",
     "fromBoosterPack": "Aus einem {{setCode}}-Booster",
     "fromCubeBoosterPack": "Aus einem Cube-Booster"
@@ -2624,8 +2793,8 @@
     "close": "KI-Entscheidungsfenster schließen"
   },
   "status": {
-    "yourPriority": "Your priority",
-    "yourPriorityReason": "Your priority — {{reason}}",
+    "yourPriority": "Du hast Priorität",
+    "yourPriorityReason": "Du hast Priorität — {{reason}}",
     "waitingFor": "Waiting for <player>{{player}}</player>",
     "waitingForReason": "Waiting for <player>{{player}}</player> — {{reason}}",
     "reason": {
@@ -2669,5 +2838,218 @@
     "reveal_one": "Reveal {{count}} card",
     "reveal_other": "Reveal {{count}} cards",
     "decline": "Don't reveal"
+  },
+  "sandboxTools": {
+    "permissionDenied": "Debug actions are disabled for this seat. The host can grant permission from their own Debug panel.",
+    "actionsTitle": "Debug Actions",
+    "clickModeDescription": "Click Mode: when ON, click any card on the board, in a hand, or in a zone viewer to open a debug menu for it (move zones, modify P/T, add counters, remove) instead of playing it normally. A banner appears at the top while it's active.",
+    "clickModeOn": "● Click Mode ON",
+    "clickMode": "Click Mode",
+    "player": "Player",
+    "life": "Life",
+    "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
+    "count": "Count",
+    "drawCards": "Draw Cards",
+    "mill": "Mill",
+    "revealTop": "Reveal Top",
+    "shuffleLibrary": "Shuffle Library",
+    "proliferate": "Proliferate",
+    "mana": "Mana",
+    "addMana": "Add Mana",
+    "state": "State",
+    "enabled": "Enabled",
+    "apply": "Apply",
+    "counter": "Counter",
+    "delta": "Delta",
+    "modifyCounters": "Modify Counters",
+    "modifyEnergy": "Modify Energy",
+    "givePlayerCounters": "Give Counters",
+    "giveEnergy": "Give Energy",
+    "browseDescription": "Opens a modal of your library in randomized order. Click a card to move it to any zone, or use the quick Battlefield / Hand buttons.",
+    "browseLibrary": "Browse Library",
+    "infiniteMana": "Infinite Mana",
+    "toZone": "To Zone",
+    "position": "Position",
+    "move": "Move",
+    "remove": "Remove",
+    "source": "Source",
+    "pickCopySource": "Pick object to copy…",
+    "owner": "Owner",
+    "nonlegendary": "Make nonlegendary",
+    "copyObject": "Copy Object",
+    "power": "Power",
+    "toughness": "Toughness",
+    "setPT": "Set P/T",
+    "tapped": "Tapped",
+    "setTapState": "Set Tap State",
+    "prepared": "Prepared",
+    "setPreparedState": "Set Prepared State",
+    "controller": "Controller",
+    "setController": "Set Controller",
+    "summoningSick": "Summoning Sick",
+    "setSummoningSickness": "Set Summoning Sickness",
+    "faceDown": "Face Down",
+    "transformed": "Transformed",
+    "flipped": "Flipped",
+    "setFaceState": "Set Face State",
+    "attach": "Attach",
+    "pickAttachment": "Pick an Aura/Equipment…",
+    "targetKind": "Target Kind",
+    "toObject": "To Object",
+    "pickHost": "Pick a host…",
+    "toPlayer": "To Player",
+    "detach": "Detach",
+    "moveToZone": "Move to Zone",
+    "removeObject": "Remove Object",
+    "setBasePT": "Set Base P/T",
+    "setTapped": "Set Tapped",
+    "setPrepared": "Set Prepared",
+    "summoningSickness": "Summoning Sickness",
+    "faceState": "Face State",
+    "counterType": "Counter Type",
+    "counters": "Counters",
+    "cardName": "Card Name",
+    "zone": "Zone",
+    "hostKind": "Host Kind",
+    "attachTo": "Attach To",
+    "runEtb": "Run ETB effects",
+    "createCard": "Create Card",
+    "loadingTokens": "Loading token catalog…",
+    "search": "Search",
+    "searchTokens": "Token, source card, set",
+    "noTokenPresets": "No presets match.",
+    "bodyOnly": "body only",
+    "createSelectedToken": "Create Selected Token",
+    "name": "Name",
+    "token": "Token",
+    "types": "Types",
+    "subtypes": "Subtypes",
+    "subtypesExample": "Human, Soldier",
+    "colors": "Colors",
+    "keywords": "Keywords",
+    "keywordsExample": "Flying, Haste",
+    "createCustomToken": "Create Custom Token",
+    "copyOf": "Copy Of",
+    "pickPermanent": "Pick a permanent…",
+    "createCopy": "Create Copy",
+    "cardCreationUnavailable": "Spawning a card by name needs the in-browser engine. The token forms below work on this connection.",
+    "createCatalogToken": "Create Token (Catalog)",
+    "customToken": "Create Token (Custom)",
+    "copyPermanent": "Copy Permanent",
+    "phase": "Phase",
+    "activePlayer": "Active Player",
+    "setPhase": "Set Phase",
+    "runSBAs": "Run SBAs",
+    "runStateBasedActions": "Run State-Based Actions",
+    "libraryDescription": "Debug: shown in randomized order. Click a card for all zones; use the buttons for quick moves.",
+    "emptyLibrary": "Library is empty.",
+    "battlefieldShort": "BF",
+    "moveBattlefield": "Move to battlefield",
+    "hand": "Hand",
+    "moveHand": "Move to hand",
+    "untap": "Untap",
+    "tap": "Tap",
+    "removeSickness": "Remove Summoning Sickness",
+    "giveSickness": "Give Summoning Sickness",
+    "untransform": "Un-transform",
+    "transform": "Transform",
+    "turnFaceUp": "Turn Face Up",
+    "turnFaceDown": "Turn Face Down",
+    "sacrifice": "Sacrifice",
+    "libraryTop": "Library (top)",
+    "libraryBottom": "Library (bottom)",
+    "set": "Set",
+    "panelTitle": "Debug Panel",
+    "object": "Object",
+    "flow": "Flow",
+    "create": "Create",
+    "console": "console",
+    "actions": "actions",
+    "actionApplied": "{{action}} applied",
+    "actionFailed": "{{action}} failed",
+    "libraryTitle": "Library — Player {{player}} ({{count}})",
+    "tokenLoadFailed": "Failed to load token catalog: {{error}}",
+    "objectId": "Object ID",
+    "useSelectedName": "Use {{name}} ({{id}})",
+    "useSelectedId": "Use {{id}}",
+    "useSelection": "sel",
+    "pickObject": "Pick an object…",
+    "searchObjects": "Search by name or id…",
+    "noObjects": "No matching objects",
+    "you": "you",
+    "artifactTokens": "Artifact tokens (with abilities)",
+    "creatureTokens": "Creature tokens",
+    "auraTokens": "Auras / Roles / Curses",
+    "equipmentTokens": "Equipment tokens",
+    "vehicleTokens": "Vehicle tokens",
+    "enchantmentTokens": "Enchantment tokens",
+    "landTokens": "Land tokens",
+    "planeswalkerTokens": "Planeswalker tokens",
+    "otherArtifactTokens": "Other artifact tokens",
+    "predefinedTokens": "{{kind}} tokens",
+    "objectFallback": "Object {{id}}",
+    "zeroToughnessHint": "0/0 creature dies to state-based actions — add +1/+1 counters to keep it alive (CR 704.5f)."
+  },
+  "physicalContest": {
+    "title": {
+      "staring": "Anstarr-Wettbewerb",
+      "breathHolding": "Luftanhalte-Wettbewerb"
+    },
+    "versus": "{{first}} gegen {{second}}",
+    "instructions": "Klicke, tippe oder drücke die Leertaste, so lange du kannst. Wer zuerst {{seconds}} Sekunden lang aufhört, verliert.",
+    "status": {
+      "pending": "Warten auf den Beginn des Wettbewerbs…",
+      "preparing": "Mach dich bereit…",
+      "go": "LOS! Weiterklicken!",
+      "paused": "Wettbewerb pausiert, bis ein Spieler sich wieder verbindet…",
+      "spectating": "Du siehst dem Wettbewerb zu…",
+      "resolving": "Ergebnis wird ermittelt…"
+    },
+    "button": {
+      "wait": "Auf LOS warten…",
+      "active": "Weiterklicken!"
+    },
+    "you": "Du",
+    "clicks": "{{name}}: {{count}}",
+    "result": {
+      "won": "Du hast den Wettbewerb gewonnen!",
+      "lost": "Du hast den Wettbewerb verloren.",
+      "winner": "{{name}} hat den Wettbewerb gewonnen.",
+      "tie": "Unentschieden – nichts passiert.",
+      "cancelled": "Der Wettbewerb wurde abgebrochen – nichts passiert."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
+    }
   }
 }

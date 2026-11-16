@@ -33,6 +33,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$ROOT/scripts/lobby-servers.sh"
 JQ_DIR="$(dirname "$(command -v jq || echo /usr/bin/jq)")"
 
+NODE_DIR="$(dirname "$(command -v node)")"
+
 PASS=0
 FAIL=0
 
@@ -83,7 +85,7 @@ STUB
 }
 
 run_script() { # $@ = script args; stdout captured in OUT, exit in STATUS
-  OUT="$(PATH="$FIXTURE/bin:$JQ_DIR:/usr/bin:/bin" bash "$SCRIPT" "$@" 2>/dev/null)"
+  OUT="$(PATH="$FIXTURE/bin:$JQ_DIR:$NODE_DIR:/usr/bin:/bin" bash "$SCRIPT" "$@" 2>/dev/null)"
   STATUS=$?
 }
 
@@ -93,10 +95,9 @@ run_script() { # $@ = script args; stdout captured in OUT, exit in STATUS
 # say "/info".
 INFO_PATH="$(grep -oE 'pub const INFO_PATH: &str = "[^"]+"' \
   "$ROOT/crates/lobby-broker/src/directory.rs" | grep -oE '"[^"]+"' | tr -d '"')"
-TREE_LOBBY_PROTOCOL="$(grep -oE 'pub const LOBBY_PROTOCOL_VERSION: u32 = [0-9]+' \
-  "$ROOT/crates/lobby-broker/src/protocol.rs" | grep -oE '[0-9]+$')"
-TREE_PROTOCOL="$(grep -oE 'pub const PROTOCOL_VERSION: u32 = [0-9]+' \
-  "$ROOT/crates/lobby-broker/src/protocol.rs" | grep -oE '[0-9]+$')"
+VERSIONS="$(node "$ROOT/scripts/protocol-versions.mjs" show --json)" || exit 1
+TREE_LOBBY_PROTOCOL="$(jq -er '.lobby' <<< "$VERSIONS")" || exit 1
+TREE_PROTOCOL="$(jq -er '.full' <<< "$VERSIONS")" || exit 1
 
 echo "lobby-servers tests"
 

@@ -81,6 +81,7 @@ fn paid(lhs: QuantityRef, concede_p2: bool) -> usize {
     r.act(GameAction::ActivateAbility {
         source_id: src,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     })
     .expect("the activation starts");
     if matches!(r.state().waiting_for, WaitingFor::TargetSelection { .. }) {

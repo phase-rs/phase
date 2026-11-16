@@ -827,8 +827,8 @@ fn sea_monster_attack_legality_follows_planeswalker_defending_player() {
 /// protector and printed defense — a local copy of
 /// `rules::battle::make_into_siege` (`crates/engine/tests/integration/rules/battle.rs:21-42`).
 /// That helper is private to the `rules` module tree and this file is a
-/// separate top-level `mod` in `tests/integration/main.rs`, so it isn't
-/// reachable from here; duplicating the same `state_mut()`-only construction
+/// separate top-level `mod` in `tests/integration/shard_3.rs`, a different test
+/// target, so it isn't reachable from here; duplicating the same `state_mut()`-only construction
 /// keeps this file's `GameScenario`/`GameRunner`-only style intact rather than
 /// reaching for `create_object` + raw `chosen_attributes` engine internals.
 fn make_into_siege(

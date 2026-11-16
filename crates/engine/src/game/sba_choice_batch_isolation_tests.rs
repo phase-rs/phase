@@ -1,7 +1,7 @@
 //! CR 603.3b + CR 704.5j: an SBA-owned player choice parks its own trigger
 //! batch, which must join the answer's ordering window. An ordinary deferred
 //! context queued beside it — a construction, terminal, or cost-trigger tail —
-//! belongs to its own window and must NOT be absorbed into the answer's.
+//! joins that window only when the queue may drain at the answer's boundary.
 //!
 //! These are crate-internal rather than integration tests for one reason:
 //! `PendingTriggerContext::batch_origin` is `pub(crate)`, so only from inside
@@ -13,7 +13,7 @@ use super::*;
 use crate::game::scenario::{GameScenario, P0};
 use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
 use crate::types::actions::GameAction;
-use crate::types::game_state::{StackEntryKind, WaitingFor};
+use crate::types::game_state::WaitingFor;
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -123,41 +123,26 @@ fn runner_at_mixed_sba_choice() -> (crate::game::scenario::GameRunner, ObjectId,
     (runner, keep, doomed)
 }
 
-/// The production-pipeline regression. Answering the SBA choice must dispatch
-/// ONLY the parked SBA batch alongside the answer's delayed trigger; the
-/// ordinary context keeps its own ordering window.
-///
-/// Before the partition fix this produced a single `OrderTriggers` prompt
-/// listing both the ordinary context and the answer's dies trigger — one
-/// ordering window covering two, which is the defect.
+/// The production-pipeline regression. With no spell on the stack the queue
+/// may drain at the answer's boundary, so the ordinary context and the parked
+/// SBA batch triggered with no priority between them and form one batch.
 #[test]
-fn sba_choice_answer_does_not_absorb_an_ordinary_deferred_context() {
+fn sba_choice_answer_joins_a_drainable_ordinary_deferred_context() {
     let (mut runner, keep, doomed) = runner_at_mixed_sba_choice();
 
     let _ = runner.act(GameAction::ChooseLegend { keep });
 
-    assert!(
-        !matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }),
-        "the ordinary context must not be ordered together with the answer's \
-         delayed trigger; got a combined ordering prompt: {:?}",
-        runner.state().waiting_for
-    );
-
-    let stacked: Vec<ObjectId> = runner
-        .state()
-        .stack
-        .iter()
-        .filter_map(|entry| match &entry.kind {
-            StackEntryKind::TriggeredAbility { source_id, .. } => Some(*source_id),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        stacked,
-        vec![doomed, ORDINARY_SOURCE],
-        "the SBA batch owns the answer's window and goes on the stack first; the \
-         ordinary context follows in its own window"
-    );
+    let WaitingFor::OrderTriggers { player, triggers } = &runner.state().waiting_for else {
+        panic!(
+            "the parked batch and the drainable ordinary context are one ordering \
+             window; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    let mut ordered: Vec<ObjectId> = triggers.iter().map(|t| t.source_id).collect();
+    ordered.sort();
+    assert_eq!(ordered, vec![doomed, ORDINARY_SOURCE]);
 }
 
 /// The unit contract the dispatch above depends on: the take is a PARTITION.

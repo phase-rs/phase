@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { isMissingApiKey, isProfileUsable, useLlmStore } from "../../stores/llmStore";
@@ -56,7 +56,10 @@ export function LlmOpponentsSection() {
   const catalog = useLlmProviderCatalog();
 
   const usableProfiles = profiles.filter((profile) => isProfileUsable(profile, catalog));
-  const defaultOpponent = usableProfiles.find((profile) => profile.id === defaultOpponentProfileId);
+  const defaultOpponent = profiles.find((profile) => profile.id === defaultOpponentProfileId);
+  const opponentOptions = defaultOpponent && !usableProfiles.some((p) => p.id === defaultOpponent.id)
+    ? [defaultOpponent, ...usableProfiles]
+    : usableProfiles;
 
   return (
     <div className="flex flex-col gap-4">
@@ -107,7 +110,7 @@ export function LlmOpponentsSection() {
           selectedValue={defaultOpponent?.id ?? DEFAULT_OPPONENT_ENGINE}
           items={[
             { value: DEFAULT_OPPONENT_ENGINE, label: t("llm.defaultOpponent.engine") },
-            ...usableProfiles.map((profile) => ({
+            ...opponentOptions.map((profile) => ({
               value: profile.id,
               label: profileLabel(profile, t("llm.unnamed")),
             })),
@@ -210,6 +213,8 @@ function ProfileCard({
   const isCustomModel =
     !profile.model || !suggestedModels.some((model) => model.id === profile.model);
   const runTest = useLlmConnectionTest(profile, setTest);
+  const threadSwitchId = useId();
+  const usesMessageThreads = profile.decisionContext === "messageThread";
 
   const onProviderChange = (value: string) => {
     const next = value as LlmProviderId;
@@ -218,12 +223,15 @@ function ProfileCard({
     // together. A model id is vendor-specific, and a key is issued by one
     // vendor -- carrying it over would send an OpenAI key to Anthropic at the
     // first decision. The store enforces this too; clearing it here keeps the
-    // field visibly empty rather than showing a stale masked value.
+    // field visibly empty rather than showing a stale masked value. The
+    // message-thread choice goes too: only one protocol honours it, so a new
+    // vendor starts from the default.
     onChange({
       provider: next,
       model: nextEntry?.defaultModel ?? "",
       baseUrl: null,
       apiKey: "",
+      decisionContext: "selfContained",
     });
   };
 
@@ -374,6 +382,38 @@ function ProfileCard({
         </p>
       </Field>
 
+      {/* Offered only where the engine's catalog says the protocol has message
+          threads; the label is part of the click target, like the switch. */}
+      {entry?.decisionContexts.includes("messageThread") ? (
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-white/8 bg-black/20 px-3 py-2.5">
+          <label htmlFor={threadSwitchId} className="flex min-w-0 cursor-pointer flex-col">
+            <span className="text-xs font-semibold text-slate-200">{t("llm.messageThreads.label")}</span>
+            <span className="text-[10px] leading-relaxed text-slate-400">
+              {t("llm.messageThreads.hint")}
+            </span>
+          </label>
+          <button
+            id={threadSwitchId}
+            type="button"
+            role="switch"
+            aria-checked={usesMessageThreads}
+            aria-label={t("llm.messageThreads.label")}
+            onClick={() =>
+              onChange({ decisionContext: usesMessageThreads ? "selfContained" : "messageThread" })
+            }
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+              usesMessageThreads ? "bg-sky-500" : "bg-white/15"
+            }`}
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                usesMessageThreads ? "translate-x-5" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </div>
+      ) : null}
+
       <div className="flex items-center gap-2">
         <button
           type="button"
@@ -400,13 +440,19 @@ function ProfileCard({
         )}
       </div>
 
-      {isProfileUsable(profile, catalog) && (
+      {isDefaultOpponent ? (
         <DefaultOpponentPrompt
           connected={test.status === "ok"}
-          isDefault={isDefaultOpponent}
+          isDefault={true}
           onMakeDefault={onMakeDefaultOpponent}
         />
-      )}
+      ) : isProfileUsable(profile, catalog) ? (
+        <DefaultOpponentPrompt
+          connected={test.status === "ok"}
+          isDefault={false}
+          onMakeDefault={onMakeDefaultOpponent}
+        />
+      ) : null}
     </div>
   );
 }

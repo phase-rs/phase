@@ -104,6 +104,8 @@ fn make_fetch_ability() -> AbilityDefinition {
     ability.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Library),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(TypedFilter::land()),
@@ -173,6 +175,7 @@ fn fetchland_candidate(fetch: ObjectId) -> CandidateAction {
         action: GameAction::ActivateAbility {
             source_id: fetch,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
         metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
     }

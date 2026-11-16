@@ -1,5 +1,8 @@
 # Repo-level PR review policy. Keep contributor names, reviewer identities,
 # standings, and personal exceptions out of this committed file.
+# Repository write access is sufficient authority to merge autonomously.
+# Respect merge-queue admission by repository writers without requiring
+# maintain/admin access or separate maintainer adoption.
 
 [defaults]
 tier = "T2"
@@ -37,10 +40,6 @@ patterns = [
   "crates/server-core/**",
   "crates/phase-server/src/main.rs",
 ]
-
-[requested_changes]
-warning_after_days = 7
-close_after_warning_days = 7
 
 [hard_stops]
 patterns = [

@@ -6,7 +6,7 @@ import {
   evaluateDeckCompatibility,
   type DeckCompatibilityResult,
 } from "../../../services/deckCompatibility";
-import { resolveCommander } from "../../../services/deckParser";
+import { resolveCommander } from "../../../services/commanderResolution";
 import { SAVED_DECK_REWRITTEN_EVENT, STORAGE_KEY_PREFIX } from "../../../constants/storage";
 
 const eligible = new Set<string>();
@@ -43,8 +43,8 @@ vi.mock("../../../adapter/wasm-adapter", () => ({
   getSharedAdapter: () => ({}),
 }));
 
-vi.mock("../../../services/deckParser", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../services/deckParser")>();
+vi.mock("../../../services/commanderResolution", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../services/commanderResolution")>();
   return { ...actual, resolveCommander: vi.fn(actual.resolveCommander) };
 });
 

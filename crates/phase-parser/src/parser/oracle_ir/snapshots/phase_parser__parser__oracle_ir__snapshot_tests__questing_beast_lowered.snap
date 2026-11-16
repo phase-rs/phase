@@ -1,0 +1,147 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "unknown",
+        "description": "Vigilance, deathtouch, haste"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "Vigilance, deathtouch, haste",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "AddRestriction",
+        "restriction": {
+          "type": "DamagePreventionDisabled",
+          "source": 0,
+          "expiry": {
+            "type": "EndOfTurn"
+          },
+          "scope": {
+            "type": "SourcesControlledBy",
+            "data": 0
+          }
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": null,
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "DamageDone",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "DealDamage",
+          "amount": {
+            "type": "Ref",
+            "qty": {
+              "type": "EventContextAmount"
+            }
+          },
+          "target": {
+            "type": "Typed",
+            "type_filters": [
+              "Planeswalker"
+            ],
+            "controller": "TriggeringPlayer",
+            "properties": []
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": null,
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "CombatOnly",
+      "secondary": false,
+      "valid_target": {
+        "type": "Typed",
+        "type_filters": [],
+        "controller": "Opponent",
+        "properties": []
+      },
+      "valid_source": {
+        "type": "SelfRef"
+      },
+      "description": "Whenever ~ deals combat damage to an opponent, it deals that much damage to target planeswalker that player controls.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [
+    {
+      "mode": {
+        "CantBeBlockedBy": {
+          "filter": {
+            "type": "Typed",
+            "type_filters": [
+              "Creature"
+            ],
+            "controller": null,
+            "properties": [
+              {
+                "type": "PtComparison",
+                "stat": "Power",
+                "scope": "Current",
+                "comparator": "LE",
+                "value": {
+                  "type": "Fixed",
+                  "value": 2
+                }
+              }
+            ]
+          }
+        }
+      },
+      "affected": {
+        "type": "SelfRef"
+      },
+      "modifications": [],
+      "condition": null,
+      "affected_zone": null,
+      "effect_zone": null,
+      "active_zones": [],
+      "characteristic_defining": false,
+      "description": "~ can't be blocked by creatures with power 2 or less."
+    }
+  ],
+  "replacements": [],
+  "extractedKeywords": []
+}

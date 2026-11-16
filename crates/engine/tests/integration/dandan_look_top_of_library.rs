@@ -7,6 +7,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -424,6 +425,7 @@ mod top_plot {
                 .act(GameAction::ActivateAbility {
                     source_id: top,
                     ability_index: index,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .expect("the holder plots the pile top");
             let plotted = &runner.state().objects[&top];
@@ -460,6 +462,7 @@ mod top_plot {
                 .act(GameAction::ActivateAbility {
                     source_id: top,
                     ability_index: index,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .is_err(),
             "the owner of the pile top cannot plot it without the permission"
@@ -479,6 +482,7 @@ mod top_plot {
             .act(GameAction::ActivateAbility {
                 source_id: own_top,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("the holder plots its own top");
         assert_eq!(runner.state().objects[&own_top].zone, Zone::Exile);

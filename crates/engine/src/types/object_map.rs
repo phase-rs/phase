@@ -14,8 +14,11 @@
 //!
 //! Sharing between a map and its clones is not part of game state. It is never
 //! serialized or hashed, and it is observable only through
-//! [`ObjectMap::ptr_eq`] and [`ObjectMap::shares_object_with`].
+//! [`ObjectMap::ptr_eq`], [`ObjectMap::shares_object_with`] and
+//! [`ObjectMap::unshared_ids`]. Callers may use sharing only to skip work whose
+//! result it cannot change.
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::ops::{Index, IndexMut};
 use std::sync::Arc;
@@ -193,6 +196,44 @@ impl ObjectMap {
         match (self.inner.get(&id), other.inner.get(&id)) {
             (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs),
             _ => false,
+        }
+    }
+
+    /// The ids whose entries differ between this map and `other`: present in
+    /// only one of them, or present in both as different allocations. Every
+    /// other id is the same allocation in both maps and so holds an identical
+    /// object. A rewrite that left an object's content unchanged is still
+    /// reported.
+    pub fn unshared_ids(&self, other: &Self) -> BTreeSet<ObjectId> {
+        if self.ptr_eq(other) {
+            return BTreeSet::new();
+        }
+        let rewritten = self
+            .inner
+            .iter()
+            .filter(|&(id, mine)| {
+                other
+                    .inner
+                    .get(id)
+                    .is_none_or(|theirs| !Arc::ptr_eq(mine, theirs))
+            })
+            .map(|(id, _)| *id);
+        let added = other
+            .inner
+            .keys()
+            .filter(|id| !self.inner.contains_key(id))
+            .copied();
+        rewritten.chain(added).collect()
+    }
+
+    /// A map holding the entries of `ids` this map contains, each sharing its
+    /// object's allocation with this map. Ids this map lacks are skipped.
+    pub fn restricted_to(&self, ids: &BTreeSet<ObjectId>) -> Self {
+        Self {
+            inner: ids
+                .iter()
+                .filter_map(|id| self.inner.get(id).map(|object| (*id, Arc::clone(object))))
+                .collect(),
         }
     }
 
@@ -831,5 +872,78 @@ mod tests {
 
         assert_eq!(asked, 40);
         assert!(map.ptr_eq(&before));
+    }
+
+    /// A clone has no unshared id. After writes, `unshared_ids` names exactly
+    /// the written, inserted and removed ids, in both directions.
+    #[test]
+    fn unshared_ids_is_empty_for_a_clone_and_names_each_write() {
+        let original = map_of(40);
+        assert!(original.len() >= 40);
+        assert!(original.unshared_ids(&original.clone()).is_empty());
+
+        let mut written = original.clone();
+        written
+            .get_mut(&ObjectId(7))
+            .expect("object 7 exists")
+            .tapped = true;
+        written.insert(ObjectId(99), object(99));
+        written.remove(&ObjectId(12));
+
+        let expected = BTreeSet::from([ObjectId(7), ObjectId(12), ObjectId(99)]);
+        assert_eq!(original.unshared_ids(&written), expected);
+        assert_eq!(written.unshared_ids(&original), expected);
+        assert!(!original.unshared_ids(&written).contains(&ObjectId(8)));
+    }
+
+    /// Identity, not equality: a write that leaves an object's content
+    /// unchanged still unshares it, so the id is reported.
+    #[test]
+    fn unshared_ids_names_a_rewrite_with_equal_content() {
+        let original = map_of(40);
+        assert!(original.len() >= 40);
+        let mut written = original.clone();
+        let _ = written.get_mut(&ObjectId(21)).expect("object 21 exists");
+
+        assert_eq!(
+            json(&written[&ObjectId(21)]),
+            json(&original[&ObjectId(21)])
+        );
+        assert_eq!(
+            original.unshared_ids(&written),
+            BTreeSet::from([ObjectId(21)])
+        );
+    }
+
+    /// `restricted_to` keeps the selected objects as the same allocations,
+    /// skips ids the map lacks, and serializes through the store's adapter as
+    /// the store's own serialized map filtered to those ids.
+    #[test]
+    fn restricted_to_shares_and_serializes_like_the_store() {
+        let map = map_of(40);
+        assert!(map.len() >= 40);
+        let ids = BTreeSet::from([ObjectId(3), ObjectId(17), ObjectId(31), ObjectId(500)]);
+
+        let restricted = map.restricted_to(&ids);
+
+        assert_eq!(
+            keys_of(&restricted).into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([ObjectId(3), ObjectId(17), ObjectId(31)])
+        );
+        for id in [ObjectId(3), ObjectId(17), ObjectId(31)] {
+            assert!(restricted.shares_object_with(&map, id), "{id:?} copied");
+        }
+        let mut whole =
+            serialize_sorted(&map, serde_json::value::Serializer).expect("the store serializes");
+        whole
+            .as_object_mut()
+            .expect("the store serializes as a map")
+            .retain(|key, _| ["3", "17", "31"].contains(&key.as_str()));
+        assert_eq!(whole.as_object().map(serde_json::Map::len), Some(3));
+        assert_eq!(
+            serialize_sorted(&restricted, serde_json::value::Serializer)
+                .expect("the restriction serializes"),
+            whole
+        );
     }
 }

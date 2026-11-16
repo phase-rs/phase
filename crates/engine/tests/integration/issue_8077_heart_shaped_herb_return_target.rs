@@ -92,6 +92,7 @@ fn activate_and_choose(runner: &mut GameRunner, herb: ObjectId, chosen: ObjectId
         .act(GameAction::ActivateAbility {
             source_id: herb,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Heart-Shaped Herb must succeed with cost paid in full");
 

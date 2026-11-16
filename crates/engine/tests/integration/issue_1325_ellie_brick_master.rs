@@ -147,4 +147,21 @@ fn ellie_creates_token_for_other_attacking_player_in_three_player_game() {
         cordyceps_tokens(&runner, P0).is_empty(),
         "Ellie's controller must not create the token when another player attacks"
     );
+
+    // CR 508.4: "that opponent" is the opponent P1 attacked, P2 — not P1 itself.
+    let token = cordyceps_tokens(&runner, P1)[0];
+    let seat = runner
+        .state()
+        .combat
+        .as_ref()
+        .expect("combat must be live")
+        .attackers
+        .iter()
+        .find(|a| a.object_id == token)
+        .map(|a| a.attack_target);
+    assert_eq!(
+        seat,
+        Some(AttackTarget::Player(P2)),
+        "the token attacks the opponent its creator attacked"
+    );
 }

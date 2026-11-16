@@ -40,6 +40,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
@@ -306,42 +307,54 @@ fn fiery_annihilation_narrows_equipment_slot_and_binds_rider_to_creature_slot() 
     assert_eq!(*target, TargetFilter::ParentTargetSlot { index: 0 });
 }
 
-/// Out of class: "that creature" names no earlier declared target slot (a
-/// trigger's other combatant; a granted trigger's own source). The fail-closed
-/// gap stays. Paired with a reach guard that the clause was reached.
+/// In class, no declared slot: "that creature" in a trigger body names the
+/// event's other combatant, not an earlier announced slot. Those clauses now
+/// lower to the filter-matched host (`AttachedTo { Host { ParentTarget } }`)
+/// and invent NO `DeclaredTarget` — the no-invented-slot guard is the
+/// load-bearing half. Shackles of Treachery's granted-trigger clause names no
+/// slot either and keeps its pre-existing `unparsed_verb_arguments` gap.
 #[test]
-fn referents_without_a_declared_slot_keep_their_gap() {
-    for (oracle, name, core, gap) in [
-        (
-            TREEFOLK_MYSTIC,
-            "Treefolk Mystic",
-            "Creature",
-            "attached_to_qualifier",
-        ),
-        (
-            CORROSIVE_OOZE,
-            "Corrosive Ooze",
-            "Creature",
-            "attached_to_qualifier",
-        ),
-        (
-            SHACKLES_OF_TREACHERY,
-            "Shackles of Treachery",
-            "Sorcery",
-            "unparsed_verb_arguments",
-        ),
+fn referents_without_a_declared_slot_lower_to_the_filter_matched_host() {
+    for (oracle, name, core) in [
+        (TREEFOLK_MYSTIC, "Treefolk Mystic", "Creature"),
+        (CORROSIVE_OOZE, "Corrosive Ooze", "Creature"),
     ] {
         let parsed = parse_oracle_text(oracle, name, &[], &types(core), &[]);
         let json = serde_json::to_string(&parsed).expect("serialize parse");
         assert!(
-            json.contains(gap),
-            "{name}: the attachment clause must keep its `{gap}` gap: {json}"
+            json.contains("\"Host\""),
+            "{name}: the clause lowers to the filter-matched host: {json}"
+        );
+        assert!(
+            json.contains("ParentTarget"),
+            "{name}: the host is the event's other combatant: {json}"
         );
         assert!(
             !json.contains("DeclaredTarget"),
             "{name}: no declared-slot referent may be invented: {json}"
         );
+        assert!(
+            !json.contains("attached_to_qualifier"),
+            "{name}: the gap is gone: {json}"
+        );
     }
+
+    let parsed = parse_oracle_text(
+        SHACKLES_OF_TREACHERY,
+        "Shackles of Treachery",
+        &[],
+        &types("Sorcery"),
+        &[],
+    );
+    let json = serde_json::to_string(&parsed).expect("serialize parse");
+    assert!(
+        json.contains("unparsed_verb_arguments"),
+        "Shackles keeps its granted-trigger gap: {json}"
+    );
+    assert!(
+        !json.contains("DeclaredTarget"),
+        "Shackles: no declared-slot referent may be invented: {json}"
+    );
 }
 
 /// Two earlier creature targets make "that creature" ambiguous: no
@@ -3357,6 +3370,7 @@ fn spellskite_on_fiery(with_equipment: bool) -> (GameRunner, ObjectId, ObjectId,
         .act(GameAction::ActivateAbility {
             source_id: spellskite,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Spellskite");
     if matches!(

@@ -4,15 +4,18 @@
  * asserts on the user-visible English copy, so framing bugs (e.g. "Your
  * priority" shown to a spectator) are caught at the rendered-text level.
  */
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { Phase, StackEntry, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
+import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
+import { usePriorityAttentionStore } from "../../../stores/priorityAttentionStore.ts";
 import {
   buildGameState,
   buildStackEntry,
+  targetSelectionWaitingForFactory,
 } from "../../../test/factories/gameStateFactory.ts";
 import { TurnStatusLine } from "../TurnStatusLine.tsx";
 
@@ -28,6 +31,7 @@ function createGameState(o: { active_player?: number; phase?: Phase; stack?: Sta
 }
 
 const ONE_STACK_ENTRY = [buildStackEntry({ id: 50 })];
+const initialVisualPreference = usePreferencesStore.getState().priorityAlertVisual;
 
 function setup(opts: { seat: number; waitingFor: WaitingFor; state?: Parameters<typeof createGameState>[0]; spectate?: boolean }) {
   useGameStore.setState({
@@ -46,11 +50,15 @@ describe("TurnStatusLine", () => {
   beforeEach(() => {
     useGameStore.getState().reset();
     useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false, playerNames: new Map() });
+    usePriorityAttentionStore.getState().publish({ cue: "none", chimeCount: 0 });
+    usePreferencesStore.setState({ priorityAlertVisual: true });
   });
   afterEach(() => {
     cleanup();
     useGameStore.getState().reset();
     useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false, playerNames: new Map() });
+    usePriorityAttentionStore.getState().publish({ cue: "none", chimeCount: 0 });
+    usePreferencesStore.setState({ priorityAlertVisual: initialVisualPreference });
   });
 
   it("announces the local player's own priority with the phase reason", () => {
@@ -92,5 +100,74 @@ describe("TurnStatusLine", () => {
     setup({ seat: 0, waitingFor: { type: "GameOver", data: { winner: 0 } } });
     render(<TurnStatusLine />);
     expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("tracks pending attention, escalation, dismissal, and the visual preference", () => {
+    setup({ seat: 0, waitingFor: { type: "Priority", data: { player: 0 } } });
+    render(<TurnStatusLine />);
+    const region = screen.getByRole("status");
+    expect(region).not.toHaveClass("priority-attention-glow");
+
+    act(() => usePriorityAttentionStore.getState().publish({ cue: "announced", chimeCount: 1 }));
+    expect(region).toHaveClass("priority-attention-glow");
+    expect(region).not.toHaveClass("priority-attention-glow-escalated");
+
+    act(() => usePriorityAttentionStore.getState().publish({ cue: "reminded", chimeCount: 1 }));
+    expect(region).toHaveClass("priority-attention-glow", "priority-attention-glow-escalated");
+
+    act(() => usePreferencesStore.getState().setPriorityAlertVisual(false));
+    expect(region).not.toHaveClass("priority-attention-glow");
+    expect(region).not.toHaveClass("priority-attention-glow-escalated");
+
+    act(() => usePreferencesStore.getState().setPriorityAlertVisual(true));
+    expect(region).toHaveClass("priority-attention-glow", "priority-attention-glow-escalated");
+
+    act(() => usePriorityAttentionStore.getState().publish({ cue: "none", chimeCount: 1 }));
+    expect(region).not.toHaveClass("priority-attention-glow");
+    expect(region).not.toHaveClass("priority-attention-glow-escalated");
+  });
+
+  it("outlines the local player's own decision, pulsing only while the Glow preference is on", () => {
+    setup({ seat: 0, waitingFor: { type: "Priority", data: { player: 0 } } });
+    render(<TurnStatusLine />);
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent("Your priority");
+    // The border holds for the whole decision, independent of the attention cue.
+    expect(region).toHaveClass("priority-turn-border", "priority-turn-border-pulse");
+
+    act(() => usePreferencesStore.getState().setPriorityAlertVisual(false));
+    expect(region).toHaveClass("priority-turn-border");
+    expect(region).not.toHaveClass("priority-turn-border-pulse");
+
+    act(() => usePreferencesStore.getState().setPriorityAlertVisual(true));
+    act(() => usePriorityAttentionStore.getState().publish({ cue: "reminded", chimeCount: 1 }));
+    expect(region).toHaveClass(
+      "priority-turn-border",
+      "priority-turn-border-pulse",
+      "priority-attention-glow",
+    );
+  });
+
+  it("outlines a non-priority decision of the local player too", () => {
+    setup({ seat: 0, waitingFor: targetSelectionWaitingForFactory.forPlayer(0).build() });
+    render(<TurnStatusLine />);
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent("Your priority");
+    expect(region).toHaveClass("priority-turn-border");
+  });
+
+  it.each([
+    { player: 1, spectate: false },
+    { player: 0, spectate: true },
+  ])("never cues another player's decision or a spectator ($player, $spectate)", ({ player, spectate }) => {
+    setup({ seat: 0, waitingFor: { type: "Priority", data: { player } }, spectate });
+    usePriorityAttentionStore.getState().publish({ cue: "reminded", chimeCount: 1 });
+    render(<TurnStatusLine />);
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent(/Waiting for/);
+    expect(region).not.toHaveClass("priority-attention-glow");
+    expect(region).not.toHaveClass("priority-attention-glow-escalated");
+    expect(region).not.toHaveClass("priority-turn-border");
+    expect(region).not.toHaveClass("priority-turn-border-pulse");
   });
 });

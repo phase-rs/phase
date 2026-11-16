@@ -26,6 +26,7 @@
 //! Both tests drive the REAL pipeline: a verbatim-Oracle spell cast from hand and
 //! resolved off the stack, never a direct call to the authority.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::DelayedTriggerCondition;
 use engine::types::mana::ManaCost;
@@ -481,7 +482,7 @@ fn exact_retirement_validates_the_whole_batch_before_any_mutation() {
     assert_exact_retirement_rejection(
         state.clone(),
         vec![effects[0].clone(), non_state],
-        Error::NotStateDuration(effects[1].id),
+        Error::NotRetirable(effects[1].id),
     );
     let mut ambiguous = state.clone();
     ambiguous

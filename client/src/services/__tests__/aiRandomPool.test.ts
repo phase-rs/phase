@@ -7,11 +7,23 @@ import {
   candidatePassesFilters,
   cedhSeatProblem,
   pickAiSeatDecks,
+  resolveBracketDrawBase,
+  resolveEffectiveAiRandomPool,
+  resolveRandomDrawPool,
   restrictAiPoolByBracket,
   type BracketTaggedCandidate,
   type CedhSeatProblem,
+  type EffectiveAiRandomPoolOptions,
   type PickAiSeatDecksOptions,
+  type RandomDrawPoolOptions,
 } from "../aiRandomPool";
+import {
+  emptyPoolSelection,
+  feedPoolGroup,
+  folderPoolGroup,
+  PRECON_POOL_GROUP,
+} from "../randomPoolSelection";
+import { DECK_FOLDERS_KEY, DECK_METADATA_KEY } from "../../constants/storage";
 
 interface FakeCandidate extends BracketTaggedCandidate {
   id: string;
@@ -226,6 +238,187 @@ describe("pickAiSeatDecks", () => {
   it("treats an unknown pinned id as Random", () => {
     const catalog = [deck("a", { coveragePct: 95 }), deck("b", { coveragePct: 55 })];
     expect(pick(catalog, ["gone"], { coverageFloor: 90 })).toEqual(["a"]);
+  });
+
+  it("never draws a Random seat from an excluded deck id", () => {
+    const catalog = [deck("a"), deck("b")];
+    for (const roll of [0, 0.5, 0.99]) {
+      vi.spyOn(Math, "random").mockReturnValue(roll);
+      expect(
+        pick(catalog, [AI_DECK_RANDOM], {
+          poolSelection: { ...emptyPoolSelection(), excludedDecks: ["b"] },
+        }),
+      ).toEqual(["a"]);
+    }
+  });
+
+  it("excludes a whole feed group from Random seats", () => {
+    const catalog = [
+      deck("keep", { source: { type: "feed", feedId: "alpha" } }),
+      deck("drop", { source: { type: "feed", feedId: "beta" } }),
+    ];
+    vi.spyOn(Math, "random").mockReturnValue(0.99);
+    expect(
+      pick(catalog, [AI_DECK_RANDOM], {
+        poolSelection: { ...emptyPoolSelection(), excludedGroups: [feedPoolGroup("beta")] },
+      }),
+    ).toEqual(["keep"]);
+  });
+
+  it("falls back to the bracket pool when the selection matches nothing", () => {
+    const catalog = [deck("a"), deck("b")];
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    expect(
+      pick(catalog, [AI_DECK_RANDOM], {
+        poolSelection: { ...emptyPoolSelection(), excludedGroups: [PRECON_POOL_GROUP] },
+      }),
+    ).toEqual(["a"]);
+  });
+
+  it("still serves a pinned seat its deck when the selection excludes it", () => {
+    const catalog = [deck("a"), deck("b")];
+    expect(
+      pick(catalog, ["b"], {
+        poolSelection: { ...emptyPoolSelection(), excludedDecks: ["b"] },
+      }),
+    ).toEqual(["b"]);
+  });
+
+  it("resolves a saved deck's folder through the stored library", () => {
+    localStorage.setItem(
+      DECK_FOLDERS_KEY,
+      JSON.stringify([{ id: "f1", name: "Aggro", order: 0 }]),
+    );
+    localStorage.setItem(
+      DECK_METADATA_KEY,
+      JSON.stringify({ Aggro: { addedAt: 1, folderId: "f1" } }),
+    );
+    const catalog = [
+      deck("saved:Aggro", { name: "Aggro", source: { type: "saved" } }),
+      deck("saved:Loose", { name: "Loose", source: { type: "saved" } }),
+    ];
+    try {
+      // Roll 0, not 0.99: with the folder exclusion applied the pool holds
+      // only Loose (index 0 either way), but a bypassed curation would serve
+      // pool [Aggro, Loose] where roll 0 picks the excluded Aggro. A 0.99
+      // roll selects the last entry on both paths and cannot discriminate.
+      vi.spyOn(Math, "random").mockReturnValue(0);
+      expect(
+        pick(catalog, [AI_DECK_RANDOM], {
+          poolSelection: { ...emptyPoolSelection(), excludedGroups: [folderPoolGroup("f1")] },
+        }),
+      ).toEqual(["saved:Loose"]);
+    } finally {
+      localStorage.clear();
+    }
+  });
+});
+
+describe("resolveBracketDrawBase", () => {
+  it("returns the bracket pool when non-empty", () => {
+    const catalog = [deck("a", { bracket: 2 }), deck("b", { bracket: 5 })];
+    expect(
+      resolveBracketDrawBase(catalog, {
+        bracketFilter: [2],
+        cedhMode: false,
+        selectedFormat: "Commander",
+      }).map((d) => d.id),
+    ).toEqual(["a"]);
+  });
+
+  it("falls back to the catalog when the bracket pool is empty", () => {
+    const catalog = [deck("a", { bracket: 2 })];
+    expect(
+      resolveBracketDrawBase(catalog, {
+        bracketFilter: [5],
+        cedhMode: false,
+        selectedFormat: "Commander",
+      }).map((d) => d.id),
+    ).toEqual(["a"]);
+  });
+
+  it("restricts to bracket 5 in cEDH mode", () => {
+    const catalog = [deck("a", { bracket: 2 }), deck("b", { bracket: 5 })];
+    expect(
+      resolveBracketDrawBase(catalog, {
+        bracketFilter: [],
+        cedhMode: true,
+        selectedFormat: "Commander",
+      }).map((d) => d.id),
+    ).toEqual(["b"]);
+  });
+});
+
+describe("resolveRandomDrawPool", () => {
+  const catalog = [deck("a", { bracket: 2 }), deck("b", { bracket: 2 }), deck("c", { bracket: 5 })];
+  const options: RandomDrawPoolOptions = {
+    bracketFilter: [2],
+    cedhMode: false,
+    selectedFormat: "Commander",
+  };
+
+  it("layers curation after the bracket restriction", () => {
+    const { pool, fellBack } = resolveRandomDrawPool(catalog, {
+      ...options,
+      poolSelection: { ...emptyPoolSelection(), excludedDecks: ["a"] },
+    });
+    expect(pool.map((d) => d.id)).toEqual(["b"]);
+    expect(fellBack).toBe(false);
+  });
+
+  it("falls back to the bracket pool when the selection matches nothing", () => {
+    const { pool, fellBack } = resolveRandomDrawPool(catalog, {
+      ...options,
+      poolSelection: { ...emptyPoolSelection(), excludedDecks: ["a", "b"] },
+    });
+    expect(pool.map((d) => d.id)).toEqual(["a", "b"]);
+    expect(fellBack).toBe(true);
+  });
+
+  it("returns the bracket base untouched without a selection", () => {
+    const { pool, fellBack } = resolveRandomDrawPool(catalog, options);
+    expect(pool.map((d) => d.id)).toEqual(["a", "b"]);
+    expect(fellBack).toBe(false);
+  });
+});
+
+describe("resolveEffectiveAiRandomPool", () => {
+  const base: EffectiveAiRandomPoolOptions = {
+    bracketFilter: [],
+    cedhMode: false,
+    selectedFormat: "Commander",
+    archetypeFilter: "Any",
+    coverageFloor: 90,
+  };
+
+  it("falls back to the curated pool when soft preferences empty it", () => {
+    // The reported case: excluding only the coverage-95 deck must preview
+    // Random (1) — the coverage-55 deck production would draw — not Random (0).
+    const catalog = [deck("hi", { coveragePct: 95 }), deck("lo", { coveragePct: 55 })];
+    expect(
+      resolveEffectiveAiRandomPool(catalog, {
+        ...base,
+        poolSelection: { ...emptyPoolSelection(), excludedDecks: ["hi"] },
+      }).map((d) => d.id),
+    ).toEqual(["lo"]);
+  });
+
+  it("falls back to the catalog when the bracket restriction matches nothing", () => {
+    const catalog = [deck("b2", { bracket: 2 }), deck("b4", { bracket: 4 })];
+    expect(
+      resolveEffectiveAiRandomPool(catalog, {
+        ...base,
+        bracketFilter: [5],
+        coverageFloor: 0,
+      }).map((d) => d.id),
+    ).toEqual(["b2", "b4"]);
+  });
+
+  it("narrows to the soft-filtered pool when preferences match", () => {
+    const catalog = [deck("hi", { coveragePct: 95 }), deck("lo", { coveragePct: 55 })];
+    expect(
+      resolveEffectiveAiRandomPool(catalog, base).map((d) => d.id),
+    ).toEqual(["hi"]);
   });
 });
 

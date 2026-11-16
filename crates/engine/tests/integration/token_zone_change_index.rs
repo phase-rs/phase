@@ -34,9 +34,9 @@
 //! global one is dominated by the ordinary-move `TurnRecordIndexMismatch` invariant in `zones.rs`
 //! and panics before any assertion here.
 //!
-//! **Filter trap:** `cargo test --test integration <bare_fn_name> -- --exact` runs ZERO tests and
+//! **Filter trap:** `cargo test --test integration_5 <bare_fn_name> -- --exact` runs ZERO tests and
 //! exits `0`. The module path is mandatory:
-//! `cargo test -p phase-engine --test integration token_zone_change_index::<fn> -- --exact`.
+//! `cargo test -p phase-engine --test integration_5 token_zone_change_index::<fn> -- --exact`.
 //! Always check the `N passed` count — a vacuous filter reports `ok. 0 passed`.
 //!
 //! MEASURED at this tip: `second_same_turn_token_batch_still_triggers`,
@@ -119,6 +119,7 @@ fn mint_token_batch(state: &mut GameState, source: ObjectId, count: i32) -> Vec<
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -604,6 +605,7 @@ fn suppressed_liminal_copy_token_entry_is_recorded_once() {
         .act(engine::types::actions::GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
 
@@ -985,6 +987,7 @@ fn drive_embalm_copy(
         .act(GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
 
@@ -1236,7 +1239,7 @@ fn suppressed_liminal_copy_token_entry_realizes_through_a_mandatory_as_enters_ch
     //     board's ETB observers fire. The action-boundary convergence would also produce +1 here
     //     (it runs the same pipeline over the slice it appends), so this assertion pins THAT the
     //     observer fires, not WHERE the realization happened; the Fanatic test's `OrderTriggers(2)`
-    //     is what pins the boundary route specifically.
+    //     is what pins trigger ordering after the second entry pause.
     assert_eq!(
         life_of_p0(runner.state()) - life_start,
         1,
@@ -1250,14 +1253,14 @@ fn suppressed_liminal_copy_token_entry_realizes_through_a_mandatory_as_enters_ch
 /// trips of two different prompt shapes. This is the shape a fix hung off any single prompt
 /// variant's resume arm cannot see.
 ///
-/// REVERT-PROBE (discriminating, RUN): delete the `run_post_action_pipeline_from` block in
-/// `engine::apply_action_boundary_core` (leaving the bare realize call) ⇒ the reach-guard below
-/// loses its `"OrderTriggers(2)"` element and fails first, and the Soul Warden assertion goes
-/// 1 → 0. No other test in this file moves.
+/// Historical revert probe, before acquired choices parked entry-completion carriers: deleting
+/// the action-boundary convergence lost `"OrderTriggers(2)"` and Soul Warden's life gain. With
+/// carriers, realization can happen inside the drain, so Tribute now reaches the shared reducer
+/// pipeline rather than depending on a second realization at the boundary.
 ///
-/// CR 603.6a: this class settles through `handle_tribute_choice`, which builds its `ActionResult`
-/// directly in the reducer match and never reaches `run_post_action_pipeline`, so the
-/// action-boundary convergence is what runs the ETB check for it. TWO abilities trigger — Soul
+/// CR 603.6a: this class settles through `handle_tribute_choice`. Its resumed entry carrier can
+/// realize the entry inside the handler, so the shared post-action pipeline must scan those
+/// events even when the boundary has no parked entry left to realize. TWO abilities trigger — Soul
 /// Warden's observer and the copy's own CR 603.4 "if tribute wasn't paid" ETB — same controller,
 /// so CR 603.3b makes their order the controller's choice and the ordering prompt is REQUIRED
 /// here, not an artifact of the harness.
@@ -1953,6 +1956,7 @@ fn copy_token_effect(additional_modifications: Vec<ContinuousModification>) -> E
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
         extra_keywords: Vec::new(),
@@ -2526,6 +2530,7 @@ fn spec_token_effect(types: Vec<String>, attach_to: Option<TargetFilter>, name: 
         owner: TargetFilter::Controller,
         attach_to,
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })],

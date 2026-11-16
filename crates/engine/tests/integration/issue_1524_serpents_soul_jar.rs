@@ -86,6 +86,7 @@ fn issue_1524_soul_jar_exiles_elf_and_offers_cast_from_exile() {
         .act(GameAction::ActivateAbility {
             source_id: jar,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Soul-Jar activated ability should succeed");
 

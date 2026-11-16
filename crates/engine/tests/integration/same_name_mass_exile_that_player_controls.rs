@@ -904,6 +904,7 @@ fn refused_deputy_does_not_stop_a_later_dark_depths_marit_lage() {
         .act(GameAction::ActivateAbility {
             source_id: depths,
             ability_index: activation,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Dark Depths");
     settle(&mut runner);
@@ -1116,6 +1117,7 @@ fn mass_exile_that_exiles_its_own_source_still_satisfies_if_you_do() {
         .act(GameAction::ActivateAbility {
             source_id: host,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate");
     settle(&mut runner);

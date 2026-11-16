@@ -348,6 +348,7 @@ fn anti_self_harm_verdict(board: &Board) -> PolicyVerdict {
         action: GameAction::ActivateAbility {
             source_id: board.troops,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
         metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
     };
@@ -590,6 +591,7 @@ mod cast_arm {
             GameAction::ActivateAbility {
                 source_id: assassin,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         );
         assert_eq!(
@@ -740,6 +742,7 @@ mod split_ability_leg {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };

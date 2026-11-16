@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useEffect, useState } from "react";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { DeckBuilder } from "../DeckBuilder";
@@ -8,7 +8,7 @@ import type { GameFormat } from "../../../adapter/types";
 import { getSharedAdapter } from "../../../adapter/wasm-adapter";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
 import { canonicalizeSavedDeckNames } from "../../../services/deckMigrations";
-import { resolveCommander } from "../../../services/deckParser";
+import { resolveCommander } from "../../../services/commanderResolution";
 import { useIsMobile } from "../../../hooks/useIsMobile";
 import {
   ACTIVE_DECK_KEY,
@@ -61,13 +61,9 @@ vi.mock("../../../hooks/useDecks", () => ({
   loadPreconDeckMap: vi.fn(),
 }));
 
-vi.mock("../../../services/deckParser", async () => {
-  const actual = await vi.importActual<typeof import("../../../services/deckParser")>("../../../services/deckParser");
-  return {
-    ...actual,
-    resolveCommander: vi.fn(async (deck) => deck),
-  };
-});
+vi.mock("../../../services/commanderResolution", () => ({
+  resolveCommander: vi.fn(async (deck) => deck),
+}));
 
 vi.mock("../CardSearch", () => ({
   CardSearch: ({ onResults }: { onResults: (cards: unknown[], total: number) => void }) => {
@@ -924,6 +920,61 @@ describe("DeckBuilder", () => {
         localStorage.getItem(STORAGE_KEY_PREFIX + "Oath Deck") ?? "{}",
       );
       expect("signature_spell" in persisted).toBe(false);
+    });
+  });
+
+  describe("deck export", () => {
+    const renderCommanderDeck = async () => {
+      localStorage.setItem(
+        STORAGE_KEY_PREFIX + "Export Deck",
+        JSON.stringify({
+          main: [
+            { name: "Lightning Bolt", count: 4 },
+            { name: "Forest", count: 20 },
+          ],
+          sideboard: [],
+          commander: ["Atraxa, Praetors' Voice"],
+          format: "Commander",
+        }),
+      );
+      render(
+        <DeckBuilder
+          format="Commander"
+          onFormatChange={vi.fn()}
+          initialDeckName="Export Deck"
+          searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}
+          onSearchFiltersChange={vi.fn()}
+          onResetSearch={vi.fn()}
+        />,
+      );
+      const nameInput = await screen.findByRole("textbox", { name: "Deck name" });
+      await waitFor(() => expect(nameInput).toHaveValue("Export Deck"));
+    };
+
+    it("exports the deck from the stack view", async () => {
+      const user = userEvent.setup();
+      await renderCommanderDeck();
+
+      await user.click(screen.getByRole("button", { name: "Stack view" }));
+      expect(screen.getByText("Deck Stack")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Export deck" }));
+
+      const dialog = await screen.findByRole("dialog", { name: "Export Deck" });
+      const exported = (within(dialog).getByRole("textbox") as HTMLTextAreaElement).value;
+      expect(exported).toContain("[Main]\n4 Lightning Bolt");
+    });
+
+    it("exports the deck with its commander from the list view", async () => {
+      const user = userEvent.setup();
+      await renderCommanderDeck();
+
+      expect(screen.getByText("Deck List")).toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "Export deck" }));
+
+      const dialog = await screen.findByRole("dialog", { name: "Export Deck" });
+      expect(within(dialog).getByRole("textbox")).toHaveValue(
+        "[Commander]\n1 Atraxa, Praetors' Voice\n[Main]\n4 Lightning Bolt\n20 Forest\n",
+      );
     });
   });
 

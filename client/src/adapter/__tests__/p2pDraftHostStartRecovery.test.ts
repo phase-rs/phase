@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { clearDraftHostSession, loadDraftHostSession, saveDraftHostSession } = vi.hoisted(() => ({
   clearDraftHostSession: vi.fn(async () => {}),
-  loadDraftHostSession: vi.fn(async () => null),
+  loadDraftHostSession: vi.fn(async () => ({ type: "absent" })),
   saveDraftHostSession: vi.fn<(id: string, session: unknown) => Promise<void>>(async () => {}),
 }));
 vi.mock("../../services/draftPersistence", () => ({

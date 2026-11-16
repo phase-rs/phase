@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::static_abilities::prohibition_scope_matches_player;
@@ -152,6 +153,12 @@ pub(crate) fn allowed_draw_count(
     let Some(player) = state.players.iter().find(|p| p.id == player_id) else {
         return 0;
     };
+    // CR 800.4a: a player who has left the game is no longer a player in it and
+    // draws nothing; a draw still owed to them is an event that can't happen
+    // (CR 614.17c), like one a can't-draw effect forbids.
+    if player.is_eliminated {
+        return 0;
+    }
 
     let mut allowed = count;
     // CR 702.26b + CR 604.1: `battlefield_active_statics` owns the phased-out /
@@ -451,6 +458,9 @@ fn prompt_up_to_draw_count(
             // `waits_for_resolution_choice`. Handing them over here as well
             // would run the tail twice.
             continuation: None,
+            // CR 608.2 (run boon-blockers-20261010): synthetic draw-amount
+            // branches carry no trigger-event context — None is a no-op.
+            trigger_context: None,
             // CR 614.5 + CR 616.1f: a replacement effect "gets only one
             // opportunity to affect an event". Carry the already-applied keys
             // into the branch so the answered draw cannot re-invoke a
@@ -2163,6 +2173,7 @@ mod tests {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
                     destination: Zone::Graveyard,
+                    position: crate::types::ability::LibraryPosition::Top,
                 };
             }),
             ("another drawer", |ability| {
@@ -2315,6 +2326,8 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,
@@ -2390,6 +2403,8 @@ mod tranche4_draw_pipeline_tests {
         let redirect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Graveyard,
                 target: TargetFilter::SelfRef,

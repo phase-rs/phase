@@ -1,6 +1,8 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::object_data::BackFaceData;
 use crate::types::resolved_commands::{
     ResolvedObjectTransformCommand, ResolvedObjectTransformReplayInvariantError,
 };
@@ -131,6 +133,47 @@ pub fn transform_permanent(
     object_id: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
+    let Some(other_face) = face_swap_subject(state, object_id)? else {
+        return Ok(());
+    };
+
+    // CR 613.7g: a double-faced permanent receives a new timestamp when it
+    // transforms. All blocked/no-op early-returns above (off-battlefield,
+    // CantTransform, meld, no back face) precede this, so they draw no timestamp.
+    let ts = state.next_timestamp();
+    let obj = state.objects.get_mut(&object_id).unwrap();
+    obj.timestamp = ts;
+    // CR 701.27f: Track successful transforms/conversions to ignore stale
+    // self-transform instructions from abilities already on the stack.
+    obj.transformation_count = obj.transformation_count.wrapping_add(1);
+
+    swap_displayed_face(state, object_id, other_face);
+    events.push(GameEvent::Transformed { object_id });
+
+    Ok(())
+}
+
+/// CR 712.14a + CR 702.145b: Turn a permanent that is entering the battlefield
+/// "transformed" back face up. It enters that way rather than transforming
+/// (CR 701.27a), so it keeps its entry timestamp (CR 613.7d), counts no
+/// CR 701.27f transform, and emits no `GameEvent::Transformed`.
+pub(crate) fn enter_back_face_up(
+    state: &mut GameState,
+    object_id: ObjectId,
+) -> Result<(), EngineError> {
+    let Some(other_face) = face_swap_subject(state, object_id)? else {
+        return Ok(());
+    };
+    swap_displayed_face(state, object_id, other_face);
+    Ok(())
+}
+
+/// The face a battlefield permanent would turn to, or `None` when a face-swap
+/// instruction is a silent no-op for it.
+fn face_swap_subject(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Result<Option<BackFaceData>, EngineError> {
     let obj = state
         .objects
         .get(&object_id)
@@ -145,49 +188,33 @@ pub fn transform_permanent(
     // A blocked, melded, or flip permanent ignores the instruction before a
     // meld result's intentionally absent back-face payload is inspected.
     if transform_instruction_is_noop(state, object_id) {
-        return Ok(());
+        return Ok(None);
     }
-    let back_face = obj
-        .back_face
+    obj.back_face
         .clone()
-        .ok_or_else(|| EngineError::InvalidAction("Card has no back face".to_string()))?;
+        .map(Some)
+        .ok_or_else(|| EngineError::InvalidAction("Card has no back face".to_string()))
+}
 
-    // CR 613.7g: a double-faced permanent receives a new timestamp when it
-    // transforms. All blocked/no-op early-returns above (off-battlefield,
-    // CantTransform, meld, no back face) precede this, so they draw no timestamp.
-    // Drawn before the `get_mut` borrow (`next_timestamp` takes `&mut self`).
-    let ts = state.next_timestamp();
-
+/// Swaps the displayed face and journals the swap with the object's settled
+/// timestamp and transformation count.
+fn swap_displayed_face(state: &mut GameState, object_id: ObjectId, other_face: BackFaceData) {
     let obj = state.objects.get_mut(&object_id).unwrap();
-
-    if obj.transformed {
-        let current_back = snapshot_object_face(obj);
-        apply_back_face_to_object(obj, back_face);
-        obj.back_face = Some(current_back);
-        obj.transformed = false;
-    } else {
-        let current_front = snapshot_object_face(obj);
-        apply_back_face_to_object(obj, back_face);
-        obj.back_face = Some(current_front);
-        obj.transformed = true;
-    }
-    // Written after `apply_back_face_to_object` (which does not touch
-    // `timestamp`) so the single write covers both flip directions and cannot
-    // be clobbered by the back-face application.
-    obj.timestamp = ts;
-    // CR 701.27f: Track successful transforms/conversions to ignore stale
-    // self-transform instructions from abilities already on the stack.
-    obj.transformation_count = obj.transformation_count.wrapping_add(1);
+    let displayed = snapshot_object_face(obj);
+    apply_back_face_to_object(obj, other_face);
+    obj.back_face = Some(displayed);
+    obj.transformed = !obj.transformed;
 
     let reference = ObjectIncarnationRef::from_object(obj);
     let resulting_transformed = obj.transformed;
+    let resulting_timestamp = obj.timestamp;
     let resulting_transformation_count = obj.transformation_count;
 
     crate::game::layers::mark_layers_full(state);
 
-    // CR 733: journal the settled transform through its owning family. Every
-    // no-op guard above returned before the swap, so only a transform that
-    // actually changed the displayed face is recorded.
+    // CR 733: journal the settled face swap through its owning family. Every
+    // no-op guard returned before the swap, so only a swap that actually changed
+    // the displayed face is recorded.
     let cause = state.current_or_begin_rules_execution_node();
     state
         .resolved_rules_journal
@@ -195,15 +222,11 @@ pub fn transform_permanent(
             object: reference,
             expected_old_transformed: !resulting_transformed,
             resulting_transformed,
-            resulting_timestamp: ts,
+            resulting_timestamp,
             resulting_transformation_count,
             cause,
         })
         .expect("resolved transform must have a live journal cause");
-
-    events.push(GameEvent::Transformed { object_id });
-
-    Ok(())
 }
 
 /// CR 701.27a + CR 613.7g: Apply one exact already-resolved transform.

@@ -1003,15 +1003,15 @@ fn every_from_none_battlefield_entry_construction_lives_in_the_authority() {
 
     assert_eq!(
         (production.len(), test_scoped.len()),
-        (3, 11),
+        (3, 13),
         "the no-origin-zone battlefield-entry construction surface moved. Expected 3 production \
          constructions — the authority plus two adjudicated survivors:{ADJUDICATED_SURVIVORS}\
          A NEW production hit means a SEVENTH clone of the record/emit split was written: route it \
          through `zones::record_and_emit_entry_from_no_zone` instead. A REMOVED hit means the \
-         authority or a survivor moved. The 11 test-scoped hits include \
-         the Saga entry-boundary regression, 7 other constructions spelled `from: None`, \
-         and 3 written in field-init shorthand \
-         (`analysis/sim.rs`, `trigger_matchers.rs`, `targeting.rs`), which the shorthand branch of \
+         authority or a survivor moved. The 13 test-scoped hits include \
+         the Saga entry-boundary regression, 8 other constructions spelled `from: None`, \
+         and 4 written in field-init shorthand \
+         (`analysis/sim.rs`, `trigger_matchers.rs`, `targeting.rs`, `game_state.rs`), which the shorthand branch of \
          `classify` is what sees. \
          Production hits = {production:#?}"
     );
@@ -1209,7 +1209,7 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
     // this conjunct does not try: it pins the whole `.extend(` / `.append(` / `.resize(` /
     // `.splice(` population instead, and a new one anywhere in `engine/src` turns this red so a
     // human reads the argument. Kept as a separate pin rather than folded into conjunct 1 for a
-    // measured reason: folding would take the pin to `(7, 0)` and put `counters.rs` and
+    // measured reason: folding would raise conjunct 1's pin and put `counters.rs` and
     // `token_copy.rs` — whose ABSENCE is conjunct 1's whole claim — back into the multiset, and
     // would add a non-authority function to conjunct 2's list.
     let ambiguous = census_with(classify_ambiguous_mutators);
@@ -1220,7 +1220,7 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
             ambiguous_production.len(),
             ambiguous.len() - ambiguous_production.len()
         ),
-        (5, 0),
+        (6, 0),
         "the argument-ambiguous mutator surface on the two anaphora containers moved. These are \
          the calls whose SINGLE-ID-ness this census cannot read, so they are pinned instead of \
          classified. If the new call's argument is a bulk source (a `Vec`, a \
@@ -1229,25 +1229,53 @@ fn every_single_id_anaphora_publish_lives_in_an_authority() {
          Ambiguous hits = {ambiguous_production:#?}"
     );
 
-    // Issue #5904 moved TWO of these from `counters.rs` to `token_copy.rs` without changing
-    // the total, which is exactly the shape this pin's own instructions ask for. The
-    // `ContinueCopyTokenCreation` resume arm's `if let Some(pending) = active_copy_token_mut()
-    // { pending.created_ids.extend(..) } else { last_created_token_ids.extend(..) }` pair was
-    // about to be COPIED verbatim into the new `ContinueCopyTokenEntryAfterAuraHost` resume,
-    // so it was lifted into `token_copy::extend_copy_batch_created_ids` instead and both arms
-    // now call it. Same five calls, same bulk arguments (`status.created_ids`, a `Vec`), one
-    // fewer place to write the destination-selection rule wrong. `counters.rs` therefore drops
-    // out of this multiset entirely; its absence is now a claim, not an omission.
+    // Issue #5904 moved the copy-batch resume arms' bulk republishes out of `counters.rs` into
+    // `token_copy.rs`, and `counters.rs` has carried none since; its absence from this multiset
+    // is a claim, not an omission. The three post-action arms that restart a paused copy batch
+    // (`ContinueCopyTokenCreation`, the Aura-host resume, the copied entry-payment resume) now
+    // all call `token_copy::resume_copy_token_batch_remainder`, the one bulk republish they
+    // share. Its `pending.created_ids.extend(status.created_ids)` (a `Vec`) is the one hit it
+    // contributes; its frameless branch assigns the continuation's prefixed list onto ledger 3
+    // instead, so it is not a mutator this conjunct pins. The other `token_copy.rs` hits are the
+    // CopyToken batch loop's `.extend(state.last_created_token_ids.clone())` pair.
+    //
+    // The compound CreateToken event (CR 614.1a: a batch a replacement appends belongs to the one
+    // modified event) added one more, in `token.rs`: `token::repark_event_copy_frame`'s
+    // `frame.created_ids.extend(ids)`. A bulk argument (a `Vec`): the event's ordered ids at
+    // completion, or the ledger at a copy batch's pause, handed to the CopyToken owner the
+    // delivery detached. It is the ONE hand-over site for every re-park of that owner, so the
+    // pause and completion paths cannot pick different ids. Since #10762 r3 the single-batch copy
+    // branch of `apply_create_token_batch` uses it too: it detaches the owner for the batch, so the
+    // delivery's raw `pending.created_ids.extend(status.created_ids)`, which appended a batch the
+    // liminal terminal had already merged, is gone.
+    //
+    // The copy batch ledger's re-sync onto the CopyToken owner added one more, in `token.rs`:
+    // `token::record_copy_batch_ledger_on_active_copy_token`'s `pending.created_ids.extend(
+    // unlisted)`. A bulk argument (a `Vec`): the ids of the guarded ledger 3 the owner does not
+    // list yet. It replaced four assignments of ledger 3 onto the owner, which dropped the
+    // earlier batches' tokens once a paused batch resumed (CR 608.2c), so it publishes nothing
+    // the ledger's own guard withheld.
+    //
+    // #10762's substituted-batch custody added one more, in `token_copy.rs`: the resumed
+    // owner's adoption of a substituted batch, `drain_copy_token_resolution`'s first
+    // `.extend(state.last_created_token_ids.clone())`. A bulk argument (a clone of ledger 3):
+    // the tokens the creation that replaced the owner's offered batch published (CR 614.6),
+    // read once when the owner resumes with that batch still marked
+    // (`OfferedBatchCustody::AtReplacementPrompt`). No delivery handed that batch's ids to the
+    // owner, so it lists none of them yet.
     assert_eq!(
         production_multiset(&ambiguous_production),
         vec![
-            ("engine/src/game/effects/token.rs".to_string(), 1),
+            ("engine/src/game/effects/token.rs".to_string(), 2),
             ("engine/src/game/effects/token_copy.rs".to_string(), 4),
         ],
-        "per-file argument-ambiguous mutator multiset moved. All five of these are bulk \
-         republishes today — `.extend(status.created_ids)` and `.extend(state.\
-         last_created_token_ids.clone())` — and the pin exists so that a SIXTH cannot arrive \
-         without someone reading its argument"
+        "per-file argument-ambiguous mutator multiset moved. All six of these are bulk \
+         republishes today — `resume_copy_token_batch_remainder`'s `.extend(status.created_ids)`, \
+         the batch loop's `.extend(state.last_created_token_ids.clone())` pair, \
+         `repark_event_copy_frame`'s `.extend(ids)`, the ledger re-sync's `.extend(unlisted)` and \
+         the resumed owner's adoption of a substituted batch (`drain_copy_token_resolution`'s \
+         first `.extend(state.last_created_token_ids.clone())`) — and the pin exists so that a \
+         SEVENTH cannot arrive without someone reading its argument"
     );
 }
 

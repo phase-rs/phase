@@ -30,8 +30,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::move_to_library_position;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectKind, LibraryPosition,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectKind, FilterProp, LibraryPosition,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -255,12 +255,12 @@ fn assert_parses_to_opponent_graveyard_trigger(
         .filter(|def| {
             matches!(def.mode, TriggerMode::ChangesZone)
                 && def.destination == Some(Zone::Graveyard)
+                // CR 400.3: "an opponent's graveyard" scopes the card's owner.
                 && matches!(
-                    def.valid_card,
-                    Some(TargetFilter::Typed(TypedFilter {
-                        controller: Some(ControllerRef::Opponent),
-                        ..
-                    }))
+                    &def.valid_card,
+                    Some(TargetFilter::Typed(typed)) if typed.properties.contains(
+                        &FilterProp::Owned { controller: ControllerRef::Opponent }
+                    )
                 )
         })
         .collect();
@@ -634,13 +634,38 @@ fn tainted_pact_draw_survives_a_replacement_order_prompt_on_its_graveyard_move()
         "precondition: this regression is about a starved producer"
     );
 
-    let outcome = runner.cast(pact).resolve();
+    let commit = runner.cast(pact).commit();
+    let mut direct = commit.state().clone();
+    engine::game::stack::resolve_top(&mut direct, &mut Vec::new());
+    let reach = "reach guard: resolved without an action boundary, the same state records the \
+                 CR 104.4b draw and then parks a CR 616.1 order choice on Tainted Pact's \
+                 graveyard move";
+    assert_eq!(
+        direct.game_end.as_ref().map(|end| end.winner),
+        Some(None),
+        "{reach}"
+    );
+    assert!(
+        matches!(direct.waiting_for, WaitingFor::ReplacementChoice { .. }),
+        "{reach}, got {:?}",
+        direct.waiting_for
+    );
+    assert!(direct.pending_replacement.is_some(), "{reach}");
+    let outcome = commit.resolve();
 
     assert_exile_top_resolved(outcome.events());
+    assert_eq!(
+        outcome.state().objects[&pact].zone,
+        Zone::Stack,
+        "the action reached the same parked graveyard move"
+    );
     assert!(
-        outcome.state().pending_replacement.is_some(),
-        "reach guard: the two exile-instead redirects must have parked a CR 616.1 \
-         order choice on Tainted Pact's graveyard move"
+        !outcome.state().stack.iter().any(|entry| entry.id == pact),
+        "the action reached the same parked graveyard move"
+    );
+    assert!(
+        outcome.state().pending_replacement.is_none(),
+        "CR 104.1: the finished game retires the order choice"
     );
     assert!(
         matches!(
@@ -1227,6 +1252,8 @@ fn parent_target_move_after_an_empty_exile_top_moves_nothing() {
     );
     ability.sub_ability = Some(Box::new(ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Hand,
             target: TargetFilter::ParentTarget,

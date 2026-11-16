@@ -25,6 +25,31 @@ export function ChoiceOverlay({
   const { t } = useTranslation("game");
   const contentRef = useRef<HTMLDivElement>(null);
   const peek = useOptionalDialogPeek();
+  const [canScrollUp, setCanScrollUp] = useState(false);
+  const [canScrollDown, setCanScrollDown] = useState(false);
+
+  // Overlay scrollbars (macOS, touch) are invisible until the user scrolls, so
+  // a tall option list reads as clipped. Edge fades make the overflow explicit.
+  const updateScrollState = useCallback(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    setCanScrollUp(el.scrollTop > 1);
+    setCanScrollDown(el.scrollTop < el.scrollHeight - el.clientHeight - 1);
+  }, []);
+
+  useEffect(() => {
+    const el = contentRef.current;
+    if (!el) return;
+    updateScrollState();
+    const observer = new ResizeObserver(updateScrollState);
+    observer.observe(el);
+    for (const child of Array.from(el.children)) observer.observe(child);
+    el.addEventListener("scroll", updateScrollState, { passive: true });
+    return () => {
+      observer.disconnect();
+      el.removeEventListener("scroll", updateScrollState);
+    };
+  }, [updateScrollState, children]);
 
   return (
     <div
@@ -55,13 +80,31 @@ export function ChoiceOverlay({
           {/* When the peek tab is mounted it overlaps the card's right edge (~24px),
               so reserve right clearance to keep edge-aligned interactive content
               (e.g. the rightmost color symbol) selectable instead of under the tab. */}
-          <div
-            ref={contentRef}
-            className={`flex min-h-0 flex-1 flex-col overflow-y-auto pl-2 pt-3 pb-2 lg:pl-5 lg:pt-5 lg:pb-5 ${
-              peek ? "pr-10 lg:pr-12" : "pr-2 lg:pr-5"
-            }`}
-          >
-            {children}
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            <div
+              ref={contentRef}
+              className={`thin-scrollbar flex min-h-0 flex-1 flex-col overflow-y-auto pl-2 pt-3 pb-2 lg:pl-5 lg:pt-5 lg:pb-5 ${
+                peek ? "pr-10 lg:pr-12" : "pr-2 lg:pr-5"
+              }`}
+            >
+              {children}
+            </div>
+            <div
+              aria-hidden
+              className={`pointer-events-none absolute inset-x-0 top-0 h-8 bg-gradient-to-b from-[#0b1020] to-transparent transition-opacity duration-150 ${
+                canScrollUp ? "opacity-100" : "opacity-0"
+              }`}
+            />
+            <div
+              aria-hidden
+              className={`pointer-events-none absolute inset-x-0 bottom-0 flex h-12 items-end justify-center bg-gradient-to-t from-[#0b1020] to-transparent pb-1 transition-opacity duration-150 ${
+                canScrollDown ? "opacity-100" : "opacity-0"
+              }`}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5 text-white/70">
+                <path fillRule="evenodd" d="M5.22 8.22a.75.75 0 0 1 1.06 0L10 11.94l3.72-3.72a.75.75 0 1 1 1.06 1.06l-4.25 4.25a.75.75 0 0 1-1.06 0L5.22 9.28a.75.75 0 0 1 0-1.06Z" clipRule="evenodd" />
+              </svg>
+            </div>
           </div>
           {footer && (
             <div className="shrink-0 border-t border-white/5 px-2 pb-3 pt-1 lg:px-5 lg:pb-5 lg:pt-2">
