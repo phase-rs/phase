@@ -22,7 +22,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -51,6 +51,12 @@ const RUBINIA: &str = "You may choose not to untap Rubinia Soulsinger during you
     {T}: Gain control of target creature for as long as you control Rubinia Soulsinger and \
     Rubinia Soulsinger remains tapped.";
 const PHYREXIAN_ALTAR: &str = "Sacrifice a creature: Add one mana of any color.";
+const ALADDIN: &str =
+    "{1}{R}{R}, {T}: Gain control of target artifact for as long as you control this creature.";
+const GUSTHAS_SCEPTER: &str = "{T}: Exile a card from your hand face down. You may look at it for \
+    as long as it remains exiled.\n{T}: Return a card you own exiled with this artifact to your \
+    hand.\nWhen you lose control of this artifact, put all cards exiled with this artifact into \
+    their owner's graveyard.";
 const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
 const AUSTERE_COMMAND: &str = "Choose two \u{2014}\n\u{2022} Destroy all artifacts.\n\u{2022} \
     Destroy all enchantments.\n\u{2022} Destroy all creatures with mana value 3 or less.\n\
@@ -168,15 +174,21 @@ fn make_aura(runner: &mut GameRunner, aura: ObjectId, enchant: TypedFilter) {
     obj.base_keywords.push(enchant);
 }
 
+/// A zero-cost instant or sorcery (`kind`) in `player`'s hand. The scenario
+/// builder takes a bool; the conversion stays at that boundary.
 fn add_free_spell(
     scenario: &mut GameScenario,
     player: PlayerId,
     name: &str,
-    instant: bool,
+    kind: CoreType,
     text: &str,
 ) -> ObjectId {
+    assert!(
+        matches!(kind, CoreType::Instant | CoreType::Sorcery),
+        "a spell kind: {kind:?}"
+    );
     scenario
-        .add_spell_to_hand_from_oracle(player, name, instant, text)
+        .add_spell_to_hand_from_oracle(player, name, kind == CoreType::Instant, text)
         .with_mana_cost(ManaCost::zero())
         .id()
 }
@@ -262,7 +274,13 @@ fn control_magic_on_and_off_fires_kharn_for_the_loser() {
     let mut scenario = kharn_board(2);
     let kharn = add_kharn(&mut scenario, P0);
     let magic = add_aura(&mut scenario, P1, "Control Magic", CONTROL_MAGIC);
-    let naturalize = add_free_spell(&mut scenario, P1, "Naturalize", true, NATURALIZE);
+    let naturalize = add_free_spell(
+        &mut scenario,
+        P1,
+        "Naturalize",
+        CoreType::Instant,
+        NATURALIZE,
+    );
     let mut runner = scenario.build();
     make_aura(&mut runner, magic, TypedFilter::creature());
     give_priority(&mut runner, P1);
@@ -333,7 +351,13 @@ fn act_of_treason_and_its_cleanup_reversion_publish_once() {
     let mut scenario = kharn_board(2);
     scenario.at_phase(Phase::PostCombatMain);
     let kharn = add_kharn(&mut scenario, P0);
-    let treason = add_free_spell(&mut scenario, P1, "Act of Treason", false, ACT_OF_TREASON);
+    let treason = add_free_spell(
+        &mut scenario,
+        P1,
+        "Act of Treason",
+        CoreType::Sorcery,
+        ACT_OF_TREASON,
+    );
     let mut runner = scenario.build();
     give_priority(&mut runner, P1);
 
@@ -583,6 +607,113 @@ fn concession_that_ends_a_rubinia_steal_fires_kharn_for_the_thief() {
     assert_eq!(p1_lib - library_size(&runner, P1), 2);
 }
 
+/// L2 (CR 514.2 + CR 514.3a + CR 603.10d): on P1's turn P1 seizes P0's Aladdin
+/// and steals P0's Gustha's Scepter with it ("for as long as you control this
+/// creature"), then exiles an Island with the Scepter. At cleanup Word of
+/// Seizing ends and Aladdin returns to P0, so the Scepter's control duration
+/// ends and its return to P0 is derived by the layer pass alone. P1 lost
+/// control of the Scepter: its trigger is P1's, stacked in that same cleanup
+/// step, and puts the Island into P1's graveyard.
+#[test]
+fn cleanup_aladdin_return_ends_its_steal_in_the_same_cleanup() {
+    let mut scenario = kharn_board(2);
+    scenario.at_phase(Phase::PostCombatMain);
+    let aladdin = scenario
+        .add_creature_from_oracle(P0, "Aladdin", 1, 1, ALADDIN)
+        .with_subtypes(vec!["Human", "Rogue"])
+        .id();
+    let scepter = scenario
+        .add_artifact_from_oracle(P0, "Gustha's Scepter", GUSTHAS_SCEPTER)
+        .id();
+    let word = add_word_of_seizing(&mut scenario, P1);
+    let island = scenario.add_land_to_hand(P1, "Island").id();
+    scenario.with_mana_pool(
+        P1,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    give_priority(&mut runner, P1);
+
+    runner.cast(word).target_object(aladdin).resolve();
+    runner.advance_until_stack_empty();
+    runner.activate(aladdin, 0).target_object(scepter).resolve();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        (controller(&runner, aladdin), controller(&runner, scepter)),
+        (P1, P1),
+        "REACH: P1 controls both"
+    );
+
+    give_priority(&mut runner, P1);
+    let mut events = Vec::new();
+    act(
+        &mut runner,
+        GameAction::ActivateAbility {
+            source_id: scepter,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        },
+        &mut events,
+    );
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => act(&mut runner, GameAction::PassPriority, &mut events),
+            WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                assert!(cards.contains(&island), "REACH: the Island is offered");
+                act(
+                    &mut runner,
+                    GameAction::SelectCards {
+                        cards: vec![island],
+                    },
+                    &mut events,
+                );
+            }
+            // "You may look at it for as long as it remains exiled."
+            WaitingFor::OptionalEffectChoice { source_id, .. } if source_id == scepter => act(
+                &mut runner,
+                GameAction::DecideOptionalEffect { accept: true },
+                &mut events,
+            ),
+            other => panic!("unexpected prompt while exiling with the Scepter: {other:?}"),
+        }
+    }
+    assert_eq!(runner.state().objects[&island].zone, Zone::Exile, "REACH");
+    assert!(
+        runner
+            .state()
+            .exile_links
+            .iter()
+            .any(|link| link.source_id == scepter && link.exiled_id == island),
+        "REACH: the Island is linked to the Scepter"
+    );
+
+    let turn = runner.state().turn_number;
+    let mut events = Vec::new();
+    drive_until(&mut runner, &mut events, "cleanup", |state| {
+        state.phase == Phase::Cleanup || state.turn_number != turn
+    });
+    let state = runner.state();
+    assert_eq!(state.turn_number, turn, "still P1's turn");
+    assert_eq!(
+        state.phase,
+        Phase::Cleanup,
+        "CR 514.3a: priority in cleanup"
+    );
+    assert_eq!(state.waiting_for, WaitingFor::Priority { player: P1 });
+    assert_eq!(changes_of(&events, aladdin), vec![(P1, P0)]);
+    assert_eq!(changes_of(&events, scepter), vec![(P1, P0)]);
+    assert_eq!(state.stack.len(), 1, "exactly the Scepter's trigger");
+    assert_eq!(state.stack[0].source_id, scepter);
+    assert_eq!(state.stack[0].controller, P1);
+    settle(&mut runner, &mut events);
+    let island_obj = &runner.state().objects[&island];
+    assert_eq!(island_obj.zone, Zone::Graveyard);
+    assert_eq!(island_obj.owner, P1);
+}
+
 /// H3 (CR 603.10 + CR 603.3a): Confiscate gives P1 Risky Move. P1 gained control
 /// of it from another player, so P1's Risky Move trigger chooses P1's creature
 /// and opponent P0, and on a lost flip (CR 705.2) P0 gains that creature.
@@ -687,7 +818,13 @@ fn austere_command_destroying_control_magic_returns_kharn_and_fires_for_the_thie
     let mut scenario = kharn_board(2);
     let kharn = add_kharn(&mut scenario, P0);
     let magic = add_aura(&mut scenario, P1, "Control Magic", CONTROL_MAGIC);
-    let command = add_free_spell(&mut scenario, P1, "Austere Command", false, AUSTERE_COMMAND);
+    let command = add_free_spell(
+        &mut scenario,
+        P1,
+        "Austere Command",
+        CoreType::Sorcery,
+        AUSTERE_COMMAND,
+    );
     let mut runner = scenario.build();
     make_aura(&mut runner, magic, TypedFilter::creature());
     give_priority(&mut runner, P1);
@@ -729,7 +866,13 @@ fn austere_command_returns_kharn_between_its_two_destroys() {
     let mut scenario = kharn_board(2);
     let kharn = add_kharn(&mut scenario, P0);
     let magic = add_aura(&mut scenario, P1, "Control Magic", CONTROL_MAGIC);
-    let command = add_free_spell(&mut scenario, P1, "Austere Command", false, AUSTERE_COMMAND);
+    let command = add_free_spell(
+        &mut scenario,
+        P1,
+        "Austere Command",
+        CoreType::Sorcery,
+        AUSTERE_COMMAND,
+    );
     let mut runner = scenario.build();
     make_aura(&mut runner, magic, TypedFilter::creature());
     give_priority(&mut runner, P1);
@@ -783,7 +926,7 @@ fn destroying_the_stolen_creature_alone_publishes_no_control_change() {
     let mut scenario = kharn_board(2);
     let kharn = add_kharn(&mut scenario, P0);
     let magic = add_aura(&mut scenario, P1, "Control Magic", CONTROL_MAGIC);
-    let murder = add_free_spell(&mut scenario, P0, "Murder", true, MURDER);
+    let murder = add_free_spell(&mut scenario, P0, "Murder", CoreType::Instant, MURDER);
     let mut runner = scenario.build();
     make_aura(&mut runner, magic, TypedFilter::creature());
     give_priority(&mut runner, P1);
@@ -829,7 +972,13 @@ fn artisans_sorrow_scry_pause_round_trip_fires_kharn_exactly_once() {
     let mut scenario = kharn_board(2);
     let kharn = add_kharn(&mut scenario, P0);
     let magic = add_aura(&mut scenario, P1, "Control Magic", CONTROL_MAGIC);
-    let sorrow = add_free_spell(&mut scenario, P0, "Artisan's Sorrow", true, ARTISANS_SORROW);
+    let sorrow = add_free_spell(
+        &mut scenario,
+        P0,
+        "Artisan's Sorrow",
+        CoreType::Instant,
+        ARTISANS_SORROW,
+    );
     let mut runner = scenario.build();
     make_aura(&mut runner, magic, TypedFilter::creature());
     give_priority(&mut runner, P1);
@@ -874,7 +1023,13 @@ fn act_of_treason_order_triggers_round_trip_delivers_once() {
     let mut scenario = kharn_board(2);
     let kharn = add_kharn(&mut scenario, P0);
     add_zidane(&mut scenario, P0);
-    let treason = add_free_spell(&mut scenario, P1, "Act of Treason", false, ACT_OF_TREASON);
+    let treason = add_free_spell(
+        &mut scenario,
+        P1,
+        "Act of Treason",
+        CoreType::Sorcery,
+        ACT_OF_TREASON,
+    );
     let mut runner = scenario.build();
     give_priority(&mut runner, P1);
 
