@@ -866,7 +866,9 @@ const fn parse_legacy_version_component(text: &str) -> u32 {
 
 /// Tripwire: fails to compile once the workspace ships past 0.140.x, the
 /// removal point for the legacy `ControlledCreatureDealtDamage` shape.
-#[allow(dead_code)]
+/// Clippy sees the version comparisons as constant; that is the point of a
+/// compile-time tripwire.
+#[allow(dead_code, clippy::absurd_extreme_comparisons)]
 const _LEGACY_DESER_TRIGGER_CAUSE_CONTROLLED_CREATURE_2026Q4: () = {
     const MAJOR: u32 = parse_legacy_version_component(env!("CARGO_PKG_VERSION_MAJOR"));
     const MINOR: u32 = parse_legacy_version_component(env!("CARGO_PKG_VERSION_MINOR"));
