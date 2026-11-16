@@ -497,6 +497,7 @@ mod parser_oracle_vote;
 mod parser_velocity_sprint_1_runtime;
 mod partner_family_keyword_remainder;
 mod payment_continuation;
+mod payment_surplus_certificate;
 mod peer_into_the_abyss;
 mod peerless_recycling_gift_recipient;
 mod pelt_collector_intervening_if;

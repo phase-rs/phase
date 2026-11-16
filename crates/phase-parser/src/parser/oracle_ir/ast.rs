@@ -375,15 +375,19 @@ impl EntersUnderSpec {
     }
 }
 
-/// Grammatical number of an anaphoric pronoun ("it" vs "they" / "those"); each
-/// consumer documents what the number selects.
+/// Grammatical number of an anaphoric pronoun: one that refers back to
+/// earlier instructions ("it" vs "they" / "those"), or an object pronoun
+/// ("it" / "him" / "her" vs "them"). Each consumer documents what the number
+/// selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum AnaphorNumber {
-    /// "It". CantRegenerate: the nearest antecedent instruction. Copula goad: the
-    /// single anaphor referent.
+    /// "It" (or "him" / "her"). CantRegenerate: the nearest antecedent
+    /// instruction. Copula goad: the single anaphor referent. Object pronoun: a
+    /// single object.
     Singular,
-    /// "They" / "those". CantRegenerate: every instruction of the preceding run.
-    /// Copula goad: every member of the anaphor's population.
+    /// "They" / "those" / "them". CantRegenerate: every instruction of the
+    /// preceding run. Copula goad: every member of the anaphor's population.
+    /// Object pronoun: several objects.
     Plural,
 }
 
