@@ -249,7 +249,9 @@ fn drive(runner: &mut GameRunner, opts: &Drive) -> Vec<GameEvent> {
                 let action = if matches!(waiting, WaitingFor::OptionalEffectChoice { .. }) {
                     GameAction::DecideOptionalEffect { accept }
                 } else {
-                    GameAction::DecideOptionalCost { pay: accept }
+                    GameAction::DecideOptionalCost {
+                        index: if accept { 0 } else { 1 },
+                    }
                 };
                 match runner.act(action) {
                     Ok(result) => {

@@ -74,7 +74,7 @@ function deck(overrides: Partial<ParsedDeck> = {}): ParsedDeck {
 }
 
 function candidate(id: string, source: DeckCatalogCandidate["source"], contents: ParsedDeck): DeckCatalogCandidate {
-  return { id, name: id, source, deck: contents };
+  return { id, name: id, source, deck: contents, comboDeclaration: { kind: "undeclared" }, };
 }
 
 function plannedInput(): CuratedMembershipInput {

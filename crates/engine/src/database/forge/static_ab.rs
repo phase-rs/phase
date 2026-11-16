@@ -53,7 +53,9 @@ pub(crate) fn translate_static(
         })),
 
         // Can't be targeted.
-        "CantTarget" => Ok(StaticDefinition::new(StaticMode::CantBeTargeted)),
+        "CantTarget" => Ok(StaticDefinition::new(StaticMode::CantBeTargeted {
+            who: crate::types::statics::ProhibitionScope::AllPlayers,
+        })),
 
         // Must attack.
         "MustAttack" => Ok(StaticDefinition::new(StaticMode::MustAttack)),

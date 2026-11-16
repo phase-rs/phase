@@ -504,6 +504,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // display field depends on the mill itself.
             | GameEvent::Milled { .. }
             | GameEvent::PhaseChanged { .. }
+            | GameEvent::PhaseChangedForPlayer { .. }
             | GameEvent::PriorityPassed { .. }
             | GameEvent::SpellCast { .. }
             | GameEvent::SpellCopied { .. }
@@ -523,6 +524,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::ShortcutRepetition { .. }
             | GameEvent::SpellCountered { .. }
             | GameEvent::EffectResolved { .. }
+            | GameEvent::Attached { .. }
             | GameEvent::Unattached { .. }
             // CR 116.2c + CR 613.1: ending a continuous effect DOES change
             // derived characteristics, but `GameState::end_continuous_effect`
@@ -532,7 +534,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::ContinuousEffectEnded { .. }
             | GameEvent::AttackersDeclared { .. }
             | GameEvent::BlockersDeclared { .. }
-            | GameEvent::AttackerBecameBlockedByEffect { .. }
+            | GameEvent::AttackerBecameBlocked { .. }
             | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
             | GameEvent::CombatTaxPaid { .. }
             | GameEvent::CombatTaxDeclined { .. }

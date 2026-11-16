@@ -5403,6 +5403,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -5478,6 +5479,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -9581,13 +9583,19 @@ fn gather_transient_continuous_effects_with(
             // `iter_cast_free_permission_source_ids`, giving one grant two
             // sources. CR 701.15b: `Goaded` is likewise a designation, not
             // an ability on the recipient; combat reads the live TCE directly.
+            // CR 611.2c + CR 613.11: a resolved `CantBeTargeted` rule effect
+            // (Vines of Vastwood, Veilstone Amulet) is read directly off the TCE by
+            // `static_abilities::transient_cant_be_targeted_prohibits`, so it is
+            // not an ability on the recipient and "loses all abilities" cannot
+            // clear it.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
                     mode: StaticMode::MayLookAtFaceDown
                         | StaticMode::ReduceAbilityCost { .. }
                         | StaticMode::CastFromHandFree { .. }
-                        | StaticMode::Goaded,
+                        | StaticMode::Goaded
+                        | StaticMode::CantBeTargeted { .. },
                 }
             ) {
                 continue;
@@ -11103,7 +11111,6 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 ///
 /// Mirrors `static_mode_uses_chosen_color`.
 fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::StaticMode) -> bool {
-    use crate::types::statics::StaticMode;
     match mode {
         StaticMode::MustBeBlockedByAll {
             blockers: Some(filter),
@@ -13377,11 +13384,33 @@ pub(crate) fn compute_current_copiable_values(
     state: &GameState,
     object_id: ObjectId,
 ) -> Option<CopiableValues> {
+    compute_copiable_values_where(state, object_id, |_| true)
+}
+
+/// CR 613.2a + CR 613.7 + CR 730.2a: copiable values at the merge effect's own
+/// position in layer 1a: every earlier copy effect, none after it or the merge itself.
+pub(crate) fn compute_copiable_values_preceding(
+    state: &GameState,
+    object_id: ObjectId,
+    merge_effect_id: u64,
+    merge_timestamp: u64,
+) -> Option<CopiableValues> {
+    compute_copiable_values_where(state, object_id, |effect| {
+        effect.timestamp < merge_timestamp && effect.transient_id != Some(merge_effect_id)
+    })
+}
+
+fn compute_copiable_values_where(
+    state: &GameState,
+    object_id: ObjectId,
+    include: impl Fn(&ActiveContinuousEffect) -> bool,
+) -> Option<CopiableValues> {
     let obj = state.objects.get(&object_id)?;
     let mut values = intrinsic_copiable_values(obj);
     let mut copy_effects: Vec<ActiveContinuousEffect> =
         gather_active_effects_for_layer(state, Layer::Copy)
             .into_iter()
+            .filter(|effect| include(effect))
             .filter(|effect| {
                 let condition_controller = active_effect_condition_controller(state, effect);
                 matches_target_filter(
@@ -32761,7 +32790,10 @@ mod tests {
             vec![StaticDefinition::new(StaticMode::IgnoreHexproof)].into();
         let b = make_creature(&mut state, "CantBeTargeted Source", 1, 1, PlayerId(0));
         state.objects.get_mut(&b).unwrap().static_definitions =
-            vec![StaticDefinition::new(StaticMode::CantBeTargeted)].into();
+            vec![StaticDefinition::new(StaticMode::CantBeTargeted {
+                who: crate::types::statics::ProhibitionScope::AllPlayers,
+            })]
+            .into();
         // Phased-out permanent carrying a Shroud static — CR 702.26b excludes it from
         // game_functioning_statics, so its kind must NOT appear in presence.
         let phased = make_creature(&mut state, "Phased Shroud Source", 1, 1, PlayerId(0));

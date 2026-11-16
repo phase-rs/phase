@@ -102,7 +102,7 @@ fn cast_promised(
 fn drive(runner: &mut GameRunner, target: ObjectId, events: &mut Vec<GameEvent>) {
     for _ in 0..100 {
         let action = match &runner.state().waiting_for {
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::ChooseGiftRecipient { .. } => {
                 GameAction::ChooseGiftRecipient { opponent: P1 }
             }

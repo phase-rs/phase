@@ -147,7 +147,7 @@ fn wort_grants_conspire_offers_cost_and_copies_when_paid() {
 
     // (2) Pay the conspire cost by tapping the two red creatures.
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("electing to pay conspire must be accepted");
 
     match runner.state().waiting_for.clone() {
