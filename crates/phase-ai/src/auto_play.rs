@@ -128,20 +128,40 @@ pub struct AiActionsRun {
 }
 
 /// Resolve the next AI-owned decision using the driver's authorization boundary.
+///
+/// CR 805.5a: under shared team turns every living teammate may act when the
+/// team has priority, so an AI teammate is eligible even while the window is
+/// parked on the human representative.
 pub fn eligible_ai_decision(
     state: &GameState,
     ai_players: &HashSet<PlayerId>,
 ) -> Option<(PlayerId, PlayerId)> {
-    state
-        .waiting_for
-        .acting_players()
-        .into_iter()
-        .find_map(|semantic_owner| {
-            let actor = turn_control::authorized_submitter_for_player(state, semantic_owner);
-            ai_players
-                .contains(&actor)
-                .then_some((semantic_owner, actor))
-        })
+    // CR 805.5a: team priority windows list every living member as a decision
+    // owner; other windows list the engine's acting players unchanged.
+    // CR 805.5b: a member who already passed this window has no new decision
+    // until someone acts (which clears passes) — skip them so the driver hands
+    // the window to an unpassed teammate instead of re-prompting the passer
+    // until the safety cap.
+    let owners = turn_control::decision_owners(state);
+    let unpassed: Vec<PlayerId> = match &state.waiting_for {
+        engine::types::game_state::WaitingFor::Priority { .. } => owners
+            .iter()
+            .copied()
+            .filter(|owner| !state.priority_passes.contains(owner))
+            .collect(),
+        _ => owners.clone(),
+    };
+    let owners = if unpassed.is_empty() {
+        owners
+    } else {
+        unpassed
+    };
+    owners.into_iter().find_map(|semantic_owner| {
+        let actor = turn_control::authorized_submitter_for_player(state, semantic_owner);
+        ai_players
+            .contains(&actor)
+            .then_some((semantic_owner, actor))
+    })
 }
 
 impl std::ops::Deref for AiActionsRun {
@@ -612,7 +632,7 @@ mod tests {
     };
     use engine::types::actions::MulliganChoice;
     use engine::types::card_type::CoreType;
-    use engine::types::format::FormatConfig;
+    use engine::types::format::{ChallengeDeck, FormatConfig};
     use engine::types::game_state::{
         AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
         StackResolutionPolicy, WaitingFor,
@@ -1181,5 +1201,80 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// CR 805.5a: on a shared survivor turn parked on the human
+    /// representative, AI allies are driven — their actions pass the
+    /// decision-contract gate and apply. Pre-fix, `permits` required the
+    /// semantic owner to be the single holder, so every ally action was
+    /// rejected and the driver stopped with `ApplyFailed`: allies never
+    /// played a land or passed (the Horde idle-allies report).
+    #[test]
+    fn ai_ally_acts_on_shared_survivor_turn() {
+        let rep = PlayerId(1);
+        let ally = PlayerId(2);
+        let ally2 = PlayerId(3);
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::ZombiesHorde.default_ruleset()),
+            4,
+            42,
+        );
+        state.phase = Phase::PreCombatMain;
+        state.active_player = rep;
+        state.priority_player = rep;
+        state.waiting_for = WaitingFor::Priority { player: rep };
+        for (seat, name) in [(ally, "Ally Forest"), (ally2, "Ally2 Forest")] {
+            let forest = create_object(&mut state, CardId(1), seat, name.to_string(), Zone::Hand);
+            state
+                .objects
+                .get_mut(&forest)
+                .expect("created land must exist")
+                .card_types
+                .core_types
+                .push(CoreType::Land);
+            state.players[seat.0 as usize].hand.push_back(forest);
+        }
+
+        let ai_players = HashSet::from([ally, ally2]);
+        let ai_configs = HashMap::from([(ally, AiConfig::default()), (ally2, AiConfig::default())]);
+        let session = AiSession::arc_from_game(&state);
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(42);
+        let run = run_ai_actions(&mut state, &ai_players, &ai_configs, &mut rng, &session);
+
+        assert!(
+            !matches!(run.stop, AiActionsStop::ApplyFailed { .. }),
+            "ally actions must apply, got {:?}",
+            run.stop
+        );
+        let ally_passed = state.priority_passes.contains(&ally);
+        let ally_land_played = state
+            .battlefield
+            .iter()
+            .any(|id| state.objects.get(id).is_some_and(|o| o.controller == ally));
+        assert!(
+            ally_passed || ally_land_played,
+            "the ally must act or pass on its team's turn"
+        );
+
+        // Stage 2: a live stack. The ally's pass must take the verified
+        // stack-pass path (permits + same-window owner check) and record
+        // without ApplyFailed. The stack stays: the human rep never passes,
+        // so unanimous pass is correctly not reached.
+        push_no_op_stack_entry(&mut state, 91_001);
+        let session = AiSession::arc_from_game(&state);
+        let run = run_ai_actions(&mut state, &ai_players, &ai_configs, &mut rng, &session);
+        assert!(
+            !matches!(run.stop, AiActionsStop::ApplyFailed { .. }),
+            "ally stack passes must apply, got {:?}",
+            run.stop
+        );
+        assert!(
+            !state.stack.is_empty(),
+            "the human rep never passed, so the stack must stay"
+        );
+        assert!(
+            state.priority_passes.contains(&ally),
+            "the ally's pass must record on the live stack"
+        );
     }
 }

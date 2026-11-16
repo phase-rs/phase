@@ -75,6 +75,7 @@ mod arashin_sovereign_self_tuck;
 mod arbalest_engineers_modal_pump_anaphor;
 mod arcbound_tracker_nonfirst_spell;
 mod archdruids_charm_search_destination;
+mod archenemy_hero_teammate_priority;
 mod archmage_ascension_gated_draw_replacement;
 mod archon_compound_target_2344;
 mod arcum_weathervane_supertype_removal;

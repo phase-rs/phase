@@ -200,6 +200,24 @@ pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId>
     team_members_admitting(state, player, SeatAdmission::Living)
 }
 
+/// CR 805.5b: true when every living member of `player`'s team has passed
+/// since the last game action. A team passes only when no player on it wishes
+/// to do anything — one teammate's pass never passes for the team.
+pub(crate) fn team_has_passed(state: &GameState, player: PlayerId) -> bool {
+    team_members(state, player)
+        .into_iter()
+        .all(|member| state.priority_passes.contains(&member))
+}
+
+/// CR 805.5b: every living player across all teams, in team order. All teams
+/// pass in succession exactly when every member of this set has passed.
+pub(crate) fn all_living_players_in_team_order(state: &GameState) -> Vec<PlayerId> {
+    priority_pass_participants(state)
+        .into_iter()
+        .flat_map(|rep| team_members(state, rep))
+        .collect()
+}
+
 /// Whether `player`'s side takes a single shared team turn (CR 805) rather than
 /// each member taking an individual turn. Per-side: the question is asked about
 /// a specific seat's side (the ACTIVE player's side at the peripheral consumers —

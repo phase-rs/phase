@@ -52,7 +52,7 @@ use engine::game::combat_damage::preview_unblocked_combat_damage;
 use engine::game::effects::player_counter::{
     preview_player_counter_addition, PlayerCounterAdditionPreview,
 };
-use engine::game::engine::apply_as_current_for_simulation;
+use engine::game::engine::{apply_as_current_for_simulation, apply_for_simulation};
 use engine::game::players::{self, PoisonLossMeasure, PoisonLossScope};
 use engine::game::sba::check_state_based_actions;
 use engine::types::ability::{AbilityDefinition, Effect, QuantityExpr, ResolvedAbility, TargetRef};
@@ -268,6 +268,32 @@ fn candidate_delivery(
     let mut board = settled_cast(board, ai_player, depth, entry, &chosen, &mut steps)?;
     while let Some(left) = steps.checked_sub(1) {
         steps = left;
+        // CR 805.5b: the holding team passes together. Passing only the
+        // representative stalls a shared-team window — the window never
+        // advances past it — so the delivery budget would burn and the
+        // verdict would degrade to pressure on a lethal line.
+        // CR 723.3 + CR 723.5: each seat passes as its authorized submitter,
+        // so a controlled seat's pass is made by its controller.
+        if let WaitingFor::Priority { player } = &board.waiting_for {
+            if board.stack.len() > depth {
+                let holder = *player;
+                let mut seats = vec![holder];
+                seats.extend(players::teammates(&board, holder));
+                let mut advanced = false;
+                for seat in seats {
+                    let submitter =
+                        engine::game::turn_control::authorized_submitter_for_player(&board, seat);
+                    if apply_for_simulation(&mut board, submitter, GameAction::PassPriority).is_ok()
+                    {
+                        advanced = true;
+                    }
+                }
+                if !advanced {
+                    return None;
+                }
+                continue;
+            }
+        }
         let answer = match &board.waiting_for {
             WaitingFor::GameOver { .. } => return Some(board),
             WaitingFor::Priority { .. } if board.stack.len() <= depth => return Some(board),

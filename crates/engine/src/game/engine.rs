@@ -1100,7 +1100,11 @@ pub fn apply_verified_ai_priority_pass(
                 .to_string(),
         ));
     };
-    if player != contract.semantic_owner {
+    // CR 805.5a: the verified pass belongs to the window's team, which the
+    // representative parks on — a teammate's pass continues the same window,
+    // so the owner check admits every living team decision owner, not just
+    // the holder.
+    if !turn_control::decision_owners(state).contains(&contract.semantic_owner) {
         return Err(EngineError::ActionNotAllowed(
             "AI stack continuation requires the issued nonempty priority window".to_string(),
         ));
@@ -9583,6 +9587,24 @@ fn pass_priority_once_with_pipeline(
     events: &mut Vec<GameEvent>,
     stack_resolution_limit: Option<u32>,
 ) -> Result<PriorityPassPipelineOutcome, EngineError> {
+    // CR 117.4 + CR 723.5/723.8: pass the *seat* that holds priority, not
+    // `priority_player` — under turn-control the latter is the authorized
+    // submitter (the controller), which would mis-count consecutive passes and
+    // soft-lock the game.
+    let current_seat = turn_control::priority_seat(state);
+    pass_priority_once_with_pipeline_for(state, current_seat, events, stack_resolution_limit)
+}
+
+/// CR 805.5b: pass for an explicit seat rather than the window holder. The
+/// manual PassPriority arm resolves the acting teammate and records their
+/// individual pass here; the team advances only when every living member has
+/// passed.
+fn pass_priority_once_with_pipeline_for(
+    state: &mut GameState,
+    current_seat: PlayerId,
+    events: &mut Vec<GameEvent>,
+    stack_resolution_limit: Option<u32>,
+) -> Result<PriorityPassPipelineOutcome, EngineError> {
     if let WaitingFor::Priority { player } = &state.waiting_for {
         if super::precast_copy_shortcut::blocks_pass(state, *player) {
             let waiting_for = state.waiting_for.clone();
@@ -9602,11 +9624,6 @@ fn pass_priority_once_with_pipeline(
 
     let stack_was_empty = state.stack.is_empty();
     let phase_before_pass = state.phase;
-    // CR 117.4 + CR 723.5/723.8: pass the *seat* that holds priority, not
-    // `priority_player` — under turn-control the latter is the authorized
-    // submitter (the controller), which would mis-count consecutive passes and
-    // soft-lock the game.
-    let current_seat = turn_control::priority_seat(state);
     let final_part_owed_before_pass = super::stack::resolving_spell_owes_final_part(state);
     let priority_outcome = priority::handle_priority_pass_with_limit(
         current_seat,
@@ -10258,8 +10275,10 @@ fn priority_pass_needs_checkpoint(state: &GameState) -> bool {
 }
 
 fn priority_pass_will_close_window(state: &GameState) -> bool {
-    let participants = super::topology::priority_pass_participants(state);
-    !participants.is_empty() && state.priority_passes.len().saturating_add(1) >= participants.len()
+    // CR 805.5b: the window closes when every living player has passed - count
+    // individuals across all teams, not team representatives.
+    let living = super::topology::all_living_players_in_team_order(state);
+    !living.is_empty() && state.priority_passes.len().saturating_add(1) >= living.len()
 }
 
 #[cfg(test)]
@@ -10379,6 +10398,8 @@ fn run_auto_pass_loop(
                 } else {
                     None
                 };
+                let phase_before_pass = state.phase;
+                let stack_len_before_pass = state.stack.len();
                 match pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit) {
                     Ok(outcome) => {
                         // Check the life failure BEFORE aggregating this
@@ -10387,6 +10408,28 @@ fn run_auto_pass_loop(
                         // these events may escape into the result.
                         if let Some(player) = boundary_life_change_failure(state) {
                             return Err(EngineError::LifeChangeUnrepresentable { player });
+                        }
+                        // CR 805.5b: a holder-only pass leaves the team holding
+                        // priority while a teammate has not passed. With no
+                        // stack, phase, or resolution progress that is not loop
+                        // progress — stop and let the teammate decide, instead
+                        // of re-passing for the same holder until the cap.
+                        if state.phase == phase_before_pass
+                            && state.stack.len() == stack_len_before_pass
+                            && matches!(
+                                &outcome.waiting_for,
+                                WaitingFor::Priority { player: next }
+                                    if super::topology::side_takes_shared_turn(state, player)
+                                        && super::topology::team_id(state, *next)
+                                            == super::topology::team_id(state, player)
+                            )
+                        {
+                            let session_finished = outcome.session_restored;
+                            result.events.extend(events);
+                            result.waiting_for = outcome.waiting_for;
+                            let _ = session_finished;
+                            advanced = true;
+                            break;
                         }
                         advanced = true;
                         let stack_empty_or_grew =
@@ -11129,7 +11172,10 @@ fn pass_installed_auto_pass_priority(
         }
         StackResolutionSessionPriorityDecision::NotActive => None,
     };
-    let outcome = pass_priority_once_with_pipeline(state, events, stack_resolution_limit)?;
+    // CR 805.5b: record the pass for the acting seat (the teammate who
+    // passed), not the window holder.
+    let outcome =
+        pass_priority_once_with_pipeline_for(state, player, events, stack_resolution_limit)?;
     Ok(ActionResult::applied(
         std::mem::take(events),
         outcome.waiting_for,
@@ -11595,6 +11641,93 @@ pub(super) fn transient_reveal_outlives_action_boundary(state: &GameState) -> bo
     }
 }
 
+/// CR 805.5a: resolve which team member a Priority action acts for. The window
+/// holder (`holder`) is the team's representative, but the submitter may be any
+/// living teammate: they act for themselves. Under turn-decision control
+/// (CR 805.8: the controller controls the whole team) the submitter is the
+/// controller, so the owner is inferred from the action's object when it names
+/// one on the team; otherwise the holder is returned, preserving single-player
+/// behavior exactly.
+fn resolve_team_priority_owner(
+    state: &GameState,
+    holder: PlayerId,
+    submitter: PlayerId,
+    action: &GameAction,
+) -> PlayerId {
+    if submitter == holder || !super::topology::side_takes_shared_turn(state, holder) {
+        return holder;
+    }
+    let members = super::topology::team_members(state, holder);
+    if members.contains(&submitter) {
+        return submitter;
+    }
+    team_priority_action_owner(state, &members, action).unwrap_or(holder)
+}
+
+/// Infer which living team member a Priority action belongs to from its
+/// object/source, for the turn-control case where the submitter is the team's
+/// controller rather than a member. Returns `None` when the action names no
+/// object on the team (passes, planar die, companion) so the caller falls back
+/// to the window holder.
+fn team_priority_action_owner(
+    state: &GameState,
+    members: &[PlayerId],
+    action: &GameAction,
+) -> Option<PlayerId> {
+    /// Owner-or-controller lookup: hand/library/graveyard/exile objects belong
+    /// to their owner; battlefield objects and activations belong to their
+    /// controller. Either hit on the team resolves the member.
+    fn member_for_object(
+        state: &GameState,
+        members: &[PlayerId],
+        id: ObjectId,
+    ) -> Option<PlayerId> {
+        let obj = state.objects.get(&id)?;
+        [obj.controller, obj.owner]
+            .into_iter()
+            .find(|candidate| members.contains(candidate))
+    }
+    match action {
+        GameAction::PlayLand { object_id, .. }
+        | GameAction::CastSpell { object_id, .. }
+        | GameAction::Foretell { object_id, .. }
+        | GameAction::CastSpellForFree { object_id, .. }
+        | GameAction::PlayFaceDown { object_id, .. }
+        | GameAction::TurnFaceUp { object_id, .. }
+        | GameAction::UntapLandForMana { object_id }
+        | GameAction::UnlockRoomDoor { object_id, .. }
+        | GameAction::Transform { object_id } => member_for_object(state, members, *object_id),
+        GameAction::ActivateAbility { source_id, .. }
+        | GameAction::Equip {
+            equipment_id: source_id,
+            ..
+        }
+        | GameAction::CrewVehicle {
+            vehicle_id: source_id,
+            ..
+        }
+        | GameAction::ActivateStation {
+            spacecraft_id: source_id,
+            ..
+        }
+        | GameAction::SaddleMount {
+            mount_id: source_id,
+            ..
+        } => member_for_object(state, members, *source_id),
+        GameAction::ActivateNinjutsu {
+            ninjutsu_object_id, ..
+        } => member_for_object(state, members, *ninjutsu_object_id),
+        GameAction::CastSpellAsSneak { hand_object, .. }
+        | GameAction::CastSpellAsWebSlinging { hand_object, .. } => {
+            member_for_object(state, members, *hand_object)
+        }
+        GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
+            member_for_object(state, members, selection.source.object_id)
+        }
+        _ => None,
+    }
+}
+
 fn apply_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -12056,16 +12189,33 @@ fn apply_action(
         // AI candidate-legality hatch and the projection fast path so the three
         // cannot drift.
         super::priority::pass_priority_legality(state, *player)?;
+        // CR 805.5a + CR 805.5b: the pass is recorded for the acting teammate
+        // individually; the team passes only when no member wishes to act.
+        let acting = resolve_team_priority_owner(state, *player, actor, &action);
+        // CR 805.8: a controller controls the whole team, so their pass is the
+        // team's pass — record every living member, not just the holder.
+        if acting == *player
+            && super::topology::side_takes_shared_turn(state, *player)
+            && !super::topology::team_members(state, *player).contains(&actor)
+        {
+            for member in super::topology::team_members(state, *player) {
+                state.priority_passes.insert(member);
+            }
+        }
         // An explicit pass can be the final CR 117.4 pass. Route it through the
         // same fenced session seam as an installed auto-pass, so its resolved-entry
         // count advances the persisted cursor rather than silently bypassing a live
         // stack-resolution authorization.
         if stack_resolution_limit.is_some() {
-            let outcome =
-                pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit)?;
+            let outcome = pass_priority_once_with_pipeline_for(
+                state,
+                acting,
+                &mut events,
+                stack_resolution_limit,
+            )?;
             return Ok(ActionResult::applied(events, outcome.waiting_for));
         }
-        return pass_installed_auto_pass_priority(state, *player, &mut events);
+        return pass_installed_auto_pass_priority(state, acting, &mut events);
     }
 
     apply_non_priority_pass_action(state, actor, action, events, semantic_actor)
@@ -12242,6 +12392,17 @@ fn apply_non_priority_pass_action(
     // `PendingCast` exists.
     let answers_a_cast_step = state.waiting_for.has_pending_cast()
         || matches!(state.waiting_for, WaitingFor::ModalFaceChoice { .. });
+    // CR 805.5a: under shared team turns the Priority submitter may be any
+    // living teammate, acting for themselves. Resolve the acting member once
+    // here (the match below moves `action`, so per-arm resolution cannot borrow
+    // it); Priority arms use this instead of the window holder for the
+    // game action itself, while window-liveness checks stay on the holder.
+    let team_priority_acting = match (&state.waiting_for, &action) {
+        (WaitingFor::Priority { player }, _) => {
+            resolve_team_priority_owner(state, *player, actor, &action)
+        }
+        _ => actor,
+    };
     // Validate and process action against current WaitingFor
     let waiting_for = match (&state.waiting_for.clone(), action) {
         (
@@ -12290,10 +12451,13 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            // CR 805.5a: the land is played by the acting teammate, not the
+            // window holder.
+            let acting = team_priority_acting;
             state.cancelled_casts.clear();
             // CR 116.2a: Playing a land is a special action — sorcery-speed, once per turn, stack must be empty.
             // CR 305.2: Playing a land is a special action, not a spell.
-            handle_play_land(state, *player, object_id, card_id, &mut events)?
+            handle_play_land(state, acting, object_id, card_id, &mut events)?
         }
         (WaitingFor::Priority { player }, GameAction::TapLandForMana { selection }) => {
             if state.priority_player
@@ -12301,10 +12465,11 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            let acting = team_priority_acting;
             let events_before = events.len();
             let waiting_for = handle_tap_land_for_mana(
                 state,
-                *player,
+                acting,
                 &selection,
                 ManaAbilityResume::Priority,
                 &mut events,
@@ -12329,10 +12494,11 @@ fn apply_non_priority_pass_action(
                     "Land mana abilities use TapLandForMana".to_string(),
                 ));
             }
+            let acting = team_priority_acting;
             let events_before = events.len();
             let waiting_for = mana_sources::activate_mana_source_selection(
                 state,
-                *player,
+                acting,
                 &selection,
                 &mut events,
                 ManaAbilityResume::Priority,
@@ -12346,9 +12512,11 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            // CR 805.5a: the undo is booked to the acting teammate's seat.
+            let acting = team_priority_acting;
             // CR 723.5a: the tap booked to the seat, so the undo must look it up
             // there rather than under its authorized submitter.
-            handle_untap_land_for_mana(state, *player, object_id, &mut events)?;
+            handle_untap_land_for_mana(state, acting, object_id, &mut events)?;
             WaitingFor::Priority { player: *player }
         }
         (
@@ -12379,7 +12547,7 @@ fn apply_non_priority_pass_action(
             }
             casting::handle_cast_spell_with_payment_mode(
                 state,
-                *player,
+                team_priority_acting,
                 object_id,
                 card_id,
                 payment_mode,
@@ -12392,7 +12560,7 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            casting::handle_foretell(state, *player, object_id, card_id, &mut events)?
+            casting::handle_foretell(state, team_priority_acting, object_id, card_id, &mut events)?
         }
         // CR 602.1: Activated abilities have a cost and an effect, written as "[Cost]: [Effect.]"
         (
@@ -12408,6 +12576,8 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
+            // CR 805.5a: the activation belongs to the acting teammate.
+            let acting = team_priority_acting;
             // Check if this is a mana ability -- resolve instantly without the stack
             let obj = state
                 .objects
@@ -12425,7 +12595,7 @@ fn apply_non_priority_pass_action(
                 let wf = mana_abilities::activate_mana_ability_with_payment_mode(
                     state,
                     source_id,
-                    *player,
+                    acting,
                     ability_index,
                     &ability_def,
                     &mut events,
@@ -12446,7 +12616,7 @@ fn apply_non_priority_pass_action(
                     && mana_sources::object_mana_ability_penalty(state, source_id, &ability_def)
                         .is_undoable()
                 {
-                    mana_sources::record_undoable_mana_tap(state, *player, source_id, &events);
+                    mana_sources::record_undoable_mana_tap(state, acting, source_id, &events);
                 }
                 wf
             } else if obj.loyalty.is_some()
@@ -12457,10 +12627,10 @@ fn apply_non_priority_pass_action(
                 )
             {
                 // CR 606.3: Loyalty abilities activate once per turn at sorcery speed.
-                state.lands_tapped_for_mana.remove(player);
+                state.lands_tapped_for_mana.remove(&acting);
                 planeswalker::handle_activate_loyalty_with_payment_mode(
                     state,
-                    *player,
+                    acting,
                     source_id,
                     ability_index,
                     payment_mode,
@@ -12468,10 +12638,10 @@ fn apply_non_priority_pass_action(
                 )?
             } else {
                 // Non-mana activated ability — the acceptance authority brackets it.
-                let cleared = begin_non_mana_activation(state, *player);
+                let cleared = begin_non_mana_activation(state, acting);
                 let wf = casting::handle_activate_ability_with_payment_mode(
                     state,
-                    *player,
+                    acting,
                     source_id,
                     ability_index,
                     payment_mode,
@@ -12483,7 +12653,7 @@ fn apply_non_priority_pass_action(
                     // announcement), so it is not accepted yet — leave the
                     // mana-undo window as it was, so a reversal before the lock
                     // returns to exactly the pre-activation state. The lock accepts it.
-                    restore_non_mana_activation(state, *player, cleared);
+                    restore_non_mana_activation(state, acting, cleared);
                 }
                 wf
             }
@@ -12494,7 +12664,13 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            super::room::handle_unlock_room_door(state, *player, object_id, door, &mut events)?
+            super::room::handle_unlock_room_door(
+                state,
+                team_priority_acting,
+                object_id,
+                door,
+                &mut events,
+            )?
         }
         (WaitingFor::Priority { player }, GameAction::RollPlanarDie) => {
             if state.priority_player
@@ -12508,8 +12684,11 @@ fn apply_non_priority_pass_action(
             // CR 605.3b + CR 616.1: a paused cost move or pre-spend echo choice
             // leaves the action uncommitted; the typed planar-die root returns
             // its prompt and finishes the locked-cost roll once answered.
-            match crate::game::planechase::take_paid_planar_die_action(state, *player, &mut events)?
-            {
+            match crate::game::planechase::take_paid_planar_die_action(
+                state,
+                team_priority_acting,
+                &mut events,
+            )? {
                 crate::game::planechase::PaidPlanarDieAction::Rolled(_) => {
                     WaitingFor::Priority { player: *player }
                 }
@@ -15746,13 +15925,14 @@ fn apply_non_priority_pass_action(
         (WaitingFor::EquipTarget { player, .. }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
         }
-        (WaitingFor::Priority { player }, GameAction::Equip { equipment_id, .. }) => {
-            let p = *player;
+        (WaitingFor::Priority { player: _ }, GameAction::Equip { equipment_id, .. }) => {
+            // CR 805.5a: the acting teammate equips, not the window holder.
+            let p = team_priority_acting;
             handle_equip_activation(state, p, equipment_id, &mut events)?
         }
         // CR 702.122a: Crew activation from Priority
-        (WaitingFor::Priority { player }, GameAction::CrewVehicle { vehicle_id, .. }) => {
-            let p = *player;
+        (WaitingFor::Priority { player: _ }, GameAction::CrewVehicle { vehicle_id, .. }) => {
+            let p = team_priority_acting;
             handle_crew_activation(state, p, vehicle_id, &mut events)?
         }
         // CR 702.122a: Crew creature selection from CrewVehicle state
@@ -15785,13 +15965,13 @@ fn apply_non_priority_pass_action(
         }
         // CR 702.184a: Station activation from Priority — enters target-selection state.
         (
-            WaitingFor::Priority { player },
+            WaitingFor::Priority { player: _ },
             GameAction::ActivateStation {
                 spacecraft_id,
                 creature_id: None,
             },
         ) => {
-            let p = *player;
+            let p = team_priority_acting;
             handle_station_activation(state, p, spacecraft_id, &mut events)?
         }
         // CR 702.184a: Station creature selection — resolves the ability.
@@ -15820,8 +16000,8 @@ fn apply_non_priority_pass_action(
             WaitingFor::Priority { player: *player }
         }
         // CR 702.171a: Saddle activation from Priority — enters target-selection state.
-        (WaitingFor::Priority { player }, GameAction::SaddleMount { mount_id, .. }) => {
-            let p = *player;
+        (WaitingFor::Priority { player: _ }, GameAction::SaddleMount { mount_id, .. }) => {
+            let p = team_priority_acting;
             handle_saddle_activation(state, p, mount_id, &mut events)?
         }
         // CR 702.171a: Saddle creature selection — announces, pays cost, pushes stack entry.
@@ -15851,8 +16031,8 @@ fn apply_non_priority_pass_action(
         (WaitingFor::SaddleMount { player, .. }, GameAction::CancelCast) => {
             WaitingFor::Priority { player: *player }
         }
-        (WaitingFor::Priority { player }, GameAction::Transform { object_id }) => {
-            let p = *player;
+        (WaitingFor::Priority { player: _ }, GameAction::Transform { object_id }) => {
+            let p = team_priority_acting;
             let obj = state
                 .objects
                 .get(&object_id)
@@ -15885,13 +16065,13 @@ fn apply_non_priority_pass_action(
         }
         // CR 702.49: Ninjutsu-family activation during combat
         (
-            WaitingFor::Priority { player },
+            WaitingFor::Priority { player: _ },
             GameAction::ActivateNinjutsu {
                 ninjutsu_object_id,
                 creature_to_return,
             },
         ) => {
-            let p = *player;
+            let p = team_priority_acting;
             super::keywords::activate_ninjutsu(
                 state,
                 p,
@@ -15915,7 +16095,7 @@ fn apply_non_priority_pass_action(
         // Applies to any card type; permanent-spell placement (CR 702.190b)
         // is handled at resolution based on the variant's `placement`.
         (
-            WaitingFor::Priority { player },
+            WaitingFor::Priority { player: _ },
             GameAction::CastSpellAsSneak {
                 hand_object,
                 card_id,
@@ -15924,7 +16104,7 @@ fn apply_non_priority_pass_action(
             },
         ) => super::casting::handle_cast_spell_as_sneak_with_payment_mode(
             state,
-            *player,
+            team_priority_acting,
             hand_object,
             card_id,
             creature_to_return,
@@ -15934,7 +16114,7 @@ fn apply_non_priority_pass_action(
         // CR 702.188a: Web-slinging — cast a spell from hand by paying the
         // Web-slinging cost and returning a tapped creature you control.
         (
-            WaitingFor::Priority { player },
+            WaitingFor::Priority { player: _ },
             GameAction::CastSpellAsWebSlinging {
                 hand_object,
                 card_id,
@@ -15943,7 +16123,7 @@ fn apply_non_priority_pass_action(
             },
         ) => super::casting::handle_cast_spell_as_web_slinging_with_payment_mode(
             state,
-            *player,
+            team_priority_acting,
             hand_object,
             card_id,
             creature_to_return,
@@ -15953,7 +16133,7 @@ fn apply_non_priority_pass_action(
         // CR 601.2b + CR 118.9a: CastFromHandFree opt-in path — cast a hand
         // spell for free via a once-per-turn permission source (Zaffai).
         (
-            WaitingFor::Priority { player },
+            WaitingFor::Priority { player: _ },
             GameAction::CastSpellForFree {
                 object_id,
                 card_id,
@@ -15962,7 +16142,7 @@ fn apply_non_priority_pass_action(
             },
         ) => super::casting::handle_cast_spell_for_free_with_payment_mode(
             state,
-            *player,
+            team_priority_acting,
             object_id,
             card_id,
             source_id,
@@ -16252,7 +16432,7 @@ fn apply_non_priority_pass_action(
             {
                 return Err(EngineError::NotYourPriority);
             }
-            let p = *player;
+            let p = team_priority_acting;
             // Validate object_id matches card_id and is in hand
             let valid = state.objects.get(&object_id).is_some_and(|obj| {
                 obj.card_id == card_id && obj.owner == p && obj.zone == Zone::Hand
@@ -16275,7 +16455,13 @@ fn apply_non_priority_pass_action(
             // legality, the CR 106.6 spend-restricted payment, CR 107.3d's X
             // announcement and the flip — belongs to one authority, shared with the
             // CR 616.1 resume that finishes a payment whose mana source paused.
-            super::morph::handle_turn_face_up(state, *player, object_id, x, &mut events)?
+            super::morph::handle_turn_face_up(
+                state,
+                team_priority_acting,
+                object_id,
+                x,
+                &mut events,
+            )?
         }
         (
             WaitingFor::TriggerTargetSelection {
@@ -16375,8 +16561,8 @@ fn apply_non_priority_pass_action(
                 .map_err(EngineError::InvalidAction)?
         }
         // CR 702.139a: Special action — pay {3} to put companion into hand (see rule 116.2g).
-        (WaitingFor::Priority { player }, GameAction::CompanionToHand) => {
-            super::companion::handle_companion_to_hand(state, *player, &mut events)?
+        (WaitingFor::Priority { player: _ }, GameAction::CompanionToHand) => {
+            super::companion::handle_companion_to_hand(state, team_priority_acting, &mut events)?
         }
         // CR 116.2c: Special action — pay a continuous effect's printed
         // termination cost to end it ("You may pay {W} to end this effect").
@@ -16396,7 +16582,7 @@ fn apply_non_priority_pass_action(
             }
             super::end_continuous_effect::handle_end_continuous_effect(
                 state,
-                *player,
+                team_priority_acting,
                 group,
                 &mut events,
             )?
@@ -16405,8 +16591,8 @@ fn apply_non_priority_pass_action(
         // prepared face through the normal spell-casting pipeline (costs,
         // targeting, and mode choices all run through casting.rs single
         // authority). Assign when WotC publishes SOS CR update.
-        (WaitingFor::Priority { player }, GameAction::CastPreparedCopy { source }) => {
-            let p = *player;
+        (WaitingFor::Priority { player: _ }, GameAction::CastPreparedCopy { source }) => {
+            let p = team_priority_acting;
             // Validate controller.
             let src = source;
             let Some(obj) = state.objects.get(&src) else {
@@ -16469,8 +16655,15 @@ fn apply_non_priority_pass_action(
             },
             GameAction::PassParadigmOffer,
         ) => WaitingFor::Priority { player: *player },
-        (WaitingFor::Priority { player }, GameAction::SetAutoPass { mode }) => {
-            return install_auto_pass_and_pass_priority(state, *player, mode, &mut events);
+        (WaitingFor::Priority { player: _ }, GameAction::SetAutoPass { mode }) => {
+            // CR 805.5a: the auto-pass preference belongs to the acting
+            // teammate, and the pass counts for them individually.
+            return install_auto_pass_and_pass_priority(
+                state,
+                team_priority_acting,
+                mode,
+                &mut events,
+            );
         }
         // CR 701.34a: Proliferate — player selected targets to proliferate.
         (
@@ -21091,7 +21284,7 @@ mod priority_reducer_census_tests {
         let start = source
             .find("(WaitingFor::Priority { player }, GameAction::PassPriority)")
             .expect("Priority reducer starts at PassPriority");
-        let end_marker = "(WaitingFor::Priority { player }, GameAction::SetAutoPass { mode })";
+        let end_marker = "GameAction::SetAutoPass { mode })";
         let end = source[start..]
             .find(end_marker)
             .map(|offset| start + offset + end_marker.len())
@@ -21100,7 +21293,9 @@ mod priority_reducer_census_tests {
         let mut families = BTreeSet::new();
         let mut lines_after_priority_pattern = 0usize;
         for line in source[start..end].lines() {
-            if line.contains("WaitingFor::Priority { player }") {
+            if line.contains("WaitingFor::Priority { player }")
+                || line.contains("WaitingFor::Priority { player: _ }")
+            {
                 lines_after_priority_pattern = 6;
             }
             if lines_after_priority_pattern > 0 {

@@ -818,10 +818,14 @@ fn seed_remaining_consented_priority_passes(
     let current_idx = participants.iter().position(|seat| *seat == current_rep)?;
     for offset in 1..participants.len() {
         let representative = participants[(current_idx + offset) % participants.len()];
-        if !state.priority_passes.contains(&representative) {
-            let actor = turn_control::authorized_submitter_for_player(state, representative);
-            state.priority_passes.insert(representative);
-            recorded.push((actor, GameAction::PassPriority));
+        // CR 805.5b: seed every unpassed living member of the remaining team,
+        // not just its representative - one teammate pass never passes the team.
+        for member in topology::team_members(state, representative) {
+            if !state.priority_passes.contains(&member) {
+                let actor = turn_control::authorized_submitter_for_player(state, member);
+                state.priority_passes.insert(member);
+                recorded.push((actor, GameAction::PassPriority));
+            }
         }
     }
     Some(())
@@ -1019,12 +1023,38 @@ where
     };
     let mut seeded = Vec::new();
 
+    // CR 805.5b: the requester passes via the boundary `apply` below and the
+    // current seat's own decision belongs to the batch loop below — but the
+    // other living teammates still owe individual passes. Seed them first
+    // (consulting each via callback) before the other teams in rotation.
+    for member in topology::team_members(state, current_rep) {
+        if member == requester || member == current_seat || state.priority_passes.contains(&member)
+        {
+            continue;
+        }
+        let actor = turn_control::authorized_submitter_for_player(state, member);
+        match choose_non_requester_action(state, actor) {
+            ResolveAllCallbackDecision::Action(GameAction::PassPriority) => {}
+            ResolveAllCallbackDecision::Action(_) | ResolveAllCallbackDecision::Proposal { .. } => {
+                return PriorityCycleFastForward::CannotSeed;
+            }
+            ResolveAllCallbackDecision::Stop => return PriorityCycleFastForward::Stop,
+        }
+        seeded.push((member, actor));
+    }
+
     for offset in 1..participants.len() {
         let seat = participants[(current_idx + offset) % participants.len()];
         let representative = topology::priority_pass_representative(state, seat);
 
-        if !state.priority_passes.contains(&representative) {
-            let actor = turn_control::authorized_submitter_for_player(state, representative);
+        // CR 805.5b: consult and seed every unpassed living member of the
+        // remaining team. Any member choosing a non-pass action vetoes the
+        // fast-forward, exactly as a representative veto does.
+        for member in topology::team_members(state, representative) {
+            if state.priority_passes.contains(&member) {
+                continue;
+            }
+            let actor = turn_control::authorized_submitter_for_player(state, member);
             if actor != requester {
                 match choose_non_requester_action(state, actor) {
                     ResolveAllCallbackDecision::Action(GameAction::PassPriority) => {}
@@ -1035,7 +1065,7 @@ where
                     ResolveAllCallbackDecision::Stop => return PriorityCycleFastForward::Stop,
                 }
             }
-            seeded.push((representative, actor));
+            seeded.push((member, actor));
         }
     }
 
@@ -1359,22 +1389,27 @@ mod tests {
     }
 
     #[test]
-    fn two_hg_resolve_all_seeds_only_opposing_team_representative() {
+    fn two_hg_resolve_all_seeds_every_unpassed_teammate() {
         let mut state = two_hg_priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
-        let calls = Cell::new(0);
+        let calls = Cell::new(Vec::new());
 
         let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, actor| {
-            calls.set(calls.get() + 1);
-            assert_eq!(
-                actor,
-                PlayerId(2),
-                "callback should be for the opposing team representative, not active teammate"
-            );
+            calls.set({
+                let mut seen = calls.take();
+                seen.push(actor);
+                seen
+            });
             ResolveAllCallbackDecision::Action(GameAction::PassPriority)
         })
         .expect("the fixture's fast-forward is representable");
 
-        assert_eq!(calls.get(), 1);
+        // CR 805.5b: the requester's own team still owes its teammate's pass,
+        // so the seed consults the active teammate first, then both opponents.
+        assert_eq!(
+            calls.take(),
+            vec![PlayerId(1), PlayerId(2), PlayerId(3)],
+            "every unpassed living member must be seeded, not just representatives"
+        );
         assert_eq!(result.items_resolved, 1);
         assert!(state.stack.is_empty());
         assert!(
@@ -1382,7 +1417,7 @@ mod tests {
                 .events
                 .iter()
                 .any(|event| matches!(event, GameEvent::PriorityPassed { .. })),
-            "Resolve All should seed the opposing team pass instead of prompting the active teammate"
+            "Resolve All should seed all remaining passes instead of prompting"
         );
     }
 

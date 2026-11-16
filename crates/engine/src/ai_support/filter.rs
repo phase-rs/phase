@@ -155,10 +155,10 @@ impl CandidateFilter for SimulationFilter {
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
             return true;
         }
-        if structurally_valid_priority_activation(state, &candidate.action) {
+        if structurally_valid_priority_activation(state, candidate) {
             return true;
         }
-        if structurally_valid_priority_cast(state, &candidate.action) {
+        if structurally_valid_priority_cast(state, candidate) {
             return true;
         }
         self.fallback_simulation(state, candidate)
@@ -179,10 +179,10 @@ impl CandidateFilter for SimulationFilter {
         if super::structurally_valid_tap_for_convoke_payment(state, &candidate.action) {
             return true;
         }
-        if structurally_valid_priority_activation(state, &candidate.action) {
+        if structurally_valid_priority_activation(state, candidate) {
             return true;
         }
-        if structurally_valid_priority_cast_with_probe(state, &candidate.action, probe) {
+        if structurally_valid_priority_cast_with_probe(state, candidate, probe) {
             return true;
         }
         self.fallback_simulation(state, candidate)
@@ -399,6 +399,19 @@ fn structurally_valid_pass_priority(state: &GameState, candidate: &CandidateActi
         return false;
     };
 
+    // CR 805.5a: under shared team turns a teammate's pass carries a different
+    // semantic owner than the window holder. Judge the pass under its own owner
+    // (their submitter mapping), while window liveness stays on the holder —
+    // and crucially stay on this fast path: falling through to simulation for a
+    // pass re-enters the stack-resolution session decision, which re-runs the
+    // meaningful-action check that called this filter (unbounded recursion).
+    let owner = candidate.metadata.semantic_owner.unwrap_or(*player);
+    // The owner must own a decision in this window — a teammate's pass is
+    // judged under the teammate, but a stranger's pass (e.g. P1 on a 2-player
+    // P0 window) is rejected exactly as the authorization boundary rejects it.
+    if !turn_control::decision_owners(state).contains(&owner) {
+        return false;
+    }
     // CR 723.5: the simulation submits under `candidate.metadata.actor` when set.
     // `PassPriority` carries no payload, so submitter identity IS half of its
     // legality — accept only the actor the engine's own candidate stamping would
@@ -407,7 +420,7 @@ fn structurally_valid_pass_priority(state: &GameState, candidate: &CandidateActi
     if candidate
         .metadata
         .actor
-        .is_some_and(|actor| actor != turn_control::authorized_submitter_for_player(state, *player))
+        .is_some_and(|actor| actor != turn_control::authorized_submitter_for_player(state, owner))
     {
         return false;
     }
@@ -415,7 +428,7 @@ fn structurally_valid_pass_priority(state: &GameState, candidate: &CandidateActi
     crate::game::priority::pass_priority_structurally_legal(state, *player)
 }
 
-fn structurally_valid_priority_activation(state: &GameState, action: &GameAction) -> bool {
+fn structurally_valid_priority_activation(state: &GameState, candidate: &CandidateAction) -> bool {
     let (
         WaitingFor::Priority { player },
         GameAction::ActivateAbility {
@@ -423,11 +436,21 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
             ability_index,
             payment_mode,
         },
-    ) = (&state.waiting_for, action)
+    ) = (&state.waiting_for, &candidate.action)
     else {
         return false;
     };
 
+    // CR 805.5a: judge the activation under the candidate's own semantic
+    // owner, not the window holder. A teammate activating their own permanent
+    // must not be judged as the representative activating it (non-controller
+    // permissions could otherwise accept a candidate the owner cannot take).
+    // Strangers to the window (not a decision owner) fall through to the
+    // simulation, which rejects them at the authorization boundary.
+    let owner = candidate.metadata.semantic_owner.unwrap_or(*player);
+    if !turn_control::decision_owners(state).contains(&owner) {
+        return false;
+    }
     // CR 602.2 + CR 602.5: `can_activate_ability_now` is the engine's
     // structural authority for beginning an activation. Avoid re-simulating the
     // same priority activation just to enter target selection and discard the
@@ -436,7 +459,7 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
     // complete it.
     crate::game::casting::can_activate_ability_now_with_payment_mode(
         state,
-        *player,
+        owner,
         *source_id,
         *ability_index,
         *payment_mode,
@@ -447,13 +470,13 @@ fn structurally_valid_priority_activation(state: &GameState, action: &GameAction
 // `can_cast_object_now` / `effective_spell_cost` below are the engine's
 // structural authorities for the cast — this fast path only avoids
 // re-simulating the full cast to discard the clone.
-fn structurally_valid_priority_cast(state: &GameState, action: &GameAction) -> bool {
-    structurally_valid_priority_cast_with_probe(state, action, None)
+fn structurally_valid_priority_cast(state: &GameState, candidate: &CandidateAction) -> bool {
+    structurally_valid_priority_cast_with_probe(state, candidate, None)
 }
 
 fn structurally_valid_priority_cast_with_probe(
     state: &GameState,
-    action: &GameAction,
+    candidate: &CandidateAction,
     probe: Option<&casting::PriorityCastProbe>,
 ) -> bool {
     let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
@@ -467,10 +490,18 @@ fn structurally_valid_priority_cast_with_probe(
             targets,
             payment_mode: CastPaymentMode::Auto,
         },
-    ) = (&state.waiting_for, action)
+    ) = (&state.waiting_for, &candidate.action)
     else {
         return false;
     };
+
+    // CR 805.5a: a teammate's cast must be judged under its own owner with its
+    // own castability, never under the window holder or the holder's probe.
+    // Skip this fast path and let the simulation validate the teammate cast.
+    let owner = candidate.metadata.semantic_owner.unwrap_or(*player);
+    if owner != *player {
+        return false;
+    }
 
     if !targets.is_empty()
         || state.priority_player != turn_control::authorized_submitter_for_player(state, *player)
@@ -2221,13 +2252,6 @@ mod tests {
         }
     }
 
-    fn cand_with_actor(action: GameAction, actor: PlayerId) -> CandidateAction {
-        CandidateAction {
-            action,
-            metadata: ActionMetadata::for_actor(Some(actor), TacticalClass::Spell),
-        }
-    }
-
     fn zero_cost_sorcery_priority_state() -> (GameState, ObjectId, CardId) {
         let mut state = GameState::new_two_player(42);
         state.phase = Phase::PreCombatMain;
@@ -2270,7 +2294,10 @@ mod tests {
             targets: Vec::new(),
             payment_mode: CastPaymentMode::Auto,
         };
-        assert!(structurally_valid_priority_cast(&state, &action));
+        assert!(structurally_valid_priority_cast(
+            &state,
+            &cand(action.clone())
+        ));
 
         let mut oracle = state.clone();
         assert!(
@@ -2279,7 +2306,7 @@ mod tests {
         );
 
         crate::game::perf_counters::reset();
-        assert!(SimulationFilter.accept(&state, &cand_with_actor(action, PlayerId(1))));
+        assert!(SimulationFilter.accept(&state, &cand(action)));
         let clones = crate::game::perf_counters::snapshot().state_clone_for_legality;
         assert_eq!(
             clones, 0,
@@ -2300,7 +2327,7 @@ mod tests {
             payment_mode: CastPaymentMode::Auto,
         };
         assert!(
-            structurally_valid_priority_cast(&state, &action),
+            structurally_valid_priority_cast(&state, &cand(action.clone())),
             "fixture must reach the positive shortcut before split second is added"
         );
 
@@ -2329,7 +2356,10 @@ mod tests {
             },
         });
 
-        assert!(!structurally_valid_priority_cast(&state, &action));
+        assert!(!structurally_valid_priority_cast(
+            &state,
+            &cand(action.clone())
+        ));
         let mut oracle = state.clone();
         assert!(
             apply_as_current_for_simulation(&mut oracle, action.clone()).is_err(),
@@ -2357,7 +2387,10 @@ mod tests {
             payment_mode: CastPaymentMode::Manual,
         };
 
-        assert!(!structurally_valid_priority_cast(&state, &action));
+        assert!(!structurally_valid_priority_cast(
+            &state,
+            &cand(action.clone())
+        ));
         let mut oracle = state.clone();
         assert!(
             apply_as_current_for_simulation(&mut oracle, action.clone()).is_ok(),

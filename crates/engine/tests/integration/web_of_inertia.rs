@@ -75,7 +75,7 @@ fn drive_to_optional_prompt(runner: &mut GameRunner) {
         if runner.state().stack.is_empty() {
             return;
         }
-        if runner.act(GameAction::PassPriority).is_err() {
+        if runner.pass_holding_team().is_err() {
             return;
         }
     }
@@ -106,7 +106,7 @@ fn drive_to_seat_prompt(runner: &mut GameRunner) -> PlayerId {
                 if runner.state().stack.is_empty() {
                     panic!("settled without surfacing the seat prompt");
                 }
-                if runner.act(GameAction::PassPriority).is_err() {
+                if runner.pass_holding_team().is_err() {
                     panic!(
                         "stuck without the seat prompt: {:?}",
                         runner.state().waiting_for
@@ -133,7 +133,7 @@ fn drive_to_idle(runner: &mut GameRunner) {
                 );
             }
             _ => {
-                if runner.act(GameAction::PassPriority).is_err() {
+                if runner.pass_holding_team().is_err() {
                     return;
                 }
             }
@@ -337,7 +337,7 @@ fn web_of_inertia_silent_through_real_controller_combat_transition() {
         if runner.state().phase != Phase::BeginCombat {
             break;
         }
-        if runner.act(GameAction::PassPriority).is_err() {
+        if runner.pass_holding_team().is_err() {
             break;
         }
     }

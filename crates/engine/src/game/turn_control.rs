@@ -583,7 +583,25 @@ pub fn authorized_submitter(state: &GameState) -> Option<PlayerId> {
 /// Each entry is mapped through `authorized_submitter_for_player` so that
 /// turn-decision-controller effects (e.g., Mindslaver) still re-route the
 /// submitter correctly.
+///
+/// CR 805.5a: A player may cast a spell, activate an ability, or take a special
+/// action when their team has priority. Under the shared team turns option the
+/// priority window is parked on the team's representative, but every living
+/// member of that team is an authorized submitter — not just the holder.
 pub fn authorized_submitters(state: &GameState) -> Vec<PlayerId> {
+    if let WaitingFor::Priority { player } = &state.waiting_for {
+        if super::topology::side_takes_shared_turn(state, *player) {
+            let mut submitters: Vec<PlayerId> = super::topology::team_members(state, *player)
+                .into_iter()
+                .map(|member| authorized_submitter_for_player(state, member))
+                .collect();
+            // A team-wide controller (CR 805.8) maps every member to the same
+            // submitter; dedup so the set stays a set.
+            submitters.sort();
+            submitters.dedup();
+            return submitters;
+        }
+    }
     state
         .waiting_for
         .acting_players()
@@ -597,6 +615,19 @@ pub fn authorized_submitters(state: &GameState) -> Vec<PlayerId> {
 /// simultaneous mulligan variants accept any pending player.
 pub fn is_authorized_submitter(state: &GameState, actor: PlayerId) -> bool {
     authorized_submitters(state).contains(&actor)
+}
+
+/// CR 805.5a: the semantic decision owners for the current `WaitingFor` —
+/// every living teammate under a shared-turn Priority window, otherwise the
+/// engine's acting players. AI drivers iterate this (not `acting_players`)
+/// so an AI teammate is eligible while the window sits on its representative.
+pub fn decision_owners(state: &GameState) -> Vec<PlayerId> {
+    if let WaitingFor::Priority { player } = &state.waiting_for {
+        if super::topology::side_takes_shared_turn(state, *player) {
+            return super::topology::team_members(state, *player);
+        }
+    }
+    state.waiting_for.acting_players()
 }
 
 #[cfg(test)]

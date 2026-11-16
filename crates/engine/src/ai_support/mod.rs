@@ -2490,6 +2490,17 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
     let mut spell_costs = HashMap::new();
     if let WaitingFor::Priority { player } = &state.waiting_for {
         crate::game::perf_counters::record_legal_actions_spell_cost_sweep();
+        // CR 805.5a: every living teammate may cast when the team has priority,
+        // so costs sweep for each member's castables — not just the holder's.
+        // Objects are overwhelmingly single-owner (hands), so the merge rarely
+        // collides; a shared-permission object both members can cast keeps the
+        // last member's cost (viewer-scoped costs are the follow-up).
+        let cost_owners: Vec<PlayerId> =
+            if crate::game::topology::side_takes_shared_turn(state, *player) {
+                crate::game::topology::team_members(state, *player)
+            } else {
+                vec![*player]
+            };
         // Zone pre-filter is performance-only: skips the battlefield/stack/library
         // walk that has no chance of yielding a castable spell. Eligibility
         // (controller, foreign-cast permissions, zone) is decided centrally by
@@ -2497,19 +2508,21 @@ pub fn legal_actions_full(state: &GameState) -> LegalActionsFull {
         // Dire Fleet Daredevil / Light-Paws-style `CastFromZone` permissions let
         // the active player cast cards owned/controlled by an opponent, and a
         // controller pre-filter would silently hide those cost displays.
-        for obj in state.objects.values() {
-            if !matches!(
-                obj.zone,
-                crate::types::zones::Zone::Hand
-                    | crate::types::zones::Zone::Command
-                    | crate::types::zones::Zone::Exile
-                    | crate::types::zones::Zone::Graveyard
-                    | crate::types::zones::Zone::Library
-            ) {
-                continue;
-            }
-            if let Some(cost) = crate::game::casting::display_spell_cost(state, *player, obj.id) {
-                spell_costs.insert(obj.id, cost);
+        for owner in cost_owners {
+            for obj in state.objects.values() {
+                if !matches!(
+                    obj.zone,
+                    crate::types::zones::Zone::Hand
+                        | crate::types::zones::Zone::Command
+                        | crate::types::zones::Zone::Exile
+                        | crate::types::zones::Zone::Graveyard
+                        | crate::types::zones::Zone::Library
+                ) {
+                    continue;
+                }
+                if let Some(cost) = crate::game::casting::display_spell_cost(state, owner, obj.id) {
+                    spell_costs.insert(obj.id, cost);
+                }
             }
         }
     }
@@ -3055,7 +3068,24 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
         return Vec::new();
     };
 
-    // The grouped map is what the frontend offers the player (CR 605.3a).
+    // CR 805.5a: every living teammate may activate mana abilities when the
+    // team has priority — merge each member's sources (disjoint objects, so
+    // no collisions) instead of the holder's alone. The grouped map is what
+    // the frontend offers each player (CR 605.3a).
+    if matches!(&state.waiting_for, WaitingFor::Priority { .. })
+        && crate::game::topology::side_takes_shared_turn(state, player)
+    {
+        return crate::game::topology::team_members(state, player)
+            .into_iter()
+            .flat_map(|member| {
+                mana_sources::mana_actions_for_player(
+                    state,
+                    member,
+                    ManaActivationPurpose::Explicit,
+                )
+            })
+            .collect();
+    }
     mana_sources::mana_actions_for_player(state, player, ManaActivationPurpose::Explicit)
 }
 

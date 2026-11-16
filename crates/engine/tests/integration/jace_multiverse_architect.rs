@@ -1488,7 +1488,8 @@ fn jace_shared_combat_fires_once_per_opponent() {
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             _ => {
-                if runner.act(GameAction::PassPriority).is_err() {
+                // CR 805.5b: the holding team passes together.
+                if runner.pass_holding_team().is_err() {
                     break;
                 }
             }

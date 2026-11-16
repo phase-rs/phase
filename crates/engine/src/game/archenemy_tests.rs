@@ -168,6 +168,23 @@ fn scheme_trigger_instances(state: &GameState, scheme_id: ObjectId) -> usize {
 // 1. CoreType round-trip
 // ---------------------------------------------------------------------------
 
+/// CR 805.5b: pass priority for the acting team. One holder pass never
+/// advances a shared team — every living member must pass.
+fn pass_team_priority(runner: &mut crate::game::scenario::GameRunner) {
+    let holder = match runner.state().waiting_for.clone() {
+        crate::types::game_state::WaitingFor::Priority { player } => player,
+        _ => return,
+    };
+    let _ = runner.act(crate::types::actions::GameAction::PassPriority);
+    for member in crate::game::topology::team_members(runner.state(), holder) {
+        let _ = crate::game::engine::apply(
+            runner.state_mut(),
+            member,
+            crate::types::actions::GameAction::PassPriority,
+        );
+    }
+}
+
 #[test]
 fn coretype_scheme_roundtrip() {
     // CR 314: Scheme is a nontraditional, non-permanent card type that offers no
@@ -1096,7 +1113,7 @@ fn fate_of_the_flammable_self_choice_deals_six_to_targeted_opponent() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).unwrap();
+        pass_team_priority(&mut runner);
     }
 
     // THE chooser assertion (Fix G): the TARGETED opponent is prompted.
@@ -1221,7 +1238,7 @@ fn fate_of_the_flammable_others_choice_hits_other_opponents() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).unwrap();
+        pass_team_priority(&mut runner);
     }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
@@ -1334,7 +1351,7 @@ fn fate_of_the_flammable_recycled_scheme_follows_current_answer() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).unwrap();
+        pass_team_priority(&mut runner);
     }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
@@ -1387,7 +1404,7 @@ fn fate_of_the_flammable_recycled_scheme_follows_current_answer() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).unwrap();
+        pass_team_priority(&mut runner);
     }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
@@ -1502,7 +1519,7 @@ fn surrender_your_thoughts_others_choice_discards_other_opponents_only() {
         if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
             break;
         }
-        runner.act(GameAction::PassPriority).unwrap();
+        pass_team_priority(&mut runner);
     }
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
