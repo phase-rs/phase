@@ -5,6 +5,7 @@
 //! same evaluator. Every spell under test is a real printed card with its verbatim Oracle text
 //! (see `oracle.rs`); targets and blockers that carry no text are textless filler bodies.
 
+mod consumers;
 mod controls;
 mod decl;
 mod event;
