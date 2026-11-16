@@ -273,6 +273,7 @@ mod that_players_graveyard_cast_9334;
 mod the_black_arrow_dragon_gated_destroy;
 mod the_chain_veil_loyalty_grants;
 mod the_fourteenth_doctor_graveyard_copy;
+mod the_gaffer_each_end_step;
 mod the_immortal_sun;
 mod the_kingpin_of_crime_combat_damage;
 mod the_mind_stone_harness_infinity;
