@@ -741,9 +741,10 @@ fn millennium_calendar_ignores_own_permanents_untapped_on_opponent_untap_step() 
 
 /// Single-fire pin: an UNWINDOWED, unbatched `Untaps` trigger fires exactly
 /// once when one permanent untaps in an untap step. This is the sole guard
-/// of the unwindowed exactly-once half: the pre-advance seam must drop the
-/// context (no window to keep it), and the post-advance scan must admit it
-/// exactly once (2 = double-fire, 0 = lost).
+/// of the unwindowed exactly-once half: the turn-based-action hold inside
+/// `untap_permanents` collects it once (phase is still Untap) and claims the
+/// event, so the upkeep scan cannot re-collect it (2 = double-fire,
+/// 0 = lost).
 ///
 /// Fixture honesty: no corpus card parses to singular `Untaps` with
 /// `batched == false` — `try_parse_untap_trigger` requires the literal "one
@@ -845,12 +846,13 @@ fn unwindowed_singular_untap_trigger_fires_exactly_once() {
 /// (`OncePerTurn { Triggering }`), UNWINDOWED, singular `Untaps` trigger
 /// fires EXACTLY ONCE when two permanents untap during the untap step.
 ///
-/// Pre-fix the pre-advance seam admitted+recorded the dropped contexts, so
-/// the post-advance upkeep scan refused to re-admit them and the trigger
-/// fired zero times. Post-fix the seam classifies window-ness before
-/// recording, the ledger stays clean, and the upkeep scan admits the first
-/// untap (spending the limit) while the second untap finds it spent: exactly
-/// one firing for two untaps (0 = the finding, 2 = double-fire).
+/// History: the interim pre-advance seam admitted+recorded the dropped
+/// contexts, so the post-advance upkeep scan refused to re-admit them and
+/// the trigger fired zero times. At head that seam is gone — upstream's hold
+/// inside `untap_permanents` is the single collector, so no second admission
+/// exists to spend ledgers twice. This pin guards the hold path: the first
+/// untap is admitted (spending the limit) while the second finds it spent,
+/// exactly one firing for two untaps (0 = the finding, 2 = double-fire).
 ///
 /// Fixture honesty: no printed card exhibits constrained+unwindowed+Untaps.
 /// Measured over the 7407-card `integration_cards.json.gz` fixture, exactly
