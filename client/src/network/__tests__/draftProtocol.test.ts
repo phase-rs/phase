@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DRAFT_PROTOCOL_VERSION as GENERATED_VERSION } from "../../generated/protocol-versions";
 import { describe, expect, it } from "vitest";
 
@@ -103,6 +106,19 @@ function workspaceWithPlacementCount(count: number) {
     ),
     virtualBasics: [],
   };
+}
+
+/**
+ * draft-core's player view for a FIFO seat after a selection passes its
+ * remainder, so that one seat's queue holds two packs. Its own tests check the
+ * fixture against its serialization.
+ */
+function queuedFifoView(): Record<string, unknown> {
+  const fixture = JSON.parse(readFileSync(resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    "../../../../fixtures/draft-contract/fifo_legacy_admission.json",
+  ), "utf8")) as { queued_view: Record<string, unknown> };
+  return fixture.queued_view;
 }
 
 describe("draftProtocol", () => {
@@ -544,6 +560,38 @@ describe("draftProtocol", () => {
     // one of those submissions, and `draftPeerSession`'s decode `.catch` would
     // drop the refusal silently. Assert on the RETURNED VALUE, not merely that
     // nothing threw: `[]` must be neither refused nor defaulted into a name.
+    // CR 702.139a: the optional companion is a card name, null, or absent. A
+    // long name is a name, not an instance id, so no instance-id bound applies.
+    it.each([
+      ["a name", "Lurrus of the Dream-Den"],
+      ["a long name", `Lurrus ${"x".repeat(300)}`],
+      ["null", null],
+    ])("accepts a deck submission whose companion is %s", (_label, companion) => {
+      const msg = validateDraftMessage({
+        type: "draft_submit_deck",
+        submissionId: "submission-1",
+        mainDeck: ["Plains"],
+        commanders: [],
+        companion,
+      });
+      expect(msg).toMatchObject({ type: "draft_submit_deck", companion });
+    });
+
+    it.each([7, "", "   ", ["Lurrus of the Dream-Den"], {}])(
+      "rejects a deck submission whose companion is %j",
+      (companion) => {
+        expect(() =>
+          validateDraftMessage({
+            type: "draft_submit_deck",
+            submissionId: "submission-1",
+            mainDeck: ["Plains"],
+            commanders: [],
+            companion,
+          }),
+        ).toThrow("companion must be a non-empty string or null");
+      },
+    );
+
     it("accepts an empty designation and returns it empty", () => {
       const msg = validateDraftMessage({
         type: "draft_submit_deck",
@@ -552,6 +600,26 @@ describe("draftProtocol", () => {
         commanders: [],
       });
       expect(msg).toMatchObject({ type: "draft_submit_deck", commanders: [] });
+    });
+
+    it.each([
+      undefined,
+      [{ section: "main_deck", name: "Plains", count: 1, printing: { set_code: "lea", collector_number: "001" } }],
+      { malformed: "not a native sidecar" },
+      Array(2049).fill(null),
+    ])("leaves extra printings uninterpreted on P2P submissions: %j", (printings) => {
+      // Native bounds do not apply here. The host projects only the four
+      // named submit arguments (p2p-draft-host.ts), not these raw extra keys.
+      const input = {
+        type: "draft_submit_deck", submissionId: "owner-1",
+        mainDeck: ["Plains", "Island"], commanders: ["Plains"],
+        ...(printings === undefined ? {} : { printings }),
+      };
+      expect(validateDraftMessage(input)).toEqual(input);
+      expect(() => validateDraftMessage({ ...input, submissionId: undefined }))
+        .toThrow("Invalid deck submission: submissionId");
+      expect(() => validateDraftMessage({ ...input, commanders: undefined }))
+        .toThrow("Invalid deck submission: commanders");
     });
 
     it.each([
@@ -1221,6 +1289,14 @@ describe("draftProtocol", () => {
         });
       });
 
+      it("accepts a launch whose localDeck carries a companion slot", () => {
+        const launch = withDeck({ companion: ["Lurrus of the Dream-Den"] });
+        expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
+          type: "draft_commander_launch",
+          launch,
+        });
+      });
+
       it("accepts a launch carrying every set the draft contained", () => {
         const launch = { ...commanderLaunch(), draftSetCodes: ["CMM", "CLB"] };
         expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
@@ -1256,6 +1332,7 @@ describe("draftProtocol", () => {
         ["main_deck holds a non-string element", withDeck({ main_deck: ["Island", 3] })],
         ["sideboard is not an array", withDeck({ sideboard: "Mountain" })],
         ["commander is not an array", withDeck({ commander: null })],
+        ["companion is present but not a string array", withDeck({ companion: "Lurrus of the Dream-Den" })],
         ["draftSetCodes is neither null nor an array", { ...commanderLaunch(), draftSetCodes: "CMM" }],
         ["draftSetCodes is absent", withoutKey("draftSetCodes")],
       ];
@@ -1331,6 +1408,64 @@ describe("draftProtocol", () => {
               : { type: msgType, ...bespokePayloads[msgType] },
       );
       expect(msg.type).toBe(msgType);
+    });
+  });
+
+  describe("view carriers the compatibility check refuses", () => {
+    const carriers = [
+      "draft_welcome",
+      "draft_reconnect_ack",
+      "draft_state_update",
+      "draft_pick_ack",
+      "draft_deck_submit_ack",
+    ] as const;
+    const carrierMessage = (type: (typeof carriers)[number], view: unknown): Record<string, unknown> => (
+      type === "draft_deck_submit_ack"
+        ? { type, submissionId: "submission-1", view }
+        : type === "draft_welcome" || type === "draft_reconnect_ack"
+          ? { type, view, workspaceState: null }
+          : { type, view }
+    );
+
+    it.each(carriers)("passes %s through with draft-core's FIFO view unnormalized", (type) => {
+      const view = queuedFifoView();
+      // Reach: the view carries the FIFO flow the compatibility check refuses.
+      expect(view).toMatchObject({ flow: "FifoAsync" });
+
+      const msg = validateDraftMessage(carrierMessage(type, view));
+
+      expect(msg.type).toBe(type);
+      expect((msg as { view?: unknown }).view).toBe(view);
+    });
+
+    it.each(carriers)("still refuses %s with that view's seats and no FIFO markers", (type) => {
+      const { flow: _flow, fifo: _fifo, seats, ...rest } = queuedFifoView();
+      const unmarked = {
+        ...rest,
+        seats: (seats as Record<string, unknown>[]).map(({ fifo_progress: _progress, ...seat }) => seat),
+      };
+
+      expect(() => validateDraftMessage(carrierMessage(type, unmarked)))
+        .toThrow("Invalid draft message: active_pack_count must be an integer 0 or 1");
+    });
+
+    it.each(carriers)("still normalizes a legacy view on %s", (type) => {
+      const view = { ...validDraftView, booster_pack_pool: ["Undealt cube entry"] };
+
+      const msg = validateDraftMessage(carrierMessage(type, view));
+      const normalized = (msg as { view?: unknown }).view;
+
+      expect(normalized).toMatchObject(validDraftView);
+      expect(normalized).not.toBe(view);
+      expect(normalized).not.toHaveProperty("booster_pack_pool");
+    });
+
+    it.each(carriers)("still refuses a non-object view on %s", (type) => {
+      expect(() => validateDraftMessage(carrierMessage(type, "FifoAsync"))).toThrow(
+        type === "draft_deck_submit_ack"
+          ? "Invalid draft deck acknowledgement"
+          : "Invalid draft message: malformed player view",
+      );
     });
   });
 

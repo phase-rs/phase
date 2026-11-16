@@ -36,7 +36,7 @@ function giftKindLabel(
  * / Gift / "or pay" additional-cost prompts.
  *
  * The decline option is an explicit, descriptively-labelled primary button
- * (`choice_index: 1` → finish the cast), kept distinct from the X / backdrop abort
+ * (`pay: false` → finish the cast), kept distinct from the X / backdrop abort
  * affordance (`CancelCast` → cancel the cast, CR 601.2). For repeatable
  * multikicker (CR 702.33c/d) the `times_kicked` count drives the title and
  * the "Done — finish casting (kicked N×)" decline label.
@@ -55,13 +55,13 @@ export function OptionalCostModalContent({
           title: t("optionalCost.gift.title"),
           options: [
             {
-              index: 0,
+              id: "pay" as const,
               label: t("optionalCost.gift.pay", {
                 gift: giftKindLabel(gift_kind, t),
               }),
             },
             {
-              index: 1,
+              id: "decline" as const,
               label: t("optionalCost.gift.decline"),
             },
           ],
@@ -71,19 +71,12 @@ export function OptionalCostModalContent({
   // picking one — no abort allowed. All other costs allow aborting the cast.
   const isMandatoryChoice = cost.type === "Choice";
 
-  // Convert numeric index to string id for ChoiceModal compatibility
-  const choiceModalOptions = options.map((opt) => ({
-    id: String(opt.index),
-    label: opt.label,
-    description: opt.description,
-  }));
-
   return (
     <ChoiceModal
       title={title}
-      options={choiceModalOptions}
+      options={options}
       onChoose={(id) =>
-        dispatch({ type: "DecideOptionalCost", data: { choice_index: Number(id) } })
+        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
       }
       onClose={isMandatoryChoice ? undefined : () => dispatch({ type: "CancelCast" })}
     />

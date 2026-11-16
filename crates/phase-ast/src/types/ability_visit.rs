@@ -612,9 +612,9 @@ where
     match effect {
         Effect::Intensify { .. } => {}
         Effect::ApplyPerpetual { .. } => {}
-        // CR 614.11: A one-shot draw replacement nests its substitute Effect
-        // (Words of Worship/Wilding). Walk it so any conjure name it carries is
-        // surfaced (GainLife/Token carry none today, but it is a nested carrier).
+        // CR 614.11: A one-shot draw replacement nests its substitute
+        // definition (the Words cycle). Walk it so any conjure name it carries
+        // is surfaced (the Words payloads carry none, but it is a nested carrier).
         //
         // BOUNDARY CARRIER (CR 614.1 primary / CR 614.15 secondary): this
         // registers a replacement that applies to a LATER event. CR 614.1:
@@ -627,7 +627,7 @@ where
         // reach it and the substitute effect is not part of THIS resolution.
         Effect::CreateDrawReplacement { replacement_effect } => {
             if scope == ResolutionScope::IncludeRegisteredLater {
-                visit_effect_scoped(replacement_effect, scope, visit)?
+                visit_ability_def_scoped(replacement_effect, scope, visit)?
             }
         }
         // CR 614.1a: A planeswalk replacement nests its substitute Effect (Fixed
@@ -648,6 +648,10 @@ where
         // static card name to extract, and that extraction now lives in the
         // caller's visitor closure (`printed_cards::collect_conjure_names`).
         Effect::Conjure { .. } => {}
+        // CR 707.13: no nested ability carrier. The literal `name` (and the
+        // closed choice domain that feeds the chosen-name form) is extracted by
+        // the caller's visitor closure (`printed_cards::collect_conjure_names`).
+        Effect::CreateCardCopyByName { .. } => {}
         // CR 701.42 / CR 712.4b: the melded permanent presents the `result`
         // card's characteristics, but `result` is an outside-the-game third card.
         // Its name is extracted by the caller's visitor closure
@@ -1063,6 +1067,7 @@ where
         | Effect::ChooseCounterKind { .. }
         | Effect::PutChosenCounter { .. }
         | Effect::ReproduceEventCounters { .. }
+        | Effect::HordePlayCard { .. }
         | Effect::Unimplemented { .. } => {}
     }
     ControlFlow::Continue(())

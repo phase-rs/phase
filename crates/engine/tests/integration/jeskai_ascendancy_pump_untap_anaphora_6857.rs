@@ -31,7 +31,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{BattlefieldEntryRecord, CastPaymentMode, FaceState, GameState, WaitingFor};
+use engine::types::game_state::{
+    BattlefieldEntryRecord, CastPaymentMode, FaceState, GameState, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;

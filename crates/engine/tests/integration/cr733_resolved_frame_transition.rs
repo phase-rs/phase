@@ -44,7 +44,6 @@ fn coin_flip_frame() -> ResolutionFrame {
         source_id: ObjectId(91),
         controller: PlayerId(0),
         flipper: PlayerId(0),
-        targets: Vec::new(),
         win_effect: None,
         lose_effect: None,
         kind: PendingCoinFlipKind::Exactly { remaining: 0 },

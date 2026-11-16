@@ -7,6 +7,7 @@ import type {
   RoomHalvesView,
   SerializedAbility,
   SerializedAbilityCost,
+  UnlessDrawCostView,
 } from "../adapter/types.ts";
 import i18n from "../i18n";
 import { getCrewPower, getSaddlePower } from "./keywordProps.ts";
@@ -117,7 +118,49 @@ type SerializedCost = {
   cost?: { type: string; shards?: string[]; generic?: number };
   filter?: { type: string; type_filters?: unknown[] } | null;
   zone?: string | null;
+  effect?: {
+    type: string;
+    amount?: QuantityExpr | number;
+    player?: {
+      type: string;
+      controller?: string | null;
+      type_filters?: unknown[];
+      properties?: unknown[];
+      player?: { type: string; exclude?: { type: string }; relation?: string };
+    };
+  };
 };
+
+/**
+ * Display-only formatting of an engine `EffectCost` (precedent: `formatFilteredCard`).
+ * The engine is the authority on what the cost is; this only renders the
+ * recipient shapes it pays at cast time — "have an opponent gain N life"
+ * (Invigorate) and "have each other player gain N life" (Reverent Silence).
+ * Every other effect-cost has no rendering here (null), so `formatCost` keeps
+ * its generic "Activate" label and keyword detail shows nothing.
+ */
+function formatEffectCost(effect: SerializedCost["effect"]): string | null {
+  if (effect?.type !== "GainLife") return null;
+  const player = effect.player;
+  const amount = formatQuantity(effect.amount, 1);
+  if (
+    player?.type === "Typed" &&
+    player.controller === "Opponent" &&
+    (player.type_filters ?? []).length === 0 &&
+    (player.properties ?? []).length === 0
+  ) {
+    return i18n.t("game:resolutionOptionalPayment.cost.haveOpponentGainLife", { amount });
+  }
+  const scope = player?.type === "PlayerMatching" ? player.player : undefined;
+  if (
+    scope?.type === "AllExcept" &&
+    scope.exclude?.type === "Controller" &&
+    (scope.relation ?? "All") === "All"
+  ) {
+    return i18n.t("game:resolutionOptionalPayment.cost.haveEachOtherPlayerGainLife", { amount });
+  }
+  return null;
+}
 
 function formatTypeFilter(filter: unknown): string {
   if (typeof filter === "string") return filter;
@@ -225,6 +268,8 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
     case "PermanentsLeftBattlefieldThisTurn": return "permanents that left the battlefield this turn";
     case "NonlandPermanentsLeftBattlefieldThisTurn": return "nonland permanents that left this turn";
     case "CrimesCommittedThisTurn": return "crimes committed this turn";
+    case "EnergyPaidOrLostThisTurn":
+      return i18n.t("quantityRef.energyPaidOrLostThisTurn");
     // Counter / property references
     case "BasicLandTypeCount": return "basic land types you control";
     case "PartySize": return "your party's size";
@@ -375,6 +420,8 @@ export function formatKnownCost(cost: SerializedCost): string | null {
       return (cost.costs ?? []).map(formatCost).join(", ");
     case "OneOf":
       return (cost.costs ?? []).map(formatCost).join(" or ");
+    case "EffectCost":
+      return formatEffectCost(cost.effect);
     default:
       return null;
   }
@@ -671,12 +718,12 @@ export function formatAbilityCost(cost: SerializedAbilityCost): string {
 }
 
 /**
- * A single option in the OptionalCostChoice modal. `index` maps to
- * `DecideOptionalCost { choice_index: index }`. The index is stable so
- * `OptionalCostModal` can dispatch the right action.
+ * A single option in the OptionalCostChoice modal. `pay` maps to
+ * `DecideOptionalCost { pay: true }`, `decline` to `{ pay: false }`. The two
+ * `id`s are stable so `OptionalCostModal` can dispatch the right action.
  */
 export interface AdditionalCostOption {
-  index: number;
+  id: "pay" | "decline";
   label: string;
   description?: string;
 }
@@ -702,9 +749,9 @@ export function additionalCostChoices(
           return {
             title: `Additional cost — paid ${timesKicked}×. Pay ${label} again?`,
             options: [
-              { index: 0, label: `Pay ${label} again` },
+              { id: "pay", label: `Pay ${label} again` },
               {
-                index: 1,
+                id: "decline",
                 label: `Done — finish casting (paid ${timesKicked}×)`,
                 description: "Stop paying this additional cost and pay the total cost.",
               },
@@ -715,12 +762,12 @@ export function additionalCostChoices(
           title: `Pay additional cost: ${label}?`,
           options: [
             {
-              index: 0,
+              id: "pay",
               label: `Pay ${label}`,
               description: "You'll be asked again so you can pay it multiple times.",
             },
             {
-              index: 1,
+              id: "decline",
               label: "Cast without paying",
               description: "Finish casting now with 0 payments.",
             },
@@ -730,8 +777,8 @@ export function additionalCostChoices(
       return {
         title: `Pay additional cost: ${label}?`,
         options: [
-          { index: 0, label: `Pay ${label}` },
-          { index: 1, label: "Skip" },
+          { id: "pay", label: `Pay ${label}` },
+          { id: "decline", label: "Skip" },
         ],
       };
     }
@@ -744,9 +791,9 @@ export function additionalCostChoices(
         return {
           title: `Multikicker — kicked ${timesKicked}×. Pay ${label} again?`,
           options: [
-            { index: 0, label: `Pay ${label} — kick again` },
+            { id: "pay", label: `Pay ${label} — kick again` },
             {
-              index: 1,
+              id: "decline",
               label: `Done — finish casting (kicked ${timesKicked}×)`,
               description: "Stop kicking and pay the total cost.",
             },
@@ -761,14 +808,14 @@ export function additionalCostChoices(
           : `Kicker — pay ${label} to kick this spell?`,
         options: [
           {
-            index: 0,
+            id: "pay",
             label: `Pay ${label} — kick it`,
             description: repeatable
               ? "Adds a kicker. You'll be asked again so you can kick multiple times."
               : "Adds a kicker to this spell.",
           },
           {
-            index: 1,
+            id: "decline",
             label: "Cast without kicking",
             description: "Finish casting now with 0 kickers — the spell still resolves.",
           },
@@ -779,20 +826,18 @@ export function additionalCostChoices(
       return {
         title: `Pay additional cost: ${formatAbilityCost(cost.data)}`,
         options: [
-          { index: 0, label: `Pay ${formatAbilityCost(cost.data)}` },
-          { index: 1, label: "Cancel" },
+          { id: "pay", label: `Pay ${formatAbilityCost(cost.data)}` },
+          { id: "decline", label: "Cancel" },
         ],
       };
-    case "Choice": {
-      const choices = cost.data as SerializedAbilityCost[];
+    case "Choice":
       return {
         title: "Choose additional cost",
-        options: choices.map((choice, index) => ({
-          index,
-          label: formatAbilityCost(choice),
-        })),
+        options: [
+          { id: "pay", label: formatAbilityCost(cost.data[0]) },
+          { id: "decline", label: formatAbilityCost(cost.data[1]) },
+        ],
       };
-    }
   }
 }
 
@@ -808,4 +853,25 @@ export function stripCostPrefix(text: string): string {
   const costMatch = text.match(/^[^:]+:\s*/);
   if (costMatch) return text.slice(costMatch[0].length);
   return text;
+}
+
+/**
+ * CR 121.1 + CR 702.24a: label the draw an unless-payment prompt asks for from
+ * the engine-resolved count and repetition (`derived.unless_draw_cost`); the
+ * cost AST is never decoded here.
+ */
+export function unlessDrawCostLabel(draw: UnlessDrawCostView): string {
+  const instruction = draw.cards === 1
+    ? i18n.t("game:gamePage.cost.draw")
+    : i18n.t("game:gamePage.cost.drawCount", { count: draw.cards });
+  return draw.instructions > 1 ? `${instruction} × ${draw.instructions}` : instruction;
+}
+
+/**
+ * CR 702.24a: whether the open unless-payment prompt offers a decline. The
+ * engine reports the stage (`derived.unless_draw_cost.stage`): a repeated draw
+ * payment that is already partly performed only continues.
+ */
+export function unlessPaymentCanBeDeclined(draw: UnlessDrawCostView | undefined): boolean {
+  return draw?.stage !== "Continuing";
 }

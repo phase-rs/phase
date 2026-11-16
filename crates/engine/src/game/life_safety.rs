@@ -153,34 +153,14 @@ fn selected_optional_life_branch(
                 | AdditionalCost::Required(_) => unreachable!("matched Optional above"),
             },
         )),
-        (AdditionalCost::Choice(cost_a, cost_b), true)
-            if matches!(cost_a, AbilityCost::PayLife { .. })
-                || matches!(cost_b, AbilityCost::PayLife { .. }) =>
-        {
-            let preferred = if matches!(cost_a, AbilityCost::PayLife { .. }) {
-                cost_a.clone()
-            } else {
-                cost_b.clone()
-            };
-            Some((
-                OptionalAdditionalCostBranch::ChoicePreferred,
-                preferred,
-            ))
-        }
-        (AdditionalCost::Choice(cost_a, cost_b), false)
-            if matches!(cost_a, AbilityCost::PayLife { .. })
-                || matches!(cost_b, AbilityCost::PayLife { .. }) =>
-        {
-            let fallback = if matches!(cost_a, AbilityCost::PayLife { .. }) {
-                cost_a.clone()
-            } else {
-                cost_b.clone()
-            };
-            Some((
-                OptionalAdditionalCostBranch::ChoiceFallback,
-                fallback,
-            ))
-        }
+        (AdditionalCost::Choice(preferred @ AbilityCost::PayLife { .. }, _), true) => Some((
+            OptionalAdditionalCostBranch::ChoicePreferred,
+            preferred.clone(),
+        )),
+        (AdditionalCost::Choice(_, fallback @ AbilityCost::PayLife { .. }), false) => Some((
+            OptionalAdditionalCostBranch::ChoiceFallback,
+            fallback.clone(),
+        )),
         (AdditionalCost::Optional { .. }, false)
         | (AdditionalCost::Optional { .. }, true)
         | (AdditionalCost::Choice(_, _), true)
@@ -721,7 +701,7 @@ mod tests {
         )
         .is_none());
         assert!(matches!(
-            selected_optional_life_branch(&AdditionalCost::Choice(life.clone(), mana.clone()), true),
+            selected_optional_life_branch(&AdditionalCost::Choice(life, mana), true),
             Some((
                 OptionalAdditionalCostBranch::ChoicePreferred,
                 AbilityCost::PayLife { .. }

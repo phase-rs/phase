@@ -18,8 +18,11 @@ use crate::types::zones::Zone;
 /// that ability's own capture — the exact incarnation that triggered, whose
 /// history and last known information answer source-relative questions
 /// ("creatures it blocked this turn", CR 113.7a). Spell and activated-ability
-/// sources carry no trigger provenance, so their current incarnation is
-/// captured here rather than later rebinding the stored `ObjectId`.
+/// sources carry no trigger provenance, so the storage object's incarnation is
+/// captured here rather than later rebinding the stored `ObjectId` — except an
+/// activated ability announced before a blink names its announced incarnation
+/// (CR 603.7c), so the epoch guards compare against the creator, not a
+/// successor that entered since.
 ///
 /// When the source changed zones before the delayed ability is created, the
 /// binding follows it only if the creating ability can find the new object it
@@ -35,10 +38,16 @@ pub(crate) fn delayed_source_context(
     delayed_source_id: ObjectId,
 ) -> Option<TriggerSourceContext> {
     let mut source_context = ability.trigger_source.clone().or_else(|| {
-        state
-            .objects
-            .get(&ability.source_id)
-            .map(|source| crate::game::triggers::trigger_source_context_for_latch(state, source))
+        let source = state.objects.get(&ability.source_id)?;
+        let mut context = crate::game::triggers::trigger_source_context_for_latch(state, source);
+        // CR 603.7c: an activated ability's delayed child names the announced
+        // source incarnation, not whatever the storage id holds now. A blink
+        // between announcement and resolution leaves a successor that is a new
+        // object (CR 400.7); the epoch guards compare against this capture.
+        if let Some(announced) = ability.announced_source_incarnation {
+            context.identity.reference.incarnation = announced;
+        }
+        Some(context)
     })?;
     // The successor verdict is about `ability.source_id`, so it may only move a
     // capture of that same object: a forwarded `CreateBoon` child can carry a
@@ -53,6 +62,23 @@ pub(crate) fn delayed_source_context(
         }
     }
     Some(source_context)
+}
+
+/// CR 608.2c + CR 603.7c: Does this delayed payload's HEAD name the tracked set
+/// the creating resolution published?
+///
+/// The plural anaphor is emitted as a `TrackedSet`/`TrackedSetFiltered` head
+/// target (Golden Argosy's "Return them"), so that population is the referent
+/// even when it is empty. Checking only the head is deliberate: a nested
+/// continuation leg can carry a tracked-set reference while the head still
+/// inherits its single referent — Fortune, Loyal Steed's "exile it …, then
+/// return those cards" — and such payloads keep the latest-nonempty preference
+/// in [`resolve`]. `ParentTarget` and `Any` heads are the inherited-referent
+/// shapes and keep it too.
+fn payload_names_tracked_set(effect: &Effect) -> bool {
+    effect
+        .target_filter()
+        .is_some_and(super::filter_references_tracked_set)
 }
 
 /// CR 603.7: Create a delayed triggered ability during resolution.
@@ -127,6 +153,14 @@ pub fn resolve(
     // CR 603.7: Prefer the active nonempty resolution-chain set, then the latest
     // nonempty published set. An empty chain id (stale pre-choice publish) must
     // not shadow a later nonempty set (Storm Herald delayed exile).
+    // CR 608.2c + CR 603.7c: a payload that NAMES the published set (a plural
+    // anaphor such as Golden Argosy's "Return them", emitted by the parser as a
+    // `TrackedSet` reference) binds the creating resolution's OWN publication,
+    // empty included. An empty publication is a real referent — a population
+    // with no members — so falling back to an older nonempty set would move
+    // unrelated objects once the delayed trigger resolves. The nonempty
+    // preference above stays for payloads that merely inherit a referent
+    // (`ParentTarget`) instead of naming the set.
     let tracked_set_id = if uses_tracked_set {
         if matches!(
             &*effect_def.effect,
@@ -137,6 +171,14 @@ pub fn resolve(
         ) {
             // CR 400.7j: a payload naming the source finds only what this ability's own move moved, so it binds that publication as is, empty included.
             state.chain_tracked_set_id
+        } else if payload_names_tracked_set(&effect_def.effect) {
+            // CR 608.2c: the set is named, so a chain publication IS the
+            // referent — empty included. With no chain publication at all
+            // (a manually built ability, or a publisher that ran in an earlier
+            // resolution) keep the established latest-nonempty fallback.
+            state
+                .chain_tracked_set_id
+                .or_else(|| crate::game::targeting::latest_tracked_set_id(state))
         } else {
             state
                 .chain_tracked_set_id
@@ -213,6 +255,14 @@ pub fn resolve(
             crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
         });
     }
+    // CR 608.2b: an unavailable announcement cannot become an unrestricted
+    // event condition. Check before contextual binding erases ParentTarget;
+    // genuinely unassigned empty bindings keep their existing behavior.
+    let references_unavailable_parent = ability.has_authoritative_empty_binding()
+        && filter_groups
+            .iter()
+            .flatten()
+            .any(|filter| reaches_bare_parent_target_bind(filter));
     let no_alternative_can_match = condition_cannot_match(&filter_groups);
     let over_fire_prone_triggers: Vec<&crate::types::ability::TriggerDefinition> = match &condition
     {
@@ -228,17 +278,9 @@ pub fn resolve(
         // `match` over fallback defaults"), so a future variant must make this
         // decision instead of inheriting a silent skip.
         //
-        // These return nothing because this guard reads `TriggerDefinition`
-        // filter slots and they carry none — NOT because they are safe. Said
-        // plainly, because an earlier version of this comment claimed they were:
-        // the four `filter: TargetFilter` variants below go through the SAME
-        // `bind_parent_target_filter` call and degrade a bare `ParentTarget` to
-        // `TargetFilter::Any` identically. MEASURED over the corpus, 79 such
-        // filters exist across 76 cards (29 `WhenDies`, 38 `WhenDiesOrExiled`,
-        // 10 `WhenLeavesPlayFiltered`, 2 `WhenEntersBattlefield`). Whether any of
-        // them can reach this call with an empty `ability.targets` is UNMEASURED.
-        // It is not a regression — these arms skip the guard on main too — and it
-        // is out of scope for #8721, which is why they stay `Vec::new()` here.
+        // These conditions carry no TriggerDefinition filter slots. Their
+        // authoritative-empty references are guarded above through the shared
+        // condition-filter enumeration; unassigned-empty behavior is unchanged.
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
@@ -259,7 +301,7 @@ pub fn resolve(
             .iter()
             .any(|filter| filter.as_ref().is_some_and(reaches_bare_parent_target_bind))
         });
-    if references_empty_parent || no_alternative_can_match {
+    if references_unavailable_parent || references_empty_parent || no_alternative_can_match {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CreateDelayedTrigger,
             source_id: ability.source_id,
@@ -432,6 +474,15 @@ pub fn resolve(
     // single-target contextual bind. This operates on the built `delayed_ability`
     // (not the condition), so it must stay after the ability chain is built.
     if let Some(real_id) = tracked_set_id {
+        // CR 608.2c + CR 603.7c: which referent a payload's `ParentTarget`
+        // names is decided by the PARSER, not inferred here. A plural anaphor
+        // to a published set is emitted as the `TrackedSet` sentinel (Golden
+        // Argosy's "Return them"); a singular creation-source reference stays
+        // `ParentTarget` (Fortune, Loyal Steed's "exile it") and must keep the
+        // parent/event-source binding below rather than absorb the whole set.
+        // Neither the absence of a declared target slot nor the fall back to
+        // `latest_tracked_set_id` proves a plural referent, so no rewrite is
+        // applied here.
         bind_tracked_set_to_ability_chain(&mut delayed_ability, real_id);
     }
 
@@ -683,12 +734,22 @@ pub fn resolve(
     };
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.set_unpinned_targets(snapshot_targets);
+    // CR 115.10a: the creation-time referents are not chosen targets; a
+    // target the payload declares is chosen when it triggers (CR 603.3d).
+    crate::game::ability_utils::clear_chosen_target_slots(&mut delayed_ability);
+    // CR 608.2b + CR 603.7c: retain an unavailable creation-time announcement
+    // on reference-only payloads so firing cannot invent a new antecedent.
+    if ability.has_authoritative_empty_binding()
+        && ability.context.forwarded_result_context.is_none()
+    {
+        super::inherit_missing_parent_referent(&mut delayed_ability, ability);
+    }
     // CR 608.2k: Give each clause that names an event-subject anaphor its own
     // referent, so a chain naming both the event's subject and its object slot
     // does not hand one clause the other's object.
     //
-    // MUST run after `set_target_incarnations_recursive` (which overwrites every
-    // node's pins with the root's) and after the root `targets` assignment —
+    // MUST run after `set_target_incarnations_recursive` (which stamps the
+    // inherited-reference scope) and after the root `targets` assignment —
     // either would otherwise clobber the per-node bindings.
     //
     // Gated on the same creation-time-provenance test as the root snapshot:
@@ -907,11 +968,8 @@ fn bind_event_subject_nodes(
             ability.target_incarnations = pins;
         }
     }
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        bind_event_subject_nodes(sub, state, source_id);
-    }
-    if let Some(alt) = ability.else_ability.as_deref_mut() {
-        bind_event_subject_nodes(alt, state, source_id);
+    for (_, child) in ability.child_links_mut() {
+        bind_event_subject_nodes(child, state, source_id);
     }
 }
 
@@ -1081,11 +1139,8 @@ fn triggering_source_destination_zone(state: &GameState) -> Option<Zone> {
 /// enforce that creation-event binding at delayed-trigger resolution.
 fn stamp_triggering_source_origins_in_ability_chain(ability: &mut ResolvedAbility, expected: Zone) {
     stamp_triggering_source_origins(&mut ability.effect, expected);
-    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
-        stamp_triggering_source_origins_in_ability_chain(sub_ability, expected);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        stamp_triggering_source_origins_in_ability_chain(else_ability, expected);
+    for (_, child) in ability.child_links_mut() {
+        stamp_triggering_source_origins_in_ability_chain(child, expected);
     }
 }
 
@@ -1579,20 +1634,14 @@ fn snapshot_parent_dependent_quantities_in_ability_chain(
         parent,
         first_instruction_amount,
     );
-    // CR 608.2c: "Otherwise" runs in place of this instruction — same position in the payload.
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        snapshot_parent_dependent_quantities_in_ability_chain(
-            else_ability,
-            state,
-            parent,
-            first_instruction_amount,
-        );
-    }
-    // CR 608.2c: a later instruction's "that many" stays live (pre-existing behavior); a
-    // later-instruction anaphor to the creation amount needs its own design. Parent-target-
-    // dependent leaves still freeze here (None only withholds EventContextAmount).
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        snapshot_parent_dependent_quantities_in_ability_chain(sub_ability, state, parent, None);
+    // CR 608.2c: Else replaces this instruction; sub and coin outcomes follow it.
+    for (edge, child) in ability.child_links_mut() {
+        let amount = match edge {
+            crate::types::game_state::ChainStep::ElseAbility => first_instruction_amount,
+            crate::types::game_state::ChainStep::SubAbility
+            | crate::types::game_state::ChainStep::CoinFlipBranch { .. } => None,
+        };
+        snapshot_parent_dependent_quantities_in_ability_chain(child, state, parent, amount);
     }
 }
 
@@ -1843,6 +1892,8 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
         // Upgrade ChangeZone → ChangeZoneAll: ChangeZone uses ability.targets (empty for
         // delayed triggers), so it would move nothing. ChangeZoneAll scans by filter.
         Effect::ChangeZone {
+            // CR 608.2c: the instruction's performer survives the upgrade.
+            actor,
             destination,
             origin,
             target,
@@ -1851,7 +1902,14 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
             enters_attacking,
             enter_with_counters,
             face_down_profile,
-            ..
+            // Named so a new field forces a decision here; these have no
+            // `ChangeZoneAll` counterpart and are dropped as before.
+            owner_library: _,
+            enter_transformed: _,
+            up_to: _,
+            conditional_enter_with_counters: _,
+            enters_modified_if: _,
+            library_shuffle: _,
         } => {
             let bound_target = match target {
                 TargetFilter::TrackedSet {
@@ -1875,6 +1933,7 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
                 _ => TargetFilter::TrackedSet { id: real_id },
             };
             *effect = Effect::ChangeZoneAll {
+                actor: actor.clone(),
                 origin: *origin,
                 destination: *destination,
                 target: bound_target,
@@ -1914,11 +1973,8 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
     if let Effect::CreateDelayedTrigger { effect, .. } = &mut ability.effect {
         bind_tracked_set_to_ability_definition(effect, real_id);
     }
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        bind_tracked_set_to_ability_chain(sub_ability, real_id);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        bind_tracked_set_to_ability_chain(else_ability, real_id);
+    for (_, child) in ability.child_links_mut() {
+        bind_tracked_set_to_ability_chain(child, real_id);
     }
     for mode in &mut ability.mode_abilities {
         bind_tracked_set_to_ability_definition(mode, real_id);
@@ -1980,24 +2036,10 @@ fn filter_refs_parent_object_anaphor_in(filter: &TargetFilter, relation: HostRel
             // `Typed { controller: ParentTargetController }` selects objects BY
             // the parent's controller; the referent being filtered is not the
             // parent's object, so it is NOT a parent object anaphor.
-            typed.properties.iter().any(|prop| match prop {
-                crate::types::ability::FilterProp::DistinctFrom { reference } => {
-                    filter_refs_parent_object_anaphor_in(reference, relation)
-                }
-                // CR 701.3a: a mass object set defined by attachment to the
-                // parent object ("Auras attached to that creature") names the
-                // parent inside the host filter. `ability_pins_object_anaphor`
-                // reads this function to decide whether the creation snapshot
-                // records `target_incarnations`, so missing this arm loses the
-                // incarnation pin the delayed payload needs at resolution.
-                crate::types::ability::FilterProp::AttachedTo {
-                    to: crate::types::ability::AttachmentReferent::Host { filter },
-                } => {
-                    relation == HostRelation::Dependency
-                        && filter_refs_parent_object_anaphor_in(filter, relation)
-                }
-                _ => false,
-            })
+            typed
+                .properties
+                .iter()
+                .any(|prop| prop_refs_parent_object_anaphor_in(prop, relation))
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter()
@@ -2006,6 +2048,47 @@ fn filter_refs_parent_object_anaphor_in(filter: &TargetFilter, relation: HostRel
         TargetFilter::TrackedSetFiltered { filter, .. } => {
             filter_refs_parent_object_anaphor_in(filter, relation)
         }
+        _ => false,
+    }
+}
+
+/// The property arm of [`filter_refs_parent_object_anaphor_in`]. Recurses into
+/// `Not` / `AnyOf`, matching `filter_refs_parent_target`, so the incarnation pin
+/// follows every shape the target freeze does.
+fn prop_refs_parent_object_anaphor_in(
+    prop: &crate::types::ability::FilterProp,
+    relation: HostRelation,
+) -> bool {
+    match prop {
+        crate::types::ability::FilterProp::DistinctFrom { reference } => {
+            filter_refs_parent_object_anaphor_in(reference, relation)
+        }
+        // CR 701.3a: a mass object set defined by attachment to the
+        // parent object ("Auras attached to that creature") names the
+        // parent inside the host filter. `ability_pins_object_anaphor`
+        // reads this function to decide whether the creation snapshot
+        // records `target_incarnations`, so missing this arm loses the
+        // incarnation pin the delayed payload needs at resolution.
+        crate::types::ability::FilterProp::AttachedTo {
+            to: crate::types::ability::AttachmentReferent::Host { filter },
+        } => {
+            relation == HostRelation::Dependency
+                && filter_refs_parent_object_anaphor_in(filter, relation)
+        }
+        // CR 603.7c + CR 400.7: a history relation to the parent object is a
+        // DEPENDENCY of the payload, like the attachment host above. Without
+        // the pin, a target that changed zones would read as its new object,
+        // which blocked nothing (CR 608.2i, Gaze of the Gorgon's ruling).
+        crate::types::ability::FilterProp::CombatRelation {
+            subject: crate::types::ability::CombatRelationSubject::AnaphoricTarget,
+            ..
+        } => relation == HostRelation::Dependency,
+        crate::types::ability::FilterProp::Not { prop } => {
+            prop_refs_parent_object_anaphor_in(prop, relation)
+        }
+        crate::types::ability::FilterProp::AnyOf { props } => props
+            .iter()
+            .any(|prop| prop_refs_parent_object_anaphor_in(prop, relation)),
         _ => false,
     }
 }
@@ -2145,7 +2228,8 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BounceSelection, ControllerRef, DamageKindFilter,
         DelayedTriggerCondition, Effect, ExtraPhaseAnchor, ExtraPhaseRecipient, ManaProduction,
-        ObjectScope, PtValue, QuantityExpr, QuantityRef, TriggerDefinition, TypedFilter,
+        ObjectScope, ParentTargetMissingReason, PtValue, QuantityExpr, QuantityRef,
+        TargetReadOrigin, TriggerDefinition, TypedFilter,
     };
     use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaCost;
@@ -3051,6 +3135,8 @@ mod tests {
         let effect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -3190,6 +3276,8 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -3292,6 +3380,8 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -3351,6 +3441,8 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -3429,6 +3521,8 @@ mod tests {
         effect_def.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -3499,6 +3593,8 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TriggeringSource,
@@ -3917,6 +4013,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Any,
@@ -3971,6 +4068,7 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSetFiltered {
@@ -4032,6 +4130,8 @@ mod tests {
         effect_def.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSetFiltered {
@@ -4054,6 +4154,7 @@ mod tests {
         effect_def.mode_abilities.push(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSet {
@@ -4132,6 +4233,7 @@ mod tests {
         let mode = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSetFiltered {
@@ -4208,6 +4310,7 @@ mod tests {
         let nested_payload = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSetFiltered {
@@ -4276,6 +4379,8 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Battlefield,
                 target: TargetFilter::TrackedSetFiltered {
@@ -4357,6 +4462,8 @@ mod tests {
         let effect = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -4412,6 +4519,85 @@ mod tests {
             Zone::Battlefield,
             "a later incarnation must not be matched through the tracked set"
         );
+    }
+
+    // Real cards: Devouring Tendrils ("Target creature you control deals damage equal to its power
+    // to target creature or planeswalker you don't control. When the permanent you don't control
+    // dies this turn, you gain 2 life.") exhibits part of this shape (Devouring Tendrils parses to
+    // exactly TargetOnly -> DealDamage -> CreateDelayedTrigger WhenDies{ParentTarget} -> GainLife;
+    // its second target can be illegal while the first keeps the spell resolving. It covers only
+    // the WhenDies arm; the test also sweeps leaves/enters/dies-or-exiled at unit level). Shape: A
+    // delayed 'when that creature dies/leaves/enters/dies-or-is-exiled, gain 3 life' keyed on the
+    // parent target is not created when that announcement is illegal, only when unassigned.
+    #[test]
+    fn zone_conditions_distinguish_unavailable_and_unassigned_parent_bindings() {
+        for condition in [
+            DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenEntersBattlefield {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenDiesOrExiled {
+                filter: TargetFilter::ParentTarget,
+            },
+        ] {
+            for reason in [
+                None,
+                Some(ParentTargetMissingReason::IllegalAnnouncement {
+                    origin: TargetReadOrigin::OwnAnnouncement,
+                }),
+                Some(ParentTargetMissingReason::IllegalAnnouncement {
+                    origin: TargetReadOrigin::ParentAnnouncement,
+                }),
+            ] {
+                let mut state = GameState::new_two_player(42);
+                let mut ability = ResolvedAbility::new(
+                    Effect::CreateDelayedTrigger {
+                        condition: condition.clone(),
+                        effect: Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 3 },
+                                player: TargetFilter::Controller,
+                            },
+                        )),
+                        uses_tracked_set: false,
+                    },
+                    vec![],
+                    ObjectId(5),
+                    PlayerId(0),
+                );
+                ability.parent_target_missing_reason = reason;
+                let mut events = Vec::new();
+                resolve(&mut state, &ability, &mut events).unwrap();
+                assert_eq!(
+                    state.delayed_triggers.len(),
+                    usize::from(reason.is_none()),
+                    "condition={condition:?}, provenance={reason:?}"
+                );
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CreateDelayedTrigger,
+                        ..
+                    }
+                )));
+                if reason.is_none() {
+                    let groups = condition_filter_groups(&mut state.delayed_triggers[0].condition);
+                    assert!(
+                        groups
+                            .into_iter()
+                            .flatten()
+                            .all(|filter| *filter == TargetFilter::Any),
+                        "ordinary unassigned-empty binding keeps its existing wildcard"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -5580,6 +5766,8 @@ mod tests {
         let delayed_inner = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -5875,6 +6063,7 @@ mod tests {
 
         let delayed = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::TrackedSet {
@@ -5910,6 +6099,52 @@ mod tests {
         );
     }
 
+    /// CR 603.7c + CR 608.2c: the tracked-set upgrade keeps the move's
+    /// performer. Synthetic actor: the delayed return is the shape below with a
+    /// non-controller subject ("that player returns those cards …").
+    #[test]
+    fn bind_tracked_set_change_zone_upgrade_keeps_the_actor() {
+        let actor = crate::types::ability::LibraryInstructionActor::Player {
+            player: TargetFilter::TriggeringPlayer,
+        };
+        let mut effect = Effect::ChangeZone {
+            actor: actor.clone(),
+            library_shuffle: Default::default(),
+            origin: Some(Zone::Exile),
+            destination: Zone::Battlefield,
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        };
+        bind_tracked_set_to_effect(&mut effect, TrackedSetId(3));
+        match &effect {
+            Effect::ChangeZoneAll {
+                actor: upgraded,
+                target,
+                ..
+            } => {
+                assert_eq!(upgraded, &actor);
+                assert_eq!(
+                    *target,
+                    TargetFilter::TrackedSet {
+                        id: TrackedSetId(3)
+                    }
+                );
+            }
+            other => panic!("expected ChangeZoneAll, got {other:?}"),
+        }
+    }
+
     /// CR 603.7c (issue #5972): binding preserves an explicit Battlefield
     /// origin when upgrading `ChangeZone { TrackedSet }` → `ChangeZoneAll`.
     #[test]
@@ -5923,6 +6158,8 @@ mod tests {
         let effect_def = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::TrackedSet {
@@ -6142,6 +6379,118 @@ mod tests {
         assert!(
             filter_names_parent_object_subject(&TargetFilter::ParentTarget),
             "a direct referent is still the moving subject"
+        );
+
+        // T-U4c — a history relation to an earlier instruction's target follows
+        // the attachment host: a dependency the payload pins, never the
+        // condition's moving subject. `Source` names the parent in neither role.
+        let history_with =
+            |subject| {
+                TargetFilter::Typed(crate::types::ability::TypedFilter::creature().properties(
+                    vec![crate::types::ability::FilterProp::CombatRelation {
+                        relation: crate::types::ability::CombatRelation::BlockPairing {
+                            direction: crate::types::ability::BlockPairDirection::Either,
+                            scope: Some(crate::types::ability::CombatHistoryScope::ThisTurn),
+                        },
+                        subject,
+                    }],
+                ))
+            };
+        let anaphoric = history_with(crate::types::ability::CombatRelationSubject::AnaphoricTarget);
+        assert!(
+            filter_refs_parent_object_anaphor(&anaphoric),
+            "payload pins must see the history dependency"
+        );
+        assert!(
+            !filter_names_parent_object_subject(&anaphoric),
+            "a history dependency is not the condition's moving subject"
+        );
+        // The pin follows the target freeze into `Not` / `AnyOf` properties.
+        let relation = crate::types::ability::FilterProp::CombatRelation {
+            relation: crate::types::ability::CombatRelation::BlockPairing {
+                direction: crate::types::ability::BlockPairDirection::Either,
+                scope: Some(crate::types::ability::CombatHistoryScope::ThisTurn),
+            },
+            subject: crate::types::ability::CombatRelationSubject::AnaphoricTarget,
+        };
+        let wrapped = |prop| {
+            TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature().properties(vec![prop]),
+            )
+        };
+        assert!(
+            filter_refs_parent_object_anaphor(&wrapped(crate::types::ability::FilterProp::Not {
+                prop: Box::new(relation.clone()),
+            })),
+            "a negated history dependency is still pinned"
+        );
+        assert!(
+            filter_refs_parent_object_anaphor(&wrapped(crate::types::ability::FilterProp::AnyOf {
+                props: vec![crate::types::ability::FilterProp::Token, relation.clone()],
+            })),
+            "a history dependency inside AnyOf is still pinned"
+        );
+        assert!(
+            !filter_refs_parent_object_anaphor(&wrapped(
+                crate::types::ability::FilterProp::AnyOf {
+                    props: vec![crate::types::ability::FilterProp::Token],
+                }
+            )),
+            "AnyOf without the relation pins nothing"
+        );
+        // The wrappers carry `HostRelation` unchanged: a nested history or
+        // attachment-host dependency is still never the condition's moving
+        // subject, and a nested player-only reference still names no object.
+        assert!(
+            !filter_names_parent_object_subject(&wrapped(crate::types::ability::FilterProp::Not {
+                prop: Box::new(relation.clone()),
+            })),
+            "a negated history dependency is not the moving subject"
+        );
+        assert!(
+            !filter_names_parent_object_subject(&wrapped(
+                crate::types::ability::FilterProp::AnyOf {
+                    props: vec![crate::types::ability::FilterProp::Token, relation],
+                }
+            )),
+            "a history dependency inside AnyOf is not the moving subject"
+        );
+        let nested_host = wrapped(crate::types::ability::FilterProp::Not {
+            prop: Box::new(crate::types::ability::FilterProp::AttachedTo {
+                to: crate::types::ability::AttachmentReferent::Host {
+                    filter: Box::new(TargetFilter::ParentTarget),
+                },
+            }),
+        });
+        assert!(
+            filter_refs_parent_object_anaphor(&nested_host),
+            "a negated host dependency is still pinned"
+        );
+        assert!(
+            !filter_names_parent_object_subject(&nested_host),
+            "a negated host dependency is not the moving subject"
+        );
+        for player_only in [
+            TargetFilter::ParentTargetController,
+            TargetFilter::ParentTargetOwner,
+        ] {
+            let nested_player = wrapped(crate::types::ability::FilterProp::AnyOf {
+                props: vec![crate::types::ability::FilterProp::Not {
+                    prop: Box::new(crate::types::ability::FilterProp::DistinctFrom {
+                        reference: Box::new(player_only),
+                    }),
+                }],
+            });
+            assert!(
+                !filter_refs_parent_object_anaphor(&nested_player),
+                "a nested player-only reference names no object"
+            );
+            assert!(!filter_names_parent_object_subject(&nested_player));
+        }
+        let source = history_with(crate::types::ability::CombatRelationSubject::Source);
+        assert!(
+            !filter_refs_parent_object_anaphor(&source),
+            "a source-subject relation names no parent object"
         );
 
         // ---- The shared function was NOT modified: all four still true. ----
@@ -6565,6 +6914,7 @@ mod tests {
                 count: event_context_amount(),
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                position: crate::types::ability::LibraryPosition::Top,
             },
         )
     }
@@ -6782,5 +7132,195 @@ mod attached_set_delayed_tests {
         );
         bind_event_subject_nodes(&mut ability, &state, attacker);
         assert!(ability.targets.is_empty());
+    }
+
+    /// CR 608.2c + CR 603.7c: a delayed payload's SINGULAR creation-source
+    /// anaphor ("exile it", Fortune, Loyal Steed) keeps its own referent even
+    /// when an unrelated tracked set is the most recently published one. The
+    /// source-filtered binding must not be widened to that whole set: only a
+    /// payload that NAMES the published set (a plural anaphor, which the parser
+    /// emits as `TrackedSet`) reads it.
+    ///
+    /// Revert probe: reinstate a creation-time "no declared referent ⇒ whole
+    /// set" rewrite here and the payload becomes a bare `TrackedSet`, so the
+    /// `TrackedSetFiltered { filter: ParentTarget }` assertion flips.
+    #[test]
+    fn singular_source_anaphor_does_not_absorb_an_unrelated_tracked_set() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When Fortune enters, scry 2.\nWhenever Fortune attacks while saddled, at end of combat, exile it and up to one creature that saddled it this turn, then return those cards to the battlefield under their owner's control.\nSaddle 1",
+            "Fortune, Loyal Steed",
+            &[],
+            &["Creature".to_string()],
+            &["Horse".to_string(), "Mount".to_string()],
+        );
+        let execute = parsed.triggers[1]
+            .execute
+            .as_ref()
+            .expect("Fortune's attack trigger");
+        let Effect::CreateDelayedTrigger {
+            effect: payload, ..
+        } = &*execute.effect
+        else {
+            panic!(
+                "expected the end-of-combat delayed trigger, got {:?}",
+                execute.effect
+            );
+        };
+        assert!(
+            matches!(
+                &*payload.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "reach: the payload head is the singular source exile: {:?}",
+            payload.effect
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let foreign = crate::game::zones::create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Unrelated card".to_string(),
+            Zone::Exile,
+        );
+        let foreign_set = TrackedSetId(1);
+        state.tracked_object_sets.insert(foreign_set, vec![foreign]);
+        state.next_tracked_set_id = 2;
+        // The creating resolution published nothing: the foreign set is only
+        // the globally latest one, never a publisher of this resolution.
+        state.chain_tracked_set_id = None;
+
+        let ability = ResolvedAbility::new(
+            (*execute.effect).clone(),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("the delayed trigger installs");
+
+        let delayed = state.delayed_triggers[0].ability.clone();
+        let Effect::ChangeZoneAll {
+            destination,
+            target,
+            ..
+        } = &delayed.effect
+        else {
+            panic!(
+                "expected the payload's zone-move head, got {:?}",
+                delayed.effect
+            );
+        };
+        assert_eq!(*destination, Zone::Exile);
+        assert!(
+            matches!(
+                target,
+                TargetFilter::TrackedSetFiltered { id, filter, .. }
+                    if *id == foreign_set
+                        && matches!(filter.as_ref(), TargetFilter::ParentTarget)
+            ),
+            "the singular source anaphor keeps its source filter; it must not \
+             become the whole unrelated set: {target:?}"
+        );
+    }
+
+    /// CR 608.2c + CR 603.7c: a delayed payload that NAMES the published set
+    /// ("Return them", Golden Argosy) binds the creating resolution's OWN
+    /// publication even when that publication is EMPTY. An empty population is
+    /// still the referent the card text names; falling back to an older
+    /// nonempty set would return unrelated exiled cards at the end step.
+    ///
+    /// Revert probe: drop the `payload_names_tracked_set` branch in `resolve`
+    /// and the installed trigger binds `foreign_set` (the latest nonempty set)
+    /// instead of the fresh empty chain set.
+    #[test]
+    fn plural_tracked_set_payload_binds_a_fresh_empty_chain_set() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Whenever Golden Argosy attacks, exile each creature that crewed it this turn. Return them to the battlefield tapped under their owner's control at the beginning of the next end step.\nCrew 1",
+            "Golden Argosy",
+            &[],
+            &["Artifact".to_string()],
+            &["Vehicle".to_string()],
+        );
+        let execute = parsed.triggers[0]
+            .execute
+            .as_ref()
+            .expect("Golden Argosy's attack trigger");
+        let delayed_def = execute
+            .sub_ability
+            .as_deref()
+            .expect("the end-step delayed return follows the exile");
+        let Effect::CreateDelayedTrigger {
+            uses_tracked_set, ..
+        } = &*delayed_def.effect
+        else {
+            panic!(
+                "expected the end-step delayed trigger, got {:?}",
+                delayed_def.effect
+            );
+        };
+        assert!(*uses_tracked_set, "the payload reads the published set");
+
+        let mut state = GameState::new_two_player(42);
+        let unrelated = create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Unrelated card".to_string(),
+            Zone::Exile,
+        );
+        let foreign_set = TrackedSetId(1);
+        state
+            .tracked_object_sets
+            .insert(foreign_set, vec![unrelated]);
+        // The creating resolution exiled no crewing creatures this turn: a
+        // FRESH EMPTY set is its publication.
+        let empty_chain_set = TrackedSetId(2);
+        state
+            .tracked_object_sets
+            .insert(empty_chain_set, Vec::new());
+        state.next_tracked_set_id = 3;
+        state.chain_tracked_set_id = Some(empty_chain_set);
+        // Reach guard: the latest-nonempty fallback would pick this set, so the
+        // binding assertion below is not vacuous.
+        assert_eq!(
+            crate::game::targeting::latest_tracked_set_id(&state),
+            Some(foreign_set)
+        );
+
+        let ability = ResolvedAbility::new(
+            (*delayed_def.effect).clone(),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("the delayed trigger installs");
+
+        let delayed = state.delayed_triggers[0].ability.clone();
+        let Effect::ChangeZoneAll { target, .. } = &delayed.effect else {
+            panic!(
+                "expected the payload's mass return, got {:?}",
+                delayed.effect
+            );
+        };
+        assert!(
+            matches!(target, TargetFilter::TrackedSet { id } if *id == empty_chain_set),
+            "the plural anaphor must bind the creating resolution's empty set, \
+             not an unrelated earlier set: {target:?}"
+        );
+
+        let mut later_events = Vec::new();
+        super::super::resolve_ability_chain(&mut state, &delayed, &mut later_events, 0)
+            .expect("the delayed return resolves");
+        assert_eq!(
+            state.objects[&unrelated].zone,
+            Zone::Exile,
+            "an empty publication returns nothing, so the unrelated exiled card stays put"
+        );
     }
 }

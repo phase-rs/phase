@@ -81,12 +81,11 @@ const SHORT_ENTRY: CuratedCardEntry = {
   face_names: ["short front"],
   faces: [imageFace(`${SHORT}-0`), imageFace(`${SHORT}-1`)],
 };
-// A printing Scryfall has no images for. `gen-scryfall-printings.sh` writes an
-// explicit null for every URL; the declared face type says `string`, which is
-// why the cast is here rather than a defect in the fixture. Measured over
-// client/public/scryfall-printings.json: 696 of the 88,846 stored printings
-// have this shape, every one of them multi-face, and all 696 are null on
-// `art_crop` wherever they are null on `normal`.
+// A printing stored without images: an explicit null for every URL; the
+// declared face type says `string`, which is why the cast is here rather than a
+// defect in the fixture. `gen-scryfall-printings.sh` wrote this shape for split,
+// adventure, flip and prepare printings whose faces carry no `image_uris`, until
+// it fell back to the card's top-level `image_uris`.
 const NO_IMAGE_FACE = { normal: null as unknown as string, art_crop: null as unknown as string };
 const BLANK_UNIMAGED = printing({
   id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
@@ -100,8 +99,8 @@ const BLANK_IMAGED = printing({
   released_at: "2018-07-13",
   faces: [imageFace("blank-p0"), imageFace("blank-p1")],
 });
-// Its scryfall-data.json entry DOES carry images, as all 211 affected cards do
-// (measured, 0 missing), so canonical art is available for exactly this class.
+// Its scryfall-data.json entry DOES carry images, as the entries of those
+// layouts always did, so canonical art is available for exactly this class.
 const BLANK_ENTRY = cardEntry(BLANK, "Blank Print", ["blank front", "blank back"]);
 
 /** Mirrors `scryfall-data.json`: cards are keyed by oracle id AND by one or
@@ -328,14 +327,13 @@ describe("planCuratedMembership", () => {
   });
 
   describe("a selected printing with no stored images", () => {
-    // MEASURED over client/public/scryfall-printings.json and
-    // scryfall-data.json: 214 oracle ids own at least one printing whose every
-    // face stores null for both `normal` and `art_crop`; 211 of them have NO
-    // renderable printing at all, and all 211 carry an image in
-    // scryfall-data.json. Gating the canonical fallback on "selected no
-    // printings" left those 211 cards contributing ZERO descriptors, while the
-    // renderer falls through to canonical art — the network, in a feature whose
-    // whole purpose is offline play.
+    // A printing whose every face stores null for both `normal` and `art_crop`
+    // (the shape `gen-scryfall-printings.sh` wrote for split, adventure, flip
+    // and prepare printings whose faces carry no `image_uris`, before it fell
+    // back to the card's top-level `image_uris`). Gating the canonical fallback
+    // on "selected no printings" left such a card contributing ZERO
+    // descriptors, while the renderer falls through to canonical art — the
+    // network, in a feature whose whole purpose is offline play.
     function blankInput(
       list: PrintingEntry[],
       overrides: Partial<CuratedMembershipInput> = {},
@@ -396,8 +394,8 @@ describe("planCuratedMembership", () => {
     });
 
     it("keeps the exact form and emits no canonical when the selected printing renders", async () => {
-      // The mixed population — a renderable printing beside the image-less one,
-      // measured at 3 oracle ids. The exclusivity gate must still fire here:
+      // The mixed population — a renderable printing beside the image-less one.
+      // The exclusivity gate must still fire here:
       // both forms carry this card's oracle-group candidate keys, and
       // `sortMatches` orders `canonical_card:` first, so a card reachable by
       // both would render the WRONG art at `sources[0]`.

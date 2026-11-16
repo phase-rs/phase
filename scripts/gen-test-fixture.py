@@ -35,6 +35,7 @@ TESTS_DIR = REPO_ROOT / "crates/engine/tests"
 SRC_DIR = REPO_ROOT / "crates/engine/src"
 PARSER_SRC_DIR = REPO_ROOT / "crates/phase-parser/src"
 FIXTURE_PATH = REPO_ROOT / "crates/engine/tests/fixtures/integration_cards.json.gz"
+CORPUS_FIXTURE_DIR = REPO_ROOT / "crates/engine/tests/fixtures/bracket_corpus"
 
 # This fixture must exercise Witherbloom Apprentice and Sakashima of a
 # Thousand Faces through the raw-MTGJSON parser, not a hand-maintained
@@ -70,6 +71,10 @@ def src_fixture_files() -> list[Path]:
             text = rs.read_text(encoding="utf-8", errors="ignore")
             if "shared_card_db" in text:
                 files.add(rs)
+    # The Horde challenge-deck lists are corpus rows consumed by
+    # horde_deck_card_names.rs through shared_card_db(); without them a
+    # regeneration would silently drop every Horde deck card from the fixture.
+    files.update((SRC_DIR / "game" / "decks").rglob("*.rs"))
 
     return sorted(files)
 
@@ -93,6 +98,30 @@ def referenced_card_keys(export: dict[str, object]) -> set[str]:
                 # Undo the common \" / \\ escapes so quoted card names resolve.
                 literal = raw.replace('\\"', '"').replace("\\\\", "\\")
                 key = literal.lower()
+                if key in export:
+                    keys.add(key)
+    return keys
+
+
+def corpus_card_keys(export: dict[str, object]) -> set[str]:
+    """Card names declared by the bracket-corpus fixtures.
+
+    These are JSON, not Rust, so `referenced_card_keys`' string-literal scan
+    cannot see them. A corpus card missing from the fixture resolves to
+    BracketSignals::default() (card_db.rs:522) -- indistinguishable from a clean
+    card -- so the corpus test would pass while measuring nothing.
+    """
+    keys: set[str] = set()
+    if not CORPUS_FIXTURE_DIR.is_dir():
+        return keys
+    for path in sorted(CORPUS_FIXTURE_DIR.glob("*.json")):
+        if path.name == "expectations.json":
+            continue
+        data = json.loads(path.read_text(encoding="utf-8"))
+        deck = data.get("decklist", {})
+        for section in ("commander", "main_deck"):
+            for name in deck.get(section, []):
+                key = name.lower()
                 if key in export:
                     keys.add(key)
     return keys
@@ -125,7 +154,7 @@ def main() -> int:
 
     export: dict[str, object] = json.loads(EXPORT_PATH.read_text(encoding="utf-8"))
 
-    referenced = referenced_card_keys(export)
+    referenced = referenced_card_keys(export) | corpus_card_keys(export)
     export_referenced = referenced - PARSER_BACKED_FIXTURE_CARDS
 
     # Group keys by oracle id so a referenced front face pulls in its siblings.

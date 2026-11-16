@@ -67,6 +67,8 @@ fn hand_to_battlefield_choice_ability(
 ) -> ResolvedAbility {
     ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -2022,7 +2024,7 @@ fn card_name_choice_validates_against_all_card_names() {
     state.waiting_for = WaitingFor::NamedChoice {
         free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -2041,7 +2043,7 @@ fn card_name_choice_validates_against_all_card_names() {
     state.waiting_for = WaitingFor::NamedChoice {
         free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -2064,7 +2066,7 @@ fn card_name_choice_is_case_insensitive() {
     state.waiting_for = WaitingFor::NamedChoice {
         free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -2228,6 +2230,7 @@ fn unless_payment_decline_preserves_nested_effect_zone_choice_continuation() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2306,6 +2309,7 @@ fn static_prison_unless_pay_sacrifice_returns_exiled_permanent() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2376,6 +2380,7 @@ fn unless_pay_success_runs_if_a_player_does_sub_ability() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2465,6 +2470,7 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2570,6 +2576,7 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2651,6 +2658,7 @@ fn unless_pay_decline_runs_primary_not_if_a_player_does_sub() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2695,6 +2703,7 @@ fn unless_pay_success_with_no_sub_ability_is_inert() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2755,6 +2764,7 @@ fn unless_pay_success_clears_stale_cost_payment_failed_flag() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2796,6 +2806,7 @@ fn unless_energy_payment_deducts_energy_and_skips_effect() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
@@ -2858,6 +2869,7 @@ fn unless_discard_payment_filters_eligible_hand_cards() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
@@ -2971,6 +2983,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         Zone::Battlefield,
     );
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![obj_id],
         count: 1,
@@ -2988,10 +3001,12 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -3049,6 +3064,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
     }
 
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![chosen_land, unchosen_land],
         count: 2,
@@ -3066,10 +3082,12 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -3102,6 +3120,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         Zone::Battlefield,
     );
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![obj_id],
         count: 1,
@@ -3119,10 +3138,12 @@ fn effect_zone_choice_up_to_respects_min_count() {
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -4581,6 +4602,8 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         let reflexive = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -4776,6 +4799,8 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
             ..crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::ParentTarget,

@@ -90,11 +90,17 @@ use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
 /// CR 905.4a + CR 113.6b: Face-down hidden-agenda conspiracies do not function
-/// even though synthesis stamps their definitions with `Zone::Command`. Other
-/// non-emblem command-zone objects keep the existing explicit opt-in path.
+/// even though synthesis stamps their definitions with `Zone::Command`. Turtle
+/// Team-Up Bosses take the same gate: a face-down Boss (still in the Boss deck
+/// pile) does not function until deployed face up. Other non-emblem
+/// command-zone objects keep the existing explicit opt-in path.
 fn non_emblem_command_zone_static_functions(obj: &GameObject, def: &StaticDefinition) -> bool {
     if crate::game::conspiracy::is_conspiracy(obj) {
         return crate::game::conspiracy::functions_from_command_zone(obj)
+            && (def.active_zones.is_empty() || static_opts_in_to_command_zone(def));
+    }
+    if crate::game::boss::is_boss(obj) {
+        return crate::game::boss::functions_from_command_zone(obj)
             && static_opts_in_to_command_zone(def);
     }
     static_opts_in_to_command_zone(def)
@@ -108,6 +114,10 @@ pub(crate) fn non_emblem_command_zone_trigger_functions(
 ) -> bool {
     if crate::game::conspiracy::is_conspiracy(obj) {
         return crate::game::conspiracy::functions_from_command_zone(obj)
+            && trigger_opts_in_to_command_zone(def);
+    }
+    if crate::game::boss::is_boss(obj) {
+        return crate::game::boss::functions_from_command_zone(obj)
             && trigger_opts_in_to_command_zone(def);
     }
     trigger_opts_in_to_command_zone(def)
@@ -180,6 +190,10 @@ pub(crate) fn non_emblem_command_zone_replacement_functions(
         return crate::game::conspiracy::functions_from_command_zone(obj)
             && replacement_opts_in_to_command_zone(def);
     }
+    if crate::game::boss::is_boss(obj) {
+        return crate::game::boss::functions_from_command_zone(obj)
+            && replacement_opts_in_to_command_zone(def);
+    }
     replacement_opts_in_to_command_zone(def)
 }
 
@@ -199,6 +213,15 @@ pub(crate) fn non_emblem_command_zone_replacement_functions(
 /// route through one predicate.
 pub fn object_sources_static_from_command_zone(obj: &GameObject) -> bool {
     if obj.zone != Zone::Command {
+        return false;
+    }
+    // CR 315.5b: a face-down conspiracy card has no characteristics, so it is no
+    // continuous-effect source at all before it is turned face up — the CDA
+    // carve-out below (CR 604.3) must not outrank that blanking. The creation
+    // path already empties the face-down object's definition lists; this gate
+    // keeps the answer true even if a restore path re-applies the printed face
+    // to a still-face-down object.
+    if obj.face_down && crate::game::conspiracy::is_conspiracy(obj) {
         return false;
     }
     obj.is_emblem
@@ -255,6 +278,12 @@ pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition)
     // have its rules text — a door-stamped static functions only while its
     // half is unlocked (single authority: `room::door_text_functions`).
     if !crate::game::room::door_text_functions(obj, def.room_door) {
+        return false;
+    }
+    // CR 315.5b: a face-down conspiracy card has no characteristics until it is
+    // turned face up, so none of its definitions function — the CR 604.3 "CDA
+    // functions in all zones" carve-out below included.
+    if obj.zone == Zone::Command && obj.face_down && crate::game::conspiracy::is_conspiracy(obj) {
         return false;
     }
     // CR 604.3: a characteristic-defining ability functions in all zones,
@@ -936,6 +965,38 @@ mod tests {
             vec![StaticDefinition::new(StaticMode::Continuous).active_zones(vec![Zone::Command])]
                 .into();
         assert!(!object_sources_static_from_command_zone(&bf));
+    }
+
+    /// CR 315.5b + CR 604.3: No printed conspiracy in the current MTGJSON data
+    /// has a CDA. Brago's Favor is the nearest printed static-ability witness:
+    /// "Spells with the chosen name you cast cost {1} less to cast."
+    /// This synthetic gate fixture checks that face-down blanking wins over a
+    /// retained CDA definition; it is not a printed-card or restore-path regression.
+    /// The face-up checks below prove the CDA reaches both admission paths.
+    #[test]
+    fn face_down_conspiracy_cda_does_not_function_from_command_zone() {
+        let state = new_state();
+        let cda = StaticDefinition::new(StaticMode::Continuous)
+            .affected(TargetFilter::SelfRef)
+            .cda();
+        let mut obj = make_obj(1, Zone::Command);
+        obj.is_conspiracy = true;
+        obj.face_down = true;
+        obj.static_definitions = vec![cda].into();
+        assert!(
+            !object_sources_static_from_command_zone(&obj),
+            "a face-down conspiracy is not a continuous-effect source"
+        );
+        assert_eq!(
+            active_static_definitions(&state, &obj).count(),
+            0,
+            "CR 315.5b: not even a CDA functions while the conspiracy is face down"
+        );
+
+        // Reach guard: the same object admitted once it is turned face up.
+        obj.face_down = false;
+        assert!(object_sources_static_from_command_zone(&obj));
+        assert_eq!(active_static_definitions(&state, &obj).count(), 1);
     }
 
     #[test]

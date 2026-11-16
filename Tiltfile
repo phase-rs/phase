@@ -65,6 +65,10 @@ PROBE_PIN_TRIGGER = TRIGGER_MODE_AUTO if IS_LINUX else TRIGGER_MODE_MANUAL
 ENGINE_SRC = [
     'crates/engine/src/',
     'crates/engine/Cargo.toml',
+    # `database/bracket_lists.rs` `include_str!`s this file from the repo root.
+    'data/bracket_lists.json',
+    # `ai_deck_manifest.rs` `include_str!`s the bundled AI Commander deck feed from here.
+    'crates/engine/data/',
     'crates/phase-ast/src/',
     'crates/phase-ast/data/',
     'crates/phase-ast/build.rs',
@@ -394,6 +398,19 @@ local_resource('prelowered-ratchet',
     cmd = 'bash scripts/lib/prelowered_ratchet_tests.sh',
     deps = ['scripts/check-prelowered-ratchet.sh',
             'scripts/lib/prelowered_ratchet_tests.sh'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
+# The coverage-regression check's numeric boundary (issue #10549): CRLF jq, non-numeric refusal,
+# and the `-gt`/`-lt` arms. Tilt is the enforcement venue for script suites, not GitHub CI — CI
+# runs the gate itself (ci.yml), never its fixtures.
+local_resource('coverage-crlf',
+    cmd = ['bash', 'scripts/lib/coverage_crlf_tests.sh'],
+    deps = ['scripts/coverage-regression-check.sh',
+            'scripts/lib/coverage_crlf_tests.sh'],
     ignore = TMP_IGNORE,
     allow_parallel = True,
     auto_init = 'lint' in enabled,
