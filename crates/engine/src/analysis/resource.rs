@@ -7868,7 +7868,7 @@ fn additional_cost_references_growing_class(a: &crate::types::ability::Additiona
     match a {
         AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => reads(cost),
         AdditionalCost::Kicker { costs, .. } => costs.iter().any(reads),
-        AdditionalCost::Choice(a, b) => reads(a) || reads(b),
+        AdditionalCost::Choice(costs) => costs.iter().any(reads),
     }
 }
 
@@ -20747,7 +20747,7 @@ mod tests {
         attacker: ObjectId,
         exert_permission: TriggerDefinitionRef,
     ) -> Vec<(&'static str, crate::types::game_state::WaitingFor, bool)> {
-        use crate::types::game_state::WaitingFor;
+        use crate::types::game_state::{UntapStepProgress, WaitingFor};
         vec![
             (
                 "Priority{active} — CR 704.3 SBA point; NOT exempt, and the positive control",
@@ -20912,6 +20912,7 @@ mod tests {
                     // battlefield, not a card in hand.
                     candidates: on_board.to_vec(),
                     chosen_not_to_untap: Vec::new(),
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
                 true,
             ),
@@ -20926,6 +20927,7 @@ mod tests {
                     // empty one, so "this window enumerates no cast" would be a
                     // degenerate zero rather than a measured one.
                     max: 1,
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
                 true,
             ),

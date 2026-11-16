@@ -200,6 +200,17 @@ pub(crate) enum DeferredTriggerBatchOrigin {
     /// later one behind a wait that is not SBA-owned). It never selects the
     /// `Any` answer scope.
     PriorityBoundary,
+    /// CR 117.3a + CR 502.4 + CR 503.1a + CR 603.3b: an ability that triggered during a
+    /// turn-based action performed as a step or phase begins (the untap step's actions, the
+    /// draw, the archenemy's scheme action, a Saga's lore counters, the roll to visit (CR 703.4g)), together with the step's
+    /// own beginning triggers, held as it begins (CR 500.6), and the abilities its state-based
+    /// check before that batch triggers (CR 704.3), before any player
+    /// received priority in that step. It is held until the next time a player would receive
+    /// priority and placed together with that boundary's own triggers in one CR 603.3b
+    /// process — "the order in which they triggered doesn't matter" (CR 503.1a). `UntapStep`
+    /// is the name it was serialized under before it covered every such action.
+    #[serde(alias = "UntapStep")]
+    TurnBasedAction,
 }
 
 fn deferred_trigger_batch_origin_is_ordinary(origin: &DeferredTriggerBatchOrigin) -> bool {
@@ -6184,7 +6195,10 @@ fn observe_creatures_exploited(state: &mut GameState, events: &[GameEvent]) {
     }
 }
 
-fn collect_pending_triggers(
+/// CR 603.2 + CR 603.10: collect `events`' ordinary triggered abilities against
+/// the game as it is now, without queuing them. The caller places the contexts
+/// exactly once (`queue_parked_trigger_contexts`).
+pub(crate) fn collect_pending_triggers(
     state: &mut GameState,
     events: &[GameEvent],
 ) -> Vec<PendingTriggerContext> {
@@ -11145,15 +11159,17 @@ pub(crate) fn handle_order_triggers(
     }
     // No trigger-specific pause remains. Restore an interrupted casting/payment
     // state if this ordering pass preempted one; otherwise fall through to
-    // Priority for the active player.
+    // Priority for the active player (CR 800.4j: or the next living player).
     // CR 603.3b: the batch dispatched fully (the paused paths returned earlier at the
     // two `return Ok` above); drop the per-batch ephemeral coverage markers before the
     // next Priority frame. Guarded so a mid-batch pause (non-empty) never clears them.
     if state.deferred_triggers.is_empty() {
         state.clear_ephemeral_trigger_order_templates();
     }
+    // CR 603.3b + CR 800.4j: once the batch is on the stack the active player receives priority, or the next
+    // player in turn order still in the game when the active player has left.
     Ok(resume_after_ordering.unwrap_or(WaitingFor::Priority {
-        player: state.active_player,
+        player: super::engine::living_priority_seat(state),
     }))
 }
 
@@ -11250,6 +11266,28 @@ pub(crate) fn take_priority_boundary_batch(state: &mut GameState) -> Vec<Pending
         context.batch_origin = DeferredTriggerBatchOrigin::Ordinary;
     }
     parked
+}
+
+/// CR 117.3a + CR 502.4 + CR 503.1a + CR 603.3b: take the held turn-based-action partition
+/// in order. Ownership is consumed, so a context that pauses during placement re-parks as an
+/// ordinary tail. If a live resolution kept the join from running, the pipeline's whole-queue
+/// drain places the stamped contexts at the same boundary.
+pub(crate) fn take_turn_based_action_trigger_batch(
+    state: &mut GameState,
+) -> Vec<PendingTriggerContext> {
+    let (mut held, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.deferred_triggers)
+        .into_iter()
+        .partition(|context| {
+            matches!(
+                context.batch_origin,
+                DeferredTriggerBatchOrigin::TurnBasedAction
+            )
+        });
+    state.deferred_triggers = rest;
+    for context in &mut held {
+        context.batch_origin = DeferredTriggerBatchOrigin::Ordinary;
+    }
+    held
 }
 
 /// CR 603.7: [`collect_unclaimed_delayed_triggers_into_deferred`], returning the
@@ -11404,25 +11442,29 @@ pub(crate) fn collect_unclaimed_triggers_into_deferred(
 /// The marker is a narrow scheduling ownership record, not a general queue
 /// heuristic: `StateBasedActionChoice` is stamped only for the closed set of
 /// commander-zone, legend, and battle-protector SBA choices.
-pub(crate) fn collect_parked_triggers_into_deferred(
-    state: &mut GameState,
-    events: &[GameEvent],
-    origin: DeferredTriggerBatchOrigin,
-) {
-    collect_parked_triggers_into_deferred_observing(state, events, origin, None);
-}
-
-/// [`collect_parked_triggers_into_deferred`] with the action's battlefield
-/// departures discovered from its raw event list (CR 603.10 + CR 608.2c);
-/// `None` derives them from `events`.
+///
+/// `action_departures` carries the action's battlefield departures discovered
+/// from its raw event list (CR 603.10 + CR 608.2c); `None` derives them from
+/// `events`.
 pub(crate) fn collect_parked_triggers_into_deferred_observing(
     state: &mut GameState,
     events: &[GameEvent],
     origin: DeferredTriggerBatchOrigin,
     action_departures: Option<ActionDepartures>,
 ) {
+    let contexts = collect_pending_triggers_observing(state, events, action_departures);
+    queue_parked_trigger_contexts(state, contexts, origin);
+}
+
+/// CR 603.3b: queue already-collected contexts stamped `origin` — a priority
+/// boundary's own batch, an SBA batch parked behind a choice, or `Ordinary`.
+pub(crate) fn queue_parked_trigger_contexts(
+    state: &mut GameState,
+    contexts: Vec<PendingTriggerContext>,
+    origin: DeferredTriggerBatchOrigin,
+) {
     let first_new_context = state.deferred_triggers.len();
-    collect_triggers_into_deferred_observing(state, events, action_departures);
+    state.deferred_triggers.extend(contexts);
     stamp_deferred_triggers_from(state, first_new_context, origin);
 }
 
@@ -13168,6 +13210,7 @@ pub(crate) fn finalize_pending_trigger_entry(
 /// Locate the in-construction `TriggeredAbility` entry identified by `entry_id`
 /// (searching from the top of the stack down) and overwrite its resolved
 /// ability. Shared find-and-assign logic for `mutate`/`finalize` above.
+/// CR 610.3b: retain the provisional ability's latched "until" events when replacing it.
 ///
 /// Returns `false` when no stack entry carries `entry_id` — the triggered
 /// ability is unexpectedly no longer on the stack (dangling push-first cursor;
@@ -13214,6 +13257,12 @@ fn assign_pending_trigger_entry_ability(
     let ability = entry
         .ability_mut()
         .expect("pending_trigger_entry must reference a TriggeredAbility stack entry");
+    // CR 610.3b + CR 603.3d: an "until" event latched on the provisional entry
+    // after it triggered must survive construction from the chosen targets.
+    // Otherwise a source that left before target selection would still exile them.
+    for duration_event in ability.latched_duration_events() {
+        assigned_ability.record_duration_event_recursive(duration_event);
+    }
     if assigned_ability.target_incarnations.is_empty()
         && !ability.target_incarnations.is_empty()
         && ability_uses_event_target_prevent_damage(&assigned_ability)
@@ -16279,7 +16328,7 @@ pub(crate) fn collect_delayed_trigger_contexts_into_deferred(
     state.deferred_triggers.extend(pending);
 }
 
-/// Delayed counterpart to [`collect_parked_triggers_into_deferred`].
+/// Delayed counterpart to [`collect_parked_triggers_into_deferred_observing`].
 pub(crate) fn collect_parked_delayed_triggers_into_deferred(
     state: &mut GameState,
     events: &[GameEvent],
@@ -18998,21 +19047,6 @@ fn process_collected_triggers_with_delayed_events_scoped(
         prompt,
         consumed_events,
     }
-}
-
-pub(crate) fn process_triggers_with_delayed_phase_events(
-    state: &mut GameState,
-    normal_events: &[GameEvent],
-    delayed_events: &[GameEvent],
-    events_out: &mut Vec<GameEvent>,
-) -> TriggerBatchOutcome {
-    let normal_pending = collect_triggers_for_batch(state, normal_events);
-    process_collected_triggers_with_delayed_phase_events(
-        state,
-        normal_pending,
-        delayed_events,
-        events_out,
-    )
 }
 
 /// CR 603.3b + CR 508.3a + CR 509.3a: settle an attack or block declaration.
@@ -22319,6 +22353,19 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// A held context serialized under the origin's earlier name, `UntapStep`, still decodes.
+    #[test]
+    fn turn_based_action_origin_reads_the_untap_step_name() {
+        assert_eq!(
+            serde_json::from_str::<DeferredTriggerBatchOrigin>("\"UntapStep\"").unwrap(),
+            DeferredTriggerBatchOrigin::TurnBasedAction
+        );
+        assert_eq!(
+            serde_json::to_string(&DeferredTriggerBatchOrigin::TurnBasedAction).unwrap(),
+            "\"TurnBasedAction\""
+        );
     }
 
     /// CR 115.10a + CR 609.7a: a SOURCE-scoped prevention's recipient field is
@@ -33670,9 +33717,10 @@ pub mod tests {
             phase: Phase::Upkeep,
         }];
         let mut events_out = Vec::new();
-        let outcome = process_triggers_with_delayed_phase_events(
+        let normal_pending = collect_triggers_for_batch(&mut state, &events);
+        let outcome = process_collected_triggers_with_delayed_phase_events(
             &mut state,
-            &events,
+            normal_pending,
             &events,
             &mut events_out,
         );
@@ -41173,6 +41221,47 @@ pub mod tests {
             Some(src),
             None,
         ));
+    }
+
+    /// CR 701.27g: a live source answers `SourceIsTransformed` through
+    /// `transform::is_transformed_permanent`, so a modal double-faced card back face up is a
+    /// transformed permanent and a front-face-up one with both flags set is not. Synthetic:
+    /// `SourceIsTransformed` has no parser producer; the nearest printed reader of
+    /// "transformed permanent" is Mutagen Connoisseur ("This creature gets +1/+0 for each
+    /// transformed permanent you control.").
+    #[test]
+    fn source_is_transformed_reads_the_face_that_is_up() {
+        let mut state = setup();
+        let modal_dfc = |state: &mut GameState, transformed: bool| {
+            let src = create_object(
+                state,
+                CardId(1),
+                PlayerId(0),
+                "Lisette, Dean of the Root".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&src).unwrap();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: "Valentin, Dean of the Vein".to_string(),
+                layout_kind: Some(crate::types::card::LayoutKind::Modal),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = true;
+            src
+        };
+        let modal_back = modal_dfc(&mut state, false);
+        let both_flags = modal_dfc(&mut state, true);
+
+        let cond = TriggerCondition::SourceIsTransformed;
+        assert!(
+            check_trigger_condition(&state, &cond, PlayerId(0), Some(modal_back), None),
+            "a modal double-faced card back face up is a transformed permanent"
+        );
+        assert!(
+            !check_trigger_condition(&state, &cond, PlayerId(0), Some(both_flags), None),
+            "a front-face-up permanent with both flags is not a transformed permanent"
+        );
     }
 
     #[test]
@@ -53830,7 +53919,9 @@ pub mod tests {
                 WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
                 WaitingFor::OptionalCostChoice { .. } => {
                     runner
-                        .act(GameAction::DecideOptionalCost { pay: kicked })
+                        .act(GameAction::DecideOptionalCost {
+                            index: if kicked { 0 } else { 1 },
+                        })
                         .expect("kicker decision must be accepted");
                 }
                 WaitingFor::TriggerTargetSelection { .. }
@@ -54006,7 +54097,9 @@ pub mod tests {
                 WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
                 WaitingFor::OptionalCostChoice { .. } => {
                     runner
-                        .act(GameAction::DecideOptionalCost { pay: kicked })
+                        .act(GameAction::DecideOptionalCost {
+                            index: if kicked { 0 } else { 1 },
+                        })
                         .expect("kicker decision must be accepted");
                 }
                 _ => {

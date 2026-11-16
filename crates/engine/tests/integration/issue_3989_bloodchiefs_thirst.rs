@@ -64,7 +64,7 @@ fn bloodchiefs_thirst_castable_on_opponent_pyrogoyf_when_kicked() {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("pay kicker");
             }
             WaitingFor::TargetSelection { target_slots, .. } => {
@@ -190,7 +190,7 @@ fn kicked_bloodchiefs_thirst_destroys_high_mv_target_on_resolution() {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("pay kicker");
             }
             WaitingFor::TargetSelection { target_slots, .. } => {
