@@ -22561,6 +22561,7 @@ mod tests {
                     kind: DamageKindFilter::Any,
                     source: Some(Box::new(TargetFilter::LastCreated)),
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 }),
             }],
         ] {
@@ -23071,6 +23072,7 @@ mod tests {
                                     kind: DamageKindFilter::Any,
                                     source: Some(Box::new(owned())),
                                     min_sources: 1,
+                                    relation: crate::types::ability::PlayerRelation::Opponent,
                                 }),
                             },
                         ]),
@@ -23353,6 +23355,7 @@ mod tests {
                         kind: DamageKindFilter::Any,
                         source: Some(Box::new(chosen())),
                         min_sources: 1,
+                        relation: crate::types::ability::PlayerRelation::Opponent,
                     }),
                 },
             ])),
@@ -27113,6 +27116,7 @@ mod tests {
                         ),
                     ))),
                     min_sources: 3,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 }),
             },
         ]))
