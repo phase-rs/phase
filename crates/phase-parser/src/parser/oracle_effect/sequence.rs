@@ -31,9 +31,9 @@ use crate::parser::oracle_quantity::{
 };
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AttachCardinality, AttachSelection,
-    CastingPermission, ChoiceType, Chooser, ContinuousModification, ControllerRef,
-    CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigRestRemainder, DigSource,
-    Duration, Effect, EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody,
+    CastingPermission, ChoiceAssignmentSide, ChoiceType, Chooser, ContinuousModification,
+    ControllerRef, CopyRetargetPermission, CounterSourceRider, DigRestOrder, DigRestRemainder,
+    DigSource, Duration, Effect, EffectScope, ExcessRecipient, ExileConcealment, FaceDownBody,
     FaceDownProfile, FilterProp, ForEachCategoryAction, LibraryPosition, ManaSpendRestriction,
     MultiTargetSpec, ObjectScope, PermissionGrantee, PlayerFilter, PtValue, QuantityExpr,
     QuantityRef, RevealUntilDisposition, SpellStackToGraveyardReplacement, StaticDefinition,
@@ -4014,19 +4014,32 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
             )),
         ),
     ))
-    // CR 701.63: "<self-ref subject> endures N" as a conjunct ("you lose 1
-    // life and this creature endures 1" — Sinkhole Surveyor). The self-ref
-    // subject axis (it / this creature / ~) is composed with the "endures "
-    // verb as a single unit, not enumerated per permutation. A self-ref
-    // pronoun/phrase followed by the conjugated keyword-action verb is always
-    // a subject-predicate clause start, never a noun-phrase continuation.
+    // Self-ref subject (it / this creature / ~) + a conjugated predicate that
+    // the subject-clause path owns. The subject axis is composed once with the
+    // predicate axis, not enumerated per permutation. A self-ref pronoun/phrase
+    // followed by one of these predicates is always a subject-predicate clause
+    // start, never a noun-phrase continuation.
+    //
+    // - CR 701.63: "endures N" ("you lose 1 life and this creature endures 1"
+    //   — Sinkhole Surveyor).
+    // - CR 510.1a: "assigns no combat damage [this turn]" (Goblin Vandal:
+    //   "destroy target artifact defending player controls and this creature
+    //   assigns no combat damage this turn"; Rysorian Badger: "you gain 1 life
+    //   for each card exiled this way and this creature assigns no combat
+    //   damage this turn"). Without this split the conjunct stays glued to the
+    //   leading imperative, whose trailing-duration strip steals "this turn"
+    //   and whose imperative-only fallback has no subject-predicate path, so
+    //   the rider is lost (Vandal: `Unimplemented`; Badger: silently dropped,
+    //   the card reported as supported). Splitting routes it through
+    //   `parse_clause_ast` to the `assigns no combat damage` subject clause
+    //   (subject.rs).
     .or(preceded(
         alt((
             tag::<_, _, OracleError<'_>>("it "),
             tag("this creature "),
             tag("~ "),
         )),
-        value((), tag("endures ")),
+        value((), alt((tag("endures "), tag("assigns no combat damage")))),
     ))
     .or(alt((
         // CR 608.2c: Anaphoric back-reference subject + continuous-modification
@@ -5801,6 +5814,27 @@ pub(super) fn apply_clause_continuation(
                     end_cost: None,
                 },
             ));
+        }
+        ContinuationAst::ChoiceAssignmentGainsControl => {
+            // CR 608.2c + CR 608.2f: the handoff is the instruction after the per-object
+            // choices — a following sibling of the repetition, so it runs once, after
+            // the last choice, and processes every assigned object at once. A pushed
+            // continuation step skips the boundary stamping of the clause loop, so the
+            // link is set here. No stated duration (CR 611.2a). It reads no
+            // `LastCreated`, so it keeps the "no SequentialSibling reads LastCreated" backstop.
+            let mut handoff = AbilityDefinition::new(
+                kind,
+                Effect::GiveControl {
+                    target: TargetFilter::ChoiceAssignment {
+                        side: ChoiceAssignmentSide::Objects,
+                    },
+                    recipient: TargetFilter::ChoiceAssignment {
+                        side: ChoiceAssignmentSide::PlayerForObject,
+                    },
+                },
+            );
+            handoff.sub_link = SubAbilityLink::SequentialSibling;
+            defs.push(handoff);
         }
         ContinuationAst::SelfCostKeywordCostClarification => {}
         ContinuationAst::CantRegenerate { scope } => {
@@ -7768,6 +7802,10 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::GoadLastCreated { .. } => true,
+        // Recognition was gated on a preceding player choice and admitted on its
+        // per-object shape (oracle_effect::mod), so the clause is always absorbed
+        // into its handoff.
+        ContinuationAst::ChoiceAssignmentGainsControl => true,
         ContinuationAst::CantRegenerate { .. } => true,
         // CR 116.2c: recognition was already gated on a preceding
         // continuous-effect-installing `GenericEffect`, so absorption is
@@ -10358,6 +10396,15 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         {
             Some(continuation)
         }
+        // CR 608.2c + CR 608.2d: "Each opponent/player gains control of the <object> for
+        // which they were chosen" after a player choice. Guard-then-call: a declining
+        // recognizer leaves every later arm reachable.
+        Effect::Choose { choice_type, .. }
+            if let Some(continuation) =
+                try_parse_choice_assignment_gains_control(&lower, choice_type) =>
+        {
+            Some(continuation)
+        }
         Effect::ControlNextTurn { .. }
             if nom_primitives::scan_contains(&lower, "after that turn")
                 && nom_primitives::scan_contains(&lower, "takes an extra turn") =>
@@ -10553,6 +10600,46 @@ fn try_parse_tokens_goaded_continuation(lower: &str) -> Option<ContinuationAst> 
         return None;
     }
     Some(ContinuationAst::GoadLastCreated { duration })
+}
+
+/// CR 608.2c + CR 608.2d: "Each opponent gains control of the <object> for which
+/// they were chosen" / "Each player gains control of …" after a choice of a
+/// player. The singular "the <noun>" restates each repetition's own object and
+/// "they" the player chosen for it, so the clause is the handoff of the
+/// resolving ability's object→player assignment. The subject must agree with
+/// the choice's player set. Scrambleverse's plural "of each permanent" is a
+/// different grammar and declines at the singular determiner. Whether the
+/// choice records an assignment is the caller's admission
+/// (`oracle_effect::clause_records_choice_assignment`).
+fn try_parse_choice_assignment_gains_control(
+    lower: &str,
+    choice_type: &ChoiceType,
+) -> Option<ContinuationAst> {
+    let (_, (subject, _, _, _, _, _, _)) = (
+        alt((
+            value(
+                TargetFilter::Opponent,
+                tag::<_, _, OracleError<'_>>("each opponent"),
+            ),
+            value(TargetFilter::Player, tag("each player")),
+        )),
+        tag(" gains control of the "),
+        super::super::oracle_nom::target::parse_type_filter_word,
+        tag(" for which they were chosen"),
+        opt(tag(".")),
+        multispace0,
+        eof,
+    )
+        .parse(lower.trim())
+        .ok()?;
+    // The subject agrees with the choice's player set: an opponent choice with
+    // "each opponent", a player choice with "each player".
+    matches!(
+        (&subject, choice_type),
+        (TargetFilter::Opponent, ChoiceType::Opponent { .. })
+            | (TargetFilter::Player, ChoiceType::Player { .. })
+    )
+    .then_some(ContinuationAst::ChoiceAssignmentGainsControl)
 }
 
 pub(super) fn source_token_power_value() -> PtValue {
@@ -18308,6 +18395,98 @@ mod tests {
                 "{unrepresented}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod choice_assignment_gains_control_tests {
+    use super::*;
+    use crate::types::ability::PlayerChoiceDistinctness;
+
+    const OPPONENT_SENTENCE: &str =
+        "each opponent gains control of the permanent for which they were chosen.";
+    const PLAYER_SENTENCE: &str =
+        "each player gains control of the permanent for which they were chosen.";
+
+    fn opponent_choice() -> ChoiceType {
+        ChoiceType::Opponent {
+            restriction: None,
+            distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices,
+        }
+    }
+
+    fn player_choice() -> ChoiceType {
+        ChoiceType::Player {
+            distinctness: PlayerChoiceDistinctness::DistinctFromPriorChoices,
+        }
+    }
+
+    /// A3.2 (SHAPE): CR 608.2c + CR 608.2d — the handoff after an opponent
+    /// choice ("each opponent") and after a player choice ("each player") is
+    /// the assignment handoff.
+    #[test]
+    fn agreeing_subject_recognizes_the_assignment_handoff() {
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(OPPONENT_SENTENCE, &opponent_choice()),
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        );
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(PLAYER_SENTENCE, &player_choice()),
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        );
+    }
+
+    /// A3.2 (SHAPE, synthetic pair): Scrambleverse's plural "of each permanent"
+    /// is not this grammar and declines at the singular determiner. Paired
+    /// reach-guard: the singular "of the permanent" after the same player
+    /// choice is recognized.
+    #[test]
+    fn each_permanent_grammar_declines_and_the_permanent_is_recognized() {
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(
+                "each player gains control of each permanent for which they were chosen.",
+                &player_choice(),
+            ),
+            None
+        );
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(PLAYER_SENTENCE, &player_choice()),
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        );
+    }
+
+    /// A3.2: the subject must agree with the choice's player set. Reach-guard:
+    /// the agreeing subject after the same player choice is recognized.
+    #[test]
+    fn mismatched_subject_declines() {
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(OPPONENT_SENTENCE, &player_choice()),
+            None,
+            "an opponent subject after a player choice"
+        );
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(PLAYER_SENTENCE, &player_choice()),
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        );
+    }
+
+    /// A3.2: a trailing conjunct is not swallowed. Reach-guard: the plain
+    /// sentence is recognized.
+    #[test]
+    fn trailing_conjunct_declines() {
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(
+                "each opponent gains control of the permanent for which they were chosen and \
+                 draws a card.",
+                &opponent_choice(),
+            ),
+            None,
+            "a trailing conjunct is not swallowed"
+        );
+        assert_eq!(
+            try_parse_choice_assignment_gains_control(OPPONENT_SENTENCE, &opponent_choice()),
+            Some(ContinuationAst::ChoiceAssignmentGainsControl)
+        );
     }
 }
 

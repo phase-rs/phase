@@ -621,6 +621,27 @@ pub(crate) fn eliminate_players(
                 }
             };
 
+        // CR 800.4a + CR 608.2d + CR 609.3: an open resolution-time player choice
+        // ("choose a different opponent") stored its options when it was raised.
+        // The departed player is no longer one that can be chosen: the prompt is
+        // re-offered without them, or, when none remains, the impossible choice
+        // does nothing and the resolution's remaining instructions run. Placed
+        // with the object-choice reconciliation above, for the same reasons.
+        let resolution_player_choice =
+            match super::engine_resolution_choices::settle_player_choice_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "resolution player choice was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "resolution player choice was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
+
         if let Some(frame) = staged_optional_sacrifice_decline {
             state.push_optional_effect_frame(frame);
             super::engine_payment_choices::handle_optional_effect_choice(state, false, events)
@@ -772,6 +793,10 @@ pub(crate) fn eliminate_players(
                 )
                 && matches!(
                     resolution_object_choice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    resolution_player_choice,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
                 && state
@@ -1729,6 +1754,11 @@ fn do_eliminate(
     if state.pending_replacement.is_some()
         && leaving_is_latched_chooser
         && !settles_with_parked_payment
+        // CR 800.4a + CR 616.1f: a combat-damage leg's choice is not abandoned
+        // with its chooser: the damaged permanent may survive the departure (a
+        // Control Magic host returns to its owner), so the event is lifted back
+        // into the parked batch and re-proposed to whoever now owes it.
+        && !super::replacement::lift_departed_combat_leg_choice(state)
     {
         state.pending_replacement = None;
         // CR 800.4a: a paused frameless single-card discard belongs to the
@@ -1774,6 +1804,17 @@ fn do_eliminate(
     // halves are false now that the discharge exists.)
     if let Some(record) = state.pending_combat_lifelink.as_mut() {
         record.remaining.retain(|gain| gain.controller != player);
+        // CR 616.1: a batch parked earlier, in its replacement pass, has not
+        // computed its gains yet — Phase C derives them from each entry's
+        // lifelink controller. Drop that seat's the same way, per entry; its
+        // damage itself still applies.
+        if let Some(parked) = record.replacement.as_mut() {
+            for entry in &mut parked.entries {
+                if entry.lifelink_controller == Some(player) {
+                    entry.lifelink_controller = None;
+                }
+            }
+        }
     }
 
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
@@ -2650,6 +2691,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         }
     }
 
@@ -2828,6 +2870,7 @@ mod tests {
             attempted: vec![leaving, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         let mut events = Vec::new();
@@ -2945,6 +2988,7 @@ mod tests {
             attempted: vec![leaving, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         let mut events = Vec::new();
@@ -3043,6 +3087,7 @@ mod tests {
         );
         let context = source_context(&state, source);
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(1),
             choice_type: crate::types::ability::ChoiceType::Labeled {
@@ -3165,6 +3210,7 @@ mod tests {
     fn leaving_persisted_named_choice_player_abandons_the_whole_family() {
         let mut state = setup_three_player();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: crate::types::ability::ChoiceType::Labeled {

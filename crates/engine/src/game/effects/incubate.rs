@@ -202,6 +202,7 @@ mod tests {
                             TypeFilter::Creature,
                         ))),
                         caused_by: Some(ThisWayCause::Exiled),
+                        destination: None,
                     },
                 },
             },

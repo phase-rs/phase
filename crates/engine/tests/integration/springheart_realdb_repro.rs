@@ -109,6 +109,14 @@ fn springheart_realdb_attached_decline_makes_insect() {
     // CR 702.103b: attach in the real bestowed-Aura form. A printed creature
     // hand-attached to a creature is exactly what CR 704.5p sentence 1 sweeps.
     runner.attach_as_bestowed_aura(sh_id, host_id);
+    // CR 118.3 + CR 608.2d: fund the decliner with {1}{G} floating mana
+    // (mirroring the accept test) so the pay prompt is reachable and the
+    // decline runs the genuine decline branch instead of being suppressed.
+    for ty in [ManaType::Green, ManaType::Green] {
+        runner.state_mut().players[0]
+            .mana_pool
+            .add(ManaUnit::new(ty, ObjectId(0), false, vec![]));
+    }
 
     let card_id = runner.state().objects[&forest].card_id;
     runner
