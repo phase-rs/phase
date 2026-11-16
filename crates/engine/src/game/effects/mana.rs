@@ -3980,17 +3980,35 @@ mod tests {
                 exiled_id: imprinted,
                 kind: ExileLinkKind::TrackedBySource,
             });
-            let mana_actions =
-                crate::game::mana_sources::activatable_mana_actions_for_player(runner.state(), P0);
-            let tap = mana_actions
-                .into_iter()
-                .find(|action| {
-                    matches!(action, GameAction::TapLandForMana { selection }
-                        | GameAction::ActivateManaSource { selection }
-                        if selection.source.object_id == chamber)
+            let ability_index =
+                crate::game::casting::activated_ability_definitions(runner.state(), chamber)
+                    .into_iter()
+                    .find(|(_, ability)| matches!(&*ability.effect, Effect::Mana { .. }))
+                    .expect("the Chamber offers its printed indexed mana ability")
+                    .0;
+            // The semantic source action preselects an echo type; this test
+            // instead exercises the raw activation's real unresolved choice.
+            let tapped = runner
+                .act(GameAction::ActivateAbility {
+                    source_id: chamber,
+                    ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
-                .expect("the Chamber can tap for mana");
-            let tapped = runner.act(tap).expect("the tap applies");
+                .expect("the tap applies");
+            assert_eq!(
+                runner.state().players[0]
+                    .mana_pool
+                    .count_color(ManaType::Green),
+                1,
+                "{mode:?}: reach: the Chamber produced its base G before the echo choice"
+            );
+            assert_eq!(
+                runner.state().players[0]
+                    .mana_pool
+                    .count_color(ManaType::Blue),
+                1,
+                "{mode:?}: reach: the Chamber produced its base U before the echo choice"
+            );
             assert!(
                 matches!(
                     tapped.waiting_for,
