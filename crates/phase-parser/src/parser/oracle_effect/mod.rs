@@ -202,13 +202,14 @@ use self::subject::{
     try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::{
+    bind_controller_phrase, BodyScope, ClauseChooser, PendingTrackedSet, ResolvedChainRoot,
+    TrackedSetProducer,
+};
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
     HeadWindowProbe, ParseContext, PriorZoneChoicePartition, SpellAnaphorBinding, TokenPtFollowup,
     TriggerConditionScope,
-};
-use crate::parser::oracle_ir::context::{
-    BodyScope, ClauseChooser, PendingTrackedSet, ResolvedChainRoot, TrackedSetProducer,
 };
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
@@ -22553,6 +22554,30 @@ fn refine_put_at_library_position(
     placement_target_set
 }
 
+/// CR 608.2c: a mass zone exile whose owner is a subject possessive
+/// ("their hand") but whose clause has no subject, printed or carried, names
+/// the player the chain last introduced. Bound through the shared antecedent
+/// binder; with no antecedent it fails closed rather than reading the caster.
+fn bind_subjectless_zone_owner(effect: &mut Effect, ctx: &ParseContext, original_clause: &str) {
+    let Effect::ChangeZoneAll { target, .. } = effect else {
+        return;
+    };
+    if target_filter_controller_ref(target) != Some(ControllerRef::ScopedPlayer) {
+        return;
+    }
+    let phrase = ControllerPhrase {
+        subject: ControllerSubject::Anaphoric(nom_target::PlayerAnaphor::They),
+        form: nom_target::ControllerForm::Singular,
+        tense: nom_target::ControllerTense::Present,
+    };
+    match bind_controller_phrase(&phrase, &ctx.player_antecedents()) {
+        // CR 109.5: a for-each iteration's player is already `ScopedPlayer`.
+        Some(ControllerRef::ScopedPlayer) => {}
+        Some(owner) => rebind_owned_scope(target, owner),
+        None => *effect = Effect::unimplemented(subject::UNBOUND_SUBJECT_GAP, original_clause),
+    }
+}
+
 fn lower_clause_ast(
     ast: ClauseAst,
     ctx: &mut ParseContext,
@@ -35932,19 +35957,28 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         {
             *target = subject_filter;
         }
-        // CR 608.2c: "that player reveals their hand and exiles all cards …" — a
-        // zone owner that names the clause's subject ("their", "from it") binds a
-        // carried, non-announced subject (the parent target's controller for Legion's
-        // End and Hour of Glory). A declared subject keeps `TargetPlayer`, which
-        // already reads its announcement.
+        // CR 608.2c: a subject possessive ("their hand and graveyard") names the
+        // clause's subject, encoded as `ScopedPlayer` until a subject binds it. Only
+        // that reference is rewritten; an explicit owner ("target player's", "your",
+        // "its owner's") is never touched, whichever recognizer produced it.
         Effect::ChangeZoneAll { target, .. }
-            if target_filter_controller_ref(target) == Some(ControllerRef::TargetPlayer)
-                && subject.target.is_none()
-                && !subject.inherits_parent
-                && player_filter_as_controller_ref(&subject_filter).is_some() =>
+            if target_filter_controller_ref(target) == Some(ControllerRef::ScopedPlayer) =>
         {
-            if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
-                force_controller(target, ctrl);
+            // CR 115.1a + CR 601.2c: a declared subject reads its announcement.
+            let owner = if subject.target.is_some() {
+                Some(ControllerRef::TargetPlayer)
+            } else {
+                proven_subject_player_ref(&subject_filter, subject.inherits_parent)
+            };
+            match owner {
+                Some(ctrl) => rebind_owned_scope(target, ctrl),
+                // CR 109.5: the caster subject is what `ScopedPlayer` already falls
+                // back to; `bind_subjectless_zone_owner` binds "their" from the
+                // chain's player antecedent afterwards.
+                None if subject_filter == TargetFilter::Controller => {}
+                None => {
+                    *effect = Effect::unimplemented(subject::UNBOUND_SUBJECT_GAP, original_clause);
+                }
             }
         }
         Effect::Shuffle { ref mut target }
@@ -42422,8 +42456,15 @@ fn clause_ir_continuous_grant_population(clause: &ClauseIr) -> Option<TargetFilt
 /// used to scope a card filter to that same player's hand. Exhaustive over
 /// the closed set of forms `parse_hand_possessive_target` can produce — a
 /// bounded translation table, not per-card special-casing.
-fn hand_reveal_target_to_controller_ref(target: &TargetFilter) -> Option<ControllerRef> {
+///
+/// CR 608.2c: it also covers a reveal whose player came from
+/// `inject_subject_target` ("its controller reveals their hand", "its owner
+/// reveals their hand"), so a later "it" / "from among them" reads the parent
+/// target's controller or owner.
+pub(super) fn hand_reveal_target_to_controller_ref(target: &TargetFilter) -> Option<ControllerRef> {
     match target {
+        TargetFilter::ParentTargetController => Some(ControllerRef::ParentTargetController),
+        TargetFilter::ParentTargetOwner => Some(ControllerRef::ParentTargetOwner),
         TargetFilter::Controller => Some(ControllerRef::You),
         TargetFilter::Player => Some(ControllerRef::TargetPlayer),
         TargetFilter::TriggeringPlayer => Some(ControllerRef::TriggeringPlayer),
@@ -53165,6 +53206,12 @@ fn parse_effect_chain_ir_body(
                     &player,
                 );
             }
+        }
+        // A printed subject was already applied by `lower_subject_predicate_ast`
+        // and a carried one just above; only a clause with neither (and no player
+        // scope) binds its subject possessive from the chain's player antecedent.
+        if inherited_player_subject.is_none() && player_scope.is_none() {
+            bind_subjectless_zone_owner(&mut clause.effect, ctx, normalized_text);
         }
         if nom_primitives::scan_contains(&text.to_lowercase(), "villainous choice") {
             if let (Effect::ChooseOneOf { chooser, .. }, Some(scope)) =

@@ -102877,7 +102877,444 @@ fn no_name_zone_exile_keeps_its_target_player_route() {
     }
 }
 
-/// CR 115.1 + CR 611.2c: a duration-scoped targeting prohibition naming a source
+/// The same-name mass exile's filter for an explicit `owner`.
+fn same_name_zone_exile_filter_owned_by(owner: ControllerRef, zones: Vec<Zone>) -> TargetFilter {
+    TargetFilter::Typed(TypedFilter {
+        type_filters: vec![],
+        controller: Some(owner),
+        properties: vec![
+            FilterProp::InAnyZone { zones },
+            FilterProp::SameNameAsParentTarget,
+        ],
+    })
+}
+
+/// The only `ChangeZoneAll` down the spine of `parsed`'s single spell ability.
+fn sole_mass_exile_target(parsed: &crate::parser::oracle::ParsedAbilities) -> TargetFilter {
+    assert_eq!(parsed.abilities.len(), 1, "{parsed:#?}");
+    let spine = reveal_conjunct_spine(&parsed.abilities[0]);
+    let targets: Vec<&TargetFilter> = spine
+        .iter()
+        .filter_map(|d| match &*d.effect {
+            Effect::ChangeZoneAll { target, .. } => Some(target),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(targets.len(), 1, "{spine:#?}");
+    targets[0].clone()
+}
+
+/// T1 (SHAPE). CR 115.1a + CR 601.2c + CR 608.2c: an explicit "target player's"
+/// zone owner is the announced player, kept apart from the exiled creature's
+/// controller the reveal names. The printed texts are the positive control.
+#[test]
+fn same_name_zone_exile_keeps_an_explicit_player_target_apart_from_the_creature_controller() {
+    // No printed card exhibits an explicit player owner in this class; nearest
+    // printed cards: Hour of Glory (first row) and Legion's End (second row).
+    for (name, text, exile_index, zones, printed) in [
+        (
+            "Hour of Glory",
+            "Exile target creature. If that creature was a God, its controller reveals their hand and exiles all cards from target player's hand with the same name as that creature.",
+            2,
+            vec![Zone::Hand],
+            "Exile target creature. If that creature was a God, its controller reveals their hand and exiles all cards from it with the same name as that creature.",
+        ),
+        (
+            "Legion's End",
+            "Exile target creature an opponent controls with mana value 2 or less and all other creatures that player controls with the same name as that creature. Then that player reveals their hand and exiles all cards with that name from target player's hand and graveyard.",
+            3,
+            vec![Zone::Hand, Zone::Graveyard],
+            "Exile target creature an opponent controls with mana value 2 or less and all other creatures that player controls with the same name as that creature. Then that player reveals their hand and exiles all cards with that name from their hand and graveyard.",
+        ),
+    ] {
+        let printed_parsed = sorcery_defs(name, printed);
+        let printed_spine = reveal_conjunct_spine(&printed_parsed.abilities[0]);
+        let Effect::ChangeZoneAll { target, .. } = &*printed_spine[exile_index].effect else {
+            panic!("{name}: {printed_spine:#?}");
+        };
+        assert_eq!(*target, same_name_zone_exile_filter(zones.clone()), "{name}");
+
+        let parsed = sorcery_defs(name, text);
+        assert_eq!(parsed.abilities.len(), 1);
+        let spine = reveal_conjunct_spine(&parsed.abilities[0]);
+        assert!(!spine.iter().any(|d| is_unimplemented_def(d)), "{spine:#?}");
+        assert!(
+            matches!(
+                &*spine[exile_index - 1].effect,
+                Effect::RevealHand {
+                    target: TargetFilter::ParentTargetController,
+                    ..
+                }
+            ),
+            "{name}: {spine:#?}"
+        );
+        let Effect::ChangeZoneAll { target, .. } = &*spine[exile_index].effect else {
+            panic!("{name}: {spine:#?}");
+        };
+        assert_eq!(
+            *target,
+            same_name_zone_exile_filter_owned_by(ControllerRef::TargetPlayer, zones.clone()),
+            "{name}"
+        );
+        assert_ne!(*target, same_name_zone_exile_filter(zones), "{name}");
+    }
+}
+
+/// T2 (SHAPE). CR 608.2c: "from it" is the hand the chain revealed, so its owner is
+/// the revealing player; with no reveal, or a population reveal, it is an explicit
+/// gap rather than a mass exile of every card.
+#[test]
+fn same_name_from_it_reads_the_revealed_players_hand() {
+    // No printed card exhibits these reveal subjects; nearest printed card: Hour of Glory.
+    for (text, owner) in [
+        (
+            "Exile target creature. Its owner reveals their hand and exiles all cards from it with the same name as that creature.",
+            ControllerRef::ParentTargetOwner,
+        ),
+        (
+            "Exile target creature. Target player reveals their hand and exiles all cards from it with the same name as that creature.",
+            ControllerRef::TargetPlayer,
+        ),
+    ] {
+        let parsed = sorcery_defs("Hour of Glory", text);
+        assert_eq!(
+            sole_mass_exile_target(&parsed),
+            same_name_zone_exile_filter_owned_by(owner, vec![Zone::Hand]),
+            "{text}"
+        );
+    }
+
+    // No printed card exhibits these shapes; nearest printed card: Hour of Glory.
+    for (text, gap) in [
+        (
+            "Exile target creature. Its controller exiles all cards from it with the same name as that creature.",
+            "exile all cards from it with the same name as that creature",
+        ),
+        (
+            "Exile target creature. Reveal your hand and exile all cards from it with the same name as that creature.",
+            "exile all cards from it with the same name as that creature",
+        ),
+        (
+            "Exile target creature. Target opponent reveals their hand and exiles all cards from it with the same name as that creature.",
+            "exile all cards from it with the same name as that creature",
+        ),
+    ] {
+        let parsed = sorcery_defs("Hour of Glory", text);
+        assert_eq!(parsed.abilities.len(), 1);
+        let spine = reveal_conjunct_spine(&parsed.abilities[0]);
+        assert!(
+            matches!(&*spine[0].effect, Effect::ChangeZone { .. }),
+            "reach guard: {spine:#?}"
+        );
+        assert!(
+            spine
+                .iter()
+                .any(|d| d.effect.unimplemented_description() == Some(gap)),
+            "{text}: {spine:#?}"
+        );
+        assert!(
+            !spine
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::ChangeZoneAll { .. })),
+            "{text}: {spine:#?}"
+        );
+    }
+}
+
+/// T3 (SHAPE). CR 115.1a + CR 608.2c: a player subject rebinds only the subject
+/// possessive, never an explicit "target player's" owner from the multi-zone player
+/// exile (the Identity Crisis class).
+#[test]
+fn multi_zone_player_exile_keeps_target_player_under_a_player_subject() {
+    // No printed card exhibits a player subject over this owner; nearest printed card: Identity Crisis.
+    for text in [
+        "Exile target creature. Its controller reveals their hand and exiles all cards from target player's hand and graveyard.",
+        "Exile target creature. Its controller exiles all cards from target player's hand and graveyard.",
+    ] {
+        let parsed = sorcery_defs("Identity Crisis", text);
+        assert_eq!(
+            sole_mass_exile_target(&parsed),
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![],
+                controller: Some(ControllerRef::TargetPlayer),
+                properties: vec![FilterProp::InAnyZone {
+                    zones: vec![Zone::Hand, Zone::Graveyard]
+                }],
+            }),
+            "{text}"
+        );
+    }
+    let revealed = sorcery_defs(
+        "Identity Crisis",
+        "Exile target creature. Its controller reveals their hand and exiles all cards from target player's hand and graveyard.",
+    );
+    assert!(reveal_conjunct_spine(&revealed.abilities[0])
+        .iter()
+        .any(|d| matches!(
+            &*d.effect,
+            Effect::RevealHand {
+                target: TargetFilter::ParentTargetController,
+                ..
+            }
+        )));
+}
+
+/// T5 (SHAPE). CR 201.2a + CR 608.2c + CR 608.2k: a same-name exile whose owner,
+/// zone or antecedent cannot be represented is an explicit gap carrying the exile
+/// text, never the generic mass path that exiles every card.
+#[test]
+fn same_name_zone_exile_unrepresentable_owner_is_an_explicit_gap() {
+    const LE_HEAD: &str = "Exile target creature an opponent controls with mana value 2 or less and all other creatures that player controls with the same name as that creature. Then that player reveals their hand and ";
+    // No printed card exhibits these owners; nearest printed cards: Legion's End,
+    // Hour of Glory.
+    let chain_rows = [
+        (
+            format!("{LE_HEAD}exiles all cards with that name from that player's hand and graveyard."),
+            "exile all cards with that name from that player's hand and graveyard",
+        ),
+        (
+            format!("{LE_HEAD}exiles all cards with that name from target opponent's hand and graveyard."),
+            "exile all cards with that name from target opponent's hand and graveyard",
+        ),
+        (
+            "Exile target creature. If that creature was a God, its controller reveals their hand and exiles all cards from an opponent's hand with the same name as that creature.".to_string(),
+            "exile all cards from an opponent's hand with the same name as that creature",
+        ),
+        (
+            "Exile target creature. Its controller reveals their hand and exiles all cards with that name from each opponent's hand and graveyard.".to_string(),
+            "exile all cards with that name from each opponent's hand and graveyard",
+        ),
+        (
+            "Exile target creature. Its controller reveals their hand and exiles all cards from each player's graveyard with the same name as that creature.".to_string(),
+            "exile all cards from each player's graveyard with the same name as that creature",
+        ),
+    ];
+    for (text, gap) in &chain_rows {
+        let parsed = sorcery_defs("Legion's End", text);
+        assert_eq!(parsed.abilities.len(), 1);
+        let spine = reveal_conjunct_spine(&parsed.abilities[0]);
+        assert!(
+            matches!(&*spine[0].effect, Effect::ChangeZone { .. }),
+            "{spine:#?}"
+        );
+        let reveal = spine
+            .iter()
+            .position(|d| {
+                matches!(
+                    &*d.effect,
+                    Effect::RevealHand {
+                        target: TargetFilter::ParentTargetController,
+                        ..
+                    }
+                )
+            })
+            .unwrap_or_else(|| panic!("reach guard: the reveal must parse: {spine:#?}"));
+        assert_eq!(
+            spine[reveal + 1].effect.unimplemented_description(),
+            Some(*gap),
+            "{text}: {spine:#?}"
+        );
+        assert!(
+            !spine[reveal..]
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::ChangeZoneAll { .. })),
+            "{text}: {spine:#?}"
+        );
+    }
+
+    // CR 608.2k: "that creature" is the trigger's object, not a parent target. No
+    // printed card exhibits these triggers; nearest printed card: Hour of Glory.
+    for (text, gap) in [
+        (
+            "Whenever a creature an opponent controls dies, exile all cards from its controller's graveyard with the same name as that creature.",
+            "exile all cards from its controller's graveyard with the same name as that creature",
+        ),
+        (
+            "Whenever a creature an opponent controls dies, exile all cards with that name from its owner's graveyard.",
+            "exile all cards with that name from its owner's graveyard",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, "Hour of Glory", &[], &["Enchantment".to_string()], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "reach guard: {parsed:#?}");
+        let execute = parsed.triggers[0]
+            .execute
+            .as_deref()
+            .unwrap_or_else(|| panic!("{text}: {parsed:#?}"));
+        let spine = reveal_conjunct_spine(execute);
+        assert_eq!(
+            spine[0].effect.unimplemented_description(),
+            Some(gap),
+            "{text}: {spine:#?}"
+        );
+        assert!(
+            !spine
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::ChangeZoneAll { .. })),
+            "{text}: {spine:#?}"
+        );
+    }
+
+    // Positive sibling: after a reveal the parent target is in scope, so an object
+    // owner passes the gate. No printed card exhibits it; nearest printed card: Legion's End.
+    let owner = sorcery_defs(
+        "Legion's End",
+        "Exile target creature. Its controller reveals their hand and exiles all cards with that name from its owner's hand and graveyard.",
+    );
+    assert_eq!(
+        sole_mass_exile_target(&owner),
+        same_name_zone_exile_filter_owned_by(
+            ControllerRef::ParentTargetOwner,
+            vec![Zone::Hand, Zone::Graveyard]
+        )
+    );
+}
+
+/// T6 (SHAPE). CR 608.2c: "their" names the clause's subject in every subject shape
+/// and, with no subject, the player the chain last declared; with neither it is an
+/// explicit gap rather than the caster.
+#[test]
+fn same_name_their_binds_the_clause_subject() {
+    // No printed card exhibits these subjects; nearest printed card: Legion's End.
+    let target_player = sorcery_defs(
+        "Legion's End",
+        "Exile target creature. Target player reveals their hand and exiles all cards with that name from their hand and graveyard.",
+    );
+    assert_eq!(
+        sole_mass_exile_target(&target_player),
+        same_name_zone_exile_filter_owned_by(
+            ControllerRef::TargetPlayer,
+            vec![Zone::Hand, Zone::Graveyard]
+        )
+    );
+
+    let each_player = sorcery_defs(
+        "Legion's End",
+        "Exile target creature. Each player reveals their hand and exiles all cards with that name from their hand and graveyard.",
+    );
+    let each_spine = reveal_conjunct_spine(&each_player.abilities[0]);
+    let each_exile = each_spine
+        .iter()
+        .find(|d| matches!(&*d.effect, Effect::ChangeZoneAll { .. }))
+        .unwrap_or_else(|| panic!("{each_spine:#?}"));
+    let Effect::ChangeZoneAll { target, .. } = &*each_exile.effect else {
+        unreachable!();
+    };
+    assert_eq!(
+        *target,
+        same_name_zone_exile_filter_owned_by(
+            ControllerRef::ScopedPlayer,
+            vec![Zone::Hand, Zone::Graveyard]
+        )
+    );
+    assert_eq!(each_exile.player_scope, Some(PlayerFilter::All));
+
+    for text in [
+        "Exile target creature. Its owner reveals their hand and exiles all cards with that name from their hand and graveyard.",
+        "Exile target creature. Exile all cards with that name from their hand and graveyard.",
+    ] {
+        let parsed = sorcery_defs("Legion's End", text);
+        let spine = reveal_conjunct_spine(&parsed.abilities[0]);
+        assert!(
+            matches!(&*spine[0].effect, Effect::ChangeZone { .. }),
+            "reach guard: {spine:#?}"
+        );
+        assert!(
+            spine.iter().any(|d| matches!(
+                &*d.effect,
+                Effect::Unimplemented { name, .. } if name == "unbound_subject"
+            )),
+            "{text}: {spine:#?}"
+        );
+        assert!(
+            !spine
+                .iter()
+                .any(|d| matches!(&*d.effect, Effect::ChangeZoneAll { .. })),
+            "{text}: {spine:#?}"
+        );
+    }
+
+    // A subjectless "their" binds the player the reveal declared.
+    let declared = sorcery_defs(
+        "Legion's End",
+        "Exile target creature. Target player reveals their hand. Exile all cards from their hand with the same name as that creature.",
+    );
+    let spine = reveal_conjunct_spine(&declared.abilities[0]);
+    let reveal = spine
+        .iter()
+        .find(|d| {
+            matches!(
+                &*d.effect,
+                Effect::RevealHand {
+                    target: TargetFilter::Player,
+                    ..
+                }
+            )
+        })
+        .unwrap_or_else(|| panic!("reach guard: {spine:#?}"));
+    let group = reveal
+        .declares_chosen_group
+        .unwrap_or_else(|| panic!("the reveal declares its player: {reveal:#?}"));
+    assert_eq!(
+        sole_mass_exile_target(&declared),
+        same_name_zone_exile_filter_owned_by(
+            ControllerRef::DeclaredPlayer { group },
+            vec![Zone::Hand]
+        )
+    );
+}
+
+/// T7 (SHAPE). CR 608.2c: "from among them" after a parent target's controller or
+/// owner reveals their hand reads that player's hand; after an exile, "them" stays
+/// the exiled cards.
+#[test]
+fn from_among_them_reads_a_parent_target_players_revealed_hand() {
+    // No printed card exhibits these reveal subjects; nearest printed card: Silent-Blade Oni.
+    for (text, owner) in [
+        (
+            "Tap target creature. Its controller reveals their hand. You may cast a spell from among them without paying its mana cost.",
+            ControllerRef::ParentTargetController,
+        ),
+        (
+            "Return target creature to its owner's hand. Its owner reveals their hand. You may cast a spell from among them without paying its mana cost.",
+            ControllerRef::ParentTargetOwner,
+        ),
+        (
+            "Tap target creature. Target player reveals their hand. You may cast a spell from among them without paying its mana cost.",
+            ControllerRef::TargetPlayer,
+        ),
+    ] {
+        let parsed = sorcery_defs("Silent-Blade Oni", text);
+        let spine = reveal_conjunct_spine(&parsed.abilities[0]);
+        assert!(
+            matches!(&*spine[1].effect, Effect::RevealHand { .. }),
+            "reach guard: {spine:#?}"
+        );
+        let Effect::CastFromZone { target, .. } = &*spine[2].effect else {
+            panic!("{text}: {spine:#?}");
+        };
+        assert_eq!(
+            *target,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: Some(owner),
+                properties: vec![FilterProp::InZone { zone: Zone::Hand }],
+            }),
+            "{text}"
+        );
+    }
+
+    let after_exile = sorcery_defs(
+        "Silent-Blade Oni",
+        "Exile target creature. Its controller reveals their hand. You may cast a spell from among them without paying its mana cost.",
+    );
+    let spine = reveal_conjunct_spine(&after_exile.abilities[0]);
+    let Effect::CastFromZone { target, .. } = &*spine[2].effect else {
+        panic!("{spine:#?}");
+    };
+    assert_eq!(*target, TargetFilter::ExiledBySource);
+}
+
+// CR 115.1 + CR 611.2c: a duration-scoped targeting prohibition naming a source
 /// kind or quality (Display of Dominance: "blue or black spells your opponents
 /// control") cannot be expressed by `CantBeTargeted { who }`, so the effect pipeline
 /// fails closed with an honest `Unimplemented` rather than a blanket restriction.
