@@ -779,10 +779,33 @@ mod tests {
             all_events.extend(result.events);
         }
 
-        assert_eq!(
-            state.objects[&wolf].damage_marked, 3,
+        // CR 120.1 + CR 704.5g: the events record both directions before
+        // state-based actions move the lethal-damaged Wolf to its graveyard
+        // (CR 400.7: its marked damage does not follow it there).
+        let dealt = |source: ObjectId, target: ObjectId, dealt_amount: u32| {
+            all_events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::DamageDealt {
+                        source_id,
+                        target: TargetRef::Object(recipient),
+                        amount,
+                        is_combat: false,
+                        ..
+                    } if *source_id == source && *recipient == target && *amount == dealt_amount
+                )
+            })
+        };
+        assert!(
+            dealt(bear, wolf, 3),
             "first direction (bear → wolf, 3 damage) must apply"
         );
+        assert!(
+            dealt(wolf, bear, 2),
+            "second direction (wolf → bear, 2 damage) must apply"
+        );
+        assert_eq!(state.objects[&wolf].zone, Zone::Graveyard);
+        assert_eq!(state.objects[&bear].zone, Zone::Battlefield);
         assert_eq!(
             state.objects[&bear].damage_marked, 2,
             "second direction (wolf → bear, 2 damage) must apply"
