@@ -17,7 +17,8 @@ use crate::database::{CardDatabase, ComboTable};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;
 use crate::types::replay::{
-    RecordedAction, RecordedActionKind, ReplayHeader, ReplayLog, REPLAY_FORMAT_VERSION,
+    RecordedAction, RecordedActionKind, ReplayHeader, ReplayLog,
+    COMBAT_DAMAGE_WINDOW_FORMAT_VERSION, REPLAY_FORMAT_VERSION,
 };
 
 use super::deck_loading::{load_and_hydrate_decks, resolve_deck_list};
@@ -40,7 +41,8 @@ pub enum ReplayError {
     #[error("replay is missing its format version")]
     MissingFormatVersion,
     #[error(
-        "unsupported replay format version {version}; this engine supports versions 2 through 4"
+        "unsupported replay format version {version}; this engine supports versions 2 through {}",
+        REPLAY_FORMAT_VERSION
     )]
     UnsupportedFormatVersion { version: u32 },
     /// An action that was recorded as having succeeded failed to re-apply
@@ -166,7 +168,7 @@ impl ReplayPlayer {
         combos: &ComboTable,
     ) -> Result<Self, ReplayError> {
         let version = match log.format_version {
-            Some(version @ (2 | 3 | REPLAY_FORMAT_VERSION)) => version,
+            Some(version @ 2..=REPLAY_FORMAT_VERSION) => version,
             Some(version) => return Err(ReplayError::UnsupportedFormatVersion { version }),
             None => return Err(ReplayError::MissingFormatVersion),
         };
@@ -229,6 +231,10 @@ impl ReplayPlayer {
             .iter()
             .enumerate()
         {
+            let first_strike_done_before = state
+                .combat
+                .as_ref()
+                .is_some_and(|combat| combat.first_strike_done);
             let applied = match recorded.kind {
                 RecordedActionKind::Submitted => {
                     apply(&mut state, recorded.actor, recorded.action.clone())
@@ -248,6 +254,12 @@ impl ReplayPlayer {
                 index: recorded.seq,
                 message: e.to_string(),
             })?;
+            reject_pre_window_combat_recording(
+                self.log.format_version,
+                first_strike_done_before,
+                &state,
+                recorded.seq,
+            )?;
             let after_action_count = start_idx + offset as u32 + 1;
             for boundary in self
                 .log
@@ -281,6 +293,43 @@ impl ReplayPlayer {
         }
         Ok(state)
     }
+}
+
+/// CR 510.3 + CR 510.4: a recording made before
+/// `COMBAT_DAMAGE_WINDOW_FORMAT_VERSION` dealt a first-strike combat's two
+/// damage steps inside one recorded action when the first step left the stack
+/// empty. The current engine stops between them, so replaying that action ends
+/// one step earlier and every following recorded action stays legal — the
+/// replay would reconstruct a different game without any rejected action to
+/// flag it. Reaching that window from the action that completed the first step
+/// (`first_strike_done` was not yet set when the action began) is exactly the
+/// case a pre-window recording cannot reproduce, so it is rejected explicitly.
+/// A first-strike step that left a trigger on the stack already opened the
+/// window before, and its later actions find `first_strike_done` already set,
+/// so those recordings keep replaying.
+fn reject_pre_window_combat_recording(
+    format_version: Option<u32>,
+    first_strike_done_before: bool,
+    state: &GameState,
+    index: u32,
+) -> Result<(), ReplayError> {
+    let recorded_without_window =
+        format_version.is_some_and(|version| version < COMBAT_DAMAGE_WINDOW_FORMAT_VERSION);
+    if recorded_without_window
+        && !first_strike_done_before
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && super::combat_damage::between_combat_damage_steps(state)
+    {
+        return Err(ReplayError::Desync {
+            index,
+            message: format!(
+                "recording predates replay format version \
+                 {COMBAT_DAMAGE_WINDOW_FORMAT_VERSION}: it dealt both combat damage steps in \
+                 one action, but the engine now gives priority between them (CR 510.3, CR 510.4)"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn validate_resolve_all_boundaries(log: &ReplayLog) -> Result<(), ReplayError> {
@@ -1060,5 +1109,210 @@ mod tests {
             .seek(50)
             .expect("empty log still has the initial state");
         assert_eq!(state.turn_number, 1);
+    }
+
+    /// A recording of an unblocked printed attacker (a 1/1 Fencing Ace with double
+    /// strike, or a vanilla 2/2 Grizzly Bears), driven action by action until
+    /// `stop` holds, returning `(initial state, recorded log, live state)`; `no_mercy`
+    /// gives the defender No Mercy. Every
+    /// action is applied to the live state and recorded with its actor, so the
+    /// log is what a writer produces and the live state is what it must replay to.
+    fn combat_recording(
+        double_strike: bool,
+        no_mercy: bool,
+        format_version: u32,
+        stop: impl Fn(&GameState) -> bool,
+    ) -> (GameState, ReplayLog, GameState) {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        if no_mercy {
+            scenario
+                .add_creature_from_oracle(
+                    P1,
+                    "No Mercy",
+                    0,
+                    0,
+                    "Whenever a creature deals damage to you, destroy it.",
+                )
+                .as_enchantment();
+        }
+        let attacker = {
+            if double_strike {
+                let mut builder = scenario.add_creature(P0, "Fencing Ace", 1, 1);
+                builder.double_strike();
+                builder.id()
+            } else {
+                scenario.add_creature(P0, "Grizzly Bears", 2, 2).id()
+            }
+        };
+        let initial = scenario.build().state().clone();
+
+        let mut log = ReplayLog::new(two_player_header(1));
+        log.format_version = Some(format_version);
+        let mut live = initial.clone();
+        for _ in 0..32 {
+            if stop(&live) {
+                return (initial, log, live);
+            }
+            let (actor, action) = match live.waiting_for.clone() {
+                WaitingFor::Priority { player } => (player, GameAction::PassPriority),
+                WaitingFor::DeclareAttackers { player, .. } => (
+                    player,
+                    GameAction::DeclareAttackers {
+                        attacks: vec![(attacker, AttackTarget::Player(P1))],
+                        bands: vec![],
+                    },
+                ),
+                WaitingFor::DeclareBlockers { player, .. } => (
+                    player,
+                    GameAction::DeclareBlockers {
+                        assignments: vec![],
+                    },
+                ),
+                other => panic!("unexpected decision while recording the combat: {other:?}"),
+            };
+            apply(&mut live, actor, action.clone()).expect("the live action applies");
+            log.push_action(actor, action);
+        }
+        panic!("the combat did not reach the wanted state within the action budget");
+    }
+
+    fn player_from(initial: &GameState, log: ReplayLog) -> ReplayPlayer {
+        let mut checkpoints = BTreeMap::new();
+        checkpoints.insert(0, initial.clone());
+        ReplayPlayer {
+            log,
+            checkpoints,
+            scratch: None,
+        }
+    }
+
+    fn first_step_window(state: &GameState) -> bool {
+        matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && crate::game::combat_damage::between_combat_damage_steps(state)
+    }
+
+    fn defender_life(state: &GameState) -> i32 {
+        state.players[1].life
+    }
+
+    /// CR 510.3 + CR 510.4: a version-4 recording of a double striker's combat
+    /// dealt both hits in the action that completed the first step. The current
+    /// engine stops in the window after the first hit, so replaying that action
+    /// would silently end one hit earlier (19 life instead of 18): it is
+    /// rejected explicitly instead, at the action that reaches the window.
+    #[test]
+    fn pre_window_recording_of_a_double_strike_combat_is_rejected() {
+        let (initial, log, live) = combat_recording(true, false, 4, first_step_window);
+        assert_eq!(defender_life(&live), 19, "the first hit has landed");
+        let last = log.actions.len() as u32;
+
+        let mut player = player_from(&initial, log);
+        player
+            .seek(last - 1)
+            .expect("everything before the window still replays");
+        let error = player
+            .seek(last)
+            .expect_err("the action that reaches the window cannot be reproduced");
+        assert!(matches!(
+            error,
+            ReplayError::Desync { index, ref message }
+                if index == last - 1 && message.contains("CR 510.3")
+        ));
+    }
+
+    /// The same recording at the current version replays exactly: the writer
+    /// recorded the window, so the replay stops in it as the live game did.
+    #[test]
+    fn current_recording_of_a_double_strike_combat_replays_to_the_window() {
+        let (initial, log, live) =
+            combat_recording(true, false, REPLAY_FORMAT_VERSION, first_step_window);
+        let last = log.actions.len() as u32;
+
+        let mut player = player_from(&initial, log);
+        let replayed = player.seek(last).expect("a current recording replays");
+        assert_eq!(defender_life(replayed), 19);
+        assert_eq!(replayed, &live);
+    }
+
+    /// Control: a pre-window recording without first or double strike has one
+    /// combat damage step and no window, so it keeps replaying.
+    #[test]
+    fn pre_window_recording_without_first_strike_keeps_replaying() {
+        let (initial, log, live) = combat_recording(false, false, 4, |state| {
+            matches!(state.waiting_for, WaitingFor::Priority { .. })
+                && state
+                    .combat
+                    .as_ref()
+                    .is_some_and(|combat| combat.regular_damage_done)
+        });
+        assert_eq!(defender_life(&live), 18, "the single hit has landed");
+        let last = log.actions.len() as u32;
+
+        let mut player = player_from(&initial, log);
+        let replayed = player.seek(last).expect("a one-step combat replays");
+        assert_eq!(defender_life(replayed), 18);
+    }
+
+    /// Passes priority on the live state and records it, until the regular
+    /// combat damage step has been dealt.
+    fn record_passes_through_the_regular_step(live: &mut GameState, log: &mut ReplayLog) {
+        for _ in 0..8 {
+            if live
+                .combat
+                .as_ref()
+                .is_some_and(|combat| combat.regular_damage_done)
+            {
+                return;
+            }
+            let WaitingFor::Priority { player } = live.waiting_for else {
+                panic!("expected a priority window, got {:?}", live.waiting_for);
+            };
+            apply(live, player, GameAction::PassPriority).expect("the pass applies");
+            log.push_action(player, GameAction::PassPriority);
+        }
+        panic!("the regular combat damage step was not reached within the pass budget");
+    }
+
+    /// #692 control: a pre-window recording whose first-strike step left a
+    /// trigger on the stack (No Mercy) already had that window, so it keeps
+    /// replaying — through the pass that resolves the trigger and leaves an empty
+    /// stack in the window, which is only safe because the first step was
+    /// complete before that action began.
+    #[test]
+    fn pre_window_recording_with_a_first_strike_trigger_keeps_replaying() {
+        let (initial, mut log, mut live) = combat_recording(true, true, 4, first_step_window);
+        let window = log.actions.len() as u32;
+        record_passes_through_the_regular_step(&mut live, &mut log);
+        let last = log.actions.len() as u32;
+        assert!(last > window, "the recording continues past the window");
+
+        let mut player = player_from(&initial, log);
+        let replayed = player
+            .seek(last)
+            .expect("a recording that already had the window keeps replaying");
+        assert_eq!(replayed, &live);
+    }
+
+    /// A replay that resumes from a checkpoint cached inside the window reads
+    /// `first_strike_done` from that checkpoint, so the first action after it is
+    /// not mistaken for the one that completed the first step.
+    #[test]
+    fn replay_resumed_from_a_checkpoint_inside_the_window_is_not_rejected() {
+        let (initial, mut log, mut live) = combat_recording(true, true, 4, first_step_window);
+        let window = log.actions.len() as u32;
+        record_passes_through_the_regular_step(&mut live, &mut log);
+        let last = log.actions.len() as u32;
+
+        let mut player = player_from(&initial, log);
+        let in_window = player.seek(window).expect("the window replays").clone();
+        player.checkpoints.insert(window, in_window);
+        let replayed = player
+            .seek(last)
+            .expect("resuming from the window checkpoint replays");
+        assert_eq!(replayed, &live);
     }
 }

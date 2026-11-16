@@ -571,7 +571,6 @@ pub fn participates_in_pending_combat_damage_substep(
 /// second step. Reads only the combat flags and the stack, never `waiting_for`
 /// or `phase`, so the unit-test drivers that call [`resolve_combat_damage`]
 /// directly share it with the integration harness.
-#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn between_combat_damage_steps(state: &GameState) -> bool {
     state
         .combat
