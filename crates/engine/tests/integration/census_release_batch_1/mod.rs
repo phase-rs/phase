@@ -414,7 +414,8 @@ use engine::game::targeting::player_is_legal_target;
 use engine::types::ability::TargetRef;
 use engine::types::player::PlayerId;
 
-/// `holder` controls a creature named `name` with `text` (a vanilla creature when `text` is empty); P0 holds Shock.
+/// `holder` controls a creature named `name` with `text` (a vanilla creature when `text` is empty), the other player
+/// controls a vanilla creature (so target selection always offers more than one target); P0 holds Shock.
 fn shock_scenario(
     holder: PlayerId,
     name: &str,
@@ -429,6 +430,7 @@ fn shock_scenario(
     } else {
         s.add_creature_from_oracle(holder, name, power, toughness, text);
     }
+    s.add_creature(if holder == P0 { P1 } else { P0 }, "Idle", 1, 1);
     let shock = s
         .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
         .id();
@@ -443,6 +445,18 @@ fn offered_player_targets(
     toughness: i32,
     text: &str,
 ) -> Vec<PlayerId> {
+    offered_targets(holder, name, power, toughness, text).0
+}
+
+/// Casts P0's Shock without a declared target and returns the players and the `holder`'s objects the target selection
+/// offers.
+fn offered_targets(
+    holder: PlayerId,
+    name: &str,
+    power: i32,
+    toughness: i32,
+    text: &str,
+) -> (Vec<PlayerId>, Vec<ObjectId>) {
     let (mut r, shock) = shock_scenario(holder, name, power, toughness, text);
     let card_id = r.state().objects[&shock].card_id;
     r.act(GameAction::CastSpell {
@@ -453,22 +467,42 @@ fn offered_player_targets(
     })
     .expect("cast Shock");
     match &r.state().waiting_for {
-        WaitingFor::TargetSelection { target_slots, .. } => target_slots[0]
-            .legal_targets
-            .iter()
-            .filter_map(|t| match t {
-                TargetRef::Player(p) => Some(*p),
-                _ => None,
-            })
-            .collect(),
+        WaitingFor::TargetSelection { target_slots, .. } => {
+            let legal = &target_slots[0].legal_targets;
+            (
+                legal
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Player(p) => Some(*p),
+                        _ => None,
+                    })
+                    .collect(),
+                legal
+                    .iter()
+                    .filter_map(|t| match t {
+                        TargetRef::Object(o) if r.state().objects[o].controller == holder => {
+                            Some(*o)
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        }
         o => panic!("expected target selection, got {o:?}"),
     }
 }
 
 #[test]
 fn you_have_hexproof_blocks_opponent_targeting_only() {
-    let offered = offered_player_targets(P1, "Spirit of the Hearth", 4, 5, "You have hexproof.");
+    let (offered, objects) =
+        offered_targets(P1, "Spirit of the Hearth", 4, 5, "You have hexproof.");
     assert_eq!(offered, vec![P0], "P0's Shock is offered only P0");
+    // the grant is to the player only: the holder's own creature stays a legal target for the opponent
+    assert_eq!(
+        objects.len(),
+        1,
+        "Spirit of the Hearth itself is offered: {objects:?}"
+    );
     let (r, shock) = shock_scenario(P1, "Spirit of the Hearth", 4, 5, "You have hexproof.");
     assert!(
         !player_is_legal_target(r.state(), P1, shock, P0),
@@ -491,11 +525,17 @@ fn you_have_hexproof_blocks_opponent_targeting_only() {
 
 #[test]
 fn you_have_shroud_blocks_all_targeting() {
-    let offered = offered_player_targets(P0, "True Believer", 2, 2, "You have shroud.");
+    let (offered, objects) = offered_targets(P0, "True Believer", 2, 2, "You have shroud.");
     assert_eq!(
         offered,
         vec![P1],
         "its controller's own Shock is offered only P1"
+    );
+    // the grant is to the player only: True Believer itself stays a legal target
+    assert_eq!(
+        objects.len(),
+        1,
+        "True Believer itself is offered: {objects:?}"
     );
     let (r, shock) = shock_scenario(P0, "True Believer", 2, 2, "You have shroud.");
     assert!(
@@ -515,17 +555,31 @@ fn you_have_shroud_blocks_all_targeting() {
 }
 
 // ---- Shape 6 variants: other wordings of the same rider ----
+/// Shock kills a bystander creature after the spell resolves, in the same turn, and returns its zone: the rider binds
+/// per wording, so each wording shows that it exiles only "that creature".
+fn shock_bystander(r: &mut GameRunner, bystander: ObjectId, shock: ObjectId) -> Zone {
+    r.cast(shock).target_object(bystander).resolve();
+    r.advance_until_stack_empty();
+    r.state().objects[&bystander].zone
+}
+
+/// Returns the victim's zone and the size of P1's graveyard after the spell resolves, then the zone of a bystander
+/// that dies later the same turn.
 fn exile_victim(
     name: &str,
     is_instant: bool,
     text: &str,
     modes: Option<&[usize]>,
-) -> (Zone, usize) {
+) -> (Zone, usize, Zone) {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let victim = s.add_creature(P1, "Victim", 2, 2).id();
+    let bystander = s.add_creature(P1, "Bystander", 2, 2).id();
     let id = s
         .add_spell_to_hand_from_oracle(P0, name, is_instant, text)
+        .id();
+    let shock = s
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
         .id();
     let mut r = s.build();
     let c = r.cast(id).target_object(victim);
@@ -534,18 +588,21 @@ fn exile_victim(
         None => c.resolve(),
     };
     r.advance_until_stack_empty();
+    let victim_zone = r.state().objects[&victim].zone;
+    let graveyard = r.state().players[1].graveyard.len();
     (
-        r.state().objects[&victim].zone,
-        r.state().players[1].graveyard.len(),
+        victim_zone,
+        graveyard,
+        shock_bystander(&mut r, bystander, shock),
     )
 }
 
 #[test]
 fn exile_rider_wordings() {
     // "that creature or planeswalker" wording with a fixed amount
-    assert_eq!(exile_victim("Obliterating Bolt", false, "Obliterating Bolt deals 4 damage to target creature or planeswalker. If that creature or planeswalker would die this turn, exile it instead.", None), (Zone::Exile, 0));
+    assert_eq!(exile_victim("Obliterating Bolt", false, "Obliterating Bolt deals 4 damage to target creature or planeswalker. If that creature or planeswalker would die this turn, exile it instead.", None), (Zone::Exile, 0, Zone::Graveyard));
     // Suplex: the rider sits in the first mode of a "choose one" spell
-    assert_eq!(exile_victim("Suplex", false, "Choose one \u{2014}\n\u{2022} Suplex deals 3 damage to target creature. If that creature would die this turn, exile it instead.\n\u{2022} Exile target artifact.", Some(&[0])), (Zone::Exile, 0));
+    assert_eq!(exile_victim("Suplex", false, "Choose one \u{2014}\n\u{2022} Suplex deals 3 damage to target creature. If that creature would die this turn, exile it instead.\n\u{2022} Exile target artifact.", Some(&[0])), (Zone::Exile, 0, Zone::Graveyard));
     // control: no rider -> graveyard
     assert_eq!(
         exile_victim(
@@ -554,12 +611,13 @@ fn exile_rider_wordings() {
             "Concentrated Fire deals 5 damage to target creature.",
             None
         ),
-        (Zone::Graveyard, 1)
+        (Zone::Graveyard, 1, Zone::Graveyard)
     );
 }
 
 // ---- Shape 6, printed wordings: Bouncer's Beatdown, Nine-Ringed Bo, Narset's Rebuke, Khaaaaaaaaaaaannn! ----
-/// Returns the victim's zone, its marked damage, and the size of P1's graveyard after the spell or ability resolves.
+/// Returns the victim's zone, its marked damage, and the size of P1's graveyard after the spell or ability resolves,
+/// then the zone of a bystander that dies later the same turn.
 fn printed_rider(
     name: &str,
     text: &str,
@@ -568,7 +626,7 @@ fn printed_rider(
     artifact_source: bool,
     x: Option<u32>,
     my_power: Option<i32>,
-) -> (Zone, u32, usize) {
+) -> (Zone, u32, usize, Zone) {
     use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
@@ -579,6 +637,10 @@ fn printed_rider(
         }
         b.id()
     };
+    let bystander = s.add_creature(P1, "Bystander", 2, 2).id();
+    let shock = s
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
+        .id();
     if let Some(p) = my_power {
         s.add_creature(P0, "Big", p, p);
     }
@@ -615,17 +677,20 @@ fn printed_rider(
     }
     r.advance_until_stack_empty();
     let o = &r.state().objects[&victim];
+    let (zone, damage) = (o.zone, o.damage_marked);
+    let graveyard = r.state().players[1].graveyard.len();
     (
-        o.zone,
-        o.damage_marked,
-        r.state().players[1].graveyard.len(),
+        zone,
+        damage,
+        graveyard,
+        shock_bystander(&mut r, bystander, shock),
     )
 }
 
 #[test]
 fn exile_rider_printed_wordings() {
     // X is the greatest power among creatures you control (3), so a 1/3 dies and is exiled.
-    let (zone, _, gy) = printed_rider(
+    let (zone, _, gy, bystander) = printed_rider(
         "Bouncer's Beatdown",
         "This spell costs {2} less to cast if it targets a black permanent.\nBouncer's Beatdown deals X damage to target creature or planeswalker, where X is the greatest power among creatures you control. If that creature or planeswalker would die this turn, exile it instead.",
         3,
@@ -634,8 +699,12 @@ fn exile_rider_printed_wordings() {
         None,
         Some(3),
     );
-    assert_eq!((zone, gy), (Zone::Exile, 0), "Bouncer's Beatdown");
-    let (zone, _, gy) = printed_rider(
+    assert_eq!(
+        (zone, gy, bystander),
+        (Zone::Exile, 0, Zone::Graveyard),
+        "Bouncer's Beatdown"
+    );
+    let (zone, _, gy, bystander) = printed_rider(
         "Nine-Ringed Bo",
         "{T}: This artifact deals 1 damage to target Spirit creature. If that creature would die this turn, exile it instead.",
         1,
@@ -644,9 +713,13 @@ fn exile_rider_printed_wordings() {
         None,
         None,
     );
-    assert_eq!((zone, gy), (Zone::Exile, 0), "Nine-Ringed Bo");
+    assert_eq!(
+        (zone, gy, bystander),
+        (Zone::Exile, 0, Zone::Graveyard),
+        "Nine-Ringed Bo"
+    );
     // the mana clause sits between the damage and the rider
-    let (zone, _, gy) = printed_rider(
+    let (zone, _, gy, bystander) = printed_rider(
         "Narset's Rebuke",
         "Narset's Rebuke deals 5 damage to target creature. Add {U}{R}{W}. If that creature would die this turn, exile it instead.",
         2,
@@ -655,13 +728,22 @@ fn exile_rider_printed_wordings() {
         None,
         None,
     );
-    assert_eq!((zone, gy), (Zone::Exile, 0), "Narset's Rebuke");
+    assert_eq!(
+        (zone, gy, bystander),
+        (Zone::Exile, 0, Zone::Graveyard),
+        "Narset's Rebuke"
+    );
     let khan = "Khaaaaaaaaaaaannn! deals twice X damage to target creature. If that creature would die this turn, exile it instead.";
     assert_eq!(
         printed_rider("Khaaaaaaaaaaaannn!", khan, 3, None, false, Some(1), None),
-        (Zone::Battlefield, 2, 0),
+        (Zone::Battlefield, 2, 0, Zone::Graveyard),
         "X = 1: twice X is 2 damage, the 1/3 survives"
     );
-    let (zone, _, gy) = printed_rider("Khaaaaaaaaaaaannn!", khan, 3, None, false, Some(2), None);
-    assert_eq!((zone, gy), (Zone::Exile, 0), "X = 2: 4 damage, exiled");
+    let (zone, _, gy, bystander) =
+        printed_rider("Khaaaaaaaaaaaannn!", khan, 3, None, false, Some(2), None);
+    assert_eq!(
+        (zone, gy, bystander),
+        (Zone::Exile, 0, Zone::Graveyard),
+        "X = 2: 4 damage, exiled"
+    );
 }
