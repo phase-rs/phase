@@ -1764,6 +1764,11 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
 /// prompted. Effects may change the life the payment actually costs, so the
 /// branch is committed only by the caster's answer, where the life-safety
 /// preview reads the post-replacement receipt.
+///
+/// The synthetic bolt pins the life branch in the fallback position. The
+/// printed cards that reach a sole payable life branch are Final Payment (life
+/// first) and Dusk Mangler (life third), both covered by
+/// `issue_10442_dusk_mangler_additional_cost`.
 #[test]
 fn choice_cost_with_a_sole_life_fallback_still_prompts() {
     let (mut runner, spell_id, result) =
