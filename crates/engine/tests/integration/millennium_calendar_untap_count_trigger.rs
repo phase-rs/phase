@@ -12,8 +12,10 @@
 //! unparsed (preview coverage marks the node supported:false), so no counters
 //! are ever added and the doubling ability spins 0 into 0. The test drives the
 //! real turn structure — P0's next untap step untaps three tapped lands — and
-//! asserts the counter total, which is robust to the batching shape (one
-//! trigger counting 3, or three triggers of 1 each).
+//! asserts the single batched firing (CR 603.2c: one trigger event fires once,
+//! so exactly one Calendar trigger reaches the stack) plus the three-counter
+//! total it resolves into. Three one-counter batches would also total three,
+//! so the total alone cannot pin the firing shape.
 //!
 //! Leg 2 (win gate): at 1,000 time counters the StateCondition trigger fires —
 //! the Calendar is sacrificed and each opponent loses 1,000 life. This pins the
@@ -33,13 +35,13 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, StaticDefinition,
-    TargetFilter, TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypedFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr, TargetFilter,
+    TriggerConstraint, TriggerDefinition, TriggerLimitSpend, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -147,6 +149,26 @@ fn millennium_calendar_puts_one_time_counter_per_permanent_untapped_in_untap_ste
             "reach guard: CR 502.3 must have untapped the tapped lands"
         );
     }
+    // CR 603.2c: the simultaneous untap is one trigger event, so it fires once.
+    // Three one-counter batches would also total three — count the Calendar's
+    // stack entries before resolving to pin the single batched firing.
+    let calendar_triggers = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.kind,
+                StackEntryKind::TriggeredAbility { source_id, .. }
+                if *source_id == calendar
+            )
+        })
+        .count();
+    assert_eq!(
+        calendar_triggers, 1,
+        "CR 603.2c: one simultaneous untap event must put exactly one Calendar \
+         trigger on the stack, got {calendar_triggers}"
+    );
     runner.advance_until_stack_empty();
 
     assert_eq!(
@@ -624,21 +646,17 @@ fn millennium_calendar_win_hits_each_opponent_in_three_player() {
     );
 }
 
-/// Row 3a: P0 permanents untapping during P1's untap step (Seedborn-class
+/// Row 3a: P0 permanents untapping during P1's untap step (Seedborn Muse's
 /// second pass) put no time counters on The Millennium Calendar (CR 603.2:
 /// the window names YOUR untap step — `DuringPlayersTurn{Controller}` inside
 /// the `EventTime` window fails while P1 is active. CR 502.3: the Seedborn
 /// second pass untaps P0's permanents during the opponent's untap step).
 ///
-/// The Seedborn-class static is installed synthetically (mirroring the
-/// `install_seedborn_static` unit helper in `turns.rs`): Seedborn Muse's
-/// Oracle is documented in `statics.rs` as "Untap all permanents you control
-/// during each other player's untap step."; a parser lowering for that line
-/// exists (`oracle_static::dispatch::parse_untaps_during_each_other_players_untap_step`),
-/// but this row pins the runtime seam rather than the parser leg, so the
-/// static is installed directly for determinism. Coverage honesty: both
-/// Calendar halves still parse from verbatim Oracle; only the
-/// Seedborn-class source is synthetic.
+/// The Seedborn source is the printed card: Seedborn Muse's verbatim Oracle
+/// ("Untap all permanents you control during each other player's untap
+/// step.") parses through the production static pipeline to
+/// `StaticMode::UntapsDuringEachOtherPlayersUntapStep`, and a reach guard
+/// below pins that shape before the drive.
 ///
 /// Paired positive: row 1 — the same untap inside your own untap step counts.
 /// Discrimination: reverting `DuringPlayersTurn{Controller}` flips this row
@@ -646,6 +664,9 @@ fn millennium_calendar_win_hits_each_opponent_in_three_player() {
 /// would match).
 #[test]
 fn millennium_calendar_ignores_own_permanents_untapped_on_opponent_untap_step() {
+    // Seedborn Muse Oracle, verbatim (canonical card-data; 2/4 Spirit).
+    const SEEDBORN_MUSE: &str =
+        "Untap all permanents you control during each other player's untap step.";
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     for _ in 0..3 {
@@ -655,7 +676,9 @@ fn millennium_calendar_ignores_own_permanents_untapped_on_opponent_untap_step() 
     let calendar = scenario
         .add_artifact_from_oracle(P0, "The Millennium Calendar", MILLENNIUM_CALENDAR)
         .id();
-    let muse_stand_in = scenario.add_creature(P0, "Seedborn Stand-in", 2, 2).id();
+    let muse = scenario
+        .add_creature_from_oracle(P0, "Seedborn Muse", 2, 4, SEEDBORN_MUSE)
+        .id();
     let own_lands = [
         scenario.add_basic_land(P0, ManaColor::White),
         scenario.add_basic_land(P0, ManaColor::Blue),
@@ -668,24 +691,25 @@ fn millennium_calendar_ignores_own_permanents_untapped_on_opponent_untap_step() 
     for land in own_lands.iter().chain(foe_lands.iter()) {
         runner.state_mut().objects.get_mut(land).unwrap().tapped = true;
     }
-    // Seedborn-class static, installed synthetically (see doc comment).
-    {
-        let def = StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
-            .affected(TargetFilter::Typed(
-                TypedFilter::permanent().controller(ControllerRef::You),
-            ));
-        let obj = runner
-            .state_mut()
-            .objects
-            .get_mut(&muse_stand_in)
-            .expect("fixture Seedborn stand-in");
-        obj.static_definitions.push(def.clone());
-        std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(def);
-    }
 
     assert!(
         has_untaps_trigger(&runner, calendar),
         "reach guard: the Calendar head must parse to TriggerMode::Untaps"
+    );
+    assert!(
+        runner.state().objects[&muse]
+            .static_definitions
+            .iter_all()
+            .any(
+                |s| s.mode == StaticMode::UntapsDuringEachOtherPlayersUntapStep
+                    && matches!(
+                        &s.affected,
+                        Some(TargetFilter::Typed(tf))
+                            if tf.controller == Some(ControllerRef::You)
+                    )
+            ),
+        "reach guard: Seedborn Muse must parse to the Seedborn-class untap \
+         static affecting permanents you control"
     );
 
     // Drive into P1's upkeep; P1's untap step runs on the way.
