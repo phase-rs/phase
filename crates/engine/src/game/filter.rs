@@ -2455,9 +2455,16 @@ pub(crate) fn controller_ref_player(
         // controller sacrifices a noncreature, nonland permanent").
         ControllerRef::EventTargetController => event_target_controller_player(state, ability),
         ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
-        ControllerRef::DefendingPlayer => {
-            crate::game::combat::resolve_defending_player(state, source_id)
-        }
+        // CR 508.5 + CR 113.7a: route through the single defending-player
+        // authority with the ability's captured trigger context, so a source
+        // removed from combat (or from the battlefield) after its ability
+        // triggered still names the player it was attacking. With no trigger
+        // context the authority falls back to the live per-attacker lookup.
+        ControllerRef::DefendingPlayer => crate::game::combat::defending_player_cr508_5(
+            state,
+            source_id,
+            ability.and_then(|ability| ability.trigger_source.as_ref()),
+        ),
         // CR 608.2c + CR 109.4: The player chosen by the Nth `Choose(Player)`
         // in this resolution — read from the resolution-scoped list.
         ControllerRef::ChosenPlayer { index } => {
@@ -10154,8 +10161,16 @@ fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
     })
 }
 
-/// CR 400.7 + CR 608.2h: The exact incarnation `subject` names. A triggered
-/// source is named by the identity its trigger captured — for a
+/// The live incarnation at `id`, when the object still exists.
+fn live_incarnation(state: &GameState, id: ObjectId) -> Option<ObjectIncarnationRef> {
+    state
+        .objects
+        .get(&id)
+        .map(ObjectIncarnationRef::from_object)
+}
+
+/// CR 400.7 + CR 608.2h: The exact incarnation of the filter's source. A
+/// triggered source is named by the identity its trigger captured — for a
 /// leaves-the-battlefield trigger, the incarnation that left (CR 603.10a). An
 /// activated ability carries no trigger identity, so it falls to the
 /// incarnation stamped onto it when it reached the stack
@@ -10163,54 +10178,101 @@ fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
 /// zone it was expected to be in). Only when neither is available does this
 /// fall to the live object at the referenced id; an object that left and
 /// returned is a new object (CR 400.7) and finds nothing its predecessor
-/// recorded. `ParentTarget` and `AnaphoricTarget` prefer the incarnation pinned
-/// when it was chosen.
-fn combat_relation_subject_ref(
+/// recorded.
+fn combat_relation_source_ref(
+    state: &GameState,
+    source: &SourceContext<'_>,
+) -> Option<ObjectIncarnationRef> {
+    source
+        .trigger_source
+        .map(|context| context.identity.reference)
+        // CR 113.7: the ability's capture describes its own source, so it does not answer
+        // for a context rebound to another object (a damage source chosen as a target).
+        .or_else(|| {
+            source
+                .ability
+                .filter(|ability| ability.source_id == source.id)
+                .and_then(|ability| ability.source_ref(state))
+        })
+        .or_else(|| live_incarnation(state, source.id))
+}
+
+/// CR 400.7 + CR 603.7c + CR 608.2i: the incarnation the object target at
+/// `position` (id `id`) was announced as: a delayed-trigger referent pin keyed by
+/// id, then the occurrence pin read positionally, then the live object. A
+/// look-back takes no action on its subject, so a departed subject keeps its
+/// name: no liveness check.
+fn announced_target_incarnation(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    position: usize,
+    id: ObjectId,
+) -> Option<ObjectIncarnationRef> {
+    ability
+        .target_incarnations
+        .iter()
+        .find(|pin| pin.object_id == id)
+        .copied()
+        .or_else(|| ability.target_pin_at(position))
+        .or_else(|| live_incarnation(state, id))
+}
+
+/// CR 400.7 + CR 608.2c + CR 608.2h + CR 608.2i: The exact incarnations
+/// `subject` names. `Source` names the filter's source
+/// ([`combat_relation_source_ref`]). `ParentTarget` names the ability's first
+/// object target (Trial's same-instruction slot). `AnaphoricTarget` names every
+/// object target an earlier instruction announced ("one of those creatures",
+/// Triton Tactics; a singular "it"/"that creature" has one), each by the
+/// incarnation pinned when it was chosen, so a member that left and returned is
+/// a new object whose blocks do not count (CR 400.7).
+fn combat_relation_subject_refs(
     state: &GameState,
     subject: CombatRelationSubject,
     source: &SourceContext<'_>,
-) -> Option<ObjectIncarnationRef> {
-    let live = |id: ObjectId| {
-        state
-            .objects
-            .get(&id)
-            .map(ObjectIncarnationRef::from_object)
-    };
+) -> Vec<ObjectIncarnationRef> {
     match subject {
-        CombatRelationSubject::Source => source
-            .trigger_source
-            .map(|context| context.identity.reference)
-            // CR 113.7: the ability's capture describes its own source, so it does not answer
-            // for a context rebound to another object (a damage source chosen as a target).
-            .or_else(|| {
-                source
-                    .ability
-                    .filter(|ability| ability.source_id == source.id)
-                    .and_then(|ability| ability.source_ref(state))
+        CombatRelationSubject::Source => combat_relation_source_ref(state, source)
+            .into_iter()
+            .collect(),
+        CombatRelationSubject::ParentTarget => source
+            .ability
+            .and_then(|ability| {
+                // The pin of the ORIGINATING occurrence (the first object target).
+                let position = ability
+                    .targets
+                    .iter()
+                    .position(|target| matches!(target, TargetRef::Object(_)))?;
+                let id = first_object_target(ability)?;
+                announced_target_incarnation(state, ability, position, id)
             })
-            .or_else(|| live(source.id)),
-        // CR 608.2i: a look-back takes no action on its subject, so a departed
-        // subject keeps its name. No liveness check on either arm.
-        CombatRelationSubject::ParentTarget | CombatRelationSubject::AnaphoricTarget => {
-            let ability = source.ability?;
-            // The pin of the ORIGINATING occurrence (the first object target),
-            // read positionally; a delayed-trigger referent pin is keyed by id.
-            let position = ability
-                .targets
-                .iter()
-                .position(|target| matches!(target, TargetRef::Object(_)))?;
-            let id = first_object_target(ability)?;
-            ability
-                .target_incarnations
-                .iter()
-                .find(|pin| pin.object_id == id)
-                .copied()
-                .or_else(|| ability.target_pin_at(position))
-                .or_else(|| live(id))
-        }
+            .into_iter()
+            .collect(),
+        CombatRelationSubject::AnaphoricTarget => source
+            .ability
+            .map(|ability| {
+                ability
+                    .targets
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(position, target)| match target {
+                        TargetRef::Object(id) => {
+                            announced_target_incarnation(state, ability, position, *id)
+                                // CR 608.2b: a target illegal as the creating spell resolved determines no history.
+                                .filter(|pin| {
+                                    !ability.context.creation_illegal_referents.contains(pin)
+                                })
+                        }
+                        TargetRef::Player(_) => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
     }
 }
 
+/// CR 509.1g + CR 608.2c + CR 608.2i: does `candidate` stand in `relation` with
+/// any incarnation `subject` names? "One of those creatures" holds for any of
+/// the announced targets.
 fn matches_combat_relation(
     state: &GameState,
     candidate: ObjectIncarnationRef,
@@ -10218,28 +10280,31 @@ fn matches_combat_relation(
     subject: CombatRelationSubject,
     source: &SourceContext<'_>,
 ) -> bool {
-    let Some(subject) = combat_relation_subject_ref(state, subject, source) else {
-        return false;
-    };
     let CombatRelation::BlockPairing { direction, scope } = relation;
-    let pair_holds = |blocker, attacker| {
-        let pair = combat::BlockHistoryPair { blocker, attacker };
-        match scope {
-            // CR 509.1g + CR 509.1h: the current pairing.
-            None => current_block_pair_holds(state, subject, pair),
-            // CR 509.1g + CR 400.7: answered from the block-history ledgers, which
-            // CR 506.4 does not prune, by the exact subject and candidate
-            // incarnations.
-            Some(scope) => state.creature_blocked_attacker(pair.blocker, pair.attacker, scope),
-        }
-    };
-    match direction {
-        BlockPairDirection::SubjectIsBlocker => pair_holds(subject, candidate),
-        BlockPairDirection::CandidateIsBlocker => pair_holds(candidate, subject),
-        BlockPairDirection::Either => {
-            pair_holds(candidate, subject) || pair_holds(subject, candidate)
-        }
-    }
+    combat_relation_subject_refs(state, subject, source)
+        .into_iter()
+        .any(|subject| {
+            let pair_holds = |blocker, attacker| {
+                let pair = combat::BlockHistoryPair { blocker, attacker };
+                match scope {
+                    // CR 509.1g + CR 509.1h: the current pairing.
+                    None => current_block_pair_holds(state, subject, pair),
+                    // CR 509.1g + CR 400.7: answered from the block-history ledgers,
+                    // which CR 506.4 does not prune, by the exact subject and
+                    // candidate incarnations.
+                    Some(scope) => {
+                        state.creature_blocked_attacker(pair.blocker, pair.attacker, scope)
+                    }
+                }
+            };
+            match direction {
+                BlockPairDirection::SubjectIsBlocker => pair_holds(subject, candidate),
+                BlockPairDirection::CandidateIsBlocker => pair_holds(candidate, subject),
+                BlockPairDirection::Either => {
+                    pair_holds(candidate, subject) || pair_holds(subject, candidate)
+                }
+            }
+        })
 }
 
 /// CR 509.1g + CR 506.4 + CR 608.2h: does the current block pairing `pair`,
@@ -10310,9 +10375,7 @@ fn matches_crew_relation(
     relation: CrewRelation,
     source: &SourceContext<'_>,
 ) -> bool {
-    let Some(source_ref) =
-        combat_relation_subject_ref(state, CombatRelationSubject::Source, source)
-    else {
+    let Some(source_ref) = combat_relation_source_ref(state, source) else {
         return false;
     };
     let pair = match relation {
@@ -10825,18 +10888,16 @@ fn matches_filter_prop(
         // last known pairings on its departure row (Plague Wight removed with
         // its trigger on the stack).
         FilterProp::BlockingSource => {
-            combat_relation_subject_ref(state, CombatRelationSubject::Source, source).is_some_and(
-                |attacker| {
-                    current_block_pair_holds(
-                        state,
+            combat_relation_source_ref(state, source).is_some_and(|attacker| {
+                current_block_pair_holds(
+                    state,
+                    attacker,
+                    combat::BlockHistoryPair {
+                        blocker: ObjectIncarnationRef::from_object(obj),
                         attacker,
-                        combat::BlockHistoryPair {
-                            blocker: ObjectIncarnationRef::from_object(obj),
-                            attacker,
-                        },
-                    )
-                },
-            )
+                    },
+                )
+            })
         }
         FilterProp::CombatRelation { relation, subject } => matches_combat_relation(
             state,
@@ -12085,7 +12146,7 @@ fn zone_change_record_matches_property(
             else {
                 return false;
             };
-            combat_relation_subject_ref(state, CombatRelationSubject::Source, source).is_some_and(
+            combat_relation_source_ref(state, source).is_some_and(
                 |attacker| {
                     let pair = combat::BlockHistoryPair { blocker, attacker };
                     record.block_pairs.contains(&pair)
@@ -19286,7 +19347,184 @@ mod tests {
         assert!(live_block_pairs_of(&state, wall).is_empty());
     }
 
-    /// U1: `combat_relation_subject_ref`'s `ParentTarget` arm prefers a pinned
+    /// Owner-level announced-set contract, not a printed-card cast test.
+    /// Triton Tactics: "Up to two target creatures each get +0/+3 until end of
+    /// turn. Untap those creatures. At this turn's next end of combat, tap each
+    /// creature that was blocked by one of those creatures this turn and it
+    /// doesn't untap during its controller's next untap step."
+    /// CR 400.7 + CR 608.2i: each historical member retains its own identity.
+    #[test]
+    fn announced_history_subjects_keep_each_members_own_incarnation() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let a = add_creature(&mut state, PlayerId(1), "First blocker");
+        let b = add_creature(&mut state, PlayerId(1), "Second blocker");
+        let first = add_creature(&mut state, PlayerId(0), "First attacker");
+        let second = add_creature(&mut state, PlayerId(0), "Second attacker");
+        let unrelated = add_creature(&mut state, PlayerId(0), "Unrelated attacker");
+        state.objects.get_mut(&a).unwrap().incarnation = 7;
+        state.objects.get_mut(&b).unwrap().incarnation = 11;
+        let a_pin = ObjectIncarnationRef::from_object(&state.objects[&a]);
+        let b_pin = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        for (blocker, attacker) in [(a_pin, first), (b_pin, second)] {
+            state
+                .creature_blocked_attackers_this_turn
+                .insert(combat::BlockHistoryPair {
+                    blocker,
+                    attacker: ObjectIncarnationRef::from_object(&state.objects[&attacker]),
+                });
+        }
+        state.objects.get_mut(&b).unwrap().bump_incarnation();
+        let b_live = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        assert_ne!(b_live, b_pin);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![
+                TargetRef::Object(a),
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Object(b),
+            ],
+            source,
+            PlayerId(0),
+        );
+        // Keyed order differs from announcement order, and the positional
+        // second-object pin is deliberately newer than the historical one.
+        ability.target_incarnations = vec![b_pin, a_pin];
+        ability.target_pins = vec![Some(a_pin), None, Some(b_live)];
+        let refs = |ability: Option<&ResolvedAbility>, subject| {
+            let mut context = SourceContext::for_controller(source, Some(PlayerId(0)));
+            context.ability = ability;
+            combat_relation_subject_refs(&state, subject, &context)
+        };
+        assert_eq!(
+            refs(Some(&ability), CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+        assert_eq!(
+            refs(Some(&ability), CombatRelationSubject::ParentTarget),
+            vec![a_pin]
+        );
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::AnaphoricTarget,
+            },
+        ]));
+        let context = FilterContext::from_ability(&ability);
+        assert!(super::matches_target_filter(
+            &state, first, &filter, &context
+        ));
+        assert!(super::matches_target_filter(
+            &state, second, &filter, &context
+        ));
+        assert!(!super::matches_target_filter(
+            &state, unrelated, &filter, &context
+        ));
+
+        let mut positional = ability.clone();
+        positional.target_incarnations.clear();
+        positional.target_pins = vec![Some(a_pin), None, Some(b_pin)];
+        assert_eq!(
+            refs(Some(&positional), CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+        let mut live = positional.clone();
+        live.target_pins.clear();
+        assert_eq!(
+            refs(Some(&live), CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_live]
+        );
+        assert_eq!(
+            refs(None, CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+        let mut empty = ability.clone();
+        empty.targets.clear();
+        assert_eq!(
+            refs(Some(&empty), CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+        empty.targets = vec![TargetRef::Player(PlayerId(1))];
+        assert_eq!(
+            refs(Some(&empty), CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+    }
+
+    /// Reader-only creation-legality contract for the same Triton Tactics
+    /// population above; actual creation and public cast evidence are separate.
+    /// CR 608.2b + CR 400.7: exclusion names an incarnation, never just its id.
+    #[test]
+    fn announced_history_subjects_exclude_only_creation_illegal_incarnations() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let a = add_creature(&mut state, PlayerId(1), "First blocker");
+        let b = add_creature(&mut state, PlayerId(1), "Second blocker");
+        state.objects.get_mut(&a).unwrap().incarnation = 7;
+        state.objects.get_mut(&b).unwrap().incarnation = 11;
+        let a_pin = ObjectIncarnationRef::from_object(&state.objects[&a]);
+        let b_pin = ObjectIncarnationRef::from_object(&state.objects[&b]);
+        let source_pin = ObjectIncarnationRef::from_object(&state.objects[&source]);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(a), TargetRef::Object(b)],
+            source,
+            PlayerId(0),
+        );
+        ability.target_incarnations = vec![b_pin, a_pin];
+        let refs = |ability: &ResolvedAbility, subject| {
+            let mut context = SourceContext::for_controller(source, Some(PlayerId(0)));
+            context.ability = Some(ability);
+            combat_relation_subject_refs(&state, subject, &context)
+        };
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+        ability.context.creation_illegal_referents = vec![b_pin];
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin]
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::Source),
+            vec![source_pin]
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::ParentTarget),
+            vec![a_pin]
+        );
+        ability.context.creation_illegal_referents = vec![a_pin, b_pin, source_pin];
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            Vec::<ObjectIncarnationRef>::new()
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::Source),
+            vec![source_pin]
+        );
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::ParentTarget),
+            vec![a_pin]
+        );
+        ability.context.creation_illegal_referents =
+            vec![ObjectIncarnationRef::of(b, b_pin.incarnation + 1)];
+        assert_eq!(
+            refs(&ability, CombatRelationSubject::AnaphoricTarget),
+            vec![a_pin, b_pin]
+        );
+    }
+
+    /// U1: `combat_relation_subject_refs`' `ParentTarget` arm prefers a pinned
     /// incarnation over the live object, and `target_incarnations` (the
     /// delayed-trigger referent pin) over the occurrence pin (`target_pins`) when
     /// both are populated. This path is production-unreachable today — no

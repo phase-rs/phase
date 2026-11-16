@@ -12840,6 +12840,7 @@ pub fn parse_you_put_counters_on_type_this_way_condition(
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(filter),
                     caused_by: None,
+                    destination: None,
                 },
             },
             comparator: Comparator::GE,
