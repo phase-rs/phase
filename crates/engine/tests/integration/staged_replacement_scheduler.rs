@@ -3093,7 +3093,7 @@ const STORM_OF_SOULS: &str = "Return all creature cards from your graveyard to t
 const DROGSKOL_CAVALRY: &str = "Flying\nWhenever another Spirit you control enters, you gain 2 life.\n{3}{W}: Create a 1/1 white Spirit creature token with flying.";
 const METALLIC_MIMIC: &str = "As this creature enters, choose a creature type.\nThis creature is the chosen type in addition to its other types.\nEach other creature you control of the chosen type enters with an additional +1/+1 counter on it.";
 
-/// CR 611.2e + CR 603.10 + CR 603.6a + CR 701.8a + CR 101.4c: Storm of Souls
+/// CR 611.2e + CR 603.10 + CR 603.6a + CR 101.4c: Storm of Souls
 /// returns Hill Giant and Metallic Mimic in ONE event ("Each of them is a 1/1
 /// Spirit with flying in addition to its other types"), a population this PR
 /// stages; the Mimic's "As this creature enters, choose a creature type" parks
