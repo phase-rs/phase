@@ -71,7 +71,7 @@ pub fn to_ascii_json_string<T: Serialize + ?Sized>(value: &T) -> serde_json::Res
 /// (before the V8 serialization framing, which callers reserve for): V8 keeps a
 /// string whose every code unit is at most U+00FF as one byte per unit, and any
 /// other string at two bytes per UTF-16 code unit, ASCII included.
-fn v8_string_bytes(text: &str) -> usize {
+pub(crate) fn v8_string_bytes(text: &str) -> usize {
     let (units, wide) = text.chars().fold((0usize, false), |(units, wide), ch| {
         (units + ch.len_utf16(), wide || u32::from(ch) > 0xFF)
     });

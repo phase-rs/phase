@@ -357,8 +357,12 @@ export class LobbyDO {
     // acknowledge a write whose snapshot had not yet been attempted. A refused
     // write leaves the state unchanged, and its refusal is delivered below by the
     // same path.
+    //
+    // Defense in depth: the admitted result already fits, but the same storage-fit
+    // authority that bounds the alarm and disconnect writes bounds this one, so no
+    // path can attempt an oversized `put`.
     if (result.dirty) {
-      await this.ctx.storage.put(SNAPSHOT_KEY, broker.snapshot());
+      await this.persistSnapshotIfFits(broker);
       await this.ensureAlarm();
     }
 
@@ -371,13 +375,13 @@ export class LobbyDO {
   }
 
   /**
-   * Persist after a write that did not pass the broker's admission check (the
-   * reaper sweep and disconnect). The broker's own storage-size authority decides
+   * The one snapshot write every path (message, reaper sweep, disconnect) goes
+   * through. The broker's own storage-size authority decides
    * whether the snapshot fits the row; an unstorable one is reported loudly and
    * skipped, leaving the last stored snapshot, rather than throwing out of the
    * handler. Sizing is never reimplemented here.
    */
-  private async persistUnadmittedSnapshot(broker: WasmBroker): Promise<void> {
+  private async persistSnapshotIfFits(broker: WasmBroker): Promise<void> {
     if (!broker.snapshot_fits_storage()) {
       console.error({ event: "lobby_snapshot_unstorable" });
       return;
@@ -393,7 +397,7 @@ export class LobbyDO {
     // is already excluded from getWebSockets()).
     const result = JSON.parse(broker.on_disconnect(JSON.stringify(conn))) as CallResult;
     this.interpret(ws, result.outbounds);
-    await this.persistUnadmittedSnapshot(broker);
+    await this.persistSnapshotIfFits(broker);
     // Player-count decrement+broadcast is shell-owned on close (the broker
     // cannot know the socket set). getWebSockets() already excludes the closing
     // socket, so this count reflects who remains.
@@ -430,7 +434,7 @@ export class LobbyDO {
     if (outbounds.length > 0) {
       console.log({ event: "lobby_reaped", count: outbounds.length });
     }
-    await this.persistUnadmittedSnapshot(broker);
+    await this.persistSnapshotIfFits(broker);
     // The same sweep, for the server directory. Storage hygiene only: the
     // liveness AUTHORITY is the read path's filter, which applies the same
     // `isServerLive` predicate, so a row that expires between alarms is

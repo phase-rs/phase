@@ -37,7 +37,7 @@ function methodBody(header) {
 
 test("webSocketMessage persists a dirty snapshot before delivering its outbounds", () => {
   const body = methodBody("async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer)");
-  const put = body.indexOf("this.ctx.storage.put(SNAPSHOT_KEY, broker.snapshot())");
+  const put = body.indexOf("this.persistSnapshotIfFits(broker)");
   assert.notEqual(put, -1, "expected the snapshot write in webSocketMessage");
 
   // The reject branch answers a frame that mutated nothing, so it replies early;
@@ -48,4 +48,21 @@ test("webSocketMessage persists a dirty snapshot before delivering its outbounds
     put < reply,
     "the snapshot write must precede the reply: a success reply has to describe stored state",
   );
+});
+
+test("every snapshot write is guarded by the broker's storage-fit authority", () => {
+  // The only raw `put` of the snapshot lives in the guarded helper; the message,
+  // alarm and disconnect paths all reach storage through it.
+  const raw = SOURCE.match(/storage\.put\(SNAPSHOT_KEY/g) ?? [];
+  assert.equal(raw.length, 1, "exactly one snapshot `put` may exist");
+
+  const helper = methodBody("private async persistSnapshotIfFits(broker: WasmBroker)");
+  const guard = helper.indexOf("broker.snapshot_fits_storage()");
+  const put = helper.indexOf("this.ctx.storage.put(SNAPSHOT_KEY, broker.snapshot())");
+  assert.notEqual(guard, -1, "the helper must ask the broker whether the snapshot fits");
+  assert.ok(guard < put, "the fit check must precede the put");
+  assert.ok(helper.includes("lobby_snapshot_unstorable"), "an unstorable snapshot is logged loudly");
+
+  const callers = SOURCE.match(/this\.persistSnapshotIfFits\(broker\)/g) ?? [];
+  assert.ok(callers.length >= 3, "message, alarm and disconnect paths all use the helper");
 });

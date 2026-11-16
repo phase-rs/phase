@@ -962,8 +962,11 @@ pub struct TournamentPlayer {
     /// **Private, never projected.** A decklist must not leak to opponents before
     /// the match, so this field is NOT carried on the wire `PlayerSummary` — only
     /// a derived `deck_submitted: bool` is (readiness display). `#[serde(default)]`
-    /// so an entrant persisted before hosting existed deserializes cleanly.
-    #[serde(default)]
+    /// so an entrant persisted before hosting existed deserializes cleanly, and
+    /// `skip_serializing_if` so re-serializing such an entrant writes exactly the
+    /// bytes the released writer stored (no added `"deck":null`): a restored
+    /// snapshot must never be larger than the one that was stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deck: Option<DeckData>,
 }
 
@@ -1136,18 +1139,18 @@ impl TournamentMeta {
     }
 
     /// The bytes this event's retained decks add to its persisted record: each
-    /// submitted deck's encoding ([`deck_encoded_bytes`]) less the
-    /// [`ABSENT_DECK_FIELD_ENCODED_BYTES`] the always-serialized `deck` field
-    /// already occupies as `null`. Exactly what a submission or withdrawal
-    /// changes in the record's encoded size, so the rest of the record (the
-    /// event's metadata) is independent of deck traffic. The deck account of the
-    /// persistence boundary's reservation
+    /// submitted deck's encoding ([`deck_encoded_bytes`]) plus the
+    /// [`DECK_FIELD_ENCODED_OVERHEAD_BYTES`] of its `deck` field, which is omitted
+    /// from the record while no deck is held. Exactly what a submission or
+    /// withdrawal changes in the record's encoded size, so the rest of the record
+    /// (the event's metadata) is independent of deck traffic. The deck account of
+    /// the persistence boundary's reservation
     /// ([`crate::broker::EVENT_DECK_RESERVE_ENCODED_BYTES`]).
     pub fn retained_deck_bytes(&self) -> usize {
         self.players
             .iter()
             .filter_map(|p| p.deck.as_ref())
-            .map(|deck| deck_encoded_bytes(deck).saturating_sub(ABSENT_DECK_FIELD_ENCODED_BYTES))
+            .map(|deck| deck_encoded_bytes(deck).saturating_add(DECK_FIELD_ENCODED_OVERHEAD_BYTES))
             .fold(0usize, usize::saturating_add)
     }
 
@@ -2218,10 +2221,10 @@ pub const MAX_EVENT_DECK_ENCODED_BYTES: usize = 8 * MAX_SINGLE_DECK_ENCODED_BYTE
 /// [`deck_encoded_bytes`] codec as the per-event budget.
 pub const MAX_SINGLE_DECK_ENCODED_BYTES: usize = 64 * 1024;
 
-/// What the `deck` field of a [`TournamentPlayer`] encodes to while no deck has
-/// been submitted: `null`. The field is always serialized, so a submitted deck
-/// adds its own encoding minus this.
-const ABSENT_DECK_FIELD_ENCODED_BYTES: usize = "null".len();
+/// What a retained deck adds to its entrant record beyond its own encoding: the
+/// `,"deck":` member (the field is skipped while no deck is held, so a record
+/// restored from a released snapshot re-serializes byte for byte).
+const DECK_FIELD_ENCODED_OVERHEAD_BYTES: usize = ",\"deck\":".len();
 
 /// The exact byte cost `deck` adds to the persisted broker snapshot: its
 /// `serde_json` encoding, the same codec the lobby Durable Object snapshots the

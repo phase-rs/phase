@@ -760,7 +760,10 @@ impl Broker {
         };
         let outbounds = self.dispatch(conn, msg, request_id, env);
         match self.admit_or_restore(checkpoint, conn) {
-            Ok(()) => Handled::changed(outbounds),
+            Ok(persisted) => Handled {
+                outbounds,
+                persisted,
+            },
             Err(reason) => {
                 warn!(%reason, "write refused at the persistence boundary");
                 Handled::unchanged(vec![settle_rejection(request_id, &reason)])
@@ -797,24 +800,33 @@ impl Broker {
 
     /// Whether the persisted state after `self` would stay within capacity,
     /// otherwise restores `checkpoint` (broker and connection) and says why.
+    /// On admission, says whether durable state actually changed.
     ///
     /// Two independent bounds. The committed total ([`Self::committed_bytes`])
     /// must stay within [`MAX_SNAPSHOT_ENCODED_BYTES`] unless the write does not
     /// raise it, so a state restored from an older, larger snapshot can still
-    /// shrink (drop, end, unregister). And the *actual* encoded size must never
+    /// shrink (drop, end, unregister). And the *actual* stored size must never
     /// grow past [`PHYSICAL_SNAPSHOT_LIMIT_BYTES`]: growth inside an unused
     /// reservation leaves the committed total flat, so for a restored
     /// over-budget snapshot the committed bound alone would let the real value
-    /// creep past what the store can hold. A write that reduces the actual
-    /// encoded size is always admitted.
+    /// creep past what the store can hold. A write that *strictly* reduces the
+    /// stored size is always admitted (it is progress toward a storable value);
+    /// a write that leaves it equal is admitted only inside the physical bound.
+    ///
+    /// A frame that left the stored snapshot byte-for-byte as it was (a request
+    /// the handler refused without mutating anything) is admitted as
+    /// [`PersistedChange::Unchanged`] whatever the size, so it neither reports
+    /// dirty nor is mistaken for a growth refusal: its own correlated refusal is
+    /// delivered and no write is attempted.
     fn admit_or_restore(
         &mut self,
         checkpoint: Checkpoint,
         conn: &mut ConnState,
-    ) -> Result<(), String> {
+    ) -> Result<PersistedChange, String> {
         let (actual_after, committed_after) = self.accounting();
         if committed_after <= MAX_SNAPSHOT_ENCODED_BYTES {
-            return Ok(());
+            // Committed bounds actual, so this value is inside the physical limit.
+            return Ok(PersistedChange::Changed);
         }
         // Over the ceiling: swap the checkpoint in to measure what it held.
         // `checkpoint` then holds the candidate, so either side can be kept.
@@ -826,14 +838,25 @@ impl Broker {
         std::mem::swap(&mut self.lobby, &mut lobby);
         std::mem::swap(&mut self.tournaments, &mut tournaments);
         let (actual_before, committed_before) = self.accounting();
-        let shrinks = actual_after <= actual_before;
+        // Equal stored size is the only case a no-op can hide in; compare the
+        // stored text itself (the one authority) only then.
+        let before_text = (actual_after == actual_before).then(|| self.snapshot_json());
+        std::mem::swap(&mut self.lobby, &mut lobby);
+        std::mem::swap(&mut self.tournaments, &mut tournaments);
+        if let Some(before_text) = before_text {
+            if self.snapshot_json() == before_text {
+                return Ok(PersistedChange::Unchanged);
+            }
+        }
+        let strictly_shrinks = actual_after < actual_before;
         let within_bounds =
             committed_after <= committed_before && actual_after <= PHYSICAL_SNAPSHOT_LIMIT_BYTES;
-        if shrinks || within_bounds {
-            std::mem::swap(&mut self.lobby, &mut lobby);
-            std::mem::swap(&mut self.tournaments, &mut tournaments);
-            return Ok(());
+        if strictly_shrinks || within_bounds {
+            return Ok(PersistedChange::Changed);
         }
+        // Refused: put the checkpoint back (it is in the locals after the swap back).
+        std::mem::swap(&mut self.lobby, &mut lobby);
+        std::mem::swap(&mut self.tournaments, &mut tournaments);
         *conn = prior_conn;
         Err(format!(
             "Refused: the server's persisted tournament state is at capacity \
@@ -8291,93 +8314,233 @@ mod tests {
             assert!(restored.snapshot_json().is_ascii());
         }
 
-        /// F1: a snapshot the released writer stored as raw UTF-8 with a huge
-        /// `Ā` event name fits storage as a two-byte V8 string (2 bytes per unit)
-        /// but would be three times larger as `\u0100` escapes (6 bytes per unit),
-        /// past the row limit. It must restore and keep persisting in the raw
-        /// form, every later write bounded by the same stored-size measure:
-        /// growth that fits is admitted, growth past the limit is refused with
-        /// its request id and the prior state intact, shrinking still works.
-        #[test]
-        fn a_released_writer_unicode_snapshot_near_the_limit_keeps_a_storable_form() {
-            let env = FakeEnv::new();
-            let mut organizer = ConnState::default();
-            let mut broker = Broker::new();
-            let (victim, _) =
-                make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
-            let mut alice = ConnState::default();
-            let token = join_tournament(&mut alice, &mut broker, &env, &victim, "a", "Alice");
-            // A retained deck the released writer had accepted.
-            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 20_000, 50), &env);
-            ack_of(&out);
-            let set_name = |broker: &mut Broker, chars: usize| {
-                broker
-                    .tournaments_mut()
-                    .fixture_meta_mut(&victim)
-                    .expect("event")
-                    .name = "\u{0100}".repeat(chars);
-            };
+        // ---- Genuine v0.126.0 snapshot shape -------------------------------
+        //
+        // The fixtures below are hand-written JSON in the shape the *released*
+        // v0.126.0 writer stored (`git show v0.126.0:crates/lobby-broker/src/`):
+        // a `TournamentPlayer` is `{player_key, player_token, display_name,
+        // dropped}` with NO `deck`, and everything else is spelled out literally.
+        // They are deliberately not produced by serializing today's structs: a
+        // fixture built that way can never notice a field a later version adds and
+        // writes back, which is exactly how a stored snapshot grows on restore.
 
-            // Tune the raw two-byte form to sit 20 kB under the stored limit.
-            let target = PHYSICAL_SNAPSHOT_LIMIT_BYTES - 20_000;
-            let mut chars = 3_000_000;
-            set_name(&mut broker, chars);
-            chars += (target - broker.snapshot_encoded_bytes()) / 2;
-            set_name(&mut broker, chars);
-            assert!(target - broker.snapshot_encoded_bytes() <= 2);
+        const RELEASED_CODE: &str = "ABCDEF";
 
-            // What the released writer stored: raw UTF-8 `serde_json::to_string`.
-            let legacy = serde_json::to_string(&broker).expect("legacy encoding");
-            let raw_units: usize = legacy.chars().map(char::len_utf16).sum();
+        /// Secret of released entrant `index`, 32 characters like a minted token.
+        fn released_secret(index: usize) -> String {
+            format!("{index:032}")
+        }
+
+        /// One v0.126.0 entrant: 20 `Ā` plus five digits for the key (45 UTF-8
+        /// bytes), 20 `Ā` for the display name.
+        fn released_entrant(index: usize) -> String {
+            let accent = "\u{0100}".repeat(20);
+            format!(
+                "{{\"player_key\":\"{accent}{index:05}\",\
+                 \"player_token\":{{\"secret\":\"{}\",\"expires_at_ms\":9000000,\"last_rotation\":null}},\
+                 \"display_name\":\"{accent}\",\"dropped\":false}}",
+                released_secret(index)
+            )
+        }
+
+        /// A complete v0.126.0 broker snapshot: an empty lobby and one
+        /// registration-stage event of `entrants` Unicode entrants whose name is
+        /// `name_chars` copies of `Ā`, in raw UTF-8 as the released writer stored it.
+        fn released_snapshot(entrants: usize, name_chars: usize) -> String {
+            let players = (0..entrants)
+                .map(released_entrant)
+                .collect::<Vec<_>>()
+                .join(",");
+            let name = "\u{0100}".repeat(name_chars);
+            format!(
+                "{{\"lobby\":{{\"games\":{{}},\"next_generation\":0}},\
+                 \"tournaments\":{{\"tournaments\":{{\"{RELEASED_CODE}\":{{\
+                 \"code\":\"{RELEASED_CODE}\",\"name\":\"{name}\",\
+                 \"organizer_token\":{{\"secret\":\"{}\",\"expires_at_ms\":9000000,\"last_rotation\":null}},\
+                 \"arity\":2,\
+                 \"scoring\":{{\"win_points\":3,\"draw_points\":1,\"loss_points\":0}},\
+                 \"bracket\":\"Swiss\",\"total_rounds_override\":null,\
+                 \"resolved_total_rounds\":null,\"plus_rounds\":null,\"format\":null,\
+                 \"match_type\":\"Bo3\",\"current_round\":0,\"status\":\"Registration\",\
+                 \"players\":[{players}],\"pairings\":[],\"hosted\":{{}},\
+                 \"created_at\":1000,\"last_activity_at\":1000}}}}}}}}",
+                released_secret(999_999)
+            )
+        }
+
+        /// What the store holds for `text` (V8 framing aside), from the one
+        /// authority the broker itself measures with.
+        fn stored_bytes_of(text: &str) -> usize {
+            crate::snapshot_codec::v8_string_bytes(text)
+        }
+
+        /// A released snapshot whose raw stored size sits `gap` bytes under the
+        /// physical limit while its ASCII-escaped form is far over it. Sizing is
+        /// linear in the event name, so one probe lands it within a code unit of
+        /// the target.
+        fn released_snapshot_near_the_limit(gap: usize) -> String {
+            let entrants = 15_000;
+            let probe = released_snapshot(entrants, 1_000);
+            let per_char =
+                stored_bytes_of(&released_snapshot(entrants, 1_001)) - stored_bytes_of(&probe);
+            let target = PHYSICAL_SNAPSHOT_LIMIT_BYTES - gap;
+            let name_chars = 1_000 + (target - stored_bytes_of(&probe)) / per_char;
+            let text = released_snapshot(entrants, name_chars);
+            let stored = stored_bytes_of(&text);
             assert!(
-                2 * raw_units <= PHYSICAL_SNAPSHOT_LIMIT_BYTES,
-                "reach guard: the released snapshot fit storage as a two-byte string"
+                (target - per_char..=target).contains(&stored),
+                "fixture lands on target: {stored} vs {target}"
             );
+            text
+        }
+
+        fn restore_released(text: &str) -> Broker {
+            serde_json::from_str(text).expect("a released snapshot restores")
+        }
+
+        /// F1 (a): restoring a genuine v0.126.0 snapshot and writing it back adds
+        /// no key the released writer did not write. The raw text is identical,
+        /// so the restored snapshot can never be larger than the stored one, and
+        /// no state is lost.
+        #[test]
+        fn a_released_snapshot_reserializes_byte_for_byte() {
+            let released = released_snapshot(25, 40);
+            assert!(!released.contains("\"deck\""), "released shape has no deck");
+            let restored = restore_released(&released);
+            assert_eq!(
+                serde_json::to_string(&restored).expect("raw encoding"),
+                released,
+                "no added keys, no reordered fields"
+            );
+            let event = restored.tournaments().get(RELEASED_CODE).expect("event");
+            assert_eq!(event.players.len(), 25);
+            assert!(event.players.iter().all(|p| p.deck.is_none() && !p.dropped));
+            assert_eq!(event.name, "\u{0100}".repeat(40));
+
+            // The stored form never exceeds what was stored, and is lossless.
+            let stored =
+                crate::snapshot_codec::stored_snapshot(&restored, usize::MAX).expect("encodes");
+            assert!(stored.stored_bytes <= stored_bytes_of(&released));
+            let again: Broker = serde_json::from_str(&stored.text).expect("restores");
+            assert_eq!(
+                serde_json::to_value(&again).expect("value"),
+                serde_json::to_value(&restored).expect("value")
+            );
+        }
+
+        /// F1 (b): a released Unicode snapshot near the physical limit restores
+        /// into the representation it was stored in (raw, since its escaped form is
+        /// far over the limit), still fits storage, and loses nothing.
+        #[test]
+        fn a_released_unicode_snapshot_near_the_limit_stays_storable() {
+            let released = released_snapshot_near_the_limit(1_000);
+            let original_bytes = stored_bytes_of(&released);
+            assert!(original_bytes <= PHYSICAL_SNAPSHOT_LIMIT_BYTES);
             assert!(
-                crate::snapshot_codec::to_ascii_json_string(&broker)
+                crate::snapshot_codec::to_ascii_json_string(&restore_released(&released))
                     .expect("ascii")
                     .len()
                     > PHYSICAL_SNAPSHOT_LIMIT_BYTES,
-                "reach guard: its escaped form would not"
+                "reach guard: the escaped form would not fit"
             );
 
-            let mut broker: Broker = serde_json::from_str(&legacy).expect("legacy restores");
-            let stored = broker.snapshot_json();
-            assert!(!stored.is_ascii(), "kept in the raw form that fits");
-            assert!(broker.snapshot_fits_storage());
-            assert_eq!(broker.snapshot_encoded_bytes(), 2 * raw_units);
+            let restored = restore_released(&released);
             assert_eq!(
-                broker
+                restored.snapshot_json(),
+                released,
+                "the stored text is what was stored"
+            );
+            assert!(restored.snapshot_encoded_bytes() <= original_bytes);
+            assert!(restored.snapshot_fits_storage());
+            assert_eq!(
+                restored
                     .tournaments()
-                    .get(&victim)
+                    .get(RELEASED_CODE)
                     .expect("event")
-                    .name
-                    .chars()
-                    .count(),
-                chars,
-                "no state lost on restore"
+                    .players
+                    .len(),
+                15_000,
+                "no entrant lost"
             );
+        }
 
-            // Growth (re-submitting the 20 kB deck, about 40 kB stored) is refused
-            // with its request id and the prior state intact: the restored state is
-            // past today's admission budget, so only writes that do not raise the
-            // committed total pass, and none may outgrow the stored limit.
-            let smaller = broker.handle(&mut alice, submit_frame(&victim, &token, 2_000, 51), &env);
-            assert_eq!(
-                ack_of(&smaller).0,
-                TournamentRequestId(51),
-                "a shrink is admitted"
-            );
-            assert!(broker.snapshot_fits_storage());
-            assert!(!broker.snapshot_json().is_ascii(), "still the raw form");
+        /// F1 (c): on that restored, near-capacity state a guard-valid, correlated
+        /// `SubmitTournamentDeck` with an invalid token is refused without touching
+        /// state. It is delivered as its own correlated refusal and is NOT reported
+        /// dirty, so no write (let alone an oversized one) follows it.
+        #[test]
+        fn a_refused_message_on_a_restored_released_snapshot_is_not_dirty() {
+            let env = FakeEnv::new();
+            let mut broker = restore_released(&released_snapshot_near_the_limit(1_000));
             let before = broker.snapshot_json();
-            let before_conn = alice.clone();
-            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 20_000, 52), &env);
-            let (id, reason) = rejection_of(&out);
-            assert_eq!(id, TournamentRequestId(52));
+            let mut conn = ConnState::default();
+            let handled = broker.handle_reporting(
+                &mut conn,
+                LobbyClientMessage::SubmitTournamentDeck {
+                    code: RELEASED_CODE.to_string(),
+                    player_token: "f".repeat(32),
+                    deck: DeckData {
+                        main_deck: vec!["Island".to_string()],
+                        ..Default::default()
+                    },
+                    request_id: Some(TournamentRequestId(77)),
+                },
+                &env,
+            );
+            assert_eq!(handled.persisted, PersistedChange::Unchanged);
+            let (id, _) = rejection_of(&handled.outbounds);
+            assert_eq!(id, TournamentRequestId(77), "the refusal is correlated");
+            assert_eq!(broker.snapshot_json(), before, "state is unchanged");
+            assert!(broker.snapshot_fits_storage());
+        }
+
+        /// F1: every admitted, dirty result stays storable. On the restored
+        /// near-capacity state growth past the limit is refused with its request id
+        /// and the prior state intact, while a successful storable reduction (an
+        /// entrant dropping) is still admitted and reported dirty.
+        #[test]
+        fn a_restored_released_snapshot_refuses_growth_and_admits_reductions() {
+            let env = FakeEnv::new();
+            let mut broker = restore_released(&released_snapshot_near_the_limit(1_000));
+            let token = released_secret(3);
+
+            // A deck far larger than the 1 kB left would push the value past the
+            // physical limit: refused, correlated, nothing changed.
+            let before = broker.snapshot_json();
+            let mut conn = ConnState::default();
+            let handled = broker.handle_reporting(
+                &mut conn,
+                LobbyClientMessage::SubmitTournamentDeck {
+                    code: RELEASED_CODE.to_string(),
+                    player_token: token.clone(),
+                    deck: DeckData {
+                        main_deck: vec!["y".repeat(100); 100],
+                        ..Default::default()
+                    },
+                    request_id: Some(TournamentRequestId(81)),
+                },
+                &env,
+            );
+            let (id, reason) = rejection_of(&handled.outbounds);
+            assert_eq!(id, TournamentRequestId(81));
             assert!(reason.contains("at capacity"), "{reason}");
+            assert_eq!(handled.persisted, PersistedChange::Unchanged);
             assert_eq!(broker.snapshot_json(), before, "the prior state is intact");
-            assert_eq!(alice, before_conn);
+
+            // Dropping reduces the stored size: admitted, dirty, still storable.
+            let size_before = broker.snapshot_encoded_bytes();
+            let handled = broker.handle_reporting(
+                &mut conn,
+                LobbyClientMessage::DropFromTournament {
+                    code: RELEASED_CODE.to_string(),
+                    player_token: token,
+                    request_id: Some(TournamentRequestId(82)),
+                },
+                &env,
+            );
+            assert_eq!(ack_of(&handled.outbounds).0, TournamentRequestId(82));
+            assert_eq!(handled.persisted, PersistedChange::Changed);
+            assert!(broker.snapshot_encoded_bytes() < size_before);
             assert!(broker.snapshot_fits_storage());
         }
 
