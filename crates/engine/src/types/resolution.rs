@@ -1091,6 +1091,8 @@ pub enum ResolutionStackError {
     },
     #[error("a parent frame requires an active child")]
     NoActiveChild,
+    #[error("no parked BatchDelivery owner carries logical group {0:?}")]
+    NoBatchDeliveryOwner(crate::types::identifiers::LogicalZoneChangeGroupId),
     #[error(
         "child-stack boundary {child_stack_start} is not below the active child stack of length {stack_len}"
     )]
@@ -2174,7 +2176,8 @@ impl ResolutionStack {
     }
 
     /// Install a synchronous original owner below its explicitly named child,
-    /// or replace that same owner when its next member delegates a delivery.
+    /// or replace that same owner when its next member delegates a delivery or
+    /// pauses again.
     pub(crate) fn park_batch_owner(
         &mut self,
         pending: PendingBatchDeliveries,
@@ -2187,14 +2190,12 @@ impl ResolutionStack {
                 .is_some_and(|link| link.parent_group_id == group)
         });
         if !linked {
-            if self
-                .active_batch_delivery()
-                .is_some_and(|batch| batch.logical_zone_change_group.logical_group_id == group)
-            {
-                return self.replace_active_batch_delivery(pending);
-            }
-            if self.frames.iter().any(|frame| matches!(frame, ResolutionFrame::BatchDelivery(batch) if batch.logical_zone_change_group.logical_group_id == group)) {
-                return Err(ResolutionStackError::NoActiveChild);
+            // An owner this group already parked is replaced in place by its
+            // group identity: the active frame, or a battlefield batch's
+            // pre-entry snapshot owner (CR 614.12) that a member's move left
+            // beneath child frames of its own, which stay above it.
+            if self.batch_delivery_slot_for_group(group).is_some() {
+                return self.replace_batch_delivery_for_group(pending);
             }
             self.push_batch_delivery(pending);
             return Ok(());
@@ -2377,6 +2378,67 @@ impl ResolutionStack {
             Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
             Some(_) | None => None,
         }
+    }
+
+    fn batch_delivery_slot_for_group(
+        &self,
+        group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) -> Option<FrameSlot> {
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if matches!(
+                self.frames.get(current),
+                Some(ResolutionFrame::BatchDelivery(batch))
+                    if batch.logical_zone_change_group.logical_group_id == group
+            ) {
+                return Some(current);
+            }
+            slot = self.frames.below(current);
+        }
+        None
+    }
+
+    /// The BatchDelivery owner of one logical zone-change group, found by that
+    /// group's identity rather than stack position: a replacement pause can leave
+    /// child frames above its owner, and the owner is still the one frame that
+    /// holds the batch's tail and pre-entry snapshot.
+    pub fn batch_delivery_for_group(
+        &self,
+        group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) -> Option<&PendingBatchDeliveries> {
+        let slot = self.batch_delivery_slot_for_group(group)?;
+        match self.frames.get(slot) {
+            Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Mutable form of [`Self::batch_delivery_for_group`].
+    pub fn batch_delivery_for_group_mut(
+        &mut self,
+        group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) -> Option<&mut PendingBatchDeliveries> {
+        let slot = self.batch_delivery_slot_for_group(group)?;
+        match self.frames.get_mut(slot) {
+            Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
+            Some(_) | None => None,
+        }
+    }
+
+    /// Re-park a batch's owner in place, addressed by its own logical group
+    /// identity (see [`Self::batch_delivery_for_group`]); any child frames above
+    /// it stay exactly where they are.
+    pub fn replace_batch_delivery_for_group(
+        &mut self,
+        pending: PendingBatchDeliveries,
+    ) -> Result<(), ResolutionStackError> {
+        let group = pending.logical_zone_change_group.logical_group_id;
+        let slot = self
+            .batch_delivery_slot_for_group(group)
+            .ok_or(ResolutionStackError::NoBatchDeliveryOwner(group))?;
+        self.frames
+            .replace(slot, ResolutionFrame::BatchDelivery(Box::new(pending)));
+        Ok(())
     }
 
     /// Consume exactly the active BatchDelivery owner after its logical group
@@ -3909,6 +3971,22 @@ impl ResolutionStack {
             Some(ResolutionFrame::ChangeZone(frame)) => Some(frame),
             Some(ResolutionFrame::PostReplacement(_)) => match self.active_predecessor() {
                 Some(ResolutionFrame::ChangeZone(frame)) => Some(frame),
+                Some(_) | None => None,
+            },
+            Some(_) | None => None,
+        }
+    }
+
+    /// The active BatchDelivery owner, or the one a post-replacement child
+    /// raised by its current member's move sits directly on. Mirrors
+    /// [`Self::active_change_zone_or_post_replacement_child`]; no deeper search.
+    pub fn active_batch_delivery_or_post_replacement_child(
+        &self,
+    ) -> Option<&PendingBatchDeliveries> {
+        match self.last() {
+            Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
+            Some(ResolutionFrame::PostReplacement(_)) => match self.active_predecessor() {
+                Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
                 Some(_) | None => None,
             },
             Some(_) | None => None,
@@ -7090,6 +7168,9 @@ impl LegacyReplacementTailsWire {
                         applied: self.post_replacement_applied,
                         event_source: self.post_replacement_event_source,
                         event_target: self.post_replacement_event_target,
+                        // The split-slot wire shape predates the CR 614.1a
+                        // substitution amount; no damage substitution existed.
+                        event_amount: None,
                         // The pre-fold split-slot wire shape predates the
                         // CR 109.5 controller slot; a migrated drain falls back
                         // to the affected object's controller, exactly as it did
@@ -7665,6 +7746,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: state.zone_changes_this_turn.len(),
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         }))
     }
 
@@ -7711,6 +7793,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         };
         let parent = batch(
             parent_group,
@@ -9997,6 +10080,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: batch.zone_changes_this_turn.len(),
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         };
         let mut batch = restore_v1_batch_delivery_fixture(batch, pending.clone());
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut batch, &mut Vec::new());

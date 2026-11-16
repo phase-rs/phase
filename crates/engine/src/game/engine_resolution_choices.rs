@@ -17378,6 +17378,7 @@ mod random_result_resolution_context_tests {
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
             library_reorder: None,
+            pre_entry_battlefield: None,
         });
 
         let saved = serde_json::to_string(&PersistedGameState::capture(state))

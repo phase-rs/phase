@@ -1941,6 +1941,11 @@ fn do_eliminate(
     if state.pending_replacement.is_some()
         && leaving_is_latched_chooser
         && !settles_with_parked_payment
+        // CR 800.4a + CR 616.1f: a combat-damage leg's choice is not abandoned
+        // with its chooser: the damaged permanent may survive the departure (a
+        // Control Magic host returns to its owner), so the event is lifted back
+        // into the parked batch and re-proposed to whoever now owes it.
+        && !super::replacement::lift_departed_combat_leg_choice(state)
     {
         state.pending_replacement = None;
         // CR 800.4a: a paused frameless single-card discard belongs to the
@@ -1986,6 +1991,17 @@ fn do_eliminate(
     // halves are false now that the discharge exists.)
     if let Some(record) = state.pending_combat_lifelink.as_mut() {
         record.remaining.retain(|gain| gain.controller != player);
+        // CR 616.1: a batch parked earlier, in its replacement pass, has not
+        // computed its gains yet — Phase C derives them from each entry's
+        // lifelink controller. Drop that seat's the same way, per entry; its
+        // damage itself still applies.
+        if let Some(parked) = record.replacement.as_mut() {
+            for entry in &mut parked.entries {
+                if entry.lifelink_controller == Some(player) {
+                    entry.lifelink_controller = None;
+                }
+            }
+        }
     }
 
     // CR 800.4a: A coupled ETB spell-resolution context can outlive its
@@ -2918,6 +2934,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         }
     }
 
@@ -3124,6 +3141,7 @@ mod tests {
             attempted: vec![leaving, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         let mut events = Vec::new();
@@ -3242,6 +3260,7 @@ mod tests {
             attempted: vec![leaving, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         let mut events = Vec::new();
@@ -3320,6 +3339,7 @@ mod tests {
             attempted: vec![original],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
             library_reorder: None,
@@ -3342,6 +3362,7 @@ mod tests {
             attempted: vec![original],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         assert!(
@@ -3432,6 +3453,7 @@ mod tests {
             attempted: vec![leaving, leaving_tail, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
             library_reorder: None,
@@ -3454,6 +3476,7 @@ mod tests {
             attempted: vec![leaving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
         state
             .resolution_stack

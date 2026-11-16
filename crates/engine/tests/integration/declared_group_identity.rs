@@ -528,6 +528,7 @@ fn seed_records(state: &mut GameState) {
         .push_back(engine::types::game_state::CounterAddedRecord {
             actor: P1,
             object_id: bear,
+            incarnation: Some(0),
             counter_type: CounterType::Plus1Plus1,
             count: 1,
             name: "Bear".into(),

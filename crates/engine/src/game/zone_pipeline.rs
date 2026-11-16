@@ -1361,7 +1361,9 @@ enum BatchDeliveryResult {
 #[derive(Clone, Copy)]
 enum BatchDeliveryParking {
     NewChild,
-    ReparkActive,
+    /// Re-park the batch's own owner frame, addressed by its logical group
+    /// identity (child frames may sit above it).
+    ReparkOwner,
 }
 
 /// CR 603.10a batch entry: move many objects to one destination through the
@@ -1456,16 +1458,61 @@ pub(crate) fn move_objects_simultaneously_settling_then(
     let ids: Vec<ObjectId> = reqs.iter().map(|r| r.object_id).collect();
     let logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
-    let group_id = logical_zone_change_group.logical_group_id;
+    let destination = reqs.first().map(|r| r.to);
+    // CR 614.12 + CR 614.1c: a simultaneous battlefield batch (Dig kept cards)
+    // snapshots the pre-entry battlefield before its first member enters. The
+    // batch frame owns the snapshot from the start, so a replacement pause
+    // re-parks it (see `stash_batch_tail`) and the resume never re-captures it.
+    let pre_entry_battlefield = destination.and_then(|zone| {
+        crate::game::engine_replacement::pre_entry_snapshot_for_entry(
+            state,
+            ids.iter().copied(),
+            zone,
+        )
+    });
+    let parking = if pre_entry_battlefield.is_some() {
+        state.push_batch_delivery(PendingBatchDeliveries {
+            library_reorder: None,
+            // A component link is attached on `NeedsChoice`, as for an owner
+            // `stash_batch_tail` parks.
+            component_delivery_parent: None,
+            logical_zone_change_group: logical_zone_change_group.clone(),
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: destination.unwrap_or(Zone::Battlefield),
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start,
+            deferred_events: Vec::new(),
+            pre_entry_battlefield,
+        });
+        BatchDeliveryParking::ReparkOwner
+    } else {
+        BatchDeliveryParking::NewChild
+    };
+    let owns_pre_entry_snapshot = matches!(parking, BatchDeliveryParking::ReparkOwner);
+    let owner_group = logical_zone_change_group.logical_group_id;
     match deliver_batch(
         state,
         reqs,
         logical_zone_change_group,
-        BatchDeliveryParking::NewChild,
+        parking,
         component_delivery_parent.as_ref(),
         events,
     ) {
         BatchDeliveryResult::Done(mut logical_zone_change_group) => {
+            if owns_pre_entry_snapshot {
+                // The simultaneous entry is over; the snapshot ends with it.
+                state
+                    .take_active_batch_delivery()
+                    .expect("snapshot-owning batch frame must be the active owner");
+            }
             // CR 730.3 + CR 603.2c: a component batch that delivers for an
             // announcing owner leaves its events in that owner's slice; the
             // owner collects the one departure once. Only an unowned move's
@@ -1505,10 +1552,18 @@ pub(crate) fn move_objects_simultaneously_settling_then(
             // paused object was the last member and the undelivered tail is empty.
             // Attach the completion to that same owner so its drain can run it
             // once, after logical settlement.
-            let pending = state
-                .resolution_stack
-                .batch_delivery_owner_mut(group_id)
-                .expect("new batch retains its exact owner");
+            let pending = if owns_pre_entry_snapshot {
+                // The re-parked owner may have child frames above it, so it is
+                // addressed by its group identity, not by stack position.
+                state
+                    .batch_delivery_for_group_mut(owner_group)
+                    .expect("paused snapshot-owning batch retains its owner frame")
+            } else {
+                state
+                    .resolution_stack
+                    .batch_delivery_owner_mut(owner_group)
+                    .expect("new batch retains its exact owner")
+            };
             pending.component_delivery_parent = component_delivery_parent;
             pending.completion = completion;
             // CR 701.20d + CR 616.1: the reorder rides the same parked owner; its
@@ -1576,6 +1631,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
             attempted: Vec::new(),
             zone_change_record_start,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
     }
     state
@@ -1789,6 +1845,14 @@ fn stash_batch_tail(
         .into_iter()
         .map(ZoneMoveRequest::into_pending)
         .collect();
+    // CR 614.12: a re-parked batch keeps the snapshot captured before its first
+    // member entered.
+    let pre_entry_battlefield = match parking {
+        BatchDeliveryParking::ReparkOwner => state
+            .batch_delivery_for_group(logical_zone_change_group.logical_group_id)
+            .and_then(|owner| owner.pre_entry_battlefield.clone()),
+        BatchDeliveryParking::NewChild => None,
+    };
     let pending = PendingBatchDeliveries {
         library_reorder: None,
         component_delivery_parent: None,
@@ -1809,16 +1873,17 @@ fn stash_batch_tail(
         attempted: Vec::new(),
         zone_change_record_start: state.zone_changes_this_turn.len(),
         deferred_events: Vec::new(),
+        pre_entry_battlefield,
     };
     match parking {
         BatchDeliveryParking::NewChild => state
             .resolution_stack
             .park_batch_owner(pending)
             .expect("new batch parks below its explicitly delegated child"),
-        BatchDeliveryParking::ReparkActive => state
+        BatchDeliveryParking::ReparkOwner => state
             .resolution_stack
             .park_batch_owner(pending)
-            .expect("re-paused batch delivery must own the active frame"),
+            .expect("re-paused batch delivery must retain its owner frame"),
     }
 }
 
@@ -1930,8 +1995,10 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             attempted,
             zone_change_record_start,
             mut deferred_events,
+            pre_entry_battlefield: _,
         } = pending;
         deferred_events.append(events);
+        let owner_group = logical_zone_change_group.logical_group_id;
         let attempted = if attempted.is_empty() {
             remaining.clone()
         } else {
@@ -1988,12 +2055,11 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 .record_delivery_completion(paused_current.member.object_id, terminal_completion)
                 .expect("resumed batch member records its exact terminal outcome");
         }
-        let group_id = logical_zone_change_group.logical_group_id;
         match deliver_batch(
             state,
             reqs,
             logical_zone_change_group,
-            BatchDeliveryParking::ReparkActive,
+            BatchDeliveryParking::ReparkOwner,
             component_delivery_parent.as_ref(),
             events,
         ) {
@@ -2087,9 +2153,8 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 // including a pause on its final member. Re-attach only the
                 // completion and external output; never replace that owner.
                 let reparking = state
-                    .resolution_stack
-                    .batch_delivery_owner_mut(group_id)
-                    .expect("repark retains the exact original batch owner");
+                    .batch_delivery_for_group_mut(owner_group)
+                    .expect("re-parked batch retains its owner frame");
                 reparking.component_delivery_parent = component_delivery_parent;
                 reparking.completion = completion;
                 // CR 701.20d + CR 616.1: the re-parked tail still owes the
@@ -2251,6 +2316,7 @@ mod paused_search_audience_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         drain_pending_batch_deliveries(&mut state, &mut Vec::new());
@@ -2338,6 +2404,7 @@ mod paused_search_audience_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         // An answer pins the boundary, then changes the proposal.
@@ -8422,6 +8489,7 @@ mod w3_library_placement_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
         install_library_to_exile_redirect(&mut state);
         install_library_to_exile_redirect(&mut state);
@@ -10394,6 +10462,7 @@ mod library_reorder_carrier_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
         assert!(
             state.active_batch_delivery().is_some(),
@@ -10565,6 +10634,7 @@ mod library_reorder_carrier_tests {
             attempted: vec![pile.b, pile.a],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
         });
 
         let mut events = Vec::new();

@@ -1602,6 +1602,12 @@ pub struct FilterContext<'a> {
     pub declared_slot_view: Option<&'a [Option<crate::game::targeting::DeclaredSlotBinding>]>,
     /// CR 201.5a: the granter stamped on the definition this filter is read for.
     pub granting_object: Option<ObjectIncarnationRef>,
+    /// CR 614.12 + CR 614.1c: the battlefield as it stood BEFORE the
+    /// simultaneous entry whose as-enters replacement is being evaluated. A
+    /// battlefield object outside this set entered in the same event, so it is
+    /// not yet part of the population the entering permanent counts. `None`
+    /// everywhere except an entering object's replacement-time quantity read.
+    pub pre_entry_battlefield: Option<&'a HashSet<ObjectId>>,
 }
 
 impl<'a> FilterContext<'a> {
@@ -1621,6 +1627,7 @@ impl<'a> FilterContext<'a> {
             declared_slot_view: source.declared_slot_view,
             granting_object: source.granting_object,
             ability_targets: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1643,6 +1650,19 @@ impl<'a> FilterContext<'a> {
     pub fn with_granting_object(self, granting_object: Option<ObjectIncarnationRef>) -> Self {
         FilterContext {
             granting_object,
+            ..self
+        }
+    }
+
+    /// CR 614.12: evaluate this filter against the battlefield as it was before
+    /// the simultaneous entry (see [`FilterContext::pre_entry_battlefield`]).
+    /// `None` leaves the live battlefield authoritative.
+    pub fn with_pre_entry_battlefield(
+        self,
+        pre_entry_battlefield: Option<&'a HashSet<ObjectId>>,
+    ) -> Self {
+        FilterContext {
+            pre_entry_battlefield,
             ..self
         }
     }
@@ -1716,6 +1736,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1738,6 +1759,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1756,6 +1778,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1774,6 +1797,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: source.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1795,6 +1819,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: source.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1818,6 +1843,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: None,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1836,6 +1862,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1856,6 +1883,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 
@@ -1879,6 +1907,7 @@ impl<'a> FilterContext<'a> {
             triggering_object: None,
             declared_slot_view: None,
             granting_object: ability.context.granting_object,
+            pre_entry_battlefield: None,
         }
     }
 }
@@ -2455,9 +2484,16 @@ pub(crate) fn controller_ref_player(
         // controller sacrifices a noncreature, nonland permanent").
         ControllerRef::EventTargetController => event_target_controller_player(state, ability),
         ControllerRef::ParentTargetOwner => parent_target_owner_player(state, ability),
-        ControllerRef::DefendingPlayer => {
-            crate::game::combat::resolve_defending_player(state, source_id)
-        }
+        // CR 508.5 + CR 113.7a: route through the single defending-player
+        // authority with the ability's captured trigger context, so a source
+        // removed from combat (or from the battlefield) after its ability
+        // triggered still names the player it was attacking. With no trigger
+        // context the authority falls back to the live per-attacker lookup.
+        ControllerRef::DefendingPlayer => crate::game::combat::defending_player_cr508_5(
+            state,
+            source_id,
+            ability.and_then(|ability| ability.trigger_source.as_ref()),
+        ),
         // CR 608.2c + CR 109.4: The player chosen by the Nth `Choose(Player)`
         // in this resolution — read from the resolution-scoped list.
         ControllerRef::ChosenPlayer { index } => {
@@ -7348,6 +7384,16 @@ fn filter_inner_with_lookup(
     if obj.is_phased_out() {
         return false;
     }
+    // CR 614.12 + CR 614.1c: an as-enters replacement modifies the entry before
+    // it happens, so a permanent that enters in the same simultaneous event is
+    // not part of the battlefield the entrant's replacement counts.
+    if obj.zone == Zone::Battlefield
+        && ctx
+            .pre_entry_battlefield
+            .is_some_and(|pre_entry| !pre_entry.contains(&object_id))
+    {
+        return false;
+    }
     filter_inner_for_object(
         state,
         obj,
@@ -7766,6 +7812,7 @@ fn filter_inner_for_object(
                     triggering_object,
                     declared_slot_view,
                     granting_object,
+                    pre_entry_battlefield: None,
                 },
             )
         }
@@ -8157,6 +8204,7 @@ fn filter_inner_for_object(
                 triggering_object,
                 declared_slot_view,
                 granting_object,
+                pre_entry_battlefield: None,
             };
             state
                 .last_chosen_damage_source
@@ -10571,6 +10619,7 @@ fn aura_can_enchant_referenced_target(
                 triggering_object: source.triggering_object,
                 declared_slot_view: source.declared_slot_view,
                 granting_object: source.granting_object,
+                pre_entry_battlefield: None,
             };
             filter_inner(state, *target_id, enchant_filter, &ctx)
         }
@@ -11708,11 +11757,21 @@ fn matches_filter_prop(
             count,
         } => {
             let controller = source.controller.unwrap_or(PlayerId(0));
+            // CR 400.7: a zone change makes a new object with no memory of the old one,
+            // so only records stamped with this object's CURRENT incarnation count.
+            let Some(current_incarnation) = state.objects.get(&object_id).map(|o| o.incarnation)
+            else {
+                return false;
+            };
             let total: u32 = state
                 .counter_added_this_turn
                 .iter()
                 .filter(|record| {
                     record.object_id == object_id
+                        // `None` is a legacy record with no provable stamp: object-id-only.
+                        && record
+                            .incarnation
+                            .is_none_or(|stamp| stamp == current_incarnation)
                         && counters.matches(&record.counter_type)
                         && filter_count_scope_actor_matches(actor, controller, record.actor)
                 })
@@ -13141,6 +13200,7 @@ fn object_shares_quality_with_reference_filter(
         triggering_object: source.triggering_object,
         declared_slot_view: source.declared_slot_view,
         granting_object: source.granting_object,
+        pre_entry_battlefield: None,
     };
     // CR 109.2 + CR 205.3m: resolve a bare descriptive reference such as "a
     // creature you control" or "a creature card in your graveyard" to the zone
