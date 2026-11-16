@@ -225,7 +225,6 @@ mod palisade_giant_redirect;
 mod parent_target_slot_delayed_condition_8758;
 mod parent_target_slot_illegal_at_resolution;
 mod pariah_attached_redirect;
-mod park_heights_pegasus_draw_condition_runtime;
 mod parser_oracle;
 mod parser_oracle_effect;
 mod part_in_friendship_conditional_reveal;
