@@ -582,10 +582,24 @@ pub fn record_battlefield_entry(
     state.battlefield_entries_this_turn.push_back(record);
 }
 
-/// Update the battlefield entry record for an object to reflect its current
-/// characteristics. This is needed for face-down entries where the profile
-/// (morph, manifest, disguise, cloak) is applied after the initial record
-/// is created in `record_battlefield_entry`.
+/// CR 608.2i: Refresh the entry-time snapshot of the object's CURRENT
+/// battlefield occurrence, after its entry characteristics are installed.
+///
+/// Needed because a face-down profile (morph/manifest/disguise/cloak) is
+/// applied AFTER `record_battlefield_entry` pushed the row: a manifested land
+/// would otherwise be recorded as a face-down LAND even though CR 701.40a
+/// makes it a 2/2 face-down creature as it enters.
+///
+/// CR 400.7: a zone change preserves `ObjectId` and bumps the incarnation, so one
+/// object can hold several rows in this turn's ledger. Only the NEWEST row is the
+/// occurrence being delivered here — earlier rows are history that look-back reads
+/// still see (CR 608.2i: an object need not "currently meet the criteria described
+/// in the action, as long as [it] did so at the specified time"). Refreshing the
+/// first matching row would rewrite that history: casting a morph face down and
+/// then blinking it would turn the original `FaceDown` row `FaceUp`, and Tunnel
+/// Tipster would never see the face-down entry. Selecting the latest occurrence is
+/// the same authority `apply_battlefield_entry_controller_override` uses
+/// (`zones.rs`, `rposition`).
 pub fn update_battlefield_entry_record_for_object(
     state: &mut crate::types::game_state::GameState,
     object_id: ObjectId,
@@ -595,11 +609,16 @@ pub fn update_battlefield_entry_record_for_object(
     };
     let new_record = battlefield_entry_record_for(obj);
 
-    for record in state.battlefield_entries_this_turn.iter_mut() {
-        if record.object_id == object_id {
-            *record = new_record;
-            break;
-        }
+    // CR 400.7: bind the refresh to the newest row for this object, not the first.
+    let Some(index) = state
+        .battlefield_entries_this_turn
+        .iter()
+        .rposition(|record| record.object_id == object_id)
+    else {
+        return;
+    };
+    if let Some(record) = state.battlefield_entries_this_turn.get_mut(index) {
+        *record = new_record;
     }
 }
 

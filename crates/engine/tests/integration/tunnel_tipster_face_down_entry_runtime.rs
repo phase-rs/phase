@@ -21,25 +21,32 @@ use engine::types::game_state::{FaceState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 /// Tunnel Tipster's printed trigger (CR 603.4 + CR 708.2).
 const TUNNEL_TIPSTER: &str = "At the beginning of your end step, if a face-down creature entered the battlefield under your control this turn, put a +1/+1 counter on this creature.\n{T}: Add {G}.";
 
 /// Sagu Archer — a printed morph creature, so the real face-down cast path
 /// (CR 708.2 + CR 708.4) produces the entry snapshot this test reads.
-/// Printed: {4}{G} 2/5 "Morph {4}{G}"
-const SAGU_ARCHER: &str = "Morph {4}{G} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)";
+/// Printed: {4}{G} 2/5 "Reach" + "Morph {4}{G}".
+const SAGU_ARCHER: &str = "Reach (This creature can block creatures with flying.)\nMorph {4}{G} (You may cast this card face down as a 2/2 creature for {3}. Turn it face up any time for its morph cost.)";
 
-fn green_pool(count: usize) -> Vec<ManaUnit> {
+/// Cloudshift — printed Oracle text. Used to force a SECOND, face-up entry
+/// record for the same `ObjectId` (CR 400.7), so the test can prove the earlier
+/// face-down snapshot survives a later refresh.
+const CLOUDSHIFT: &str =
+    "Exile target creature you control, then return that card to the battlefield under your control.";
+
+fn mana_pool(color: ManaType, count: usize) -> Vec<ManaUnit> {
     (0..count)
-        .map(|_| ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]))
+        .map(|_| ManaUnit::new(color, ObjectId(0), false, vec![]))
         .collect()
 }
 
-/// Tunnel Tipster plus a Sagu Archer in hand. Six green mana covers both the
-/// face-down {3} and the printed {4}{G}; three library cards fuel the draw
-/// step of the turn-reset control.
-fn board() -> (GameRunner, ObjectId, ObjectId) {
+/// Tunnel Tipster on the battlefield plus a Sagu Archer in hand. Six green mana
+/// cover the face-down {3} and the printed {4}{G}; three library cards fuel the
+/// draw step of the turn-reset control.
+fn scenario_board() -> (GameScenario, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let tipster = scenario
@@ -53,10 +60,30 @@ fn board() -> (GameRunner, ObjectId, ObjectId) {
             generic: 4,
         })
         .id();
-    scenario.with_mana_pool(P0, green_pool(6));
+    scenario.with_mana_pool(P0, mana_pool(ManaType::Green, 6));
     scenario.with_library_top(P0, &["Filler A", "Filler B", "Filler C"]);
     scenario.with_library_top(P1, &["Filler D", "Filler E", "Filler F"]);
+    (scenario, tipster, archer)
+}
+
+fn board() -> (GameRunner, ObjectId, ObjectId) {
+    let (scenario, tipster, archer) = scenario_board();
     (scenario.build(), tipster, archer)
+}
+
+/// The same board plus Cloudshift in hand and the {W} to cast it (CR 601.2f).
+/// The blink appends a second entry record for the archer's `ObjectId`.
+fn blink_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let (mut scenario, tipster, archer) = scenario_board();
+    let cloudshift = scenario
+        .add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(P0, mana_pool(ManaType::White, 1));
+    (scenario.build(), tipster, archer, cloudshift)
 }
 
 fn plus_one_counters(runner: &GameRunner, id: ObjectId) -> u32 {
@@ -129,6 +156,61 @@ fn face_down_entry_fires_tunnel_tipster() {
     );
     assert_eq!(runner.state().objects[&tipster].power, Some(2));
     assert_eq!(runner.state().objects[&tipster].toughness, Some(2));
+}
+
+/// CR 608.2i: every entry keeps its own entry-time snapshot. Casting Sagu
+/// Archer face down and then blinking it with Cloudshift appends a second
+/// (face-up) record for the same `ObjectId`; refreshing that new record must
+/// not rewrite the earlier face-down one, which is what the intervening-if
+/// looks back at.
+#[test]
+fn later_face_up_entry_preserves_the_face_down_snapshot() {
+    let (mut runner, tipster, archer, cloudshift) = blink_board();
+
+    runner
+        .cast(archer)
+        .alternative_cast(AlternativeCastDecision::Alternative)
+        .resolve();
+    let first_incarnation = runner.state().objects[&archer].incarnation;
+
+    runner.cast(cloudshift).target_object(archer).resolve();
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.state().objects[&archer].zone,
+        Zone::Battlefield,
+        "reach-guard: Cloudshift must return the archer"
+    );
+    assert_ne!(
+        runner.state().objects[&archer].incarnation,
+        first_incarnation,
+        "CR 400.7: the returned permanent is a new object"
+    );
+    assert!(
+        !runner.state().objects[&archer].face_down,
+        "reach-guard: Cloudshift returns the card face up"
+    );
+
+    let snapshots: Vec<FaceState> = runner
+        .state()
+        .battlefield_entries_this_turn
+        .iter()
+        .filter(|entry| entry.object_id == archer)
+        .map(|entry| entry.face_state)
+        .collect();
+    assert_eq!(
+        snapshots,
+        vec![FaceState::FaceDown, FaceState::FaceUp],
+        "each entry must keep its own entry-time face state"
+    );
+
+    advance_to_end_step(&mut runner);
+
+    assert_eq!(
+        plus_one_counters(&runner, tipster),
+        1,
+        "the earlier face-down entry must still satisfy the condition"
+    );
 }
 
 /// Control: an ordinary face-up entry must not satisfy the condition.

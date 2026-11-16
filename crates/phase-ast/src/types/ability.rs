@@ -11003,7 +11003,8 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// against a `BattlefieldEntryRecord`?
 ///
 /// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types::game_state::BattlefieldEntryRecord`). Every other
+/// supertypes / colors / keywords / controller / face_state`
+/// (`types::game_state::BattlefieldEntryRecord`). Every other
 /// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
 /// matcher fails closed at the `FilterProp` match's fail-closed arm inside
 /// `battlefield_entry_matches_filter`'s `TargetFilter::Typed` case, and at the fail-closed
@@ -11011,7 +11012,7 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// a silent constant 0 — but see the `Or` exception documented beside that function's
 /// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
 /// instead. Measured: 100
-/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
+/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 5.
 ///
 /// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
 /// absent from the list and therefore defaults to "not evaluable" — the conservative side, which

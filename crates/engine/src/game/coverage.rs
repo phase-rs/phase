@@ -23061,15 +23061,15 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     /// `FilterProp`s the entry snapshot never captured, so a ledger read over one
     /// of them resolves a silent constant 0. The classifier must stop calling that
     /// `Handled`. The entry snapshot NOW captures `FaceDown` (FaceState enum), so
-    /// Tunnel Tipster's intervening-if is answerable. Case (a) uses `NonToken`
-    /// which the entry snapshot cannot answer. This test drives
+    /// Tunnel Tipster's intervening-if is answerable (case (a2)). Case (a) uses
+    /// `NonToken`, which the entry snapshot cannot answer. This test drives
     /// `quantity_ref_feature` directly; the classifier now also reaches Tunnel
     /// Tipster's trigger intervening-if through `extract_trigger_condition_features`,
     /// which `trigger_condition_walk_marks_tunnel_tipster_supported` proves is
     /// now Handled end to end.
     ///
     /// REVERT-PROBE: remove `FaceDown` from `ledger_filter_is_evaluable` allow-list
-    /// → (a) and (d) FAIL; (b)/(c) pass in both builds and are the vacuity controls.
+    /// → (a2) FAILS; (a)/(b)/(c)/(d) pass in both builds and are the controls.
     #[test]
     fn ledger_ref_feature_is_unhandled_when_filter_is_unevaluable() {
         let ledger = |properties: Vec<FilterProp>| QuantityRef::BattlefieldEntriesThisTurn {
@@ -23086,6 +23086,12 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             quantity_ref_feature(&ledger(vec![FilterProp::NonToken])),
             ("BattlefieldEntriesThisTurn", FeatureSupport::Unhandled),
             "(a) NonToken is not answerable from a BattlefieldEntryRecord"
+        );
+        // (a2) FaceDown IS answerable: the entry snapshot records the face state.
+        assert_eq!(
+            quantity_ref_feature(&ledger(vec![FilterProp::FaceDown])),
+            ("BattlefieldEntriesThisTurn", FeatureSupport::Handled),
+            "(a2) FaceDown is captured on the entry snapshot"
         );
         // (b)/(c) vacuity controls — the feature stays Handled for evaluable filters.
         assert_eq!(
