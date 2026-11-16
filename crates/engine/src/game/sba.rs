@@ -2944,6 +2944,7 @@ mod tests {
         )
         .expect("the fixture begins with no carrier installed");
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ability),
             trigger_event: None,
             trigger_events: Vec::new(),

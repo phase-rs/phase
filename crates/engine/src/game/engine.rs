@@ -27274,6 +27274,7 @@ mod stage2_injector_tests {
         );
         optional.optional = true;
         state.push_optional_effect_frame(crate::types::resolution::OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),

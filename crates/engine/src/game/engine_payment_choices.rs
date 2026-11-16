@@ -17,7 +17,7 @@ use crate::types::mana::ManaCost;
 use crate::types::mana::ManaSourceSelection;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
-use crate::types::resolution::OptionalEffectFrame;
+use crate::types::resolution::{OptionalEffectFrame, ParkedOpponentMayPoll};
 use crate::types::zones::Zone;
 use crate::types::ResolutionOptionalPaymentChoice;
 
@@ -166,6 +166,12 @@ fn handle_optional_effect_choice_inner(
                 trigger_events: pending_events,
                 trigger_match_count: pending_count,
                 return_result_occurrence,
+                // A parked poll cursor owns no prompt, so it cannot be the frame
+                // an answer consumes: `validate` refuses a state whose top
+                // direct-choice frame does not match the live `WaitingFor`, and a
+                // parked cursor's gate is `AfterChild`. Bound rather than elided
+                // so a later field forces this re-audit.
+                parked_poll: _,
             } = frame;
             let choice = if accept {
                 AutoMayChoice::Accept
@@ -685,40 +691,59 @@ fn handle_opponent_may_choice_inner(
                 // — `acceptance_leaves_the_option_open` is the authority, and
                 // the Sin Prodder case is why the re-offer is not unconditional.
                 //
-                // Only from a settled priority: a chain that suspended on its
-                // own prompt owns the stack top, and burying it under another
-                // direct-choice frame is exactly what
-                // `install_direct_choice_frame` refuses. No card in this class
-                // reaches that case today (the costs resolve to completion), and
-                // the invariant is the right thing to respect rather than work
-                // around — the remaining responders are dropped there, as they
-                // were on every path before this change.
-                if acceptance_leaves_the_option_open(&ability.effect)
-                    && matches!(state.waiting_for, WaitingFor::Priority { .. })
-                {
+                // The accepted action may or may not have resolved to completion.
+                // CR 101.4 owes the next responder an offer either way, so the
+                // only question is whether this poll may own the prompt right
+                // now: exactly one frame may (`MultipleDirectChoiceOwners`), and
+                // an action that suspended on a prompt of its own — a CR 616.1
+                // replacement-ordering choice, say — holds it.
+                //
+                // Settled priority: install the offer as the live prompt.
+                // Otherwise: park the cursor beneath that live prompt, where it
+                // owns nothing and arms once the frames above it are gone. Same
+                // two roles a `Parked`/`Armed` Cipher offer and a past-cursor-0
+                // `DieRoll` carry, and the reason `parked_poll` moves the gate to
+                // `AfterChild`.
+                if acceptance_leaves_the_option_open(&ability.effect) {
                     if let Some((&next, rest)) = remaining.split_first() {
                         let mut reoffered = frame.ability.clone();
                         reoffered.context.optional_effect_performed = true;
-                        state
-                            .install_direct_choice_frame(
-                                crate::types::resolution::ResolutionFrame::OptionalEffect(
-                                    OptionalEffectFrame {
-                                        ability: reoffered,
-                                        trigger_event: frame.trigger_event.clone(),
-                                        trigger_events: frame.trigger_events.clone(),
-                                        trigger_match_count: frame.trigger_match_count,
-                                        return_result_occurrence: frame.return_result_occurrence,
+                        let settled = matches!(state.waiting_for, WaitingFor::Priority { .. });
+                        let mut offer = OptionalEffectFrame {
+                            parked_poll: None,
+                            ability: reoffered,
+                            trigger_event: frame.trigger_event.clone(),
+                            trigger_events: frame.trigger_events.clone(),
+                            trigger_match_count: frame.trigger_match_count,
+                            return_result_occurrence: frame.return_result_occurrence,
+                        };
+                        if settled {
+                            state
+                                .install_direct_choice_frame(
+                                    crate::types::resolution::ResolutionFrame::OptionalEffect(
+                                        offer,
+                                    ),
+                                    WaitingFor::OpponentMayChoice {
+                                        player: next,
+                                        decision_subject_id,
+                                        source_id,
+                                        description,
+                                        remaining: rest.to_vec(),
                                     },
-                                ),
-                                WaitingFor::OpponentMayChoice {
-                                    player: next,
-                                    decision_subject_id,
-                                    source_id,
-                                    description,
-                                    remaining: rest.to_vec(),
-                                },
-                            )
-                            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                                )
+                                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                        } else {
+                            offer.parked_poll = Some(Box::new(ParkedOpponentMayPoll {
+                                next,
+                                remaining: rest.to_vec(),
+                                decision_subject_id,
+                                source_id,
+                                description,
+                            }));
+                            state
+                                .park_opponent_may_poll_beneath_live_prompt(offer)
+                                .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+                        }
                     }
                 }
             }
@@ -747,6 +772,36 @@ fn handle_opponent_may_choice_inner(
     resume_pending_continuation_if_priority(state, events)?;
     super::triggers::collect_and_drain_observer_triggers_if_settled(state, events, events_before);
     Ok(state.waiting_for.clone())
+}
+
+/// CR 101.4: Arms a parked any-player poll cursor — the offer for the responder
+/// after an acceptance whose action suspended on a prompt of its own.
+///
+/// Called from `resume_resolution_frames`, i.e. only once the frames above the
+/// cursor are gone and priority has settled, which is what puts the next offer
+/// after the accepted action's own child prompt rather than racing it. Clearing
+/// `parked_poll` moves the frame's gate back to `DirectChoice`, so the frame and
+/// the prompt it is permitted to consume become consistent in the same step —
+/// the invariant `install_direct_choice_frame` enforces when it installs a fresh
+/// owner, held here by mutating a frame that is already the top one, exactly as
+/// `cipher::arm_parked_encode_offer` does.
+pub(crate) fn arm_parked_opponent_may_poll(state: &mut GameState) {
+    let Some(poll) = state
+        .active_optional_effect_frame()
+        .and_then(|frame| frame.parked_poll.as_deref().cloned())
+    else {
+        return;
+    };
+    if let Some(frame) = state.active_optional_effect_frame_mut() {
+        frame.parked_poll = None;
+    }
+    state.waiting_for = WaitingFor::OpponentMayChoice {
+        player: poll.next,
+        decision_subject_id: poll.decision_subject_id,
+        source_id: poll.source_id,
+        description: poll.description,
+        remaining: poll.remaining,
+    };
 }
 
 /// CR 101.4 + CR 608.2d: whether an acceptance leaves the offer standing for the
@@ -5830,6 +5885,7 @@ mod tests {
         ability.optional = true;
         ability.optional_for = Some(crate::types::ability::OpponentMayScope::AnyPlayer);
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ability),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -5935,6 +5991,103 @@ mod tests {
         );
     }
 
+    /// CR 101.4 + CR 616.1: an acceptance whose own action suspends on a prompt
+    /// of its own still owes an offer to the responders after it.
+    ///
+    /// Two competing life-loss modifiers replace the accepted payment, which is
+    /// a CR 616.1 choice the paying player must answer mid-resolution: "If two
+    /// or more replacement and/or prevention effects are attempting to modify
+    /// the way an event affects an object or player, … the affected player
+    /// chooses one to apply." That rule cites CR 101.4 for its own ordering, so
+    /// the two rules here are the same poll seen from both ends. The poll cannot
+    /// own the prompt while that choice is live — only one frame may — so its
+    /// cursor parks beneath it and arms once the choice is answered.
+    ///
+    /// This is blocker 1 of the #10741 round-3 review. The engine before this
+    /// change gated the re-offer on an already-settled priority and so dropped
+    /// every remaining responder in exactly this case; reverting that gate makes
+    /// the final assertion below fail with `Priority`.
+    #[test]
+    fn a_poll_survives_a_child_prompt_raised_by_the_accepted_action() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+        // CR 616.1: two applicable LoseLife replacements on a permanent the
+        // payer controls, so the payment cannot settle until it is told which
+        // one applies first.
+        let modifiers = create_object(
+            &mut state,
+            CardId(903),
+            PlayerId(0),
+            "Competing Life-Loss Modifiers".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&modifiers)
+            .expect("the modifier permanent was just created")
+            .replacement_definitions = vec![
+            crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::LoseLife,
+            )
+            .quantity_modification(crate::types::ability::QuantityModification::DOUBLE)
+            .description("Double".to_string()),
+            crate::types::ability::ReplacementDefinition::new(
+                crate::types::replacements::ReplacementEvent::LoseLife,
+            )
+            .quantity_modification(crate::types::ability::QuantityModification::Plus { value: 1 })
+            .description("Plus one".to_string()),
+        ]
+        .into();
+
+        // Positive reach-guard: the first responder is on the clock.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(0)
+            ),
+            "the poll must open on the active player (CR 101.4), got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("an acceptance whose payment defers to a replacement choice is legal");
+
+        // Positive reach-guard for this test's whole premise: the acceptance
+        // really did suspend on a child prompt. Without it the final assertion
+        // would also pass on an engine where the payment simply resolved to
+        // completion, which is the case the sibling test already covers.
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::ReplacementChoice { player, .. } if player == PlayerId(0)
+            ),
+            "the accepted payment must suspend on its own CR 616.1 ordering \
+             choice for this row to exercise the parked-cursor path, got {:?}",
+            state.waiting_for
+        );
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseReplacement { index: 0 },
+        )
+        .expect("the payer orders the competing replacements");
+
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, ref remaining, .. }
+                    if player == PlayerId(1) && remaining.as_slice() == [PlayerId(2)]
+            ),
+            "the responders after an acceptance that suspended must still be \
+             offered the option (CR 101.4), got {:?}",
+            state.waiting_for
+        );
+    }
+
     #[test]
     fn opponent_may_reprompts_preserve_latched_subject_until_terminal_resolution() {
         let mut state = opponent_may_state(gain_life(1), vec![PlayerId(1), PlayerId(2)]);
@@ -6010,6 +6163,7 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -6044,6 +6198,7 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -6084,6 +6239,7 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -6121,6 +6277,7 @@ mod tests {
         )));
         optional.sub_ability = Some(Box::new(if_you_do));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -6156,6 +6313,7 @@ mod tests {
         continuation_sub.sub_link = SubAbilityLink::ContinuationStep;
         optional.sub_ability = Some(Box::new(continuation_sub));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -6190,6 +6348,7 @@ mod tests {
         });
         optional.sub_ability = Some(Box::new(decline_branch));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -6224,6 +6383,7 @@ mod tests {
         let mut optional = ResolvedAbility::new(gain_life(2), vec![], source_id, PlayerId(0));
         optional.optional = true;
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(optional),
             trigger_event: None,
             trigger_events: Vec::new(),

@@ -2128,6 +2128,18 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::DieRoll(_) => {
             roll_die::drain_active_die_roll(state, events);
         }
+        // CR 101.4: a continuing any-player poll parked under the accepted
+        // action's own prompt arms here — i.e. only once that prompt's owner is
+        // consumed, which is what puts the next responder's offer after the
+        // accepted action finishes rather than racing its child (blocker 1 of
+        // the #10741 review). An unparked frame is a live offer and falls
+        // through to the direct-choice rule below.
+        ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            parked_poll: Some(_),
+            ..
+        }) => {
+            crate::game::engine_payment_choices::arm_parked_opponent_may_poll(state);
+        }
         ResolutionFrame::OptionalEffect(_)
         | ResolutionFrame::CoinFlip(_)
         | ResolutionFrame::Proliferate(_)
@@ -25317,6 +25329,7 @@ fn resolve_chain_body(
                 state
                     .install_direct_choice_frame(
                         ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                            parked_poll: None,
                             ability: Box::new(hydrated_ability),
                             trigger_event: state.current_trigger_event.clone(),
                             trigger_events: state.current_trigger_events.clone(),
@@ -25423,6 +25436,7 @@ fn resolve_chain_body(
             state
                 .install_direct_choice_frame(
                     ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                        parked_poll: None,
                         ability: Box::new(ability_with_event_context_targets(state, ability)),
                         trigger_event: state.current_trigger_event.clone(),
                         trigger_events: state.current_trigger_events.clone(),
@@ -25472,6 +25486,7 @@ fn resolve_chain_body(
         state
             .install_direct_choice_frame(
                 ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                    parked_poll: None,
                     ability: Box::new(hydrated_ability),
                     // CR 608.2: capture the triggering event in lockstep with the stashed
                     // ability while `current_trigger_event` is still live (we are inside
@@ -42265,6 +42280,7 @@ mod tests {
         let mut first = optional_gain_life(first_key.source_id, PlayerId(0), 1);
         first.sub_ability = Some(Box::new(continuation(first_key.source_id)));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(first),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -42311,6 +42327,7 @@ mod tests {
 
         let reject_forged_same_card = |state: &mut GameState, key: MayTriggerAutoChoiceKey| {
             state.push_optional_effect_frame(OptionalEffectFrame {
+                parked_poll: None,
                 ability: Box::new(optional_gain_life(key.source_id, PlayerId(0), 1)),
                 trigger_event: None,
                 trigger_events: Vec::new(),

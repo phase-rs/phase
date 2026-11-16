@@ -33437,6 +33437,32 @@ impl GameState {
         })
     }
 
+    /// CR 101.4: Park a continuing any-player poll beneath the frame that owns
+    /// the accepted action's own prompt, so the next responder's offer arms only
+    /// after that owner is consumed.
+    ///
+    /// The frame must carry `parked_poll`, which is what makes it an
+    /// `AfterChild` owner rather than a second prompt owner. As with
+    /// [`Self::park_cipher_encode_beneath_live_prompt`], the position is the
+    /// stack's decision and not this caller's, and for the same reason this does
+    /// NOT go through `InsertParentOfActive`.
+    pub fn park_opponent_may_poll_beneath_live_prompt(
+        &mut self,
+        frame: super::resolution::OptionalEffectFrame,
+    ) -> Result<(), ResolutionStackError> {
+        debug_assert!(
+            frame.parked_poll.is_some(),
+            "a poll parked beneath a live prompt must carry its responder cursor"
+        );
+        self.resolve_and_apply_frame_transition(ResolvedFrameTransition::ParkBeneathLivePrompt {
+            frame: super::resolution::ResolutionFrame::OptionalEffect(frame),
+        })
+        .map(|_| ())
+        .map_err(|error| match error {
+            ResolvedFrameTransitionReplayInvariantError::Stack(error) => error,
+        })
+    }
+
     /// CR 702.99a: Consume the active Cipher encode offer once answered.
     pub fn take_active_cipher_encode_frame(
         &mut self,
@@ -57726,6 +57752,7 @@ mod tests {
         }
         fn optional_frame(trigger_events: Vec<GameEvent>) -> ResolutionFrame {
             ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                parked_poll: None,
                 ability: Box::new(ResolvedAbility::new(
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },
@@ -66494,6 +66521,7 @@ mod restored_exact_attack_authority_tests {
                     state
                         .resolution_stack
                         .push_optional_effect(OptionalEffectFrame {
+                            parked_poll: None,
                             ability: Box::new(ResolvedAbility::new(
                                 Effect::NoOp,
                                 vec![],
@@ -66740,6 +66768,7 @@ mod restored_exact_attack_authority_tests {
         state
             .resolution_stack
             .push_optional_effect(OptionalEffectFrame {
+                parked_poll: None,
                 ability: node.clone(),
                 trigger_event: trigger_event.clone(),
                 trigger_events: trigger_event.clone().into_iter().collect(),
@@ -66897,6 +66926,7 @@ mod restored_exact_attack_authority_tests {
                 state
                     .resolution_stack
                     .push_optional_effect(OptionalEffectFrame {
+                        parked_poll: None,
                         ability: harmless,
                         trigger_event: trigger_event.clone(),
                         trigger_events: vec![],
@@ -67852,6 +67882,7 @@ mod restored_exact_attack_authority_tests {
                             paused_at_index: 0,
                             completion: PendingSacrificeCostCompletion::ResolutionOptionalPayment {
                                 frame: Box::new(OptionalEffectFrame {
+                                    parked_poll: None,
                                     ability: node.clone(),
                                     trigger_event: trigger_event.clone(),
                                     trigger_events: trigger_event.clone().into_iter().collect(),

@@ -21,6 +21,9 @@
 //! consume the slot of one who can.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::{GameEvent, PlayerActionKind};
@@ -30,7 +33,8 @@ use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::{EtbTapState, Zone};
 
 /// `scenario` exports only P0/P1; the three-player rows below need the third.
 const P2: PlayerId = PlayerId(2);
@@ -67,12 +71,21 @@ fn was_countered(events: &[GameEvent], spell: ObjectId) -> bool {
 /// resolving, which is precisely how this helper read before. Returning
 /// normally therefore carries its own assertion: the game settled at a priority
 /// window with an empty stack.
-fn settle_cast(
-    runner: &mut GameRunner,
-    accepts: &dyn Fn(PlayerId) -> bool,
-) -> (Vec<PlayerId>, Vec<GameEvent>) {
+struct Settled {
+    prompted: Vec<PlayerId>,
+    events: Vec<GameEvent>,
+    /// CR 616.1 ordering choices the run had to answer. Reported rather than
+    /// swallowed so a row whose premise is "the acceptance suspends on a
+    /// replacement choice" can prove that choice actually happened; a count of
+    /// zero would otherwise be indistinguishable from an action that resolved
+    /// straight through.
+    replacement_choices: usize,
+}
+
+fn settle_cast(runner: &mut GameRunner, accepts: &dyn Fn(PlayerId) -> bool) -> Settled {
     let mut prompted = Vec::new();
     let mut events = Vec::new();
+    let mut replacement_choices = 0usize;
     for _ in 0..60 {
         match runner.state().waiting_for.clone() {
             WaitingFor::OpponentMayChoice { player, .. } => {
@@ -84,9 +97,24 @@ fn settle_cast(
                     .expect("the any-player-may offer must accept a decision");
                 events.extend(result.events);
             }
+            // CR 616.1: the affected player orders simultaneously applicable
+            // replacements. Answering it here (rather than panicking as an
+            // unexpected prompt) is what lets a row observe what happens AFTER
+            // a mid-resolution suspension.
+            WaitingFor::ReplacementChoice { .. } => {
+                replacement_choices += 1;
+                let result = runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("the CR 616.1 ordering choice must accept a decision");
+                events.extend(result.events);
+            }
             WaitingFor::Priority { .. } => {
                 if runner.state().stack.is_empty() {
-                    return (prompted, events);
+                    return Settled {
+                        prompted,
+                        events,
+                        replacement_choices,
+                    };
                 }
                 let result = runner
                     .act(GameAction::PassPriority)
@@ -131,9 +159,9 @@ fn cast_extortion(
         .expect("Temporal Extortion must be castable with {B}{B}{B}{B} available")
         .events;
 
-    let (prompted, settle_events) = settle_cast(&mut runner, &accepts);
-    events.extend(settle_events);
-    (runner, prompted, events, spell)
+    let settled = settle_cast(&mut runner, &accepts);
+    events.extend(settled.events);
+    (runner, settled.prompted, events, spell)
 }
 
 /// CR 118.12 + CR 500.7: nobody pays, so the spell is not countered and its
@@ -275,7 +303,7 @@ fn cast_dash_hopes(
     dash: ObjectId,
     opposing: ObjectId,
     accepts: &dyn Fn(PlayerId) -> bool,
-) -> (Vec<PlayerId>, Vec<GameEvent>) {
+) -> (Vec<PlayerId>, Vec<GameEvent>, usize) {
     let card_id = runner.state().objects[&dash].card_id;
     let mut events = runner
         .act(GameAction::CastSpell {
@@ -286,9 +314,9 @@ fn cast_dash_hopes(
         })
         .expect("Dash Hopes must be castable with {B}{B} available and a spell to target")
         .events;
-    let (prompted, settle_events) = settle_cast(runner, accepts);
-    events.extend(settle_events);
-    (prompted, events)
+    let settled = settle_cast(runner, accepts);
+    events.extend(settled.events);
+    (settled.prompted, events, settled.replacement_choices)
 }
 
 /// CR 118.12 + CR 119.4: "any player may pay 5 life. If a player does, counter
@@ -297,7 +325,8 @@ fn cast_dash_hopes(
 fn dash_hopes_is_paid_by_the_accepting_player_not_the_caster() {
     // Distinct life totals, so a 5-life payment names exactly one payer.
     let (mut runner, dash, opposing) = stage_dash_hopes(2, &[(P0, 20), (P1, 13)]);
-    let (prompted, events) = cast_dash_hopes(&mut runner, dash, opposing, &|player| player == P1);
+    let (prompted, events, _) =
+        cast_dash_hopes(&mut runner, dash, opposing, &|player| player == P1);
 
     // Reach-guard: P1 must actually have been offered the choice, so the life
     // assertions below cannot pass on an engine that never fired the trigger.
@@ -337,7 +366,8 @@ fn dash_hopes_is_paid_by_the_accepting_player_not_the_caster() {
 #[test]
 fn an_acceptance_does_not_end_the_poll_for_the_remaining_players() {
     let (mut runner, dash, opposing) = stage_dash_hopes(3, &[(P0, 20), (P1, 13), (P2, 17)]);
-    let (prompted, events) = cast_dash_hopes(&mut runner, dash, opposing, &|player| player == P1);
+    let (prompted, events, _) =
+        cast_dash_hopes(&mut runner, dash, opposing, &|player| player == P1);
 
     // Reach-guard: the poll must have reached P1 at all, and P1 must have paid,
     // so the P2 assertion cannot pass on an engine that offered nobody anything.
@@ -376,7 +406,8 @@ fn an_acceptance_does_not_end_the_poll_for_the_remaining_players() {
 fn an_unpayable_acceptance_does_not_consume_a_payable_players_option() {
     let (mut runner, dash, opposing) = stage_dash_hopes(3, &[(P0, 20), (P1, 4), (P2, 17)]);
     // Everyone but the caster tries to pay; only P2 can afford it.
-    let (prompted, events) = cast_dash_hopes(&mut runner, dash, opposing, &|player| player != P0);
+    let (prompted, events, _) =
+        cast_dash_hopes(&mut runner, dash, opposing, &|player| player != P0);
 
     // Reach-guard: P1 must genuinely have been offered the choice and tried to
     // take it, or this proves nothing about the unaffordable path.
@@ -412,5 +443,104 @@ fn an_unpayable_acceptance_does_not_consume_a_payable_players_option() {
         life(&runner, P0),
         20,
         "the caster is never the payer for an accepted any-player offer"
+    );
+}
+
+/// Rest in Peace / Leyline of the Void class: "If a card would be put into a
+/// graveyard from anywhere, exile it instead." A `Moved` replacement keyed on
+/// `destination_zone(Graveyard)` whose execute exiles the moving card.
+/// `valid_card` is left unset, so it watches every card.
+fn graveyard_exile_redirect(description: &str) -> ReplacementDefinition {
+    ReplacementDefinition::new(ReplacementEvent::Moved)
+        .destination_zone(Zone::Graveyard)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
+                destination: Zone::Exile,
+                origin: None,
+                target: TargetFilter::SelfRef,
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        ))
+        .description(description.to_string())
+}
+
+/// CR 101.4 + CR 616.1: the poll survives a replacement choice raised by the
+/// accepted action itself.
+///
+/// Two Rest in Peace effects are on the battlefield, so countering Dash Hopes
+/// moves it stack → graveyard with two applicable `Moved` redirects, and
+/// `effects/counter.rs` surfaces a CR 616.1 ordering choice mid-resolution.
+/// P1's acceptance therefore does NOT return straight to priority: the poll
+/// cursor has to survive that child prompt for P2 to be offered the option that
+/// Dash Hopes' ruling promises ("the remaining players still get the option").
+///
+/// This is the cast-path row for blocker 1 of the #10741 round-3 review. On the
+/// engine before this change the re-offer was gated on an already-settled
+/// priority, so P2 was dropped in exactly this case while the ordinary
+/// no-replacement row above still passed.
+#[test]
+fn an_acceptance_that_suspends_on_a_replacement_choice_still_offers_the_rest() {
+    let (mut runner, dash, opposing) = stage_dash_hopes(3, &[(P0, 20), (P1, 13), (P2, 17)]);
+    for (owner, description) in [(P1, "Rest in Peace"), (P2, "Leyline of the Void")] {
+        let host = engine::game::zones::create_object(
+            runner.state_mut(),
+            CardId(702),
+            owner,
+            description.to_string(),
+            Zone::Battlefield,
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&host)
+            .expect("the redirect host was just created")
+            .replacement_definitions = vec![graveyard_exile_redirect(description)].into();
+    }
+
+    let (prompted, events, replacement_choices) =
+        cast_dash_hopes(&mut runner, dash, opposing, &|player| player == P1);
+
+    // Reach-guards. The poll must have reached P1, P1 must have paid, and the
+    // payment's counter must genuinely have suspended on a CR 616.1 choice —
+    // without that last one this row would be a duplicate of the plain
+    // three-seat row and would pass without exercising the parked cursor at all.
+    assert!(
+        prompted.contains(&P1),
+        "P1 must be offered the choice in order to accept it; prompted={prompted:?}"
+    );
+    assert_eq!(life(&runner, P1), 8, "P1 accepted, so P1 paid the 5 life");
+    assert!(
+        was_countered(&events, dash),
+        "P1's payment must counter Dash Hopes; events={events:?}"
+    );
+    assert!(
+        replacement_choices >= 1,
+        "the countered spell's move must raise a CR 616.1 ordering choice for \
+         this row to exercise the parked-cursor path; answered {replacement_choices}"
+    );
+
+    // The finding: P2's option survives both P1's acceptance AND the child
+    // prompt that acceptance raised.
+    assert!(
+        prompted.contains(&P2),
+        "the remaining players still get the option after an acceptance that \
+         suspended on its own replacement choice; prompted={prompted:?}"
+    );
+    assert_eq!(
+        life(&runner, P2),
+        17,
+        "P2 was offered the choice and declined, so P2 pays nothing"
     );
 }
