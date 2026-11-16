@@ -743,12 +743,34 @@ fn resolve_all_declined_opponent_may(
 ) -> Result<(), EngineError> {
     // CR 118.12 + the Dash Hopes ruling ("As soon as any player performs the
     // action, the spell is countered, but the remaining players still get the
-    // option"): because the poll continues past the first acceptance, a LATER
-    // decline reaches this path even though the action WAS performed. The
-    // "if no one does" rider must not fire then. The re-offered frame carries
-    // the performed bit forward for exactly this check; on every other path
-    // into this function the frame's ability is pristine and the bit is false.
-    if ability.context.optional_effect_performed {
+    // option"): because such a poll continues past the first acceptance, a LATER
+    // decline reaches this path even though the action WAS performed, and the
+    // "if no one does" rider must not fire then — Browbeat's one seat took the 5
+    // damage, so nobody draws three cards.
+    //
+    // The performed bit CANNOT carry that fact on its own, and the qualifier is
+    // the correction to round 3 rather than a narrowing for convenience: an
+    // acceptance sets the bit RECURSIVELY down the chain
+    // (`set_optional_effect_performed_recursive`), so a nested poll inherits it
+    // from an ENCLOSING optional that was accepted and never spent anything of
+    // its own. `effects::declined_by_every_seat_branch` resets the bit for this
+    // exact reason ("not an acceptance inherited from an enclosing optional"),
+    // so reading it here unqualified closed the rider of every nested poll under
+    // an accepted outer optional.
+    //
+    // Why the qualifier is EXACT for a poll that ends at its first acceptance:
+    // such a poll never re-offers, so no decline can reach this function after
+    // one of its OWN seats accepted, and a set bit is therefore necessarily
+    // inherited. Only a poll that continues past an acceptance can have spent
+    // its own rider, so only those polls may read the bit as their own.
+    //
+    // Residual, disclosed rather than hidden: for a CONTINUING poll nested under
+    // an accepted enclosing optional, the inherited bit is still
+    // indistinguishable from its own acceptance. Closing that needs the fact
+    // stored per-poll on `OptionalEffectFrame` instead of in the chain context.
+    if acceptance_leaves_the_option_open(&ability.effect)
+        && ability.context.optional_effect_performed
+    {
         return Ok(());
     }
     if let Some(branch) = effects::declined_by_every_seat_branch(ability) {
@@ -5804,6 +5826,118 @@ mod tests {
             "the performed one-shot action leaves no legal choice for the \
              remaining responders (CR 608.2d), so the poll must end, got {:?}",
             state.waiting_for
+        );
+    }
+
+    /// Attach an "If no one does" rider to the poll frame `opponent_may_state`
+    /// just pushed — a `Not(OptionalEffectPerformed)`-gated sub that gains the
+    /// controller 3. This is Browbeat's shape ("Any player may have Browbeat deal
+    /// 5 damage to them. If no one does, target player draws three cards.") at the
+    /// building-block level, composed onto the existing helper rather than
+    /// duplicating it.
+    fn with_if_no_one_does_rider(state: &mut GameState) {
+        let mut rider = ResolvedAbility::new(gain_life(3), vec![], ObjectId(100), PlayerId(0));
+        rider.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::effect_performed()),
+        });
+        state
+            .active_optional_effect_frame_mut()
+            .expect("the poll frame the helper just pushed")
+            .ability
+            .sub_ability = Some(Box::new(rider));
+    }
+
+    /// CR 118.12 + CR 608.2d: a continuing poll SPENDS its "if no one does" rider
+    /// at the first acceptance, so a later responder's decline must not fire it.
+    /// Browbeat: one seat took the 5 damage, so nobody draws three cards.
+    ///
+    /// The row that was missing when round 3 added the guard this pins — the
+    /// suppression had no test of its own, so narrowing the guard could have
+    /// neutered it unnoticed. Paired with
+    /// `an_unspent_rider_fires_when_every_responder_declines` below: this one
+    /// fails on an engine that fires the rider regardless of the acceptance, that
+    /// one fails on an engine that suppresses it regardless, and neither can pass
+    /// vacuously because each asserts the opposite life total on the same board.
+    #[test]
+    fn a_spent_rider_does_not_fire_when_a_later_responder_declines() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+        with_if_no_one_does_rider(&mut state);
+        let life_before = state.players[0].life;
+
+        crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("a payable self-funded acceptance resolves");
+
+        // Positive reach-guards: the acceptance really was performed (CR 118.12
+        // binds the payment to the accepting seat, so P0 is 5 life down), and the
+        // poll really did continue, so the decline below is a LATER one.
+        assert_eq!(
+            state.players[0].life,
+            life_before - 5,
+            "reach-guard: the accepting seat paid its own 5 life"
+        );
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::OpponentMayChoice { player, .. } if player == PlayerId(1)
+            ),
+            "reach-guard: the poll continues past the acceptance, got {:?}",
+            state.waiting_for
+        );
+
+        for seat in [PlayerId(1), PlayerId(2)] {
+            if matches!(state.waiting_for, WaitingFor::OpponentMayChoice { .. }) {
+                crate::game::engine::apply(
+                    &mut state,
+                    seat,
+                    GameAction::DecideOptionalEffect { accept: false },
+                )
+                .expect("a later responder declines");
+            }
+        }
+
+        assert_eq!(
+            state.players[0].life,
+            life_before - 5,
+            "a player DID pay, so the \"if no one does\" rider is spent and must \
+             not gain the controller 3 on a later decline (CR 118.12)"
+        );
+    }
+
+    /// CR 608.2d + CR 101.4: the unspent case. Nobody accepts, so the rider fires
+    /// once the last seat declines — including when the poll's chain context
+    /// carries an acceptance INHERITED from an enclosing optional, which is what
+    /// `effects::declined_by_every_seat_branch` resets the performed bit for.
+    #[test]
+    fn an_unspent_rider_fires_when_every_responder_declines() {
+        let mut state = opponent_may_state(pay_five_life(), vec![PlayerId(1), PlayerId(2)]);
+        with_if_no_one_does_rider(&mut state);
+        let life_before = state.players[0].life;
+
+        for seat in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+            assert!(
+                matches!(
+                    state.waiting_for,
+                    WaitingFor::OpponentMayChoice { player, .. } if player == seat
+                ),
+                "reach-guard: every seat is offered in turn, got {:?} for {seat:?}",
+                state.waiting_for
+            );
+            crate::game::engine::apply(
+                &mut state,
+                seat,
+                GameAction::DecideOptionalEffect { accept: false },
+            )
+            .expect("each responder declines");
+        }
+
+        assert_eq!(
+            state.players[0].life,
+            life_before + 3,
+            "no player paid, so the \"if no one does\" rider fires (CR 608.2d)"
         );
     }
 
