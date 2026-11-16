@@ -122,14 +122,17 @@ fi
 # identity fails closed.
 #
 # `source_corpus_hash` is read as: absent/null -> "" (no identity recorded);
-# a non-empty string -> itself; anything else (including "") -> a
-# `malformed:` marker, which the SHA-256 shape check below rejects. The
-# trailing CR of native Windows jq is dropped as in `jq_num` (#10549).
+# a lowercase SHA-256 string -> itself; anything else (including "") -> a
+# `malformed:` marker, which the SHA-256 shape check below rejects. The shape
+# is decided inside jq, on the decoded string, so the only raw CR left in the
+# output is native Windows jq's line ending, dropped as in `jq_num` (#10549).
+# `\A`/`\z` anchor the whole string: jq's `$` also matches before a final
+# newline.
 read_source_corpus_hash() {
     local value
     value="$(jq -r '.source_corpus_hash
         | if . == null then ""
-          elif type == "string" and . != "" then .
+          elif type == "string" and test("\\A[0-9a-f]{64}\\z") then .
           else "malformed:" + tojson
           end' "$1")" || return
     printf '%s\n' "${value%$'\r'}"

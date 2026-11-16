@@ -56,6 +56,17 @@ EOF
 cat > "$TMP/malformed_corpus.json" <<EOF
 {"source_corpus_hash":"AAA","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":70,"ignored_remainder":1}}
 EOF
+# A valid hash followed by a JSON-escaped CR or LF is malformed, not a transport line ending: the
+# CR strip and command substitution's newline trim must not turn it into a valid identity.
+cat > "$TMP/trailing_cr_current.json" <<EOF
+{"source_corpus_hash":"$CORPUS_A\r","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":70,"ignored_remainder":1}}
+EOF
+cat > "$TMP/trailing_lf_current.json" <<EOF
+{"source_corpus_hash":"$CORPUS_A\n","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":70,"ignored_remainder":1}}
+EOF
+cat > "$TMP/trailing_cr_base.json" <<EOF
+{"source_corpus_hash":"$CORPUS_B\r","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":68,"ignored_remainder":1}}
+EOF
 
 # --- stubs ------------------------------------------------------------------------------------
 mkdir -p "$TMP/crlf" "$TMP/text"
@@ -241,21 +252,27 @@ fi
 
 # --- row 8: the corpus-identity read decides the same under CRLF --------------------------------
 # A CR left on the identity turns a valid 64-hex hash into a malformed one, so a CRLF jq would fail
-# closed where the plain jq compares (rows 1-2) or warns and skips (here). A malformed identity is
-# refused under both.
-for row in other_corpus:0:CORPUS_MISMATCH malformed_corpus:2:CORPUS_IDENTITY_MALFORMED; do
-    IFS=: read -r current want_rc want_marker <<<"$row"
-    run - "$TMP/base.json" "$TMP/$current.json"
+# closed where the plain jq compares (rows 1-2) or warns and skips (here). A malformed identity,
+# including a valid hash followed by a decoded CR or LF, is refused under both, in either file.
+for row in \
+    base:other_corpus:0:CORPUS_MISMATCH \
+    base:malformed_corpus:2:CORPUS_IDENTITY_MALFORMED \
+    base:trailing_cr_current:2:CORPUS_IDENTITY_MALFORMED \
+    base:trailing_lf_current:2:CORPUS_IDENTITY_MALFORMED \
+    trailing_cr_base:worse:2:CORPUS_IDENTITY_MALFORMED; do
+    IFS=: read -r baseline current want_rc want_marker <<<"$row"
+    label="corpus $baseline vs $current"
+    run - "$TMP/$baseline.json" "$TMP/$current.json"
     if [ "$RC" -eq "$want_rc" ] && printf '%s' "$OUT" | grep -qF "$want_marker"; then
-        ok "corpus control $current: a plain jq reports $want_marker (exit $RC)"
+        ok "$label: a plain jq reports $want_marker (exit $RC)"
     else
-        bad "corpus control $current: expected $want_marker and exit $want_rc, got exit $RC"
+        bad "$label: expected $want_marker and exit $want_rc, got exit $RC"
         printf '%s\n' "$OUT" | sed 's/^/     /'
     fi
     plain_out="$OUT"
     plain_rc="$RC"
-    run "$TMP/crlf" "$TMP/base.json" "$TMP/$current.json"
-    expect_same "corpus $current under CRLF" "$plain_out" "$plain_rc"
+    run "$TMP/crlf" "$TMP/$baseline.json" "$TMP/$current.json"
+    expect_same "$label under CRLF" "$plain_out" "$plain_rc"
 done
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
