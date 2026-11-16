@@ -9385,13 +9385,19 @@ fn parse_whose_controller_predicate_clause(input: &str) -> OracleResult<'_, Play
 ///
 /// Supported predicates (each a leaf of the `alt`, composed — not enumerated):
 ///   - "was dealt combat damage by [<N> or more ]<source>" →
-///     `OpponentDealtDamage { CombatOnly, Some(source), min_sources: N }`
+///     `OpponentDealtDamage { CombatOnly, Some(source), min_sources: N, All }`
 ///     (Admiral Beckett Brass: "by three or more Pirates" → `min_sources = 3`;
 ///     Steel Hellkite: "by this creature" → `Some(SelfRef)`, `min_sources = 1`).
 ///     The "<N> or more" threshold IS enforced (distinct-source count at runtime).
 ///   - "was dealt combat damage" (no source) → `OpponentDealtDamage {
-///     CombatOnly, None, min_sources: 1 }`.
+///     CombatOnly, None, min_sources: 1, All }`.
 ///   - "lost life" → `OpponentLostLife` (sibling unlocked by the bridge).
+///
+/// CR 608.2c: neither subject form ("a player who …", "whose controller …")
+/// names an opponent, so the damage leaves emit `relation: All` — the damaged
+/// player qualifies even if it later controls the source (Steel Hellkite +
+/// Ray of Command). Explicit "opponent … dealt damage" grammar routes through
+/// `oracle_quantity` and keeps `Opponent`.
 pub(crate) fn parse_controller_predicate_leaves(input: &str) -> OracleResult<'_, PlayerFilter> {
     // Each leaf leaves the remainder positioned just before the trailing
     // " this turn" (leading space intact), which the outer combinator consumes
@@ -9404,6 +9410,7 @@ pub(crate) fn parse_controller_predicate_leaves(input: &str) -> OracleResult<'_,
                 kind: DamageKindFilter::CombatOnly,
                 source: None,
                 min_sources: 1,
+                relation: PlayerRelation::All,
             },
             terminated(tag("was dealt combat damage"), peek(tag(" this turn"))),
         ),
@@ -9455,6 +9462,8 @@ fn parse_controller_dealt_combat_damage_by(input: &str) -> OracleResult<'_, Play
             kind: DamageKindFilter::CombatOnly,
             source: Some(Box::new(source)),
             min_sources,
+            // CR 608.2c: no opponent word in this grammar (see the leaves doc).
+            relation: PlayerRelation::All,
         },
     ))
 }
@@ -12208,10 +12217,12 @@ mod tests {
                             kind: DamageKindFilter::CombatOnly,
                             source: Some(src),
                             min_sources: 1,
+                            // CR 608.2c: "whose controller …" names no opponent.
+                            relation: PlayerRelation::All,
                         } if matches!(&**src, TargetFilter::SelfRef)
                     )
             ),
-            "expected ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(SelfRef), 1}}}}, got {prop:?}"
+            "expected ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(SelfRef), 1, All}}}}, got {prop:?}"
         );
     }
 

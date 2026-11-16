@@ -513,19 +513,11 @@ pub fn matches_player_scope(
                     // CR 120.2a/120.2b: Each opponent who was dealt damage of the
                     // given kind this turn, optionally restricted to a matching
                     // source.
-                    PlayerFilter::OpponentDealtDamage {
-                        kind,
-                        source,
-                        min_sources,
-                    } => crate::game::quantity::opponent_dealt_damage_matches(
-                        state,
-                        p.id,
-                        controller,
-                        *kind,
-                        source,
-                        *min_sources,
-                        source_id,
-                    ),
+                    PlayerFilter::OpponentDealtDamage { .. } => {
+                        crate::game::quantity::opponent_dealt_damage_matches(
+                            state, p.id, controller, scope, source_id,
+                        )
+                    }
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
                         crate::game::players::is_opponent(state, controller, p.id)

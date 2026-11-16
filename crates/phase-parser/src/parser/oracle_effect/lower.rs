@@ -17262,7 +17262,8 @@ mod where_x_tests {
     #[test]
     fn beckett_brass_gain_control_target_carries_controller_matches() {
         use crate::types::ability::{
-            DamageKindFilter, Effect, FilterProp, PlayerFilter, TargetFilter, TypeFilter,
+            DamageKindFilter, Effect, FilterProp, PlayerFilter, PlayerRelation, TargetFilter,
+            TypeFilter,
         };
         let parsed = crate::parser::oracle::parse_oracle_text(
             "Other Pirates you control get +1/+1.\nAt the beginning of your end step, gain control of target nonland permanent controlled by a player who was dealt combat damage by three or more Pirates this turn.",
@@ -17306,6 +17307,8 @@ mod where_x_tests {
                             // "three or more Pirates" → the count threshold is
                             // enforced (not dropped), so min_sources must be 3.
                             min_sources: 3,
+                            // CR 608.2c: "a player who …" names no opponent.
+                            relation: PlayerRelation::All,
                         } if matches!(
                             &**src,
                             TargetFilter::Typed(t)
@@ -17317,7 +17320,7 @@ mod where_x_tests {
         });
         assert!(
             has_predicate,
-            "GainControl target must carry ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(Pirate), min_sources: 3}}}}, got {:?}",
+            "GainControl target must carry ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(Pirate), min_sources: 3, All}}}}, got {:?}",
             typed.properties
         );
     }
@@ -17332,7 +17335,7 @@ mod where_x_tests {
     #[test]
     fn steel_hellkite_destroy_target_carries_controller_damage_predicate() {
         use crate::types::ability::{
-            DamageKindFilter, Effect, FilterProp, PlayerFilter, TargetFilter,
+            DamageKindFilter, Effect, FilterProp, PlayerFilter, PlayerRelation, TargetFilter,
         };
         let parsed = crate::parser::oracle::parse_oracle_text(
             "Flying\n{2}: This creature gets +1/+0 until end of turn.\n{X}: Destroy each nonland permanent with mana value X whose controller was dealt combat damage by this creature this turn. Activate only once each turn.",
@@ -17386,13 +17389,15 @@ mod where_x_tests {
                             kind: DamageKindFilter::CombatOnly,
                             source: Some(src),
                             min_sources: 1,
+                            // CR 608.2c: "whose controller …" names no opponent.
+                            relation: PlayerRelation::All,
                         } if matches!(&**src, TargetFilter::SelfRef)
                     )
             )
         });
         assert!(
             has_predicate,
-            "DestroyAll target must carry ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(SelfRef), min_sources: 1}}}}, got {:?}",
+            "DestroyAll target must carry ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(SelfRef), min_sources: 1, All}}}}, got {:?}",
             typed.properties
         );
     }

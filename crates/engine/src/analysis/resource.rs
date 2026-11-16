@@ -34242,6 +34242,7 @@ mod tests {
                 kind: crate::types::ability::DamageKindFilter::Any,
                 source: Some(Box::new(TargetFilter::SourceController)),
                 min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             },
         };
         assert_eq!(

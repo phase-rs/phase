@@ -32990,6 +32990,7 @@ mod tests {
                 kind: DamageKindFilter::Any,
                 source: Some(Box::new(life_filter.clone())),
                 min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             }
         ));
         // CR 120.1: the damage-recipient scope routes through the same player

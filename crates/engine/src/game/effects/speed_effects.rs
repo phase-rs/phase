@@ -59,11 +59,7 @@ pub(crate) fn players_for_filter(
         // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Each
         // opponent who was dealt damage of the given kind this turn, optionally
         // restricted to a matching source.
-        PlayerFilter::OpponentDealtDamage {
-            kind,
-            source,
-            min_sources,
-        } => state
+        PlayerFilter::OpponentDealtDamage { .. } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
@@ -72,9 +68,7 @@ pub(crate) fn players_for_filter(
                     state,
                     player.id,
                     controller,
-                    *kind,
-                    source,
-                    *min_sources,
+                    filter,
                     source_id,
                 )
             })

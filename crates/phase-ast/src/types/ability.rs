@@ -15580,6 +15580,19 @@ fn is_player_relation_all(relation: &PlayerRelation) -> bool {
     matches!(relation, PlayerRelation::All)
 }
 
+/// Back-compat default for `PlayerFilter::OpponentDealtDamage`'s `relation`
+/// field. Legacy data serialized before the field existed encoded the
+/// opponents-only semantics, so an absent `relation` must deserialize to
+/// `Opponent` — NOT `All`, which would newly qualify the controller and
+/// misresolve reloaded games/scenarios.
+fn player_relation_opponent() -> PlayerRelation {
+    PlayerRelation::Opponent
+}
+
+fn is_player_relation_opponent(relation: &PlayerRelation) -> bool {
+    matches!(relation, PlayerRelation::Opponent)
+}
+
 fn target_zone_count_scope_default() -> ControllerRef {
     ControllerRef::TargetOpponent
 }
@@ -15661,18 +15674,19 @@ pub enum PlayerFilter {
     /// effect recipient filter. Rampant Frogantua class: "+10/+10 for each
     /// player who has lost the game".
     HasLostTheGame,
-    /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was dealt
-    /// damage this turn matching `kind`, optionally restricted to damage from a
-    /// source matching `source`. Resolved against `state.damage_dealt_this_turn`
-    /// records whose `target = Player(p.id)` and whose combat status matches
-    /// `kind` (CR 120.2a combat / CR 120.2b noncombat / `Any` = either).
-    /// `kind = CombatOnly` + `source = None` counts any combat-damage source
-    /// (Tymna the Weaver); `kind = Any` counts any damage combat or noncombat
-    /// (Furious Spinesplitter, You've Been Caught Stealing); `source = Some(f)`
-    /// (CR 120.9) further restricts to opponents dealt matching damage by a
-    /// source matching `f` — matched against each record's CR 608.2i look-back
-    /// source snapshot, so the source's qualities are checked as they were at
-    /// damage time (Estinien Varlineau: "by ~ or a Dragon").
+    /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each player in `relation`
+    /// who was dealt damage this turn matching `kind`, optionally restricted
+    /// to damage from a source matching `source`. Resolved against
+    /// `state.damage_dealt_this_turn` records whose `target = Player(p.id)`
+    /// and whose combat status matches `kind` (CR 120.2a combat / CR 120.2b
+    /// noncombat / `Any` = either). `kind = CombatOnly` + `source = None`
+    /// counts any combat-damage source (Tymna the Weaver); `kind = Any` counts
+    /// any damage combat or noncombat (Furious Spinesplitter, You've Been
+    /// Caught Stealing); `source = Some(f)` (CR 120.9) further restricts to
+    /// players dealt matching damage by a source matching `f` — matched
+    /// against each record's CR 608.2i look-back source snapshot, so the
+    /// source's qualities are checked as they were at damage time (Estinien
+    /// Varlineau: "by ~ or a Dragon").
     ///
     /// `min_sources` (CR 120.9) requires damage from at least that many DISTINCT
     /// matching sources ("was dealt combat damage by three or more Pirates this
@@ -15680,6 +15694,15 @@ pub enum PlayerFilter {
     /// counted by `DamageRecord::source_id` across the matching records; the
     /// default `1` preserves the historical "≥1 matching source" semantics for
     /// every existing card.
+    ///
+    /// `relation` selects the candidate population. Clauses naming an opponent
+    /// ("for each opponent dealt …", Tymna) emit `Opponent`; clauses with no
+    /// opponent word ("a player who was dealt …", Beckett; "whose controller
+    /// was dealt …", Steel Hellkite — CR 608.2c reads the English as written)
+    /// emit `All`, so a damaged player who later gains control of the source
+    /// still qualifies. The name stays `OpponentDealtDamage` (and the
+    /// historical `player != controller` gate stays for `Opponent`) so existing
+    /// card-data and saves resolve byte-identically; only `All` widens.
     #[serde(alias = "OpponentDealtCombatDamage")]
     OpponentDealtDamage {
         /// CR 120.2a/120.2b: which damage kind counts. Defaults to `CombatOnly`
@@ -15693,6 +15716,14 @@ pub enum PlayerFilter {
         /// `1` (any matching source) for back-compat; Beckett sets `3`.
         #[serde(default = "default_one", skip_serializing_if = "is_one")]
         min_sources: u32,
+        /// CR 102.2 + CR 608.2c: which players may qualify. Defaults to
+        /// `Opponent` on absence (preserving the historical opponents-only
+        /// gate for legacy data) and is omitted from serialized output then.
+        #[serde(
+            default = "player_relation_opponent",
+            skip_serializing_if = "is_player_relation_opponent"
+        )]
+        relation: PlayerRelation,
     },
     /// CR 508.6: Each opponent that `subject` attacked (declared one or more
     /// creatures attacking, per CR 508.1b; CR 508.5 resolves planeswalker/battle

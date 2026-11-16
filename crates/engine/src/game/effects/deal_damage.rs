@@ -2681,19 +2681,15 @@ fn collect_matching_players(
                     // CR 120.2a/120.2b: Each opponent who was dealt damage of the
                     // given kind this turn, optionally restricted to a matching
                     // source.
-                    PlayerFilter::OpponentDealtDamage {
-                        kind,
-                        ref source,
-                        min_sources,
-                    } => crate::game::quantity::opponent_dealt_damage_matches(
-                        state,
-                        p.id,
-                        source_controller,
-                        kind,
-                        source,
-                        min_sources,
-                        source_id,
-                    ),
+                    PlayerFilter::OpponentDealtDamage { .. } => {
+                        crate::game::quantity::opponent_dealt_damage_matches(
+                            state,
+                            p.id,
+                            source_controller,
+                            &player_filter,
+                            source_id,
+                        )
+                    }
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
                         p.id != source_controller
@@ -2976,19 +2972,15 @@ pub fn resolve_each_player(
                     // CR 120.2a/120.2b: Each opponent who was dealt damage of the
                     // given kind this turn, optionally restricted to a matching
                     // source.
-                    PlayerFilter::OpponentDealtDamage {
-                        kind,
-                        source,
-                        min_sources,
-                    } => crate::game::quantity::opponent_dealt_damage_matches(
-                        state,
-                        p.id,
-                        ability.controller,
-                        *kind,
-                        source,
-                        *min_sources,
-                        ability.source_id,
-                    ),
+                    PlayerFilter::OpponentDealtDamage { .. } => {
+                        crate::game::quantity::opponent_dealt_damage_matches(
+                            state,
+                            p.id,
+                            ability.controller,
+                            &player_filter,
+                            ability.source_id,
+                        )
+                    }
                     // CR 508.6 + CR 102.2: opponent of the controller attacking
                     // the enchanted player. Delegates to the single scope
                     // authority (live, kind-preserving, team-aware).

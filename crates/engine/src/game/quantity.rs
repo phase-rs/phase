@@ -9878,8 +9878,8 @@ pub(crate) fn compute_party_size(state: &GameState, player: PlayerId) -> i32 {
 }
 
 /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Single
-/// authority for `PlayerFilter::OpponentDealtDamage` matching. `player` was
-/// dealt damage this turn (relative to `controller`'s opponents) when a
+/// authority for `PlayerFilter::OpponentDealtDamage` matching. `player` (in
+/// `relation` to `controller`) was dealt damage this turn when a
 /// `damage_dealt_this_turn` record targets it, its combat status matches `kind`
 /// (CR 120.2a combat / CR 120.2b noncombat / `Any` = either), AND its source
 /// matches `source`. `source = None` accepts any source (Tymna the Weaver);
@@ -9890,13 +9890,42 @@ pub(crate) fn opponent_dealt_damage_matches(
     state: &GameState,
     player: PlayerId,
     controller: PlayerId,
-    kind: crate::types::ability::DamageKindFilter,
-    source: &Option<Box<TargetFilter>>,
-    min_sources: u32,
+    filter: &PlayerFilter,
     ability_source_id: ObjectId,
 ) -> bool {
-    if player == controller {
+    // The callers dispatch on the variant; anything else fails closed. The
+    // payload rides as the whole filter (not four flat params) so the next
+    // field does not re-trip `too_many_arguments`.
+    let PlayerFilter::OpponentDealtDamage {
+        kind,
+        source,
+        min_sources,
+        relation,
+    } = filter
+    else {
         return false;
+    };
+    let kind = *kind;
+    let min_sources = *min_sources;
+    let relation = *relation;
+    // CR 102.2 + CR 608.2c: `relation` gates the candidate population. `All`
+    // (clauses with no opponent word, e.g. Steel Hellkite) skips the gate so a
+    // damaged player who later controls the source still qualifies. `Opponent`
+    // keeps the HISTORICAL `player != controller` gate verbatim — deliberately
+    // not `is_opponent`, so team-game behavior for existing cards is unchanged
+    // (teammate refinement is a separate unit).
+    match relation {
+        crate::types::ability::PlayerRelation::All => {}
+        crate::types::ability::PlayerRelation::Opponent => {
+            if player == controller {
+                return false;
+            }
+        }
+        crate::types::ability::PlayerRelation::Controller => {
+            if player != controller {
+                return false;
+            }
+        }
     }
     let ctx = FilterContext::from_source_with_controller(ability_source_id, controller);
     let record_matches = |r: &crate::types::game_state::DamageRecord| {
@@ -10141,19 +10170,9 @@ pub(crate) fn player_count_matching_ids(
                     // CR 120.2a/120.2b: Each opponent who was dealt damage of
                     // the given kind this turn, optionally restricted to a
                     // matching source.
-                    PlayerFilter::OpponentDealtDamage {
-                        kind,
-                        source,
-                        min_sources,
-                    } => opponent_dealt_damage_matches(
-                        state,
-                        p.id,
-                        controller,
-                        *kind,
-                        source,
-                        *min_sources,
-                        source_id,
-                    ),
+                    PlayerFilter::OpponentDealtDamage { .. } => {
+                        opponent_dealt_damage_matches(state, p.id, controller, filter, source_id)
+                    }
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
                         p.id != controller
@@ -18144,6 +18163,7 @@ mod tests {
                     source: None,
 
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 },
             },
         };
@@ -18194,6 +18214,7 @@ mod tests {
                             kind,
                             source: None,
                             min_sources: 1,
+                            relation: crate::types::ability::PlayerRelation::Opponent,
                         },
                     },
                 },
@@ -18234,6 +18255,7 @@ mod tests {
                 kind: DamageKindFilter::CombatOnly,
                 source: None,
                 min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             }
         );
 
@@ -18246,11 +18268,42 @@ mod tests {
                 kind: DamageKindFilter::Any,
                 source: None,
                 min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             }
         );
         let reser = serde_json::to_string(&any).unwrap();
         let back: PlayerFilter = serde_json::from_str(&reser).unwrap();
         assert_eq!(any, back);
+
+        // Absent `relation` → Opponent (NOT All): legacy card-data keeps the
+        // historical opponents-only gate. And `Opponent` is omitted when
+        // serializing, so existing cards stay byte-identical.
+        assert!(
+            !reser.contains("relation"),
+            "default Opponent must not serialize, got {reser}"
+        );
+
+        // Explicit `relation: All` (Steel Hellkite) round-trips with the field
+        // (`PlayerRelation` serializes internally-tagged: `{"type":"All"}`).
+        let all: PlayerFilter =
+            serde_json::from_str(r#"{"type":"OpponentDealtDamage","relation":{"type":"All"}}"#)
+                .unwrap();
+        assert_eq!(
+            all,
+            PlayerFilter::OpponentDealtDamage {
+                kind: DamageKindFilter::CombatOnly,
+                source: None,
+                min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::All,
+            }
+        );
+        let reser_all = serde_json::to_string(&all).unwrap();
+        assert!(
+            reser_all.contains(r#""relation":{"type":"All"}"#),
+            "non-default All must serialize, got {reser_all}"
+        );
+        let back_all: PlayerFilter = serde_json::from_str(&reser_all).unwrap();
+        assert_eq!(all, back_all);
     }
 
     /// CR 120.1 + CR 510.1: With no combat damage dealt this turn, the
@@ -18266,6 +18319,7 @@ mod tests {
                     source: None,
 
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 },
             },
         };
@@ -18314,6 +18368,7 @@ mod tests {
                     source: Some(Box::new(dragon_filter)),
 
                     min_sources: 1,
+                    relation: crate::types::ability::PlayerRelation::Opponent,
                 },
             },
         };
@@ -18357,6 +18412,7 @@ mod tests {
                             source: Some(Box::new(source)),
 
                             min_sources: 1,
+                            relation: crate::types::ability::PlayerRelation::Opponent,
                         },
                     },
                 },

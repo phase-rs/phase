@@ -5253,6 +5253,10 @@ fn scan_player_filter(x: &PlayerFilter, mode: ScanMode) -> Axes {
             // A distinct-source-count threshold; carries no scan axis of its own
             // (the source read is already classified via `source` below).
             min_sources: _,
+            // A static candidate-population selector (controller/opponents/all),
+            // like `kind` — not an event-context, sibling, or projected-growth
+            // resource, so it carries no axis.
+            relation: _,
         } => {
             let mut acc = Axes {
                 event: false,

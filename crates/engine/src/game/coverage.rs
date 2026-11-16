@@ -2313,13 +2313,22 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             kind,
             source,
             min_sources,
+            relation,
         } => {
             let kind_text = match kind {
                 DamageKindFilter::CombatOnly => "combat damage",
                 DamageKindFilter::NoncombatOnly => "noncombat damage",
                 DamageKindFilter::Any => "damage",
             };
-            let mut rendered = format!("each opponent who was dealt {kind_text}");
+            // The candidate population selects: "each opponent who …" is not
+            // "each player who …". `Opponent` renders exactly as before so
+            // existing cards keep byte-identical signatures.
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            let mut rendered = format!("{who} who was dealt {kind_text}");
             if let Some(source) = source.as_deref() {
                 rendered.push_str(&format!(" from {}", fmt_target(source)));
             }
@@ -16496,6 +16505,7 @@ mod tests {
                 kind,
                 source: source.map(Box::new),
                 min_sources,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             }
         }
 
