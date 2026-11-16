@@ -9127,6 +9127,8 @@ pub fn audit_silent_drops(summary: &CoverageSummary) -> Vec<SilentDropResult> {
 /// (Covert Blue Mage, whose subject check pins the marker to the named
 /// commander) never matches under the empty name, so production callers must
 /// use [`effective_oracle_lines_for_card`].
+// exercised by this module's unit tests
+#[cfg_attr(not(test), allow(dead_code))]
 fn effective_oracle_lines(oracle_text: &str) -> Vec<String> {
     effective_oracle_lines_for_card(oracle_text, "")
 }

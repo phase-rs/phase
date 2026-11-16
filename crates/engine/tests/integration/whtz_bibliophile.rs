@@ -10,7 +10,8 @@
 //! V14 pins controller scoping and the latch's immunity to mill.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::game_state::WaitingFor;
+use engine::types::actions::GameAction;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -86,7 +87,17 @@ fn whtz_needs_full_price_with_199_card_starting_deck() {
     let life_before = runner.state().players[P0.0 as usize].life;
     let hand_before = runner.state().players[P0.0 as usize].hand.len();
 
-    let result = runner.activate(whtz, 0).pay_with(&[whtz]).try_resolve();
+    // Announce-time rejection surfaces as graceful `Err` via `act` (the
+    // sibling convention in `activation_cost_reduction_election.rs`:
+    // `an_illegal_activation_never_reaches_the_election`). The fluent
+    // `activate(..).try_resolve()` unwraps the announce step
+    // (`scenario.rs`: "ActivateAbility must be accepted by the engine"), so an
+    // unaffordable activation panics there instead of returning `Err`.
+    let result = runner.act(GameAction::ActivateAbility {
+        source_id: whtz,
+        ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
+    });
     assert!(
         result.is_err(),
         "2 mana must not pay a {{3}} activation the 199-card deck does not discount"

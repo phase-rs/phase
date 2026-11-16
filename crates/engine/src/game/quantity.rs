@@ -14207,8 +14207,18 @@ mod tests {
         state.players[0].starting_deck_size = 200;
         state.players[1].starting_deck_size = 60;
         // P0 mills down to a 50-card library: the latch must not move.
+        // NOTE: the entries must back real `GameObject`s — `ZoneCardCount`
+        // only counts library entries present in `state.objects` (CR 400.1
+        // zone membership), so pushing raw `ObjectId`s would count 0 and
+        // the comparative below would exercise nothing.
         for id in 1..=50 {
-            state.players[0].library.push_back(ObjectId(id));
+            create_object(
+                &mut state,
+                CardId(id),
+                PlayerId(0),
+                format!("Milled Card {id}"),
+                Zone::Library,
+            );
         }
 
         let latch = QuantityExpr::Ref {
@@ -14245,7 +14255,9 @@ mod tests {
             Comparator::GT.evaluate(lhs, rhs),
             "nylea gate: 50-card library > 40-card starting deck must hold"
         );
-        state.players[0].library.retain(|id| id.0 <= 40);
+        while state.players[0].library.len() > 40 {
+            state.players[0].library.pop_back();
+        }
         let lhs = resolve_quantity(&state, &library, PlayerId(0), ObjectId(0));
         let rhs = resolve_quantity(&state, &latch, PlayerId(0), ObjectId(0));
         assert_eq!((lhs, rhs), (40, 40));

@@ -520,7 +520,7 @@ fn parse_deck_size_sentence<'a>(input: &'a str, card_name_lower: &str) -> Oracle
 /// CR 903.5a: Recognize a deck-construction maximum-size sentence so the line
 /// is consumed as `no_maximum_deck_size` metadata (see
 /// `compute_no_maximum_deck_size_from_text`, read by deck validation) instead
-/// of falling through to `Effect::Unimplemented { name: "static_structure" }`.
+/// of falling through to an unimplemented gap (see `Effect::unimplemented`).
 pub fn is_deck_construction_size_sentence(line: &str, card_name: &str) -> bool {
     let lower = line.trim().to_ascii_lowercase();
     let card_name_lower = card_name.trim().to_ascii_lowercase();
@@ -533,17 +533,18 @@ pub fn is_deck_construction_size_sentence(line: &str, card_name: &str) -> bool {
 /// printed line ("Rulebreaker — A deck with this commander has no maximum
 /// deck size."), so unlike the copy-limit tail sentences no per-sentence
 /// split is needed; the same combinator both extracts the marker (for deck
-/// validation) and recognizes the line. The first match wins. Reminder-text
-/// bodies carry no size sentence (the Covert reminder only gives the 120-card
-/// example), so only printed lines are scanned.
+/// validation) and recognizes the line. The first match wins. Reminder text
+/// is stripped per line before matching: the Class B sentence carries its
+/// 120-card example as a parenthetical on the same printed line, which would
+/// otherwise defeat the all-consuming recognizer. Reminder-text bodies carry
+/// no size sentence of their own, so they are stripped, never scanned.
 pub fn compute_no_maximum_deck_size_from_text(text: &str, card_name: &str) -> bool {
-    let card_name_lower = card_name.trim().to_ascii_lowercase();
     for line in text.lines() {
-        let lower = line.trim().to_ascii_lowercase();
-        if all_consuming(|input| parse_deck_size_sentence(input, &card_name_lower))
-            .parse(lower.as_str())
-            .is_ok()
-        {
+        let stripped = strip_reminder_text(line);
+        if stripped.is_empty() {
+            continue;
+        }
+        if is_deck_construction_size_sentence(&stripped, card_name) {
             return true;
         }
     }
