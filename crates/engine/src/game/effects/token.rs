@@ -9454,6 +9454,7 @@ mod tests {
             attach_to: host,
         };
         ProposedEvent::CreateToken {
+            redirected_to: None,
             owner: PlayerId(0),
             spec: Box::new(spec),
             copy: None,
