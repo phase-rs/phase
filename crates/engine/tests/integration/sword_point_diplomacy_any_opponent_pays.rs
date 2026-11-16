@@ -203,7 +203,8 @@ fn mixed_answers_split_cards_between_hand_and_exile() {
 }
 
 /// CR 118.12a + CR 101.4: any opponent may pay — if the first declines, the next
-/// is asked, and the first to pay stops that card from reaching the hand.
+/// is asked about the same card, and the first to pay stops that card from
+/// reaching the hand. Each card starts a fresh poll with the first opponent.
 #[test]
 fn second_opponent_may_pay_after_first_declines() {
     let Setup {
@@ -211,51 +212,41 @@ fn second_opponent_may_pay_after_first_declines() {
         revealed,
         deep_card,
     } = setup(3);
-    // First card: P1 declines
-    let (player, card) = prompted_card(&runner);
+    // First card: P1 declines, then P2 is asked about the same card and pays.
+    let (player, paid_card) = prompted_card(&runner);
     assert_eq!(player, P1);
-    assert!(revealed.contains(&card));
-    let first_declined = card;
+    assert!(revealed.contains(&paid_card));
     answer(&mut runner, false);
-    // P2 pays for the first card (same card as P1 was prompted for)
     let (player, card) = prompted_card(&runner);
     assert_eq!(player, P2);
-    assert!(revealed.contains(&card));
-    assert_eq!(
-        card, first_declined,
-        "P2 must be prompted for the same card P1 declined"
-    );
-    let paid_card = card;
+    assert_eq!(card, paid_card, "P2 is asked about the card P1 declined");
     answer(&mut runner, true);
     assert_eq!(runner.life(P2), 17);
     assert_eq!(runner.life(P1), 20);
-    // Next card: fresh poll with P1 again
-    let (player, card) = prompted_card(&runner);
-    assert_eq!(player, P1);
-    assert!(revealed.contains(&card));
-    assert_ne!(card, first_declined);
-    assert_ne!(card, paid_card);
-    let second_declined = card;
-    answer(&mut runner, false);
-    // Remaining cards: P1 declines all
+    // Each remaining card: a fresh poll — P1 then P2, both decline.
+    let mut kept = Vec::new();
     for _ in 0..2 {
         let (player, card) = prompted_card(&runner);
-        assert_eq!(player, P1);
+        assert_eq!(
+            player, P1,
+            "each card's poll starts with the first opponent"
+        );
         assert!(revealed.contains(&card));
-        assert_ne!(card, first_declined);
         assert_ne!(card, paid_card);
-        assert_ne!(card, second_declined);
+        assert!(!kept.contains(&card));
         answer(&mut runner, false);
+        let (player, same) = prompted_card(&runner);
+        assert_eq!(player, P2);
+        assert_eq!(same, card, "P2 is asked about the card P1 declined");
+        answer(&mut runner, false);
+        kept.push(card);
     }
     runner.advance_until_stack_empty();
-    // Verify card identity
     assert_eq!(runner.state().objects[&paid_card].zone, Zone::Exile);
-    assert_eq!(runner.state().objects[&first_declined].zone, Zone::Hand);
-    assert_eq!(runner.state().objects[&second_declined].zone, Zone::Hand);
+    for card in &kept {
+        assert_eq!(runner.state().objects[card].zone, Zone::Hand);
+    }
     assert_eq!(runner.state().objects[&deep_card].zone, Zone::Library);
-    let in_exile = zones(&runner, &revealed)
-        .iter()
-        .filter(|z| **z == Zone::Exile)
-        .count();
-    assert_eq!(in_exile, 1);
+    assert_eq!(runner.life(P1), 20);
+    assert_eq!(runner.life(P2), 17);
 }

@@ -834,15 +834,25 @@ fn r10b_gain() {
 
 /// R11 — CR 101.4 + CR 603.6a + CR 611.3c: both players' lands enter in one
 /// simultaneous event; Urborg's static applies as they enter, so the Plains is
-/// a Swamp and the Staff triggers.
+/// a Swamp and the Staff triggers. CR 608.2c: "exiles the rest" exiles every
+/// other revealed card — no card-by-card choice is offered.
 #[test]
 fn r11_clear_the_land() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_artifact_from_oracle(P0, "Staff of the Death Magus", STAFF_OF_THE_DEATH_MAGUS);
+    let mut nonlands = Vec::new();
     for i in 0..4 {
-        scenario.add_spell_to_library_top(P0, &format!("P0 Spell {i}"), false);
-        scenario.add_spell_to_library_top(P1, &format!("P1 Spell {i}"), false);
+        nonlands.push(
+            scenario
+                .add_spell_to_library_top(P0, &format!("P0 Spell {i}"), false)
+                .id(),
+        );
+        nonlands.push(
+            scenario
+                .add_spell_to_library_top(P1, &format!("P1 Spell {i}"), false)
+                .id(),
+        );
     }
     let plains = scenario
         .add_land_to_library_top(P0, "Plains")
@@ -857,12 +867,13 @@ fn r11_clear_the_land() {
     let mut runner = scenario.build();
     let life_before = runner.life(P0);
     runner.cast(spell).resolve();
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::EffectZoneChoice { .. }
-    ));
-    let _ = drive_to_empty(&mut runner, &[], None);
+    let (_, prompts) = drive_to_empty(&mut runner, &[], None);
+    assert!(
+        !prompts.iter().any(|p| p == "EffectZoneChoice"),
+        "exiling the rest is not a choice: {prompts:?}"
+    );
     let st = runner.state();
+    assert!(nonlands.iter().all(|id| st.objects[id].zone == Zone::Exile));
     assert_eq!(st.objects[&plains].zone, Zone::Battlefield);
     assert_eq!(st.objects[&urborg].zone, Zone::Battlefield);
     assert!(st.objects[&plains].tapped && st.objects[&urborg].tapped);
