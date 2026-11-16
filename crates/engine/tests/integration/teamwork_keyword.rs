@@ -940,7 +940,9 @@ fn helicarrier_damage_after_cast(pay_teamwork: bool) -> u32 {
         }
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => runner
-                .act(GameAction::DecideOptionalCost { index: if pay_teamwork { 0 } else { 1 } })
+                .act(GameAction::DecideOptionalCost {
+                    index: if pay_teamwork { 0 } else { 1 },
+                })
                 .expect("choosing whether to pay Teamwork must succeed"),
             WaitingFor::PayCost {
                 kind: PayCostKind::TapCreatures { .. },
@@ -1045,7 +1047,9 @@ fn we_say_thee_nay_unless_costs(pay_teamwork: bool) -> Vec<u32> {
         }
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => runner
-                .act(GameAction::DecideOptionalCost { index: if pay_teamwork { 0 } else { 1 } })
+                .act(GameAction::DecideOptionalCost {
+                    index: if pay_teamwork { 0 } else { 1 },
+                })
                 .expect("choosing whether to pay Teamwork must succeed"),
             WaitingFor::PayCost {
                 kind: PayCostKind::TapCreatures { .. },
@@ -1255,7 +1259,9 @@ fn drive_emh_keep_count(runner: &mut GameRunner, pay_teamwork: bool, tapper: Obj
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { index: if pay_teamwork { 0 } else { 1 } })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_teamwork { 0 } else { 1 },
+                    })
                     .expect("deciding teamwork must be accepted");
             }
             WaitingFor::PayCost {

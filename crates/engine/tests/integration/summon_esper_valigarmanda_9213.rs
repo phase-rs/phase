@@ -748,7 +748,9 @@ fn warped_space_reaches_the_opponents_linked_card() {
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::DecideOptionalCost { index: if pay_zero { 0 } else { 1 } })
+            .act(GameAction::DecideOptionalCost {
+                index: if pay_zero { 0 } else { 1 },
+            })
             .expect("decide the alternative");
         for _ in 0..8 {
             if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
@@ -816,7 +818,9 @@ fn warped_space_keeps_casualty_for_a_card_with_no_mana_cost() {
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::DecideOptionalCost { index: if sacrifice { 0 } else { 1 } })
+            .act(GameAction::DecideOptionalCost {
+                index: if sacrifice { 0 } else { 1 },
+            })
             .expect("decide casualty");
         if sacrifice && runner.state().objects[&fodder].zone == Zone::Battlefield {
             runner
@@ -974,7 +978,7 @@ fn warped_space_keeps_casualty_for_a_card_with_a_printed_cost() {
                     });
                     runner
                         .act(GameAction::DecideOptionalCost {
-                            pay: !alternative || pay_zero,
+                            index: if !alternative || pay_zero { 0 } else { 1 },
                         })
                         .expect("decide a cost");
                 }
@@ -1056,7 +1060,7 @@ fn warped_space_keeps_replicate_for_a_card_with_a_printed_cost() {
                     prompts.push((alternative, origin));
                     runner
                         .act(GameAction::DecideOptionalCost {
-                            pay: alternative && pay_zero,
+                            index: if alternative && pay_zero { 0 } else { 1 },
                         })
                         .expect("decide a cost");
                 }
@@ -1153,7 +1157,9 @@ fn cast_linked_fling(
                 });
                 let pay = if alternative { pay_zero } else { casualty };
                 runner
-                    .act(GameAction::DecideOptionalCost { index: if pay { 0 } else { 1 } })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    })
                     .expect("decide a cost");
             }
             WaitingFor::PayCost { choices, .. } => {
@@ -1371,7 +1377,7 @@ fn warped_space_is_elected_before_casualty_and_targets_for_a_targeted_card() {
                     });
                     runner
                         .act(GameAction::DecideOptionalCost {
-                            pay: !alternative || pay_zero,
+                            index: if !alternative || pay_zero { 0 } else { 1 },
                         })
                         .expect("decide a cost");
                 }
@@ -1838,7 +1844,9 @@ fn canceling_a_linked_cast_restores_prior_life_or_discard_and_settles_the_chapte
                 })
                 .expect("target creature");
             runner
-                .act(GameAction::DecideOptionalCost { index: if discard { 0 } else { 1 } })
+                .act(GameAction::DecideOptionalCost {
+                    index: if discard { 0 } else { 1 },
+                })
                 .inspect(|result| {
                     events.extend(result.events.clone());
                 })
@@ -2102,7 +2110,9 @@ fn linked_alternative_costs_preserve_printed_choice_and_kicker() {
                     }
                 ));
                 runner
-                    .act(GameAction::DecideOptionalCost { index: if pay_zero { 0 } else { 1 } })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_zero { 0 } else { 1 },
+                    })
                     .expect("elect alternative");
                 assert!(
                     matches!(
@@ -2112,7 +2122,9 @@ fn linked_alternative_costs_preserve_printed_choice_and_kicker() {
                     "reach guard: printed additional obligation still offered"
                 );
                 runner
-                    .act(GameAction::DecideOptionalCost { index: if pay_extra { 0 } else { 1 } })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_extra { 0 } else { 1 },
+                    })
                     .expect("elect printed extra");
                 if !kicker && pay_extra {
                     runner

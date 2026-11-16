@@ -247,9 +247,9 @@ fn foil_with_affordable_mana_offers_both_costs() {
     else {
         panic!("expected the alternative/printed cost choice, got {waiting:?}");
     };
-    assert_eq!(costs.len(), 2);
-    let alternative = &costs[0];
-    let printed = &costs[1];
+    let [alternative, printed] = costs.as_slice() else {
+        panic!("expected exactly the alternative and printed costs, got {costs:?}");
+    };
     assert!(matches!(
         alternative,
         AbilityCost::Composite { costs } if costs.len() == 2

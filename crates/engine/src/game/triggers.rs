@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::database::synthesis::KeywordTriggerInstaller;
 use crate::game::game_object::ObjectIncarnationRefExt;
@@ -8,9 +8,10 @@ use crate::types::ability::{
     AttachmentReferent, CardTypeSetSource, CastManaSpentMetric, ChosenAttribute,
     CommanderOwnership, ControllerRef, CopyRetargetPermission, DamageAmountScope,
     DamageAmountThreshold, DelayedAbilityOrigin, DelayedTriggerCondition, DurationEvent, Effect,
-    FilterProp, IndicatedActionLimit, ModalChoice, NameStickerSet, ObjectScope, OriginConstraint,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RenownSubject, ResolvedAbility,
-    SacrificeCost, StaticCondition, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
+    FilterProp, GameRestriction, IndicatedActionLimit, ModalChoice, NameStickerSet, ObjectScope,
+    OriginConstraint, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RenownSubject,
+    ResolvedAbility, RestrictionPlayerScope, SacrificeCost, StaticCondition,
+    TapCreaturesRequirement, TargetFilter, TargetRef, TributeOutcome, TriggerCondition,
     TriggerConditionAnchor, TriggerConstraint, TriggerDefinition, TriggerDefinitionOccurrenceRef,
     TriggerDefinitionRef, TriggerEntry, TriggerGrantProducerKey, TriggerLimitSpend, TypeFilter,
     TypedFilter,
@@ -35,6 +36,7 @@ use crate::types::keywords::WardCost;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
+use crate::types::proposed_event::ProposedEvent;
 use crate::types::resolved_commands::{
     ResolvedDelayedTriggerCommand, ResolvedDelayedTriggerReplayInvariantError,
     ResolvedTriggerCollection, ResolvedTriggerCollectionCommand,
@@ -63,7 +65,9 @@ use super::speed::{
 use super::stack;
 
 // Re-export so existing paths stay valid.
-pub use super::trigger_matchers::{build_trigger_registry, trigger_matcher, trigger_registry};
+pub use super::trigger_matchers::{
+    attack_trigger_matches_attack, build_trigger_registry, trigger_matcher, trigger_registry,
+};
 
 /// Function signature for trigger matchers: returns true if event matches the trigger.
 pub type TriggerMatcher = fn(
@@ -196,6 +200,17 @@ pub(crate) enum DeferredTriggerBatchOrigin {
     /// later one behind a wait that is not SBA-owned). It never selects the
     /// `Any` answer scope.
     PriorityBoundary,
+    /// CR 117.3a + CR 502.4 + CR 503.1a + CR 603.3b: an ability that triggered during a
+    /// turn-based action performed as a step or phase begins (the untap step's actions, the
+    /// draw, the archenemy's scheme action, a Saga's lore counters, the roll to visit (CR 703.4g)), together with the step's
+    /// own beginning triggers, held as it begins (CR 500.6), and the abilities its state-based
+    /// check before that batch triggers (CR 704.3), before any player
+    /// received priority in that step. It is held until the next time a player would receive
+    /// priority and placed together with that boundary's own triggers in one CR 603.3b
+    /// process — "the order in which they triggered doesn't matter" (CR 503.1a). `UntapStep`
+    /// is the name it was serialized under before it covered every such action.
+    #[serde(alias = "UntapStep")]
+    TurnBasedAction,
 }
 
 fn deferred_trigger_batch_origin_is_ordinary(origin: &DeferredTriggerBatchOrigin) -> bool {
@@ -339,18 +354,21 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
         WardCost::Waterbend(mana_cost) => AbilityCost::Mana {
             cost: mana_cost.clone(),
         },
-        // CR 702.21a: Compound ward cost — use the first mana component as
-        // the unless cost. Full compound cost resolution deferred to ward
-        // cost payment integration.
-        WardCost::Compound(costs) => {
-            if let Some(first) = costs.first() {
-                ward_cost_to_ability_cost(first)
-            } else {
-                AbilityCost::Mana {
-                    cost: crate::types::mana::ManaCost::zero(),
-                }
-            }
-        }
+        // CR 702.21a + CR 118.3: A compound ward cost ("Ward—{2}, Pay 2 life.")
+        // is one cost paid in full or not at all, so every leg joins the
+        // AND-composed `Composite` — never only the first leg. The
+        // unless-payment handler pays the whole composite through the single
+        // payment authority and falls through to the ward counter when any
+        // part is unpayable.
+        WardCost::Compound(costs) => match costs.as_slice() {
+            [] => AbilityCost::Mana {
+                cost: crate::types::mana::ManaCost::zero(),
+            },
+            [only] => ward_cost_to_ability_cost(only),
+            legs => AbilityCost::Composite {
+                costs: legs.iter().map(ward_cost_to_ability_cost).collect(),
+            },
+        },
         WardCost::GetPlayerCounters {
             counter_kind,
             count,
@@ -662,6 +680,9 @@ struct TriggerCollectionSession {
     /// session prepares each event batch with `ObserveEventBatch` and reads
     /// these sources instead of rebuilding them (`BulkMemberTriggerCollection`).
     bulk_member_sources: Option<Vec<OffZoneTriggerSourceCache>>,
+    /// CR 614.12a + CR 603.2: only an explicitly collected payment slice
+    /// observes the board before this entrant's simultaneous entry group.
+    payment_entrant: Option<ObjectId>,
 }
 
 impl TriggerCollectionSession {
@@ -671,6 +692,7 @@ impl TriggerCollectionSession {
             operation_journal: None,
             admitted_matches: 0,
             bulk_member_sources: None,
+            payment_entrant: None,
         }
     }
 
@@ -684,6 +706,7 @@ impl TriggerCollectionSession {
             operation_journal: Some(operation_journal),
             admitted_matches: 0,
             bulk_member_sources: None,
+            payment_entrant: None,
         }
     }
 
@@ -928,6 +951,17 @@ impl PendingActivationTriggerCollection {
     /// is already on the stack, so the targeting source resolves against its
     /// real stack entry and needs no virtual projection.
     pub(crate) fn for_spell() -> Self {
+        Self {
+            overlay: TriggerCollectionOverlay::default(),
+            operation_journal: Vec::new(),
+            pending_contexts: Vec::new(),
+        }
+    }
+
+    /// Creates a collector for an action's own event batch that must be
+    /// admitted or refused whole before any of it reaches the live game: an
+    /// Un-card touch is bounded by the size of the batch it would add.
+    pub(crate) fn for_player_action() -> Self {
         Self {
             overlay: TriggerCollectionOverlay::default(),
             operation_journal: Vec::new(),
@@ -1905,7 +1939,464 @@ fn occurrence_trigger_events(
                 state,
             ))
         }
+        // CR 805.4d: an opponent-scoped phase trigger on a shared team turn
+        // fires once per eligible opponent. Production `PhaseChanged` only: a
+        // fanned occurrence never re-fans (its binding rides along instead).
+        _ if trig_def.mode == TriggerMode::Phase
+            && matches!(event, GameEvent::PhaseChanged { .. }) =>
+        {
+            shared_turn_phase_occurrences(event, trig_def, state, ability)
+        }
         _ => None,
+    }
+}
+
+/// CR 805.4d: the per-player phase occurrences for an opponent-scoped phase
+/// trigger on a shared team turn. Returns `None` unless every gate holds —
+/// the trigger is opponent-turn-scoped, its effect names the turn's player
+/// (never through a team-collective payment, which names no "that player"
+/// per CR 805.4d plus the Bow 2017-06-13 ruling), the active side
+/// shares its turn, and at least two eligible opponents share it — so every
+/// other phase trigger keeps the single firing below.
+fn shared_turn_phase_occurrences(
+    event: &GameEvent,
+    trig_def: &TriggerDefinition,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<Vec<GameEvent>> {
+    let GameEvent::PhaseChanged { phase } = event else {
+        return None;
+    };
+    if trig_def.constraint != Some(TriggerConstraint::OnlyDuringOpponentsTurn) {
+        return None;
+    }
+    // CR 805.4d (no "that player" reference) + the Bow 2017-06-13 ruling: a
+    // team-collective payment names the TEAM, not "that player".
+    // The veto fires FIRST: it suppresses fan-out even when the trigger also
+    // carries a turn-player condition (no printed card pairs the two; the
+    // order is load-bearing and pinned by W2's veto-first case).
+    if ability_tree_has_collective_payment(ability) {
+        return None;
+    }
+    // CR 805.4d's third locus (the intervening "if" naming "that player"):
+    // a condition-scoped trigger fans out exactly like an effect-scoped one.
+    if !phase_trigger_effect_references_turn_player(ability)
+        && !trigger_condition_references_turn_player(&trig_def.condition)
+    {
+        return None;
+    }
+    let active = state.active_player;
+    if !super::topology::side_takes_shared_turn(state, active) {
+        return None;
+    }
+    let members: Vec<PlayerId> = super::topology::team_members(state, active)
+        .into_iter()
+        .filter(|&member| super::players::is_opponent(state, ability.controller, member))
+        .collect();
+    if members.len() < 2 {
+        return None;
+    }
+    Some(
+        members
+            .into_iter()
+            .map(|player_id| GameEvent::PhaseChangedForPlayer {
+                phase: *phase,
+                player_id,
+            })
+            .collect(),
+    )
+}
+
+/// CR 805.4d's "when the effect refers to that opponent": whether the firing's
+/// effect tree names the turn's player through a PER-FIRING binding — the
+/// stamped `ScopedPlayer` or the occurrence-bound `TriggeringPlayer`. Live or
+/// set-wide references (`ActivePlayer`, `Opponent`, bare `You`) do NOT count:
+/// fanning out cannot differentiate them, so counting them would duplicate
+/// identical firings.
+///
+/// CR 805.4d (no "that player" reference) + the Bow 2017-06-13 ruling: a
+/// team-collective payment (Bow to My Command's "they may tap … with total
+/// power 8 or greater", `collective: true`) refers to the TEAM, not "that
+/// opponent" — the collective payment authority distributes
+/// the per-hero prompts internally, so the single firing must never fan out.
+/// Any collective node anywhere in the tree disqualifies the whole firing:
+/// duplicating it per opponent would demand the team threshold N times.
+fn phase_trigger_effect_references_turn_player(ability: &ResolvedAbility) -> bool {
+    if ability_tree_has_collective_payment(ability) {
+        return false;
+    }
+    if ability_node_references_turn_player(ability) {
+        return true;
+    }
+    ability
+        .child_links()
+        .any(|(_, child)| phase_trigger_effect_references_turn_player(child))
+}
+
+/// CR 805.4d's "or intervening 'if' clause refers to 'that player'": whether
+/// `trig_def.condition` names the turn's player through a PER-OCCURRENCE
+/// binding — the occurrence-bound `ScopedPlayer` (or `TriggeringPlayer`) read
+/// from the `PhaseChangedForPlayer` event. Live or set-wide references
+/// (`Controller`, `Opponent`, bare `You`) do NOT count: fanning out cannot
+/// differentiate them, so admitting them would duplicate identical firings.
+///
+/// Shape precedent: the `*_binding_diverges` classifier family below —
+/// exhaustive `match`, no wildcard, combinator recursion, leaf delegation to
+/// the existing player-reference authorities — but the opposite polarity:
+/// `false` preserves today's single firing, `true` creates firings, so
+/// unverified shapes MUST read `false` (fail-closed).
+fn trigger_condition_references_turn_player(condition: &Option<TriggerCondition>) -> bool {
+    match condition {
+        None => false,
+        Some(cond) => trigger_condition_node_references_turn_player(cond),
+    }
+}
+
+fn trigger_condition_node_references_turn_player(cond: &TriggerCondition) -> bool {
+    match cond {
+        TriggerCondition::And { conditions } | TriggerCondition::Or { conditions } => {
+            conditions
+                .iter()
+                .any(trigger_condition_node_references_turn_player)
+        }
+        // Admission is polarity-insensitive: a `Not`-wrapped occurrence
+        // reference still evaluates differently per seat.
+        TriggerCondition::Not { condition } | TriggerCondition::EventTime { condition } => {
+            trigger_condition_node_references_turn_player(condition)
+        }
+        TriggerCondition::QuantityComparison { lhs, rhs, .. } => {
+            quantity_expr_refs_turn_player(lhs) || quantity_expr_refs_turn_player(rhs)
+        }
+        TriggerCondition::QuantityQuality { quantity, .. } => {
+            quantity_expr_refs_turn_player(quantity)
+        }
+        TriggerCondition::IsMonarch { player } | TriggerCondition::HasBoon { player } => {
+            matches!(player, PlayerScope::ScopedPlayer)
+        }
+        // Only the event-read `TriggeringPlayer` differentiates per
+        // occurrence; `Controller`/`Opponent` read global state (CR 102.1).
+        TriggerCondition::DuringPlayersTurn { player } => {
+            matches!(player, PlayerFilter::TriggeringPlayer)
+        }
+        TriggerCondition::GainedLife { .. }
+        | TriggerCondition::LostLife
+        | TriggerCondition::Descended
+        | TriggerCondition::ControlsType { .. }
+        | TriggerCondition::NoSpellsCastLastTurn
+        | TriggerCondition::TwoOrMoreSpellsCastLastTurn
+        | TriggerCondition::SourceEnteredThisTurn
+        | TriggerCondition::SourceAttackedThisCombat
+        | TriggerCondition::ChoseOtherRingBearer
+        | TriggerCondition::ChoseRingBearer
+        | TriggerCondition::EchoDue
+        | TriggerCondition::MinCoAttackers { .. }
+        | TriggerCondition::SolveConditionMet
+        | TriggerCondition::ClassLevelGE { .. }
+        | TriggerCondition::SourceIsHarnessed
+        | TriggerCondition::AttractionVisitRoll { .. }
+        | TriggerCondition::WasCast { .. }
+        | TriggerCondition::WasPlayed
+        | TriggerCondition::AdditionalCostPaid { .. }
+        | TriggerCondition::SourceIsAttacking
+        | TriggerCondition::CastVariantPaid { .. }
+        | TriggerCondition::CastVariantPaidPersistent { .. }
+        | TriggerCondition::ActivatedAbilityIsNonMana
+        | TriggerCondition::DealtDamageBySourceThisTurn
+        | TriggerCondition::DealtDamageThisTurnBySource { .. }
+        | TriggerCondition::FirstTimeObjectTappedThisTurn
+        | TriggerCondition::FirstTimeObjectCountersAddedThisTurn
+        | TriggerCondition::WasType { .. }
+        | TriggerCondition::LifeTotalGE { .. }
+        // `ControlsType`/`ControlsNone`/`ControlCount` filters bind from the
+        // trigger source context, never the event: identical verdicts per
+        // occurrence, so admitting them would DUPLICATE identical firings.
+        | TriggerCondition::ControlCount { .. }
+        | TriggerCondition::ControlsNone { .. }
+        | TriggerCondition::AttackedThisTurn
+        | TriggerCondition::FirstCombatPhaseOfTurn
+        | TriggerCondition::CastSpellThisTurn { .. } => false,
+        TriggerCondition::HasMaxSpeed
+        | TriggerCondition::IsInitiative
+        | TriggerCondition::NoMonarch
+        | TriggerCondition::WasStartingPlayer { .. }
+        | TriggerCondition::SpellCastWithVariantThisTurn { .. }
+        | TriggerCondition::HasCityBlessing
+        | TriggerCondition::HasEnduringStory
+        | TriggerCondition::CompletedDungeon { .. }
+        | TriggerCondition::SourceIsTapped
+        | TriggerCondition::SourceIsTransformed
+        | TriggerCondition::SourceIsFaceUp
+        | TriggerCondition::SourceIsFaceDown
+        | TriggerCondition::SourceInZone { .. }
+        | TriggerCondition::CounterAddedThisTurn
+        | TriggerCondition::LostLifeLastTurn
+        | TriggerCondition::DefendingPlayerControlsNone { .. }
+        | TriggerCondition::TributeNotPaid
+        | TriggerCondition::CastDuringPhase { .. }
+        | TriggerCondition::CurrentPhaseIs { .. }
+        | TriggerCondition::CastTimingPermission { .. }
+        | TriggerCondition::ManaColorSpent { .. }
+        | TriggerCondition::ManaSpentCondition { .. }
+        | TriggerCondition::HadCounters { .. }
+        | TriggerCondition::ControlsCommander { .. }
+        | TriggerCondition::IsRenowned { .. }
+        | TriggerCondition::HasCounters { .. }
+        | TriggerCondition::ZoneChangeObjectMatchesFilter { .. }
+        | TriggerCondition::ZoneChangeObjectIsTapped
+        | TriggerCondition::SourceMatchesFilter { .. }
+        | TriggerCondition::EventDamageSourceMatchesFilter { .. }
+        | TriggerCondition::EventObjectMatchesFilter { .. }
+        | TriggerCondition::DamagedPlayerIsEventSourceOwner
+        | TriggerCondition::ChosenLabelIs { .. }
+        | TriggerCondition::AttackersDeclaredCount { .. }
+        | TriggerCondition::ExceptFirstDrawInDrawStep
+        | TriggerCondition::PlacedByAbilitySource
+        | TriggerCondition::AddedManaWithThisAbilityThisTurn
+        | TriggerCondition::TriggeringSpellTargetsFilter { .. }
+        | TriggerCondition::TriggeringSpellMatchesFilter { .. } => false,
+    }
+}
+
+/// Whether a trigger-side quantity reads the turn's player through a
+/// PER-OCCURRENCE binding. Recursion shape mirrors
+/// `quantity_expr_binding_diverges` (same arms, opposite polarity).
+fn quantity_expr_refs_turn_player(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Ref { qty } => quantity_ref_refs_turn_player(qty),
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner }
+        | QuantityExpr::Power {
+            exponent: inner, ..
+        } => quantity_expr_refs_turn_player(inner),
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            exprs.iter().any(quantity_expr_refs_turn_player)
+        }
+        QuantityExpr::Difference { left, right } => {
+            quantity_expr_refs_turn_player(left) || quantity_expr_refs_turn_player(right)
+        }
+        QuantityExpr::Fixed { .. } => false,
+    }
+}
+
+/// Whether a trigger-side quantity leaf names the occurrence player:
+/// object-count filters via the effect gate's own turn-player authority, and
+/// the per-player scalars only through the event-bound `ScopedPlayer`
+/// (proven by `resolve_quantity_for_trigger_check` + `extract_player_from_event`;
+/// every other scope reads the same value on every occurrence). Everything
+/// else — unit reads, global ledgers, resolution-scoped tallies — is `false`
+/// (fail-closed: single firing until a reader proves otherwise).
+fn quantity_ref_refs_turn_player(qty: &QuantityRef) -> bool {
+    match qty {
+        QuantityRef::ObjectCount { filter }
+        | QuantityRef::ObjectCountDistinct { filter, .. }
+        | QuantityRef::ObjectCountBySharedQuality { filter, .. } => {
+            turn_player_filter_references(filter)
+        }
+        QuantityRef::HandSize { player, .. }
+        | QuantityRef::LifeTotal { player }
+        | QuantityRef::GraveyardSize { player, .. }
+        | QuantityRef::StartingLifeTotal { player } => {
+            matches!(player, PlayerScope::ScopedPlayer)
+        }
+        QuantityRef::CountersOn { .. }
+        | QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::NameStickerLetterCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::EnteredThisTurn { .. }
+        | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::ZoneCardCount { .. }
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::AttackedThisTurn { .. }
+        | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::SharedCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. }
+        | QuantityRef::DistinctColorsAmong { .. }
+        | QuantityRef::PropertyAggregate(..)
+        | QuantityRef::ManaSpentToCast { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::VoteCount { .. }
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::PlayerCount { .. }
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::DeployedBossCount
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. } => false,
+    }
+}
+
+/// Whether any node in the effect tree carries a team-collective payment.
+/// Mirrors the payment authority's own read (`game::costs` matches
+/// `Aggregate { collective: true, .. }`), so the fan-out gate and the payment
+/// path can never disagree on what counts as collective.
+fn ability_tree_has_collective_payment(ability: &ResolvedAbility) -> bool {
+    if let Effect::PayCost { cost, .. } = &ability.effect {
+        if ability_cost_is_team_collective(cost) {
+            return true;
+        }
+    }
+    ability
+        .child_links()
+        .any(|(_, child)| ability_tree_has_collective_payment(child))
+}
+
+fn ability_cost_is_team_collective(cost: &AbilityCost) -> bool {
+    match cost {
+        AbilityCost::TapCreatures { requirement, .. } => matches!(
+            requirement,
+            TapCreaturesRequirement::Aggregate {
+                collective: true,
+                ..
+            }
+        ),
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            costs.iter().any(ability_cost_is_team_collective)
+        }
+        AbilityCost::EffectCost { effect } => {
+            matches!(effect.as_ref(), Effect::PayCost { cost, .. } if ability_cost_is_team_collective(cost))
+        }
+        _ => false,
+    }
+}
+
+fn ability_node_references_turn_player(node: &ResolvedAbility) -> bool {
+    if node
+        .effect
+        .target_filter()
+        .is_some_and(turn_player_filter_references)
+    {
+        return true;
+    }
+    if let Effect::PayCost { payer, .. } = &node.effect {
+        if turn_player_filter_references(payer) {
+            return true;
+        }
+    }
+    if node
+        .optional_player
+        .as_ref()
+        .is_some_and(turn_player_filter_references)
+    {
+        return true;
+    }
+    if let Effect::AddRestriction { restriction, .. } = &node.effect {
+        match restriction {
+            GameRestriction::ProhibitActivity {
+                affected_players, ..
+            } => {
+                if matches!(affected_players, RestrictionPlayerScope::ScopedPlayer) {
+                    return true;
+                }
+            }
+            GameRestriction::CantEnterBattlefieldFrom { filter, .. } => {
+                if turn_player_filter_references(filter) {
+                    return true;
+                }
+            }
+            GameRestriction::DamagePreventionDisabled { .. } => {}
+        }
+    }
+    false
+}
+
+fn turn_player_filter_references(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::ScopedPlayer | TargetFilter::TriggeringPlayer => true,
+        TargetFilter::Typed(typed) => {
+            typed.controller == Some(ControllerRef::ScopedPlayer)
+                || typed.properties.iter().any(|prop| {
+                    matches!(
+                        prop,
+                        FilterProp::Owned {
+                            controller: ControllerRef::ScopedPlayer
+                        }
+                    )
+                })
+        }
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(turn_player_filter_references)
+        }
+        TargetFilter::Not { filter } => turn_player_filter_references(filter),
+        _ => false,
+    }
+}
+
+/// CR 805.4d: rebind a fanned phase firing to its own occurrence player. A
+/// no-op for every other event shape (production `PhaseChanged` keeps the
+/// collection-time stamp).
+fn restamp_scoped_player_from_phase_occurrence(ability: &mut ResolvedAbility, event: &GameEvent) {
+    if let GameEvent::PhaseChangedForPlayer { player_id, .. } = event {
+        ability.set_scoped_player_recursive(*player_id);
     }
 }
 
@@ -1966,10 +2457,23 @@ fn trigger_firing_groups(
     conditions: FiringConditions<'_>,
     ability: &ResolvedAbility,
 ) -> Vec<FiringGroup> {
+    // CR 805.4d + CR 603.4: on a shared team turn, an opponent-scoped phase
+    // trigger fires once per eligible opponent. The raw `PhaseChanged` event
+    // names nobody (its `ScopedPlayer` reads the representative seat), so the
+    // raw-event pre-check below is the wrong gate for a fanned trigger — each
+    // `PhaseChangedForPlayer` occurrence is evaluated on its own at the
+    // per-occurrence filter instead. Collective triggers (Bow) never fan out
+    // and keep the raw gate.
+    let fan_out = if trig_def.mode == TriggerMode::Phase {
+        shared_turn_phase_occurrences(event, trig_def, state, ability)
+    } else {
+        None
+    };
     // CR 508.5 + CR 603.4: Attacks triggers with intervening-if clauses read
     // the defending player from each expanded attack event; the batch-level
     // event is the wrong context, so their check waits for the narrowed firing.
-    if !trig_def.batched
+    if fan_out.is_none()
+        && !trig_def.batched
         && !matches!(trig_def.mode, TriggerMode::Attacks)
         && !conditions.hold(state, controller, source_context, event)
     {
@@ -2052,8 +2556,8 @@ fn trigger_firing_groups(
         } else {
             vec![FiringGroup::from_indexed(members)]
         }
-    } else if let Some(occurrences) =
-        occurrence_trigger_events(event, trig_def, source_context, state, ability)
+    } else if let Some(occurrences) = fan_out
+        .or_else(|| occurrence_trigger_events(event, trig_def, source_context, state, ability))
     {
         occurrences
             .into_iter()
@@ -2456,6 +2960,8 @@ fn trigger_source_context_for_event(
     {
         // Enters-the-battlefield triggers observe the post-entry object; only
         // a source leaving its observed zone needs the record's pre-move view.
+        // A source entering the battlefield is seen as its pre-event card by the
+        // own-entry arm of `collect_pending_triggers_with_collection` (`event_subject_observes`).
         if *object_id == source.id && *to != Zone::Battlefield {
             if let Some(source_context) = record.trigger_source_context() {
                 return source_context.clone();
@@ -2591,7 +3097,7 @@ fn trigger_observes_zone_change(
     origin_matches && destination_matches(trigger.destination, &trigger.destination_constraint)
 }
 
-fn zone_is_visible_to_all_players(zone: Zone) -> bool {
+pub(super) fn zone_is_visible_to_all_players(zone: Zone) -> bool {
     !matches!(zone, Zone::Hand | Zone::Library)
 }
 
@@ -2751,10 +3257,20 @@ pub(crate) enum LogicalZoneTriggerCollection<'a> {
 
 #[derive(Clone, Copy)]
 enum TriggerSourceVisit {
-    /// The moved object reads its own record-owned immediately-before view.
+    /// The moved object reads its own record-owned immediately-before view: a
+    /// battlefield departure or a sacrifice (CR 603.10a), or the pre-event card of an object
+    /// entering the battlefield from another zone, which observes only its own look-back halves
+    /// (`event_subject_observes`).
     EventSubject,
     /// Every other source path: live index, off-zone cache, or co-departed LKI.
-    Observer,
+    ///
+    /// CR 603.10 + CR 603.6a: `exists_from` is the earliest point at which the source exists for
+    /// the visited event. `ImmediatelyAfter` marks a newcomer of the event's own entry event (its
+    /// own entry, or a co-entrant's), which observes the event only through a half that does not
+    /// look back (CR 603.10a; `observes_from_immediately_after`). Only the battlefield candidate
+    /// loop of `collect_pending_triggers` (and its debug shadow scan) computes it; every other
+    /// observer path passes `ImmediatelyBefore`.
+    Observer { exists_from: TriggerObservationTime },
     /// CR 603.10 + CR 603.10d: a look-back control-change watcher, latched
     /// immediately before the event's instruction and carried on the event.
     /// The only visit that admits a printed `ChangesController` definition, and
@@ -2786,7 +3302,12 @@ impl LogicalZoneTriggerCollection<'_> {
                             && member.identity.incarnation <= source.incarnation
                     })
             }
-            Self::Settlement(_) => matches!(visit, TriggerSourceVisit::Observer),
+            Self::Settlement(_) => match visit {
+                TriggerSourceVisit::Observer { .. } => true,
+                TriggerSourceVisit::EventSubject | TriggerSourceVisit::ControlChangeWatcher => {
+                    false
+                }
+            },
         }
     }
 
@@ -3002,7 +3523,10 @@ fn collect_observer_triggers_under_lki_attachment(
         registered_this_event,
         active_suppress_triggers,
         collection,
-        TriggerSourceVisit::Observer,
+        // CR 603.10a: an LKI observer existed on the battlefield before the event.
+        TriggerSourceVisit::Observer {
+            exists_from: TriggerObservationTime::ImmediatelyBefore,
+        },
     );
     // Restore unconditionally, before the caller consumes `matched`, so every
     // early-return path the caller may take is still covered.
@@ -3250,6 +3774,29 @@ fn collect_matching_triggers_inner(
         // visits, from the board after the event.
         if is_look_back_control_change(&trig_def.mode)
             != matches!(visit, TriggerSourceVisit::ControlChangeWatcher)
+        {
+            continue;
+        }
+        // CR 603.6a + CR 603.10 + CR 603.10a: an observer that exists only immediately after the
+        // event (a newcomer of its own entry event) observes it only through a half that does not
+        // look back (`observes_from_immediately_after`); its own look-back halves are observed by
+        // its pre-event card (`event_subject_observes`). Before the batched /
+        // registered-this-event bookkeeping, so a refused definition consumes no batch slot.
+        if let TriggerSourceVisit::Observer {
+            exists_from: TriggerObservationTime::ImmediatelyAfter,
+        } = visit
+        {
+            if !observes_from_immediately_after(trig_def, event) {
+                continue;
+            }
+        }
+        // CR 603.10 + CR 603.10a + CR 113.6k: the pre-event card of an object entering the
+        // battlefield observes only what its post-event permanent does not, and only where it was
+        // (`event_subject_observes`). Before the zone guard, whose event-subject destination
+        // fallback would otherwise admit a battlefield-only definition for an entry, and before the
+        // batched / registered-this-event bookkeeping.
+        if matches!(visit, TriggerSourceVisit::EventSubject)
+            && !event_subject_observes(trig_def, event)
         {
             continue;
         }
@@ -3549,6 +4096,9 @@ fn collect_matching_triggers_inner(
                     Some(&trigger_event),
                     later_equal_in_batch,
                 );
+                // CR 805.4d: a fanned phase occurrence rebinds its firing to
+                // its own player; every other shape keeps the stamp above.
+                restamp_scoped_player_from_phase_occurrence(&mut pending_ability, &trigger_event);
                 pending.push(MatchedTrigger {
                     trig_idx,
                     definition_ref: definition_ref.clone(),
@@ -3834,66 +4384,396 @@ pub(crate) fn departure_observer_provably_excludes(
 /// that the SAME spell sacrificed before she was put back onto the
 /// battlefield).
 ///
-/// `battlefield_entry_index` maps each object to the observation boundary of
-/// its LAST `ZoneChanged { to: Battlefield }` in `events`. The boundary also
-/// includes contiguous same-object counter events published immediately before
-/// that entry record for "enters with counters" replacements. An object with
-/// no entry recorded was already on the battlefield before the batch began
+/// `observations` maps each object that entered within the batch to its
+/// observation window ([`EntryObservation::presence_at`]): its LAST entry span
+/// (its `ZoneChanged { to: Battlefield }` in `events` and the contiguous
+/// same-object counter events published immediately before that entry record
+/// for "enters with counters" replacements), the entry spans of the objects that
+/// entered in the same event as that entry (CR 603.6a; see
+/// [`battlefield_entry_observation_indices`]), and every later event. An object
+/// with no entry recorded was already on the battlefield before the batch began
 /// (the caller already restricts candidates to objects currently on the
-/// battlefield), so it is present for every event in the batch. An object
-/// that DID (re-)enter mid-batch is present only from that boundary onward —
-/// CR 400.7 treats a permanent that changes zones as a new object
-/// with no memory of its prior incarnation, so even an earlier temporary
-/// presence within the SAME batch (a blink-and-return) does not extend
-/// backward past the most recent entry. This subsumes the original
-/// self-departure check: for a source that leaves and later re-enters within
-/// the same batch, its own departure index is always strictly less than its
-/// last-entry index, so it is correctly excluded.
-fn live_battlefield_source_was_present_at_event(
+/// battlefield), so it exists immediately before every event in the batch. An
+/// object that DID (re-)enter mid-batch is absent before that entry — CR 400.7
+/// treats a permanent that changes zones as a new object with no memory of its
+/// prior incarnation, so even an earlier temporary presence within the SAME
+/// batch (a blink-and-return) does not extend backward past the most recent
+/// entry. This subsumes the original self-departure check: for a source that
+/// leaves and later re-enters within the same batch, its own departure index is
+/// always strictly less than its last-entry index, so it is correctly excluded.
+///
+/// CR 603.10 + CR 603.10a: for the events of its own entry event (its own entry
+/// span and its co-entrants' spans) the entrant exists only immediately after the
+/// event, so it observes them only through halves that do not look back
+/// (`observes_from_immediately_after`); the look-back halves of its own entry are observed by
+/// its pre-event card instead (`event_subject_observes`); for every later event it
+/// existed immediately before it.
+fn battlefield_source_presence_at_event(
     event_idx: usize,
     source_id: ObjectId,
-    battlefield_entry_index: &std::collections::HashMap<ObjectId, usize>,
-) -> bool {
-    battlefield_entry_index
-        .get(&source_id)
-        .is_none_or(|&entry_idx| event_idx >= entry_idx)
+    observations: &BattlefieldEntryObservations,
+) -> Option<TriggerObservationTime> {
+    match observations.by_object.get(&source_id) {
+        Some(observation) => observation.presence_at(event_idx),
+        None => Some(TriggerObservationTime::ImmediatelyBefore),
+    }
 }
 
-/// Return each entrant's observation boundary within a resolved event batch.
+/// The event indices of one resolved batch that an object entering the
+/// battlefield within it observes.
+struct EntryObservation {
+    /// The object's LAST entry span: the events of its own entry.
+    own_span: std::ops::RangeInclusive<usize>,
+    /// CR 603.6a: the entry spans of the other objects that entered in the same
+    /// event as that last entry.
+    co_entry_spans: Vec<std::ops::RangeInclusive<usize>>,
+}
+
+impl EntryObservation {
+    /// CR 603.10 + CR 603.6a + CR 400.7: the earliest point at which this entrant exists for one
+    /// event of the batch: `None` before its entry (issue #8160), `Some(ImmediatelyAfter)` for the
+    /// events of its own CR 603.6a entry event (its own entry span and its co-entrants' spans, in
+    /// either delivery order), and `Some(ImmediatelyBefore)` for every later event.
+    fn presence_at(&self, event_idx: usize) -> Option<TriggerObservationTime> {
+        if self.own_span.contains(&event_idx)
+            || self
+                .co_entry_spans
+                .iter()
+                .any(|span| span.contains(&event_idx))
+        {
+            Some(TriggerObservationTime::ImmediatelyAfter)
+        } else if event_idx > *self.own_span.end() {
+            Some(TriggerObservationTime::ImmediatelyBefore)
+        } else {
+            None
+        }
+    }
+}
+
+/// CR 603.10 + CR 603.10a + CR 603.6a: whether an observer that exists only immediately after
+/// `event` (a newcomer of its own entry event) observes it through `trigger`.
+///
+/// Domain: only events inside an entry span reach it — a `ZoneChanged` to the battlefield and the
+/// same-object `CounterAdded` prefix before it (`entry_span_start`) — because only those visits
+/// carry `exists_from: ImmediatelyAfter` ([`EntryObservation::presence_at`]), and
+/// `event_subject_observes`, whose complement it is, passes only a `ZoneChanged` to the battlefield.
+/// Of the CR
+/// 603.10a–g exceptions only CR 603.10a can arise there: a leaves-the-battlefield half, a
+/// sacrifice, a leaves-a-graveyard half, or a visible object put into a hand or library
+/// (`trigger_matchers::zone_change_observed_after`). The catch-all `true` arm is the CR 603.10
+/// normal rule for that domain: enters modes, and counter triggers on a co-entrant's entry
+/// counters (CR 122.6). A future look-back trigger mode that can match an entry-span event must
+/// add an explicit `false` arm.
+///
+/// CR 603.10 + CR 603.10a + CR 400.7: a newcomer's own entry is no exception. The look-back halves
+/// of its own entry are observed by its pre-event card, which the entry's record owns
+/// (`event_subject_observes`): the permanent is a new object whose definitions after the entry need
+/// not be the card's (Xu-Ifit, Osteoharmonist's "has no abilities" applies with the entry, CR
+/// 611.2e).
+fn observes_from_immediately_after(trigger: &TriggerDefinition, event: &GameEvent) -> bool {
+    match (&trigger.mode, event) {
+        (
+            TriggerMode::ChangesZone | TriggerMode::ChangesZoneAll,
+            GameEvent::ZoneChanged { from, to, .. },
+        ) => super::trigger_matchers::zone_change_observed_after(trigger, *from, *to),
+        // CR 603.10a: leaves-the-battlefield and sacrifice triggers look back in time.
+        (TriggerMode::LeavesBattlefield, GameEvent::ZoneChanged { .. })
+        | (
+            TriggerMode::Sacrificed | TriggerMode::SacrificedOnce,
+            GameEvent::PermanentSacrificed { .. },
+        ) => false,
+        _ => true,
+    }
+}
+
+/// CR 603.10 + CR 603.10a: whether the record-owned immediately-before view of `event`'s subject
+/// (`TriggerSourceVisit::EventSubject`) observes `event` through `trigger`.
+///
+/// CR 603.6a + CR 603.10 + CR 400.7: for an object entering the battlefield from another zone, the
+/// view is its pre-event card, and the permanent that entered is a new object that observes the
+/// entry through every half checked after the event (`observes_from_immediately_after`). The card
+/// observes exactly the rest, the look-back halves (CR 603.10a), and only for a definition that
+/// functioned where the card was (CR 113.6 + CR 113.6b + CR 113.6k;
+/// `trigger_definition_functions_in_zone`): Oglor, Devoted Assistant's granted "When this card
+/// leaves your graveyard, create a tapped 2/2 black Zombie creature token." functioned in the
+/// graveyard, so it triggers even when Xu-Ifit, Osteoharmonist's "has no abilities" removes it with
+/// the entry (CR 611.2e). Syr Konrad, the Grim's "a creature card leaves your graveyard" functions
+/// only on the battlefield (CR 113.6). Prized Amalgam's "Whenever a creature enters, …" functions
+/// only in the graveyard (CR 113.6m) and is an enters half, checked after the event, when the card
+/// is on the battlefield. Being complementary, the two views never collect one definition twice.
+///
+/// Every other event-subject visit (a battlefield departure, a sacrifice) is the CR 603.10a
+/// look-back view itself and is unchanged.
+fn event_subject_observes(trigger: &TriggerDefinition, event: &GameEvent) -> bool {
+    match event {
+        GameEvent::ZoneChanged {
+            from,
+            to: Zone::Battlefield,
+            ..
+        } => {
+            from.is_some_and(|origin| trigger_definition_functions_in_zone(trigger, origin))
+                && !observes_from_immediately_after(trigger, event)
+        }
+        _ => true,
+    }
+}
+
+/// Every object that entered the battlefield within one resolved batch, with
+/// the events it observes there.
+struct BattlefieldEntryObservations {
+    by_object: std::collections::HashMap<ObjectId, EntryObservation>,
+}
+
+impl BattlefieldEntryObservations {
+    /// CR 614.12a + CR 603.2: an as-enters choice precedes entry, so these
+    /// objects cannot observe any event in this batch, including co-entry spans.
+    fn treat_as_not_yet_entered(
+        &mut self,
+        sources: impl IntoIterator<Item = ObjectId>,
+        event_count: usize,
+    ) {
+        for source in sources {
+            self.by_object.insert(
+                source,
+                EntryObservation {
+                    own_span: event_count..=event_count,
+                    co_entry_spans: Vec::new(),
+                },
+            );
+        }
+    }
+}
+
+/// One battlefield entry occurrence of a resolved batch.
+struct BatchEntry {
+    object_id: ObjectId,
+    span: std::ops::RangeInclusive<usize>,
+    /// The entrant and its CR 603.6a co-entrants, sorted and deduplicated.
+    members: Vec<ObjectId>,
+}
+
+/// Return each entrant's observation window within a resolved event batch.
+///
+/// CR 603.6a: "Each time an event puts one or more permanents onto the
+/// battlefield, all permanents on the battlefield (including the newcomers) are
+/// checked". The newcomers of one event therefore see that event's entries,
+/// each with its entry counter prefix (CR 122.6), whichever of them was
+/// delivered first. Which entries are one event is read from the stamped
+/// `ZoneChangeRecord::co_entered` fact, never from event order: entries whose
+/// member sets (the entrant plus its `co_entered`) are equal join one event,
+/// and a member seen again under the same set opens a new event (CR 400.7: an
+/// earlier entry of the same object is an earlier event). An unstamped entry
+/// is its own event.
+///
+/// CR 603.10 + CR 603.10a: a newcomer exists only immediately after its own
+/// entry event, so it sees that event's entries (its own and its co-entrants')
+/// only through enters halves and other halves checked after the event; a
+/// look-back half (leaves the battlefield, a sacrifice, leaves a graveyard, a
+/// visible object put into a hand or library) needs the source to have existed
+/// immediately before the event, which a newcomer did not, whichever member was
+/// delivered first ([`EntryObservation::presence_at`],
+/// `observes_from_immediately_after`). The look-back halves of the newcomer's own entry are
+/// observed by its pre-event card, read from the entry's record, where a definition that
+/// functioned in the origin zone (CR 113.6b + CR 113.6k) looks back from there
+/// (`event_subject_observes`).
+///
+/// Known gap of that refusal: the logical-group settlement member pass
+/// (`collect_logical_zone_trigger_settlement_for`) visits every member with
+/// `exists_from: ImmediatelyBefore`.
+///
+/// CR 400.7 + issue #8160: every other event before an observer's own entry
+/// stays unseen, including one interleaved within the group's delivery before
+/// that entry, such as a sacrifice (a look-back trigger event, CR 603.10a).
 ///
 /// An "enters with counters" replacement is applied while the object enters,
 /// but token creation currently publishes those contiguous `CounterAdded`
 /// events immediately before its journaled `ZoneChanged` event. They are part
-/// of the entry lifetime, so the boundary includes that same-object counter
+/// of the entry lifetime, so an entry span includes that same-object counter
 /// prefix. It deliberately stops at the first different event, keeping an
 /// unrelated event that occurred before entry outside the observer's lifetime.
-fn battlefield_entry_observation_indices(
+///
+/// Known gaps: the reader reads the batch it is given. An entrant whose own
+/// entry occurrence is absent from that batch has no boundary there: the
+/// occurrence was claimed by its owner, captured for a mid-entry choice, or
+/// removed as a queued witness (Living Death returning Carmen, Cruel
+/// Skymarcher beside Impact Tremors, "Whenever a creature you control enters,
+/// this enchantment deals 1 damage to each opponent.": Tremors witnesses
+/// Carmen's entry at the owner, so Carmen reads the earlier sacrifice of
+/// Grizzly Bears). A co-entrant delivered in another segment or action (a
+/// member resumed after a pause, or one delivered before it) is not observed
+/// (Living Death returning Hill Giant, then Famished Worldsire, whose devour
+/// choice pauses the group, then Soul Warden, "Whenever another creature
+/// enters, you gain 1 life.": Soul Warden misses Hill Giant's entry).
+fn battlefield_entry_observation_indices(events: &[GameEvent]) -> BattlefieldEntryObservations {
+    let entries: Vec<BatchEntry> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(entry_idx, event)| {
+            let GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } = event
+            else {
+                return None;
+            };
+            let mut members = record.co_entered.clone();
+            members.push(*object_id);
+            members.sort_unstable();
+            members.dedup();
+            Some(BatchEntry {
+                object_id: *object_id,
+                span: entry_span_start(events, entry_idx, *object_id)..=entry_idx,
+                members,
+            })
+        })
+        .collect();
+
+    // CR 603.6a + CR 400.7: group the entries into events. Per member set, the
+    // open event and the members already seen in it.
+    let mut entry_event: Vec<usize> = Vec::with_capacity(entries.len());
+    let mut event_entries: Vec<Vec<usize>> = Vec::new();
+    let mut open_events: std::collections::HashMap<&[ObjectId], (usize, Vec<ObjectId>)> =
+        std::collections::HashMap::new();
+    for (entry_ordinal, entry) in entries.iter().enumerate() {
+        let joined = match open_events.get_mut(entry.members.as_slice()) {
+            Some((event, seen)) if !seen.contains(&entry.object_id) => {
+                seen.push(entry.object_id);
+                Some(*event)
+            }
+            Some(_) | None => None,
+        };
+        let event = joined.unwrap_or_else(|| {
+            let event = event_entries.len();
+            event_entries.push(Vec::new());
+            open_events.insert(entry.members.as_slice(), (event, vec![entry.object_id]));
+            event
+        });
+        event_entries[event].push(entry_ordinal);
+        entry_event.push(event);
+    }
+
+    let mut last_entry: std::collections::HashMap<ObjectId, usize> =
+        std::collections::HashMap::new();
+    for (entry_ordinal, entry) in entries.iter().enumerate() {
+        last_entry.insert(entry.object_id, entry_ordinal);
+    }
+    let by_object = last_entry
+        .into_iter()
+        .map(|(object_id, entry_ordinal)| {
+            let co_entry_spans = event_entries[entry_event[entry_ordinal]]
+                .iter()
+                .filter(|&&co_entry| co_entry != entry_ordinal)
+                .map(|&co_entry| entries[co_entry].span.clone())
+                .collect();
+            let observation = EntryObservation {
+                own_span: entries[entry_ordinal].span.clone(),
+                co_entry_spans,
+            };
+            (object_id, observation)
+        })
+        .collect();
+    BattlefieldEntryObservations { by_object }
+}
+
+/// Start of the entry span of `object_id`'s battlefield entry at `entry_idx`: the entry itself
+/// and the contiguous same-object `CounterAdded` events published immediately before it.
+fn entry_span_start(events: &[GameEvent], entry_idx: usize, object_id: ObjectId) -> usize {
+    let mut start = entry_idx;
+    while start > 0
+        && matches!(
+            &events[start - 1],
+            GameEvent::CounterAdded { object_id: countered_id, .. }
+                if *countered_id == object_id
+        )
+    {
+        start -= 1;
+    }
+    start
+}
+
+/// CR 603.6a: the ledger index of each entrant's LAST battlefield entry in `events`, for the
+/// entries recorded on this turn's ledger. It identifies the instruction that put the entrant
+/// onto the battlefield ([`GameState::instruction_of_zone_change`]).
+fn battlefield_entry_ledger_indices(
+    state: &GameState,
     events: &[GameEvent],
 ) -> std::collections::HashMap<ObjectId, usize> {
-    let mut boundaries = std::collections::HashMap::new();
-    for (entry_idx, event) in events.iter().enumerate() {
-        let GameEvent::ZoneChanged {
-            object_id,
-            to: Zone::Battlefield,
-            ..
-        } = event
-        else {
-            continue;
-        };
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ZoneChanged {
+                object_id,
+                to: Zone::Battlefield,
+                record,
+                ..
+            } if record.recorded_turn_number == state.turn_number => {
+                Some((*object_id, record.turn_zone_change_index))
+            }
+            _ => None,
+        })
+        .collect()
+}
 
-        let mut boundary = entry_idx;
-        while boundary > 0
-            && matches!(
-                &events[boundary - 1],
-                GameEvent::CounterAdded { object_id: countered_id, .. }
-                    if countered_id == object_id
-            )
-        {
-            boundary -= 1;
-        }
-        boundaries.insert(*object_id, boundary);
+/// CR 603.6a: "each time an event puts one or more permanents onto the battlefield, all
+/// permanents on the battlefield (including the newcomers) are checked for any
+/// enters-the-battlefield triggers that match the event." Entrants of one instruction are one
+/// event, so a newcomer observes the entry of a co-entrant even when its own entry record comes
+/// later in the batch: the positional lifetime guard
+/// ([`battlefield_source_presence_at_event`]) separates events that happened in order
+/// (issue #8160), not the entries of one simultaneous event.
+fn source_enters_with_event(
+    state: &GameState,
+    event: &GameEvent,
+    source_id: ObjectId,
+    entry_ledger_index: &std::collections::HashMap<ObjectId, usize>,
+) -> bool {
+    let GameEvent::ZoneChanged {
+        to: Zone::Battlefield,
+        record,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if record.recorded_turn_number != state.turn_number {
+        return false;
     }
-    boundaries
+    // Only a cohort that included an entry held across answers: an entry that was never held
+    // keeps the positional lifetime guard.
+    if !state
+        .released_entry_rows
+        .contains(&record.turn_zone_change_index)
+    {
+        return false;
+    }
+    entry_ledger_index
+        .get(&source_id)
+        .is_some_and(|source_entry| {
+            state.instruction_of_zone_change(record.turn_zone_change_index)
+                == state.instruction_of_zone_change(*source_entry)
+        })
+}
+
+/// CR 113.6 + CR 603.2 + CR 603.6a: when could the live battlefield source `source_id` observe
+/// `events[event_idx]`. The batch's own observation window
+/// ([`battlefield_source_presence_at_event`]) decides first; a source that entered in the same
+/// instruction as an entry that was held across answers ([`source_enters_with_event`]) observes
+/// that entry as a newcomer of the same event, immediately after it, as the window does for the
+/// co-entrants it knows.
+fn scan_source_presence_at_event(
+    state: &GameState,
+    event_idx: usize,
+    events: &[GameEvent],
+    source_id: ObjectId,
+    observations: &BattlefieldEntryObservations,
+    entry_ledger_index: &std::collections::HashMap<ObjectId, usize>,
+) -> Option<TriggerObservationTime> {
+    battlefield_source_presence_at_event(event_idx, source_id, observations).or_else(|| {
+        source_enters_with_event(state, &events[event_idx], source_id, entry_ledger_index)
+            .then_some(TriggerObservationTime::ImmediatelyAfter)
+    })
 }
 
 fn storm_copy_count_before_cast(state: &GameState) -> i32 {
@@ -4721,7 +5601,10 @@ fn observe_creatures_exploited(state: &mut GameState, events: &[GameEvent]) {
     }
 }
 
-fn collect_pending_triggers(
+/// CR 603.2 + CR 603.10: collect `events`' ordinary triggered abilities against
+/// the game as it is now, without queuing them. The caller places the contexts
+/// exactly once (`queue_parked_trigger_contexts`).
+pub(crate) fn collect_pending_triggers(
     state: &mut GameState,
     events: &[GameEvent],
 ) -> Vec<PendingTriggerContext> {
@@ -4778,13 +5661,58 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
     group: &mut LogicalZoneChangeGroup,
     events: &[GameEvent],
 ) -> Result<(), String> {
+    append_and_collect_logical_zone_trigger_segment_for(
+        state,
+        group,
+        events,
+        EntryOccurrenceCollector::Owner,
+    )
+}
+
+/// Retain every `ZoneChanged` occurrence of one delivery segment on its owner, and collect
+/// ordinary triggers only for the occurrences `collector` leaves with the owner. A handed-off
+/// entry stays retained (outcome bookkeeping and completeness are unchanged) but is checked by
+/// the post-action collector instead (CR 603.10 + CR 611.2e).
+pub(crate) fn append_and_collect_logical_zone_trigger_segment_for(
+    state: &mut GameState,
+    group: &mut LogicalZoneChangeGroup,
+    events: &[GameEvent],
+    collector: EntryOccurrenceCollector,
+) -> Result<(), String> {
+    append_logical_zone_trigger_segment(group, events)?;
+    collect_owner_logical_zone_trigger_segment(state, group, events, collector)
+}
+
+/// Retain every `ZoneChanged` occurrence of one delivery segment on its owner.
+fn append_logical_zone_trigger_segment(
+    group: &mut LogicalZoneChangeGroup,
+    events: &[GameEvent],
+) -> Result<(), String> {
     let zone_change_events: Vec<_> = events
         .iter()
         .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
         .cloned()
         .collect();
-    group.append_delivery_events(&zone_change_events)?;
-    let pending = collect_logical_zone_trigger_segment(state, group, &zone_change_events);
+    group.append_delivery_events(&zone_change_events)
+}
+
+/// Collect and park the ordinary triggers of one retained delivery segment's `ZoneChanged`
+/// occurrences that `collector` leaves with the owner.
+fn collect_owner_logical_zone_trigger_segment(
+    state: &mut GameState,
+    group: &LogicalZoneChangeGroup,
+    events: &[GameEvent],
+    collector: EntryOccurrenceCollector,
+) -> Result<(), String> {
+    let owner_collected_events: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(event, GameEvent::ZoneChanged { .. })
+                && owner_collects_occurrence(collector, event)
+        })
+        .cloned()
+        .collect();
+    let pending = collect_logical_zone_trigger_segment(state, group, &owner_collected_events);
     resolve_and_apply_trigger_collection(
         state,
         ResolvedTriggerCollection::DeferPending { contexts: pending },
@@ -4793,19 +5721,161 @@ pub(crate) fn append_and_collect_logical_zone_trigger_segment(
     Ok(())
 }
 
+/// CR 603.10 + CR 603.6a + CR 611.2e: which collector checks the ordinary enter triggers of a
+/// logical zone-change owner's battlefield-entry occurrences.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EntryOccurrenceCollector {
+    /// The owner checks the entry at the instruction's completion: when no later instruction of
+    /// this resolution can apply an effect with the entry; when one that starts after the entry
+    /// may act on a moved object (CR 608.2c: "Put a flying counter on it.", "It gains haste
+    /// until end of turn."); or when the completion site narrows the group back to its owner
+    /// (CR 603.2c: an occurrence that ends outside the battlefield, an entry delivered by an
+    /// earlier action, or a resume with members still to deliver). In every case but the first
+    /// the "is/has" effect does not exist yet (known gap: an observer keyed on that effect alone
+    /// misses the entry).
+    Owner,
+    /// A later instruction may still apply an "is/has" effect simultaneously with the entry
+    /// (CR 611.2e) and no instruction that starts after the entry may act on a moved object
+    /// (CR 608.2c), so the whole resolution's changes to the entrant are the ones that apply with
+    /// the entry: the post-action collector of this action checks the entry, after that effect
+    /// exists unless the instruction applying it pauses first (known gap: a multi-host
+    /// ReturnAsAura host choice, CR 303.4f).
+    AfterSimultaneousEntryEffects,
+}
+
+impl EntryOccurrenceCollector {
+    /// The collector for one logical zone-change `group` that the current action delivers
+    /// whole: its retained occurrences plus `unretained_events`, the delivery output not yet
+    /// appended to it. See [`Self::for_group_delivered_by`].
+    pub(crate) fn for_group<'a>(
+        self,
+        group: &'a LogicalZoneChangeGroup,
+        unretained_events: impl IntoIterator<Item = &'a GameEvent>,
+    ) -> Self {
+        self.for_group_delivered_by(group, unretained_events, |_| true)
+    }
+
+    /// [`Self::for_group`] for a resumed owner: the hand-off goes to the post-action collector
+    /// of the action that completes the owner, and that collector checks only this action's
+    /// events (`action_events`). If an entry was delivered by an earlier action of a paused
+    /// owner, no later collector would check it, so the owner keeps every occurrence.
+    pub(crate) fn within_action<'a>(
+        self,
+        group: &'a LogicalZoneChangeGroup,
+        unretained_events: impl IntoIterator<Item = &'a GameEvent>,
+        action_events: &[GameEvent],
+    ) -> Self {
+        self.for_group_delivered_by(group, unretained_events, |event| {
+            action_events.contains(event)
+        })
+    }
+
+    /// CR 603.2c + CR 603.10a: the hand-off is all-or-nothing per logical group. The group's
+    /// zone changes are one event, and the owner's latched batched pass and the post-action
+    /// collector would each see "one or more" of its occurrences, but a batched trigger triggers
+    /// only once for the event. So the owner hands off only when every zone-change occurrence
+    /// of the group is a battlefield entry delivered by this action; one that ends in another
+    /// zone (Storm of Souls' return with one member exiled instead) or was delivered by an
+    /// earlier action keeps the whole group with the owner.
+    fn for_group_delivered_by<'a>(
+        self,
+        group: &'a LogicalZoneChangeGroup,
+        unretained_events: impl IntoIterator<Item = &'a GameEvent>,
+        delivered_by_this_action: impl Fn(&GameEvent) -> bool,
+    ) -> Self {
+        match self {
+            Self::Owner => Self::Owner,
+            Self::AfterSimultaneousEntryEffects => {
+                let hands_off_whole_group = group
+                    .all_origin_occurrences
+                    .iter()
+                    .map(|occurrence| &occurrence.event)
+                    .chain(unretained_events)
+                    .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+                    .all(|event| {
+                        !owner_collects_occurrence(self, event) && delivered_by_this_action(event)
+                    });
+                if hands_off_whole_group {
+                    Self::AfterSimultaneousEntryEffects
+                } else {
+                    Self::Owner
+                }
+            }
+        }
+    }
+}
+
+/// CR 603.10 + CR 611.2e: does the logical owner itself check `event`'s ordinary triggers?
+/// Only moves to the battlefield are handed off. A move to the battlefield from a graveyard is
+/// handed off whole, its CR 603.10a leaves-the-graveyard half included. The completion sites
+/// pick the collector through [`EntryOccurrenceCollector::for_group`] /
+/// [`EntryOccurrenceCollector::within_action`], so under `AfterSimultaneousEntryEffects` every
+/// zone-change occurrence of the group is a battlefield entry and the owner keeps none of them.
+fn owner_collects_occurrence(collector: EntryOccurrenceCollector, event: &GameEvent) -> bool {
+    match collector {
+        EntryOccurrenceCollector::Owner => true,
+        EntryOccurrenceCollector::AfterSimultaneousEntryEffects => !matches!(
+            event,
+            GameEvent::ZoneChanged {
+                to: Zone::Battlefield,
+                ..
+            }
+        ),
+    }
+}
+
 /// Complete the one logical zone-change owner after its final delivery slice.
 ///
 /// CR 603.10 observes ordinary triggers only after the final layer flush, while
 /// CR 603.10a uses each departed member's record-owned pre-event authority.
 /// This is the sole completion seam: it appends the final segment, latches the
-/// post-event authority, stamps only derived battlefield departures, and runs
+/// post-event authority, stamps the group's battlefield entries before its final
+/// segment is collected and its derived battlefield departures after it, and runs
 /// settlement exactly once before the caller emits its trailing completion.
 pub(crate) fn complete_logical_zone_trigger_collection(
     state: &mut GameState,
     group: &mut LogicalZoneChangeGroup,
     final_events: &mut [GameEvent],
 ) -> Result<(), String> {
-    append_and_collect_logical_zone_trigger_segment(state, group, final_events)?;
+    complete_logical_zone_trigger_collection_for(
+        state,
+        group,
+        final_events,
+        EntryOccurrenceCollector::Owner,
+    )
+}
+
+/// `complete_logical_zone_trigger_collection` with an explicit entry-occurrence collector.
+///
+/// CR 603.10 + CR 603.6a + CR 611.2e: under
+/// `EntryOccurrenceCollector::AfterSimultaneousEntryEffects` the owner checks no ordinary
+/// trigger for its battlefield-entry occurrences (segment, settlement, or latched batched pass).
+/// A handed-off entry therefore carries no witness in `deferred_triggers`, so the post-action
+/// collector of this action is its sole collector and checks it once (CR 603.2c), after the
+/// resolution's simultaneous "is/has" effects exist when no instruction pauses before applying
+/// one (a multi-host ReturnAsAura host choice is a known gap). It is chosen only when no
+/// instruction that starts after the entry acts on a moved object, so that collector reads no
+/// change CR 608.2c makes after the entry (`effects::entry_occurrence_collector`), and only for
+/// a group whose every zone-change occurrence is such an entry
+/// ([`EntryOccurrenceCollector::for_group`], CR 603.2c).
+pub(crate) fn complete_logical_zone_trigger_collection_for(
+    state: &mut GameState,
+    group: &mut LogicalZoneChangeGroup,
+    final_events: &mut [GameEvent],
+    collector: EntryOccurrenceCollector,
+) -> Result<(), String> {
+    // CR 603.6a: the group's entries are one event. Its final segment joins the owner, and every
+    // entry is stamped before any collector reads it, so the owner's own check, the post-action
+    // pass and a deferred-entry replay read the same simultaneity, and witnesses captured below
+    // equal the stamped buffer (CR 603.2c).
+    append_logical_zone_trigger_segment(group, final_events)?;
+    group.stamp_battlefield_entries();
+    sync_logical_zone_change_simultaneity_stamps(group, final_events);
+    sync_logical_zone_change_simultaneity_stamps(group, &mut state.deferred_entry_events);
+    // CR 400.7 + CR 603.2c: the entries' ledger rows and the parked copies carry the same stamp,
+    // so a restore binds every copy to its occurrence.
+    mirror_logical_zone_change_entry_stamps(state, group);
+    collect_owner_logical_zone_trigger_segment(state, group, final_events, collector)?;
     latch_logical_zone_change_group_immediately_after(state, group);
 
     let post_event_members: Vec<_> = group
@@ -4839,8 +5909,8 @@ pub(crate) fn complete_logical_zone_trigger_collection(
     }
 
     group.stamp_battlefield_departures()?;
-    sync_logical_zone_change_departure_stamps(group, final_events);
-    let settlement = collect_logical_zone_trigger_settlement(state, group)?;
+    sync_logical_zone_change_simultaneity_stamps(group, final_events);
+    let settlement = collect_logical_zone_trigger_settlement_for(state, group, collector)?;
     resolve_and_apply_trigger_collection(
         state,
         ResolvedTriggerCollection::DeferPending {
@@ -4851,54 +5921,131 @@ pub(crate) fn complete_logical_zone_trigger_collection(
     Ok(())
 }
 
-/// Copy owner-derived CR 603.10a departure stamps onto any externally retained
-/// delivery output. A paused batch keeps earlier delivery events outside its
-/// final segment until it completes, but those events must expose the same
-/// derived `co_departed` projection as the owner's retained records.
-pub(crate) fn sync_logical_zone_change_departure_stamps(
+/// Copy the owner-derived simultaneity stamps, CR 603.10a `co_departed` and CR 603.6a
+/// `co_entered`, onto every copy of the group's occurrences held outside it: any externally
+/// retained delivery output. A paused batch keeps earlier delivery events outside its final
+/// segment until it completes, but those events must expose the same derived projections as
+/// the owner's retained records.
+pub(crate) fn sync_logical_zone_change_simultaneity_stamps(
     group: &LogicalZoneChangeGroup,
     events: &mut [GameEvent],
 ) {
     for event in events {
-        let GameEvent::ZoneChanged {
-            object_id,
-            from,
-            to,
-            record,
-        } = event
-        else {
+        let Some(retained_record) = retained_occurrence_record(group, event) else {
             continue;
         };
-        let Some(GameEvent::ZoneChanged {
-            record: retained_record,
-            ..
-        }) = group
-            .all_origin_occurrences
-            .iter()
-            .map(|occurrence| &occurrence.event)
-            .find(|retained| {
-                matches!(
-                    retained,
-                    GameEvent::ZoneChanged {
-                        object_id: retained_id,
-                        from: retained_from,
-                        to: retained_to,
-                        record: retained_record,
-                    } if retained_id == object_id
-                        && retained_from == from
-                        && retained_to == to
-                        && retained_record
-                            .trigger_source_context()
-                            .map(|context| context.identity.reference)
-                            == record
-                                .trigger_source_context()
-                                .map(|context| context.identity.reference)
-                )
-            })
-        else {
-            continue;
+        let GameEvent::ZoneChanged { record, .. } = event else {
+            unreachable!("retained_occurrence_record matches only ZoneChanged events");
         };
         record.co_departed = retained_record.co_departed.clone();
+        record.co_entered = retained_record.co_entered.clone();
+    }
+}
+
+/// The record of the group's retained occurrence that `event` is a copy of: the same object
+/// moved between the same zones under the same source-context reference. `None` for any other
+/// event.
+fn retained_occurrence_record<'g>(
+    group: &'g LogicalZoneChangeGroup,
+    event: &GameEvent,
+) -> Option<&'g crate::types::game_state::ZoneChangeRecord> {
+    let GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+        record,
+    } = event
+    else {
+        return None;
+    };
+    group.all_origin_occurrences.iter().find_map(|occurrence| {
+        let GameEvent::ZoneChanged {
+            object_id: retained_id,
+            from: retained_from,
+            to: retained_to,
+            record: retained_record,
+        } = &occurrence.event
+        else {
+            return None;
+        };
+        if retained_id == object_id
+            && retained_from == from
+            && retained_to == to
+            && retained_record
+                .trigger_source_context()
+                .map(|context| context.identity.reference)
+                == record
+                    .trigger_source_context()
+                    .map(|context| context.identity.reference)
+        {
+            Some(retained_record.as_ref())
+        } else {
+            None
+        }
+    })
+}
+
+/// CR 603.6a + CR 400.7 + CR 603.2c: copy each entry's `co_entered` stamp onto the copies of the
+/// group's entries that its completion does not otherwise produce. Each entry's per-turn ledger
+/// row was recorded at its move, possibly in an earlier action, and a trigger the owner collected
+/// from an earlier delivery segment is parked in `deferred_triggers` with an unstamped copy. A
+/// restore binds every live `ZoneChanged` record to its ledger row by the record's rules
+/// projection, `co_entered` included, so every copy must state the same event. The precedent is
+/// `zones::mark_simultaneous_departure_records`. `co_departed` is not mirrored here: the ledger's
+/// copy is read by `co_departed_observer_record` and a parked copy's by
+/// `source_was_not_co_departed_into_zone`.
+fn mirror_logical_zone_change_entry_stamps(state: &mut GameState, group: &LogicalZoneChangeGroup) {
+    for occurrence in &group.all_origin_occurrences {
+        let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(from),
+            to: Zone::Battlefield,
+            record,
+        } = &occurrence.event
+        else {
+            continue;
+        };
+        if record.recorded_turn_number != state.turn_number {
+            continue;
+        }
+        let Some(row) = state
+            .zone_changes_this_turn
+            .get_mut(record.turn_zone_change_index)
+        else {
+            continue;
+        };
+        if row.object_id == *object_id
+            && row.from_zone == Some(*from)
+            && row.to_zone == Zone::Battlefield
+        {
+            row.co_entered = record.co_entered.clone();
+        }
+    }
+
+    for context in &mut state.deferred_triggers {
+        for event in context
+            .trigger_events
+            .iter_mut()
+            .chain(context.pending.trigger_event.iter_mut())
+        {
+            if !matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    from: Some(_),
+                    to: Zone::Battlefield,
+                    ..
+                }
+            ) {
+                continue;
+            }
+            let Some(retained_record) = retained_occurrence_record(group, event) else {
+                continue;
+            };
+            let GameEvent::ZoneChanged { record, .. } = event else {
+                unreachable!("matched a battlefield ZoneChanged above");
+            };
+            record.co_entered = retained_record.co_entered.clone();
+        }
     }
 }
 
@@ -4912,10 +6059,30 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
     group: &LogicalZoneChangeGroup,
     events: &[GameEvent],
 ) {
+    mark_logical_zone_events_consumed_before_priority_for(
+        state,
+        group,
+        events,
+        EntryOccurrenceCollector::Owner,
+    );
+}
+
+/// `mark_logical_zone_events_consumed_before_priority` restricted to the occurrences
+/// `collector` left with the owner. A handed-off entry stays unclaimed, so the post-action
+/// collector checks it once the resolution's simultaneous "is/has" effects exist
+/// (CR 603.2c + CR 603.10 + CR 611.2e).
+pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
+    state: &mut GameState,
+    group: &LogicalZoneChangeGroup,
+    events: &[GameEvent],
+    collector: EntryOccurrenceCollector,
+) {
     let mut unclaimed_owned_zone_events: Vec<_> = group
         .all_origin_occurrences
         .iter()
-        .map(|occurrence| occurrence.event.clone())
+        .map(|occurrence| &occurrence.event)
+        .filter(|event| owner_collects_occurrence(collector, event))
+        .cloned()
         .collect();
     let occurrences = events
         .iter()
@@ -4950,9 +6117,14 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
 /// event-subject trigger, so settlement replays a member only over the other
 /// retained occurrences. Batched definitions use the carrier latches below;
 /// they are never rediscovered through the current live trigger surface.
-pub(crate) fn collect_logical_zone_trigger_settlement(
+///
+/// Settlement covers only the occurrences `collector` leaves with the owner (CR 603.10 +
+/// CR 611.2e): a handed-off entry is neither replayed to the members nor offered to the
+/// latched batched pass.
+fn collect_logical_zone_trigger_settlement_for(
     state: &mut GameState,
     group: &LogicalZoneChangeGroup,
+    collector: EntryOccurrenceCollector,
 ) -> Result<Vec<PendingTriggerContext>, String> {
     group.validate_complete()?;
     group.immediately_before_latches()?;
@@ -4961,7 +6133,9 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
     let all_events: Vec<GameEvent> = group
         .all_origin_occurrences
         .iter()
-        .map(|occurrence| occurrence.event.clone())
+        .map(|occurrence| &occurrence.event)
+        .filter(|event| owner_collects_occurrence(collector, event))
+        .cloned()
         .collect();
     let mut pending = Vec::new();
 
@@ -4975,7 +6149,9 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
         }
         let source_context = group.settlement_member_source_context(member_index)?;
         for occurrence in &group.all_origin_occurrences {
-            if group.is_member_own_occurrence(member, occurrence) {
+            if group.is_member_own_occurrence(member, occurrence)
+                || !owner_collects_occurrence(collector, &occurrence.event)
+            {
                 continue;
             }
             let mut batched_this_pass = HashSet::new();
@@ -4990,7 +6166,16 @@ pub(crate) fn collect_logical_zone_trigger_settlement(
                 &mut registered_this_event,
                 &[],
                 LogicalZoneTriggerCollection::Settlement(group),
-                TriggerSourceVisit::Observer,
+                // CR 603.10 + CR 603.10a: one `exists_from` for every member. The pass visits
+                // `prospective_battlefield_members`, which mix the group's entrants (`Moved`)
+                // with members that remained (`Prevented` / `Remained`), so a uniform value is
+                // wrong for one side either way; per-member presence needs each member's
+                // terminal outcome. `ImmediatelyBefore` keeps the behavior this pass had before
+                // newcomers were classified (known gap: an entrant's look-back half is not
+                // refused here).
+                TriggerSourceVisit::Observer {
+                    exists_from: TriggerObservationTime::ImmediatelyBefore,
+                },
             );
             for matched in matched_triggers {
                 debug_assert!(
@@ -5285,6 +6470,42 @@ pub(crate) fn has_active_state_triggers(state: &GameState) -> bool {
         })
 }
 
+/// CR 614.12a + CR 611.3b + CR 611.3c + CR 603.10: payment observers see the
+/// battlefield before the entry group and its continuous effects exist.
+/// The projection owns only observation; admission and occurrence ledgers
+/// continue to be written through the live collection session.
+struct TriggerObservationBoard {
+    pre_entry: Option<Box<GameState>>,
+}
+
+impl TriggerObservationBoard {
+    fn prepare(state: &GameState, payment_entrant: Option<ObjectId>) -> Self {
+        let pre_entry = payment_entrant.and_then(|entrant| {
+            let mut absent = super::effects::token_copy::entering_token_co_entrants(state, entrant);
+            absent.push(entrant);
+            match super::filter::pre_entry_board(state, &absent) {
+                Cow::Borrowed(_) => None,
+                Cow::Owned(board) => Some(Box::new(board)),
+            }
+        });
+        Self { pre_entry }
+    }
+
+    fn candidates_for_event(
+        &mut self,
+        live: &mut GameState,
+        event: &GameEvent,
+    ) -> smallvec::SmallVec<[ObjectId; 16]> {
+        let board = self.pre_entry.as_deref_mut().unwrap_or(live);
+        super::trigger_index::ensure_ready(board);
+        super::trigger_index::candidates_for_event(board, event)
+    }
+
+    fn read<'a>(&'a self, live: &'a GameState) -> &'a GameState {
+        self.pre_entry.as_deref().unwrap_or(live)
+    }
+}
+
 fn collect_pending_triggers_with_collection(
     state: &mut GameState,
     events: &[GameEvent],
@@ -5313,6 +6534,7 @@ fn collect_pending_triggers_with_collection(
     // occurrence-count == 1 for the placement that just fired. Same chokepoint as
     // the tap ledger, so effect, ETB, and ability counter placements all count.
     session.prepare(state, events);
+    let mut observation = TriggerObservationBoard::prepare(state, session.payment_entrant);
     let mut pending: Vec<PendingTriggerContext> = Vec::new();
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
@@ -5326,25 +6548,44 @@ fn collect_pending_triggers_with_collection(
     } else if let Some(sources) = &session.bulk_member_sources {
         sources.clone()
     } else {
-        off_zone_trigger_source_caches(state)
+        off_zone_trigger_source_caches(observation.read(state))
     };
     let active_suppress_triggers = if events.is_empty() {
         Vec::new()
     } else {
-        active_suppress_trigger_statics(state)
+        active_suppress_trigger_statics(observation.read(state))
     };
     // CR 603.2 + CR 400.7: `events` accumulates every event produced across a
     // WHOLE resolved ability chain (e.g. Living Death's exile, then sacrifice,
     // then return-to-battlefield steps all land in one `events` vec), and this
     // pass scans them together, once, against the END-of-chain live object
     // state. Record the LAST index at which each object entered the
-    // battlefield in this batch so `live_battlefield_source_was_present_at_event`
+    // battlefield in this batch so `battlefield_source_presence_at_event`
     // can refuse to match an earlier event in the SAME batch against an object
     // that had not yet (re-)entered the battlefield when that event happened —
     // otherwise a permanent returned to the battlefield later in the chain
     // retroactively "sees" a sacrifice/etc. that occurred earlier in the same
-    // chain, before it was there to observe it (issue #8160).
-    let battlefield_entry_index = battlefield_entry_observation_indices(events);
+    // chain, before it was there to observe it (issue #8160). The carrier also
+    // holds each entrant's co-entry spans: the entries of the objects that
+    // entered in the same event as that entry, which it observes only through
+    // halves that do not look back (CR 603.6a + CR 603.10a).
+    let mut battlefield_entry_observations = battlefield_entry_observation_indices(events);
+    // CR 614.12a + CR 603.2: an as-enters payment precedes the whole group's
+    // entry even when earlier tokens have physically moved on a prior action.
+    // Extend the same observation boundary used by both indexed and shadow
+    // scans only for the explicit payment slice. Earlier entry occurrences
+    // belong to the ordinary live-board scan (CR 603.6a).
+    if let Some(entrant) = session.payment_entrant {
+        battlefield_entry_observations.treat_as_not_yet_entered(
+            super::effects::token_copy::entering_token_co_entrants(state, entrant)
+                .into_iter()
+                .chain(std::iter::once(entrant)),
+            events.len(),
+        );
+    }
+    let entry_ledger_index = battlefield_entry_ledger_indices(state, events);
+    // CR 603.10a: built on the first co-departure group this pass sees.
+    let mut co_departure_index: Option<CoDepartureObserverIndex> = None;
 
     for (event_idx, event) in events.iter().enumerate() {
         // CR 603.2 / CR 603.3: Per-event dedup. A single printed trigger definition
@@ -5381,8 +6622,7 @@ fn collect_pending_triggers_with_collection(
         // `evaluate_layers` rebuild at the top of `collect_pending_triggers`
         // guarantees the index reflects post-layer trigger sets.
         //
-        super::trigger_index::ensure_ready(state);
-        let candidates = crate::game::trigger_index::candidates_for_event(state, event);
+        let candidates = observation.candidates_for_event(state, event);
 
         // CR 603.2 differential test (debug-only): run a SHADOW scan over the
         // full battlefield with cloned dedup sets and verify every matched
@@ -5397,13 +6637,16 @@ fn collect_pending_triggers_with_collection(
 
         // Scan candidate permanents for matching triggers
         for obj_id in candidates.iter().copied() {
-            if !live_battlefield_source_was_present_at_event(
+            let Some(exists_from) = scan_source_presence_at_event(
+                state,
                 event_idx,
+                events,
                 obj_id,
-                &battlefield_entry_index,
-            ) {
+                &battlefield_entry_observations,
+                &entry_ledger_index,
+            ) else {
                 continue;
-            }
+            };
             let (
                 controller,
                 timestamp,
@@ -5415,6 +6658,7 @@ fn collect_pending_triggers_with_collection(
                 has_decayed,
                 matched_triggers,
             ) = {
+                let state = observation.read(state);
                 let obj = match state.objects.get(&obj_id) {
                     Some(o) => o,
                     None => continue,
@@ -5463,7 +6707,7 @@ fn collect_pending_triggers_with_collection(
                         &mut registered_this_event,
                         &active_suppress_triggers,
                         collection,
-                        TriggerSourceVisit::Observer,
+                        TriggerSourceVisit::Observer { exists_from },
                     ),
                 )
             };
@@ -5724,8 +6968,8 @@ fn collect_pending_triggers_with_collection(
                 }
             }
 
-            // CR 702.21a: Ward triggers when this permanent becomes the target
-            // of a spell or ability an opponent controls. Each ward instance
+            // CR 702.21a + CR 102.3: Ward triggers when this permanent becomes the
+            // target of a spell or ability an opponent (not a teammate) controls. Each ward instance
             // triggers independently. Only fires for permanents (battlefield scan).
             if !ward_costs.is_empty() {
                 if let GameEvent::BecomesTarget {
@@ -5757,7 +7001,9 @@ fn collect_pending_triggers_with_collection(
                             &active_suppress_triggers,
                         );
                         if let Some(src_ctrl) = source_controller {
-                            if src_ctrl != controller && !ward_suppressed {
+                            if super::players::is_opponent(state, controller, src_ctrl)
+                                && !ward_suppressed
+                            {
                                 for ward in &ward_costs {
                                     // CR 702.21a + CR 118.12: Ward generates a counter
                                     // effect with an unless-pay modifier. Post-fold, the
@@ -5863,6 +7109,7 @@ fn collect_pending_triggers_with_collection(
         #[cfg(debug_assertions)]
         {
             if audit_trigger_index {
+                let state = observation.read(state);
                 // CR 113.6: "Abilities of an instant or sorcery spell usually function only
                 // while that object is on the stack. Abilities of all other objects usually
                 // function only while that object is on the battlefield." The shadow
@@ -5884,13 +7131,16 @@ fn collect_pending_triggers_with_collection(
                     .map(|(id, _)| *id)
                     .collect();
                 for obj_id in shadow_population {
-                    if !live_battlefield_source_was_present_at_event(
+                    let Some(exists_from) = scan_source_presence_at_event(
+                        state,
                         event_idx,
+                        events,
                         obj_id,
-                        &battlefield_entry_index,
-                    ) {
+                        &battlefield_entry_observations,
+                        &entry_ledger_index,
+                    ) else {
                         continue;
-                    }
+                    };
                     let Some(obj) = state.objects.get(&obj_id) else {
                         continue;
                     };
@@ -5905,7 +7155,7 @@ fn collect_pending_triggers_with_collection(
                         &mut shadow_registered,
                         &active_suppress_triggers,
                         collection,
-                        TriggerSourceVisit::Observer,
+                        TriggerSourceVisit::Observer { exists_from },
                     );
                     for m in matched {
                         shadow_matched.insert((obj_id, m.trig_idx));
@@ -5980,6 +7230,59 @@ fn collect_pending_triggers_with_collection(
                         batched_this_pass.insert((*moved_id, matched.trig_idx));
                     }
                     registered_this_event.insert((*moved_id, matched.trig_idx));
+                    pending.push(PendingTriggerContext::batched(
+                        matched.pending,
+                        matched.trigger_events,
+                    ));
+                }
+            }
+        }
+
+        // CR 603.10 + CR 603.10a + CR 113.6k: an object entering the battlefield from another zone
+        // sees the look-back halves of its own entry as the card it was immediately before the
+        // event. The entry's record owns that card's view (`GameObject::snapshot_for_zone_change`);
+        // the battlefield candidate loop visits only the permanent that entered, a new object (CR
+        // 400.7) whose definitions need not be the card's (Xu-Ifit, Osteoharmonist's "has no
+        // abilities", CR 611.2e).
+        if let GameEvent::ZoneChanged {
+            object_id: moved_id,
+            from: Some(origin),
+            to: Zone::Battlefield,
+            record,
+        } = event
+        {
+            let pre_event_card = record.trigger_source_context().filter(|context| {
+                context.identity.reference.object_id == *moved_id
+                    && context.identity.expected_zone == *origin
+                    && context
+                        .trigger_entries
+                        .iter()
+                        .any(|entry| event_subject_observes(entry.definition(), event))
+            });
+            if let Some(source_context) = pre_event_card {
+                // CR 400.7: the card is not the permanent the candidate loop visited, and its
+                // entries are indexed in a different list, so the card's per-event dedup is its
+                // own; no other path visits the card for its own entry.
+                let mut registered_by_card = HashSet::new();
+                let matched_triggers = collect_matching_triggers_from_context(
+                    state,
+                    event,
+                    events,
+                    source_context,
+                    Some(*origin),
+                    &mut batched_this_pass,
+                    &mut registered_by_card,
+                    &active_suppress_triggers,
+                    collection,
+                    TriggerSourceVisit::EventSubject,
+                );
+                for matched in matched_triggers {
+                    if !session.record_match(state, &matched, event) {
+                        continue;
+                    }
+                    if matched.batched {
+                        batched_this_pass.insert((*moved_id, matched.trig_idx));
+                    }
                     pending.push(PendingTriggerContext::batched(
                         matched.pending,
                         matched.trigger_events,
@@ -6103,7 +7406,12 @@ fn collect_pending_triggers_with_collection(
                             &mut registered_this_event,
                             &active_suppress_triggers,
                             collection,
-                            TriggerSourceVisit::Observer,
+                            // CR 603.10 + CR 702.110b: a `CreatureExploited` event is never inside
+                            // an entry span, so the exploiter is not a newcomer of it;
+                            // `ImmediatelyBefore` adds no newcomer refusal.
+                            TriggerSourceVisit::Observer {
+                                exists_from: TriggerObservationTime::ImmediatelyBefore,
+                            },
                         )
                     };
                     for matched in matched_triggers {
@@ -6180,6 +7488,15 @@ fn collect_pending_triggers_with_collection(
                 if observer_id == *moved_id {
                     continue;
                 }
+                let index = &*co_departure_index
+                    .get_or_insert_with(|| CoDepartureObserverIndex::build(state, events));
+                // CR 603.10a: only an observer that left with a trigger can
+                // observe this departure. Skipping the rest up front keeps a
+                // board wipe of vanilla creatures from resolving N² source
+                // contexts that would match nothing.
+                if !index.may_observe(observer_id) {
+                    continue;
+                }
                 // CR 603.10a + CR 704.5d: a co-departed observer that ceased to
                 // exist is still an observer. Its object is gone from
                 // `state.objects`, but its ZoneChangeRecord owns its identity and
@@ -6200,6 +7517,8 @@ fn collect_pending_triggers_with_collection(
                 if !super::zones::battlefield_residency(state, observer_id).has_departed() {
                     continue;
                 }
+                #[cfg(feature = "test-support")]
+                super::perf_counters::record_co_departure_observer_resolution();
                 // CR 603.10a + CR 400.7: This observer left in the same
                 // departure batch, so its own ZoneChanged record—not the
                 // post-move object in `state`—owns the source identity. The
@@ -6211,8 +7530,8 @@ fn collect_pending_triggers_with_collection(
                 // observer's departure in an earlier action fragment, so it is
                 // absent from `events`; its stamped per-turn record is the same
                 // authority and is consulted when the event is not at hand.
-                let observer_source_context = events
-                    .iter()
+                let observer_source_context = index
+                    .zone_changes(events, observer_id)
                     .find_map(|observer_event| {
                         let GameEvent::ZoneChanged {
                             object_id,
@@ -6260,8 +7579,8 @@ fn collect_pending_triggers_with_collection(
                 // correctly for co-departed Curse Auras whose live
                 // `attached_to` was cleared by
                 // `sever_battlefield_attachment_graph_on_exit`.
-                let lki_attached_to = events
-                    .iter()
+                let lki_attached_to = index
+                    .zone_changes(events, observer_id)
                     .find_map(|ev| {
                         if let GameEvent::ZoneChanged {
                             object_id: oid,
@@ -6426,6 +7745,7 @@ fn collect_pending_triggers_with_collection(
                     continue;
                 }
                 let matched_triggers = {
+                    let state = observation.read(state);
                     let obj = match state
                         .objects
                         .get(&obj_id)
@@ -6450,7 +7770,11 @@ fn collect_pending_triggers_with_collection(
                         None,
                         &active_suppress_triggers,
                         collection,
-                        TriggerSourceVisit::Observer,
+                        // Off-battlefield sources are not classified as newcomers; behavior
+                        // unchanged.
+                        TriggerSourceVisit::Observer {
+                            exists_from: TriggerObservationTime::ImmediatelyBefore,
+                        },
                     )
                 };
 
@@ -7364,10 +8688,10 @@ fn collect_pending_triggers_with_collection(
     // alongside The Ring's emblem trigger rather than from object definitions.
     super::cipher::collect_combat_damage_recast_triggers(state, events, &mut pending);
 
-    // CR 603.2d: Trigger doubling — Panharmonicon-style effects.
-    // Scan battlefield for objects with StaticMode::Panharmonicon statics,
-    // then clone matching pending triggers.
-    apply_trigger_doubling(state, &mut pending);
+    // CR 614.12a + CR 603.2d + CR 603.10: trigger doubling observes
+    // the same board as trigger discovery, before entry for payments and live
+    // otherwise. Admission and occurrence accounting stay on the live session.
+    apply_trigger_doubling(observation.read(state), &mut pending);
     pending = filter_auto_inert_noop_triggers(state, pending);
 
     // CR 800.4d: a departing permanent's own leaves-the-battlefield abilities
@@ -7468,7 +8792,7 @@ fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerConte
     if !pending.ability.optional {
         return false;
     }
-    if pending.ability.sub_ability.is_some() {
+    if pending.ability.sub_ability.is_some() || pending.ability.coin_branches.is_some() {
         return false;
     }
     let Some(origin) = pending.may_trigger_origin.clone() else {
@@ -7480,14 +8804,13 @@ fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerConte
         origin,
     };
     match state.may_trigger_auto_choice_for_live_prompt(&key) {
-        Some(AutoMayChoice::Decline) => {
-            // CR 603.5: the remembered decline is the controller's optional choice.
-            state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
-            true
-        }
+        // CR 603.5: an optional trigger goes on the stack regardless of whether
+        // its controller intends to exercise the option; the remembered decline
+        // is applied when the ability resolves. While it waits on the stack,
+        // players receive priority and it can be targeted (Strionic Resonator).
+        Some(AutoMayChoice::Decline) | None => false,
         // CR 603.3d: no legal target means no choice was offered, so nothing is recorded.
         Some(AutoMayChoice::Accept) => pending_trigger_has_no_legal_resolution_targets(state, ctx),
-        None => false,
     }
 }
 
@@ -7496,6 +8819,9 @@ fn pending_trigger_has_no_legal_resolution_targets(
     ctx: &PendingTriggerContext,
 ) -> bool {
     let pending = &ctx.pending;
+    if pending.ability.coin_branches.is_some() {
+        return false;
+    }
     let context_snapshot = push_trigger_event_context(
         state,
         pending.trigger_event.as_ref(),
@@ -7559,32 +8885,38 @@ fn collect_ring_emblem_triggers(
                 // times, it has "Whenever your Ring-bearer becomes blocked by
                 // a creature, the blocking creature's controller sacrifices it
                 // at end of combat."
-                if let GameEvent::BlockersDeclared { assignments } = event {
-                    for (blocker_id, attacker_id) in assignments {
-                        if *attacker_id != bearer_id {
-                            continue;
-                        }
-                        let Some(blocker) = state.objects.get(blocker_id) else {
-                            continue;
-                        };
-                        if !blocker.card_types.core_types.contains(&CoreType::Creature) {
-                            continue;
-                        }
-                        pending.push(ring_pending_trigger(
-                            state,
-                            bearer_id,
-                            player,
-                            player,
-                            event,
-                            ring_level_three_ability(
-                                bearer_id,
-                                blocker.id,
-                                player,
-                                blocker.controller,
-                            ),
-                            "The Ring level 3",
-                        ));
+                let mut collect_blocker = |blocker_id, attacker_id| {
+                    if attacker_id != bearer_id {
+                        return;
                     }
+                    let Some(blocker) = state.objects.get(&blocker_id) else {
+                        return;
+                    };
+                    if !blocker.card_types.core_types.contains(&CoreType::Creature) {
+                        return;
+                    }
+                    pending.push(ring_pending_trigger(
+                        state,
+                        bearer_id,
+                        player,
+                        player,
+                        event,
+                        ring_level_three_ability(bearer_id, blocker.id, player, blocker.controller),
+                        "The Ring level 3",
+                    ));
+                };
+                match event {
+                    GameEvent::BlockersDeclared { assignments } => {
+                        for &(blocker, attacker) in assignments {
+                            collect_blocker(blocker, attacker);
+                        }
+                    }
+                    // CR 509.3d: entering blocking is also a creature-bound
+                    // attacker occurrence; the bare transition event is not.
+                    GameEvent::AttackerBecameBlockedByFilteredBlocker { attacker, blocker } => {
+                        collect_blocker(*blocker, *attacker);
+                    }
+                    _ => {}
                 }
             }
 
@@ -9090,15 +10422,17 @@ pub(crate) fn handle_order_triggers(
     }
     // No trigger-specific pause remains. Restore an interrupted casting/payment
     // state if this ordering pass preempted one; otherwise fall through to
-    // Priority for the active player.
+    // Priority for the active player (CR 800.4j: or the next living player).
     // CR 603.3b: the batch dispatched fully (the paused paths returned earlier at the
     // two `return Ok` above); drop the per-batch ephemeral coverage markers before the
     // next Priority frame. Guarded so a mid-batch pause (non-empty) never clears them.
     if state.deferred_triggers.is_empty() {
         state.clear_ephemeral_trigger_order_templates();
     }
+    // CR 603.3b + CR 800.4j: once the batch is on the stack the active player receives priority, or the next
+    // player in turn order still in the game when the active player has left.
     Ok(resume_after_ordering.unwrap_or(WaitingFor::Priority {
-        player: state.active_player,
+        player: super::engine::living_priority_seat(state),
     }))
 }
 
@@ -9118,6 +10452,25 @@ pub(crate) fn handle_order_triggers(
 /// if the continuation paused on a target.
 pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[GameEvent]) {
     let pending = collect_pending_triggers(state, events);
+    state.deferred_triggers.extend(pending);
+}
+
+/// CR 614.12a + CR 603.2: collect only the occurrences emitted by an
+/// as-enters payment before its entry group exists. Ordinary entry events
+/// retain their live-board observers, even while this payment is parked.
+pub(crate) fn collect_entry_payment_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+    entrant: ObjectId,
+) {
+    let mut session = TriggerCollectionSession::new(TriggerCollectionOverlay::default());
+    session.payment_entrant = Some(entrant);
+    let pending = collect_pending_triggers_with_collection(
+        state,
+        events,
+        LogicalZoneTriggerCollection::Ordinary,
+        &mut session,
+    );
     state.deferred_triggers.extend(pending);
 }
 
@@ -9165,6 +10518,28 @@ pub(crate) fn take_priority_boundary_batch(state: &mut GameState) -> Vec<Pending
         context.batch_origin = DeferredTriggerBatchOrigin::Ordinary;
     }
     parked
+}
+
+/// CR 117.3a + CR 502.4 + CR 503.1a + CR 603.3b: take the held turn-based-action partition
+/// in order. Ownership is consumed, so a context that pauses during placement re-parks as an
+/// ordinary tail. If a live resolution kept the join from running, the pipeline's whole-queue
+/// drain places the stamped contexts at the same boundary.
+pub(crate) fn take_turn_based_action_trigger_batch(
+    state: &mut GameState,
+) -> Vec<PendingTriggerContext> {
+    let (mut held, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.deferred_triggers)
+        .into_iter()
+        .partition(|context| {
+            matches!(
+                context.batch_origin,
+                DeferredTriggerBatchOrigin::TurnBasedAction
+            )
+        });
+    state.deferred_triggers = rest;
+    for context in &mut held {
+        context.batch_origin = DeferredTriggerBatchOrigin::Ordinary;
+    }
+    held
 }
 
 /// CR 603.7: [`collect_unclaimed_delayed_triggers_into_deferred`], returning the
@@ -9324,8 +10699,19 @@ pub(crate) fn collect_parked_triggers_into_deferred(
     events: &[GameEvent],
     origin: DeferredTriggerBatchOrigin,
 ) {
+    let contexts = collect_pending_triggers(state, events);
+    queue_parked_trigger_contexts(state, contexts, origin);
+}
+
+/// CR 603.3b: queue already-collected contexts stamped `origin` — a priority
+/// boundary's own batch, an SBA batch parked behind a choice, or `Ordinary`.
+pub(crate) fn queue_parked_trigger_contexts(
+    state: &mut GameState,
+    contexts: Vec<PendingTriggerContext>,
+    origin: DeferredTriggerBatchOrigin,
+) {
     let first_new_context = state.deferred_triggers.len();
-    collect_triggers_into_deferred(state, events);
+    state.deferred_triggers.extend(contexts);
     stamp_deferred_triggers_from(state, first_new_context, origin);
 }
 
@@ -9409,6 +10795,84 @@ pub(crate) fn take_sba_choice_trigger_batch(
     sba_choice
 }
 
+/// CR 603.10a: Per-pass lookups for the co-departure arm of
+/// `collect_pending_triggers_with_collection`.
+///
+/// A simultaneous departure of N permanents (one board wipe) stamps every
+/// departure with an (N - 1)-member `co_departed` group, so the arm visits
+/// N² (departure, observer) pairs. Resolving each pair by scanning `events`
+/// and the per-turn departure ledger made a board wipe O(N³) (issue #10468).
+/// This index is built once per collection pass, the first time a
+/// co-departure group is seen, and answers both questions per pair without a
+/// scan. Trigger collection never grows `zone_changes_this_turn`, so a
+/// pass-scoped snapshot of it stays exact.
+struct CoDepartureObserverIndex {
+    /// Indices into `events` of every `ZoneChanged` naming the object, in
+    /// event order, so a per-observer lookup visits the same events, in the
+    /// same order, that a scan of `events` would match.
+    zone_changes_by_object: HashMap<ObjectId, Vec<usize>>,
+    /// Objects with at least one battlefield-departure record (in `events` or
+    /// in the per-turn ledger) whose latched source context carries a trigger
+    /// entry. Every source context the co-departure arm can select is one of
+    /// these records, and a context source matches only its latched
+    /// `trigger_entries`, so an observer absent from this set cannot trigger.
+    observers_with_triggers: HashSet<ObjectId>,
+}
+
+impl CoDepartureObserverIndex {
+    fn build(state: &GameState, events: &[GameEvent]) -> Self {
+        #[cfg(feature = "test-support")]
+        super::perf_counters::record_co_departure_index_build();
+        let mut zone_changes_by_object: HashMap<ObjectId, Vec<usize>> = HashMap::new();
+        let mut observers_with_triggers = HashSet::new();
+        let mut note_departure = |record: &crate::types::game_state::ZoneChangeRecord| {
+            if record.from_zone == Some(Zone::Battlefield)
+                && record
+                    .trigger_source_context()
+                    .is_some_and(|context| !context.trigger_entries.is_empty())
+            {
+                observers_with_triggers.insert(record.object_id);
+            }
+        };
+        for (idx, event) in events.iter().enumerate() {
+            if let GameEvent::ZoneChanged {
+                object_id, record, ..
+            } = event
+            {
+                zone_changes_by_object
+                    .entry(*object_id)
+                    .or_default()
+                    .push(idx);
+                note_departure(record);
+            }
+        }
+        state.zone_changes_this_turn.iter().for_each(note_departure);
+        Self {
+            zone_changes_by_object,
+            observers_with_triggers,
+        }
+    }
+
+    /// Whether `observer_id` left the battlefield with a trigger that could
+    /// observe a co-departure. `false` means the arm would collect nothing.
+    fn may_observe(&self, observer_id: ObjectId) -> bool {
+        self.observers_with_triggers.contains(&observer_id)
+    }
+
+    /// The `ZoneChanged` events naming `object_id`, in event order.
+    fn zone_changes<'e>(
+        &'e self,
+        events: &'e [GameEvent],
+        object_id: ObjectId,
+    ) -> impl Iterator<Item = &'e GameEvent> + 'e {
+        self.zone_changes_by_object
+            .get(&object_id)
+            .into_iter()
+            .flatten()
+            .map(move |&idx| &events[idx])
+    }
+}
+
 /// CR 603.10a + CR 608.2h: The most recent battlefield-departure record of
 /// `observer_id` that names `moved_id` in its simultaneous-departure group.
 fn co_departed_observer_record(
@@ -9440,27 +10904,628 @@ pub(crate) fn park_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
+    park_observer_triggers_if_paused_matching(
+        state,
+        events,
+        slice_start,
+        |_| true,
+        DelayedObservers::Collect,
+    );
+}
+
+/// CR 603.2 + CR 603.6a + CR 616.1f: the park for a replacement or copy-choice
+/// answer that pauses on the next prompt. Only this answer's battlefield entries
+/// are scanned: the replacement handler's inner discard collectors already own
+/// its `Discarded` events, and queued-context witnesses deduplicate only zone
+/// changes, so a whole-slice pass here would collect those observers twice.
+///
+/// The entries are not matched here while their entering instruction is still
+/// suspended: [`settle_entry_batch_scan`] holds them until it has completed.
+pub(crate) fn park_entry_observer_triggers_if_paused(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+) {
+    park_observer_triggers_if_paused_matching(
+        state,
+        events,
+        slice_start,
+        is_battlefield_entry,
+        DelayedObservers::Skip,
+    );
+}
+
+/// CR 603.2 + CR 603.6a + CR 702.104a + CR 303.4f: the entry collector for an
+/// answer handler that returns its result directly, bypassing
+/// `run_post_action_pipeline` (the Tribute answer, which is what puts the
+/// creature onto the battlefield, and the Aura-host answer, which does the same
+/// for an entering Aura, token or card). Only this answer's battlefield entries,
+/// filtered as [`park_entry_observer_triggers_if_paused`] filters them; once the
+/// action has settled they are queued and the deferred queue is drained, as
+/// [`collect_and_drain_observer_triggers_if_settled`] drains it.
+pub(crate) fn collect_and_drain_entry_observer_triggers_if_settled(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+) {
+    if triggered_mana_sidecar_owns_local_collection(state) {
+        return;
+    }
+    collect_answer_slice_matching(
+        state,
+        events,
+        slice_start,
+        is_battlefield_entry,
+        DelayedObservers::Skip,
+    );
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !state.deferred_triggers.is_empty()
+    {
+        let _ = drain_deferred_trigger_queue(state, events);
+    }
+}
+
+fn is_battlefield_entry(event: &GameEvent) -> bool {
+    // CR 701.3b + CR 603.2: an entering Aura's host attachment is part of the
+    // same entry answer; its canonical `Attached` event feeds attachment
+    // observers alongside the battlefield entry.
+    matches!(
+        event,
+        GameEvent::ZoneChanged {
+            to: Zone::Battlefield,
+            ..
+        } | GameEvent::Attached { .. }
+    )
+}
+
+fn park_observer_triggers_if_paused_matching(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+    keep: impl Fn(&GameEvent) -> bool,
+    delayed: DelayedObservers,
+) {
     if triggered_mana_sidecar_owns_local_collection(state) {
         return;
     }
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return;
     }
+    collect_answer_slice_matching(state, events, slice_start, keep, delayed);
+}
+
+/// The slice an answer emitted, minus what a live announcement owns and what
+/// another collector already queued, narrowed by `keep`, through the action-end
+/// collector (and so the entry gate).
+fn collect_answer_slice_matching(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+    keep: impl Fn(&GameEvent) -> bool,
+    delayed: DelayedObservers,
+) {
+    // A resumed simultaneous move can hand back a buffer the batch drain has
+    // already taken into its pending frame, leaving events shorter than the
+    // anchor captured before the answer ran (zone_pipeline::drain_pending_batch_deliveries).
+    if slice_start >= events.len() {
+        return;
+    }
     // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
     // wait in its carrier; only the span it does not own is parked here.
     let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
-    // CR 603.2c: logical zone-change owners can queue observers without claiming
-    // the consumed ledger; honor their queued contexts as collection witnesses.
-    let candidates = filter_already_collected_trigger_events_from(
+    let slice = &events[..owned.end.min(events.len())];
+    collect_unclaimed_ordinary_observers_matching(
         state,
-        &events[..owned.end],
+        slice,
         slice_start,
+        &keep,
+        ObserverCollection::ThroughEntryGate,
+    );
+    match delayed {
+        DelayedObservers::Collect => {
+            // CR 603.7 + CR 603.3: an action that pauses here is not scanned by the
+            // post-action pipeline, and the answer runs on a new event buffer, so a
+            // delayed trigger watching these events ("When that creature dies this
+            // turn") is collected now, by the paused-exit collector's delayed half.
+            collect_unclaimed_delayed_observers(state, slice, slice_start, &keep);
+        }
+        DelayedObservers::Skip => {}
+    }
+}
+
+/// Whether an answer's paused collection also queues the delayed triggers watching its events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelayedObservers {
+    /// Every paused observer park: the delayed half is collected beside the ordinary one.
+    Collect,
+    /// The entry-only collectors of the replacement, copy-choice, Tribute and Aura-host
+    /// answers: they own battlefield entries only, as before.
+    Skip,
+}
+
+/// CR 603.2 + CR 603.3b + CR 603.6a: the collect-only seam for a handler that
+/// collects its own slice as its action pauses or settles, instead of leaving
+/// it to the post-action scan. Battlefield entries pass the entry gate first
+/// ([`settle_entry_batch_scan`]); everything else is queued exactly as
+/// [`collect_triggers_into_deferred`] queues it.
+///
+/// The gate reads the action's wait (`state.waiting_for`) to decide whether the
+/// action has settled, so the caller must have installed the wait it is about to
+/// return: entries are held only while that wait is not `Priority`, and are
+/// released by the first collector that runs once it is.
+pub(crate) fn collect_action_end_triggers_into_deferred(
+    state: &mut GameState,
+    events: &[GameEvent],
+) {
+    if action_has_settled(state) && state.unsettled_entry_batch_events.is_empty() {
+        collect_triggers_into_deferred(state, events);
+        return;
+    }
+    let scan = settle_entry_batch_scan(state, events.to_vec());
+    collect_triggers_into_deferred(state, &scan);
+}
+
+/// CR 603.6a + CR 603.6b + CR 611.3c + CR 603.2c: the entry event of an instruction that was
+/// held across answers is matched when the instruction completes, against the board it left,
+/// not after the later instructions of the same resolution have changed which permanents
+/// observe or suppress it. The whole event is collected once: the held entries and the entries
+/// of the same instruction in `events` (ledger rows `first_row..` below the new instruction
+/// mark). Those in `events` are claimed for ordinary collectors, so the action's own scan does
+/// not collect them again, while delayed triggers keep their view of them (CR 603.7). The
+/// triggers are queued, not put on the stack: that waits for a player to receive priority
+/// (CR 603.3b). An instruction whose entries were never held is left to the action's scan, as
+/// it is for every other resolution (`CompletedEntryCollection::HeldInstruction`), unless the
+/// boundary separates two performances of a repeated keyword action
+/// (`CompletedEntryCollection::Occurrence`): those are successive entry events (CR 608.2c), so
+/// the completed one is collected here whether or not it was held, and the action's one scan
+/// cannot batch it with the next.
+pub(crate) fn collect_completed_entry_instruction(
+    state: &mut GameState,
+    events: &[GameEvent],
+    first_row: usize,
+    collection: CompletedEntryCollection,
+) {
+    let held = std::mem::take(&mut state.unsettled_entry_batch_events);
+    match collection {
+        CompletedEntryCollection::HeldInstruction if held.is_empty() => return,
+        CompletedEntryCollection::HeldInstruction | CompletedEntryCollection::Occurrence => {}
+    }
+    let completed_through = state.completed_instruction_ledger_len();
+    let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
+    // An occurrence another collector already claimed (the paused copy-token handoff queues the
+    // committed entries of a batch) is matched once, by its claimant.
+    let unclaimed = unclaimed_trigger_events_from(
+        events,
+        0,
+        TriggerCollectionRequester::Ordinary,
         &state.consumed_before_priority_trigger_events,
     );
-    let trigger_events = paused_observer_trigger_events(state, candidates);
-    if !trigger_events.is_empty() {
-        collect_triggers_into_deferred(state, &trigger_events);
+    let mut scan = held;
+    let mut claims = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        let Some(key) = battlefield_entry_key(event) else {
+            continue;
+        };
+        let (turn, row, _) = key;
+        if turn == state.turn_number
+            && (first_row..completed_through).contains(&row)
+            && !held_keys.contains(&key)
+            && unclaimed.positions.contains(&index)
+        {
+            scan.push(event.clone());
+            claims.push(ConsumedTriggerEventOccurrence {
+                event: event.clone(),
+                occurrence: trigger_event_occurrence(events, index),
+                scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+            });
+        }
     }
+    if scan.is_empty() {
+        return;
+    }
+    note_released_entry_cohorts(state, &scan, &held_keys);
+    collect_triggers_into_deferred(state, &scan);
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority {
+            occurrences: claims,
+        },
+    )
+    .expect("an entry-instruction claim must have a live journal cause");
+}
+
+/// Which completed entering instructions an instruction boundary collects itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CompletedEntryCollection {
+    /// Only an instruction whose entries were held across answers.
+    HeldInstruction,
+    /// CR 608.2c: a completed performance of a repeated keyword action, held or not.
+    Occurrence,
+}
+
+/// CR 603.6a: the ledger identity of a battlefield-entry occurrence. The row
+/// index rather than full event equality, as in
+/// `zones::settle_battlefield_entry_observations`, so later record stamping
+/// cannot make one entry look like two.
+fn battlefield_entry_key(event: &GameEvent) -> Option<(u32, usize, ObjectId)> {
+    match event {
+        GameEvent::ZoneChanged {
+            object_id,
+            to: Zone::Battlefield,
+            record,
+            ..
+        } => Some((
+            record.recorded_turn_number,
+            record.turn_zone_change_index,
+            *object_id,
+        )),
+        _ => None,
+    }
+}
+
+/// CR 117.5 + CR 614.12a + CR 616.1f: has the action settled? `Priority` with no
+/// replacement parked is the complement of "any pause", so no prompt shape is
+/// enumerated, as in `effects::token::realize_settled_token_battlefield_entry`.
+/// `pending_replacement` is read as a field because the record is parked before
+/// its wait is installed (see `engine_priority::run_post_action_pipeline`).
+fn action_has_settled(state: &GameState) -> bool {
+    matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.pending_replacement.is_none()
+}
+
+/// CR 614.12a + CR 616.1 + CR 707.5: is a battlefield entry still being made?
+/// Every carrier of an entry that has been decided but not completed: a parked
+/// replacement that modifies an entry ([`parked_replacement_modifies_an_entry`]:
+/// an ordering choice, a copy offer, an entry-controller choice), an entrant
+/// held liminal for its copy choice, a token committed before its entry
+/// record, an entry parked for its own mid-entry choice, an entering Aura's
+/// host choice (CR 303.4f: it is made as the Aura enters, and its entry tail is
+/// stashed behind the prompt), and a seat's optional answer in a player-scope clause
+/// (CR 101.4: "each player may create a token": the seats' actions are one
+/// simultaneous event, so a later seat's prompt is the same instruction's entry
+/// still being made). A pause that holds none of them belongs to a later event,
+/// not to an entry.
+pub(crate) fn battlefield_entry_in_progress(state: &GameState) -> bool {
+    state
+        .pending_replacement
+        .as_ref()
+        .is_some_and(|pending| parked_replacement_modifies_an_entry(state, &pending.proposed))
+        || matches!(state.waiting_for, WaitingFor::ReturnAsAuraTarget { .. })
+        || !state.liminal_entries.is_empty()
+        || state.pending_token_battlefield_entry.is_some()
+        || !state.deferred_entry_events.is_empty()
+        || state.active_optional_effect_frame().is_some_and(|frame| {
+            super::effects::bound_to_a_player_by_an_instruction(&frame.ability)
+        })
+}
+
+/// CR 614.12a + CR 614.1c + CR 616.1: does a parked replacement modify a
+/// battlefield entry still being made? The entry itself (a zone change to the
+/// battlefield, a token's creation or entry), or an event on an object that is
+/// on the battlefield with its entry not recorded yet (a token's counters it
+/// enters with, placed before its entry record). An event on a permanent that
+/// has already entered (counters put on it afterwards, as Amass does to the
+/// Army it has just created) or on an object elsewhere (a discarded or found
+/// card) is not part of any entry. A card's enters-with counters are placed
+/// after its zone-change record, so they do not count here; a card entering
+/// with co-entrants is delivered by a logical zone-change group, whose entries
+/// this gate passes through unheld (see [`settle_entry_batch_scan`]).
+fn parked_replacement_modifies_an_entry(state: &GameState, proposed: &ProposedEvent) -> bool {
+    match proposed {
+        ProposedEvent::ZoneChange { to, .. } => *to == Zone::Battlefield,
+        ProposedEvent::TokenEntry { .. } | ProposedEvent::CreateToken { .. } => true,
+        other => other
+            .affected_object_id()
+            .is_some_and(|object_id| battlefield_entrant_unrecorded(state, object_id)),
+    }
+}
+
+/// CR 400.7 + CR 603.6a: is this object on the battlefield with its current
+/// entry not yet recorded? Not when it entered on an earlier turn, or when this
+/// turn's zone-change ledger holds the entry of its current incarnation.
+fn battlefield_entrant_unrecorded(state: &GameState, object_id: ObjectId) -> bool {
+    let Some(object) = state
+        .objects
+        .get(&object_id)
+        .filter(|object| object.zone == Zone::Battlefield)
+    else {
+        return false;
+    };
+    !(object
+        .entered_battlefield_turn
+        .is_some_and(|turn| turn < state.turn_number)
+        || state.zone_changes_this_turn.iter().any(|record| {
+            record.object_id == object_id
+                && record.to_zone == Zone::Battlefield
+                && record
+                    .entered_incarnation
+                    .is_none_or(|incarnation| incarnation == object.incarnation)
+        }))
+}
+
+/// CR 608.2c + CR 603.6a: has the instruction that put this permanent onto the
+/// battlefield completed? An instruction boundary
+/// (`effects::settle_entries_before_instruction`) has passed since it was
+/// recorded (`GameState::instruction_boundary_marks`), or it was
+/// recorded on an earlier turn. The boundary records nothing while a
+/// co-entering step, a choice of the same instruction, or any other
+/// battlefield entry is outstanding ([`battlefield_entry_in_progress`]: a rider
+/// chain run inside an entry passes boundaries of its own), nor between the
+/// seat legs of a paused player-scope clause resuming under its scope sidecar
+/// (CR 101.4: one simultaneous event).
+fn battlefield_entry_instruction_completed(state: &GameState, event: &GameEvent) -> bool {
+    matches!(
+        event,
+        GameEvent::ZoneChanged { record, .. }
+            if record.recorded_turn_number < state.turn_number
+                || record.turn_zone_change_index < state.completed_instruction_ledger_len()
+    )
+}
+
+/// CR 603.6a + CR 603.6b + CR 611.3c: the one gate between battlefield-entry
+/// events and the ordinary observer scan.
+///
+/// Each time an event puts one or more permanents onto the battlefield, all
+/// permanents on the battlefield, including the newcomers, are checked for
+/// enters triggers that match it (CR 603.6a), with the continuous effects that
+/// exist once the permanents are there (CR 603.6b + CR 611.3c). One entering
+/// instruction can span several actions: each entrant's replacement choices are
+/// made before it enters (CR 614.12a + CR 616.1), so an entrant can be on the
+/// battlefield while a co-entrant's prompt is open. Matching it then would read
+/// a battlefield the event has not finished building: a later co-entrant's
+/// trigger suppression or characteristic-changing static would be missed, and a
+/// firing limit could be spent on an event the completed state does not match.
+///
+/// So a battlefield entry that reaches a collector while its action has not
+/// settled and another battlefield entry is still being made
+/// ([`battlefield_entry_in_progress`]), and whose entering instruction has not
+/// completed ([`battlefield_entry_instruction_completed`]), is held in
+/// `GameState::unsettled_entry_batch_events` instead of being matched. It is
+/// released, ahead of the caller's own events, to the first collector that runs
+/// once no entry is in progress, its instruction has completed, or the action
+/// has settled; or, when the instruction's own boundary comes first, it is
+/// collected there, before a later instruction of the same resolution can change
+/// what observes or suppresses it ([`collect_completed_entry_instruction`]). That collector matches the whole event in one scan against the
+/// completed state, so batched ("one or more", CR 603.2c) definitions and
+/// firing limits see it once. Nothing is held at a pause with no entry in
+/// progress (a later instruction's own choice, or the replacement of a later
+/// event on a permanent that has already entered), nor an entry whose
+/// instruction has completed: what reached such a pause is matched there, as
+/// before.
+///
+/// The collectors that run as an action pauses or settles route through here:
+/// the post-action scan, and [`collect_action_end_triggers_into_deferred`] for
+/// the paused-observer helpers (the replacement and copy-choice answers among
+/// them), the resolution-choice answers, and the Tribute and Aura-host answers
+/// ([`collect_and_drain_entry_observer_triggers_if_settled`]). Existing owners
+/// of entries keep their own timing and do not pass through: a logical
+/// zone-change group's segment collection (an entry it retains is passed through
+/// unheld here), the replay of an entry parked for its own mid-entry choice
+/// (`engine_replacement::collect_deferred_entry_replay`), the initial collection
+/// of a payment transaction's events
+/// (`payment_transaction::collect_initial_payment_events`), and the delayed-trigger
+/// scans (which read the acting buffer only). `meld::refresh_meld_entry_records`
+/// rewrites the records parked in `deferred_entry_events` and not the held ones; a
+/// meld result is not an entry the gate holds today.
+pub(crate) fn settle_entry_batch_scan(
+    state: &mut GameState,
+    candidates: Vec<GameEvent>,
+) -> Vec<GameEvent> {
+    state.released_entry_rows.clear();
+    let unsettled = !action_has_settled(state) && battlefield_entry_in_progress(state);
+    if !unsettled && state.unsettled_entry_batch_events.is_empty() {
+        return candidates;
+    }
+    let held = std::mem::take(&mut state.unsettled_entry_batch_events);
+    let held_keys: Vec<_> = held.iter().filter_map(battlefield_entry_key).collect();
+    let (mut scan, still_held): (Vec<_>, Vec<_>) = held
+        .into_iter()
+        .partition(|event| !unsettled || battlefield_entry_instruction_completed(state, event));
+    state.unsettled_entry_batch_events = still_held;
+    let mut owner_retained: Option<Vec<GameEvent>> = None;
+    for event in candidates {
+        let Some(key) = battlefield_entry_key(&event) else {
+            scan.push(event);
+            continue;
+        };
+        // The same occurrence, re-read from a buffer this gate already saw.
+        if held_keys.contains(&key) {
+            continue;
+        }
+        if !unsettled || battlefield_entry_instruction_completed(state, &event) {
+            scan.push(event);
+            continue;
+        }
+        let owner_retained = owner_retained
+            .get_or_insert_with(|| super::engine_priority::retained_logical_zone_events(state));
+        if owner_retained.contains(&event) {
+            scan.push(event);
+        } else {
+            state.unsettled_entry_batch_events.push(event);
+        }
+    }
+    note_released_entry_cohorts(state, &scan, &held_keys);
+    scan
+}
+
+/// CR 603.6a + CR 608.2c: the entries of `scan` in an instruction that held an entry across
+/// answers (`held_keys`) are one event whose co-entrants observe each other, whichever answer
+/// recorded them; they are noted for the collection that follows
+/// (`GameState::released_entry_rows`).
+fn note_released_entry_cohorts(
+    state: &mut GameState,
+    scan: &[GameEvent],
+    held_keys: &[(u32, usize, ObjectId)],
+) {
+    let held_instructions: Vec<usize> = held_keys
+        .iter()
+        .filter(|(turn, _, _)| *turn == state.turn_number)
+        .map(|(_, row, _)| state.instruction_of_zone_change(*row))
+        .collect();
+    let rows: Vec<usize> = scan
+        .iter()
+        .filter_map(battlefield_entry_key)
+        .filter(|(turn, row, _)| {
+            *turn == state.turn_number
+                && held_instructions.contains(&state.instruction_of_zone_change(*row))
+        })
+        .map(|(_, row, _)| row)
+        .collect();
+    state.released_entry_rows = rows;
+}
+
+/// CR 117.5 + CR 603.3b: a settled action still holds entries whose observers
+/// have not been checked. They must be before any player receives priority, so
+/// the action boundary runs the scan for handlers that reach no pipeline.
+pub(crate) fn settled_entry_batch_awaits_scan(state: &GameState) -> bool {
+    !state.unsettled_entry_batch_events.is_empty() && action_has_settled(state)
+}
+
+/// CR 603.2c + CR 603.3b: the paused-exit collector. An action that ends at a
+/// further prompt inside a payment leaves its events to no later scan, so their
+/// ordinary and delayed triggers are queued here, once: occurrences another
+/// collector already claimed are skipped, and the ones collected here are
+/// claimed in turn, so no later collector over the same buffer repeats them.
+pub(crate) fn collect_paused_exit_triggers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+) {
+    collect_paused_exit_triggers_matching(
+        state,
+        events,
+        event_start,
+        |_| true,
+        ObserverCollection::Direct,
+    );
+}
+
+/// CR 603.2c: collect only the occurrences selected by an exit's owner, keeping
+/// their full-buffer positions so a later scan honors the same claims. Both
+/// halves of the paused exit, ordinary and delayed, see the same selection.
+pub(crate) fn collect_paused_exit_triggers_matching(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+    matches: impl Fn(&GameEvent) -> bool,
+    collection: ObserverCollection,
+) {
+    collect_unclaimed_ordinary_observers_matching(state, events, event_start, &matches, collection);
+    collect_unclaimed_delayed_observers(state, events, event_start, &matches);
+}
+
+/// CR 603.2c + CR 603.7: the delayed half of every paused exit: the delayed
+/// triggers of `events[event_start..]` that no collector has claimed and no
+/// live owner retains.
+fn collect_unclaimed_delayed_observers(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+    matches: impl Fn(&GameEvent) -> bool,
+) {
+    let retained = paused_exit_retained_events(state);
+    let mut delayed = unclaimed_trigger_events_from(
+        events,
+        event_start,
+        TriggerCollectionRequester::Delayed,
+        &state.consumed_before_priority_trigger_events,
+    );
+    delayed.retain(|event| matches(event) && !retained.contains(event));
+    collect_unclaimed_delayed_triggers_into_deferred(state, events, &delayed);
+}
+
+/// Events a live owner still holds and collects itself: logical zone moves,
+/// parked entries and cost events (CR 603.2c + CR 603.10a + CR 614.12a).
+fn paused_exit_retained_events(state: &GameState) -> Vec<GameEvent> {
+    let mut retained = super::engine_priority::retained_logical_zone_events(state);
+    retained.extend(state.deferred_entry_events.iter().cloned());
+    retained.extend(super::engine_priority::retained_cost_events(state));
+    retained
+}
+
+/// How [`collect_unclaimed_ordinary_observers_matching`] queues what it collects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObserverCollection {
+    /// Matched now, as every paused exit inside a payment is.
+    Direct,
+    /// CR 603.6a: battlefield entries pass [`settle_entry_batch_scan`] first, so an entry
+    /// whose entering instruction is still suspended is held, not matched.
+    ThroughEntryGate,
+}
+
+/// CR 603.2c: the ordinary half of every paused exit. Collects the observer
+/// triggers of `events[event_start..]` that no collector has claimed and no
+/// live owner retains, narrowed to the events `keep` accepts, queued as
+/// `collection` says, then claims exactly those occurrences for ordinary
+/// collectors. Logical zone-change owners can queue observers without claiming
+/// the ledger, so their queued contexts are honored as collection witnesses.
+/// The occurrences are claimed either way: a held entry is released from the
+/// gate's own list, never re-read from a buffer.
+fn collect_unclaimed_ordinary_observers_matching(
+    state: &mut GameState,
+    events: &[GameEvent],
+    event_start: usize,
+    keep: impl Fn(&GameEvent) -> bool,
+    collection: ObserverCollection,
+) {
+    let retained = paused_exit_retained_events(state);
+    let mut zone_change_witnesses: Vec<GameEvent> = state
+        .deferred_triggers
+        .iter()
+        .flat_map(|context| context.trigger_events.iter())
+        .filter(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+        .cloned()
+        .collect();
+    let mut ordinary = unclaimed_trigger_events_from(
+        events,
+        event_start,
+        TriggerCollectionRequester::Ordinary,
+        &state.consumed_before_priority_trigger_events,
+    );
+    ordinary.retain(|event| {
+        if !keep(event) {
+            return false;
+        }
+        // CR 707.10: `copy_spell` collects `SpellCopied` observers at
+        // announcement and drains them after CopyRetarget finalization.
+        if matches!(
+            event,
+            GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
+        ) || retained.contains(event)
+        {
+            return false;
+        }
+        if let Some(index) = zone_change_witnesses
+            .iter()
+            .position(|witness| witness == event)
+        {
+            zone_change_witnesses.remove(index);
+            return false;
+        }
+        true
+    });
+    if ordinary.events.is_empty() {
+        return;
+    }
+    match collection {
+        ObserverCollection::Direct => collect_triggers_into_deferred(state, &ordinary.events),
+        ObserverCollection::ThroughEntryGate => {
+            collect_action_end_triggers_into_deferred(state, &ordinary.events)
+        }
+    }
+    let occurrences = ordinary
+        .positions
+        .iter()
+        .map(|&position| ConsumedTriggerEventOccurrence {
+            event: events[position].clone(),
+            occurrence: trigger_event_occurrence(events, position),
+            scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+        })
+        .collect();
+    resolve_and_apply_trigger_collection(
+        state,
+        ResolvedTriggerCollection::ConsumeBeforePriority { occurrences },
+    )
+    .expect("a paused-exit claim must have a live journal cause");
 }
 
 /// CR 603.2 + CR 603.7: Park delayed observer triggers if the action paused
@@ -9493,7 +11558,10 @@ pub(crate) fn park_delayed_observer_triggers_if_paused(
 /// `flush_deferred_entry_events_into_priority_scan`), which scans it against the
 /// realized post-choice object (CR 603.10); collecting it here too would trigger
 /// the observer twice. Mirrors `engine_priority::run_post_action_pipeline`.
-fn paused_observer_trigger_events(state: &GameState, candidates: Vec<GameEvent>) -> Vec<GameEvent> {
+pub(crate) fn paused_observer_trigger_events(
+    state: &GameState,
+    candidates: Vec<GameEvent>,
+) -> Vec<GameEvent> {
     candidates
         .into_iter()
         .filter(|ev| {
@@ -9533,10 +11601,8 @@ pub(crate) fn collect_and_drain_observer_triggers_if_settled(
         TriggerCollectionRequester::Ordinary,
         &state.consumed_before_priority_trigger_events,
     );
-    let trigger_events = paused_observer_trigger_events(state, candidates);
-    if !trigger_events.is_empty() {
-        collect_triggers_into_deferred(state, &trigger_events);
-    }
+    let candidates = paused_observer_trigger_events(state, candidates);
+    collect_action_end_triggers_into_deferred(state, &candidates);
     if !state.deferred_triggers.is_empty() {
         let _ = drain_deferred_trigger_queue(state, events);
     }
@@ -9674,6 +11740,10 @@ pub(crate) fn seed_batched_attack_parent_targets(
     if attacker_ids.is_empty() {
         return;
     }
+    // CR 608.2b: a validated-empty announcement cannot be reseeded by an event.
+    if ability.has_authoritative_empty_binding() {
+        return;
+    }
     if !effect_uses_parent_target(&ability.effect) || !ability.targets.is_empty() {
         return;
     }
@@ -9694,6 +11764,11 @@ pub(crate) fn seed_batched_attack_parent_targets(
 /// `current_trigger_event`. CR 603.6 specifically authorizes zone-change
 /// abilities to find and affect the object after it changes zones.
 fn parent_target_seeding_blocked(ability: &ResolvedAbility) -> bool {
+    // CR 608.2b: neither event subjects nor attached hosts replace an
+    // unavailable announcement, at stack placement or resolution fallback.
+    if ability.has_authoritative_empty_binding() {
+        return true;
+    }
     // CR 115.1: event-context seeding is not a spell or ability that may change
     // a chosen target, so it never overwrites one, even when the chosen target
     // is the trigger's own source.
@@ -9726,6 +11801,11 @@ pub(crate) fn seed_event_context_parent_targets(
     let Some(event) = trigger_event else {
         return;
     };
+    if timing == EventContextSeedTiming::StackPush {
+        // CR 400.7 + CR 608.2k: non-targeted event operands need their original
+        // identities before opponents can respond, not a resolution-time lookup.
+        super::effects::phase_out::seed_event_context_pins(state, ability, event);
+    }
     if !effect_uses_parent_target(&ability.effect) || parent_target_seeding_blocked(ability) {
         return;
     }
@@ -10322,6 +12402,7 @@ pub(crate) fn finalize_pending_trigger_entry(
 /// Locate the in-construction `TriggeredAbility` entry identified by `entry_id`
 /// (searching from the top of the stack down) and overwrite its resolved
 /// ability. Shared find-and-assign logic for `mutate`/`finalize` above.
+/// CR 610.3b: retain the provisional ability's latched "until" events when replacing it.
 ///
 /// Returns `false` when no stack entry carries `entry_id` — the triggered
 /// ability is unexpectedly no longer on the stack (dangling push-first cursor;
@@ -10368,6 +12449,12 @@ fn assign_pending_trigger_entry_ability(
     let ability = entry
         .ability_mut()
         .expect("pending_trigger_entry must reference a TriggeredAbility stack entry");
+    // CR 610.3b + CR 603.3d: an "until" event latched on the provisional entry
+    // after it triggered must survive construction from the chosen targets.
+    // Otherwise a source that left before target selection would still exile them.
+    for duration_event in ability.latched_duration_events() {
+        assigned_ability.record_duration_event_recursive(duration_event);
+    }
     if assigned_ability.target_incarnations.is_empty()
         && !ability.target_incarnations.is_empty()
         && ability_uses_event_target_prevent_damage(&assigned_ability)
@@ -10670,25 +12757,15 @@ pub(crate) enum PendingTriggeredManaClass {
     Ordinary(Box<PendingTriggerContext>),
 }
 
-/// True iff any reachable `sub_ability` / `else_ability` link satisfies `pred`.
+/// True iff any reachable live child link satisfies `pred`.
 pub(crate) fn any_reachable_link(
     ability: &ResolvedAbility,
     pred: &dyn Fn(&ResolvedAbility) -> bool,
 ) -> bool {
-    if pred(ability) {
-        return true;
-    }
-    if let Some(sub) = ability.sub_ability.as_deref() {
-        if any_reachable_link(sub, pred) {
-            return true;
-        }
-    }
-    if let Some(else_branch) = ability.else_ability.as_deref() {
-        if any_reachable_link(else_branch, pred) {
-            return true;
-        }
-    }
-    false
+    pred(ability)
+        || ability
+            .child_links()
+            .any(|(_, child)| any_reachable_link(child, pred))
 }
 
 /// True iff any reachable link carries an `unless_pay` modifier
@@ -11141,6 +13218,7 @@ fn dispatch_pending_trigger_context_core(
                                     total,
                                     targets: assigned_targets,
                                     unit,
+                                    scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
                                 };
                             restore_trigger_event_context(state, context_snapshot);
                             return TriggerDispatchDisposition::Paused;
@@ -11424,8 +13502,8 @@ pub(crate) fn collect_mana_action_trigger_batch(
 ///
 /// The collected state records what observing bound (`ActivationObservers`):
 /// any admitted trigger, counted at match time — before an auto-inert context
-/// (a remembered decline) is pruned, since admission alone may have spent a
-/// "triggers only once each turn" limit. A bound observation revokes any undo
+/// (a remembered accept with no legal target) is pruned, since admission alone
+/// may have spent a "triggers only once each turn" limit. A bound observation revokes any undo
 /// already recorded for this source (CR 605.3b; a replacement-paused
 /// activation reaches this boundary only on resume), and
 /// `mana_sources::record_undoable_mana_tap` never records one for it.
@@ -12184,7 +14262,14 @@ pub(super) fn is_trigger_construction_prompt(
             | WaitingFor::OptionalEffectChoice { .. }
             | WaitingFor::AbilityModeChoice { .. }
             | WaitingFor::TriggerTargetSelection { .. }
-            | WaitingFor::DistributeAmong { .. }
+            // CR 603.3d + CR 601.2d: only an announce-time division is part of
+            // putting a trigger on the stack. A CR 608.2d resolution-time division
+            // (`ResolutionCandidates`) is a choice made while the effect is applied,
+            // not a construction prompt.
+            | WaitingFor::DistributeAmong {
+                scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
+                ..
+            }
     )
 }
 
@@ -12622,6 +14707,7 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
@@ -12629,6 +14715,7 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -12830,6 +14917,7 @@ fn latched_property_kind(
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -13670,9 +15758,9 @@ pub(crate) fn filter_consumed_trigger_events(
 ///     `engine_resolution_choices.rs`, plus bottom selection in `mulligan.rs`,
 ///     the last of which answers the SAME
 ///     `GameAction::SelectCards` variant. A duplicate id therefore reaches
-///     `move_library_origin_cards_in_selection_order`
+///     the owner-ordered `PutAtLibraryPosition` delivery batch
 ///     (`engine_resolution_choices.rs`) and repositions one object twice
-///     inside one loop. That is a boundary-validation gap, not a filter defect.
+///     inside one batch. That is a boundary-validation gap, not a filter defect.
 ///
 /// CARVE-OUT: `game/stack.rs` builds a production `ZoneChanged` carrying
 /// index `0`, but it is a local probe passed only to
@@ -14269,8 +16357,12 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef) -> bool {
         | QuantityRef::PlayerCounter { .. }
         | QuantityRef::SelfManaValue
         | QuantityRef::Devotion { .. }
+        // Turtle Team-Up: global command-zone pile census — binds identically
+        // on both legs (not resolution-scoped like the linked-exile family).
+        | QuantityRef::DeployedBossCount
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -14425,6 +16517,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // membership already diverges, so the conjunction does.
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         // CR 607.2a: the source's linked-exile population and its ORDER — the
         // same two the quantity axis already declines for
         // (`QuantityRef::CardsExiledBySource`, `CardTypeSetSource::ExiledBySource`).
@@ -14499,6 +16592,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // same dual path `ObjectScope::EventSource` / `EventTarget` and
         // `PlayerScope::DefendingPlayer` are adjudicated non-divergent under.
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringSpellController
@@ -14673,8 +16767,9 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // `state.last_named_choice` diverges; a printed parity does not.
         FilterProp::ManaValueParity { parity } => parity_source_binding_diverges(parity),
         // CR 115.1 + CR 400.7: the combat relation can be scoped to the parent
-        // target (`ability.targets`, empty at fire time) or to the source, which
-        // the `TriggerSourceContext` carries on both legs.
+        // target or an earlier instruction's target (`ability.targets`, empty at
+        // fire time) or to the source, which the `TriggerSourceContext` carries on
+        // both legs.
         FilterProp::CombatRelation { subject, .. } => {
             combat_relation_subject_binding_diverges(subject)
         }
@@ -14813,6 +16908,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         // An unrecognized parser escape hatch matches nothing on either leg.
         | FilterProp::Other { .. } => false,
@@ -14952,6 +17048,9 @@ fn parity_source_binding_diverges(parity: &crate::types::ability::ParitySource) 
         ParitySource::LastNamedChoice => true,
         // A printed parity is a literal — nothing to bind.
         ParitySource::Fixed { .. } => false,
+        // CR 607.2d: the source's persisted choice reads the same source state
+        // at fire time and at resolution, as the other chosen-attribute reads do.
+        ParitySource::SourceChosen => false,
     }
 }
 
@@ -14964,7 +17063,7 @@ fn combat_relation_subject_binding_diverges(
     use crate::types::ability::CombatRelationSubject;
     match subject {
         // CR 115.1: reads `ability.targets`, empty at fire time.
-        CombatRelationSubject::ParentTarget => true,
+        CombatRelationSubject::ParentTarget | CombatRelationSubject::AnaphoricTarget => true,
         // CR 400.7: the source object, carried by the `TriggerSourceContext` on
         // both legs — the same authority `ObjectScope::Source` is adjudicated
         // non-divergent under.
@@ -15359,6 +17458,11 @@ fn delayed_trigger_to_context(
         }),
         _ => None,
     };
+    // CR 603.3c + CR 700.2b: a modal delayed or reflexive trigger ("When you
+    // remove a counter this way, choose one —") has its mode chosen as it is put
+    // on the stack, exactly as a printed modal trigger does.
+    let modal = trigger.ability.modal.clone();
+    let mode_abilities = trigger.ability.mode_abilities.clone();
     let mut context = PendingTriggerContext::delayed(
         PendingTrigger {
             source_id: trigger.source_id,
@@ -15369,8 +17473,8 @@ fn delayed_trigger_to_context(
             target_constraints: Vec::new(),
             distribute: None,
             trigger_event: Some(trigger_event),
-            modal: None,
-            mode_abilities: vec![],
+            modal,
+            mode_abilities,
             description: None,
             may_trigger_origin: None,
             subject_match_count,
@@ -15382,6 +17486,11 @@ fn delayed_trigger_to_context(
     // CR 603.2c + CR 608.2c: the firing's whole narrowed group, on the Delayed
     // dispatch identity (not `PendingTriggerContext::batched`).
     context.trigger_events = trigger_events;
+    // CR 805.4d: a fanned phase occurrence rebinds its firing to its own
+    // player (same authority as the printed per-group loop).
+    if let Some(event) = context.pending.trigger_event.clone() {
+        restamp_scoped_player_from_phase_occurrence(&mut context.pending.ability, &event);
+    }
     context
 }
 
@@ -16086,21 +18195,6 @@ fn process_collected_triggers_with_delayed_events_scoped(
         prompt,
         consumed_events,
     }
-}
-
-pub(crate) fn process_triggers_with_delayed_phase_events(
-    state: &mut GameState,
-    normal_events: &[GameEvent],
-    delayed_events: &[GameEvent],
-    events_out: &mut Vec<GameEvent>,
-) -> TriggerBatchOutcome {
-    let normal_pending = collect_triggers_for_batch(state, normal_events);
-    process_collected_triggers_with_delayed_phase_events(
-        state,
-        normal_pending,
-        delayed_events,
-        events_out,
-    )
 }
 
 /// CR 603.3b + CR 508.3a + CR 509.3a: settle an attack or block declaration.
@@ -17371,16 +19465,16 @@ fn evaluate_trigger_condition_with_source(
             controller: caster_scope,
             owner: owner_scope,
         } => trigger_subject_read(state, trigger_event, source_context).is_some_and(|read| {
-            read.cast_from_zone()
-                .is_some_and(|cast_zone| zone.is_none_or(|expected| expected == cast_zone))
-                && caster_scope.as_ref().is_none_or(|scope| {
-                    read.cast_controller().is_some_and(|caster| {
-                        controller_ref_matches_player(caster, controller, scope)
-                    })
-                })
-                && owner_scope.as_ref().is_none_or(|scope| {
-                    controller_ref_matches_player(read.owner(), controller, scope)
-                })
+            // CR 601.2a + CR 707.13: a cast from outside the game satisfies a bare
+            // "was cast" but no named origin zone.
+            read.cast_from_zone().is_some_and(|cast_zone| {
+                zone.is_none_or(|expected| !read.cast_from_outside_game() && expected == cast_zone)
+            }) && caster_scope.as_ref().is_none_or(|scope| {
+                read.cast_controller()
+                    .is_some_and(|caster| controller_ref_matches_player(caster, controller, scope))
+            }) && owner_scope
+                .as_ref()
+                .is_none_or(|scope| controller_ref_matches_player(read.owner(), controller, scope))
         }),
         // CR 603.4 + CR 603.6a: "put onto the battlefield with this ability" —
         // the entering object was placed by THIS trigger's source ability.
@@ -17796,9 +19890,25 @@ fn evaluate_trigger_condition_with_source(
         // The match is exhaustive over PlayerFilter so future additions force a
         // deliberate decision here. Variants with no single-player "whose turn"
         // semantic (set-valued predicates, action-result predicates) fail-closed.
+        // CR 102.1 + CR 805.4: "your turn" is the CONTROLLER'S TEAM's turn when
+        // the format uses shared team turns. Normalize both seats through the
+        // team representative; identity when the format does not share turns.
         TriggerCondition::DuringPlayersTurn { player } => match player {
-            // CR 102.1: "your turn" — controller is active.
-            PlayerFilter::Controller => state.active_player == controller,
+            // CR 102.1: "your turn" — the controller's side is the active side.
+            PlayerFilter::Controller => {
+                if state.format_config.topology().has_shared_team_turns() {
+                    super::topology::normalize_shared_turn_recipient(state, controller)
+                        == super::topology::normalize_shared_turn_recipient(
+                            state,
+                            state.active_player,
+                        )
+                } else {
+                    // CR 102.1: individual-turn formats have no team
+                    // representative to normalize; the existing equality path
+                    // is exact and allocates no side vectors.
+                    controller == state.active_player
+                }
+            }
             // CR 102.3 + CR 805.4a: "an opponent's turn" is team-aware. Under
             // shared team turns, a teammate holding `active_player` remains on
             // the controller's active team and is not an opponent.
@@ -17807,7 +19917,9 @@ fn evaluate_trigger_condition_with_source(
             }
             // CR 603.4 + CR 102.1: "that player's turn" — the player named by
             // the trigger event (drawer / tapper / damaged player / etc.) is
-            // currently the active player.
+            // currently the active player. Shared-team normalization for this
+            // arm is deliberately not claimed here; this PR verifies only the
+            // controller arm through production play.
             PlayerFilter::TriggeringPlayer => trigger_event
                 .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
                 .is_some_and(|p| state.active_player == p),
@@ -18699,7 +20811,7 @@ fn attack_target_matches_controller_scope(
             crate::game::combat::AttackTarget::Player(player_id),
         ) => player_matches(player_id),
         (
-            AttackTargetFilter::Planeswalker,
+            AttackTargetFilter::Planeswalker { subtype: None },
             crate::game::combat::AttackTarget::Planeswalker(object_id),
         )
         | (
@@ -18726,18 +20838,18 @@ fn attack_target_filters_compatible(
         (trigger_filter, condition_filter),
         (AttackTargetFilter::Player, AttackTargetFilter::Player)
             | (
-                AttackTargetFilter::Planeswalker,
-                AttackTargetFilter::Planeswalker
+                AttackTargetFilter::Planeswalker { subtype: None },
+                AttackTargetFilter::Planeswalker { subtype: None }
             )
             | (AttackTargetFilter::Battle, AttackTargetFilter::Battle)
             | (
                 AttackTargetFilter::PlayerOrPlaneswalker,
                 AttackTargetFilter::PlayerOrPlaneswalker
                     | AttackTargetFilter::Player
-                    | AttackTargetFilter::Planeswalker
+                    | AttackTargetFilter::Planeswalker { subtype: None }
             )
             | (
-                AttackTargetFilter::Player | AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Player | AttackTargetFilter::Planeswalker { subtype: None },
                 AttackTargetFilter::PlayerOrPlaneswalker
             )
     )
@@ -19264,7 +21376,7 @@ pub(super) fn build_triggered_ability_from_context(
         // Crescent Moon / Howling Mine-class triggers no longer fall back to
         // the source's controller.
         if matches!(trig_def.mode, TriggerMode::Phase) {
-            resolved.set_scoped_player_recursive(state.active_player);
+            resolved.set_phase_turn_player_recursive(state.active_player);
         }
         resolved.set_trigger_source_recursive(source_context.clone());
         // CR 400.7 + CR 509.1c: Source-referential force-block instructions
@@ -19334,7 +21446,7 @@ pub(super) fn build_triggered_ability(
     }
     resolved.unless_pay.clone_from(&trig_def.unless_pay);
     if matches!(trig_def.mode, TriggerMode::Phase) {
-        resolved.set_scoped_player_recursive(state.active_player);
+        resolved.set_phase_turn_player_recursive(state.active_player);
     }
     resolved
 }
@@ -19354,13 +21466,13 @@ pub mod tests {
         CommanderOwnership, Comparator, ContinuousModification, ControllerRef, DamageChannel,
         DamageKindFilter, DelayedTriggerCondition, DelayedTriggerKind, DelayedTriggerLifetime,
         DiscardSelfScope, Duration, EachDamageRecipient, Effect, FilterProp, GuessSubject,
-        KickerVariant, ModalChoice, MultiTargetSpec, NumberQuality, Parity, PlayerFilter,
-        PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, SpentColor,
-        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TargetSelectionMode,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef,
-        TypeFilter, TypedFilter,
+        KickerVariant, ModalChoice, MultiTargetSpec, NumberQuality, ParentTargetMissingReason,
+        Parity, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue,
+        PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+        ResolvedAbility, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        SpentColor, StaticCondition, StaticDefinition, TargetFilter, TargetReadOrigin, TargetRef,
+        TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
+        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -19389,6 +21501,19 @@ pub mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    /// A held context serialized under the origin's earlier name, `UntapStep`, still decodes.
+    #[test]
+    fn turn_based_action_origin_reads_the_untap_step_name() {
+        assert_eq!(
+            serde_json::from_str::<DeferredTriggerBatchOrigin>("\"UntapStep\"").unwrap(),
+            DeferredTriggerBatchOrigin::TurnBasedAction
+        );
+        assert_eq!(
+            serde_json::to_string(&DeferredTriggerBatchOrigin::TurnBasedAction).unwrap(),
+            "\"TurnBasedAction\""
+        );
     }
 
     /// CR 115.10a + CR 609.7a: a SOURCE-scoped prevention's recipient field is
@@ -19557,19 +21682,675 @@ pub mod tests {
         ];
         let boundaries = battlefield_entry_observation_indices(&events);
 
-        assert!(
-            !live_battlefield_source_was_present_at_event(0, saga, &boundaries),
+        assert_eq!(
+            battlefield_source_presence_at_event(0, saga, &boundaries),
+            None,
             "the entering Saga must not observe an unrelated pre-entry sacrifice"
         );
-        assert!(
-            live_battlefield_source_was_present_at_event(1, saga, &boundaries),
+        assert_eq!(
+            battlefield_source_presence_at_event(1, saga, &boundaries),
+            Some(TriggerObservationTime::ImmediatelyAfter),
             "the Saga's intrinsic lore counter belongs to its entry lifetime"
         );
-        assert!(live_battlefield_source_was_present_at_event(
-            2,
-            saga,
-            &boundaries
+        assert_eq!(
+            battlefield_source_presence_at_event(2, saga, &boundaries),
+            Some(TriggerObservationTime::ImmediatelyAfter)
+        );
+        // An object with no entry in the batch existed before every event of it.
+        assert_eq!(
+            battlefield_source_presence_at_event(0, ObjectId(11), &boundaries),
+            Some(TriggerObservationTime::ImmediatelyBefore)
+        );
+    }
+
+    const OBSERVATION_GIANT: ObjectId = ObjectId(20);
+    const OBSERVATION_WARDEN: ObjectId = ObjectId(21);
+    const OBSERVATION_WORLDSIRE: ObjectId = ObjectId(22);
+    const OBSERVATION_CARMEN: ObjectId = ObjectId(23);
+    const OBSERVATION_FOREST: ObjectId = ObjectId(24);
+    const OBSERVATION_TOKEN: ObjectId = ObjectId(25);
+
+    /// A graveyard-to-battlefield entry of `object_id` stamped with `co_entered`.
+    fn observation_entry(object_id: ObjectId, co_entered: &[ObjectId]) -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Graveyard),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                co_entered: co_entered.to_vec(),
+                ..ZoneChangeRecord::test_minimal(
+                    object_id,
+                    Some(Zone::Graveyard),
+                    Zone::Battlefield,
+                )
+            }),
+        }
+    }
+
+    fn observation_sacrifice(object_id: ObjectId) -> GameEvent {
+        GameEvent::PermanentSacrificed {
+            object_id,
+            player_id: PlayerId(0),
+        }
+    }
+
+    fn observation_counter(object_id: ObjectId) -> GameEvent {
+        GameEvent::CounterAdded {
+            object_id,
+            counter_type: CounterType::Plus1Plus1,
+            count: 1,
+            actor: PlayerId(0),
+        }
+    }
+
+    fn presence(
+        events: &[GameEvent],
+        observer: ObjectId,
+        event_idx: usize,
+    ) -> Option<TriggerObservationTime> {
+        battlefield_source_presence_at_event(
+            event_idx,
+            observer,
+            &battlefield_entry_observation_indices(events),
+        )
+    }
+
+    const AFTER: Option<TriggerObservationTime> = Some(TriggerObservationTime::ImmediatelyAfter);
+    const BEFORE: Option<TriggerObservationTime> = Some(TriggerObservationTime::ImmediatelyBefore);
+
+    /// CR 603.6a + CR 603.10: a newcomer observes a co-entrant's entry delivered before its own,
+    /// existing only immediately after it.
+    #[test]
+    fn battlefield_entry_observation_co_entrant_delivered_first() {
+        let events = [
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_WARDEN]),
+            observation_entry(OBSERVATION_WARDEN, &[OBSERVATION_GIANT]),
+        ];
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 0), AFTER);
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 1), AFTER);
+    }
+
+    /// CR 603.6a + CR 603.10: a co-entrant delivered after the observer is still part of the
+    /// observer's own entry event, so the observer exists only immediately after it; a later
+    /// unrelated event finds it already on the battlefield; and an event interleaved before the
+    /// observer's own entry stays unseen (CR 400.7, issue #8160).
+    #[test]
+    fn battlefield_entry_observation_co_entrant_delivered_after_exists_only_after() {
+        let events = [
+            observation_entry(OBSERVATION_WARDEN, &[OBSERVATION_GIANT]),
+            observation_sacrifice(OBSERVATION_FOREST),
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_WARDEN]),
+            observation_sacrifice(OBSERVATION_TOKEN),
+        ];
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 0), AFTER);
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 1), BEFORE);
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 2), AFTER);
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 3), BEFORE);
+        assert_eq!(presence(&events, OBSERVATION_GIANT, 0), AFTER);
+        assert_eq!(presence(&events, OBSERVATION_GIANT, 1), None);
+        assert_eq!(presence(&events, OBSERVATION_GIANT, 2), AFTER);
+        assert_eq!(presence(&events, OBSERVATION_GIANT, 3), BEFORE);
+    }
+
+    /// CR 603.6a + CR 122.6: a co-entrant's entry span includes its entry counter prefix.
+    #[test]
+    fn battlefield_entry_observation_includes_co_entrant_counter_prefix() {
+        let events = [
+            observation_counter(OBSERVATION_WORLDSIRE),
+            observation_entry(OBSERVATION_WORLDSIRE, &[OBSERVATION_CARMEN]),
+            observation_entry(OBSERVATION_CARMEN, &[OBSERVATION_WORLDSIRE]),
+        ];
+        assert_eq!(presence(&events, OBSERVATION_CARMEN, 0), AFTER);
+        assert_eq!(presence(&events, OBSERVATION_CARMEN, 1), AFTER);
+    }
+
+    /// CR 603.6a + CR 400.7 + CR 603.10a: a sacrifice interleaved within the group's delivery,
+    /// before the observer's entry, stays unseen while the co-entrants' entries around it are
+    /// seen.
+    #[test]
+    fn battlefield_entry_observation_excludes_interleaved_sacrifice() {
+        let events = [
+            observation_entry(
+                OBSERVATION_GIANT,
+                &[OBSERVATION_WORLDSIRE, OBSERVATION_CARMEN],
+            ),
+            observation_sacrifice(OBSERVATION_FOREST),
+            observation_counter(OBSERVATION_WORLDSIRE),
+            observation_entry(
+                OBSERVATION_WORLDSIRE,
+                &[OBSERVATION_GIANT, OBSERVATION_CARMEN],
+            ),
+            observation_entry(
+                OBSERVATION_CARMEN,
+                &[OBSERVATION_GIANT, OBSERVATION_WORLDSIRE],
+            ),
+        ];
+        assert_eq!(presence(&events, OBSERVATION_CARMEN, 0), AFTER);
+        assert_eq!(presence(&events, OBSERVATION_CARMEN, 1), None);
+        for event_idx in 2..=4 {
+            assert_eq!(
+                presence(&events, OBSERVATION_CARMEN, event_idx),
+                AFTER,
+                "{event_idx}"
+            );
+        }
+    }
+
+    /// CR 400.7 + issue #8160: an event before the group stays unseen by its entrants.
+    #[test]
+    fn battlefield_entry_observation_excludes_event_before_the_group() {
+        let events = [
+            observation_sacrifice(OBSERVATION_FOREST),
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_CARMEN]),
+            observation_entry(OBSERVATION_CARMEN, &[OBSERVATION_GIANT]),
+        ];
+        assert_eq!(presence(&events, OBSERVATION_CARMEN, 0), None);
+        assert_eq!(presence(&events, OBSERVATION_CARMEN, 1), AFTER);
+    }
+
+    /// CR 603.6a + CR 400.7: a member seen again under the same member set opens a new event, so
+    /// the observer's last entry sees only its own event's co-entrant.
+    #[test]
+    fn battlefield_entry_observation_repeated_members_open_a_new_event() {
+        let events = [
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_WARDEN]),
+            observation_entry(OBSERVATION_WARDEN, &[OBSERVATION_GIANT]),
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_WARDEN]),
+            observation_sacrifice(OBSERVATION_FOREST),
+            observation_entry(OBSERVATION_WARDEN, &[OBSERVATION_GIANT]),
+        ];
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 2), AFTER);
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 0), None);
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 3), None);
+    }
+
+    /// CR 400.7: unstamped entries keep each entrant's own boundary.
+    #[test]
+    fn battlefield_entry_observation_unstamped_entries_keep_own_boundary() {
+        let events = [
+            observation_entry(OBSERVATION_GIANT, &[]),
+            observation_entry(OBSERVATION_WARDEN, &[]),
+        ];
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 0), None);
+        assert_eq!(presence(&events, OBSERVATION_WARDEN, 1), AFTER);
+    }
+
+    /// CR 603.6a + CR 111.1: an entry inside the group's delivery span that is not one of its
+    /// members (a token created on the battlefield) is not a co-entrant.
+    #[test]
+    fn battlefield_entry_observation_excludes_non_member_entry() {
+        let events = [
+            observation_entry(OBSERVATION_GIANT, &[OBSERVATION_CARMEN]),
+            GameEvent::ZoneChanged {
+                object_id: OBSERVATION_TOKEN,
+                from: None,
+                to: Zone::Battlefield,
+                record: Box::new(ZoneChangeRecord::test_minimal(
+                    OBSERVATION_TOKEN,
+                    None,
+                    Zone::Battlefield,
+                )),
+            },
+            observation_entry(OBSERVATION_CARMEN, &[OBSERVATION_GIANT]),
+        ];
+        assert_eq!(presence(&events, OBSERVATION_CARMEN, 0), AFTER);
+        assert_eq!(presence(&events, OBSERVATION_CARMEN, 1), None);
+    }
+
+    /// The first trigger definition parsed from a card's verbatim Oracle text whose mode is
+    /// `mode` and that satisfies `reach` (the card-data shape the row depends on).
+    fn parsed_trigger(
+        oracle_text: &str,
+        name: &str,
+        keyword_names: &[&str],
+        types: &[&str],
+        subtypes: &[&str],
+        mode: TriggerMode,
+        reach: impl Fn(&TriggerDefinition) -> bool,
+    ) -> TriggerDefinition {
+        let owned = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        crate::parser::parse_oracle_text(
+            oracle_text,
+            name,
+            &owned(keyword_names),
+            &owned(types),
+            &owned(subtypes),
+        )
+        .triggers
+        .into_iter()
+        .find(|trigger| trigger.mode == mode && reach(trigger))
+        .unwrap_or_else(|| panic!("{name} parses a {mode:?} trigger of the expected shape"))
+    }
+
+    /// A zone change of `object_id` from `from` to `to`.
+    fn observation_move(object_id: ObjectId, from: Zone, to: Zone) -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id,
+            from: Some(from),
+            to,
+            record: Box::new(ZoneChangeRecord::test_minimal(object_id, Some(from), to)),
+        }
+    }
+
+    /// Soul Warden: "Whenever another creature enters, you gain 1 life." — an enters half.
+    fn soul_warden_trigger() -> TriggerDefinition {
+        parsed_trigger(
+            "Whenever another creature enters, you gain 1 life.",
+            "Soul Warden",
+            &[],
+            &["Creature"],
+            &["Human", "Cleric"],
+            TriggerMode::ChangesZone,
+            |trigger| trigger.destination == Some(Zone::Battlefield),
+        )
+    }
+
+    /// Syr Konrad, the Grim: its three-clause disjunction. The leaves-your-graveyard clause looks
+    /// back (CR 603.10a); the put-into-a-graveyard-from-anywhere-but-the-battlefield clause does
+    /// not. The ability functions only on the battlefield (CR 113.6).
+    fn syr_konrad_trigger() -> TriggerDefinition {
+        parsed_trigger(
+            "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, Syr Konrad deals 1 damage to each opponent.\n{1}{B}: Each player mills a card. (They each put the top card of their library into their graveyard.)",
+            "Syr Konrad, the Grim",
+            &[],
+            &["Creature"],
+            &["Human", "Knight"],
+            TriggerMode::ChangesZone,
+            |trigger| trigger.zone_change_clauses.len() == 3,
+        )
+    }
+
+    /// Tormod, the Desecrator: "Whenever one or more cards leave your graveyard" (batched).
+    fn tormod_trigger() -> TriggerDefinition {
+        parsed_trigger(
+            "Whenever one or more cards leave your graveyard, create a tapped 2/2 black Zombie creature token.\nPartner (You can have two commanders if both have partner.)",
+            "Tormod, the Desecrator",
+            &["Partner"],
+            &["Creature"],
+            &["Zombie", "Wizard"],
+            TriggerMode::ChangesZoneAll,
+            |trigger| trigger.batched && trigger.origin == Some(Zone::Graveyard),
+        )
+    }
+
+    /// River Kelpie: "Whenever this creature or another permanent enters from a graveyard" — an
+    /// enters half that names a graveyard origin (CR 603.6a; River Kelpie ruling).
+    fn river_kelpie_trigger() -> TriggerDefinition {
+        parsed_trigger(
+            "Whenever this creature or another permanent enters from a graveyard, draw a card.\nWhenever a player casts a spell from a graveyard, draw a card.\nPersist (When this creature dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)",
+            "River Kelpie",
+            &["Persist"],
+            &["Creature"],
+            &["Beast"],
+            TriggerMode::ChangesZone,
+            |trigger| {
+                trigger.origin == Some(Zone::Graveyard)
+                    && trigger.destination == Some(Zone::Battlefield)
+            },
+        )
+    }
+
+    /// Fiend Hunter: "When this creature leaves the battlefield, …" (CR 603.10a).
+    fn fiend_hunter_trigger() -> TriggerDefinition {
+        parsed_trigger(
+            "When this creature enters, you may exile another target creature.\nWhen this creature leaves the battlefield, return the exiled card to the battlefield under its owner's control.",
+            "Fiend Hunter",
+            &[],
+            &["Creature"],
+            &["Human", "Cleric"],
+            TriggerMode::LeavesBattlefield,
+            |_| true,
+        )
+    }
+
+    /// Carmen, Cruel Skymarcher: "Whenever a player sacrifices a permanent, …" (CR 603.10a).
+    fn carmen_trigger() -> TriggerDefinition {
+        parsed_trigger(
+            "Flying\nWhenever a player sacrifices a permanent, put a +1/+1 counter on Carmen and you gain 1 life.\nWhenever Carmen attacks, return up to one target permanent card with mana value less than or equal to Carmen's power from your graveyard to the battlefield.",
+            "Carmen, Cruel Skymarcher",
+            &["Flying"],
+            &["Creature"],
+            &["Vampire", "Soldier"],
+            TriggerMode::Sacrificed,
+            |_| true,
+        )
+    }
+
+    /// Oglor, Devoted Assistant's granted "When this card leaves your graveyard, create a tapped
+    /// 2/2 black Zombie creature token." — a look-back half that functions in the graveyard
+    /// (CR 113.6k).
+    fn oglor_grant_trigger() -> TriggerDefinition {
+        parsed_trigger(
+            "When this card leaves your graveyard, create a tapped 2/2 black Zombie creature token.",
+            "Grizzly Bears",
+            &[],
+            &["Creature"],
+            &["Bear"],
+            TriggerMode::ChangesZone,
+            |trigger| {
+                trigger.trigger_zones == [Zone::Battlefield, Zone::Graveyard, Zone::Exile]
+                    && matches!(
+                        trigger.zone_change_clauses.as_slice(),
+                        [clause] if clause.origin
+                            == crate::types::ability::OriginConstraint::Equals(Zone::Graveyard)
+                            && clause.valid_card == Some(TargetFilter::SelfRef)
+                    )
+            },
+        )
+    }
+
+    /// Prized Amalgam: "Whenever a creature enters, if it entered from your graveyard or you cast
+    /// it from your graveyard, return this card from your graveyard to the battlefield tapped at
+    /// the beginning of the next end step." — an enters half that functions only in the graveyard
+    /// (CR 113.6m).
+    fn prized_amalgam_trigger() -> TriggerDefinition {
+        parsed_trigger(
+            "Whenever a creature enters, if it entered from your graveyard or you cast it from your graveyard, return this card from your graveyard to the battlefield tapped at the beginning of the next end step.",
+            "Prized Amalgam",
+            &[],
+            &["Creature"],
+            &["Zombie"],
+            TriggerMode::ChangesZone,
+            |trigger| {
+                trigger.trigger_zones == [Zone::Graveyard]
+                    && trigger.destination == Some(Zone::Battlefield)
+            },
+        )
+    }
+
+    /// CR 603.6a + CR 603.10 + CR 603.10a: a newcomer of an entry event (an observer that exists
+    /// only immediately after it) observes it through every half checked after the event and
+    /// through no look-back half. River Kelpie's enters half and Syr Konrad's leaves-your-graveyard
+    /// half both name a graveyard origin over the same graveyard-to-battlefield move: the pair an
+    /// origin-keyed classifier cannot tell apart.
+    ///
+    /// CR 603.10a + CR 400.7: the newcomer refuses a look-back half of its own entry too; its
+    /// pre-event card observes those (`event_subject_observes`).
+    #[test]
+    fn newcomer_observes_only_post_event_halves() {
+        let to_battlefield = observation_entry(OBSERVATION_GIANT, &[]);
+
+        assert!(observes_from_immediately_after(
+            &soul_warden_trigger(),
+            &to_battlefield
         ));
+
+        let syr_konrad = syr_konrad_trigger();
+        assert!(!observes_from_immediately_after(
+            &syr_konrad,
+            &to_battlefield
+        ));
+        assert!(observes_from_immediately_after(
+            &syr_konrad,
+            &observation_move(OBSERVATION_GIANT, Zone::Hand, Zone::Graveyard)
+        ));
+
+        assert!(!observes_from_immediately_after(
+            &tormod_trigger(),
+            &to_battlefield
+        ));
+
+        assert!(observes_from_immediately_after(
+            &river_kelpie_trigger(),
+            &to_battlefield
+        ));
+
+        assert!(!observes_from_immediately_after(
+            &fiend_hunter_trigger(),
+            &observation_move(OBSERVATION_GIANT, Zone::Battlefield, Zone::Exile)
+        ));
+
+        assert!(!observes_from_immediately_after(
+            &carmen_trigger(),
+            &observation_sacrifice(OBSERVATION_FOREST)
+        ));
+
+        // Simic Ascendancy: "Whenever one or more +1/+1 counters are put on a creature you
+        // control, …" over a co-entrant's entry counter (CR 603.10 + CR 122.6).
+        let simic_ascendancy = parsed_trigger(
+            "{1}{G}{U}: Put a +1/+1 counter on target creature you control.\nWhenever one or more +1/+1 counters are put on a creature you control, put that many growth counters on this enchantment.\nAt the beginning of your upkeep, if this enchantment has twenty or more growth counters on it, you win the game.",
+            "Simic Ascendancy",
+            &[],
+            &["Enchantment"],
+            &[],
+            TriggerMode::CounterAdded,
+            |_| true,
+        );
+        assert!(observes_from_immediately_after(
+            &simic_ascendancy,
+            &observation_counter(OBSERVATION_WORLDSIRE)
+        ));
+
+        // A newcomer never observes a look-back half, its own departure included.
+        assert!(!observes_from_immediately_after(
+            &oglor_grant_trigger(),
+            &to_battlefield
+        ));
+    }
+
+    /// CR 603.10 + CR 603.10a + CR 113.6k + CR 113.6m: the pre-event card of an object entering the
+    /// battlefield from another zone observes exactly the look-back halves of its own entry that
+    /// functioned where it was. Oglor, Devoted Assistant's granted leaves-your-graveyard half
+    /// against Syr Konrad, the Grim's (both look back; only Oglor's grant functions in the
+    /// graveyard): the pair that fails without the functions-in-origin conjunct. Oglor's grant
+    /// against Prized Amalgam's enters half (both function in the graveyard; only Oglor's grant
+    /// looks back): the pair that fails without the complement conjunct. A departure visit (a
+    /// battlefield departure, a sacrifice) is unchanged.
+    #[test]
+    fn entrant_pre_event_card_observes_only_its_look_back_halves() {
+        let to_battlefield = observation_entry(OBSERVATION_GIANT, &[]);
+
+        assert!(event_subject_observes(
+            &oglor_grant_trigger(),
+            &to_battlefield
+        ));
+        assert!(!event_subject_observes(
+            &syr_konrad_trigger(),
+            &to_battlefield
+        ));
+        assert!(!event_subject_observes(&tormod_trigger(), &to_battlefield));
+        assert!(!event_subject_observes(
+            &soul_warden_trigger(),
+            &to_battlefield
+        ));
+        assert!(!event_subject_observes(
+            &river_kelpie_trigger(),
+            &to_battlefield
+        ));
+        assert!(!event_subject_observes(
+            &prized_amalgam_trigger(),
+            &to_battlefield
+        ));
+        assert!(event_subject_observes(
+            &fiend_hunter_trigger(),
+            &observation_move(OBSERVATION_GIANT, Zone::Battlefield, Zone::Exile)
+        ));
+        assert!(event_subject_observes(
+            &carmen_trigger(),
+            &observation_sacrifice(OBSERVATION_FOREST)
+        ));
+    }
+
+    const MIRROR_TURN: u32 = 2;
+
+    /// Key `event`'s record to ledger row `index` of `turn`.
+    fn keyed_occurrence(mut event: GameEvent, index: usize, turn: u32) -> GameEvent {
+        let GameEvent::ZoneChanged { record, .. } = &mut event else {
+            unreachable!("mirror fixtures key only zone changes");
+        };
+        record.turn_zone_change_index = index;
+        record.recorded_turn_number = turn;
+        event
+    }
+
+    /// Hill Giant's graveyard-to-battlefield entry, keyed to ledger row `index` of `turn`.
+    fn mirror_giant_entry(index: usize, turn: u32) -> GameEvent {
+        keyed_occurrence(observation_entry(OBSERVATION_GIANT, &[]), index, turn)
+    }
+
+    /// A state on turn 2 whose zone-change ledger holds rows 0: Hill Giant graveyard to
+    /// battlefield, 1: Forest battlefield to graveyard, 2: Soul Warden graveyard to battlefield,
+    /// 3: Carmen (outside the group) graveyard to battlefield. Two contexts are parked: one on an
+    /// unstamped copy of the Giant's entry, one on Carmen's entry.
+    fn mirror_state() -> GameState {
+        let mut state = setup();
+        state.turn_number = MIRROR_TURN;
+        let rows = [
+            mirror_giant_entry(0, MIRROR_TURN),
+            keyed_occurrence(mirror_forest_departure(), 1, MIRROR_TURN),
+            keyed_occurrence(observation_entry(OBSERVATION_WARDEN, &[]), 2, MIRROR_TURN),
+            keyed_occurrence(observation_entry(OBSERVATION_CARMEN, &[]), 3, MIRROR_TURN),
+        ];
+        state.zone_changes_this_turn = rows
+            .iter()
+            .map(|event| {
+                let GameEvent::ZoneChanged { record, .. } = event else {
+                    unreachable!("mirror rows are zone changes");
+                };
+                record.as_ref().clone()
+            })
+            .collect();
+        for (source, trigger_event) in [
+            (OBSERVATION_WARDEN, rows[0].clone()),
+            (OBSERVATION_WARDEN, rows[3].clone()),
+        ] {
+            state
+                .deferred_triggers
+                .push(PendingTriggerContext::single(PendingTrigger {
+                    trigger_event: Some(trigger_event),
+                    ..PendingTrigger::ordinary(
+                        source,
+                        PlayerId(0),
+                        None,
+                        Box::new(ResolvedAbility::new(
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 1 },
+                                player: TargetFilter::Controller,
+                            },
+                            vec![],
+                            source,
+                            PlayerId(0),
+                        )),
+                        0,
+                    )
+                }));
+        }
+        state
+    }
+
+    /// The Forest's battlefield-to-graveyard departure.
+    fn mirror_forest_departure() -> GameEvent {
+        GameEvent::ZoneChanged {
+            object_id: OBSERVATION_FOREST,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord::test_minimal(
+                OBSERVATION_FOREST,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            )),
+        }
+    }
+
+    /// A completed group that moved the Giant (retained as `giant_entry`), the Forest (row 1) and
+    /// Soul Warden (row 2), stamped.
+    fn mirror_group(state: &mut GameState, giant_entry: GameEvent) -> LogicalZoneChangeGroup {
+        let mut group = state.allocate_logical_zone_change_group(&[]);
+        group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("test group owns an explicit pre-delivery latch");
+        group
+            .append_delivery_events(&[
+                giant_entry,
+                keyed_occurrence(mirror_forest_departure(), 1, MIRROR_TURN),
+                keyed_occurrence(observation_entry(OBSERVATION_WARDEN, &[]), 2, MIRROR_TURN),
+            ])
+            .expect("append the group's occurrences");
+        group.stamp_battlefield_entries();
+        group
+    }
+
+    fn ledger_co_entered(state: &GameState) -> Vec<Vec<ObjectId>> {
+        state
+            .zone_changes_this_turn
+            .iter()
+            .map(|row| row.co_entered.clone())
+            .collect()
+    }
+
+    fn parked_co_entered(state: &GameState) -> Vec<Vec<ObjectId>> {
+        state
+            .deferred_triggers
+            .iter()
+            .map(|context| {
+                let Some(GameEvent::ZoneChanged { record, .. }) = &context.pending.trigger_event
+                else {
+                    unreachable!("mirror contexts are parked on zone changes");
+                };
+                record.co_entered.clone()
+            })
+            .collect()
+    }
+
+    /// CR 603.6a + CR 400.7 + CR 603.2c: completion copies each entry's stamp onto its own ledger
+    /// row and onto a parked copy of it, and leaves a departure's row, an entry outside the group
+    /// and its parked copy unstamped.
+    #[test]
+    fn logical_zone_change_entry_mirror_stamps_ledger_rows_and_parked_copies() {
+        let mut state = mirror_state();
+        let group = mirror_group(&mut state, mirror_giant_entry(0, MIRROR_TURN));
+
+        mirror_logical_zone_change_entry_stamps(&mut state, &group);
+
+        assert_eq!(
+            ledger_co_entered(&state),
+            vec![
+                vec![OBSERVATION_WARDEN],
+                Vec::new(),
+                vec![OBSERVATION_GIANT],
+                Vec::new(),
+            ]
+        );
+        assert_eq!(
+            parked_co_entered(&state),
+            vec![vec![OBSERVATION_WARDEN], Vec::new()]
+        );
+        let giant_context = &state.deferred_triggers[0];
+        assert!(
+            giant_context.trigger_events.iter().all(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { record, .. } if record.co_entered == [OBSERVATION_WARDEN]
+            )),
+            "the context's batch copy is stamped too"
+        );
+    }
+
+    /// CR 400.7: a retained entry whose key names another object's row (same zones) leaves that
+    /// row and its own unstamped, while the other entry's row is stamped.
+    #[test]
+    fn logical_zone_change_entry_mirror_leaves_a_row_another_object_owns() {
+        let mut state = mirror_state();
+        let group = mirror_group(&mut state, mirror_giant_entry(3, MIRROR_TURN));
+
+        mirror_logical_zone_change_entry_stamps(&mut state, &group);
+
+        let ledger = ledger_co_entered(&state);
+        assert!(ledger[0].is_empty(), "{ledger:?}");
+        assert!(ledger[3].is_empty(), "{ledger:?}");
+        assert_eq!(ledger[2], vec![OBSERVATION_GIANT]);
+    }
+
+    /// CR 400.7: a retained entry keyed to a previous turn names no row of this turn's ledger.
+    #[test]
+    fn logical_zone_change_entry_mirror_leaves_a_prior_turn_key() {
+        let mut state = mirror_state();
+        let group = mirror_group(&mut state, mirror_giant_entry(0, MIRROR_TURN - 1));
+
+        mirror_logical_zone_change_entry_stamps(&mut state, &group);
+
+        let ledger = ledger_co_entered(&state);
+        assert!(ledger[0].is_empty(), "{ledger:?}");
+        assert_eq!(ledger[2], vec![OBSERVATION_GIANT]);
     }
 
     #[test]
@@ -20406,8 +23187,12 @@ pub mod tests {
             "the unchanged grant coalesces into its existing exact-ref latch"
         );
 
-        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("the coalesced grant settles from its retained all-origin events");
+        let settled = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("the coalesced grant settles from its retained all-origin events");
         assert_eq!(settled.len(), 1, "one unchanged ref produces one context");
         assert_eq!(
             settled[0].pending.ability.trigger_definition_ref.as_ref(),
@@ -20514,8 +23299,12 @@ pub mod tests {
             "final-layer discovery does not rediscover the removed grant"
         );
 
-        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("the removed pre-event grant remains resolvable");
+        let settled = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("the removed pre-event grant remains resolvable");
         assert_eq!(
             settled.len(),
             1,
@@ -21059,6 +23848,86 @@ pub mod tests {
             Some(state.waiting_for.clone()),
             "the orphaned trigger's prompt must be surfaced, not silently dropped"
         );
+    }
+
+    // Real cards: no printed card exhibits this shape (Oracle regexes: attack trigger + counter on
+    // it (Gleam of Battle), attack trigger + search/reveal/look + counter on it (explore cards
+    // Glowcap Lantern, Subterranean Schooner), mill trigger + counter on it (Grolnok, the Omnivore,
+    // which has an Unimplemented clause). None combines an empty producer with event seeding).
+    // Shape: A 'put a +1/+1 counter on it' instruction under a Milled or attackers-declared trigger
+    // is not seeded with the event object exactly when its parent binding is authoritatively empty
+    // (dig, search, reveal, exile-top, illegal announcement). Nearest printed card: Gleam of Battle
+    // ("Whenever a creature you control attacks, put a +1/+1 counter on it.") -- Gleam of Battle
+    // seeds 'it' from the attack event; it has no producer or announcement whose empty result could
+    // block that seeding.
+    #[test]
+    fn unavailable_announcements_block_only_their_own_event_and_attack_reseeding() {
+        let state = GameState::default();
+        let event = GameEvent::Milled {
+            player_id: PlayerId(0),
+            object_id: ObjectId(42),
+            to: Zone::Graveyard,
+        };
+        let attack = GameEvent::AttackersDeclared {
+            attacker_ids: vec![ObjectId(42)],
+            defending_player: PlayerId(1),
+            attacks: vec![],
+            declaration_records: vec![],
+        };
+        for reason in [
+            None,
+            Some(ParentTargetMissingReason::Dig),
+            Some(ParentTargetMissingReason::ChooseFromZone),
+            Some(ParentTargetMissingReason::RevealHandChoice),
+            Some(ParentTargetMissingReason::ExileTop),
+            Some(ParentTargetMissingReason::RevealUntil),
+            Some(ParentTargetMissingReason::SearchLibrary),
+            Some(ParentTargetMissingReason::IllegalAnnouncement {
+                origin: TargetReadOrigin::OwnAnnouncement,
+            }),
+            Some(ParentTargetMissingReason::IllegalAnnouncement {
+                origin: TargetReadOrigin::ParentAnnouncement,
+            }),
+        ] {
+            for timing in [
+                EventContextSeedTiming::StackPush,
+                EventContextSeedTiming::ResolutionFallback,
+            ] {
+                let mut ability = ResolvedAbility::new(
+                    Effect::PutCounter {
+                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::ParentTarget,
+                    },
+                    vec![],
+                    ObjectId(99),
+                    PlayerId(0),
+                );
+                ability.parent_target_missing_reason = reason;
+                let blocked = ability.has_authoritative_empty_binding();
+                seed_event_context_parent_targets(&state, &mut ability, Some(&event), timing);
+                assert_eq!(
+                    ability.targets,
+                    if blocked {
+                        vec![]
+                    } else {
+                        vec![TargetRef::Object(ObjectId(42))]
+                    },
+                    "event reason={reason:?} timing={timing:?}"
+                );
+                ability.set_unpinned_targets(vec![]);
+                seed_batched_attack_parent_targets(&mut ability, Some(&attack));
+                assert_eq!(
+                    ability.targets,
+                    if blocked {
+                        vec![]
+                    } else {
+                        vec![TargetRef::Object(ObjectId(42))]
+                    },
+                    "attack reason={reason:?}"
+                );
+            }
+        }
     }
 
     /// V15 — CR 701.17c: the placement-time half of the "that card" anaphor.
@@ -22435,8 +25304,8 @@ pub mod tests {
         for (trigger_filter, condition_filter) in [
             (AttackTargetFilter::Player, AttackTargetFilter::Player),
             (
-                AttackTargetFilter::Planeswalker,
-                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker { subtype: None },
+                AttackTargetFilter::Planeswalker { subtype: None },
             ),
             (AttackTargetFilter::Battle, AttackTargetFilter::Battle),
             (
@@ -22445,7 +25314,7 @@ pub mod tests {
             ),
             (
                 AttackTargetFilter::PlayerOrPlaneswalker,
-                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker { subtype: None },
             ),
             (
                 AttackTargetFilter::PlayerOrPlaneswalker,
@@ -22456,7 +25325,7 @@ pub mod tests {
                 AttackTargetFilter::PlayerOrPlaneswalker,
             ),
             (
-                AttackTargetFilter::Planeswalker,
+                AttackTargetFilter::Planeswalker { subtype: None },
                 AttackTargetFilter::PlayerOrPlaneswalker,
             ),
         ] {
@@ -24600,6 +27469,7 @@ pub mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         let current_record = SpellCastRecord {
@@ -24616,6 +27486,7 @@ pub mod tests {
             cast_variant: crate::types::game_state::CastingVariant::Normal,
             was_kicked: false,
             spell_object_id: None,
+            from_outside_game: false,
             prepared_copy_source: None,
         };
         state.spells_cast_this_turn_by_player.insert(
@@ -29110,6 +31981,12 @@ pub mod tests {
             "CR 115.1: the parent target is read from `ability.targets`"
         );
         assert!(
+            combat_relation_subject_binding_diverges(
+                &crate::types::ability::CombatRelationSubject::AnaphoricTarget
+            ),
+            "CR 115.1: an earlier instruction's target is read from `ability.targets`"
+        );
+        assert!(
             !combat_relation_subject_binding_diverges(
                 &crate::types::ability::CombatRelationSubject::Source
             ),
@@ -29910,9 +32787,10 @@ pub mod tests {
             phase: Phase::Upkeep,
         }];
         let mut events_out = Vec::new();
-        let outcome = process_triggers_with_delayed_phase_events(
+        let normal_pending = collect_triggers_for_batch(&mut state, &events);
+        let outcome = process_collected_triggers_with_delayed_phase_events(
             &mut state,
-            &events,
+            normal_pending,
             &events,
             &mut events_out,
         );
@@ -30284,6 +33162,156 @@ pub mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::CombatDamageDealtToPlayer { .. })),
             "the aggregate must be consumed so a re-scan cannot fire the trigger twice"
+        );
+    }
+
+    /// CR 805.4d parity — a DELAYED opponent-scoped phase trigger fans out
+    /// exactly like its printed twin: on a shared team turn one `PhaseChanged`
+    /// yields one firing per eligible opponent, each firing bound to its own
+    /// player (occurrence event + scoped-player stamp).
+    /// REVERT-FAIL (fan-out removed): a single firing bound to P2.
+    #[test]
+    fn delayed_phase_trigger_fans_out_per_opponent_on_shared_turn() {
+        // 2HG: P0+P1 vs P2+P3; P0 controls the trigger; P2 holds the turn.
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let controller = PlayerId(0);
+        let (p2, p3) = (PlayerId(2), PlayerId(3));
+        state.active_player = p2;
+        let source = create_object(
+            &mut state,
+            CardId(0x8054_0001),
+            controller,
+            "Shared Watcher".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::Phase);
+        trigger.phase = Some(crate::types::phase::Phase::BeginCombat);
+        trigger.constraint =
+            Some(crate::types::ability::TriggerConstraint::OnlyDuringOpponentsTurn);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::ScopedPlayer,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        let rider_ctx = trigger_source_context_for_latch(&state, &state.objects[&source]);
+        ability.set_trigger_source_recursive(rider_ctx);
+        state.delayed_triggers.push(DelayedTrigger {
+            condition: DelayedTriggerCondition::WheneverEvent {
+                trigger: Box::new(trigger),
+                expiry: crate::types::ability::WheneverEventExpiry::EndOfTurn,
+            },
+            ability: Box::new(ability),
+            controller,
+            source_id: source,
+            one_shot: false,
+            kind: DelayedTriggerKind::Ordinary,
+            provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+        });
+
+        let events = vec![GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::BeginCombat,
+        }];
+        let DelayedTriggerMatch {
+            contexts: pending, ..
+        } = collect_matching_delayed_triggers(&mut state, &events, DelayedTriggerEventScope::Any);
+        assert_eq!(pending.len(), 2, "one firing per eligible opponent");
+        let bindings: Vec<(PlayerId, Option<PlayerId>)> = pending
+            .iter()
+            .map(|ctx| {
+                let event_player = match ctx.pending.trigger_event {
+                    Some(GameEvent::PhaseChangedForPlayer { player_id, .. }) => player_id,
+                    ref other => panic!("each firing rides its own occurrence, got {other:?}"),
+                };
+                (event_player, ctx.pending.ability.scoped_player)
+            })
+            .collect();
+        assert_eq!(bindings.len(), 2);
+        assert!(
+            bindings.contains(&(p2, Some(p2))) && bindings.contains(&(p3, Some(p3))),
+            "each firing is bound to its own seat, got {bindings:?}"
+        );
+    }
+
+    /// CR 805.4d + the Bow 2017-06-13 ruling — a team-collective payment
+    /// never fans out: Bow
+    /// to My Command's "they may tap … with total power 8 or greater" names
+    /// the TEAM, not "that opponent", so on the same shared 2HG turn that
+    /// fans a singular payment out, the collective shape keeps the single
+    /// firing. REVERT-FAIL (collective exclusion removed): two occurrences,
+    /// one per opponent, instead of `None`.
+    #[test]
+    fn collective_team_payment_keeps_single_firing_on_shared_turn() {
+        // Same shared-turn board as the parity test: P0+P1 vs P2+P3, P0
+        // controls the trigger, P2 holds the turn.
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let controller = PlayerId(0);
+        let p2 = PlayerId(2);
+        state.active_player = p2;
+        let source = create_object(
+            &mut state,
+            CardId(0x8054_0002),
+            controller,
+            "Collective Watcher".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::Phase);
+        trigger.phase = Some(crate::types::phase::Phase::BeginCombat);
+        trigger.constraint =
+            Some(crate::types::ability::TriggerConstraint::OnlyDuringOpponentsTurn);
+        // Bow's shape: optional team-collective tap payment by the triggering
+        // opponent. The payer IS turn-player-bound — only the `collective`
+        // stamp keeps this singular, which is exactly what the test pins.
+        let mut ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: crate::types::ability::AbilityCost::TapCreatures {
+                    requirement: crate::types::ability::TapCreaturesRequirement::Aggregate {
+                        stat: crate::types::ability::TapCreaturesAggregateStat::TotalPower,
+                        comparator: crate::types::ability::Comparator::GE,
+                        value: 8,
+                        collective: true,
+                    },
+                    filter: TargetFilter::TriggeringPlayer,
+                },
+                scale: None,
+                payer: TargetFilter::TriggeringPlayer,
+            },
+            vec![],
+            source,
+            controller,
+        );
+        ability.optional = true;
+        let rider_ctx = trigger_source_context_for_latch(&state, &state.objects[&source]);
+        ability.set_trigger_source_recursive(rider_ctx);
+
+        assert!(
+            !phase_trigger_effect_references_turn_player(&ability),
+            "a team-collective payment refers to the team, not that opponent"
+        );
+        assert_eq!(
+            shared_turn_phase_occurrences(
+                &GameEvent::PhaseChanged {
+                    phase: crate::types::phase::Phase::BeginCombat,
+                },
+                &trigger,
+                &state,
+                &ability,
+            ),
+            None,
+            "the collective firing must stay single on a shared turn"
         );
     }
 
@@ -30898,6 +33926,343 @@ pub mod tests {
         );
     }
 
+    /// Shared 2HG board for the Keeper per-occurrence rows: team B holds the
+    /// turn (P2 representative); P0 controls Keeper plus one extra creature
+    /// (2 total); P2/P3 hold `p2_n`/`p3_n` creatures. Returns the state, the
+    /// Keeper source, and the parsed creature-trigger definition.
+    fn keeper_shared_intervening_if_board(
+        p2_n: usize,
+        p3_n: usize,
+    ) -> (GameState, ObjectId, TriggerDefinition) {
+        let controller = PlayerId(0);
+        let (p2, p3) = (PlayerId(2), PlayerId(3));
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        state.active_player = p2;
+        let source = make_creature(&mut state, controller, "Keeper of the Accord", 3, 4);
+        make_creature(&mut state, controller, "Mine", 1, 1);
+        for i in 0..p2_n {
+            make_creature(&mut state, p2, &format!("Theirs P2-{i}"), 1, 1);
+        }
+        for i in 0..p3_n {
+            make_creature(&mut state, p3, &format!("Theirs P3-{i}"), 1, 1);
+        }
+        let trig_def = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        (state, source, trig_def)
+    }
+
+    /// Drive a raw end-step event through the production firing pipeline
+    /// (matcher → constraint → `trigger_firing_groups`) on a shared-turn
+    /// board. The reach-guard asserts prove the trigger reaches the fan-out
+    /// path (the fix's domain) rather than dying at an upstream gate.
+    fn keeper_shared_firing_groups(
+        state: &GameState,
+        source: ObjectId,
+        trig_def: &TriggerDefinition,
+    ) -> Vec<FiringGroup> {
+        let controller = PlayerId(0);
+        let source_context = trigger_source_context_for_latch(state, &state.objects[&source]);
+        let ability = build_triggered_ability_from_context(state, trig_def, &source_context, None);
+        // Keeper's turn-player reference lives in the intervening-if CONDITION,
+        // not the effect tree (which only creates a token for the controller):
+        // the effect gate answers false. The fan-out admission below must come
+        // from the condition-aware path (the F2 fix), never from this gate —
+        // asserting the negation pins that the test exercises the condition
+        // arm rather than re-proving an effect reference that does not exist.
+        assert!(
+            !phase_trigger_effect_references_turn_player(&ability),
+            "Keeper's EFFECT names no turn player — fan-out must ride the condition"
+        );
+        let raw = GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::End,
+        };
+        let matcher = trigger_matcher(TriggerMode::Phase).expect("Phase mode has a matcher");
+        assert!(
+            matcher(&raw, trig_def, &source_context, state),
+            "the Phase matcher admits the raw end-step event"
+        );
+        assert!(
+            check_trigger_constraint_with_ref(
+                state,
+                trig_def,
+                None,
+                Some(&source_context),
+                controller,
+                Some(&raw),
+            ),
+            "OnlyDuringOpponentsTurn holds on the shared turn"
+        );
+        assert_eq!(
+            shared_turn_phase_occurrences(&raw, trig_def, state, &ability)
+                .map(|occurrences| occurrences.len()),
+            Some(2),
+            "the builder fans out to both opposing seats"
+        );
+        trigger_firing_groups(
+            state,
+            &raw,
+            None,
+            std::slice::from_ref(&raw),
+            trig_def,
+            &source_context,
+            controller,
+            matcher,
+            &[],
+            FiringConditions::printed(trig_def, None),
+            &ability,
+        )
+    }
+
+    /// W2 (CR 805.4d, P-F2e gate): the condition-admission walker admits
+    /// condition-scoped turn-player references and NOTHING else. Keeper's two
+    /// sentences (creature + lands) and the "You Cannot Hide from Me" scheme
+    /// sentence admit (ScopedPlayer quantities); Luminarch Ascension's "if you
+    /// didn't lose life this turn" does not (Controller-scoped); Bow to My
+    /// Command admits nothing (no intervening-if, and the collective veto
+    /// fires first); Jace's offer still rides the effect arm (guard: this
+    /// round leaves the effect path untouched).
+    /// REVERT-FAIL (condition OR-arm removed): the Keeper arms read false
+    /// (the r1 defect, reproduced at the predicate level).
+    /// REVERT-FAIL (collective veto removed from the effect gate): the
+    /// veto-first case below fans out to two occurrences (exclusion violation).
+    #[test]
+    fn condition_admission_names_only_the_occurrence_player() {
+        // Keeper, creature leg (verbatim Oracle sentence).
+        let keeper_creatures = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more creatures than you, create a 1/1 white Soldier creature token.",
+            "Keeper of the Accord",
+        );
+        assert!(
+            trigger_condition_references_turn_player(&keeper_creatures.condition),
+            "Keeper's creature intervening-if names the turn player"
+        );
+        // Keeper, lands leg (verbatim Oracle sentence).
+        let keeper_lands = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player controls more lands than you, you may search your library for a basic Plains card, put it onto the battlefield tapped, then shuffle.",
+            "Keeper of the Accord",
+        );
+        assert!(
+            trigger_condition_references_turn_player(&keeper_lands.condition),
+            "Keeper's lands intervening-if names the turn player"
+        );
+        // You Cannot Hide from Me (scheme): a ScopedPlayer life-total
+        // intervening-if — admitted at the predicate level (schemes have no
+        // shared-turn acceptance harness; the full-suite gate watches the
+        // consequence).
+        let hidden = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if that player has less than half their starting life total, abandon this scheme.",
+            "You Cannot Hide from Me",
+        );
+        assert!(
+            trigger_condition_references_turn_player(&hidden.condition),
+            "the scheme's ScopedPlayer intervening-if names the turn player"
+        );
+        // Luminarch Ascension: "if you didn't lose life this turn" names the
+        // controller ("you"), not "that player" — no fan-out.
+        let luminarch = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of each opponent's end step, if you didn't lose life this turn, you may put a quest counter on this enchantment.",
+            "Luminarch Ascension",
+        );
+        assert!(
+            !trigger_condition_references_turn_player(&luminarch.condition),
+            "Luminarch's Controller-scoped intervening-if must not admit, got {:?}",
+            luminarch.condition
+        );
+        // Bow to My Command: no intervening-if at all.
+        let bow = crate::parser::oracle_trigger::parse_trigger_line(
+            "At the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.",
+            "Bow to My Command",
+        );
+        assert!(
+            !trigger_condition_references_turn_player(&bow.condition),
+            "Bow carries no turn-player condition, got {:?}",
+            bow.condition
+        );
+        // The veto fires first: even paired with an admitting turn-player
+        // condition, a collective firing stays single on a shared turn.
+        {
+            let mut state = GameState::new(
+                crate::types::format::FormatConfig::two_headed_giant(),
+                4,
+                42,
+            );
+            let controller = PlayerId(0);
+            state.active_player = PlayerId(2);
+            let source = create_object(
+                &mut state,
+                CardId(0x8054_00B0),
+                controller,
+                "Veto Probe".to_string(),
+                Zone::Battlefield,
+            );
+            let mut trigger = TriggerDefinition::new(TriggerMode::Phase);
+            trigger.phase = Some(Phase::End);
+            trigger.constraint = Some(TriggerConstraint::OnlyDuringOpponentsTurn);
+            // Bow's shape: team-collective tap payment by the triggering
+            // opponent. The payer IS turn-player-bound — only the `collective`
+            // stamp keeps this singular.
+            let mut ability = ResolvedAbility::new(
+                Effect::PayCost {
+                    cost: AbilityCost::TapCreatures {
+                        requirement: crate::types::ability::TapCreaturesRequirement::Aggregate {
+                            stat: crate::types::ability::TapCreaturesAggregateStat::TotalPower,
+                            comparator: Comparator::GE,
+                            value: 8,
+                            collective: true,
+                        },
+                        filter: TargetFilter::TriggeringPlayer,
+                    },
+                    scale: None,
+                    payer: TargetFilter::TriggeringPlayer,
+                },
+                vec![],
+                source,
+                controller,
+            );
+            ability.optional = true;
+            let rider_ctx = trigger_source_context_for_latch(&state, &state.objects[&source]);
+            ability.set_trigger_source_recursive(rider_ctx);
+            // A turn-player condition that WOULD admit on its own ...
+            trigger.condition = keeper_creatures.condition.clone();
+            assert!(
+                trigger_condition_references_turn_player(&trigger.condition),
+                "the paired condition admits — the veto must win anyway"
+            );
+            assert!(
+                ability_tree_has_collective_payment(&ability),
+                "the probe ability is collective (the veto's precondition)"
+            );
+            assert!(
+                !phase_trigger_effect_references_turn_player(&ability),
+                "the collective veto suppresses the effect arm"
+            );
+            assert_eq!(
+                shared_turn_phase_occurrences(
+                    &GameEvent::PhaseChanged { phase: Phase::End },
+                    &trigger,
+                    &state,
+                    &ability,
+                ),
+                None,
+                "veto-first: a collective firing never fans out, condition or not"
+            );
+        }
+        // Jace's offer still rides the EFFECT arm (guard: this round leaves
+        // the effect path untouched — the walker must not claim it).
+        {
+            let mut state = GameState::new_two_player(42);
+            let controller = PlayerId(0);
+            let source = create_object(
+                &mut state,
+                CardId(0x8054_00A1),
+                controller,
+                "Jace Probe".to_string(),
+                Zone::Battlefield,
+            );
+            let jace = crate::parser::oracle_trigger::parse_trigger_line(
+                "At the beginning of combat on each opponent's turn, they may pay {2}. If they don't, creatures they control can't attack Jaces you control this turn.",
+                "Jace, Multiverse Architect",
+            );
+            let source_context = trigger_source_context_for_latch(&state, &state.objects[&source]);
+            let ability =
+                build_triggered_ability_from_context(&state, &jace, &source_context, None);
+            assert!(
+                phase_trigger_effect_references_turn_player(&ability),
+                "Jace's {{2}} offer names the turn player through the effect arm"
+            );
+            assert!(
+                !trigger_condition_references_turn_player(&jace.condition),
+                "Jace carries no intervening-if — the walker must not claim it"
+            );
+        }
+        // Admission is polarity-insensitive: a `Not`-wrapped occurrence
+        // reference still evaluates differently per seat.
+        let negated = TriggerCondition::Not {
+            condition: Box::new(
+                keeper_creatures
+                    .condition
+                    .clone()
+                    .expect("Keeper must lower a condition"),
+            ),
+        };
+        assert!(
+            trigger_condition_node_references_turn_player(&negated),
+            "a Not-wrapped turn-player reference still admits"
+        );
+        // Source-bound filters never differentiate per occurrence: admitting
+        // them would DUPLICATE identical firings.
+        assert!(
+            !trigger_condition_node_references_turn_player(&TriggerCondition::ControlsType {
+                filter: TargetFilter::ScopedPlayer
+            }),
+            "a source-context filter must not admit even when ScopedPlayer-flavored"
+        );
+    }
+
+    /// K1 (CR 805.4d): on a shared 2HG turn, an intervening-if phase trigger
+    /// is evaluated per occurrence, not once from the representative seat.
+    /// Only the nonrepresentative seat (P3) is ahead here, so exactly one
+    /// firing rides P3's occurrence.
+    /// Was red until the F2 condition arm landed: the fan-out builder used to
+    /// read only the effect tree, so condition-scoped Keeper never fanned out
+    /// and zero groups fired. The condition walker now admits condition-scoped
+    /// turn-player references, and the per-occurrence evaluation below yields
+    /// exactly this firing.
+    #[test]
+    fn keeper_shared_turn_fires_only_for_qualifying_nonrepresentative_seat() {
+        let (state, source, trig_def) = keeper_shared_intervening_if_board(1, 3);
+        let groups = keeper_shared_firing_groups(&state, source, &trig_def);
+        assert_eq!(
+            groups.len(),
+            1,
+            "only the qualifying seat fires, got {}",
+            groups.len()
+        );
+        assert!(
+            matches!(
+                groups[0].events.first(),
+                Some(GameEvent::PhaseChangedForPlayer { player_id, .. })
+                    if *player_id == PlayerId(3)
+            ),
+            "the single firing rides P3's occurrence, got {:?}",
+            groups[0].events.first()
+        );
+    }
+
+    /// K2 (CR 805.4d): both seats qualify, so both occurrences fire — one
+    /// group per seat, each bound to its own player.
+    /// Was red until the F2 condition arm landed (same builder-gate cause as
+    /// K1): zero groups fired until condition-scoped references were admitted.
+    #[test]
+    fn keeper_shared_turn_fires_once_per_qualifying_seat() {
+        let (state, source, trig_def) = keeper_shared_intervening_if_board(3, 3);
+        let groups = keeper_shared_firing_groups(&state, source, &trig_def);
+        assert_eq!(
+            groups.len(),
+            2,
+            "both qualifying seats fire, got {}",
+            groups.len()
+        );
+        let seats: Vec<PlayerId> = groups
+            .iter()
+            .map(|group| match group.events.first() {
+                Some(GameEvent::PhaseChangedForPlayer { player_id, .. }) => *player_id,
+                other => panic!("each firing rides its own occurrence, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(seats.len(), 2);
+        assert!(
+            seats.contains(&PlayerId(2)) && seats.contains(&PlayerId(3)),
+            "each firing is bound to its own seat, got {seats:?}"
+        );
+    }
+
     /// Builds and dispatches a "choose one — deal 3 to target creature; or deal
     /// 3 to target creature" modal trigger from `source`, returning the live
     /// dispatch disposition.
@@ -31216,6 +34581,8 @@ pub mod tests {
                         AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                                library_shuffle: Default::default(),
                                 origin: Some(Zone::Battlefield),
                                 destination: Zone::Exile,
                                 target: TargetFilter::Typed(
@@ -31833,6 +35200,8 @@ pub mod tests {
             let mut execute = AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Typed(TypedFilter {
@@ -32023,6 +35392,8 @@ pub mod tests {
         let mut execute = AbilityDefinition::new(
             AbilityKind::Database,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter {
@@ -32229,6 +35600,8 @@ pub mod tests {
             let mut execute = AbilityDefinition::new(
                 AbilityKind::Database,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::Typed(TypedFilter {
@@ -32349,6 +35722,8 @@ pub mod tests {
                         AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                                library_shuffle: Default::default(),
                                 origin: Some(Zone::Battlefield),
                                 destination: Zone::Exile,
                                 target: TargetFilter::Typed(
@@ -32426,6 +35801,8 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: Some(Zone::Battlefield),
                             destination: Zone::Exile,
                             target: TargetFilter::Typed(
@@ -32487,6 +35864,8 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Typed(
@@ -32677,6 +36056,8 @@ pub mod tests {
             trigger.execute = Some(Box::new(crate::types::ability::AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
@@ -32837,6 +36218,8 @@ pub mod tests {
             trigger.execute = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
@@ -32979,6 +36362,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -32995,6 +36379,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -33116,12 +36501,17 @@ pub mod tests {
                                 selection: crate::types::ability::CardSelectionMode::Chosen,
                                 choice_optional: false,
                                 reveal: true,
+                                cardinality:
+                                    crate::types::ability::ObjectSelectionCardinality::SINGLE,
                             },
                         )
                         .sub_ability(
                             AbilityDefinition::new(
                                 AbilityKind::Spell,
                                 Effect::ChangeZone {
+                                    actor:
+                                        crate::types::ability::LibraryInstructionActor::Controller,
+                                    library_shuffle: Default::default(),
                                     origin: None,
                                     destination: Zone::Exile,
                                     target: TargetFilter::Any,
@@ -34043,6 +37433,26 @@ pub mod tests {
         let waterbend = WardCost::Waterbend(ManaCost::generic(4));
         let result = ward_cost_to_ability_cost(&waterbend);
         assert!(matches!(result, AbilityCost::Mana { cost } if cost == ManaCost::generic(4)));
+
+        // CR 702.21a + CR 118.3: a compound ward cost joins every leg into the
+        // AND-composed `Composite` (Captain Howler, Sea Scourge: "Ward—{2},
+        // Pay 2 life.") — never only the first leg.
+        let compound = WardCost::Compound(vec![
+            WardCost::Mana(ManaCost::generic(2)),
+            WardCost::PayLife(2),
+        ]);
+        let result = ward_cost_to_ability_cost(&compound);
+        let AbilityCost::Composite { costs } = result else {
+            panic!("a compound ward cost must become a Composite, got {result:?}");
+        };
+        assert_eq!(costs.len(), 2);
+        assert!(matches!(&costs[0], AbilityCost::Mana { cost } if *cost == ManaCost::generic(2)));
+        assert!(matches!(
+            &costs[1],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
 
         // Get player counters (The Serpent Society: "Ward—Get five poison counters.")
         let poison = WardCost::GetPlayerCounters {
@@ -36883,6 +40293,47 @@ pub mod tests {
         ));
     }
 
+    /// CR 701.27g: a live source answers `SourceIsTransformed` through
+    /// `transform::is_transformed_permanent`, so a modal double-faced card back face up is a
+    /// transformed permanent and a front-face-up one with both flags set is not. Synthetic:
+    /// `SourceIsTransformed` has no parser producer; the nearest printed reader of
+    /// "transformed permanent" is Mutagen Connoisseur ("This creature gets +1/+0 for each
+    /// transformed permanent you control.").
+    #[test]
+    fn source_is_transformed_reads_the_face_that_is_up() {
+        let mut state = setup();
+        let modal_dfc = |state: &mut GameState, transformed: bool| {
+            let src = create_object(
+                state,
+                CardId(1),
+                PlayerId(0),
+                "Lisette, Dean of the Root".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&src).unwrap();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: "Valentin, Dean of the Vein".to_string(),
+                layout_kind: Some(crate::types::card::LayoutKind::Modal),
+                ..Default::default()
+            });
+            obj.transformed = transformed;
+            obj.modal_back_face = true;
+            src
+        };
+        let modal_back = modal_dfc(&mut state, false);
+        let both_flags = modal_dfc(&mut state, true);
+
+        let cond = TriggerCondition::SourceIsTransformed;
+        assert!(
+            check_trigger_condition(&state, &cond, PlayerId(0), Some(modal_back), None),
+            "a modal double-faced card back face up is a transformed permanent"
+        );
+        assert!(
+            !check_trigger_condition(&state, &cond, PlayerId(0), Some(both_flags), None),
+            "a front-face-up permanent with both flags is not a transformed permanent"
+        );
+    }
+
     #[test]
     fn source_is_face_up_inverse_of_face_down() {
         let mut state = setup();
@@ -37108,6 +40559,8 @@ pub mod tests {
         // CR 115.1: "Put a land from your hand" doesn't target — selection at resolution.
 
         let effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::Typed(
@@ -37138,6 +40591,8 @@ pub mod tests {
         // "Exile target creature" should still extract the target filter
 
         let effect = Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: None,
             destination: Zone::Exile,
             target: TargetFilter::Typed(TypedFilter::creature()),
@@ -39576,6 +43031,7 @@ pub mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }]),
         );
@@ -39601,6 +43057,7 @@ pub mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }]),
         );
@@ -39627,6 +43084,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -39643,6 +43101,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -39672,6 +43131,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -39688,6 +43148,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -39715,6 +43176,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -39731,6 +43193,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
                 SpellCastRecord {
@@ -39747,6 +43210,7 @@ pub mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    from_outside_game: false,
                     prepared_copy_source: None,
                 },
             ]),
@@ -39774,6 +43238,7 @@ pub mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                from_outside_game: false,
                 prepared_copy_source: None,
             }
         }
@@ -43606,6 +47071,34 @@ pub mod tests {
         ));
     }
 
+    /// CR 102.1 + CR 805.4: under shared team turns the controller's TEAM owns
+    /// the turn, so a nonrepresentative teammate seat is still "your turn".
+    #[test]
+    fn during_players_turn_controller_uses_shared_team_turn() {
+        let mut state = GameState::new(
+            crate::types::format::FormatConfig::two_headed_giant(),
+            4,
+            42,
+        );
+        let controller = PlayerId(1);
+        let condition = TriggerCondition::DuringPlayersTurn {
+            player: PlayerFilter::Controller,
+        };
+
+        // Seat 0 is the active team's representative; seat 1 is its teammate.
+        state.active_player = PlayerId(0);
+        assert!(
+            check_trigger_condition(&state, &condition, controller, None, None),
+            "the controller's teammate's shared turn is the controller's turn"
+        );
+
+        // The opposing team's turn is not the controller's team's turn.
+        state.active_player = PlayerId(2);
+        assert!(!check_trigger_condition(
+            &state, &condition, controller, None, None
+        ));
+    }
+
     /// CR 603.4 + CR 102.3 + CR 805.4a — `DuringPlayersTurn { Opponent }`
     /// is true only while the active player is on an opposing team, not merely
     /// while a non-controller seat is active.
@@ -45244,6 +48737,7 @@ pub mod tests {
                 triggers: Vec::new(),
             },
             WaitingFor::NamedChoice {
+                decision_subject_id: None,
                 player: PlayerId(0),
                 choice_type: crate::types::ability::ChoiceType::Player {
                     distinctness: Default::default(),
@@ -45295,8 +48789,55 @@ pub mod tests {
                 total: 2,
                 targets: Vec::new(),
                 unit: crate::types::game_state::DistributionUnit::Damage,
+                scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
             },
         ]
+    }
+
+    /// D5 / C2.6: the construction census keeps today's classification of an
+    /// announce-time (CR 603.3d + CR 601.2d) division and excludes a CR 608.2d
+    /// resolution-time division, which is chosen while the effect is applied.
+    #[test]
+    fn trigger_construction_prompt_census_excludes_resolution_time_division() {
+        let targets = vec![
+            TargetRef::Object(ObjectId(11)),
+            TargetRef::Object(ObjectId(12)),
+        ];
+        let announced = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets: targets.clone(),
+            unit: DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
+        };
+        assert!(
+            is_trigger_construction_prompt(&announced),
+            "announce-time division stays a construction prompt"
+        );
+        let pending = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        let resolution = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets,
+            unit: DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+        assert!(
+            !is_trigger_construction_prompt(&resolution),
+            "CR 608.2d resolution-time division is not a construction prompt"
+        );
     }
 
     /// Round-20 closure map, "Exact preserve/finish contract" clause 1: with no
@@ -45715,6 +49256,246 @@ pub mod tests {
         }
     }
 
+    /// A "whenever a creature enters" observer and one battlefield entry it
+    /// matches, paused the way `observer_helper_fixture` pauses. Synthetic
+    /// building block; the nearest printed observer is Soul Warden ("Whenever
+    /// another creature enters, you gain 1 life."), which excludes itself.
+    fn entry_observer_fixture() -> (GameState, Vec<GameEvent>) {
+        let (mut state, _) = observer_helper_fixture(false);
+        let observer = make_creature(&mut state, PlayerId(0), "Entry observer", 1, 1);
+        let mut enters = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .valid_card(TargetFilter::Typed(TypedFilter::creature()))
+            .execute(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            ));
+        enters.destination = Some(Zone::Battlefield);
+        let object = state.objects.get_mut(&observer).expect("observer exists");
+        object.trigger_definitions.push(enters.clone());
+        std::sync::Arc::make_mut(&mut object.base_trigger_definitions).push(enters);
+        object.materialize_base_trigger_definitions();
+        let entrant = make_creature(&mut state, PlayerId(0), "Entrant", 2, 2);
+        let mut events = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(&mut state, entrant, &mut events)
+            .expect("entrant exists");
+        (state, events)
+    }
+
+    /// CR 603.6a + CR 608.2c: entrants of one instruction whose entry was held across answers
+    /// are one entry event, so a newcomer observes a co-entrant's entry even when its own entry
+    /// record comes later in the batch; the entries of separate instructions happen in order,
+    /// and a newcomer does not observe an entry that preceded it (issue #8160), nor one that
+    /// was never held. Synthetic: three hand-made entries on the ledger cut by one
+    /// instruction boundary.
+    #[test]
+    fn a_newcomer_observes_only_the_entries_of_its_own_instruction() {
+        let mut state = setup();
+        let mut events = Vec::new();
+        let mut entrants = Vec::new();
+        for name in ["First", "Second", "Third"] {
+            let id = make_creature(&mut state, PlayerId(0), name, 1, 1);
+            crate::game::zones::record_and_emit_entry_from_no_zone(&mut state, id, &mut events)
+                .expect("entrant exists");
+            entrants.push(id);
+        }
+        // The boundary falls between the second and third entries: First and Second are one
+        // instruction, Third is the next.
+        state.instruction_boundary_marks = vec![2];
+        // An entry that was never held keeps the positional guard: nothing is observed.
+        {
+            let boundaries = battlefield_entry_observation_indices(&events);
+            let ledger = battlefield_entry_ledger_indices(&state, &events);
+            assert!(scan_source_presence_at_event(
+                &state,
+                0,
+                &events,
+                entrants[1],
+                &boundaries,
+                &ledger,
+            )
+            .is_none());
+        }
+        // The cohort of an instruction that held an entry across answers is observed.
+        state.released_entry_rows = vec![0, 1, 2];
+        let boundaries = battlefield_entry_observation_indices(&events);
+        let ledger = battlefield_entry_ledger_indices(&state, &events);
+        let observes = |event_idx: usize, source: ObjectId| {
+            scan_source_presence_at_event(&state, event_idx, &events, source, &boundaries, &ledger)
+                .is_some()
+        };
+        assert!(
+            observes(0, entrants[1]),
+            "Second entered in the same instruction as First's entry"
+        );
+        assert!(observes(1, entrants[0]), "First was on the battlefield");
+        assert!(
+            !observes(0, entrants[2]) && !observes(1, entrants[2]),
+            "Third's instruction came after theirs"
+        );
+        assert!(observes(2, entrants[2]), "Third observes its own entry");
+    }
+
+    /// CR 614.12a: a co-entrant whose entry is still being made, parked for its
+    /// own mid-entry choice the way `capture_deferred_entry_events_if_mid_entry_choice`
+    /// parks one.
+    fn park_co_entrant_mid_entry(state: &mut GameState) {
+        let co_entrant = make_creature(state, PlayerId(0), "Co-entrant", 2, 2);
+        let mut parked = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(state, co_entrant, &mut parked)
+            .expect("co-entrant exists");
+        state.deferred_entry_events.extend(parked);
+    }
+
+    /// CR 603.6a: the paused-resolution helper is handed a battlefield entry
+    /// while a co-entrant is still entering. It must not match it there, and the
+    /// entry must still be checked once the action settles, even though the
+    /// settling action's own buffer no longer holds it. A pause with no entry in
+    /// progress belongs to a later instruction: the entry is matched there.
+    #[test]
+    fn observer_helpers_leave_an_unsettled_battlefield_entry_for_the_settled_scan() {
+        // Positive reach guard: at a settled action the same entry is collected.
+        let (mut settled, mut settled_events) = entry_observer_fixture();
+        settled.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        collect_and_drain_observer_triggers_if_settled(&mut settled, &mut settled_events, 0);
+        assert_eq!(
+            settled.stack.len() + settled.deferred_triggers.len(),
+            1,
+            "positive reach guard: the observer matches this entry"
+        );
+
+        // A later instruction's pause, no entry in progress: matched at the pause.
+        let (mut later, mut later_events) = entry_observer_fixture();
+        park_observer_triggers_if_paused(&mut later, &mut later_events, 0);
+        assert_eq!(
+            later.deferred_triggers.len(),
+            1,
+            "no entry is being made: the completed entry is matched at the pause"
+        );
+        assert!(later.unsettled_entry_batch_events.is_empty());
+
+        let (mut state, mut events) = entry_observer_fixture();
+        park_co_entrant_mid_entry(&mut state);
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+        // Reading the same buffer again must not match it either.
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+        assert!(
+            state.deferred_triggers.is_empty() && state.stack.is_empty(),
+            "a co-entrant is still entering: nothing is matched at the pause"
+        );
+        state.deferred_entry_events.clear();
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let mut settling_events = Vec::new();
+        collect_and_drain_observer_triggers_if_settled(&mut state, &mut settling_events, 0);
+        assert_eq!(
+            state.stack.len() + state.deferred_triggers.len(),
+            1,
+            "the earlier entry is checked once when the action settles"
+        );
+    }
+
+    /// CR 614.12a + CR 614.1c: a parked replacement belongs to an entry still
+    /// being made only when it modifies the entry itself or an event on a
+    /// battlefield object whose entry has not been recorded (its entering
+    /// counters). Counters on a permanent whose entry is recorded (Amass's
+    /// Army) and a discard of a card in hand belong to later events.
+    #[test]
+    fn a_parked_replacement_belongs_to_an_entry_only_through_an_unrecorded_entrant() {
+        let mut state = setup();
+        let add_counter = |object_id| crate::types::proposed_event::ProposedEvent::AddCounter {
+            placement: crate::types::proposed_event::CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id,
+                counter_type: CounterType::Plus1Plus1,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let entering = make_creature(&mut state, PlayerId(0), "Entering", 0, 0);
+        assert!(
+            parked_replacement_modifies_an_entry(&state, &add_counter(entering)),
+            "positive reach guard: counters on an entrant with no entry record yet"
+        );
+        let entered = make_creature(&mut state, PlayerId(0), "Entered", 0, 0);
+        crate::game::zones::record_and_emit_entry_from_no_zone(
+            &mut state,
+            entered,
+            &mut Vec::new(),
+        )
+        .expect("entrant exists");
+        assert!(!parked_replacement_modifies_an_entry(
+            &state,
+            &add_counter(entered)
+        ));
+        let in_hand = crate::game::zones::create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Discarded".to_string(),
+            Zone::Hand,
+        );
+        let discard = crate::types::proposed_event::ProposedEvent::Discard {
+            player_id: PlayerId(0),
+            object_id: in_hand,
+            source_id: None,
+            caused_by_effect: true,
+            discard_frame: None,
+            applied: HashSet::new(),
+        };
+        assert!(!parked_replacement_modifies_an_entry(&state, &discard));
+    }
+
+    /// CR 608.2c + CR 603.6a + CR 611.3c: an entrant published in an earlier
+    /// answer is observed at the instruction boundary a later answer reaches,
+    /// with its co-entrants, and from then on its entry is a completed event: the
+    /// next pause matches it while a later instruction's own unsettled entry
+    /// still waits.
+    #[test]
+    fn instruction_boundary_observes_an_entrant_published_in_an_earlier_answer() {
+        let (mut state, mut events) = entry_observer_fixture();
+        let GameEvent::ZoneChanged { record, .. } = events[0].clone() else {
+            panic!("the fixture emits a battlefield entry");
+        };
+        park_co_entrant_mid_entry(&mut state);
+        park_observer_triggers_if_paused(&mut state, &mut events, 0);
+        assert!(state.battlefield_entry_observation(&record).is_none());
+        // The co-entrant finishes entering, and the boundary runs in a later answer,
+        // whose buffer does not hold the entry: it records the completed
+        // instructions' ledger rows and observes the entrants.
+        state.deferred_entry_events.clear();
+        state.instruction_boundary_marks = vec![state.zone_changes_this_turn.len()];
+        crate::game::zones::settle_battlefield_entry_observations(&mut state, &[]);
+        assert!(
+            state.battlefield_entry_observation(&record).is_some(),
+            "the earlier entrant is observed at the instruction boundary"
+        );
+        let later = make_creature(&mut state, PlayerId(0), "Later entrant", 2, 2);
+        let mut later_events = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(
+            &mut state,
+            later,
+            &mut later_events,
+        )
+        .expect("later entrant exists");
+        park_co_entrant_mid_entry(&mut state);
+        park_observer_triggers_if_paused(&mut state, &mut later_events, 0);
+        assert_eq!(
+            state.deferred_triggers.len(),
+            1,
+            "only the completed instruction's entry is matched at this pause"
+        );
+        assert_eq!(
+            state.unsettled_entry_batch_events, later_events,
+            "the later instruction's own entry is the one still held"
+        );
+    }
+
     /// Round-18 closure: the ordinary (no-sidecar) branch of both helpers now
     /// derives its suffix through `filter_consumed_trigger_events_from`, so an
     /// exact occurrence already claimed by `ConsumeBeforePriority` cannot be
@@ -45747,10 +49528,24 @@ pub mod tests {
                 collected, 1,
                 "settled={settled}: exactly the unclaimed second occurrence is collected"
             );
+            // The settled helper borrows the journal. The paused exit claims
+            // exactly the occurrence it collected, so no later collector over
+            // the same buffer repeats it.
+            let mut expected = vec![ConsumedTriggerEventOccurrence {
+                event: repeated.clone(),
+                occurrence: trigger_event_occurrence(&events, 0),
+                scope: ConsumedTriggerEventScope::AllCollectors,
+            }];
+            if !settled {
+                expected.push(ConsumedTriggerEventOccurrence {
+                    event: repeated.clone(),
+                    occurrence: trigger_event_occurrence(&events, events.len() - 1),
+                    scope: ConsumedTriggerEventScope::OrdinaryCollectorsOnly,
+                });
+            }
             assert_eq!(
-                state.consumed_before_priority_trigger_events.len(),
-                1,
-                "settled={settled}: the helper borrows the journal, it never takes it"
+                state.consumed_before_priority_trigger_events, expected,
+                "settled={settled}: the journal holds the prior claim and only what this exit collected"
             );
         }
     }
@@ -46377,6 +50172,283 @@ pub mod tests {
             TriggerOrderingDisposition::PromptForChoice(_) => {}
             TriggerOrderingDisposition::NoChoiceNeeded(_) => {
                 panic!("C0: danger-card class must prompt even when loop_detection On")
+            }
+        }
+    }
+
+    fn charge_counter() -> CounterType {
+        CounterType::Generic("charge".to_string())
+    }
+
+    /// "Remove a charge counter from each artifact with two or more charge
+    /// counters on it" (a mass removal, `EffectScope::All`), optionally followed
+    /// by "then put a charge counter on this artifact".
+    fn mass_charge_removal(then_charge_source: bool) -> ResolvedAbility {
+        let removal = ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(charge_counter()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(
+                    vec![FilterProp::Counters {
+                        counters: crate::types::counter::CounterMatch::OfType(charge_counter()),
+                        comparator: Comparator::GE,
+                        count: QuantityExpr::Fixed { value: 2 },
+                    }],
+                )),
+                scope: crate::types::ability::EffectScope::All,
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        );
+        if !then_charge_source {
+            return removal;
+        }
+        removal.sub_ability(ResolvedAbility::new(
+            Effect::PutCounter {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+                counter_type: charge_counter(),
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        ))
+    }
+
+    /// Two artifacts on one upkeep event, A with two charge counters and B with
+    /// one, each the source of an identical trigger built by `ability`.
+    fn mass_charge_removal_group(
+        ability: fn() -> ResolvedAbility,
+    ) -> (GameState, Vec<PendingTriggerContext>) {
+        let mut state = setup();
+        let event = Some(GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        });
+        let group = vec![
+            pr625_no_input_trigger(
+                &mut state,
+                PlayerId(0),
+                "Artifact A",
+                ability(),
+                event.clone(),
+            ),
+            pr625_no_input_trigger(&mut state, PlayerId(0), "Artifact B", ability(), event),
+        ];
+        for (ctx, count) in group.iter().zip([2, 1]) {
+            let object = state.objects.get_mut(&ctx.pending.source_id).unwrap();
+            object.card_types.core_types.push(CoreType::Artifact);
+            object.counters.insert(charge_counter(), count);
+        }
+        (state, group)
+    }
+
+    /// Resolve the group's abilities in the given member order (each bound to its
+    /// own source) and read back `(A, B)` charge counters.
+    fn resolve_in_order(
+        mut state: GameState,
+        group: &[PendingTriggerContext],
+        order: [usize; 2],
+    ) -> (u32, u32) {
+        for index in order {
+            let pending = &group[index].pending;
+            let mut ability = (*pending.ability).clone();
+            ability.source_id = pending.source_id;
+            if let Some(sub) = ability.sub_ability.as_mut() {
+                sub.source_id = pending.source_id;
+            }
+            let mut events = Vec::new();
+            crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0)
+                .expect("the mass removal resolves");
+        }
+        let charge_of = |index: usize| {
+            state.objects[&group[index].pending.source_id]
+                .counters
+                .get(&charge_counter())
+                .copied()
+                .unwrap_or(0)
+        };
+        (charge_of(0), charge_of(1))
+    }
+
+    /// CR 603.3b + CR 608.2h: two identical same-event triggers from different
+    /// sources, each removing a charge counter from each artifact with two or
+    /// more and then charging its own source, end differently by order (A=2 and
+    /// B=1 at the start). The mass removal's population reads are what make the
+    /// group prompt; before they were recorded it auto-ordered.
+    #[test]
+    fn same_event_mass_counter_removal_feeding_its_population_prompts() {
+        let (state, group) = mass_charge_removal_group(|| mass_charge_removal(true));
+        // Premise: the two orders really diverge.
+        assert_ne!(
+            resolve_in_order(state.clone(), &group, [0, 1]),
+            resolve_in_order(state.clone(), &group, [1, 0]),
+            "REACH-GUARD: the order must be observable for this group"
+        );
+        let mut state = state;
+        assert!(
+            !group_is_order_independent(&state, &group),
+            "an order-dependent mass removal group must not auto-order"
+        );
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::PromptForChoice(_) => {}
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
+                panic!("the order-dependent mass removal group must prompt")
+            }
+        }
+    }
+
+    /// Control: the bare mass removal writes nothing that depends on its source,
+    /// so the identical same-event pair is one function applied twice and stays
+    /// auto-ordered.
+    #[test]
+    fn same_event_source_independent_mass_counter_removal_auto_orders() {
+        let (state, group) = mass_charge_removal_group(|| mass_charge_removal(false));
+        assert_eq!(
+            resolve_in_order(state.clone(), &group, [0, 1]),
+            resolve_in_order(state.clone(), &group, [1, 0]),
+        );
+        let mut state = state;
+        assert!(group_is_order_independent(&state, &group));
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {}
+            TriggerOrderingDisposition::PromptForChoice(_) => {
+                panic!("the source-independent mass removal group must auto-order")
+            }
+        }
+    }
+
+    /// "Remove a charge counter from each other artifact with `threshold` or
+    /// more charge counters on it" (a mass removal, `EffectScope::All`).
+    ///
+    /// Synthetic witness: no printed card combines a mass counter removal with a
+    /// population threshold that reads the SOURCE's own counters, so the
+    /// source-relative threshold tests below cannot be built from a real card.
+    /// The closest printed analogues each cover one half of the shape:
+    /// Heartmender ("At the beginning of your upkeep, remove a -1/-1 counter from
+    /// each creature you control.") is the mass removal, and Corrosion ("destroy
+    /// each artifact with mana value less than or equal to the number of rust
+    /// counters on it") is a quantity-qualified population. These tests keep both
+    /// halves so the profile's threshold read is exercised on the exact shape a
+    /// future printing would take.
+    fn other_artifact_charge_removal(threshold: QuantityExpr) -> ResolvedAbility {
+        other_artifact_charge_removal_matching(FilterProp::Counters {
+            counters: crate::types::counter::CounterMatch::OfType(charge_counter()),
+            comparator: Comparator::GE,
+            count: threshold,
+        })
+    }
+
+    /// "Remove a charge counter from each other artifact [that satisfies
+    /// `condition`]" (a mass removal, `EffectScope::All`).
+    fn other_artifact_charge_removal_matching(condition: FilterProp) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::RemoveCounter {
+                counter_type: Some(charge_counter()),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Artifact)
+                        .properties(vec![FilterProp::Another, condition]),
+                ),
+                scope: crate::types::ability::EffectScope::All,
+            },
+            Vec::new(),
+            ObjectId(0),
+            PlayerId(0),
+        )
+    }
+
+    /// The source's charge-counter count, as a quantity.
+    fn source_charge_count() -> QuantityExpr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: crate::types::ability::ObjectScope::Source,
+                counter_type: Some(charge_counter()),
+            },
+        }
+    }
+
+    /// CR 603.3b + CR 608.2h + CR 109.4: the source-relative operand reached
+    /// through the player axis. Each trigger removes a charge counter from each
+    /// other artifact whose controller controls at least as many artifacts as its
+    /// source has charge counters. The one controller controls two artifacts;
+    /// with A=3 and B=2, A first leaves (2, 2) (A's threshold 3 fails, then B's
+    /// 2 holds), B first leaves (2, 1) (A's threshold drops to 2 and holds). The
+    /// `ControlsCount` operand read is what makes the group prompt.
+    #[test]
+    fn same_event_mass_counter_removal_with_source_relative_controls_count_prompts() {
+        let (mut state, group) = mass_charge_removal_group(|| {
+            other_artifact_charge_removal_matching(FilterProp::ControllerMatches {
+                player: Box::new(crate::types::ability::PlayerFilter::ControlsCount {
+                    relation: crate::types::ability::PlayerRelation::All,
+                    filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)),
+                    comparator: Comparator::GE,
+                    count: Box::new(source_charge_count()),
+                }),
+            })
+        });
+        for (ctx, count) in group.iter().zip([3, 2]) {
+            let object = state.objects.get_mut(&ctx.pending.source_id).unwrap();
+            object.counters.insert(charge_counter(), count);
+        }
+        // Premise: the two orders really diverge.
+        assert_eq!(resolve_in_order(state.clone(), &group, [0, 1]), (2, 2));
+        assert_eq!(resolve_in_order(state.clone(), &group, [1, 0]), (2, 1));
+        assert!(
+            !group_is_order_independent(&state, &group),
+            "a source-relative ControlsCount operand makes the mass removal order-dependent"
+        );
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::PromptForChoice(_) => {}
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
+                panic!("the source-relative ControlsCount mass removal group must prompt")
+            }
+        }
+    }
+
+    /// CR 603.3b + CR 608.2h: two identical same-event triggers, each removing a
+    /// charge counter from each OTHER artifact with at least as many charge
+    /// counters as its source (A=2, B=1). The threshold reads the source's
+    /// counters, which the sibling's removal writes, so the order is observable:
+    /// A first leaves (1, 1), B first leaves (1, 0). The filter's threshold read
+    /// is what makes the group prompt; unrecorded, it auto-ordered.
+    #[test]
+    fn same_event_mass_counter_removal_with_source_relative_threshold_prompts() {
+        let (state, group) =
+            mass_charge_removal_group(|| other_artifact_charge_removal(source_charge_count()));
+        // Premise: the two orders really diverge (A=2, B=1 as set up above).
+        assert_eq!(resolve_in_order(state.clone(), &group, [0, 1]), (1, 1));
+        assert_eq!(resolve_in_order(state.clone(), &group, [1, 0]), (1, 0));
+        let mut state = state;
+        assert!(
+            !group_is_order_independent(&state, &group),
+            "a source-relative threshold makes the mass removal order-dependent"
+        );
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::PromptForChoice(_) => {}
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {
+                panic!("the source-relative mass removal group must prompt")
+            }
+        }
+    }
+
+    /// Control: the same removal with a fixed threshold reads no source state,
+    /// so the identical same-event pair commutes and stays auto-ordered.
+    #[test]
+    fn same_event_mass_counter_removal_with_fixed_threshold_auto_orders() {
+        let (state, group) = mass_charge_removal_group(|| {
+            other_artifact_charge_removal(QuantityExpr::Fixed { value: 1 })
+        });
+        assert_eq!(
+            resolve_in_order(state.clone(), &group, [0, 1]),
+            resolve_in_order(state.clone(), &group, [1, 0]),
+        );
+        let mut state = state;
+        assert!(group_is_order_independent(&state, &group));
+        match begin_trigger_ordering(&mut state, group) {
+            TriggerOrderingDisposition::NoChoiceNeeded(_) => {}
+            TriggerOrderingDisposition::PromptForChoice(_) => {
+                panic!("the fixed-threshold mass removal group must auto-order")
             }
         }
     }
@@ -48917,7 +52989,9 @@ pub mod tests {
                 WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
                 WaitingFor::OptionalCostChoice { .. } => {
                     runner
-                        .act(GameAction::DecideOptionalCost { index: if kicked { 0 } else { 1 } })
+                        .act(GameAction::DecideOptionalCost {
+                            index: if kicked { 0 } else { 1 },
+                        })
                         .expect("kicker decision must be accepted");
                 }
                 WaitingFor::TriggerTargetSelection { .. }
@@ -49093,7 +53167,9 @@ pub mod tests {
                 WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
                 WaitingFor::OptionalCostChoice { .. } => {
                     runner
-                        .act(GameAction::DecideOptionalCost { index: if kicked { 0 } else { 1 } })
+                        .act(GameAction::DecideOptionalCost {
+                            index: if kicked { 0 } else { 1 },
+                        })
                         .expect("kicker decision must be accepted");
                 }
                 _ => {
@@ -50790,8 +54866,12 @@ pub mod tests {
             .expect("retain the observer's own occurrence");
         latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
 
-        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("complete departure contexts settle");
+        let settled = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("complete departure contexts settle");
         assert_eq!(
             settled
                 .iter()
@@ -50867,8 +54947,12 @@ pub mod tests {
             .expect("retain the observer's own occurrence");
         latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
 
-        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("complete departure contexts settle");
+        let settled = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("complete departure contexts settle");
         assert_eq!(
             settled
                 .iter()
@@ -50950,11 +55034,15 @@ pub mod tests {
         }
         latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
 
-        let settled: Vec<_> = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("batched latches settle")
-            .into_iter()
-            .filter(|context| context.pending.source_id == observer)
-            .collect();
+        let settled: Vec<_> = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("batched latches settle")
+        .into_iter()
+        .filter(|context| context.pending.source_id == observer)
+        .collect();
         (state, settled, observer, leader_ref)
     }
 
@@ -51023,8 +55111,12 @@ pub mod tests {
             .expect("retain second all-origin occurrence");
         latch_logical_zone_change_group_immediately_after(&mut state, &mut group);
 
-        let settled = collect_logical_zone_trigger_settlement(&mut state, &group)
-            .expect("batched latches settle");
+        let settled = collect_logical_zone_trigger_settlement_for(
+            &mut state,
+            &group,
+            EntryOccurrenceCollector::Owner,
+        )
+        .expect("batched latches settle");
         assert_eq!(
             settled.len(),
             1,
@@ -51069,7 +55161,12 @@ pub mod tests {
             "a new incarnation cannot satisfy the original member's post-event authority"
         );
         assert!(
-            collect_logical_zone_trigger_settlement(&mut state, &group).is_err(),
+            collect_logical_zone_trigger_settlement_for(
+                &mut state,
+                &group,
+                EntryOccurrenceCollector::Owner
+            )
+            .is_err(),
             "settlement fails closed without an exact post-event context"
         );
     }
@@ -51230,6 +55327,8 @@ pub mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Database,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,
@@ -52104,6 +56203,7 @@ pub mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
@@ -52297,6 +56397,7 @@ pub mod tests {
         // Sacrifice exactly these three (count == pool) via the interactive
         // selection handler.
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![observer, b1, b2],
             count: 3,
@@ -52314,10 +56415,12 @@ pub mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -52449,6 +56552,7 @@ pub mod tests {
         // Mass ChangeZone battlefield→hand over all three creatures.
         let ability = ResolvedAbility::new(
             Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
@@ -52511,6 +56615,7 @@ pub mod tests {
     ) {
         let effect = match carrier {
             LogicalZoneProductionCarrier::ChangeZone => Effect::ChangeZoneAll {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Hand,
                 target: TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature)),
@@ -52558,6 +56663,8 @@ pub mod tests {
             LogicalZoneProductionCarrier::ChangeZone => {
                 let ability = ResolvedAbility::new(
                     Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination,
                         target: TargetFilter::Any,
@@ -52642,6 +56749,8 @@ pub mod tests {
                         .execute(AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                                library_shuffle: Default::default(),
                                 origin: None,
                                 destination: redirected_destination,
                                 target: TargetFilter::SelfRef,
@@ -55389,6 +59498,8 @@ pub mod tests {
                         .execute(AbilityDefinition::new(
                             AbilityKind::Database,
                             Effect::ChangeZone {
+                                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                                library_shuffle: Default::default(),
                                 origin: None,
                                 destination: Zone::Exile,
                                 target: TargetFilter::SelfRef,
@@ -55629,6 +59740,8 @@ pub mod tests {
                 ],
             };
             let execute_effect = Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -55758,6 +59871,8 @@ pub mod tests {
                 ],
             };
             let execute_effect = Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter {
@@ -56256,6 +60371,123 @@ pub mod tests {
         let mut fresh = vec![chosen[1].clone(), chosen[2].clone()];
         normalize_deferred_trigger_order(&unmarked, &mut fresh);
         assert_eq!(sources(&fresh), vec![3, 2]);
+    }
+
+    /// Row 10b — the subtype-defended restriction scope never matches a
+    /// controller-scoped attack ("whenever you attack ...") position. The
+    /// `match` falls to `_ => false`, which compiles silently on a widened
+    /// arm — this pin is the revert-fail mechanism (widening the arm to
+    /// `{ .. }` is the revert).
+    ///
+    /// The planeswalker negative and the paired positive share ONE live
+    /// P0-controlled planeswalker in ONE state: the negative rejects because
+    /// of the subtype parameter, never because the object lookup misses.
+    #[test]
+    fn subtype_defended_scope_never_matches_controller_scope() {
+        let mut live = setup();
+        let walker_card = CardId(live.next_object_id);
+        let walker = create_object(
+            &mut live,
+            walker_card,
+            PlayerId(0),
+            "Jace".to_string(),
+            Zone::Battlefield,
+        );
+        let target = crate::game::combat::AttackTarget::Planeswalker(walker);
+        // Negative: the subtype parameter rejects a live controlled walker.
+        // REVERT-FAIL (arm widened to `{ .. }`): the live lookup succeeds and
+        // this assertion fails.
+        assert!(
+            !attack_target_matches_controller_scope(
+                &live,
+                target,
+                PlayerId(0),
+                &ControllerRef::You,
+                &AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string()),
+                },
+            ),
+            "restriction-only subtype scope must not match a controller-scoped attack"
+        );
+        // Paired positive on the SAME object and state: the unparameterized
+        // arm accepts, so the negative above proves the parameter — not the
+        // harness — rejects.
+        assert!(
+            attack_target_matches_controller_scope(
+                &live,
+                target,
+                PlayerId(0),
+                &ControllerRef::You,
+                &AttackTargetFilter::Planeswalker { subtype: None },
+            ),
+            "reach-guard: the unparameterized Planeswalker arm still matches a controlled planeswalker"
+        );
+        // The other target types fall through for both parameter arms.
+        for target in [
+            crate::game::combat::AttackTarget::Player(PlayerId(0)),
+            crate::game::combat::AttackTarget::Battle(ObjectId(9)),
+        ] {
+            for filter in [
+                AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string()),
+                },
+                AttackTargetFilter::Planeswalker { subtype: None },
+            ] {
+                assert!(
+                    !attack_target_matches_controller_scope(
+                        &live,
+                        target,
+                        PlayerId(0),
+                        &ControllerRef::You,
+                        &filter,
+                    ),
+                    "non-planeswalker targets never match a planeswalker scope: {target:?}"
+                );
+            }
+        }
+    }
+
+    /// Row 10c — the subtype-defended restriction scope is never compatible
+    /// with any attack-trigger filter. `matches!` without a wildcard is
+    /// non-match by default — this pin is the revert-fail mechanism.
+    #[test]
+    fn subtype_defended_scope_never_compatible_with_attack_filters() {
+        let subtype = AttackTargetFilter::Planeswalker {
+            subtype: Some("Jace".to_string()),
+        };
+        let every_filter = || {
+            [
+                AttackTargetFilter::Player,
+                AttackTargetFilter::Planeswalker { subtype: None },
+                AttackTargetFilter::Planeswalker {
+                    subtype: Some("Jace".to_string()),
+                },
+                AttackTargetFilter::PlayerOrPlaneswalker,
+                AttackTargetFilter::Battle,
+                AttackTargetFilter::Owner,
+                AttackTargetFilter::OwnerOrPlaneswalker,
+                AttackTargetFilter::PlayerOrPermanents,
+                AttackTargetFilter::Monarch,
+            ]
+        };
+        for other in every_filter() {
+            assert!(
+                !attack_target_filters_compatible(&subtype, &other),
+                "restriction-only subtype scope is incompatible in trigger position"
+            );
+            assert!(
+                !attack_target_filters_compatible(&other, &subtype),
+                "restriction-only subtype scope is incompatible in condition position"
+            );
+        }
+        // Paired positive: sibling compatibility still holds.
+        assert!(
+            attack_target_filters_compatible(
+                &AttackTargetFilter::Player,
+                &AttackTargetFilter::Player,
+            ),
+            "reach-guard: Player remains compatible with itself"
+        );
     }
 }
 

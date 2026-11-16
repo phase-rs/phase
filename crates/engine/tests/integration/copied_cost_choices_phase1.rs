@@ -405,7 +405,9 @@ fn copy_squad_with_payments(payments: u32) -> usize {
             WaitingFor::OptionalCostChoice { .. }
         ));
         runner
-            .act(GameAction::DecideOptionalCost { index: if pay { 0 } else { 1 } })
+            .act(GameAction::DecideOptionalCost {
+                index: if pay { 0 } else { 1 },
+            })
             .expect("declare Squad payment count");
     }
     assert!(matches!(

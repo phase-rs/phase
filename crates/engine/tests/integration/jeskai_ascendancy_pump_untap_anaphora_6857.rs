@@ -348,7 +348,6 @@ fn motivated_pony_untaps_only_the_attacking_creatures_it_pumped() {
             colors: vec![],
             keywords: vec![],
             controller: P0,
-            face_down: false,
         });
     runner.advance_to_combat();
     runner

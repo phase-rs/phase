@@ -722,7 +722,11 @@ fn whispersteel_concession_prices_an_additional_cost_choice() {
     .expect("Bayou Groff's additional cost");
     assert!(matches!(
         &groff_cost,
-        AdditionalCost::Choice(costs) if costs.len() == 2 && matches!(&costs[0], AbilityCost::Sacrifice(_)) && matches!(&costs[1], AbilityCost::Mana { .. })
+        AdditionalCost::Choice(costs)
+            if matches!(
+                costs.as_slice(),
+                [AbilityCost::Sacrifice(_), AbilityCost::Mana { .. }]
+            )
     ));
     let groff_mana = ManaCost::Cost {
         shards: vec![ManaCostShard::Green],
@@ -853,6 +857,7 @@ fn printed_single_cast_static_is_refused() {
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
             cast_limit,

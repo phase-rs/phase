@@ -143,7 +143,9 @@ fn drive(s: &mut Setup, pay_cost: bool, chosen_type: &str, found: Option<ObjectI
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 s.runner
-                    .act(GameAction::DecideOptionalCost { index: if pay_cost { 0 } else { 1 } })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_cost { 0 } else { 1 },
+                    })
                     .expect("decide optional behold cost");
             }
             WaitingFor::CostTypeChoice { options, .. } => {

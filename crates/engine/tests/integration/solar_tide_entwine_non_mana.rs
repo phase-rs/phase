@@ -925,7 +925,9 @@ fn cast_capsize_with_citadel_under_terror(pay_buyback: bool) -> (GameRunner, Obj
                 assert!(!buyback_offered, "Buyback must be offered exactly once");
                 buyback_offered = true;
                 runner
-                    .act(GameAction::DecideOptionalCost { index: if pay_buyback { 0 } else { 1 } })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay_buyback { 0 } else { 1 },
+                    })
                     .expect("decide Buyback");
             }
             _ => break,

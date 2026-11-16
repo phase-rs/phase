@@ -170,7 +170,11 @@ fn drive(runner: &mut GameRunner, source: ObjectId, first: GameAction, answers: 
                 }
             }
             WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost {
-                index: if answers.defiler_pay.unwrap_or(answers.pay_optional) { 0 } else { 1 },
+                index: if answers.defiler_pay.unwrap_or(answers.pay_optional) {
+                    0
+                } else {
+                    1
+                },
             },
             WaitingFor::AlternativeCastChoice { .. } => GameAction::ChooseAlternativeCast {
                 choice: answers.alt.unwrap_or(AlternativeCastDecision::Alternative),

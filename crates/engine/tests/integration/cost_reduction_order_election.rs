@@ -673,7 +673,9 @@ fn an_accepted_defiler_reduction_is_ordered_before_the_cost_floor() {
             "the Defiler offer must be presented before costs are locked in"
         );
         runner
-            .act(GameAction::DecideOptionalCost { index: if pay { 0 } else { 1 } })
+            .act(GameAction::DecideOptionalCost {
+                index: if pay { 0 } else { 1 },
+            })
             .expect("the Defiler decision must be accepted");
         runner
             .state()
@@ -736,7 +738,9 @@ fn an_accepted_defiler_reduction_can_create_the_election_itself() {
             })
             .expect("the cast must begin");
         runner
-            .act(GameAction::DecideOptionalCost { index: if pay { 0 } else { 1 } })
+            .act(GameAction::DecideOptionalCost {
+                index: if pay { 0 } else { 1 },
+            })
             .expect("the Defiler decision must be accepted");
         matches!(
             runner.state().waiting_for,
