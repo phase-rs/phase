@@ -1721,13 +1721,22 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
             },
         });
 
-    // CR 601.2b: No prompt; fallback was applied automatically.
     assert!(
-        !matches!(result.waiting_for, WaitingFor::OptionalCostChoice { .. }),
-        "no prompt expected when preferred cost is unpayable and fallback applies, got {:?}",
+        matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
+        "reach guard: the bolt's target is chosen first, got {:?}",
         result.waiting_for,
     );
     handle_target_selection(&mut runner, &result);
+
+    // CR 601.2b: No prompt; fallback was applied automatically.
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "no prompt expected when preferred cost is unpayable and fallback applies, got {:?}",
+        runner.state().waiting_for,
+    );
 
     assert!(
         runner
@@ -1761,17 +1770,18 @@ fn choice_cost_with_a_sole_life_fallback_still_prompts() {
         cast_choice_bolt_with_unpayable_blight(AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: 2 },
         });
+    handle_target_selection(&mut runner, &result);
 
     assert!(
         matches!(
-            &result.waiting_for,
+            &runner.state().waiting_for,
             WaitingFor::OptionalCostChoice {
                 cost: AdditionalCost::Choice(costs),
                 ..
             } if costs.len() == 2
         ),
         "a sole life branch must be decided through the prompt, got {:?}",
-        result.waiting_for,
+        runner.state().waiting_for,
     );
     assert_eq!(
         runner.state().players[0].life,
@@ -1779,10 +1789,9 @@ fn choice_cost_with_a_sole_life_fallback_still_prompts() {
         "no life is paid before the caster answers"
     );
 
-    let result = runner
+    runner
         .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("the payable life branch is accepted");
-    handle_target_selection(&mut runner, &result);
 
     assert_eq!(
         runner.state().players[0].life,
