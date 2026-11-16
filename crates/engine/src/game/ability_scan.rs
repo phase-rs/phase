@@ -2796,12 +2796,18 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
         // CR 608.2c: with a cause, the set is what one zone change, keyword action or control
         // change produced "this way", so its size scales only through that producer, whose own
         // arm carries any population read.
-        QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
-            let ctx = match (mode, caused_by) {
-                (ScanMode::LoopFirewall, Some(_)) => FilterReadContext::SnapshotOrEvent,
-                (ScanMode::LoopFirewall, None) | (ScanMode::Conservative, _) => {
-                    FilterReadContext::LiveBoardCensus
-                }
+        // CR 614.6: a named destination is read against each member's CURRENT zone
+        // (live state), so it never counts as a snapshot-only read.
+        QuantityRef::FilteredTrackedSetSize {
+            filter,
+            caused_by,
+            destination,
+        } => {
+            let ctx = match (mode, caused_by, destination) {
+                (ScanMode::LoopFirewall, Some(_), None) => FilterReadContext::SnapshotOrEvent,
+                (ScanMode::LoopFirewall, Some(_), Some(_))
+                | (ScanMode::LoopFirewall, None, _)
+                | (ScanMode::Conservative, _, _) => FilterReadContext::LiveBoardCensus,
             };
             scan_target_filter(filter, ctx, mode)
         }
@@ -9698,6 +9704,7 @@ mod tests {
                 &QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(ct()),
                     caused_by,
+                    destination: None,
                 },
                 LoopFirewall,
             )

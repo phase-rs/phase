@@ -21224,28 +21224,21 @@ fn try_parse_for_each_effect(text: &str, ctx: &mut ParseContext) -> Option<Parse
                 // each" — so `try_parse_token`'s own "this way" dispatch never
                 // sees the "for each" clause here; `scoped_count` above, from
                 // this function's OWN `quantity`, is the only count this path
-                // ever produces. That `quantity` comes from the context-free
-                // `parse_for_each_clause_expr_with_context`, which correctly
-                // keeps a bare "card put into a graveyard this way" on the
-                // unfiltered `TrackedSetSize` by default — the right answer
-                // for a single-pile producer with no complementary partition
-                // to disambiguate from (Pinnacle Starcage's "put each card
-                // exiled with this artifact into its owner's graveyard, then
-                // create ... for each card put into a graveyard this way" —
-                // every exiled card lands in the SAME graveyard pile via
-                // `ChangeZoneAll`, not a Dig split). Only re-resolve through
-                // the dedicated `PutIntoGraveyard`-cause parser when a REAL
-                // Dig split precedes this chunk (`ctx.nearest_dig_rest_zone`)
-                // AND its rest destination matches the zone this clause
-                // names — Dihada, Binder of Wills's -3: "Create a Treasure
-                // token for each card put into your graveyard this way",
-                // where the preceding Dig puts the rest into Graveyard.
-                // Every other Token for-each count, and every bare-graveyard
-                // clause with no preceding Dig split, is unaffected.
+                // ever produces. A bare "card put into a graveyard this way"
+                // counts only tracked cards delivered to Graveyard (CR 614.6);
+                // this is the normal path for Pinnacle Starcage's one-pile move.
+                // When a preceding Dig puts the rest into Graveyard, re-resolve
+                // through the dedicated `PutIntoGraveyard` cause for the rest
+                // partition (Dihada, Binder of Wills's -3).
                 let count = if matches!(
                     scoped_count,
                     QuantityExpr::Ref {
                         qty: QuantityRef::TrackedSetSize
+                            | QuantityRef::FilteredTrackedSetSize {
+                                caused_by: None,
+                                destination: Some(Zone::Graveyard),
+                                ..
+                            }
                     }
                 ) && ctx.nearest_dig_rest_zone == Some(Zone::Graveyard)
                 {
@@ -42557,7 +42550,8 @@ fn nearest_dig_rest_zone_in_ability(def: &AbilityDefinition) -> Option<Zone> {
 /// card exiled with this artifact into its owner's graveyard, then create ...
 /// for each card put into a graveyard this way" — every exiled card lands in
 /// the SAME graveyard pile via `ChangeZoneAll`, not a Dig, so this returns
-/// `None` and the bare `TrackedSetSize` default stays correct there).
+/// `None` and the clause keeps the destination-count parse: the tracked cards
+/// delivered to Graveyard, CR 614.6).
 fn nearest_dig_rest_zone_in_clause(clause: &ParsedEffectClause) -> Option<Zone> {
     dig_rest_zone(&clause.effect).or_else(|| {
         clause
