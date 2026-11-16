@@ -10443,12 +10443,15 @@ pub(crate) fn collect_and_drain_entry_observer_triggers_if_settled(
 }
 
 fn is_battlefield_entry(event: &GameEvent) -> bool {
+    // CR 701.3b + CR 603.2: an entering Aura's host attachment is part of the
+    // same entry answer; its canonical `Attached` event feeds attachment
+    // observers alongside the battlefield entry.
     matches!(
         event,
         GameEvent::ZoneChanged {
             to: Zone::Battlefield,
             ..
-        }
+        } | GameEvent::Attached { .. }
     )
 }
 
@@ -14383,6 +14386,7 @@ fn latched_property_kind(
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -16372,6 +16376,7 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         // An unrecognized parser escape hatch matches nothing on either leg.
         | FilterProp::Other { .. } => false,

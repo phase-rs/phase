@@ -13,6 +13,8 @@ client/src/wasm
 data/*
 !data/card-data.json
 !data/draft-pools.json
+# Compiled into the engine with include_str!.
+!data/bracket_lists.json
 
 *.log
 *.tmp

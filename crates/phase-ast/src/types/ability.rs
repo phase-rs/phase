@@ -7792,6 +7792,10 @@ pub enum FilterProp {
     /// CR 509.1a: Creature was declared as a blocker this turn.
     /// Checks `creatures_blocked_this_turn` tracking set on GameState.
     BlockedThisTurn,
+    /// CR 701.14a + CR 701.14b: Creature fought this turn (a fight that didn't
+    /// happen doesn't count). Checks the incarnation-keyed
+    /// `creatures_fought_this_turn` set on GameState.
+    FoughtThisTurn,
     /// CR 508.1a + CR 509.1a: Creature attacked or blocked this turn.
     /// Compound check used by "that attacked or blocked this turn" Oracle text.
     AttackedOrBlockedThisTurn,
@@ -8064,6 +8068,7 @@ impl FilterProp {
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -9269,6 +9274,7 @@ fn filter_prop_binds_prior_target(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -9526,6 +9532,7 @@ pub fn filter_prop_contains(prop: &FilterProp, leaf: &dyn Fn(&TargetFilter) -> b
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -9822,6 +9829,7 @@ pub fn filter_prop_grammar_any(
             | FilterProp::ZoneChangedThisTurn { .. }
             | FilterProp::AttackedThisTurn { .. }
             | FilterProp::BlockedThisTurn
+            | FilterProp::FoughtThisTurn
             | FilterProp::AttackedOrBlockedThisTurn
             | FilterProp::CountersPutOnThisTurn { .. }
             | FilterProp::FaceDown
@@ -10483,6 +10491,7 @@ pub fn rewrite_filter_prop<C>(
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -12866,6 +12875,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -29212,6 +29222,7 @@ fn filter_prop_recipient_read(prop: &FilterProp) -> RecipientRead {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -30990,6 +31001,64 @@ impl TargetFilter {
             }
             _ => None,
         }
+    }
+
+    /// CR 109.2 + CR 109.2a: the conjunctive clauses of this filter that
+    /// POSITIVELY and explicitly name `zone`, each as a standalone filter.
+    ///
+    /// The filter is read in disjunctive normal form: `Or` alternatives are
+    /// expanded (through any `And` nesting) and each resulting clause is the `And`
+    /// of its leaves. A clause qualifies only if one of its own non-negated leaves
+    /// names `zone` (`InZone`, `InAnyZone`, or a zone-implying variant such as
+    /// `ExiledBySource` / `StackSpell`); a bare clause ("creatures") denotes
+    /// battlefield permanents and a `Not` supplies no zone (it excludes one).
+    /// Matching an off-battlefield object against only these clauses keeps the zone
+    /// constraint attached to the alternative that carries it, so a bare sibling
+    /// alternative can never admit a card in another zone.
+    ///
+    /// The single authority for "can this filter denote an object in a non-default
+    /// zone"; `extract_in_zone` reports one zone for the whole filter and cannot
+    /// answer that. Expansion is capped at `MAX_CLAUSES` (filters are tiny; the cap
+    /// only bounds pathological inputs).
+    pub fn clauses_naming_zone(&self, zone: crate::types::zones::Zone) -> Vec<TargetFilter> {
+        const MAX_CLAUSES: usize = 256;
+        fn expand(filter: &TargetFilter) -> Vec<Vec<&TargetFilter>> {
+            match filter {
+                TargetFilter::Or { filters } => filters.iter().flat_map(expand).collect(),
+                TargetFilter::And { filters } => {
+                    filters.iter().fold(vec![Vec::new()], |clauses, conjunct| {
+                        let alternatives = expand(conjunct);
+                        clauses
+                            .iter()
+                            .flat_map(|clause| {
+                                alternatives.iter().map(move |alt| {
+                                    let mut merged = clause.clone();
+                                    merged.extend(alt.iter().copied());
+                                    merged
+                                })
+                            })
+                            .take(MAX_CLAUSES)
+                            .collect()
+                    })
+                }
+                leaf => vec![vec![leaf]],
+            }
+        }
+        expand(self)
+            .into_iter()
+            .filter(|clause| {
+                clause.iter().any(|leaf| {
+                    !matches!(leaf, TargetFilter::Not { .. })
+                        && leaf.population_zones().contains(&zone)
+                })
+            })
+            .map(|clause| match clause.as_slice() {
+                [only] => (*only).clone(),
+                leaves => TargetFilter::And {
+                    filters: leaves.iter().map(|leaf| (*leaf).clone()).collect(),
+                },
+            })
+            .collect()
     }
 
     /// CR 400.1: Returns the union of explicit zone constraints in this filter.
@@ -41099,6 +41168,20 @@ impl CoinFlipRun {
     }
 }
 
+/// CR 509.3e: "becomes blocked by `minimum` or more <blocker>" — the threshold
+/// of [`TriggerDefinition::blocker_count`]. Only the "at least N" form is
+/// representable: every printed card uses it, and an "exactly"/"or fewer" form
+/// would need blocker-removal crossings. `minimum == 0` is never produced by
+/// the parser, and the matcher treats it as never firing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockerCountThreshold {
+    pub minimum: u32,
+    /// The blockers that count. `None` counts every blocker (all blockers are
+    /// creatures, CR 509.1a).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<TargetFilter>,
+}
+
 /// CR 706.2: Typed result-face filter for "Whenever you roll a [result]" die-roll
 /// triggers. `Exact` covers single faces ("roll a 1") AND disjunctions ("roll a 1
 /// or 2") — a set, which no single Comparator can express; `AtLeast` is the GE
@@ -41236,6 +41319,14 @@ pub struct TriggerDefinition {
     /// CR 508.3a: Filter for attack target type ("attacks a planeswalker").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attack_target_filter: Option<crate::types::triggers::AttackTargetFilter>,
+    /// CR 509.3e: the attacker-side "becomes blocked by N or more <noun>"
+    /// blocker-count threshold. Read only by `TriggerMode::BecomesBlocked`.
+    /// When `Some`, the trigger fires once for an attacker whose matching
+    /// blockers reach the threshold: when blockers are declared, or (for an
+    /// unfiltered threshold only) when an effect adds a blocker. Matched at the
+    /// event, never rechecked on resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker_count: Option<BlockerCountThreshold>,
     /// Typed player actions for PlayerPerformedAction trigger mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub player_actions: Option<Vec<PlayerActionKind>>,
@@ -42163,6 +42254,7 @@ impl TriggerDefinition {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,
             damage_amount: None,
@@ -48576,6 +48668,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clauses_naming_zone_attach_the_zone_to_the_positive_clause() {
+        use crate::types::zones::Zone;
+        let in_gy = |f: TypedFilter| {
+            TargetFilter::Typed(f.properties(vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }]))
+        };
+        let gy_land = in_gy(TypedFilter::land());
+        let bare = TargetFilter::Typed(TypedFilter::creature());
+        let you = TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You));
+        let any_zone =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::InAnyZone {
+                    zones: vec![Zone::Exile, Zone::Hand],
+                }]),
+            );
+
+        // Top-level Or: only the zone-naming alternative survives.
+        let or = TargetFilter::Or {
+            filters: vec![bare.clone(), gy_land.clone(), any_zone.clone()],
+        };
+        assert_eq!(
+            or.clauses_naming_zone(Zone::Graveyard),
+            vec![gy_land.clone()]
+        );
+        assert_eq!(or.clauses_naming_zone(Zone::Hand), vec![any_zone.clone()]);
+        assert!(or.clauses_naming_zone(Zone::Library).is_empty());
+        assert!(bare.clauses_naming_zone(Zone::Graveyard).is_empty());
+
+        // And(Or(bare, gy_land), you): the zone stays on the land clause.
+        let nested = TargetFilter::And {
+            filters: vec![
+                TargetFilter::Or {
+                    filters: vec![bare.clone(), gy_land.clone()],
+                },
+                you.clone(),
+            ],
+        };
+        assert_eq!(
+            nested.clauses_naming_zone(Zone::Graveyard),
+            vec![TargetFilter::And {
+                filters: vec![gy_land.clone(), you.clone()]
+            }]
+        );
+
+        // A negated predicate never supplies the zone.
+        let negated = TargetFilter::And {
+            filters: vec![
+                bare.clone(),
+                TargetFilter::Not {
+                    filter: Box::new(gy_land),
+                },
+            ],
+        };
+        assert!(negated.clauses_naming_zone(Zone::Graveyard).is_empty());
+    }
+
     // CR 109.2: a stack-spell/stack-ability filter denotes an object on the
     // stack by construction — mirrors the `ExiledBySource => Exile` arm so a
     // continuous effect's affected-filter scan
@@ -48750,6 +48900,7 @@ mod tests {
             gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
+            blocker_count: None,
             player_actions: None,
             scry_bottom_count: None,
             damage_amount: None,

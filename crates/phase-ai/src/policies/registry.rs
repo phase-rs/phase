@@ -129,7 +129,7 @@ pub enum PolicyId {
     /// mana rock (Basalt Monolith class) — a self-funded, net-zero loop.
     SelfUntapLoop,
     ComboLineProgress,
-    CedhKeepablesMulligan,
+    BracketKeepablesMulligan,
     FixedDeckKeepMulligan,
     /// Universal mulligan card-count floor — see `policies::mulligan::card_floor`.
     MulliganCardFloor,
