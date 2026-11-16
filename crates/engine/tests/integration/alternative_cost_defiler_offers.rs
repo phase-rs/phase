@@ -77,7 +77,7 @@ fn cast_accepting_the_defiler(runner: &mut GameRunner, spell: ObjectId) -> i32 {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the Defiler must complete the cast");
     life_before - runner.state().players[0].life
 }
@@ -266,7 +266,7 @@ fn defiler_is_offered_when_its_life_and_the_residuals_are_payable() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying the Defiler's life must be legal");
 
     // The cast completed: both life payments were made (4 - 2 - 2) and the
@@ -350,7 +350,7 @@ fn blitz_affordable_only_with_a_payable_defiler_is_offered_and_completes() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying the Defiler's life must be legal");
     assert_eq!(runner.state().players[0].life, 0, "both life payments made");
     assert_eq!(
@@ -452,7 +452,7 @@ fn blitz_with_a_defiler_and_an_imposed_life_tax_completes_when_payable() {
     runner.act(action).expect("the offered cast is accepted");
     if let WaitingFor::DefilerPayment { .. } = runner.state().waiting_for {
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("paying the Defiler's life");
     }
     assert_eq!(runner.state().players[0].life, 0, "all 6 life paid");

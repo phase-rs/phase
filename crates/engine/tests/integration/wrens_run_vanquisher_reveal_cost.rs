@@ -92,7 +92,7 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
 
     // 2. Choose to pay the preferred cost (reveal an Elf).
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("deciding to reveal must be accepted");
 
     // 3. Must prompt to select the Elf card from hand.
@@ -208,7 +208,7 @@ fn wrens_run_vanquisher_cast_by_paying_three() {
 
     // Choose to pay {3} instead of revealing an Elf.
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("deciding to pay {3} must be accepted");
 
     // Cast completes immediately by paying the full {4}{G}.

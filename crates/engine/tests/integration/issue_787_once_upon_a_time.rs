@@ -83,12 +83,7 @@ fn once_upon_a_time_free_as_first_spell_of_game() {
         matches!(
             result.waiting_for,
             WaitingFor::OptionalCostChoice {
-                cost: AdditionalCost::Choice(
-                    AbilityCost::Mana {
-                        cost: ManaCost::NoCost
-                    },
-                    _
-                ),
+                cost: AdditionalCost::Choice(costs) if costs.first() == Some(&AbilityCost::Mana { cost: ManaCost::NoCost }),
                 ..
             }
         ),
@@ -97,7 +92,7 @@ fn once_upon_a_time_free_as_first_spell_of_game() {
     );
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("choosing the free alternative should put the spell on the stack");
 
     assert_eq!(

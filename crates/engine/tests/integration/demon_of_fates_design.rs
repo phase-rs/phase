@@ -122,7 +122,7 @@ fn demon_of_fates_design_accept_alt_cost_pays_life() {
 
     // Accept the alternative cost.
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the alternative cost should succeed");
 
     // Spell must be on the stack.

@@ -91,7 +91,7 @@ fn optional_cost_paid_sets_flag() {
 
     // Pay the additional cost — this opens BlightChoice.
     let result_opt = runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("decide optional cost should succeed");
     assert!(
         matches!(result_opt.waiting_for, WaitingFor::BlightChoice { .. }),
@@ -174,7 +174,7 @@ fn optional_cost_skipped_clears_flag() {
 
     // Skip the additional cost
     let result3 = runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("skip optional cost should succeed");
 
     assert!(
@@ -265,7 +265,7 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
             runner.state().waiting_for,
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("paying the optional cost should succeed");
         assert_eq!(
             tapped_count(&runner, &lands),
@@ -288,7 +288,7 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
             })
             .expect("cast should succeed at base cost");
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("skipping the optional cost should succeed");
         assert_eq!(
             tapped_count(&runner, &lands),
@@ -2763,7 +2763,7 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
 
     // Accept the alternative cost → Zombie reaches the stack with {0} paid.
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the alternative cost should succeed");
     assert_eq!(
         runner.state().objects[&zombie_id].zone,
@@ -2884,7 +2884,7 @@ fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
     // Accept the {0} alternative → the spell reaches the stack and the source's
     // once-per-turn slot is consumed (CR 118.9 + CR 601.2b).
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the alternative cost should succeed");
     assert_eq!(
         runner.state().objects[&mv2_id].zone,
@@ -2961,7 +2961,7 @@ fn as_foretold_decline_printed_cost_does_not_consume_slot() {
 
     // Decline → pay the printed {2} cost; the slot must remain unspent.
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining the alternative cost should succeed");
     assert_eq!(
         runner.state().objects[&mv2_id].zone,

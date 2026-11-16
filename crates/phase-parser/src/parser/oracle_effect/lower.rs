@@ -9073,14 +9073,16 @@ pub(crate) const BOUNDED_TARGET_CARDINALITIES: &[(&str, usize, usize)] =
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
 /// phrase. "two target creatures" and "X target creatures" both set the exact
 /// number of targets, unlike "up to X target creatures".
-pub(crate) fn strip_exact_target_prefix(lower: &str) -> Option<(QuantityExpr, &str)> {
-    let (rest, count) = parse_exact_target_count_expr(lower).ok()?;
+pub(crate) fn strip_exact_target_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
+    let lower = text.to_ascii_lowercase();
+    let (rest, count) = parse_exact_target_count_expr(&lower).ok()?;
     let rest = rest.trim_start();
     if alt((tag::<_, _, OracleError<'_>>("target "), tag("target,")))
         .parse(rest)
         .is_ok()
     {
-        Some((count, rest))
+        let consumed = lower.len() - rest.len();
+        Some((count, &text[consumed..]))
     } else {
         None
     }

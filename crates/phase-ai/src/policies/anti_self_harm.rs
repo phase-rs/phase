@@ -1951,7 +1951,7 @@ mod tests {
         let candidate = engine::ai_support::candidate_actions(&state)
             .into_iter()
             .find(|candidate| {
-                matches!(candidate.action, GameAction::DecideOptionalCost { pay: selected } if selected == pay)
+                matches!(candidate.action, GameAction::DecideOptionalCost { index: idx } if idx == if pay { 0 } else { 1 })
             })
             .expect("the generated candidate set must contain the selected optional-cost action");
         (state, candidate)
@@ -2041,7 +2041,7 @@ mod tests {
         let candidate = engine::ai_support::candidate_actions(&state)
             .into_iter()
             .find(|candidate| {
-                matches!(candidate.action, GameAction::DecideOptionalCost { pay: selected } if selected == pay)
+                matches!(candidate.action, GameAction::DecideOptionalCost { index: idx } if idx == if pay { 0 } else { 1 })
             })
             .expect("the generated candidate set must contain the selected Defiler decision");
         (state, candidate)
@@ -2111,7 +2111,7 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     candidate.action,
-                    GameAction::DecideOptionalCost { pay: true }
+                    GameAction::DecideOptionalCost { index: 0 }
                 )
             })
             .expect("the queued prompt must generate its accept candidate");

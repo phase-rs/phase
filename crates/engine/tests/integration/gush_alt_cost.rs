@@ -134,7 +134,7 @@ fn cast_and_accept_alt(runner: &mut GameRunner, gush: ObjectId) -> (usize, Vec<O
         result.waiting_for
     );
     let result = runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept the alternative cost");
     match result.waiting_for {
         WaitingFor::PayCost {
@@ -402,7 +402,7 @@ fn gush_declined_alt_cost_pays_the_mana_cost() {
     );
     board
         .runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("decline the alternative cost");
     board.runner.advance_until_stack_empty();
 

@@ -138,7 +138,7 @@ fn cast_paid_instead_attach_to_target_selection(runner: &mut GameRunner, spell: 
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("kicker cost must be paid");
             }
             WaitingFor::ManaPayment { .. } => {

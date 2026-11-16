@@ -560,7 +560,7 @@ fn analyze_the_pollen_folded_searches_reveal_their_own_result() {
         ));
         events.extend(
             runner
-                .act(GameAction::DecideOptionalCost { pay })
+                .act(GameAction::DecideOptionalCost { index: if pay { 0 } else { 1 } })
                 .unwrap()
                 .events,
         );

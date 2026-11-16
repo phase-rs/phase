@@ -155,7 +155,7 @@ fn run_k(def: AbilityDefinition, picks: &[Pick], elim: Option<usize>, kicked: bo
                     .expect("t");
             }
             WaitingFor::OptionalCostChoice { .. } => {
-                r.act(GameAction::DecideOptionalCost { pay: true })
+                r.act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("kick");
             }
             WaitingFor::ManaPayment { .. } => {

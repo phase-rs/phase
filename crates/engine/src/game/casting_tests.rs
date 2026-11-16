@@ -16090,7 +16090,7 @@ fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
     };
     assert!(costs.iter().any(|c| matches!(c, AbilityCost::PayLife { .. })));
 
-    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("paying alternative life cost should cast");
 
     assert_eq!(state.players[0].life, 16);
@@ -16289,7 +16289,7 @@ fn cast_without_mana_cost_option_checks_commander_control() {
     assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { cost: ManaCost::NoCost })));
     assert!(costs.iter().any(|c| matches!(c, AbilityCost::Mana { cost: ManaCost::Cost { .. } })));
 
-    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("choosing the free-cast branch should cast the spell");
 
     assert_eq!(state.stack.len(), 1);
@@ -16398,7 +16398,7 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
     };
     assert!(costs.iter().any(|c| matches!(c, AbilityCost::PayLife { .. })));
 
-    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("paying 4 life should commit Snuff Out to the stack");
 
     assert_eq!(state.players[0].life, 16);
@@ -16536,7 +16536,7 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
         &[TargetRef::Object(target_id)]
     );
 
-    apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("paying 4 life should commit Snuff Out to the stack");
 
     // CR 118.3b + CR 601.2h + CR 601.2i: pay four life exactly once and finish
@@ -19489,7 +19489,7 @@ fn gift_recipient_auto_cast_remains_offered_and_reaches_gift_recipient_choice() 
         state.waiting_for,
         WaitingFor::OptionalCostChoice { .. }
     ));
-    apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    apply_as_current(&mut state, GameAction::DecideOptionalCost { index: 0 })
         .expect("promising the gift must be legal");
     let WaitingFor::ChooseGiftRecipient {
         pending_cast,
@@ -28171,7 +28171,7 @@ fn drive_deadly(
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: pay_evidence })
+                    .act(GameAction::DecideOptionalCost { index: if pay_evidence { 0 } else { 1 } })
                     .expect("optional collect-evidence decision accepted");
             }
             WaitingFor::CollectEvidenceChoice { cards, .. } => {
@@ -28218,7 +28218,7 @@ fn collect_evidence_auto_cast_remains_offered_and_reaches_evidence_choice() {
             WaitingFor::OptionalCostChoice { pending_cast, .. } => {
                 assert_eq!(pending_cast.object_id, deadly);
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("collect evidence must be accepted");
             }
             WaitingFor::TargetSelection {
@@ -60362,7 +60362,7 @@ mod x_sentinel_tap_creatures_activation_cost {
 /// silently rewrote the spell's X to the number of creatures the player happened
 /// to tap.
 ///
-/// Production route: `GameAction::CastSpell` → `DecideOptionalCost{pay:true}` →
+/// Production route: `GameAction::CastSpell` → `DecideOptionalCost{index:0}` →
 /// `pay_additional_cost_with_source`'s `Aggregate` sub-arm →
 /// `WaitingFor::PayCost` → `handle_tap_creatures_for_spell_cost` (the fixed
 /// line) → `ChooseXValue` → `ManaPayment` → resolution.
@@ -60439,7 +60439,7 @@ mod aggregate_tap_cost_does_not_clobber_chosen_x {
                 }
                 WaitingFor::OptionalCostChoice { .. } => {
                     runner
-                        .act(GameAction::DecideOptionalCost { pay: true })
+                        .act(GameAction::DecideOptionalCost { index: 0 })
                         .expect("opting to pay teamwork must be accepted");
                 }
                 WaitingFor::PayCost {

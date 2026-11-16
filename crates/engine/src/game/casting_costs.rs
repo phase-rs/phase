@@ -684,13 +684,14 @@ pub(crate) fn handle_decide_additional_cost(
     player: PlayerId,
     pending: PendingCast,
     additional_cost: &AdditionalCost,
-    pay: bool,
+    index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // CR 118.9d: an alternative-cost choice made with additional costs still
     // queued or in flow is answered here, not by their handlers.
     let answers_alternative_cost = pending.alternative_cost_election
         == crate::types::game_state::SpellAlternativeCostElection::Offered;
+    let pay = index == 0; // For backward compatibility: index 0 = pay, index 1 = don't pay
     if !answers_alternative_cost
         && pending
             .additional_cost_queue
@@ -813,54 +814,38 @@ pub(crate) fn handle_decide_additional_cost(
             unreachable!("kicker costs are handled before generic optional costs")
         }
         AdditionalCost::Choice(costs) => {
-            // TODO: Support N-way choices (currently only binary choices work with DecideOptionalCost)
-            // For now, assume exactly 2 choices as per existing binary choice prompt design.
-            let (preferred, fallback) = match costs.as_slice() {
-                [first, second] => (first.clone(), second.clone()),
-                _ => {
-                    // Fallback for unexpected N>2: treat first as preferred, last as fallback
-                    (costs.first().cloned().unwrap_or(AbilityCost::Mana { cost: ManaCost::zero() }), costs.last().cloned().unwrap_or(AbilityCost::Mana { cost: ManaCost::zero() }))
-                }
-            };
-            if pay {
-                let is_card_additional_cost_choice = !answers_alternative_cost;
-                if is_card_additional_cost_choice {
-                    // CR 601.2b: Optional/additional `Choice` costs (e.g. casualty).
-                    ability
-                        .context
-                        .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
-                } else if matches!(preferred, AbilityCost::Mana { .. }) {
-                    // CR 118.9: Spellcasting-option alternative mana costs are not
-                    // additional costs; gate riders via `alternative_mana_cost_paid`.
-                    ability.context.alternative_mana_cost_paid = true;
-                }
-                let is_spell_alternative_choice = answers_alternative_cost;
-                if is_spell_alternative_choice {
-                    ability.context.alternative_mana_cost_paid = true;
-                    // CR 118.9 + CR 601.2b: accepting a once-per-turn grant's
-                    // alternative cost records the source on the ability context so
-                    // finalize_cast consumes its per-turn slot. Declining (below)
-                    // leaves it `None` — the printed cost was paid, nothing spent.
-                    ability.context.alt_cost_grant_source = pending.alt_cost_grant_source;
-                    match preferred {
-                        AbilityCost::Mana { cost } => {
-                            alternative_base_override = Some(cost.clone());
-                            recompute_choice_cost = true;
-                            None
-                        }
-                        _ => Some(preferred.clone()),
+            // Support N-way choices: use the selected index directly.
+            let selected_index = index.min(costs.len().saturating_sub(1));
+            let selected_cost = costs[selected_index].clone();
+            let is_card_additional_cost_choice = !answers_alternative_cost;
+            if is_card_additional_cost_choice {
+                // CR 601.2b: Optional/additional `Choice` costs (e.g. casualty).
+                ability
+                    .context
+                    .record_additional_cost_payment(AdditionalCostOrigin::Other, 1);
+            } else if matches!(selected_cost, AbilityCost::Mana { .. }) {
+                // CR 118.9: Spellcasting-option alternative mana costs are not
+                // additional costs; gate riders via `alternative_mana_cost_paid`.
+                ability.context.alternative_mana_cost_paid = true;
+            }
+            let is_spell_alternative_choice = answers_alternative_cost;
+            if is_spell_alternative_choice {
+                ability.context.alternative_mana_cost_paid = true;
+                // CR 118.9 + CR 601.2b: accepting a once-per-turn grant's
+                // alternative cost records the source on the ability context so
+                // finalize_cast consumes its per-turn slot. Declining (below)
+                // leaves it `None` — the printed cost was paid, nothing spent.
+                ability.context.alt_cost_grant_source = pending.alt_cost_grant_source;
+                match selected_cost {
+                    AbilityCost::Mana { cost } => {
+                        alternative_base_override = Some(cost.clone());
+                        recompute_choice_cost = true;
+                        None
                     }
-                } else {
-                    Some(preferred.clone())
+                    _ => Some(selected_cost.clone()),
                 }
             } else {
-                let is_spell_alternative_choice = answers_alternative_cost;
-                if is_spell_alternative_choice {
-                    recompute_choice_cost = true;
-                    None
-                } else {
-                    Some(fallback.clone())
-                }
+                Some(selected_cost.clone())
             }
         }
         AdditionalCost::Required(cost) => {
@@ -885,7 +870,11 @@ pub(crate) fn handle_decide_additional_cost(
             crate::types::game_state::SpellAlternativeCostElection::Declined
         };
     } else if matches!(additional_cost, AdditionalCost::Choice(..)) {
-        updated_pending.additional_cost_flow = None;
+        // Preserve imposed Required cost in additional_cost_flow (e.g., Terror of the Peaks
+        // tax when casting Bone Shards). Only clear the flow if it doesn't contain a Required cost.
+        if !matches!(updated_pending.additional_cost_flow, Some(AdditionalCost::Required(_))) {
+            updated_pending.additional_cost_flow = None;
+        }
         updated_pending.additional_cost_decided = true;
     }
     if let Some(base) = alternative_base_override {
@@ -28336,7 +28325,7 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
         }
 
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("first kick must be accepted");
 
         // Re-prompt after one kick.
@@ -28361,7 +28350,7 @@ it for each time it was kicked.\n{T}: Add {C} for each charge counter on this ar
         }
 
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("second kick must be accepted");
 
         // CR 601.2f: all four mana are committed, so a third kick is not
@@ -28470,7 +28459,7 @@ library in a random order.";
                     "kicker decision prompt must carry a real Kicker cost: {cost:?}"
                 );
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: kick })
+                    .act(GameAction::DecideOptionalCost { index: if kick { 0 } else { 1 } })
                     .expect("kicker decision must be accepted");
             }
             other => panic!("expected OptionalCostChoice for kicker, got {other:?}"),
@@ -28640,7 +28629,7 @@ Flashback {5}{U}{U}";
         );
 
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("declining the kicker must finish the cast");
         runner.advance_until_stack_empty();
 
@@ -28714,13 +28703,13 @@ many tokens that are copies of it.)";
         }
 
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("first squad payment must be accepted");
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("second squad payment must be accepted");
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("declining further squad payments must finish the cast");
         runner.advance_until_stack_empty();
 
@@ -28793,7 +28782,7 @@ many tokens that are copies of it.)";
         }
 
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("granted Offspring payment must be accepted");
         runner.advance_until_stack_empty();
 
@@ -28971,13 +28960,13 @@ its replicate cost was paid.)\nDraw a card.";
         }
 
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("first replicate payment must be accepted");
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("second replicate payment must be accepted");
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("declining further replicate payments must finish the cast");
 
         // CR 601.2i + CR 603.3: after the cast commits, the stack holds the
@@ -29035,13 +29024,13 @@ its replicate cost was paid.)\nDraw a card.";
         }
 
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("first granted Replicate payment must be accepted");
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("second granted Replicate payment must be accepted");
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("declining further granted Replicate payments must finish the cast");
 
         let copies = drain_counting_spell_copies(&mut runner);
@@ -29176,7 +29165,7 @@ its replicate cost was paid.)\nDraw a card.";
         );
 
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("declining replicate must finish the cast");
 
         let copies = drain_counting_spell_copies(&mut runner);
@@ -29966,7 +29955,7 @@ its replicate cost was paid.)\nDraw a card.";
         };
         crate::game::engine::apply_as_current(
             &mut state,
-            GameAction::DecideOptionalCost { pay: true },
+            GameAction::DecideOptionalCost { index: 0 },
         )
         .expect("Offering must be accepted");
         let WaitingFor::PayCost {

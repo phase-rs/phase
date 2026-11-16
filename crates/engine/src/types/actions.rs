@@ -502,7 +502,7 @@ pub enum GameAction {
         indices: Vec<usize>,
     },
     DecideOptionalCost {
-        pay: bool,
+        index: usize,
     },
     /// CR 715.3a: Choose creature face (true) or Adventure half (false).
     ChooseAdventureFace {

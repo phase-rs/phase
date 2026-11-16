@@ -111,7 +111,7 @@ fn nourishing_shoal_pitch_exile_binds_x_and_gains_life() {
         .expect("cast");
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept pitch cost");
 
     assert!(

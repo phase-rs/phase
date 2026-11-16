@@ -1250,10 +1250,10 @@ pub(super) fn handle_optional_cost_choice(
     player: PlayerId,
     pending_cast: PendingCast,
     cost: &AdditionalCost,
-    pay: bool,
+    index: usize,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    casting_costs::handle_decide_additional_cost(state, player, pending_cast, cost, pay, events)
+    casting_costs::handle_decide_additional_cost(state, player, pending_cast, cost, index, events)
 }
 
 #[allow(clippy::too_many_arguments)]

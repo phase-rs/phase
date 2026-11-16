@@ -160,17 +160,13 @@ fn selected_optional_life_branch(
                 preferred.clone(),
             ))
         }
-        (AdditionalCost::Choice(costs), false) if costs.iter().any(|c| matches!(c, AbilityCost::PayLife { .. })) => {
-            let fallback = costs.iter().find(|c| matches!(c, AbilityCost::PayLife { .. })).unwrap();
-            Some((
-                OptionalAdditionalCostBranch::ChoiceFallback,
-                fallback.clone(),
-            ))
-        }
+        (AdditionalCost::Choice(costs), false) => costs
+            .last()
+            .filter(|c| matches!(c, AbilityCost::PayLife { .. }))
+            .map(|fallback| (OptionalAdditionalCostBranch::ChoiceFallback, fallback.clone())),
         (AdditionalCost::Optional { .. }, false)
         | (AdditionalCost::Optional { .. }, true)
         | (AdditionalCost::Choice(_), true)
-        | (AdditionalCost::Choice(_), false)
         | (AdditionalCost::Kicker { .. }, true | false)
         | (AdditionalCost::Required(_), true | false) => None,
     }
@@ -230,8 +226,8 @@ fn extract_life_cost_root(
                 pending_cast,
                 ..
             },
-            GameAction::DecideOptionalCost { pay: true },
-        ) if *player == semantic_owner => Some(ArmedLifeCostRoot::DefilerPayment(Box::new(
+            GameAction::DecideOptionalCost { index },
+        ) if *player == semantic_owner && *index == 0 => Some(ArmedLifeCostRoot::DefilerPayment(Box::new(
             DefilerPaymentWitness {
                 player: *player,
                 offered_life_cost: *life_cost,
@@ -249,9 +245,10 @@ fn extract_life_cost_root(
                 gift_kind,
                 pending_cast,
             },
-            GameAction::DecideOptionalCost { pay },
+            GameAction::DecideOptionalCost { index },
         ) if *player == semantic_owner => {
-            let (branch, materialized_cost) = selected_optional_life_branch(cost, *pay)?;
+            let pay = *index == 0;
+            let (branch, materialized_cost) = selected_optional_life_branch(cost, pay)?;
             let path = optional_additional_cost_path(pending_cast);
             Some(ArmedLifeCostRoot::OptionalAdditionalCost(Box::new(
                 OptionalAdditionalCostWitness {
@@ -448,7 +445,7 @@ pub(crate) fn begin_defiler_payment_attempt(
             && *waiting_life_cost == life_cost
             && waiting_reduction == mana_reduction
             && waiting_pending.as_ref() == pending_cast
-            && witness.candidate.action == GameAction::DecideOptionalCost { pay: true }
+            && witness.candidate.action == GameAction::DecideOptionalCost { index: 0 }
             && witness.candidate.metadata.semantic_owner == Some(player)
             && witness.candidate.metadata.actor
                 == Some(authorized_submitter_for_player(state, player))
@@ -495,7 +492,7 @@ pub(crate) fn begin_optional_additional_cost_attempt(
                     && &cost == materialized_cost
             });
             let matches_prompt = witness.player == player
-                && witness.candidate.action == GameAction::DecideOptionalCost { pay }
+                && witness.candidate.action == GameAction::DecideOptionalCost { index: if pay { 0 } else { 1 } }
                 && witness.candidate.metadata.semantic_owner == Some(player)
                 && witness.candidate.metadata.actor
                     == Some(authorized_submitter_for_player(state, player))
@@ -638,7 +635,7 @@ mod tests {
                 ManaCost::zero(),
             ),
             candidate: CandidateAction {
-                action: GameAction::DecideOptionalCost { pay: true },
+                action: GameAction::DecideOptionalCost { index: 0 },
                 metadata: ActionMetadata::for_actor(Some(player), TacticalClass::Selection),
             },
         }))
@@ -767,7 +764,7 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     candidate.action,
-                    GameAction::DecideOptionalCost { pay: true }
+                    GameAction::DecideOptionalCost { index: 0 }
                 )
             })
             .expect("the optional-life prompt must emit its accepted decision");
@@ -915,7 +912,7 @@ mod tests {
             .find(|candidate| {
                 matches!(
                     candidate.action,
-                    GameAction::DecideOptionalCost { pay: true }
+                    GameAction::DecideOptionalCost { index: 0 }
                 )
             })
             .expect("the generated candidate set must contain the accepted Defiler decision");
@@ -1046,6 +1043,32 @@ mod tests {
         assert!(viewer_state.life_safety_probe.attempt.is_none());
         assert!(viewer_state.life_safety_probe.receipt.is_none());
         assert!(!viewer_state.life_safety_probe.carrier_observed);
-        assert_eq!(viewer_state.life_safety_probe.next_token, 0);
+assert_eq!(viewer_state.life_safety_probe.next_token, 0);
+        }
+
+    #[test]
+    fn choice_decline_selects_final_paylife_branch() {
+        // Choice([PayLife(1), PayLife(3)]) — declining must select the final PayLife(3)
+        // branch, not the first PayLife(1). This ensures the recorded receipt matches
+        // what casting actually pays (the last entry for binary choices).
+        let cost = AdditionalCost::Choice(vec![
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+            },
+        ]);
+        let result = selected_optional_life_branch(&cost, false);
+        assert!(
+            matches!(
+                result,
+                Some((
+                    OptionalAdditionalCostBranch::ChoiceFallback,
+                    AbilityCost::PayLife { amount: QuantityExpr::Fixed { value: 3 } }
+                ))
+            ),
+            "declining Choice([PayLife(1), PayLife(3)]) must select PayLife(3), got {result:?}"
+        );
     }
 }

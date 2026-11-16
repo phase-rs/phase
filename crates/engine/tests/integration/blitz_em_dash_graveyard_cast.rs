@@ -1262,7 +1262,7 @@ fn blitz_with_a_non_mana_rider_offers_a_matching_defiler() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying the Defiler's life must be legal");
     pay_offered_costs(&mut runner);
 
@@ -1304,7 +1304,7 @@ fn blitz_with_a_declined_defiler_pays_its_full_cost_and_rider() {
         WaitingFor::DefilerPayment { .. }
     ));
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining the Defiler must be legal");
     pay_offered_costs(&mut runner);
 
@@ -1392,7 +1392,7 @@ fn compound_bestow_offers_a_matching_defiler_and_still_collects_evidence() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying the Defiler's life must be legal");
     match runner.state().waiting_for.clone() {
         WaitingFor::CollectEvidenceChoice { .. } => {
@@ -2537,7 +2537,7 @@ fn bestow_onto_terror_with_a_defiler_completes_through_the_offered_cast() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("paying the Defiler's life");
     let WaitingFor::CollectEvidenceChoice { .. } = runner.state().waiting_for else {
         panic!(
@@ -2600,7 +2600,7 @@ fn bestow_with_a_tax_free_target_is_offered_and_enchanting_terror_is_refused_at_
         })
         .expect("the Bears are a legal creature to enchant");
     onto_bear
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("the Defiler is offered with no tax committed");
     onto_bear
         .act(GameAction::SelectCards {
@@ -2666,7 +2666,7 @@ fn bestow_onto_terror_with_its_tax_payable_completes() {
     runner.act(action).expect("the offered cast is accepted");
     if let WaitingFor::DefilerPayment { .. } = runner.state().waiting_for {
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("declining the Defiler");
     }
     let WaitingFor::CollectEvidenceChoice { .. } = runner.state().waiting_for else {
@@ -2755,7 +2755,7 @@ fn bestow_without_a_residual_pays_terrors_tax_alongside_the_defiler() {
             WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(terror)),
             },
-            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { index: 0 },
             _ => break,
         };
         runner
@@ -3129,7 +3129,7 @@ fn bestow_onto_terror_with_a_card_for_its_discard_tax_completes() {
             WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(terror)),
             },
-            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: false },
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { index: 1 },
             WaitingFor::CollectEvidenceChoice { .. } => GameAction::SelectCards {
                 cards: evidence.clone(),
             },

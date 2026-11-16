@@ -2793,7 +2793,7 @@ impl<'a> SpellCast<'a> {
                             panic!("OptionalPolicy::Stop is only valid after spell commitment")
                         }
                     };
-                    act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                    act_collect(runner, GameAction::DecideOptionalCost { index: if pay { 0 } else { 1 } }, &mut events)?;
                 }
                 // CR 702.174a: after promising Gift with ≥2 opponents, pick a recipient.
                 // Sole-opponent games auto-latch and never raise this prompt.
@@ -3898,7 +3898,7 @@ fn drive_resolution(
                     OptionalPolicy::Decline => false,
                     OptionalPolicy::Stop => break,
                 };
-                act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                act_collect(runner, GameAction::DecideOptionalCost { index: if pay { 0 } else { 1 } }, &mut events)?;
             }
             WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                 let opponent = candidates

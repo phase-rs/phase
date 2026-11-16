@@ -96,7 +96,7 @@ fn counter_with_ertai(pay_kicker: bool) -> bool {
         WaitingFor::OptionalCostChoice { .. }
     ) {
         runner
-            .act(GameAction::DecideOptionalCost { pay: pay_kicker })
+            .act(GameAction::DecideOptionalCost { index: if pay_kicker { 0 } else { 1 } })
             .expect("P0 decides the kicker");
     }
 

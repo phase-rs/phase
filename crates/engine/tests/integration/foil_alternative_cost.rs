@@ -124,7 +124,7 @@ fn cast_with_alternative(b: &mut Board, picks: &[ObjectId]) -> Result<Vec<Vec<Ob
             WaitingFor::AlternativeCastChoice { .. } => GameAction::ChooseAlternativeCast {
                 choice: AlternativeCastDecision::Alternative,
             },
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(b.opponent_spell)),
             },

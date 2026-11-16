@@ -5035,7 +5035,7 @@ pub(crate) fn deterministic_choice(
             engine::types::ability::AdditionalCost::Choice(_) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,
         };
-        return Some(GameAction::DecideOptionalCost { pay });
+        return Some(GameAction::DecideOptionalCost { index: if pay { 0 } else { 1 } });
     }
 
     // CR 601.2b: Defiler — accept life payment when life cushion is sufficient.
@@ -5045,7 +5045,7 @@ pub(crate) fn deterministic_choice(
     {
         let life = state.players[player.0 as usize].life;
         let pay = life > (*life_cost as i32) * 3;
-        return Some(GameAction::DecideOptionalCost { pay });
+        return Some(GameAction::DecideOptionalCost { index: if pay { 0 } else { 1 } });
     }
 
     // CR 514.1 + CR 701.9a: cleanup discard. The give-up order is
@@ -14830,7 +14830,7 @@ mod tests {
             .expect("deterministic_choice must decide the kicker prompt");
         assert_eq!(
             action,
-            GameAction::DecideOptionalCost { pay: false },
+            GameAction::DecideOptionalCost { index: 1 },
             "AI must decline a multikick that over-commits its mana"
         );
     }
@@ -14846,7 +14846,7 @@ mod tests {
             .expect("deterministic_choice must decide the kicker prompt");
         assert_eq!(
             action,
-            GameAction::DecideOptionalCost { pay: true },
+            GameAction::DecideOptionalCost { index: 0 },
             "AI must pay a multikick when it has mana to spare"
         );
     }

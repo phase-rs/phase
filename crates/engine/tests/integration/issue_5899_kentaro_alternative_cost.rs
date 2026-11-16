@@ -62,7 +62,7 @@ fn kentaro_offers_and_pays_the_matching_samurai_mana_value() {
     }
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("the mana-value alternative cost must be payable");
 
     assert!(
