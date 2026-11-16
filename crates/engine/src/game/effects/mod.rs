@@ -11614,6 +11614,8 @@ fn trigger_matchers_read_filter_population(
         die_sides: _,
         expend_threshold: _,
         attack_target_filter: _,
+        // CR 509.3e: the blocker-count filter is a matcher like `valid_target`.
+        blocker_count,
         player_actions: _,
         scry_bottom_count: _,
         damage_amount: _,
@@ -11633,6 +11635,11 @@ fn trigger_matchers_read_filter_population(
     [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()
         .flatten()
+        .chain(
+            blocker_count
+                .as_ref()
+                .and_then(|threshold| threshold.blocker.as_ref()),
+        )
         .any(has_filter)
         || zone_change_clauses
             .iter()

@@ -2689,6 +2689,7 @@ pub(crate) mod tests {
             &config.weights,
             &config.archetype_multipliers,
             PlayerId(0),
+            engine::game::bracket_estimate::EffectiveBracketTier::default(),
         );
         ctx_threat.opponent_threat = Some(ThreatProfile {
             probabilities: ThreatProbabilities {
@@ -2737,6 +2738,7 @@ pub(crate) mod tests {
             &config.weights,
             &config.archetype_multipliers,
             PlayerId(0),
+            engine::game::bracket_estimate::EffectiveBracketTier::default(),
         );
         let services_none = PlannerServices::new(PlayerId(0), &config, policies, ctx_none);
         let weights_none = services_none.context.adjusted_weights.for_turn(turn);

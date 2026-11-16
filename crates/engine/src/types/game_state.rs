@@ -12791,12 +12791,17 @@ pub struct PlayerDeckPool {
     pub registered_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
-    /// The declared bracket tier for this player's deck. Used by the AI to
-    /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
-    /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
-    /// compatibility with saved states and test fixtures that omit the field.
+    /// The bracket this player's deck owner declared; `None` means undeclared.
+    /// The AI reads [`Self::effective_bracket_tier`] instead of this declaration
+    /// directly. Saved states and fixtures that omit the field deserialize to `None`.
     #[serde(default)]
-    pub bracket_tier: CommanderBracketTier,
+    pub bracket_tier: Option<CommanderBracketTier>,
+    /// The estimator's bracket floor. `None` means no estimate was taken, such as
+    /// for a deck without a commander, a pre-phase payload, or a test fixture.
+    /// The AI must never read `bracket_tier` directly; it reads
+    /// [`Self::effective_bracket_tier`].
+    #[serde(default)]
+    pub estimated_bracket_tier: Option<CommanderBracketTier>,
     /// CR 203.1 + CR 206.1: the owner's printing record for this seat (display-only),
     /// filled at load and never written after it. Redacted with the lists it annotates
     /// (`visibility.rs`, CR 400.2 + CR 100.4).
@@ -12805,8 +12810,20 @@ pub struct PlayerDeckPool {
 }
 
 impl PlayerDeckPool {
+    /// The tier the AI acts on. The only read of bracket data any AI path may
+    /// perform: `bracket_tier` alone is the player's declaration and remains for
+    /// legality and display.
+    pub fn effective_bracket_tier(&self) -> crate::game::bracket_estimate::EffectiveBracketTier {
+        crate::game::bracket_estimate::effective_tier(
+            self.bracket_tier,
+            self.estimated_bracket_tier,
+        )
+    }
+}
+
+impl PlayerDeckPool {
     /// True when `other` holds every deck list in the same allocation with the
-    /// same seat and bracket, i.e. neither pool has written a list since one
+    /// same seat and brackets, i.e. neither pool has written a list since one
     /// was cloned from the other. Identity, not equality: true implies both
     /// serialize identically; false says nothing about content.
     pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
@@ -12826,6 +12843,7 @@ impl PlayerDeckPool {
             registered_scheme_deck,
             current_scheme_deck,
             bracket_tier,
+            estimated_bracket_tier,
             printings,
         } = self;
         // Named rather than written inline: `clippy::type_complexity` rejects the
@@ -12857,6 +12875,7 @@ impl PlayerDeckPool {
         };
         *player == other.player
             && *bracket_tier == other.bracket_tier
+            && *estimated_bracket_tier == other.estimated_bracket_tier
             && printings_shared
             && lists
                 .into_iter()
@@ -38509,6 +38528,12 @@ impl GameState {
                     exploiter_incarnation: Some(incarnation),
                     ..
                 } => f(*exploiter, incarnation),
+                // CR 509.3c + CR 509.3e + CR 400.7: the blocked attacker's stamp
+                // is the same class of pin as a tap stamp.
+                GameEvent::AttackerBecameBlocked {
+                    attacker,
+                    attacker_incarnation: Some(incarnation),
+                } => f(*attacker, incarnation),
                 // Exhaustive on purpose: a new event that names an incarnation must
                 // decide here whether loop normalization renumbers it.
                 GameEvent::PermanentTapped {
@@ -38516,6 +38541,10 @@ impl GameState {
                 }
                 | GameEvent::DamageDealt {
                     source_incarnation: None,
+                    ..
+                }
+                | GameEvent::AttackerBecameBlocked {
+                    attacker_incarnation: None,
                     ..
                 }
                 | GameEvent::ZoneChanged { .. }
@@ -38583,7 +38612,6 @@ impl GameState {
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::AttackersDeclared { .. }
                 | GameEvent::BlockersDeclared { .. }
-                | GameEvent::AttackerBecameBlockedByEffect { .. }
                 | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
                 | GameEvent::CombatTaxPaid { .. }
                 | GameEvent::CombatTaxDeclined { .. }
@@ -38951,7 +38979,7 @@ impl GameState {
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::AttackersDeclared { .. }
                 | GameEvent::BlockersDeclared { .. }
-                | GameEvent::AttackerBecameBlockedByEffect { .. }
+                | GameEvent::AttackerBecameBlocked { .. }
                 | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
                 | GameEvent::CombatTaxPaid { .. }
                 | GameEvent::CombatTaxDeclined { .. }
@@ -39127,7 +39155,7 @@ impl GameState {
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::BlockersDeclared { .. }
-                | GameEvent::AttackerBecameBlockedByEffect { .. }
+                | GameEvent::AttackerBecameBlocked { .. }
                 | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
                 | GameEvent::CombatTaxPaid { .. }
                 | GameEvent::CombatTaxDeclined { .. }
@@ -44738,6 +44766,12 @@ mod tests {
             ..pool.clone()
         };
         assert!(!other_seat.shares_storage_with(&pool));
+
+        let other_estimate = PlayerDeckPool {
+            estimated_bracket_tier: Some(CommanderBracketTier::Optimized),
+            ..pool.clone()
+        };
+        assert!(!other_estimate.shares_storage_with(&pool));
     }
 
     /// The retained printing record is part of storage identity: a clone shares it, an
@@ -62549,6 +62583,35 @@ mod tests {
         let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
         assert!(pool.registered_companion.is_empty());
         assert!(pool.current_companion.is_empty());
+    }
+
+    #[test]
+    fn deck_pool_without_estimated_bracket_tier_defaults_to_none() {
+        let mut json = serde_json::to_value(PlayerDeckPool::default()).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("estimated_bracket_tier");
+
+        let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
+        assert_eq!(pool.estimated_bracket_tier, None);
+        assert_eq!(pool.bracket_tier, None);
+        assert_eq!(
+            pool.effective_bracket_tier().tier(),
+            crate::game::bracket_estimate::CommanderBracketTier::Core,
+            "a legacy pool with neither a declaration nor an estimate plays at Core"
+        );
+    }
+
+    /// An undeclared pool goes out on the full-game and P2P wire as an explicit
+    /// `null`, which a peer from before the nullable-bracket protocol bump cannot
+    /// decode. Current peers must read it back as undeclared.
+    #[test]
+    fn undeclared_deck_pool_round_trips_through_an_explicit_null() {
+        let json = serde_json::to_value(PlayerDeckPool::default()).unwrap();
+        assert!(json["bracket_tier"].is_null());
+
+        let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
+        assert_eq!(pool.bracket_tier, None);
     }
 
     #[test]

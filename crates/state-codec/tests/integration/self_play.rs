@@ -3,7 +3,7 @@ use std::fs::File;
 use std::io::{BufReader, Write};
 use std::time::{Duration, Instant};
 
-use engine::database::CardDatabase;
+use engine::database::{CardDatabase, ComboTable};
 use engine::game::deck_loading::{
     load_and_hydrate_decks, resolve_deck_list, DeckList, PlayerDeckList,
 };
@@ -623,7 +623,7 @@ fn run(seed: u64, players: u8, cap: usize, require_terminal: bool) -> String {
         ai_decks: (2..players).map(|seat| deck(&db, seat % 2 == 1)).collect(),
         ..Default::default()
     };
-    let payload = resolve_deck_list(&db, &list);
+    let payload = resolve_deck_list(&db, &ComboTable::default(), &list);
     let mut state = GameState::new(FormatConfig::free_for_all(), players, seed);
     load_and_hydrate_decks(&mut state, &payload, Some(&db));
     engine::game::engine::start_game(&mut state);
