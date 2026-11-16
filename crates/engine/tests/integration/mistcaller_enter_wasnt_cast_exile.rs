@@ -58,6 +58,18 @@ would enter and it wasn't cast, exile it instead.";
 const HALLOWED_MOONLIGHT: &str = "Until end of turn, if a creature would enter and it wasn't \
 cast, exile it instead.\nDraw a card.";
 
+/// Verbatim Oracle text of Recruit the Worthy (Scryfall, Instant): a printed plain
+/// creature-token maker.
+const RECRUIT_THE_WORTHY: &str = "Buyback {3} (You may pay an additional {3} as you cast this \
+spell. If you do, put this card into your hand as it resolves.)\nCreate a 1/1 white Soldier \
+creature token.";
+
+/// Verbatim Oracle text of Strike It Rich (Scryfall, Sorcery): a printed noncreature
+/// (Treasure) token maker.
+const STRIKE_IT_RICH: &str = "Create a Treasure token. (It's an artifact with \"{T}, Sacrifice \
+this token: Add one mana of any color.\")\nFlashback {2}{R} (You may cast this card from your \
+graveyard for its flashback cost. Then exile it.)";
+
 /// Verbatim Oracle text of Mirkwood Bats (Scryfall): the token-creation observer.
 const MIRKWOOD_BATS: &str =
     "Flying\nWhenever you create or sacrifice a token, each opponent loses 1 life.";
@@ -154,6 +166,18 @@ fn add_instant(
     oracle: &str,
 ) -> ObjectId {
     let mut card = scenario.add_spell_to_hand_from_oracle(player, name, true, oracle);
+    card.with_mana_cost(ManaCost::generic(0));
+    card.id()
+}
+
+/// A zero-cost sorcery parsed from `oracle`.
+fn add_sorcery(
+    scenario: &mut GameScenario,
+    player: PlayerId,
+    name: &str,
+    oracle: &str,
+) -> ObjectId {
+    let mut card = scenario.add_spell_to_hand_from_oracle(player, name, false, oracle);
     card.with_mana_cost(ManaCost::generic(0));
     card.id()
 }
@@ -1098,8 +1122,8 @@ fn created_tokens_named(events: &[GameEvent], name: &str) -> Vec<ObjectId> {
 fn hallowed_moonlight_token_creation_is_observed_then_exiled() {
     let mut scenario = base_scenario();
     let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
-    let soldier = add_instant(&mut scenario, P0, "Make Soldier", MAKE_SOLDIER);
-    let treasure = add_instant(&mut scenario, P0, "Make Treasure", MAKE_TREASURE);
+    let soldier = add_instant(&mut scenario, P0, "Recruit the Worthy", RECRUIT_THE_WORTHY);
+    let treasure = add_sorcery(&mut scenario, P0, "Strike It Rich", STRIKE_IT_RICH);
     scenario.add_creature_from_oracle(P0, "Mirkwood Bats", 2, 3, MIRKWOOD_BATS);
     let mut runner = scenario.build();
     assert!(
@@ -1235,8 +1259,8 @@ fn hallowed_moonlight_redirects_a_debug_created_creature_token() {
 fn redirected_token_creation_replays_and_survives_save_reopen() {
     let mut scenario = base_scenario();
     let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
-    let soldier = add_instant(&mut scenario, P0, "Make Soldier", MAKE_SOLDIER);
-    let treasure = add_instant(&mut scenario, P0, "Make Treasure", MAKE_TREASURE);
+    let soldier = add_instant(&mut scenario, P0, "Recruit the Worthy", RECRUIT_THE_WORTHY);
+    let treasure = add_sorcery(&mut scenario, P0, "Strike It Rich", STRIKE_IT_RICH);
     let mut runner = scenario.build();
     cast_hallowed(&mut runner, hallowed);
 
