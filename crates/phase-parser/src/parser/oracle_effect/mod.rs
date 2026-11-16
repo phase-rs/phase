@@ -24393,8 +24393,18 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // continuation context is otherwise blank, and a blank context is not evidence
     // of any antecedent. Same pin the chunk loop applies when a continued
     // instruction named the source (`parsed_clause_targets_self_ref`).
+    // CR 608.2c: when the primary instruction instead introduced a typed object
+    // referent — an announced "target creature …" (CR 115.1d) or a typed chosen
+    // object — that object is the pronoun's antecedent: "tap target creature an
+    // opponent controls and put a stun counter on it" (Grappling Kraken). Pin
+    // `ParentTarget`, the same rung the chunk loop applies across sentences
+    // (`chain_has_prior_typed_referent`). Without it the blank context sends
+    // `resolve_it_pronoun` to its `SelfRef` fallback, and under a typed trigger
+    // subject the anaphor rewrite below never repairs that.
     if uses_parent_target_reference && effect_targets_self_ref(&primary_effect) {
         continuation_ctx.object_pronoun_ref = Some(TargetFilter::SelfRef);
+    } else if uses_parent_target_reference && has_typed_target_widened(&primary_effect) {
+        continuation_ctx.object_pronoun_ref = Some(TargetFilter::ParentTarget);
     }
 
     // CR 608.2c: when the primary instruction announced an OBJECT target, a
@@ -24703,9 +24713,11 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
-    // CR 608.2k carve-out (issue #319): in typed-trigger-subject context the
-    // pronoun has already been correctly resolved to TriggeringSource by
-    // `resolve_pronoun_target` — preserve that binding instead of clobbering.
+    // Issue #319 carve-out: under a typed trigger subject the continuation keeps
+    // the binding it was parsed with instead of being rewritten to
+    // `ParentTarget` here. The blank continuation context never carries the
+    // trigger subject, so no CR 608.2k `TriggeringSource` binding reaches this
+    // point; a typed primary referent is already pinned to `ParentTarget` above.
     if uses_parent_target_reference && !ctx_has_typed_trigger_subject(ctx) {
         // CR 608.2c: same fail-closed refusal as the chunk-loop arms —
         // see `anaphor_rewrite_would_drop_this_way_binding`.

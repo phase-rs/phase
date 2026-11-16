@@ -22229,6 +22229,55 @@ fn compound_tap_and_put_counter_lowercase_trigger_context() {
     );
 }
 
+/// CR 608.2c: in a targeted compound's anaphoric continuation, a bare "it"
+/// names the object the primary instruction announced (CR 115.1d), not the
+/// trigger subject or the ability's source. Grappling Kraken (landfall, a typed
+/// land subject), Fear of Sleep Paralysis (eerie, an `Or{SelfRef, Typed}`
+/// subject) and Mjölnir, Storm Hammer ("equipped creature", `AttachedTo`) all
+/// print this clause under a typed trigger subject. Reverting the typed-referent
+/// continuation pin in `try_split_targeted_compound` makes the sub `SelfRef`.
+#[test]
+fn compound_tap_and_put_counter_binds_parent_target_under_typed_trigger_subject() {
+    for subject in [
+        TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+        TargetFilter::AttachedTo,
+    ] {
+        let clause = parse_effect_clause(
+            "tap target creature an opponent controls and put a stun counter on it",
+            &mut ParseContext {
+                subject: Some(subject.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::SetTapState {
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Tap,
+                    target: TargetFilter::Typed(_),
+                    ..
+                }
+            ),
+            "primary should tap the announced typed target under subject {subject:?}, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::PutCounter {
+                    counter_type: CounterType::Stun,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "stun counter should go on the tapped target under subject {subject:?}, got {:?}",
+            sub.effect
+        );
+    }
+}
+
 #[test]
 fn compound_exile_own_and_control_not_split() {
     let clause = parse_effect_clause(
