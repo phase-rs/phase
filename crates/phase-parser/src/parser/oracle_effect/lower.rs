@@ -8059,7 +8059,7 @@ pub(crate) fn player_lookback_relative_clause_owns_suffix(input: &str) -> bool {
         .is_ok()
 }
 
-/// CR 608.2i + CR 611.2a: a "whose controller <look-back> this turn"
+/// CR 608.2i + CR 610.1: a "whose controller <look-back> this turn"
 /// possessive-relative controller-predicate clause owns its trailing "this turn"
 /// (Steel Hellkite #3248) — it is the look-back's window, not the effect's
 /// duration. Possessive-relative sibling of
@@ -17327,8 +17327,8 @@ mod where_x_tests {
     /// CombatOnly, Some(SelfRef), min_sources: 1 }` — the "whose controller was dealt
     /// combat damage by this creature this turn" relative clause is the
     /// possessive-relative subject form of the object-side controller-predicate bridge
-    /// (CR 109.4 + CR 608.2i; CR 120.2a combat damage; CR 120.9 damage by a specified
-    /// source), not a dropped tail. Without it the ability destroys every MV-X nonland.
+    /// (CR 109.4 + CR 608.2i; CR 120.2a combat damage),
+    /// not a dropped tail. Without it the ability destroys every MV-X nonland.
     #[test]
     fn steel_hellkite_destroy_target_carries_controller_damage_predicate() {
         use crate::types::ability::{
@@ -17429,7 +17429,7 @@ mod where_x_tests {
     /// Issue #3248 — Steel Hellkite: the "this turn" belongs to the "whose
     /// controller was dealt combat damage … this turn" look-back relative clause on
     /// the target, NOT to the destroy effect's duration (which states none,
-    /// CR 611.2a). The possessive-relative look-back guard must preserve the whole
+    /// CR 610.1). The possessive-relative look-back guard must preserve the whole
     /// clause and yield no duration — otherwise the stripper amputates the "this
     /// turn" the target parser's shared leaves require, and the clause is dropped.
     #[test]

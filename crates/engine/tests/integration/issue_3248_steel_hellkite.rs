@@ -57,7 +57,7 @@ fn add_mv_creature(
 }
 
 /// Fund mana on the LIVE state (post-build). Scenario-time funding would empty
-/// across combat steps (CR 500.4), so combat tests fund after damage.
+/// across combat steps (CR 106.4), so combat tests fund after damage.
 fn fund_mana_live(runner: &mut GameRunner, player: PlayerId, colorless: usize) {
     for _ in 0..colorless {
         runner.state_mut().add_mana_to_pool(
@@ -123,7 +123,7 @@ fn deal_unblocked_combat_damage(runner: &mut GameRunner, attacker: ObjectId, def
     );
 }
 
-/// CR 608.2c + CR 120.2a + CR 120.9: with combat damage dealt, X=2 destroys the
+/// CR 608.2c + CR 120.2a: with combat damage dealt, X=2 destroys the
 /// damaged opponent's MV-2 nonlands — and nothing else. Pre-fix the filter was
 /// absent, so the controller's own MV-2 nonland was destroyed too.
 #[test]
@@ -213,7 +213,7 @@ fn hellkite_without_combat_damage_destroys_nothing() {
     );
 }
 
-/// Source discrimination (CR 120.9): combat damage dealt ONLY by another creature
+/// Source discrimination: combat damage dealt ONLY by another creature
 /// does not qualify anyone. The look-back names damage "by this creature".
 #[test]
 fn hellkite_ignores_combat_damage_dealt_by_other_sources() {
