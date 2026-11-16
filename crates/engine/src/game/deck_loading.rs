@@ -3228,7 +3228,7 @@ mod tests {
         assert_eq!(state.players[1].starting_deck_size, 200);
     }
 
-    /// CR 702.139b: the Oathbreaker signature spell counts exactly once —
+    /// The Oathbreaker signature spell counts exactly once —
     /// a copy listed in both the main and the signature-spell slot nets to
     /// its single command-zone placement.
     #[test]
