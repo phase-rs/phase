@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DraftPodPage } from "../DraftPodPage";
+import { classifyDraft27Compatibility } from "../../adapter/draft-compatibility";
 
 const { draftState } = vi.hoisted(() => ({
   draftState: {
@@ -172,6 +173,23 @@ describe("DraftPodPage pod error banner", () => {
     renderPage();
 
     expect(screen.getByText("Refresh both windows")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Try Reconnecting" })).toBeNull();
+  });
+
+  it("shows the translated incompatibility message for a guest's compatibility refusal", () => {
+    const refusal = classifyDraft27Compatibility({ flow: "FifoAsync" });
+    if (refusal.ok) throw new Error("Expected the FIFO-flow refusal");
+    const failure = { kind: "incompatible" as const, message: refusal.error.message, code: refusal.error.code };
+    // The real store sets both from the guest's reconnectFailed event.
+    draftState.phase = "error";
+    draftState.guestRecoveryFailure = failure;
+    draftState.error = failure.message;
+    renderPage();
+
+    // Reach: the error view itself mounted.
+    expect(screen.getByRole("button", { name: "Return to Menu" })).toBeInTheDocument();
+    expect(screen.getByText("This draft is incompatible with your protocol version.")).toBeInTheDocument();
+    expect(screen.queryByText(failure.message)).toBeNull();
     expect(screen.queryByRole("button", { name: "Try Reconnecting" })).toBeNull();
   });
 

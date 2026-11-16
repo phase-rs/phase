@@ -545,15 +545,8 @@ pub(super) fn parse_bare_graveyard_this_way_token_count(clause: &str) -> Option<
     let (rest, _) = tag::<_, _, OracleError<'_>>("card put into ")
         .parse(clause)
         .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("a graveyard"),
-        tag::<_, _, OracleError<'_>>("your graveyard"),
-        tag::<_, _, OracleError<'_>>("their graveyard"),
-        tag::<_, _, OracleError<'_>>("its owner's graveyard"),
-        tag::<_, _, OracleError<'_>>("their owner's graveyard"),
-    ))
-    .parse(rest)
-    .ok()?;
+    let (rest, _) =
+        crate::parser::oracle_quantity::parse_graveyard_destination_phrase(rest).ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>(" this way").parse(rest).ok()?;
     if !rest.trim().is_empty() {
         return None;
@@ -561,6 +554,7 @@ pub(super) fn parse_bare_graveyard_this_way_token_count(clause: &str) -> Option<
     Some(QuantityRef::FilteredTrackedSetSize {
         filter: Box::new(TargetFilter::Any),
         caused_by: Some(ThisWayCause::PutIntoGraveyard),
+        destination: None,
     })
 }
 
@@ -2312,6 +2306,7 @@ mod tests {
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(TargetFilter::Any),
                     caused_by: Some(ThisWayCause::PutIntoGraveyard),
+                    destination: None,
                 },
             },
             "a bare 'card put into your graveyard this way' token count must bind \
@@ -2542,6 +2537,31 @@ mod tests {
         )
         .expect("existing leading copy-token form must stay supported");
         assert!(tapped && enters_attacking);
+    }
+
+    #[test]
+    fn copy_of_the_blighted_creature_binds_the_blight_choice() {
+        // CR 701.68c: "the blighted creature" is the creature chosen for the
+        // blight, never a new target, and the except clause stays on the token.
+        let txt = "create a tapped and attacking token that's a copy of the blighted creature, \
+                   except it has \"At the beginning of the end step, sacrifice this token.\"";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            target,
+            tapped,
+            enters_attacking,
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf")
+        };
+        assert_eq!(target, TargetFilter::CostPaidObject);
+        assert!(tapped && enters_attacking);
+        assert!(additional_modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })));
     }
 
     #[test]

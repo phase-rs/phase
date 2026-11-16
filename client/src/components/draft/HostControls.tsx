@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 
-import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
+import { isDraftPodWorkspacePhase, useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import type { DraftShellTopAction } from "../chrome/ShellContext";
 import { menuButtonClass } from "../menu/buttonStyles";
 
@@ -35,7 +35,7 @@ export function useHostDraftTopActions({
     if (!enabled || role !== "host") {
       return EMPTY_HOST_DRAFT_TOP_ACTIONS;
     }
-    if (phase === "drafting") {
+    if (isDraftPodWorkspacePhase(phase)) {
       return [
         {
           id: "pause-resume",

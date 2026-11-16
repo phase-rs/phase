@@ -6,6 +6,7 @@ import { usePriorityAttentionClass } from "../../hooks/usePriorityAttention.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { GameplayTooltip } from "../ui/GameplayTooltip.tsx";
 
 /**
@@ -25,20 +26,27 @@ export function TurnStatusLine() {
   // for a null seat, which is never rendered thanks to the guard below.
   const waitingSeatColor = useSeatColor(waitingSeatId);
   const attentionClass = usePriorityAttentionClass(canIActNow);
+  const pulseBorder = usePreferencesStore((s) => s.priorityAlertVisual);
 
   // Nothing pending to narrate (between turns, mid-animation, game over).
   if (waitingSeatId == null) return null;
 
   const reasonText = reason ? t(`status.reason.${reason.id}`, reason.params) : "";
 
-  // Your decision reads as a positive prompt; waiting on someone else reads as
-  // a muted, patient state. The controller's pending alert adds a CSS-only
+  // Your decision reads as a positive prompt and carries a border for the whole
+  // time the decision is yours, independent of the timed attention cue; the
+  // border pulses while the Glow preference is on and is static with it off or
+  // under reduced motion. Waiting on someone else reads as a muted, patient
+  // state. The controller's pending alert adds a CSS-only
   // ring/glow, stronger after escalation, when visual alerts are enabled.
   // Reduced motion keeps the ring static. Other seats retain their identity
   // color in the name, inside <Trans> so localization can reorder the sentence.
   const tone = canIActNow
     ? "border-emerald-400/40 bg-emerald-950/70 text-emerald-50"
     : "border-white/12 bg-slate-950/75 text-slate-200";
+  const turnBorderClass = canIActNow
+    ? `priority-turn-border${pulseBorder ? " priority-turn-border-pulse" : ""}`
+    : "";
 
   // The pill carries WHO holds the pending decision; a small icon badge overlapping
   // its corner carries WHAT that decision is (attack / block / target / pay / …),
@@ -58,7 +66,7 @@ export function TurnStatusLine() {
     <div
       role="status"
       aria-live="polite"
-      className={`group relative flex max-w-[min(22rem,calc(100vw-1.25rem))] items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-medium tracking-wide shadow-[0_8px_20px_rgba(15,23,42,0.38)] ${tone} ${attentionClass} [@media(max-height:500px)]:px-2 [@media(max-height:500px)]:py-0.5 [@media(max-height:500px)]:text-[10px]`}
+      className={`group relative flex max-w-[min(22rem,calc(100vw-1.25rem))] items-center rounded-[8px] border px-2.5 py-1 text-[11px] font-medium tracking-wide shadow-[0_8px_20px_rgba(15,23,42,0.38)] ${tone} ${turnBorderClass} ${attentionClass} [@media(max-height:500px)]:px-2 [@media(max-height:500px)]:py-0.5 [@media(max-height:500px)]:text-[10px]`}
     >
       <span
         aria-hidden

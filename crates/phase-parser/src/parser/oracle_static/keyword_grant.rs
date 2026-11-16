@@ -351,53 +351,17 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // `parse_nth_qualified_spell_filter` grammar + `nth_qualified_spell_condition`
     // gate as the paired cost-modifier consumer, so the qualifying spell filter,
     // cast-origin restriction, and `SpellsCastThisTurn == 0` gate are all preserved
-    // instead of collapsing to "every spell you cast".
-    match parse_nth_qualified_spell_filter(subject) {
-        // Not an Nth-qualified-spell line — fall through to the ordinary
-        // "[type] spells you cast [from zone] have [keyword]" patterns below.
-        NthQualifiedSpell::NotApplicable => {}
-        // The shape is present but the qualifier/timing isn't representable. Fall
-        // through (NOT a `return None`) so the existing gateless static is
-        // preserved for not-yet-representable qualifiers — no regression.
-        NthQualifiedSpell::UnsupportedQualifier => {}
-        NthQualifiedSpell::Supported {
-            filter,
-            timing,
-            ordinal,
-        } => {
-            // CR 601.2f: trailing-residue guard. `parse_nth_qualified_spell_filter`
-            // discards any text after the timing phrase; if that region is
-            // non-empty an unrepresentable qualifier was dropped (Rain of Riches'
-            // "that mana from a Treasure was spent to cast"; TARDIS Bay's
-            // post-timing "with mana value 2 or greater"). Decline rather than emit
-            // a residue-blind gate — fall through to the existing gateless static.
-            if nth_qualified_spell_subject_fully_consumed(subject) {
-                // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not
-                // recursion) so an opponent's qualifying spell never qualifies.
-                let affected =
-                    apply_spell_keyword_subject_constraints(filter.clone(), None, None, Vec::new());
-                // CR 611.2f: `SpellsCastThisTurn(filter) == 0` first-spell gate,
-                // plus `DuringYourTurn` for the controller-turn timing (a clean
-                // "during each of your turns" subject with no post-timing residue;
-                // TARDIS Bay itself declines above because its MV qualifier follows
-                // the timing). When a leading "during your turn," scope was already
-                // stripped, combine both rather than dropping either.
-                let nth_qualified = nth_qualified_spell_condition(&filter, &timing, ordinal);
-                let combined_condition = match condition.clone() {
-                    Some(leading) => StaticCondition::And {
-                        conditions: vec![leading, nth_qualified],
-                    },
-                    None => nth_qualified,
-                };
-                return Some(
-                    StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
-                        .affected(affected)
-                        .condition(combined_condition)
-                        .description(text.to_string())
-                        .active_zones(vec![Zone::Battlefield]),
-                );
-            }
-        }
+    // instead of collapsing to "every spell you cast". `None` falls through to
+    // the ordinary patterns below, preserving the gateless static.
+    if let Some(def) = nth_qualified_spell_grant(
+        subject,
+        StaticMode::CastWithKeyword {
+            keyword: keyword.clone(),
+        },
+        condition.clone(),
+        text,
+    ) {
+        return Some(def);
     }
 
     // Find "spells you cast" in the subject — may be preceded by a type descriptor
@@ -609,6 +573,73 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     None
 }
 
+/// CR 611.3a: Gated `mode` (`CastWithKeyword` or `CastWithFlash`) for a "the
+/// <ordinal> <qualifier> spell you cast <timing>" subject (`subject_lower`), the
+/// single owner of that lowering.
+/// `None` when the subject is not Nth-qualified, its caster is not "you", its
+/// qualifier/timing is unrepresentable, or text after the timing phrase would
+/// be dropped.
+pub(crate) fn nth_qualified_spell_grant(
+    subject_lower: &str,
+    mode: StaticMode,
+    leading: Option<StaticCondition>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    // CR 611.3a: the grant and its spell history below are scoped to the
+    // source's controller, so an opponent-cast subject ("each opponent casts")
+    // must decline rather than grant the controller.
+    if !nom_primitives::scan_contains(subject_lower, "you cast ") {
+        return None;
+    }
+    let NthQualifiedSpell::Supported {
+        filter,
+        timing,
+        ordinal,
+    } = parse_nth_qualified_spell_filter(subject_lower)
+    else {
+        return None;
+    };
+    // CR 601.2f: trailing-residue guard (Rain of Riches' "that mana from a
+    // Treasure was spent to cast"; TARDIS Bay's post-timing MV qualifier).
+    if !nth_qualified_spell_subject_fully_consumed(subject_lower) {
+        return None;
+    }
+    // CR 601.2a: scope `ControllerRef::You` to every leaf (And/Not recursion) so
+    // an opponent's qualifying spell never qualifies.
+    let affected = apply_spell_keyword_subject_constraints(filter.clone(), None, None, Vec::new());
+    let nth_qualified = nth_qualified_spell_condition(&filter, &timing, ordinal);
+    let condition = match leading {
+        Some(leading) => StaticCondition::And {
+            conditions: vec![leading, nth_qualified],
+        },
+        None => nth_qualified,
+    };
+    Some(
+        StaticDefinition::new(mode)
+            .affected(affected)
+            .condition(condition)
+            .description(text.to_string())
+            .active_zones(vec![Zone::Battlefield]),
+    )
+}
+
+/// "you may cast <subject> as though it had flash[.]" → the lowercase subject.
+fn parse_singular_flash_permission_subject(lower: &str) -> OracleResult<'_, &str> {
+    let (i, subject) =
+        preceded(tag("you may cast "), take_until(" as though it had flash")).parse(lower)?;
+    let (i, _) = (tag(" as though it had flash"), opt(tag(".")), eof).parse(i)?;
+    Ok((i, subject))
+}
+
+/// CR 601.3b: The Blue Spirit — "You may cast the first creature spell you cast
+/// each turn as though it had flash." Shares the permission arm's combinator so
+/// the classifier routes exactly the lines the static parser lowers.
+pub(crate) fn is_nth_qualified_spell_flash_permission(lower: &str) -> bool {
+    parse_singular_flash_permission_subject(lower).is_ok_and(|(_, subject)| {
+        nth_qualified_spell_grant(subject, StaticMode::CastWithFlash, None, lower).is_some()
+    })
+}
+
 /// Parse the static permission "You may cast [type] spells as though they had
 /// flash." (Leyline of Anticipation, Vedalken Orrery, Vivien, Champion of the
 /// Wilds' first ability).
@@ -617,18 +648,18 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
 /// lets that player begin to cast it at instant speed. CR 702.8a: flash means
 /// the spell may be cast any time its controller could cast an instant.
 ///
-/// This must emit `StaticMode::CastWithKeyword { keyword: Flash }` with the
-/// spell-type filter in `affected` — that is the ONLY static mode the
-/// flash-timing path (`granted_spell_keywords` in casting.rs) actually reads.
-/// The legacy `StaticMode::CastWithFlash` carries no spell filter and is never
-/// consumed by that path, so it silently dropped both the timing grant and the
-/// "creature spells" restriction (issue #1957). Mirrors the activated/triggered
-/// `try_parse_cast_as_though_flash_permission` (oracle_effect) so the static and
-/// duration-scoped forms share one filter-construction contract.
+/// `CastWithFlash` is a timing permission read by `spell_has_effective_flash`;
+/// CR 609.4 keeps it out of the spell's keywords.
 pub(crate) fn parse_cast_as_though_flash_static(
     tp: &TextPair<'_>,
     text: &str,
 ) -> Option<StaticDefinition> {
+    // CR 601.3b + CR 702.8a: singular nth-qualified subject (The Blue Spirit);
+    // no ungated fallback, so "this spell" subjects never become a static.
+    if let Ok((_, subject)) = parse_singular_flash_permission_subject(tp.lower) {
+        return nth_qualified_spell_grant(subject, StaticMode::CastWithFlash, None, text);
+    }
+
     let (type_text, all_players) = nom_on_lower(tp.original, tp.lower, |i| {
         let (i, all_players) = alt((
             value(false, tag::<_, _, OracleError<'_>>("you may ")),
@@ -675,12 +706,10 @@ pub(crate) fn parse_cast_as_though_flash_static(
     };
 
     Some(
-        StaticDefinition::new(StaticMode::CastWithKeyword {
-            keyword: Keyword::Flash,
-        })
-        .affected(affected)
-        .description(text.to_string())
-        .active_zones(vec![Zone::Battlefield]),
+        StaticDefinition::new(StaticMode::CastWithFlash)
+            .affected(affected)
+            .description(text.to_string())
+            .active_zones(vec![Zone::Battlefield]),
     )
 }
 
@@ -999,16 +1028,23 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
         // CR 607.2a: cards exiled with the host. Optional card-type qualifier
         // narrows the granted set (Agatha grants creature cards only).
         grant_exiled_source,
-        // CR 201.2: "creatures you control that don't have the same name as
-        // it/~" (Marvin) — battlefield creatures you control, excluding ones
-        // sharing the recipient's name.
+        // CR 201.2 + CR 613.1f: "creatures you control that don't have the
+        // same name as it/~" (Marvin) — battlefield creatures you control,
+        // excluding ones sharing the recipient's name. The InZone pin keeps
+        // hand/graveyard/exile/library creatures from donating abilities
+        // (Drana-and-Linvala precedent).
         value(
             TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::Not {
-                        prop: Box::new(FilterProp::SameName),
-                    }]),
+                    .properties(vec![
+                        FilterProp::Not {
+                            prop: Box::new(FilterProp::SameName),
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
+                        },
+                    ]),
             ),
             (
                 tag("creatures you control that don't have the same name as "),
@@ -1016,8 +1052,9 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
             ),
         ),
         // CR 613.1f: "each other creature with a +1/+1 counter on it"
-        // (Experiment Kraj) — all creatures except self with at least one
-        // +1/+1 counter.
+        // (Experiment Kraj) — battlefield creatures except self with at least
+        // one +1/+1 counter. The InZone pin keeps counter-bearing cards in
+        // other zones from donating abilities (Drana-and-Linvala precedent).
         value(
             TargetFilter::And {
                 filters: vec![
@@ -1026,6 +1063,9 @@ fn grant_source_noun_phrase(input: &str) -> OracleResult<'_, crate::types::abili
                             counters: CounterMatch::OfType(CounterType::Plus1Plus1),
                             comparator: Comparator::GE,
                             count: QuantityExpr::Fixed { value: 1 },
+                        },
+                        FilterProp::InZone {
+                            zone: Zone::Battlefield,
                         },
                     ])),
                     TargetFilter::Not {
@@ -1420,7 +1460,8 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     // Oblivion — "loses all land types and abilities") reuses the same
     // `RemoveAllSubtypes` runtime the `CreatureTypes` arm already exercises;
     // `game/layers.rs` already has a working `SubtypeSet::Land` arm, so this is
-    // pure parser wiring, no engine change.
+    // pure parser wiring, no engine change. "has/have no abilities" (Xu-Ifit)
+    // yields the same Abilities member (CR 613.1f).
     for member in scan_loss_enumeration(unquoted_tp.lower) {
         match member {
             LossMember::Abilities => {
@@ -1971,21 +2012,6 @@ pub(crate) fn push_grant_clause_modifications(
 
     if let Some(kw) = map_keyword(part_trimmed) {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
-        return;
-    }
-
-    // CR 702.18a / 702.11a: a descriptive "can't be the target [of ...]" grant is
-    // Shroud (blanket) or Hexproof (opponents only). Emit the keyword so the
-    // existing targeting checks apply the correct controller scope, rather than a
-    // scope-less rule static.
-    if let Some(scope) =
-        crate::parser::oracle_keyword::classify_cant_be_targeted(part_lower.as_str())
-    {
-        let keyword = match scope {
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
-        };
-        modifications.push(ContinuousModification::AddKeyword { keyword });
         return;
     }
 

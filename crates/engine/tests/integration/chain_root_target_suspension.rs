@@ -204,16 +204,19 @@ fn chain_root_targets_survive_a_real_coin_flip_keep_choice_suspension() {
     let mut runner = scenario.build();
 
     let ability = with_chain_root(
-        ResolvedAbility::new(
-            Effect::FlipCoins {
-                flips: CoinFlipRun::single(),
-                win_effect: Some(Box::new(counter_gated_branch())),
-                lose_effect: Some(Box::new(counter_gated_branch())),
-                flipper: TargetFilter::Controller,
-            },
-            vec![],
+        engine::game::ability_utils::build_resolved_from_def_with_targets(
+            &AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::FlipCoins {
+                    flips: CoinFlipRun::single(),
+                    win_effect: Some(Box::new(counter_gated_branch())),
+                    lose_effect: Some(Box::new(counter_gated_branch())),
+                    flipper: TargetFilter::Controller,
+                },
+            ),
             source,
             P0,
+            vec![],
         ),
         root,
     );
