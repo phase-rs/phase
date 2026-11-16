@@ -3863,70 +3863,77 @@ mod tests {
         assert_eq!(ogre, f64::NEG_INFINITY);
     }
 
-    /// The F1 board (#10928 review), through production actions: P0 at `life`
-    /// with Treasonous Ogre, a Swamp and a cast trigger gated on 13 or less
-    /// life announces Walking Corpse ({1}{B}); the Swamp and one Ogre
-    /// activation pay it. Returns the state and the Ogre activation.
-    fn life_gated_payment_decision(life: i32) -> (GameState, GameAction) {
+    /// The printed F1 board (#10928 review), through production actions: P0 at
+    /// `life` controls Liberator, Urza's Battlethopter, Thraben Doomsayer, a
+    /// Forest and two Fiery Islets, and announces Grizzly Bears ({1}{G}); the
+    /// Forest's {G} and Islet A's {R} pay it. Returns the state and Islet B's
+    /// {R} action.
+    fn liberator_payment_decision(life: i32) -> (GameState, GameAction) {
         use engine::game::mana_sources::activatable_mana_actions_for_player;
         use engine::game::scenario::GameScenario;
         use engine::types::game_state::CastPaymentMode;
-        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType};
 
+        const ISLET: &str =
+            "{T}, Pay 1 life: Add {U} or {R}.\n{1}, {T}, Sacrifice this land: Draw a card.";
         let mut sc = GameScenario::new();
         sc.at_phase(Phase::PreCombatMain);
         sc.with_life(AI, life);
-        sc.with_library_top(AI, &["Card A", "Card B", "Card C"]);
-        let swamp = sc.add_basic_land(AI, ManaColor::Black);
-        let ogre = sc
-            .add_creature(AI, "Treasonous Ogre", 2, 3)
-            .from_oracle_text_with_keywords(&["Dethrone"], TREASONOUS_OGRE)
-            .id();
-        sc.add_enchantment_from_oracle(
-            AI,
-            "Life-Gated Watcher",
-            "Whenever you cast a creature spell, if you have 13 or less life, draw a card.",
+        sc.add_creature(AI, "Liberator, Urza's Battlethopter", 1, 2)
+            .from_oracle_text_with_keywords(
+                &["Flash", "Flying"],
+                "Flash\nFlying\nYou may cast colorless spells and artifact spells as though they had flash.\nWhenever you cast a spell, if the amount of mana spent to cast that spell is greater than Liberator's power, put a +1/+1 counter on Liberator.",
+            );
+        sc.add_creature(AI, "Thraben Doomsayer", 2, 2).from_oracle_text(
+            "{T}: Create a 1/1 white Human creature token.\nFateful hour — As long as you have 5 or less life, other creatures you control get +2/+2.",
         );
-        let corpse = sc
-            .add_creature_to_hand_from_oracle(AI, "Walking Corpse", 2, 2, "")
+        let forest = sc.add_basic_land(AI, ManaColor::Green);
+        let islets = [
+            sc.add_land_from_oracle(AI, "Fiery Islet", ISLET).id(),
+            sc.add_land_from_oracle(AI, "Fiery Islet", ISLET).id(),
+        ];
+        let bears = sc
+            .add_creature_to_hand_from_oracle(AI, "Grizzly Bears", 2, 2, "")
             .with_mana_cost(ManaCost::Cost {
-                shards: vec![ManaCostShard::Black],
+                shards: vec![ManaCostShard::Green],
                 generic: 1,
             })
             .id();
         let mut state = sc.build().state().clone();
-        let card_id = state.objects[&corpse].card_id;
+        let card_id = state.objects[&bears].card_id;
         engine::game::engine::apply_as_current_for_simulation(
             &mut state,
             GameAction::CastSpell {
-                object_id: corpse,
+                object_id: bears,
                 card_id,
                 targets: vec![],
                 payment_mode: CastPaymentMode::Manual,
             },
         )
         .expect("the cast reaches its payment step");
-        let tap_swamp = activatable_mana_actions_for_player(&state, AI)
-            .into_iter()
-            .find(|action| {
-                matches!(action, GameAction::TapLandForMana { selection } if selection.source.object_id == swamp)
-            })
-            .expect("the Swamp taps for {B}");
-        let ogre_activation = GameAction::ActivateAbility {
-            source_id: ogre,
-            ability_index: 0,
-            payment_mode: CastPaymentMode::Auto,
+        let mana_action = |state: &GameState, source, color: Option<ManaType>| {
+            activatable_mana_actions_for_player(state, AI)
+                .into_iter()
+                .find(|action| {
+                    matches!(action,
+                    GameAction::TapLandForMana { selection }
+                        if selection.source.object_id == source
+                            && color.is_none_or(|color| selection.mana_type == color))
+                })
+                .expect("the land offers its mana action")
         };
-        for action in [tap_swamp, ogre_activation.clone()] {
+        for (source, color) in [(forest, None), (islets[0], Some(ManaType::Red))] {
+            let action = mana_action(&state, source, color);
             engine::game::engine::apply_as_current_for_simulation(&mut state, action)
                 .expect("payment step action");
         }
         assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
-        (state, ogre_activation)
+        let islet_b = mana_action(&state, islets[1], Some(ManaType::Red));
+        (state, islet_b)
     }
 
-    /// The Ogre activation's root score on `state` at Easy.
-    fn root_ogre_score(state: &GameState, ogre_activation: &GameAction) -> f64 {
+    /// `activation`'s root score on `state` at Easy.
+    fn root_score(state: &GameState, activation: &GameAction) -> f64 {
         use crate::config::{create_config, AiDifficulty, Platform};
         crate::search::score_candidates(
             state,
@@ -3934,30 +3941,30 @@ mod tests {
             &create_config(AiDifficulty::Easy, Platform::Native),
         )
         .into_iter()
-        .find(|(action, _)| action == ogre_activation)
+        .find(|(action, _)| action == activation)
         .map(|(_, score)| score)
-        .expect("reach: the Ogre activation is scored")
+        .expect("reach: the activation is scored")
     }
 
-    /// F1 (#10928 review): when the extra activation's life payment changes
-    /// which cast triggers fire (15 → 12 life crosses the trigger's 13), the
-    /// engine refuses the certificate and root scoring keeps the activation
-    /// finite. Control: from 15 life the trigger fires either way, and the
-    /// activation is rejected.
+    /// F1 (#10928 review): Islet B's 1 life drops P0 to 5, Thraben Doomsayer's
+    /// fateful hour makes Liberator 3/4, and its cast trigger no longer fires
+    /// (CR 601.2i). The engine refuses the certificate and root scoring keeps
+    /// the activation finite. Control: from 8 life the trigger fires either
+    /// way and the activation is rejected.
     #[test]
     fn root_scoring_keeps_an_activation_that_changes_a_cast_trigger() {
-        let (state, ogre_activation) = life_gated_payment_decision(18);
+        let (state, islet_b) = liberator_payment_decision(7);
         assert_eq!(
-            engine::ai_support::surplus_mana_activation(&state, &ogre_activation),
+            engine::ai_support::surplus_mana_activation(&state, &islet_b),
             engine::ai_support::SurplusManaActivation::NotCertified(
                 engine::ai_support::SurplusNotCertified::CastTriggersDiverge
             ),
             "reach: the engine refuses on the cast-trigger comparison"
         );
-        assert!(root_ogre_score(&state, &ogre_activation).is_finite());
+        assert!(root_score(&state, &islet_b).is_finite());
 
-        let (state, ogre_activation) = life_gated_payment_decision(15);
-        assert_eq!(root_ogre_score(&state, &ogre_activation), f64::NEG_INFINITY);
+        let (state, islet_b) = liberator_payment_decision(8);
+        assert_eq!(root_score(&state, &islet_b), f64::NEG_INFINITY);
     }
 
     /// The arm prepares the certificate's decision-level work once per

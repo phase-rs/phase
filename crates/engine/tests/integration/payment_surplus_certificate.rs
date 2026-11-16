@@ -1822,42 +1822,6 @@ fn refractor_ability_index_kept_by_the_finisher_is_surplus() {
     );
 }
 
-/// A cast trigger gated on its controller's life (CR 603.4 intervening "if"),
-/// checked as the spell becomes cast (CR 601.2i). Not a printed card: no
-/// printed cast trigger reads life directly, and the printed witness for this
-/// class — Scourge of the Skyclaves's life-reading power (CR 604.3) feeding
-/// Sarkhan's Unsealing — doesn't reach here, because the layer pass doesn't
-/// re-derive power for a spell on the stack (`layers.rs`, the stack-object
-/// reset maintains only keywords and controller).
-const LIFE_GATED_CAST_TRIGGER: &str =
-    "Whenever you cast a creature spell, if you have 13 or less life, draw a card.";
-const WALKING_CORPSE: &str = "";
-
-/// P0 at `life`, with Treasonous Ogre, a Swamp and the life-gated cast
-/// trigger, announces Walking Corpse ({1}{B}); the Swamp's {B} and one Ogre
-/// {R} pay it.
-fn life_gated_board(life: i32) -> (GameRunner, ObjectId, ObjectId) {
-    let mut sc = GameScenario::new();
-    sc.at_phase(Phase::PreCombatMain);
-    sc.with_life(P0, life);
-    sc.with_library_top(P0, &LIBRARY);
-    let swamp = sc.add_basic_land(P0, ManaColor::Black);
-    let ogre = add_ogre(&mut sc, P0);
-    let watcher = sc
-        .add_enchantment_from_oracle(P0, "Life-Gated Watcher", LIFE_GATED_CAST_TRIGGER)
-        .id();
-    let corpse = sc
-        .add_creature_to_hand_from_oracle(P0, "Walking Corpse", 2, 2, WALKING_CORPSE)
-        .with_mana_cost(cost(vec![ManaCostShard::Black], 1))
-        .id();
-    let mut runner = sc.build();
-    cast_to_payment(&mut runner, corpse, Answers::default());
-    produce(&mut runner, &[(swamp, None)]);
-    act(&mut runner, ogre_activation(ogre));
-    assert_payment_step(runner.state());
-    (runner, ogre, watcher)
-}
-
 /// The abilities `source` put on the stack.
 fn triggers_from(state: &GameState, source: ObjectId) -> usize {
     state
@@ -1867,64 +1831,143 @@ fn triggers_from(state: &GameState, source: ObjectId) -> usize {
         .count()
 }
 
-/// The two finishers of `board`: without and with one more Ogre activation.
-fn finishers(runner: &GameRunner, ogre: ObjectId) -> (GameState, GameState) {
+const LIBERATOR: &str = "Flash\nFlying\nYou may cast colorless spells and artifact spells as though they had flash.\nWhenever you cast a spell, if the amount of mana spent to cast that spell is greater than Liberator's power, put a +1/+1 counter on Liberator.";
+const THRABEN_DOOMSAYER: &str = "{T}: Create a 1/1 white Human creature token.\nFateful hour — As long as you have 5 or less life, other creatures you control get +2/+2.";
+
+/// The printed F1 board: P0 at `life` controls Liberator, Urza's
+/// Battlethopter (1/2), Thraben Doomsayer, a Forest and two Fiery Islets, and
+/// announces Grizzly Bears ({1}{G}); the Forest's {G} and Islet A's {R} (1
+/// life) pay it. Returns the runner, Liberator and Islet B's {R} action.
+fn liberator_board(life: i32) -> (GameRunner, ObjectId, GameAction) {
+    let mut sc = GameScenario::new();
+    sc.at_phase(Phase::PreCombatMain);
+    sc.with_life(P0, life);
+    let liberator = sc
+        .add_creature(P0, "Liberator, Urza's Battlethopter", 1, 2)
+        .from_oracle_text_with_keywords(&["Flash", "Flying"], LIBERATOR)
+        .id();
+    sc.add_creature(P0, "Thraben Doomsayer", 2, 2)
+        .from_oracle_text(THRABEN_DOOMSAYER);
+    let forest = sc.add_basic_land(P0, ManaColor::Green);
+    let islets = [add_islet(&mut sc), add_islet(&mut sc)];
+    let bears = sc
+        .add_creature_to_hand_from_oracle(P0, "Grizzly Bears", 2, 2, "")
+        .with_mana_cost(cost(vec![ManaCostShard::Green], 1))
+        .id();
+    let mut runner = sc.build();
+    cast_to_payment(&mut runner, bears, Answers::default());
+    produce(
+        &mut runner,
+        &[(forest, None), (islets[0], Some(ManaType::Red))],
+    );
+    let islet_b = mana_action(runner.state(), islets[1], Some(ManaType::Red));
+    (runner, liberator, islet_b)
+}
+
+/// Both finishers of a decision: the pass, and `activation` then the pass.
+/// Reach: each finalizes the cast and returns the payer priority.
+fn finishers_after(runner: &GameRunner, activation: &GameAction) -> (GameState, GameState) {
     let without = finalizes_in_one_step(runner.state(), &GameAction::PassPriority)
         .expect("reach: a pass finalizes the cast");
     let mut activated = GameRunner::from_state(runner.state().clone());
-    act(&mut activated, ogre_activation(ogre));
+    act(&mut activated, activation.clone());
     let with = finalizes_in_one_step(activated.state(), &GameAction::PassPriority)
         .expect("reach: a pass after the activation finalizes the cast");
+    for finished in [&without, &with] {
+        assert_eq!(
+            finished.waiting_for,
+            WaitingFor::Priority { player: P0 },
+            "reach: the pass returns the payer priority"
+        );
+    }
     (without, with)
 }
 
-/// F1 (#10928 review): from 18 life, the Swamp and one Ogre activation leave
-/// P0 at 15, above the trigger's 13; another activation leaves 12, so the cast
-/// trigger fires only after it (CR 601.2i). Both finishers record equal
-/// payment stamps — only the cast triggers tell them apart — and deferring the
-/// activation past the cast can't recreate the trigger.
+/// F1, printed: from 7 life the Forest and Islet A leave P0 at 6. The pass
+/// spends 2 mana against Liberator's power 1, so its cast trigger fires
+/// (CR 601.2i + CR 603.4). Islet B's {R} first costs 1 more life: at 5,
+/// Thraben Doomsayer's fateful hour makes Liberator 3/4 and the trigger
+/// doesn't fire, though the extra {R} isn't spent and both finishers record
+/// the same payment stamps.
 #[test]
-fn life_payment_that_changes_a_cast_trigger_is_not_certified() {
-    let (runner, ogre, watcher) = life_gated_board(18);
-    let (without, with) = finishers(&runner, ogre);
-    let spell = runner.state().pending_cast.as_ref().unwrap().object_id;
+fn islet_life_payment_that_turns_off_liberator_is_not_certified() {
+    let (runner, liberator, islet_b) = liberator_board(7);
+    let state = runner.state();
     assert_eq!(
-        without.waiting_for,
-        WaitingFor::Priority { player: P0 },
-        "reach: the payer holds priority after the pass"
+        state.players[0].life, 6,
+        "reach: P0 is at 6 at the decision"
     );
-    assert_eq!(
-        (
-            triggers_from(&without, watcher),
-            triggers_from(&with, watcher)
-        ),
-        (0, 1),
-        "reach: the cast triggers only after the extra activation"
+    let spell = state.pending_cast.as_ref().unwrap().object_id;
+
+    let mut activated = GameRunner::from_state(state.clone());
+    act(&mut activated, islet_b.clone());
+    let new_units: Vec<_> = activated.state().players[0]
+        .mana_pool
+        .units()
+        .filter(|unit| {
+            !state.players[0]
+                .mana_pool
+                .units()
+                .any(|before| before.pip_id == unit.pip_id)
+        })
+        .collect();
+    assert_eq!(new_units.len(), 1, "reach: Islet B adds one unit");
+    let unit = &new_units[0];
+    assert_eq!(unit.color, ManaType::Red);
+    assert!(
+        unit.restrictions.is_empty() && unit.grants.is_empty(),
+        "reach: the new {{R}} is rider-free"
     );
+    assert!(
+        activated.state().players[0]
+            .mana_pool
+            .units()
+            .any(|other| other.pip_id != unit.pip_id
+                && units_spend_equivalent(activated.state(), &other, unit)),
+        "reach: Islet A's {{R}} is spend-equivalent to it, saturating the {{1}}"
+    );
+
+    let (without, with) = finishers_after(&runner, &islet_b);
     assert!(
         without.objects[&spell].cast_payment_stamps_equivalent(&with.objects[&spell]),
         "reach: both finishers record the same payment stamps"
     );
     assert_eq!(
-        certificate(&runner, &ogre_activation(ogre)),
+        (
+            without.objects[&liberator].power,
+            with.objects[&liberator].power
+        ),
+        (Some(1), Some(3)),
+        "reach: fateful hour makes Liberator 3/4 only after the activation"
+    );
+    assert_eq!(
+        (
+            triggers_from(&without, liberator),
+            triggers_from(&with, liberator)
+        ),
+        (1, 0),
+        "reach: Liberator's cast trigger fires only without the activation"
+    );
+    assert_eq!(
+        certificate(&runner, &islet_b),
         NotCertified(SurplusNotCertified::CastTriggersDiverge)
     );
 }
 
-/// F1 control: from 15 life the trigger fires at 12 without the activation and
-/// at 9 with it — the same ability, the same trigger event — so the extra
-/// activation is a surplus.
+/// Control: from 8 life P0 is at 7 at the decision and 6 after Islet B, above
+/// fateful hour either way, so Liberator's trigger fires in both finishers and
+/// the extra {R} is a surplus.
 #[test]
-fn life_payment_that_keeps_the_cast_triggers_is_surplus() {
-    let (runner, ogre, watcher) = life_gated_board(15);
-    let (without, with) = finishers(&runner, ogre);
+fn islet_life_payment_that_keeps_liberator_is_surplus() {
+    let (runner, liberator, islet_b) = liberator_board(8);
+    let (without, with) = finishers_after(&runner, &islet_b);
     assert_eq!(
         (
-            triggers_from(&without, watcher),
-            triggers_from(&with, watcher)
+            triggers_from(&without, liberator),
+            triggers_from(&with, liberator)
         ),
         (1, 1),
-        "reach: the cast triggers in both finishers"
+        "reach: Liberator's cast trigger fires in both finishers"
     );
-    assert_eq!(certificate(&runner, &ogre_activation(ogre)), Surplus);
+    assert_eq!(certificate(&runner, &islet_b), Surplus);
 }
