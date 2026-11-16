@@ -89,6 +89,24 @@ impl DeckCopyLimit {
     }
 }
 
+/// CR 903.5a: A per-card deck-construction maximum-size override. The
+/// Commander maximum ("the minimum deck size and the maximum deck size are
+/// both 100") is lifted by a face whose rules text prints a maximum-size
+/// override — either the Class A sentence ("A deck with this commander has
+/// no maximum deck size", Whtz, the Bibliophile) or the Class B sentence
+/// ("your starting deck can contain any number of cards beyond the maximum
+/// deck size", The Covert Blue Mage). `None` on the face means no override.
+///
+/// A new enum rather than a sibling of [`DeckCopyLimit`]: the copy-count
+/// axis (CR 100.2a / CR 903.5b) cannot absorb a size-ceiling axis (CR 903.5a)
+/// without conflating rule sections. Exhaustive `match` everywhere — no
+/// wildcards — so a future variant forces every consumer through review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DeckSizeOverride {
+    NoMaximum,
+}
+
 /// A format's deck-size legality rule: either a floor with no ceiling, or an
 /// exact count that is simultaneously the minimum and the maximum.
 ///
@@ -221,6 +239,19 @@ mod tests {
         assert_eq!(parsed, DeckCopyLimit::Unlimited);
         let parsed: DeckCopyLimit = serde_json::from_str(r#"{"type":"UpTo","data":9}"#).unwrap();
         assert_eq!(parsed, DeckCopyLimit::UpTo(9));
+    }
+
+    #[test]
+    fn deck_size_override_serializes_as_tagged_union() {
+        // Unit variant emits {"type": "..."} with no "data" field — the same
+        // tagged shape as DeckCopyLimit::Unlimited. Consumers switch on
+        // `.type`, never destructure `.data` unconditionally.
+        let no_maximum = serde_json::to_string(&DeckSizeOverride::NoMaximum).unwrap();
+        assert_eq!(no_maximum, r#"{"type":"NoMaximum"}"#);
+
+        // Round-trips.
+        let parsed: DeckSizeOverride = serde_json::from_str(r#"{"type":"NoMaximum"}"#).unwrap();
+        assert_eq!(parsed, DeckSizeOverride::NoMaximum);
     }
 
     #[test]

@@ -354,6 +354,7 @@ mod memory_plunder_free_cast_2884;
 mod memory_vessel_std_s25;
 mod menace_requires_two_blockers;
 mod mercenaries_any_player_activate_prevention_scope;
+mod merged_component_departure_owner;
 mod merieke_ri_berit_cant_regenerate;
 mod metalworker_reveal_mana;
 mod metamorphic_alteration;

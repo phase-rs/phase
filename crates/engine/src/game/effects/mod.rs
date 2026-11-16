@@ -510,22 +510,14 @@ pub fn matches_player_scope(
                     // no player ever matches it as an effect target.
                     PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => false,
                     // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i +
-                    // CR 120.2a/120.2b: Each opponent who was dealt damage of the
-                    // given kind this turn, optionally restricted to a matching
-                    // source.
-                    PlayerFilter::OpponentDealtDamage {
-                        kind,
-                        source,
-                        min_sources,
-                    } => crate::game::quantity::opponent_dealt_damage_matches(
-                        state,
-                        p.id,
-                        controller,
-                        *kind,
-                        source,
-                        *min_sources,
-                        source_id,
-                    ),
+                    // CR 120.2a/120.2b: Each player in `relation` who was dealt
+                    // damage of the given kind this turn, optionally restricted
+                    // to a matching source.
+                    PlayerFilter::OpponentDealtDamage { .. } => {
+                        crate::game::quantity::opponent_dealt_damage_matches(
+                            state, p.id, controller, scope, source_id,
+                        )
+                    }
                     // CR 508.6: opponent the subject attacked within scope.
                     PlayerFilter::OpponentAttacked { subject, scope } => {
                         crate::game::players::is_opponent(state, controller, p.id)
@@ -2856,10 +2848,15 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             });
             let delivery_start = events.len();
             let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
+            let owner = crate::game::effects::change_zone::change_zone_member_owner(
+                logical_zone_change_group.logical_group_id,
+                anticipated_pause.as_ref(),
+            );
             match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
                 state,
                 &ctx,
                 member,
+                owner,
                 logical_zone_change_group.announced_members(),
                 events,
             ) {
@@ -2942,15 +2939,13 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                         WaitingFor::EntryAttackTargetChoice { .. }
                     );
                     let paused_current = (!entry_target_choice).then(|| {
-                        state
-                            .pending_zone_change_delivery_from_replacement()
-                            .or_else(|| {
-                                anticipated_pause.map(|mut boundary| {
-                                    boundary.append_delivery_events(&events[delivery_start..]);
-                                    boundary
-                                })
-                            })
-                            .expect("replacement pause must retain its exact boundary")
+                        crate::game::zone_pipeline::parked_member_boundary(
+                            state,
+                            logical_zone_change_group.logical_group_id,
+                            anticipated_pause,
+                            &events[delivery_start..],
+                        )
+                        .expect("replacement pause must retain its exact boundary")
                     });
                     let trigger_events: Vec<GameEvent> = events[events_before_drain..]
                         .iter()
@@ -70302,6 +70297,7 @@ mod entry_observation_settlement_tests {
                 .expect("empty batch group retains its pre-delivery latch");
             let pending = PendingBatchDeliveries {
                 library_reorder: None,
+                component_delivery_parent: None,
                 logical_zone_change_group,
                 paused_current: None,
                 remaining: Vec::new(),

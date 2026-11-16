@@ -4010,12 +4010,23 @@ fn check_state_based_actions_before_step_batch(
 ) -> Option<WaitingFor> {
     let waiting_before = state.waiting_for.clone();
     let sba_start = events_out.len();
-    super::sba::check_state_based_actions_in_pass(state, events_out);
+    let departure_queued = super::sba::check_state_based_actions_in_pass(state, events_out);
     // CR 104.1: a game the check ended places nothing; ending it already retired the queue
     // (`elimination` → `retire_finished_game_triggers`, elimination.rs:502).
     if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
         return Some(state.waiting_for.clone());
     }
+    // CR 603.10a + CR 603.3b: a player's departure at this check queued its own triggers
+    // (the last `departure_queued` contexts) and claimed its occurrences; they wait with the
+    // step's batch like the rest of the check's.
+    super::triggers::stamp_deferred_triggers_from(
+        state,
+        state
+            .deferred_triggers
+            .len()
+            .saturating_sub(departure_queued),
+        super::triggers::DeferredTriggerBatchOrigin::TurnBasedAction,
+    );
     hold_turn_based_action_triggers(state, events_out, sba_start);
     if state.waiting_for != waiting_before
         && !matches!(state.waiting_for, WaitingFor::Priority { .. })
