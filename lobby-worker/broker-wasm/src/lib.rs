@@ -220,6 +220,17 @@ impl WasmBroker {
         self.inner.snapshot_json()
     }
 
+    /// `true` when [`Self::snapshot`] fits the Durable Object row (key, V8
+    /// framing and value). Writes through `Broker::handle` are admitted against
+    /// the same measure; the shell asks this before the writes that are not
+    /// (the reaper and disconnect), so it never hands `storage.put()` a value
+    /// the store would refuse. A snapshot restored from the released writer's
+    /// raw-UTF-8 form that would be too large escaped is kept raw (see
+    /// `lobby_broker::snapshot_codec`), so this holds for it too.
+    pub fn snapshot_fits_storage(&self) -> bool {
+        self.inner.snapshot_fits_storage()
+    }
+
     /// `true` when the broker holds nothing in any durable registry. Lets the
     /// DO shell stop rescheduling the reaper alarm so a truly idle Durable
     /// Object hibernates fully (alarms keep a DO awake).
@@ -519,9 +530,7 @@ fn result_json(r: CallResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lobby_broker::{
-        BracketShape, LobbyClientMessage, MatchArity, ScoringPolicy, ServerMode,
-    };
+    use lobby_broker::{BracketShape, LobbyClientMessage, MatchArity, ScoringPolicy, ServerMode};
 
     /// `dirty` is the broker's own report of whether durable state changed, and
     /// getting it wrong is SILENT in the costly direction: a write reported clean
@@ -566,7 +575,12 @@ mod tests {
             !dirty,
             "GetTournament is a pure read; a `true` here writes storage on every poll"
         );
-        let (_, dirty) = call(&mut b, "{}", &frame(&LobbyClientMessage::SubscribeLobby), T0);
+        let (_, dirty) = call(
+            &mut b,
+            "{}",
+            &frame(&LobbyClientMessage::SubscribeLobby),
+            T0,
+        );
         assert!(!dirty);
         let (_, dirty) = call(
             &mut b,
@@ -732,6 +746,72 @@ mod tests {
         let from_legacy = WasmBroker::from_snapshot(&legacy);
         assert!(!from_legacy.is_empty(), "a legacy snapshot still restores");
         assert_eq!(from_legacy.snapshot(), stored, "and re-emits ASCII-only");
+    }
+
+    /// F1: a snapshot the released writer stored as raw UTF-8 that fits storage
+    /// only as a two-byte string must restore and re-snapshot into a form that
+    /// still fits, through the real `from_snapshot` / `snapshot` path.
+    #[test]
+    fn a_released_writer_unicode_snapshot_restores_into_a_storable_form() {
+        const NAME: &str = "marker-name";
+        let mut b = WasmBroker::new();
+        let msg = match create_tournament_msg() {
+            LobbyClientMessage::CreateTournament {
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+                plus_rounds,
+                format,
+                match_type,
+                ..
+            } => LobbyClientMessage::CreateTournament {
+                name: NAME.into(),
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+                plus_rounds,
+                format,
+                match_type,
+            },
+            other => panic!("unexpected {other:?}"),
+        };
+        let frame = serde_json::to_string(&msg).expect("frame encodes");
+        let (_, dirty) = call(&mut b, "{}", &frame, 1_000_000.0);
+        assert!(dirty, "reach guard: the create wrote state");
+
+        // 3.6M `Ā`: 7.2 MB as a two-byte string, 21.6 MB as `\u0100` escapes.
+        let mut value = serde_json::to_value(&b.inner).expect("value");
+        fn rename(value: &mut serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::String(s) if s == NAME => {
+                    *s = "\u{0100}".repeat(3_600_000);
+                    true
+                }
+                serde_json::Value::Array(items) => items.iter_mut().any(rename),
+                serde_json::Value::Object(map) => map.values_mut().any(rename),
+                _ => false,
+            }
+        }
+        assert!(rename(&mut value), "reach guard: the event name was found");
+        let legacy = serde_json::to_string(&value).expect("released encoding");
+        assert!(!legacy.is_ascii());
+        assert!(
+            legacy.chars().map(char::len_utf16).sum::<usize>() * 2 < 8_000_000,
+            "reach guard: the released writer's value fit the store"
+        );
+
+        let restored = WasmBroker::from_snapshot(&legacy);
+        assert!(!restored.is_empty(), "restored rather than reset");
+        let stored = restored.snapshot();
+        assert!(
+            !stored.is_ascii(),
+            "kept raw: the escaped form is 3x larger"
+        );
+        assert!(restored.snapshot_fits_storage());
+        let again = WasmBroker::from_snapshot(&stored);
+        assert_eq!(again.snapshot(), stored, "the stored form round-trips");
     }
 
     /// `/games` serves this listing, so it must hold the listed rooms only: a

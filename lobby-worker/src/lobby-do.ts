@@ -370,6 +370,21 @@ export class LobbyDO {
     await this.recordGameStats(result.outbounds);
   }
 
+  /**
+   * Persist after a write that did not pass the broker's admission check (the
+   * reaper sweep and disconnect). The broker's own storage-size authority decides
+   * whether the snapshot fits the row; an unstorable one is reported loudly and
+   * skipped, leaving the last stored snapshot, rather than throwing out of the
+   * handler. Sizing is never reimplemented here.
+   */
+  private async persistUnadmittedSnapshot(broker: WasmBroker): Promise<void> {
+    if (!broker.snapshot_fits_storage()) {
+      console.error({ event: "lobby_snapshot_unstorable" });
+      return;
+    }
+    await this.ctx.storage.put(SNAPSHOT_KEY, broker.snapshot());
+  }
+
   async webSocketClose(ws: WebSocket): Promise<void> {
     const broker = await this.loadBroker();
     const conn = ws.deserializeAttachment() ?? DEFAULT_CONN;
@@ -378,7 +393,7 @@ export class LobbyDO {
     // is already excluded from getWebSockets()).
     const result = JSON.parse(broker.on_disconnect(JSON.stringify(conn))) as CallResult;
     this.interpret(ws, result.outbounds);
-    await this.ctx.storage.put(SNAPSHOT_KEY, broker.snapshot());
+    await this.persistUnadmittedSnapshot(broker);
     // Player-count decrement+broadcast is shell-owned on close (the broker
     // cannot know the socket set). getWebSockets() already excludes the closing
     // socket, so this count reflects who remains.
@@ -415,7 +430,7 @@ export class LobbyDO {
     if (outbounds.length > 0) {
       console.log({ event: "lobby_reaped", count: outbounds.length });
     }
-    await this.ctx.storage.put(SNAPSHOT_KEY, broker.snapshot());
+    await this.persistUnadmittedSnapshot(broker);
     // The same sweep, for the server directory. Storage hygiene only: the
     // liveness AUTHORITY is the read path's filter, which applies the same
     // `isServerLive` predicate, so a row that expires between alarms is

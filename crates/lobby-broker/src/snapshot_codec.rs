@@ -17,6 +17,8 @@
 //! Restore needs nothing special: `\uXXXX` is plain JSON, so
 //! `serde_json::from_str` decodes it, and a snapshot written before this codec
 //! (raw UTF-8, possibly non-ASCII) is still valid JSON and restores unchanged.
+//! Such a snapshot can be *larger* once escaped, so [`stored_snapshot`] keeps the
+//! raw form whenever the ASCII form would not fit.
 
 use std::io::{self, Write};
 
@@ -63,6 +65,59 @@ pub fn to_ascii_json_string<T: Serialize + ?Sized>(value: &T) -> serde_json::Res
     let bytes = to_ascii_json_vec(value)?;
     // The serializer emits only valid UTF-8 and this formatter only ASCII.
     String::from_utf8(bytes).map_err(|e| serde::ser::Error::custom(e.to_string()))
+}
+
+/// How many bytes the Durable Object stores for a JS string holding `text`
+/// (before the V8 serialization framing, which callers reserve for): V8 keeps a
+/// string whose every code unit is at most U+00FF as one byte per unit, and any
+/// other string at two bytes per UTF-16 code unit, ASCII included.
+fn v8_string_bytes(text: &str) -> usize {
+    let (units, wide) = text.chars().fold((0usize, false), |(units, wide), ch| {
+        (units + ch.len_utf16(), wide || u32::from(ch) > 0xFF)
+    });
+    if wide {
+        2 * units
+    } else {
+        units
+    }
+}
+
+/// A snapshot's text and what storing it costs.
+pub(crate) struct StoredSnapshot {
+    pub(crate) text: String,
+    /// Bytes the store holds for `text` (see [`v8_string_bytes`]).
+    pub(crate) stored_bytes: usize,
+}
+
+/// The one authority for how a snapshot is stored and how big that is.
+///
+/// Fresh state is written ASCII-only (see the module docs). A snapshot the
+/// pre-codec writer stored as raw UTF-8 can be larger once escaped (`Ā` is two
+/// bytes stored raw as a two-byte V8 string, six as `Ā`), so when the
+/// ASCII form is over `limit` and the raw form stores smaller, the raw form is
+/// emitted instead: it is what the store already held, so restoring and
+/// re-writing it never produces an unstorable value. Both the text the Worker
+/// writes and every capacity measurement come from here, so they cannot drift.
+pub(crate) fn stored_snapshot<T: Serialize + ?Sized>(
+    value: &T,
+    limit: usize,
+) -> serde_json::Result<StoredSnapshot> {
+    let ascii = to_ascii_json_string(value)?;
+    if ascii.len() > limit {
+        let raw = serde_json::to_string(value)?;
+        let raw_bytes = v8_string_bytes(&raw);
+        if raw_bytes < ascii.len() {
+            return Ok(StoredSnapshot {
+                text: raw,
+                stored_bytes: raw_bytes,
+            });
+        }
+    }
+    let stored_bytes = ascii.len();
+    Ok(StoredSnapshot {
+        text: ascii,
+        stored_bytes,
+    })
 }
 
 /// Exact byte length of `value` in the stored encoding; [`usize::MAX`] if it

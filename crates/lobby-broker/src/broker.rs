@@ -118,7 +118,14 @@ const DURABLE_OBJECT_KEY_VALUE_LIMIT_BYTES: usize = 8_000_000;
 /// growth of the actual encoded size past this value, so the Worker's `put` can
 /// never be handed an unstorable key and value.
 pub const PHYSICAL_SNAPSHOT_LIMIT_BYTES: usize =
-    DURABLE_OBJECT_KEY_VALUE_LIMIT_BYTES - SNAPSHOT_STORAGE_KEY.len();
+    DURABLE_OBJECT_KEY_VALUE_LIMIT_BYTES - SNAPSHOT_STORAGE_KEY.len() - V8_STRING_FRAMING_BYTES;
+
+/// Worst-case bytes V8's value serializer adds around a string it stores: the
+/// two-byte version header, an alignment pad, the string tag and a varint length
+/// of at most five bytes. Reserved out of [`PHYSICAL_SNAPSHOT_LIMIT_BYTES`] so a
+/// measured value plus its framing plus the key is what the row holds (a
+/// 7,999,985 byte ASCII string serializes to 7,999,992).
+const V8_STRING_FRAMING_BYTES: usize = 2 + 1 + 1 + 5;
 
 const _: () = assert!(MAX_SNAPSHOT_ENCODED_BYTES < PHYSICAL_SNAPSHOT_LIMIT_BYTES);
 
@@ -1820,7 +1827,25 @@ impl Broker {
     /// the stored text, so the bytes [`Self::snapshot_encoded_bytes`] measures
     /// are exactly the bytes written. Infallible for the broker's types.
     pub fn snapshot_json(&self) -> String {
-        crate::snapshot_codec::to_ascii_json_string(self).expect("broker state always serializes")
+        self.stored_snapshot().text
+    }
+
+    /// Whether [`Self::snapshot_json`] fits the store: its stored size, key and
+    /// V8 framing included, is within the row limit. Always true for a state the
+    /// persistence boundary admitted; the shell checks it before the writes that
+    /// bypass admission (the reaper and disconnect), so one measure bounds
+    /// every `put`.
+    pub fn snapshot_fits_storage(&self) -> bool {
+        self.snapshot_encoded_bytes() <= PHYSICAL_SNAPSHOT_LIMIT_BYTES
+    }
+
+    /// The text to store and its stored size, from the one authority
+    /// ([`crate::snapshot_codec::stored_snapshot`]) that picks the ASCII-only
+    /// form, or, for a snapshot restored from the pre-codec raw-UTF-8 form whose
+    /// escaped size would not fit, the raw form.
+    fn stored_snapshot(&self) -> crate::snapshot_codec::StoredSnapshot {
+        crate::snapshot_codec::stored_snapshot(self, PHYSICAL_SNAPSHOT_LIMIT_BYTES)
+            .expect("broker state always serializes")
     }
 
     /// The exact byte length of the complete persisted snapshot — the whole
@@ -1831,7 +1856,8 @@ impl Broker {
     /// per-field budget. A hypothetical serialization failure yields
     /// [`usize::MAX`], so the admission check refuses rather than under-counts.
     fn snapshot_encoded_bytes(&self) -> usize {
-        encoded_len(self)
+        crate::snapshot_codec::stored_snapshot(self, PHYSICAL_SNAPSHOT_LIMIT_BYTES)
+            .map_or(usize::MAX, |stored| stored.stored_bytes)
     }
 
     /// The snapshot size plus every reservation not yet used: what the persisted
@@ -8188,9 +8214,11 @@ mod tests {
         #[test]
         fn the_physical_ceiling_counts_the_storage_key_at_the_exact_boundary() {
             assert_eq!(
-                PHYSICAL_SNAPSHOT_LIMIT_BYTES + SNAPSHOT_STORAGE_KEY.len(),
+                PHYSICAL_SNAPSHOT_LIMIT_BYTES
+                    + SNAPSHOT_STORAGE_KEY.len()
+                    + V8_STRING_FRAMING_BYTES,
                 8_000_000,
-                "key and value together fill exactly the decimal 8 MB"
+                "key, value and V8 framing together fill exactly the decimal 8 MB"
             );
             assert_physical_boundary(submit_frame);
         }
@@ -8261,6 +8289,108 @@ mod tests {
                 "Ā \u{1F409} 日本"
             );
             assert!(restored.snapshot_json().is_ascii());
+        }
+
+        /// F1: a snapshot the released writer stored as raw UTF-8 with a huge
+        /// `Ā` event name fits storage as a two-byte V8 string (2 bytes per unit)
+        /// but would be three times larger as `\u0100` escapes (6 bytes per unit),
+        /// past the row limit. It must restore and keep persisting in the raw
+        /// form, every later write bounded by the same stored-size measure:
+        /// growth that fits is admitted, growth past the limit is refused with
+        /// its request id and the prior state intact, shrinking still works.
+        #[test]
+        fn a_released_writer_unicode_snapshot_near_the_limit_keeps_a_storable_form() {
+            let env = FakeEnv::new();
+            let mut organizer = ConnState::default();
+            let mut broker = Broker::new();
+            let (victim, _) =
+                make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+            let mut alice = ConnState::default();
+            let token = join_tournament(&mut alice, &mut broker, &env, &victim, "a", "Alice");
+            // A retained deck the released writer had accepted.
+            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 20_000, 50), &env);
+            ack_of(&out);
+            let set_name = |broker: &mut Broker, chars: usize| {
+                broker
+                    .tournaments_mut()
+                    .fixture_meta_mut(&victim)
+                    .expect("event")
+                    .name = "\u{0100}".repeat(chars);
+            };
+
+            // Tune the raw two-byte form to sit 20 kB under the stored limit.
+            let target = PHYSICAL_SNAPSHOT_LIMIT_BYTES - 20_000;
+            let mut chars = 3_000_000;
+            set_name(&mut broker, chars);
+            chars += (target - broker.snapshot_encoded_bytes()) / 2;
+            set_name(&mut broker, chars);
+            assert!(target - broker.snapshot_encoded_bytes() <= 2);
+
+            // What the released writer stored: raw UTF-8 `serde_json::to_string`.
+            let legacy = serde_json::to_string(&broker).expect("legacy encoding");
+            let raw_units: usize = legacy.chars().map(char::len_utf16).sum();
+            assert!(
+                2 * raw_units <= PHYSICAL_SNAPSHOT_LIMIT_BYTES,
+                "reach guard: the released snapshot fit storage as a two-byte string"
+            );
+            assert!(
+                crate::snapshot_codec::to_ascii_json_string(&broker)
+                    .expect("ascii")
+                    .len()
+                    > PHYSICAL_SNAPSHOT_LIMIT_BYTES,
+                "reach guard: its escaped form would not"
+            );
+
+            let mut broker: Broker = serde_json::from_str(&legacy).expect("legacy restores");
+            let stored = broker.snapshot_json();
+            assert!(!stored.is_ascii(), "kept in the raw form that fits");
+            assert!(broker.snapshot_fits_storage());
+            assert_eq!(broker.snapshot_encoded_bytes(), 2 * raw_units);
+            assert_eq!(
+                broker
+                    .tournaments()
+                    .get(&victim)
+                    .expect("event")
+                    .name
+                    .chars()
+                    .count(),
+                chars,
+                "no state lost on restore"
+            );
+
+            // Growth (re-submitting the 20 kB deck, about 40 kB stored) is refused
+            // with its request id and the prior state intact: the restored state is
+            // past today's admission budget, so only writes that do not raise the
+            // committed total pass, and none may outgrow the stored limit.
+            let smaller = broker.handle(&mut alice, submit_frame(&victim, &token, 2_000, 51), &env);
+            assert_eq!(
+                ack_of(&smaller).0,
+                TournamentRequestId(51),
+                "a shrink is admitted"
+            );
+            assert!(broker.snapshot_fits_storage());
+            assert!(!broker.snapshot_json().is_ascii(), "still the raw form");
+            let before = broker.snapshot_json();
+            let before_conn = alice.clone();
+            let out = broker.handle(&mut alice, submit_frame(&victim, &token, 20_000, 52), &env);
+            let (id, reason) = rejection_of(&out);
+            assert_eq!(id, TournamentRequestId(52));
+            assert!(reason.contains("at capacity"), "{reason}");
+            assert_eq!(broker.snapshot_json(), before, "the prior state is intact");
+            assert_eq!(alice, before_conn);
+            assert!(broker.snapshot_fits_storage());
+        }
+
+        /// A broker whose every form exceeds the store is reported unstorable
+        /// rather than silently written.
+        #[test]
+        fn a_snapshot_over_the_limit_in_every_form_is_not_storable() {
+            let env = FakeEnv::new();
+            let mut organizer = ConnState::default();
+            let mut broker = Broker::new();
+            let (code, _) = make_tournament(&mut organizer, &mut broker, &env, BracketShape::Swiss);
+            set_event_name_chars(&mut broker, &code, PHYSICAL_SNAPSHOT_LIMIT_BYTES);
+            assert!(!broker.snapshot_fits_storage());
         }
 
         fn assert_physical_boundary(
