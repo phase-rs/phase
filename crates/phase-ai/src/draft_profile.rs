@@ -1221,7 +1221,7 @@ fn filter_may_name_another_creature(filter: &TargetFilter) -> bool {
         | TargetFilter::AmassedArmy => true,
         TargetFilter::Typed(typed) => typed_filter_admits_creature(typed),
         TargetFilter::Or { filters } => filters.iter().any(filter_may_name_another_creature),
-        // CR 109.3: every constraint of an `And` must hold for the match.
+        // Every constraint of an `And` must hold for the match.
         TargetFilter::And { filters } => filters.iter().all(filter_may_name_another_creature),
         // "Not this creature" names every other creature; any other negation
         // ("not a creature") may name none, so it fails closed.
@@ -1377,7 +1377,7 @@ fn reaches_opposing_creature(effect: &Effect) -> bool {
         Effect::ChangeZone { origin, target, .. } => {
             move_origin_is_battlefield(*origin, target) && may_be_opposing_creature(target)
         }
-        // CR 701.5a: countering a spell and CR 701.8a: discarding a card touch
+        // CR 701.6a: countering a spell and CR 701.9a: discarding a card touch
         // no battlefield permanent; they keep the shared classifier's answer.
         Effect::Counter { .. } | Effect::DiscardCard { .. } => true,
         // Only the shapes `is_direct_removal` classifies reach this function.
@@ -1535,7 +1535,7 @@ fn may_be_opposing_creature(filter: &TargetFilter) -> bool {
                 && typed_filter_admits_creature(typed)
         }
         TargetFilter::Or { filters } => filters.iter().any(may_be_opposing_creature),
-        // CR 109.3: every constraint of an `And` must hold for the match.
+        // Every constraint of an `And` must hold for the match.
         TargetFilter::And { filters } => filters.iter().all(may_be_opposing_creature),
         TargetFilter::Not { .. }
         | TargetFilter::AttachedTo
@@ -1645,7 +1645,7 @@ fn sacrifice_reaches_opposing_creature(
         TargetFilter::Or { filters } => filters
             .iter()
             .any(|f| sacrifice_reaches_opposing_creature(f, player_scope, parent_target)),
-        // CR 109.3: every constraint of an `And` must hold for the match.
+        // Every constraint of an `And` must hold for the match.
         TargetFilter::And { filters } => filters
             .iter()
             .all(|f| sacrifice_reaches_opposing_creature(f, player_scope, parent_target)),
@@ -3657,8 +3657,8 @@ mod tests {
             classes.contains(&CardClass::NinjutsuEnabler),
             "a triggered evasion grant is a Ninjutsu enabler"
         );
-        // CR 115.1c: the target is chosen as the trigger resolves, and
-        // "target creature" can name the Guardian itself, so the grant is also
+        // CR 115.1d: the target is chosen as the triggered ability is put on the
+        // stack, and "target creature" can name the Guardian itself, so the grant is also
         // its own evasion (the same eligibility Higure exercises).
         assert!(classes.contains(&CardClass::EvasiveThreat));
         assert!(roles(&guardian).contains(&DeckRole::Evasion));
@@ -4409,7 +4409,7 @@ mod tests {
         let black = vec!["B".to_string()];
         // Horobi's Whisper (CHK): "If you control a Swamp, destroy target
         // nonblack creature." This is conditional removal — the condition is
-        // checked at resolution (CR 608.2b). The parser emits a Destroy effect
+        // checked at resolution (CR 608.2c). The parser emits a Destroy effect
         // with a condition; we classify it as removal because the effect shape
         // is removal when the condition is met.
         let whisper = oracle_face(serde_json::json!({
