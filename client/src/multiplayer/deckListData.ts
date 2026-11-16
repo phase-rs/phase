@@ -20,7 +20,7 @@ export const DECK_LIST_FIELDS_ARE_EXHAUSTIVE: [Exclude<ListKeys, DeckListField>]
  *  spelling and the engine's echo (every list present, engine field order,
  *  `bracket_tier` always serialized). Reads the lists only, each in its own
  *  order, as the echo returns them; an absent list is empty, as the engine
- *  reads it. The declared bracket tier is not part of which deck it is. */
+ *  reads it. The declared bracket tier and combo answer are not part of which deck it is. */
 export function deckListIdentityKey(data: DeckListData): string {
   return JSON.stringify(DECK_LIST_FIELDS.map((field) => data[field] ?? []));
 }

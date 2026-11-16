@@ -52,6 +52,7 @@ fn bend_performed(state: &GameState, ability: &ResolvedAbility, kind: BendingTyp
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: Box::new(TargetFilter::Any),
                     caused_by: Some(ThisWayCause::Exiled),
+                    destination: None,
                 },
             };
             resolve_quantity_with_targets(state, &exiled_this_way, ability) > 0

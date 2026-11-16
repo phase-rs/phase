@@ -91,7 +91,7 @@ fn optional_cost_paid_sets_flag() {
 
     // Pay the additional cost — this opens BlightChoice.
     let result_opt = runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("decide optional cost should succeed");
     assert!(
         matches!(result_opt.waiting_for, WaitingFor::BlightChoice { .. }),
@@ -174,7 +174,7 @@ fn optional_cost_skipped_clears_flag() {
 
     // Skip the additional cost
     let result3 = runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("skip optional cost should succeed");
 
     assert!(
@@ -265,7 +265,7 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
             runner.state().waiting_for,
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("paying the optional cost should succeed");
         assert_eq!(
             tapped_count(&runner, &lands),
@@ -288,7 +288,7 @@ fn bargain_additional_cost_paid_reduces_self_spell_cost() {
             })
             .expect("cast should succeed at base cost");
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("skipping the optional cost should succeed");
         assert_eq!(
             tapped_count(&runner, &lands),
@@ -1282,6 +1282,7 @@ fn play_land_from_graveyard_with_permission() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
@@ -1355,6 +1356,7 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
@@ -1429,6 +1431,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
@@ -1514,6 +1517,7 @@ fn muldrotha_per_permanent_type_resets_at_turn_start() {
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
@@ -1665,14 +1669,15 @@ fn required_blight_with_no_creatures_rejects_cast() {
     assert!(matches!(result.waiting_for, WaitingFor::Priority { player } if player == P0));
 }
 
-/// CR 601.2b: When an `AdditionalCost::Choice(A, B)` has an unpayable
-/// preferred cost A, the fallback B is applied automatically with no prompt.
-#[test]
-fn choice_cost_falls_through_when_preferred_unpayable() {
+/// Casts a "Choice Bolt" whose additional cost is blight 1 (unpayable: P0
+/// controls no creatures) or `fallback`, and returns the cast's result.
+fn cast_choice_bolt_with_unpayable_blight(
+    fallback: AbilityCost,
+) -> (engine::game::scenario::GameRunner, ObjectId, ActionResult) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_basic_land(P0, ManaColor::White);
-    // No creatures — blight half is unpayable — but life is available.
+    scenario.add_basic_land(P0, ManaColor::White);
 
     let spell_id = scenario
         .add_creature_to_hand(P0, "Choice Bolt", 0, 0)
@@ -1683,18 +1688,14 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
             damage_source: None,
             excess: None,
         })
-        .with_additional_cost(AdditionalCost::Choice(
+        .with_additional_cost(AdditionalCost::Choice(vec![
             AbilityCost::Blight { count: 1 },
-            AbilityCost::PayLife {
-                amount: QuantityExpr::Fixed { value: 2 },
-            },
-        ))
+            fallback,
+        ]))
         .id();
 
     let mut runner = scenario.build();
-    let life_before = runner.state().players[0].life;
     let card_id = runner.state().objects[&spell_id].card_id;
-
     let result = runner
         .act(GameAction::CastSpell {
             object_id: spell_id,
@@ -1704,7 +1705,27 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("cast should succeed");
+    (runner, spell_id, result)
+}
 
+/// CR 601.2b + CR 601.2h: When an `AdditionalCost::Choice(A, B)` has an
+/// unpayable preferred cost A and a fallback B that pays no life, B is applied
+/// automatically with no prompt.
+#[test]
+fn choice_cost_falls_through_when_preferred_unpayable() {
+    let (mut runner, spell_id, result) =
+        cast_choice_bolt_with_unpayable_blight(AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            },
+        });
+
+    assert!(
+        matches!(result.waiting_for, WaitingFor::TargetSelection { .. }),
+        "reach guard: the bolt's target is chosen first, got {:?}",
+        result.waiting_for,
+    );
     handle_target_selection(&mut runner, &result);
 
     // CR 601.2b: No prompt; fallback was applied automatically.
@@ -1716,10 +1737,80 @@ fn choice_cost_falls_through_when_preferred_unpayable() {
         "no prompt expected when preferred cost is unpayable and fallback applies, got {:?}",
         runner.state().waiting_for,
     );
+
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.id == spell_id),
+        "the fallback branch must complete the cast, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner
+            .state()
+            .objects
+            .values()
+            .filter(|obj| obj.zone == Zone::Battlefield && obj.tapped)
+            .count(),
+        1,
+        "the {{1}} fallback taps exactly one land"
+    );
+    assert_eq!(runner.state().players[0].life, 20, "no life is paid");
+}
+
+/// CR 118.11 + CR 119.4: a sole payable fallback that pays life is still
+/// prompted. Effects may change the life the payment actually costs, so the
+/// branch is committed only by the caster's answer, where the life-safety
+/// preview reads the post-replacement receipt.
+///
+/// The synthetic bolt pins the life branch in the fallback position. The
+/// printed cards that reach a sole payable life branch are Final Payment (life
+/// first) and Dusk Mangler (life third), both covered by
+/// `issue_10442_dusk_mangler_additional_cost`.
+#[test]
+fn choice_cost_with_a_sole_life_fallback_still_prompts() {
+    let (mut runner, spell_id, result) =
+        cast_choice_bolt_with_unpayable_blight(AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+        });
+    handle_target_selection(&mut runner, &result);
+
+    assert!(
+        matches!(
+            &runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice {
+                cost: AdditionalCost::Choice(costs),
+                ..
+            } if costs.len() == 2
+        ),
+        "a sole life branch must be decided through the prompt, got {:?}",
+        runner.state().waiting_for,
+    );
     assert_eq!(
         runner.state().players[0].life,
-        life_before - 2,
+        20,
+        "no life is paid before the caster answers"
+    );
+
+    runner
+        .act(GameAction::DecideOptionalCost { index: 1 })
+        .expect("the payable life branch is accepted");
+
+    assert_eq!(
+        runner.state().players[0].life,
+        18,
         "fallback life cost should have been paid"
+    );
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.id == spell_id),
+        "paying the life branch must complete the cast, got {:?}",
+        runner.state().waiting_for
     );
 }
 
@@ -2736,7 +2827,8 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
 
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(alt, printed) => {
+            AdditionalCost::Choice(costs) if costs.len() == 2 => {
+                let (alt, printed) = (&costs[0], &costs[1]);
                 assert_eq!(
                     *alt,
                     AbilityCost::Mana {
@@ -2762,7 +2854,7 @@ fn rooftop_storm_grants_alternative_zero_cost_to_zombie_spells() {
 
     // Accept the alternative cost → Zombie reaches the stack with {0} paid.
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the alternative cost should succeed");
     assert_eq!(
         runner.state().objects[&zombie_id].zone,
@@ -2855,7 +2947,8 @@ fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
 
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(alt, printed) => {
+            AdditionalCost::Choice(costs) if costs.len() == 2 => {
+                let (alt, printed) = (&costs[0], &costs[1]);
                 assert_eq!(
                     *alt,
                     AbilityCost::Mana {
@@ -2882,7 +2975,7 @@ fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
     // Accept the {0} alternative → the spell reaches the stack and the source's
     // once-per-turn slot is consumed (CR 118.9 + CR 601.2b).
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the alternative cost should succeed");
     assert_eq!(
         runner.state().objects[&mv2_id].zone,
@@ -2959,12 +3052,19 @@ fn as_foretold_decline_printed_cost_does_not_consume_slot() {
 
     // Decline → pay the printed {2} cost; the slot must remain unspent.
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("declining the alternative cost should succeed");
     assert_eq!(
         runner.state().objects[&mv2_id].zone,
         Zone::Stack,
         "MV-2 spell should be on the stack after paying the printed {{2}} cost"
+    );
+    // CR 601.2f: declining leaves the printed {2} as the whole cost — paid
+    // once, from exactly the two mana provided.
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "the printed {{2}} is paid exactly once"
     );
     assert!(
         !runner

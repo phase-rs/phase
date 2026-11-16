@@ -1293,6 +1293,7 @@ fn ref_less_resolution_mana_cost_records_nothing() {
         effect_description: None,
         remaining: vec![],
         affected_object: None,
+        repeat: None,
     };
 
     runner

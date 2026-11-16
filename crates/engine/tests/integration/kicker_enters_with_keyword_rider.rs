@@ -22,7 +22,7 @@
 //! never resolved cannot satisfy either assertion vacuously.
 //!
 //! REVERT DISCRIMINATOR: `kavu_titan_kicked_enters_with_trample`. Remove the
-//! `compose_enters_with_keyword_grant` call from `parse_enters_with_counters`
+//! `compose_enters_with_entry_grants` call from `parse_enters_with_counters`
 //! and the trample grant disappears while the counters still land, so the
 //! keyword assertion fails and the counter reach-guard still passes.
 
@@ -105,7 +105,9 @@ fn cast_kavu_titan(kicked: bool) -> (GameRunner, ObjectId) {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: kicked })
+        .act(GameAction::DecideOptionalCost {
+            index: if kicked { 0 } else { 1 },
+        })
         .expect("P0 decides the kicker");
 
     while runner.state().objects.get(&titan).map(|o| o.zone) != Some(Zone::Battlefield) {
