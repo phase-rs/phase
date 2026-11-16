@@ -20965,12 +20965,14 @@ fn continue_with_prepared(
             );
         }
 
-        // CR 702.56a: Replicate is a repeatable optional additional cost, so it
-        // must be declared before targets are chosen just like Casualty.
-        if let Some(replicate_cost) =
-            casting_costs::effective_replicate_additional_cost(state, player, prepared.object_id)
+        // CR 702.56a + CR 601.2b: Replicate is a repeatable optional additional
+        // cost, declared before targets through the keyword queue just like
+        // Casualty, so every instance is announced once (CR 702.56b) and the
+        // authority does not offer it again after the targets.
+        if casting_costs::effective_replicate_additional_cost(state, player, prepared.object_id)
+            .is_some()
         {
-            return casting_costs::begin_optional_cost_before_targets(
+            return casting_costs::begin_keyword_queue_before_targets(
                 state,
                 player,
                 prepared.object_id,
@@ -20978,8 +20980,6 @@ fn continue_with_prepared(
                 resolved,
                 prepared.mana_cost,
                 Some(prepared.base_mana_cost.clone()),
-                replicate_cost,
-                SpellCostSource::Other,
                 prepared.casting_variant,
                 prepared.casting_permission_index,
                 prepared.cast_timing_permission,
