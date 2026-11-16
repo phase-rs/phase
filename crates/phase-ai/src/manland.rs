@@ -446,6 +446,9 @@ fn left_only_its_effects(
     activated.player_actions_this_way = without.player_actions_this_way.clone();
     activated.last_effect_amount = without.last_effect_amount;
     activated.last_zone_changed_ids = without.last_zone_changed_ids.clone();
+    // CR 608.2c: advanced by the instruction boundaries of the repeat's own
+    // resolution.
+    activated.instruction_boundary_marks = without.instruction_boundary_marks.clone();
     // `GameState::normalize_for_loop` resets the journal: it is provenance,
     // not position.
     activated.resolved_rules_journal = without.resolved_rules_journal.clone();

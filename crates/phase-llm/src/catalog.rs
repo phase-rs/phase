@@ -9,7 +9,7 @@
 
 use serde::Serialize;
 
-use crate::provider::LlmProvider;
+use crate::provider::{DecisionContext, LlmProvider};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +35,10 @@ pub struct ProviderCatalogEntry {
     /// field; empty for the generic compatible endpoint, which has no vendor.
     pub api_key_url: &'static str,
     pub models: &'static [ModelOption],
+    /// Every [`DecisionContext`] the engine honours for this provider. The
+    /// settings UI offers the message-thread setting exactly where this lists
+    /// it, rather than keeping its own list of protocols.
+    pub decision_contexts: &'static [DecisionContext],
 }
 
 const OPENAI_MODELS: &[ModelOption] = &[
@@ -190,6 +194,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://platform.openai.com/api-keys",
         models: OPENAI_MODELS,
+        decision_contexts: LlmProvider::OpenAi.wire().decision_contexts(),
     },
     ProviderCatalogEntry {
         provider: LlmProvider::Anthropic,
@@ -200,6 +205,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://console.anthropic.com/settings/keys",
         models: ANTHROPIC_MODELS,
+        decision_contexts: LlmProvider::Anthropic.wire().decision_contexts(),
     },
     ProviderCatalogEntry {
         provider: LlmProvider::Gemini,
@@ -210,6 +216,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://aistudio.google.com/apikey",
         models: GEMINI_MODELS,
+        decision_contexts: LlmProvider::Gemini.wire().decision_contexts(),
     },
     ProviderCatalogEntry {
         provider: LlmProvider::DeepSeek,
@@ -220,6 +227,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://platform.deepseek.com/api_keys",
         models: DEEPSEEK_MODELS,
+        decision_contexts: LlmProvider::DeepSeek.wire().decision_contexts(),
     },
     ProviderCatalogEntry {
         provider: LlmProvider::OpenRouter,
@@ -230,6 +238,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://openrouter.ai/keys",
         models: OPENROUTER_MODELS,
+        decision_contexts: LlmProvider::OpenRouter.wire().decision_contexts(),
     },
     ProviderCatalogEntry {
         provider: LlmProvider::OpenAiCompatible,
@@ -240,6 +249,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: false,
         api_key_url: "",
         models: COMPATIBLE_MODELS,
+        decision_contexts: LlmProvider::OpenAiCompatible.wire().decision_contexts(),
     },
     ProviderCatalogEntry {
         provider: LlmProvider::Jev,
@@ -250,6 +260,7 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: true,
         api_key_url: "https://docs.typesafe.ai/api",
         models: JEV_MODELS,
+        decision_contexts: LlmProvider::Jev.wire().decision_contexts(),
     },
 ];
 
@@ -289,6 +300,30 @@ mod tests {
             assert_eq!(entry.display_name, entry.provider.display_name());
             assert_eq!(entry.default_base_url, entry.provider.default_base_url());
             assert_eq!(entry.requires_api_key, entry.provider.requires_api_key());
+            assert_eq!(
+                entry.decision_contexts,
+                entry.provider.wire().decision_contexts()
+            );
+        }
+    }
+
+    /// The settings UI offers the message-thread setting from this list, so
+    /// it must name exactly the providers the engine threads, in the
+    /// `DecisionContext` spelling the client mirrors.
+    #[test]
+    fn only_anthropic_lists_message_threads() {
+        for entry in CATALOG {
+            let wire = serde_json::to_value(entry).unwrap()["decisionContexts"].clone();
+            let expected = match entry.provider {
+                LlmProvider::Anthropic => serde_json::json!(["selfContained", "messageThread"]),
+                LlmProvider::OpenAi
+                | LlmProvider::Gemini
+                | LlmProvider::DeepSeek
+                | LlmProvider::OpenRouter
+                | LlmProvider::OpenAiCompatible
+                | LlmProvider::Jev => serde_json::json!(["selfContained"]),
+            };
+            assert_eq!(wire, expected, "{:?}", entry.provider);
         }
     }
 
