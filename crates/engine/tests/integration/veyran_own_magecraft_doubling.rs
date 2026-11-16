@@ -50,6 +50,7 @@ const DESOLATION_TWIN: &str =
     "When you cast this spell, create a 10/10 colorless Eldrazi creature token.";
 const FELIX_FIVE_BOOTS: &str = "If a creature you control dealing combat damage to a player causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
 const MURDER: &str = "Destroy target creature.";
+const JABS: &str = "If a triggered ability of a permanent you control but don't own triggers, that ability triggers an additional time.";
 const SCROLL_THIEF: &str = "Whenever this creature deals combat damage to a player, draw a card.";
 const PROFESSIONAL_FACE_BREAKER: &str = "Menace
 Whenever one or more creatures you control deal combat damage to a player, create a Treasure token.
@@ -598,4 +599,36 @@ fn felix_five_boots_doubles_a_one_or_more_combat_damage_trigger() {
         .filter(|id| runner.state().objects[id].name == "Treasure")
         .count();
     assert_eq!(treasures, 2);
+}
+
+/// CR 603.2d: Jabs, Mistress of Mockery doubles triggers of "a permanent you
+/// control but don't own". Its scope now parses (the doubler's `And`
+/// conjunction is accepted as restrictive), so Witherbloom Apprentice's
+/// Magecraft is doubled only while P0 controls it without owning it.
+/// Revert-to-red: with no parsed scope, the owned Apprentice is doubled too.
+#[test]
+fn jabs_doubles_only_triggers_of_permanents_you_control_but_dont_own() {
+    for (owner, expected) in [(P0, 1), (P1, 2)] {
+        let mut s = scenario();
+        s.add_creature_from_oracle(P0, "Jabs, Mistress of Mockery", 1, 1, JABS);
+        let apprentice = add_apprentice(&mut s);
+        let spell = add_instant(&mut s, "Quick Study", QUICK_STUDY);
+        let mut runner = s.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&apprentice)
+            .unwrap()
+            .owner = owner;
+        let before = life(&runner);
+
+        cast(&mut runner, spell);
+        drive(&mut runner, true);
+
+        assert_eq!(
+            life(&runner) - before,
+            expected,
+            "Apprentice owned by {owner:?}"
+        );
+    }
 }
