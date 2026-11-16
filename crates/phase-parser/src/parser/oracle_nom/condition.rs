@@ -4351,29 +4351,37 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     // snapshot. Only the library noun binds; a graveyard comparative ("more
     // cards in your graveyard than your starting deck") MUST fail loud —
     // the graveyard size is a different count and must never alias the latch.
-    if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("more cards in your library than your starting deck")
-            .parse(rest)
-    {
-        return Ok((
-            rest,
-            StaticCondition::QuantityComparison {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::ZoneCardCount {
-                        zone: ZoneRef::Library,
-                        card_types: Vec::new(),
-                        filter: None,
-                        scope: CountScope::Controller,
-                    },
-                },
-                comparator: Comparator::GT,
-                rhs: QuantityExpr::Ref {
-                    qty: QuantityRef::StartingDeckSize {
-                        player: PlayerScope::Controller,
-                    },
-                },
-            },
-        ));
+    // Typed decomposition: the zone noun routes through the `parse_zone_word`
+    // authority with a `peek_zone_boundary` guard and an explicit Library-only
+    // gate, so non-library zones fall through to later arms (loud failure).
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("more cards in your ").parse(rest) {
+        if let Ok((rest, zone)) = parse_zone_word(rest) {
+            if peek_zone_boundary(rest).is_ok() && matches!(zone, Zone::Library) {
+                if let Ok((rest, _)) =
+                    tag::<_, _, OracleError<'_>>(" than your starting deck").parse(rest)
+                {
+                    return Ok((
+                        rest,
+                        StaticCondition::QuantityComparison {
+                            lhs: QuantityExpr::Ref {
+                                qty: QuantityRef::ZoneCardCount {
+                                    zone: ZoneRef::Library,
+                                    card_types: Vec::new(),
+                                    filter: None,
+                                    scope: CountScope::Controller,
+                                },
+                            },
+                            comparator: Comparator::GT,
+                            rhs: QuantityExpr::Ref {
+                                qty: QuantityRef::StartingDeckSize {
+                                    player: PlayerScope::Controller,
+                                },
+                            },
+                        },
+                    ));
+                }
+            }
+        }
     }
 
     // "you have exactly N life" → LifeTotal EQ N
