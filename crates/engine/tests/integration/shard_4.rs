@@ -362,6 +362,7 @@ mod militant_angel_attacked_opponents;
 mod mill_double_redirect_choice_continuation;
 mod mill_rest_in_peace_redirect;
 mod mill_this_way_graveyard_destination;
+mod millennium_calendar_untap_count_trigger;
 mod mimeoplasm_interactive_exile;
 mod minimus_containment_treasure_grant;
 mod mirror_march_copy_token_exile;
