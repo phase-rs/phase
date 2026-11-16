@@ -474,16 +474,16 @@ fn offered_targets(
                     .iter()
                     .filter_map(|t| match t {
                         TargetRef::Player(p) => Some(*p),
-                        _ => None,
+                        TargetRef::Object(_) => None,
                     })
                     .collect(),
                 legal
                     .iter()
                     .filter_map(|t| match t {
-                        TargetRef::Object(o) if r.state().objects[o].controller == holder => {
-                            Some(*o)
+                        TargetRef::Object(o) => {
+                            (r.state().objects[o].controller == holder).then_some(*o)
                         }
-                        _ => None,
+                        TargetRef::Player(_) => None,
                     })
                     .collect(),
             )
