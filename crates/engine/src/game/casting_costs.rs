@@ -10527,17 +10527,46 @@ fn check_additional_cost_or_pay_with_kept_cost(
                     [] => Err(EngineError::ActionNotAllowed(
                         "Cannot pay any alternative additional cost".to_string(),
                     )),
-                    [only] => continue_cost_declarations(
-                        state,
-                        player,
-                        pending,
-                        residual,
-                        DeclarationExit::Pay {
-                            cost: costs[*only].clone(),
-                            source: SpellCostSource::Other,
-                        },
-                        events,
-                    ),
+                    [only] => {
+                        // CR 119.4 + CR 601.2b: if the sole offerable branch is a life
+                        // payment that would be lethal (reduce life to 0 or less), we
+                        // must prompt so the AI's lethal-life veto can trigger.
+                        // Auto-paying would bypass the safety boundary.
+                        let sole_cost = &costs[*only];
+                        let is_lethal_life_payment = match sole_cost {
+                            AbilityCost::PayLife { amount } => {
+                                let life_amount = super::quantity::resolve_quantity(
+                                    state, amount, player, object_id,
+                                )
+                                .max(0);
+                                let current_life = super::players::team_life_total(state, player);
+                                current_life - life_amount <= 0
+                            }
+                            _ => false,
+                        };
+                        if is_lethal_life_payment {
+                            continue_cost_declarations(
+                                state,
+                                player,
+                                pending,
+                                residual,
+                                DeclarationExit::Prompt(additional_cost),
+                                events,
+                            )
+                        } else {
+                            continue_cost_declarations(
+                                state,
+                                player,
+                                pending,
+                                residual,
+                                DeclarationExit::Pay {
+                                    cost: sole_cost.clone(),
+                                    source: SpellCostSource::Other,
+                                },
+                                events,
+                            )
+                        }
+                    }
                     _ => continue_cost_declarations(
                         state,
                         player,
