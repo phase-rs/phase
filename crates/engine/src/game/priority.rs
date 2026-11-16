@@ -105,13 +105,14 @@ pub(crate) fn handle_priority_pass_with_limit(
                 return deferred_transition_outcome(state);
             }
             // CR 510.4: The combat damage step's turn-based action runs in two
-            // sub-steps when a first-strike/double-strike creature is present. If
-            // the first-strike sub-step paused on a CR 603.3b trigger-ordering
-            // prompt (combat_damage.rs), `resolve_combat_damage` returned before
-            // the MANDATORY second (regular) sub-step ran (`regular_damage_done ==
-            // false`). Those ordered triggers have now resolved and all players
-            // passed with an empty stack, but combat damage is INCOMPLETE — re-enter
-            // the combat-damage turn-based action (auto_advance re-calls
+            // sub-steps when a first-strike/double-strike creature is present, and
+            // each ends with a CR 510.3 priority window. After the first-strike
+            // sub-step `resolve_combat_damage` returns (`regular_damage_done ==
+            // false`) whatever filled that window: a CR 603.3b trigger-ordering
+            // prompt, a trigger on the stack, or nothing. Once the stack is empty
+            // and all players have passed (CR 117.4), combat damage is INCOMPLETE —
+            // the MANDATORY second (regular) sub-step has not run. Re-enter the
+            // combat-damage turn-based action (auto_advance re-calls
             // resolve_combat_damage, which runs only the regular sub-step) instead
             // of advancing to end of combat (which would silently skip the regular
             // damage, violating CR 510.4). `regular_damage_done` is set true before

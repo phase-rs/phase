@@ -9447,10 +9447,22 @@ fn followed_by_target_article(input: &str) -> bool {
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
 /// phrase. "two target creatures" and "X target creatures" both set the exact
 /// number of targets, unlike "up to X target creatures".
-pub(crate) fn strip_exact_target_prefix(lower: &str) -> Option<(QuantityExpr, &str)> {
-    let (rest, count) = parse_exact_target_count_expr(lower).ok()?;
+///
+/// The prefix is matched case-insensitively because printed Oracle text carries
+/// an uppercase `X` (Mass Manipulation: "Gain control of X target creatures
+/// and/or planeswalkers"), and the verb branches dispatch on original-case
+/// text. The returned remainder is sliced from `text`, so callers keep the
+/// original casing. `to_ascii_lowercase` preserves byte length, which keeps the
+/// consumed offset a valid boundary in `text`.
+pub(crate) fn strip_exact_target_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
+    let lower = text.to_ascii_lowercase();
+    let (rest, count) = parse_exact_target_count_expr(&lower).ok()?;
     let rest = rest.trim_start();
-    followed_by_target_article(rest).then_some((count, rest))
+    if !followed_by_target_article(rest) {
+        return None;
+    }
+    let consumed = lower.len() - rest.len();
+    Some((count, &text[consumed..]))
 }
 
 fn parse_exact_target_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> {
