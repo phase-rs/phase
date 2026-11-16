@@ -38709,6 +38709,7 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                | GameEvent::PhaseChangedForPlayer { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }
@@ -39073,6 +39074,9 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                // Synthetic per-player phase occurrence (shared-turn fan-out):
+                // carries only phase + player, no incarnation-bearing records.
+                | GameEvent::PhaseChangedForPlayer { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }
@@ -39253,6 +39257,9 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                // Synthetic per-player phase occurrence (shared-turn fan-out):
+                // carries only phase + player, no incarnation-bearing records.
+                | GameEvent::PhaseChangedForPlayer { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }

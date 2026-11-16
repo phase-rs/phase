@@ -31115,6 +31115,42 @@ fn combat_tax_sphere_of_safety_per_affected_and_ref() {
     ));
 }
 
+/// CR 508.1h differential: the printed Ghostly Prison sentence (for-each tail
+/// → `PerAffectedCreature`) vs the printed Brainwash sentence (no tail →
+/// `Flat`), asserted through the same helper in one test so a scaling-table
+/// mutation in either direction fails exactly one half. (Both halves also
+/// exist as class coverage at `combat_tax_ghostly_prison_per_affected_creature`
+/// and `combat_tax_brainwash_flat_aura` — this test is the discriminator.)
+/// REVERT-FAIL (tail lattice `(true, None)` arm → `Flat`): the Ghostly half
+/// fails. REVERT-FAIL (no-tail default → `PerAffectedCreature`): the
+/// Brainwash half fails. The two arms return an identical per-creature
+/// contribution at `compute_attack_tax`, so no runtime row can distinguish a
+/// Flat↔PerAffectedCreature mutation — this typed parser test is the only
+/// discriminator (verified load-bearing fact, §Step 2).
+#[test]
+fn combat_tax_scaling_distinguishes_per_affected_from_flat() {
+    let ghostly = parse_static_line(
+        "Creatures can't attack you unless their controller pays {2} for each creature they control that's attacking you.",
+    )
+    .expect("Ghostly Prison should parse");
+    let (ghostly_cost, ghostly_scaling) = extract_unless_pay(&ghostly);
+    assert_eq!(ghostly_cost.mana_value(), 2);
+    assert!(
+        matches!(ghostly_scaling, UnlessPayScaling::PerAffectedCreature),
+        "the written for-each tail must scale, got {ghostly_scaling:?}"
+    );
+
+    let brainwash =
+        parse_static_line("Enchanted creature can't attack unless its controller pays {3}.")
+            .expect("Brainwash should parse");
+    let (brainwash_cost, brainwash_scaling) = extract_unless_pay(&brainwash);
+    assert_eq!(brainwash_cost.mana_value(), 3);
+    assert!(
+        matches!(brainwash_scaling, UnlessPayScaling::Flat),
+        "the tailless sentence must stay flat, got {brainwash_scaling:?}"
+    );
+}
+
 /// CR 118.12a: Cowed by Wisdom — aura combat tax scaled by a game-state
 /// quantity without multiplying by the number of affected creatures.
 #[test]
@@ -31432,7 +31468,7 @@ fn combat_tax_onakke_oathkeeper_defended_planeswalker_only() {
     };
     assert_eq!(
         defended.as_ref(),
-        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker),
+        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None }),
         "Onakke Oathkeeper must defend only planeswalkers controlled by its controller",
     );
 }
@@ -31447,7 +31483,7 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
         .expect("subject combat rule should parse");
     assert_eq!(
         subject.attack_defended,
-        Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+        Some(crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     );
 
     let split = parse_static_line_multi(
@@ -31455,7 +31491,8 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
     );
     assert!(split.iter().any(|def| {
         def.mode == StaticMode::CantAttack
-            && def.attack_defended == Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+            && def.attack_defended
+                == Some(crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     }));
 
     let combined = parse_static_line_multi(
@@ -31463,7 +31500,8 @@ fn planeswalker_only_defended_scope_reaches_every_static_consumer() {
     );
     assert!(combined.iter().any(|def| {
         def.mode == StaticMode::CantAttack
-            && def.attack_defended == Some(crate::types::triggers::AttackTargetFilter::Planeswalker)
+            && def.attack_defended
+                == Some(crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     }));
 }
 
@@ -31483,7 +31521,7 @@ fn mixed_case_planeswalker_only_combat_tax_preserves_scaling() {
     };
     assert_eq!(
         defended.as_ref(),
-        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker)
+        Some(&crate::types::triggers::AttackTargetFilter::Planeswalker { subtype: None })
     );
 }
 
