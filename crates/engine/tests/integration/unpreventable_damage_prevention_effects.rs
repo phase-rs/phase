@@ -1974,12 +1974,12 @@ fn a_pause_in_the_first_clause_keeps_the_runs_reading() {
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            readings(&forwarded.context.settled_damage_guards),
+            readings(forwarded.context.settled_damage_guards.as_slice()),
             vec![(champion, DamageGuardReading::Holds)]
         );
         let else_clause = forwarded.else_ability.as_deref().expect("the else clause");
         assert_eq!(
-            readings(&else_clause.context.settled_damage_guards),
+            readings(else_clause.context.settled_damage_guards.as_slice()),
             vec![(champion, DamageGuardReading::Holds)]
         );
         // strict-failure: the printed second target is "target creature that player or that

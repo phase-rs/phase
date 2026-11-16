@@ -2167,6 +2167,41 @@ pub(crate) fn park_damage_batch(
     Ok(())
 }
 
+/// CR 608.2c + CR 616.1: a damage resolver that paused on a replacement choice parks this
+/// node's later instructions itself, behind its remaining recipients, and reports it with its
+/// frame's `parent_kind`. The chain's generic path would run them twice, the first time ahead
+/// of those recipients: Lightning Helix's "you gain 3 life" under Furnace of Rath and
+/// Phytohydra, or Shake the Foundations' "Draw a card." before the creatures still to be dealt
+/// damage. A rider this node opened keeps its pause with the generic path, whatever tagged the
+/// frame. Kept out of line: `resolve_chain_body` recurses once per instruction, and this
+/// check's temporaries must not sit on each of its frames.
+#[inline(never)]
+pub(super) fn damage_resolver_owns_tail(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    entered_without_continuation: bool,
+    damage_rider_resident_before: bool,
+) -> bool {
+    let resolver_parked_tail = entered_without_continuation
+        // A rider this node opened is not this node's park: the frame's tag may be the rider's
+        // own damage resolver (New Way Forward), and the tail takes the child-boundary arm.
+        && (damage_rider_resident_before || state.post_replacement_event_source().is_none())
+        && matches!(
+            ability.effect,
+            Effect::DealDamage { .. }
+                | Effect::DamageAll { .. }
+                | Effect::DamageEachPlayer { .. }
+                | Effect::EachDealsDamageEqualToPower { .. }
+                | Effect::EachSourceDealsDamage { .. }
+        )
+        && state.active_ability_continuation().is_some_and(|pending| {
+            pending.parent_kind == Some(EffectKind::from(&ability.effect))
+        });
+    // CR 120.4b + CR 616.1e: a two-phase damage batch that paused with no child frame parked its
+    // later instructions beneath its own resumable batch.
+    resolver_parked_tail || parked_batch_owns_tail(state, ability)
+}
+
 /// CR 120.4b + CR 616.1e: the active continuation is a batch this ability parked on top of its
 /// later instructions (`park_damage_batch`), so the chain must not park them again.
 pub(crate) fn parked_batch_owns_tail(state: &GameState, ability: &ResolvedAbility) -> bool {
@@ -2474,7 +2509,7 @@ fn keep_chain_identity(
     node.ability_index = ability.ability_index;
     // CR 608.2f + CR 700.1: a remaining portion of a simultaneous batch keeps the guards
     // the batch read; nothing else is such a portion (`apply_parent_chain_context`).
-    node.context.settled_damage_guards = replacement::settled_damage_guards(state);
+    node.context.settled_damage_guards = replacement::settled_damage_guards(state).into();
     // CR 616.1 + CR 101.4: deferred choices and held riders belong to the batch that parks
     // them only.
     node.context.parked_damage_batch = None;
@@ -2544,7 +2579,7 @@ pub(super) fn settle_joined_damage_run(
     let mut stamped = Box::new(ability.clone());
     let mut node = &mut *stamped;
     loop {
-        node.context.settled_damage_guards = guards.clone();
+        node.context.settled_damage_guards = guards.clone().into();
         if !joins_next_damage_clause(node) {
             return Some(stamped);
         }
@@ -2555,7 +2590,7 @@ pub(super) fn settle_joined_damage_run(
         node = match sub.condition {
             None => sub,
             Some(_) => {
-                sub.context.settled_damage_guards = guards.clone();
+                sub.context.settled_damage_guards = guards.clone().into();
                 sub.else_ability.as_deref_mut()?
             }
         };

@@ -283,6 +283,49 @@ impl<'de, K: Ord + Deserialize<'de>, V: Deserialize<'de>> Deserialize<'de> for L
     }
 }
 
+/// A rarely-populated `Vec` stored behind one pointer and allocated only while it holds an
+/// element: `None` when empty, so a type carrying it widens by 8 B instead of 24 (deep
+/// resolution chains keep many `ResolvedAbility` values on the stack). Serializes exactly as
+/// the `Vec` it holds.
+// The box is the point: one pointer instead of a `Vec`'s three words.
+#[allow(clippy::box_collection)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LazyBoxedVec<T>(Option<Box<Vec<T>>>);
+
+impl<T> Default for LazyBoxedVec<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T> LazyBoxedVec<T> {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+impl<T> From<Vec<T>> for LazyBoxedVec<T> {
+    fn from(items: Vec<T>) -> Self {
+        Self((!items.is_empty()).then(|| Box::new(items)))
+    }
+}
+
+impl<T: Serialize> Serialize for LazyBoxedVec<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_slice().serialize(serializer)
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for LazyBoxedVec<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<T>::deserialize(deserializer).map(Self::from)
+    }
+}
+
 fn nonzero_delta_magnitude(delta: i32) -> Result<u32, ResolvedPlayerEditReplayInvariantError> {
     (delta != 0)
         .then_some(delta.unsigned_abs())
@@ -53912,6 +53955,30 @@ mod tests {
             .is_none());
     }
 
+    /// `LazyBoxedVec` holds no allocation while empty, is one pointer wide, and serializes as
+    /// the plain `Vec` it holds.
+    #[test]
+    fn lazy_boxed_vec_is_one_pointer_and_unallocated_while_empty() {
+        assert_eq!(
+            std::mem::size_of::<LazyBoxedVec<u32>>(),
+            std::mem::size_of::<usize>()
+        );
+        let empty = LazyBoxedVec::<u32>::from(Vec::new());
+        assert!(empty.0.is_none() && empty.is_empty() && empty.as_slice().is_empty());
+        assert_eq!(empty, LazyBoxedVec::default());
+
+        let held = LazyBoxedVec::from(vec![1u32, 2]);
+        assert_eq!(held.as_slice(), [1, 2]);
+        assert_eq!(serde_json::to_string(&held).unwrap(), "[1,2]");
+        let decoded: LazyBoxedVec<u32> = serde_json::from_str("[1,2]").unwrap();
+        assert_eq!(decoded, held);
+        let decoded_empty: LazyBoxedVec<u32> = serde_json::from_str("[]").unwrap();
+        assert!(
+            decoded_empty.0.is_none(),
+            "an empty list decodes unallocated"
+        );
+    }
+
     /// CR 104.4b + CR 732.2a: repeated same-step zone cycles accumulate
     /// incarnation-versioned LKI, but snapshots no pending trigger can consume
     /// are history rather than a change to the recurring game state. A snapshot
@@ -66341,7 +66408,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({})).expect("legacy context");
         assert!(legacy_context.settled_damage_guards.is_empty());
         let context = SpellContext {
-            settled_damage_guards: vec![guard],
+            settled_damage_guards: vec![guard].into(),
             ..SpellContext::default()
         };
         let round_trip: SpellContext =

@@ -1908,9 +1908,14 @@ pub struct SplitDamagePortion {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
     /// CR 608.2f + CR 700.1: guards read for the simultaneous damage batch this node is a
-    /// remaining portion of. Node-local: a later instruction reads live (CR 700.1).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub settled_damage_guards: Vec<SettledDamageGuard>,
+    /// remaining portion of. Node-local: a later instruction reads live (CR 700.1). Lazily
+    /// boxed, like `parked_damage_batch`, so the common empty case keeps every
+    /// `ResolvedAbility` one pointer wider, not three.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::game_state::LazyBoxedVec::is_empty"
+    )]
+    pub settled_damage_guards: crate::types::game_state::LazyBoxedVec<SettledDamageGuard>,
     /// CR 616.1 + CR 101.4 + CR 615.5: what a parked two-phase damage batch
     /// (`Effect::ResumeDamageBatch`) carries besides its portions: the choices it deferred behind
     /// earlier players' outstanding ones, and the riders it holds until its damage is dealt.
@@ -2157,9 +2162,13 @@ pub struct SpellContext {
     /// CR 601.2 + CR 608.2c: Presence filters the controller matched as the
     /// spell was cast. Used by effects that say "if you controlled a [filter]
     /// as you cast this spell"; the resolver checks this snapshot instead of
-    /// the resolution-time battlefield.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub controller_controlled_as_cast: Vec<TargetFilter>,
+    /// the resolution-time battlefield. Lazily boxed: only a spell whose text reads such a
+    /// condition stamps it, and every `ResolvedAbility` carries the field.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::game_state::LazyBoxedVec::is_empty"
+    )]
+    pub controller_controlled_as_cast: crate::types::game_state::LazyBoxedVec<TargetFilter>,
     /// CR 702: Keyword origin carried from the parsed/synthesized definition
     /// into runtime resolution for keyword-specific events.
     #[serde(default, skip_serializing_if = "Option::is_none")]

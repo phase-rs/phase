@@ -27906,34 +27906,12 @@ fn resolve_chain_body(
         if attach_child_already_owns_tail {
             return Ok(progress);
         }
-        // CR 608.2c + CR 616.1: a damage resolver that paused on a replacement choice parks this
-        // node's later instructions itself, behind its remaining recipients, and reports it with
-        // its frame's `parent_kind`. The generic path below would run them twice, the first time
-        // ahead of those recipients: Lightning Helix's "you gain 3 life" under Furnace of Rath and
-        // Phytohydra, or Shake the Foundations' "Draw a card." before the creatures still to be
-        // dealt damage. A rider this node opened keeps its pause with the path below, whatever
-        // tagged the frame.
-        let damage_resolver_owns_tail = pending_continuation_before.is_none()
-            // A rider this node opened is not this node's park: the frame's tag may be the
-            // rider's own damage resolver (New Way Forward), and the tail takes the
-            // child-boundary arm below.
-            && (damage_rider_resident_before || state.post_replacement_event_source().is_none())
-            && matches!(
-                ability.effect,
-                Effect::DealDamage { .. }
-                    | Effect::DamageAll { .. }
-                    | Effect::DamageEachPlayer { .. }
-                    | Effect::EachDealsDamageEqualToPower { .. }
-                    | Effect::EachSourceDealsDamage { .. }
-            )
-            && state.active_ability_continuation().is_some_and(|pending| {
-                pending.parent_kind == Some(EffectKind::from(&ability.effect))
-            });
-        // CR 120.4b + CR 616.1e: a two-phase damage batch that paused with no child frame
-        // parked its later instructions beneath its own resumable batch.
-        let damage_resolver_owns_tail =
-            damage_resolver_owns_tail || deal_damage::parked_batch_owns_tail(state, ability);
-        if damage_resolver_owns_tail {
+        if deal_damage::damage_resolver_owns_tail(
+            state,
+            ability,
+            pending_continuation_before.is_none(),
+            damage_rider_resident_before,
+        ) {
             return Ok(progress);
         }
         // CR 608.2c: every later condition, alternative, sibling and target
@@ -30919,6 +30897,7 @@ pub(crate) fn evaluate_condition(
         AbilityCondition::ControllerControlledMatchingAsCast { filter } => ability
             .context
             .controller_controlled_as_cast
+            .as_slice()
             .iter()
             .any(|snapshot_filter| snapshot_filter == filter),
         // CR 608.2c: "If it's your turn" — check active player against the
@@ -60695,13 +60674,13 @@ mod tests {
             PlayerId(0),
         )
         .context(SpellContext {
-            controller_controlled_as_cast: vec![filter],
+            controller_controlled_as_cast: vec![filter].into(),
             ..SpellContext::default()
         });
 
         assert!(evaluate_condition(&condition, &state, &ability));
 
-        ability.context.controller_controlled_as_cast.clear();
+        ability.context.controller_controlled_as_cast = Default::default();
         assert!(!evaluate_condition(&condition, &state, &ability));
     }
 
