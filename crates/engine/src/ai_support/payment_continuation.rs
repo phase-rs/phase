@@ -87,6 +87,18 @@ pub struct AcceptedPaymentSuccessor {
     pub action: GameAction,
     pub state: GameState,
     pub step: PaymentContinuationStep,
+    /// The accepted edge's own reducer step, for consumers that read the step
+    /// rather than only its successor.
+    pub trace: WitnessedStepTrace,
+}
+
+/// What one reducer step left besides its successor state: the events it
+/// returned, and the deferred-trigger queue's length before it ran. The
+/// payment-surplus certificate's CR 603.2 trigger check reads both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WitnessedStepTrace {
+    pub events: Vec<GameEvent>,
+    pub deferred_triggers_before: usize,
 }
 
 /// What the accepted edge's own reducer step did to the payment root.
@@ -218,6 +230,23 @@ pub fn witness_payment_continuation(
 ) -> Option<AcceptedPaymentSuccessor> {
     let batch = witness_payment_continuations(state, std::slice::from_ref(action));
     batch.successors.into_iter().next().flatten()
+}
+
+/// CR 601.2h–i / CR 602.2b: apply `action` once to a copy of `state` and return
+/// the successor when that single reducer step finalizes the affiliated root
+/// in progress — the same finalization predicate the witness's root step uses,
+/// without its continuation search. `None` when `state` is not an affiliated
+/// payment, the action is rejected, or the root is not finalized by this step.
+pub fn finalizes_in_one_step(state: &GameState, action: &GameAction) -> Option<GameState> {
+    let PaymentContinuationState::Affiliated(root) = classify_payment_continuation(state) else {
+        return None;
+    };
+    let baseline = WitnessBaseline::capture(state, &root)?;
+    let mut successor = state.clone();
+    let result = apply_as_current_for_simulation(&mut successor, action.clone()).ok()?;
+    (!root_present(&successor, &root)
+        && finalized_root_matches(&successor, &root, &baseline, &result.events))
+    .then_some(successor)
 }
 
 /// Witness all raw actions for one exact payment decision with a shared bounded
@@ -592,6 +621,10 @@ fn witness_payment_continuations_inner(
                     action: action.clone(),
                     state: successor,
                     step: PaymentContinuationStep::Finalizes,
+                    trace: WitnessedStepTrace {
+                        events: result.events,
+                        deferred_triggers_before: state.deferred_triggers.len(),
+                    },
                 });
                 if let SearchPolicy::AnyRoot { .. } = policy {
                     return (
@@ -617,6 +650,7 @@ fn witness_payment_continuations_inner(
                 root_index: index,
                 root_action: action.clone(),
                 root_successor: successor.clone(),
+                root_events: result.events.clone(),
                 state: successor,
                 events: result.events,
                 remaining_actions: None,
@@ -671,6 +705,10 @@ fn witness_payment_continuations_inner(
                     action: node.root_action,
                     state: node.root_successor,
                     step: PaymentContinuationStep::Continues,
+                    trace: WitnessedStepTrace {
+                        events: node.root_events,
+                        deferred_triggers_before: state.deferred_triggers.len(),
+                    },
                 });
                 if let SearchPolicy::AnyRoot { .. } = policy {
                     return (
@@ -711,6 +749,7 @@ fn witness_payment_continuations_inner(
                 root_index: node.root_index,
                 root_action: node.root_action,
                 root_successor: node.root_successor,
+                root_events: node.root_events,
                 state: next_state,
                 events,
                 remaining_actions: None,
@@ -766,6 +805,8 @@ struct WitnessNode {
     root_index: usize,
     root_action: GameAction,
     root_successor: GameState,
+    /// The root step's own events (`events` accumulates the whole path).
+    root_events: Vec<GameEvent>,
     state: GameState,
     events: Vec<GameEvent>,
     remaining_actions: Option<(Vec<GameAction>, usize)>,
