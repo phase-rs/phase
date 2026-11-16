@@ -5483,32 +5483,24 @@ fn migrate_legacy_change_zone_performers(value: &mut Value, version: u64) {
 /// Pre-v15 logical-zone owners did not record prospective entrants. Their
 /// missing list retains the legacy empty-list meaning; present lists, including
 /// malformed ones, remain untouched so the strict group decoder validates them.
-/// This migration is confined to the two owner schemas and their v1 slots.
+fn migrate_legacy_prospective_entrants_owner(owner: &mut Value) {
+    if let Some(group) = owner
+        .get_mut("logical_zone_change_group")
+        .and_then(Value::as_object_mut)
+    {
+        group
+            .entry("prospective_entrants")
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+}
+
+/// The v2–v14 half of the prospective-entrant migration: the two owner schemas
+/// on the typed frame stack. Their v1 slots are migrated by the v1 reader arm.
 fn migrate_legacy_prospective_entrants(value: &mut Value, version: u64) {
     if version > LEGACY_UNRECORDED_PROSPECTIVE_ENTRANTS_RESOLUTION_STATE_WIRE_VERSION {
         return;
     }
 
-    fn migrate_owner(owner: &mut Value) {
-        if let Some(group) = owner
-            .get_mut("logical_zone_change_group")
-            .and_then(Value::as_object_mut)
-        {
-            group
-                .entry("prospective_entrants")
-                .or_insert_with(|| Value::Array(Vec::new()));
-        }
-    }
-
-    for key in [
-        "pending_change_zone_iteration",
-        "pending_batch_deliveries",
-        "pending_mill_deliveries",
-    ] {
-        if let Some(owner) = value.get_mut(key) {
-            migrate_owner(owner);
-        }
-    }
     if let Some(frames) = value
         .get_mut("resolution_frames")
         .and_then(|stack| stack.get_mut("frames"))
@@ -5521,12 +5513,12 @@ fn migrate_legacy_prospective_entrants(value: &mut Value, version: u64) {
                         .get_mut("data")
                         .and_then(|data| data.get_mut("pending"))
                     {
-                        migrate_owner(owner);
+                        migrate_legacy_prospective_entrants_owner(owner);
                     }
                 }
                 Some("BatchDelivery") => {
                     if let Some(owner) = frame.get_mut("data") {
-                        migrate_owner(owner);
+                        migrate_legacy_prospective_entrants_owner(owner);
                     }
                 }
                 Some(_) | None => {}
@@ -5977,6 +5969,17 @@ impl ResolutionStateWire {
                 // whole-value walks reach this carrier, but they only rewrite or
                 // refuse shapes a writer never puts in its `remaining` or entry
                 // fields, so the migrated result is unchanged.
+                // v1 owners never recorded prospective entrants; their missing
+                // list keeps its legacy empty meaning.
+                for key in [
+                    "pending_change_zone_iteration",
+                    "pending_batch_deliveries",
+                    "pending_mill_deliveries",
+                ] {
+                    if let Some(owner) = value.get_mut(key) {
+                        migrate_legacy_prospective_entrants_owner(owner);
+                    }
+                }
                 if let Some(carrier) = value
                     .get_mut("pending_change_zone_iteration")
                     .filter(|carrier| !carrier.is_null())
