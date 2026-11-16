@@ -23,6 +23,8 @@ struct Board {
     target: ObjectId,
     bystander: ObjectId,
     shock: ObjectId,
+    /// A second Shock, to finish the damaged target after the spell resolved.
+    finisher: ObjectId,
 }
 
 /// P0 casts at an opposing creature with `target_toughness`; a second opposing 2/2
@@ -62,12 +64,21 @@ fn board(target_toughness: i32, lessons: usize) -> Board {
             "Shock deals 2 damage to target creature.",
         )
         .id();
+    let finisher = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Shock",
+            true,
+            "Shock deals 2 damage to target creature.",
+        )
+        .id();
     Board {
         runner: scenario.build(),
         spell,
         target,
         bystander,
         shock,
+        finisher,
     }
 }
 
@@ -109,13 +120,21 @@ fn nonlethal_damage_leaves_the_creature_on_the_battlefield() {
     );
 }
 
-/// The replacement is about THAT creature only. A different creature dying later
-/// this turn must reach the graveyard normally.
+/// Paired positive + negative. POSITIVE reach-guard: the 4/4 survives the spell with 2
+/// damage marked, and a later Shock finishes it, so the rider (installed at resolution) must
+/// exile it. NEGATIVE, afterwards on the same board: an unrelated creature killed by the other
+/// Shock goes to the graveyard, so the replacement is scoped to the damaged creature only.
 #[test]
-fn other_creatures_dying_this_turn_are_not_exiled() {
-    let mut b = board(5, 0);
+fn replacement_is_live_on_the_target_and_scoped_to_it() {
+    let mut b = board(4, 0);
     b.runner.cast(b.spell).target_object(b.target).resolve();
-    // Kill the bystander with an ordinary damage spell cast after the replacement is live.
+    assert_eq!(b.runner.state().objects[&b.target].damage_marked, 2);
+    let finished = b.runner.cast(b.finisher).target_object(b.target).resolve();
+    assert_eq!(
+        finished.zone_of(b.target),
+        Zone::Exile,
+        "the rider installed at resolution exiles the target when it later dies this turn"
+    );
     let outcome = b.runner.cast(b.shock).target_object(b.bystander).resolve();
     assert_eq!(
         outcome.zone_of(b.bystander),

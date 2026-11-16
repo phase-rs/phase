@@ -21,9 +21,23 @@ use engine::types::zones::Zone;
 
 const SHOCK: &str = "Shock deals 2 damage to target creature.";
 
+/// Whether the spell under test is an instant or a sorcery (CR 304 / CR 307).
+#[derive(Clone, Copy)]
+enum SpellKind {
+    Instant,
+    Sorcery,
+}
+
+impl SpellKind {
+    /// The scenario builder takes this as a boolean at its call boundary only.
+    fn is_instant(self) -> bool {
+        matches!(self, Self::Instant)
+    }
+}
+
 struct Case {
     oracle: &'static str,
-    instant: bool,
+    kind: SpellKind,
     modes: Option<&'static [usize]>,
     x: Option<u32>,
     damage: i32,
@@ -59,7 +73,7 @@ fn stage(c: &Case, name: &str) -> (GameScenario, ObjectId) {
             .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
             .collect(),
     );
-    let mut b = scenario.add_spell_to_hand_from_oracle(P0, name, c.instant, c.oracle);
+    let mut b = scenario.add_spell_to_hand_from_oracle(P0, name, c.kind.is_instant(), c.oracle);
     if c.x.is_some() {
         b.with_mana_cost(ManaCost::Cost {
             shards: vec![ManaCostShard::X],
@@ -96,13 +110,13 @@ fn single_target(c: Case, name: &str) {
 }
 
 macro_rules! single {
-    ($fn:ident, $name:expr, $oracle:expr, $instant:expr, $modes:expr, $x:expr, $dmg:expr) => {
+    ($fn:ident, $name:expr, $oracle:expr, $kind:expr, $modes:expr, $x:expr, $dmg:expr) => {
         #[test]
         fn $fn() {
             single_target(
                 Case {
                     oracle: $oracle,
-                    instant: $instant,
+                    kind: $kind,
                     modes: $modes,
                     x: $x,
                     damage: $dmg,
@@ -115,31 +129,31 @@ macro_rules! single {
 
 single!(bot_bashing_time, "Bot Bashing Time",
     "Bot Bashing Time deals 6 damage to target creature. If that creature would die this turn, exile it instead.",
-    false, None, None, 6);
+    SpellKind::Sorcery, None, None, 6);
 single!(feed_the_flames, "Feed the Flames",
     "Feed the Flames deals 5 damage to target creature. If that creature would die this turn, exile it instead.",
-    true, None, None, 5);
+    SpellKind::Instant, None, None, 5);
 single!(narsets_rebuke, "Narset's Rebuke",
     "Narset's Rebuke deals 5 damage to target creature. Add {U}{R}{W}. If that creature would die this turn, exile it instead.",
-    true, None, None, 5);
+    SpellKind::Instant, None, None, 5);
 single!(khaaaaaaaaaaaannn, "Khaaaaaaaaaaaannn!",
     "Khaaaaaaaaaaaannn! deals twice X damage to target creature. If that creature would die this turn, exile it instead.",
-    true, None, Some(2), 4);
+    SpellKind::Instant, None, Some(2), 4);
 single!(ob_nixilis_cruelty, "Ob Nixilis's Cruelty",
     "Target creature gets -5/-5 until end of turn. If that creature would die this turn, exile it instead.",
-    true, None, None, 5);
+    SpellKind::Instant, None, None, 5);
 single!(sparks_ablaze, "Sparks Ablaze",
     "Sparks Ablaze deals 2 damage to target creature or planeswalker. If that creature or planeswalker would die this turn, exile it instead.\nThe next planeswalker spell you cast costs {1} less to cast.",
-    true, None, None, 2);
+    SpellKind::Instant, None, None, 2);
 single!(pinecone_strike, "Pinecone Strike",
     "Choose one or both —\n• Pinecone Strike deals 3 damage to target creature. If that creature would die this turn, exile it instead.\n• Destroy target artifact token.",
-    true, Some(&[0]), None, 3);
+    SpellKind::Instant, Some(&[0]), None, 3);
 single!(suplex, "Suplex",
     "Choose one —\n• Suplex deals 3 damage to target creature. If that creature would die this turn, exile it instead.\n• Exile target artifact.",
-    false, Some(&[0]), None, 3);
+    SpellKind::Sorcery, Some(&[0]), None, 3);
 single!(brutal_expulsion, "Brutal Expulsion",
     "Devoid (This card has no color.)\nChoose one or both —\n• Return target spell or creature to its owner's hand.\n• Brutal Expulsion deals 2 damage to target creature or planeswalker. If that creature or planeswalker would die this turn, exile it instead.",
-    true, Some(&[1]), None, 2);
+    SpellKind::Instant, Some(&[1]), None, 2);
 
 const BOUNCERS_BEATDOWN: &str = "This spell costs {2} less to cast if it targets a black permanent.\nBouncer's Beatdown deals X damage to target creature or planeswalker, where X is the greatest power among creatures you control. If that creature or planeswalker would die this turn, exile it instead.";
 
@@ -197,5 +211,31 @@ fn brutal_expulsion_both_modes_binds_rider_to_the_damaged_creature() {
         outcome.zone_of(damaged),
         Zone::Exile,
         "the rider binds to the creature dealt lethal damage by mode 2"
+    );
+}
+
+/// CR 704.5i + CR 614.6: "creature or planeswalker" — a planeswalker that reaches 0 loyalty
+/// from Brutal Expulsion's damage is put into the graveyard by a state-based action, which
+/// is a separate path from creature death; the rider must exile it instead.
+#[test]
+fn brutal_expulsion_exiles_a_planeswalker_that_loses_all_loyalty() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let walker = scenario
+        .add_planeswalker_from_oracle(P1, "Test Walker", "Gideon", 2, "")
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Brutal Expulsion", true, BRUTAL_EXPULSION)
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner
+        .cast(spell)
+        .modes(&[1])
+        .target_object(walker)
+        .resolve();
+    assert_eq!(
+        outcome.zone_of(walker),
+        Zone::Exile,
+        "the damaged planeswalker is exiled instead of dying to 0 loyalty"
     );
 }
