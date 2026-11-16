@@ -8158,6 +8158,10 @@ pub enum TargetFilter {
     /// `ScopedPlayer`'s sentinel role for "each player's library". It never survives into
     /// a finished `AbilityDefinition`: `lift_distributive_exile_top_scope` rewrites it to
     /// `Controller` and stamps `AbilityDefinition.player_scope = Some(PlayerFilter::Opponent)`.
+    ///
+    /// THIRD ROLE (CR 118.12a): as `UnlessPayModifier.payer` it is the "unless any opponent
+    /// pays ..." poll (Sword-Point Diplomacy) — each opponent in APNAP order, the first to
+    /// pay prevents the effect, mirroring `AllPlayers` for "any player pays".
     Opponent,
     SelfRef,
     /// CR 201.5a: The specific object that GRANTED the ability this filter lives

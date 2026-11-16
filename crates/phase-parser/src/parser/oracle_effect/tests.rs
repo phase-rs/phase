@@ -10492,6 +10492,42 @@ fn effect_resolution_unless_any_player_pays_life() {
     ));
 }
 
+/// CR 118.12a + CR 608.2c: Sword-Point Diplomacy — the per-card "unless any
+/// opponent pays 3 life" clause lowers to a member-driven loop over the
+/// revealed set, each iteration moving that card to hand unless an opponent pays.
+#[test]
+fn sword_point_diplomacy_unless_any_opponent_pays_life() {
+    let def = parse_effect_chain(
+        "Reveal the top three cards of your library. For each of those cards, put that card into your hand unless any opponent pays 3 life. Then exile the rest.",
+        AbilityKind::Spell,
+    );
+    let defs = chain_defs(&def);
+    assert_eq!(defs.len(), 3, "{defs:#?}");
+    let per_card = defs[1];
+    assert_eq!(unimplemented_name(per_card), None, "{per_card:#?}");
+    let unless_pay = per_card.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Opponent);
+    assert!(matches!(
+        unless_pay.cost,
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 3 }
+        }
+    ));
+    assert!(
+        matches!(
+            &*per_card.effect,
+            Effect::ChangeZone {
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "{:?}",
+        per_card.effect
+    );
+    assert!(per_card.repeat_for.is_some(), "{per_card:#?}");
+}
+
 /// CR 118.12a: Nicol Bolas, the Deceiver [+3] — "Each opponent loses 3
 /// life unless that player sacrifices ... or discards a card." The "that
 /// player" payer pronoun + "-s" verb forms must route through the

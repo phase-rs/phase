@@ -5585,6 +5585,26 @@ pub(crate) fn strip_for_each_prefix_with_difference(
         if let Ok((remainder, clause)) =
             terminated(take_until(", "), tag::<_, _, OracleError<'_>>(", ")).parse(rest_lower)
         {
+            // CR 608.2c: "for each of those cards, <effect> that card" iterates the
+            // chain's tracked set one member at a time — the body's "that card"
+            // anaphor binds the per-iteration member (Sword-Point Diplomacy).
+            // Gated on the body naming "that card" so the distributive-but-not-
+            // per-member readings ("its owner may play it", "pay N life or ...")
+            // keep their own lowerings.
+            if tag::<_, _, OracleError<'_>>("of those cards")
+                .parse(clause)
+                .is_ok_and(|(clause_rest, _)| clause_rest.is_empty())
+                && nom_primitives::scan_contains(remainder, "that card")
+            {
+                let offset = text.len() - remainder.len();
+                return (
+                    Some(QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize,
+                    }),
+                    None,
+                    text[offset..].to_string(),
+                );
+            }
             let parsed_comparison = nom_quantity::parse_for_each_clause_ref_with_difference(clause)
                 .ok()
                 .and_then(|(rest, parsed)| rest.is_empty().then_some(parsed));

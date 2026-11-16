@@ -2943,6 +2943,13 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // that the depth==0 prelude in `resolve_ability_chain` would
             // otherwise reset. The resumed iteration is logically continuing the
             // outer chain, not starting a fresh top-level resolution.
+            let mut sibling_tail_deferred = iter_effective.clone();
+            strip_sibling_tail_before_last_member(
+                &mut sibling_tail_deferred,
+                iteration,
+                total_iterations,
+            );
+            let iter_effective = &sibling_tail_deferred;
             let progress =
                 match with_iteration_return_result_occurrence(state, iter_effective, |state| {
                     resolve_ability_chain_step(state, iter_effective, events, 1)
@@ -16380,6 +16387,50 @@ pub(crate) fn bind_detached_continuation_to_parent(
 /// complete object list with its one current member while retaining independent
 /// player targets. Ordinary member loops retain the established first-slot
 /// binding for their independent target slots.
+/// CR 608.2c: pin the `TrackedSetId(0)` ("latest set") sentinel of the independent
+/// sibling tail of a per-member unless-payment loop to the set the loop iterates.
+/// Each member's payment pause re-enters the chain at depth 0, which forgets the
+/// chain set, and each declined member's move then publishes a fresh set — so an
+/// unpinned "the rest" would read the last-moved card's set instead of the
+/// revealed cards.
+fn pin_member_loop_tail_to_set(ability: &mut ResolvedAbility, set_id: TrackedSetId) {
+    let Some(sub) = ability.sub_ability.as_deref_mut() else {
+        return;
+    };
+    if sub.sub_link != SubAbilityLink::SequentialSibling {
+        return;
+    }
+    let sentinel = TrackedSetId(0);
+    match &mut sub.effect {
+        Effect::ChangeZoneAll {
+            target: TargetFilter::TrackedSet { id },
+            ..
+        } if *id == sentinel => *id = set_id,
+        _ => {}
+    }
+}
+
+/// CR 608.2c + CR 118.12a: a per-member unless-payment loop repeats only the
+/// instruction that carries the payment. An independent following sentence
+/// (`SubAbilityLink::SequentialSibling` — Sword-Point Diplomacy's "Then exile the
+/// rest.") reads the outcome of EVERY member, so it runs once, after the final
+/// member's payment decision, rather than after each member's.
+fn strip_sibling_tail_before_last_member(
+    ability: &mut ResolvedAbility,
+    iteration: usize,
+    total_iterations: usize,
+) {
+    if ability.unless_pay.is_some()
+        && iteration + 1 < total_iterations
+        && ability
+            .sub_ability
+            .as_deref()
+            .is_some_and(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+    {
+        ability.sub_ability = None;
+    }
+}
+
 fn rebind_member_driven_parent_target(ability: &mut ResolvedAbility, member: ObjectId) {
     // The member is this iteration's object, not an announced target: it is
     // written unpinned, while every retained (player) occurrence keeps its own
@@ -16447,6 +16498,21 @@ fn has_member_driven_repeat(ability: &ResolvedAbility) -> bool {
             qty: QuantityRef::ObjectCount { .. },
         })
     ) && effect_iterates_over_parent_target(&ability.effect)
+        || has_tracked_set_unless_member_loop(ability)
+}
+
+/// CR 118.12a + CR 608.2c: a per-member unless payment over the chain's tracked
+/// set ("for each of those cards, put that card into your hand unless any
+/// opponent pays 3 life" — Sword-Point Diplomacy) asks its payer(s) once per
+/// member, so each iteration must bind its own member before the payment gate.
+fn has_tracked_set_unless_member_loop(ability: &ResolvedAbility) -> bool {
+    matches!(
+        ability.repeat_for,
+        Some(QuantityExpr::Ref {
+            qty: QuantityRef::TrackedSetSize,
+        })
+    ) && ability.unless_pay.is_some()
+        && effect_refs_parent_target(&ability.effect)
 }
 
 pub(crate) fn has_member_driven_repeat_after_hydration(
@@ -23569,10 +23635,13 @@ fn resolve_chain_body(
                 }
                 Some(QuantityExpr::Ref {
                     qty: QuantityRef::TrackedSetSize,
-                }) if effect_refs_parent_target(&effective.effect) => state
-                    .chain_tracked_set_id
-                    .and_then(|id| state.tracked_object_sets.get(&id).cloned())
-                    .unwrap_or_default(),
+                }) if effect_refs_parent_target(&effective.effect) => {
+                    member_driven = has_tracked_set_unless_member_loop(effective);
+                    state
+                        .chain_tracked_set_id
+                        .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                        .unwrap_or_default()
+                }
                 Some(QuantityExpr::Ref {
                     qty: QuantityRef::ObjectCount { filter },
                 }) if effect_iterates_over_parent_target(&effective.effect) => {
@@ -23601,6 +23670,19 @@ fn resolve_chain_body(
                     }
                 }
                 _ => Vec::new(),
+            };
+
+            // CR 608.2c: a per-member unless loop's independent tail reads the
+            // loop's own set, whichever later publication shadows "the latest".
+            let pinned_tail;
+            let effective = match state.chain_tracked_set_id {
+                Some(set_id) if member_driven && effective.unless_pay.is_some() => {
+                    let mut pinned = effective.clone();
+                    pin_member_loop_tail_to_set(&mut pinned, set_id);
+                    pinned_tail = pinned;
+                    &pinned_tail
+                }
+                _ => effective,
             };
 
             // CR 122.1 + CR 608.2c: A `repeat_for: DistinctCounterKindsAmong`
@@ -23789,6 +23871,13 @@ fn resolve_chain_body(
                 if repeated_full_chain {
                     let mut full_chain_iteration = iter_effective.clone();
                     full_chain_iteration.repeat_for = None;
+                    if member_driven {
+                        strip_sibling_tail_before_last_member(
+                            &mut full_chain_iteration,
+                            iteration,
+                            iterations,
+                        );
+                    }
                     full_chain_iteration.copy_count_status =
                         crate::types::ability::CopyCountStatus::Finalized;
                     progress = with_iteration_return_result_occurrence(
@@ -28429,6 +28518,12 @@ fn resolve_unless_payers(
 ) -> Vec<crate::types::player::PlayerId> {
     match payer {
         TargetFilter::AllPlayers => crate::game::players::apnap_order(state),
+        // CR 118.12a + CR 101.4: "unless any opponent pays ..." polls each
+        // opponent of the ability's controller in APNAP order.
+        TargetFilter::Opponent => crate::game::players::apnap_order(state)
+            .into_iter()
+            .filter(|&player| crate::game::players::is_opponent(state, ability.controller, player))
+            .collect(),
         _ => resolve_unless_payer(state, ability, payer)
             .into_iter()
             .collect(),

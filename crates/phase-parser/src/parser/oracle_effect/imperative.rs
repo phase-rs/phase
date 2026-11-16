@@ -11863,6 +11863,29 @@ pub(super) fn parse_exile_ast(
     let (_, rest_text) = nom_on_lower(text, lower, |input| value((), tag("exile ")).parse(input))?;
     let rest_lower = &lower[lower.len() - rest_text.len()..];
 
+    // CR 608.2c + CR 701.13a: "exile the rest" names every card of the chain's
+    // revealed/looked-at set that is still in the library once the earlier
+    // instructions have moved their share (Sword-Point Diplomacy, Eye of
+    // Yawgmoth). It is a mass move over that set — never a one-card choice — and
+    // cards already routed elsewhere (to hand) are not "the rest".
+    if all_consuming(terminated(
+        tag::<_, _, OracleError<'_>>("the rest"),
+        opt(one_of(".;")),
+    ))
+    .parse(rest_lower)
+    .is_ok()
+    {
+        return Some(ZoneCounterImperativeAst::Exile {
+            origin: Some(Zone::Library),
+            target: TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+            all: true,
+            enter_with_counters: vec![],
+            multi_target: None,
+        });
+    }
+
     if let Some(target) = try_parse_heterogeneous_chosen_exile(rest_lower, ctx) {
         return Some(ZoneCounterImperativeAst::Exile {
             origin: None,
