@@ -19097,11 +19097,6 @@ pub(crate) fn bind_detached_continuation_to_parent(
     inherit_missing_parent_referent(continuation, parent);
 }
 
-/// CR 701.20e + CR 608.2c: A carried look-result collection owns every object
-/// target on its immediate looping child, so each iteration must replace the
-/// complete object list with its one current member while retaining independent
-/// player targets. Ordinary member loops retain the established first-slot
-/// binding for their independent target slots.
 /// CR 608.2c: pin the `TrackedSetId(0)` ("latest set") sentinel of the independent
 /// sibling tail of a per-member unless-payment loop to the set the loop iterates.
 /// Each member's payment pause re-enters the chain at depth 0, which forgets the
@@ -19148,6 +19143,11 @@ fn strip_sibling_tail_before_last_member(
     }
 }
 
+/// CR 701.20e + CR 608.2c: A carried look-result collection owns every object
+/// target on its immediate looping child, so each iteration must replace the
+/// complete object list with its one current member while retaining independent
+/// player targets. Ordinary member loops retain the established first-slot
+/// binding for their independent target slots.
 fn rebind_member_driven_parent_target(ability: &mut ResolvedAbility, member: ObjectId) {
     // The member is this iteration's object, not an announced target: it is
     // written unpinned, while every retained (player) occurrence keeps its own
