@@ -265,16 +265,96 @@
     "clearOverride": "Limpar Substituição de Arte"
   },
   "bracket": {
-    "unavailable": "A estimativa de bracket não está disponível nesta build.",
+    "card": {
+      "estimatedLabel": "Bracket estimado",
+      "tierName": "B{{tier}} {{label}}",
+      "tierShort": "B{{tier}}",
+      "declaredNone": "Declarado: nenhum",
+      "declared": "Declarado: B{{tier}} {{label}}",
+      "youMarker": "Você",
+      "belowFloor": "Você declarou B{{declared}}, mas este deck não pode ficar abaixo de B{{floor}}. A IA joga o seu B{{declared}} declarado.",
+      "partialCoverage_one": "{{count}} nome de carta não foi encontrado; as contagens podem estar baixas",
+      "partialCoverage_few": "{{count}} nomes de cartas não foram encontrados; as contagens podem estar baixas",
+      "partialCoverage_many": "{{count}} nomes de cartas não foram encontrados; as contagens podem estar baixas",
+      "partialCoverage_other": "{{count}} nomes de cartas não foram encontrados; as contagens podem estar baixas",
+      "combosUnchecked": "Os combos de duas cartas não foram verificados nesta compilação. Responda à pergunta sobre combos acima para incluí-los.",
+      "tabsLabel": "Detalhes do bracket",
+      "tabWhy": "Por que B{{tier}}",
+      "tabBringDown": "Reduzir",
+      "commanderTag": "Comandante",
+      "listComma": ", ",
+      "listOr": " ou ",
+      "why": {
+        "nothingRaises": "Nada neste deck o eleva acima de B2, onde toda estimativa começa.",
+        "rulesOutB1": "Estes impedem declarar B1:"
+      },
+      "reason": {
+        "cardRule": "{{axis}}: {{count}}",
+        "comboStandalone": "Combo de duas cartas",
+        "comboEarly": "Combo rápido de duas cartas",
+        "ownerAnswer": "Sua resposta sobre combos",
+        "ownerIntended": "Você disse que este deck tem um combo de duas cartas intencional.",
+        "ownerIntendedEarly": "Você disse que este deck tem um combo de duas cartas no início do jogo.",
+        "ownerIntendedLate": "Você disse que este deck tem um combo de duas cartas que só se completa tarde.",
+        "comboFromTable": "(combo)"
+      },
+      "combo": {
+        "assembles": "se monta por {{cost}} de mana"
+      },
+      "explain": {
+        "cardRule": "B{{tier}} permite até {{allowed}}; este deck tem {{observed}}.",
+        "cardRuleNone": "B{{tier}} não permite nenhuma; este deck tem {{observed}}.",
+        "comboStandalone": "B1 e B2 não permitem combos infinitos de duas cartas intencionais.",
+        "comboEarly": "B3 só permite combos de duas cartas se eles se completarem tarde (mais de {{ceiling}} de mana).",
+        "ownerAnswer": "A phase não consegue verificar esta resposta; ela usa o que você informou. Altere na pergunta sobre combos acima."
+      },
+      "source": "{{document}}, {{published}} ↗",
+      "ladder": {
+        "removeAll_one": "Remova-a:",
+        "removeAll_few": "Remova todas as {{count}}:",
+        "removeAll_many": "Remova todas as {{count}}:",
+        "removeAll_other": "Remova todas as {{count}}:",
+        "removeSome_one": "Remova {{count}} entre:",
+        "removeSome_few": "Remova {{count}} entre:",
+        "removeSome_many": "Remova {{count}} entre:",
+        "removeSome_other": "Remova {{count}} entre:",
+        "breakCombo": "Quebre o combo",
+        "removeOneOf": "Remova uma entre:",
+        "removeThis": "Remova:",
+        "replaceCommander_one": "Para descer mais, também é preciso outro comandante:",
+        "replaceCommander_few": "Para descer mais, também são necessários {{count}} comandantes diferentes:",
+        "replaceCommander_many": "Para descer mais, também são necessários {{count}} comandantes diferentes:",
+        "replaceCommander_other": "Para descer mais, também são necessários {{count}} comandantes diferentes:",
+        "changeComboAnswer": "Altere sua resposta sobre combos na pergunta acima.",
+        "footnote": "B2 é o mais baixo que a estimativa chega; B1 depende do tema do deck."
+      }
+    },
+    "unavailable": "A estimativa de bracket precisa de dados de cartas que ainda não foram carregados.",
     "addCommander": "Adicione um comandante para ver sua estimativa de bracket.",
-    "estimated": "Estimado: B{{tier}} {{label}}",
-    "manual": "Manual: B{{tier}} {{label}}",
-    "mismatch": " ⚠ divergência",
-    "hideBreakdown": "Ocultar detalhamento",
-    "showBreakdown": "Mostrar detalhamento",
-    "hideBreakdownButton": "▲ Ocultar detalhamento",
-    "showBreakdownButton": "▼ Mostrar detalhamento",
-    "forced": "(B{{tier}} forçado)",
+    "axis": {
+      "gameChangers": "Game Changers",
+      "massLandDenial": "Negação em massa de terrenos",
+      "extraTurns": "Turnos extras",
+      "efficientTutors": "Tutores eficientes"
+    },
+    "combo": {
+      "attribution": "Dados de combos: {{attribution}}, captura de {{date}}",
+      "outcome": {
+        "wins": "Vence o jogo",
+        "unbounded": "{{resource}} sem limite"
+      },
+      "resource": {
+        "mana": "mana",
+        "damage": "dano",
+        "lifeLoss": "perda de vida",
+        "lifegain": "ganho de vida",
+        "mill": "moagem",
+        "draw": "compra de cartas",
+        "tokens": "fichas",
+        "combat": "fases de combate",
+        "turns": "turnos"
+      }
+    },
     "dataVersion": "Dados: {{version}}",
     "aboutBrackets": "Sobre brackets ↗",
     "estimatedChip": "Estimado: B{{tier}}",
@@ -285,6 +365,37 @@
   "bracketPicker": {
     "ariaLabel": "Bracket do deck",
     "unrated": "Sem classificação"
+  },
+  "signals": {
+    "title": "Sinais do deck",
+    "disclaimer": "Estatísticas descritivas do texto analisado das cartas do deck. Não são critérios de bracket e nunca alteram a estimativa.",
+    "avgManaValue": "Valor de mana médio (não terrenos): {{value}}",
+    "notMeasurable": "não mensurável",
+    "noCommander": "Adicione um comandante para ver os sinais do deck.",
+    "unavailable": "Os sinais do deck precisam de dados de cartas, que ainda não foram carregados.",
+    "unresolved": "{{n}} nomes de cartas não foram encontrados nos dados de cartas.",
+    "kind": {
+      "counterspells": "Contramágicas",
+      "spot_removal": "Remoção pontual",
+      "sweepers": "Limpadores de mesa",
+      "card_advantage": "Vantagem de cartas",
+      "free_interaction": "Interação gratuita",
+      "mana_producers": "Produtores de mana",
+      "land_fetch": "Busca de terrenos",
+      "rituals": "Rituais",
+      "extra_land_drops": "Terrenos adicionais por turno"
+    }
+  },
+  "comboBarometer": {
+    "ariaLabel": "Combo infinito de duas cartas",
+    "question": "Combo infinito intencional de duas cartas?",
+    "undeclared": "Sem resposta",
+    "noneIntended": "Nenhum intencional",
+    "intended": "Intencional",
+    "windowAriaLabel": "Quando pode ser montado?",
+    "windowUnstated": "Não especificado",
+    "windowEarly": "Início de jogo",
+    "windowLate": "Apenas no fim do jogo"
   },
   "warnings": {
     "commanderCount": "O deck tem {{count}} cartas (precisa de exatamente {{expected}})",
