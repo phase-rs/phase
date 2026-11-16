@@ -3681,10 +3681,16 @@ pub struct PendingAttachmentRemainder {
 ///   made (replacement-made tokens included, CR 614.1a), pinned at creation
 ///   (CR 400.7). Their union is the referent of a tail that reads "the tokens";
 ///   each entry is the "it" of that seat's co-scoped second action. The last
-///   entry is the seat in progress.
+///   entry is the seat in progress;
+/// - the clause's "this way" zone-change ledger (CR 608.2c + CR 608.2f), live
+///   when `zone_changed_this_way` is `Some`: every object the clause's seats
+///   moved, across every pause, published as `last_zone_changed_ids` before
+///   `after_scope` resolves, exactly as a clause that completes without a
+///   pause publishes its whole event span.
 ///
 /// Wire keys are unchanged from the linked-exile-only sidecar; a sidecar
-/// serialized without `created_tokens` decodes as linked-exile-only.
+/// serialized without `created_tokens` decodes as linked-exile-only, and one
+/// without `zone_changed_this_way` carries no ledger channel.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PendingPlayerScopeTail {
     pub source_id: ObjectId,
@@ -3693,6 +3699,8 @@ pub(crate) struct PendingPlayerScopeTail {
     pub linked_exile_batch: Vec<ObjectIncarnationRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_tokens: Option<Vec<SeatCreatedTokens>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone_changed_this_way: Option<Vec<ObjectId>>,
 }
 
 /// CR 608.2e + CR 400.7: one seat's creation result inside a player-scoped
@@ -3864,6 +3872,14 @@ pub struct PendingExileFromTopUntil {
 }
 
 impl PendingContinuation {
+    /// Install a `player_scope` clause's detached-tail sidecar. `None` keeps the
+    /// sidecar [`Self::new`] cloned from the resolving clause, if any.
+    pub(crate) fn install_player_scope_tail(&mut self, scope: Option<PendingPlayerScopeTail>) {
+        if scope.is_some() {
+            self.player_scope_tail = scope;
+        }
+    }
+
     pub(crate) fn player_scope_queue_end(
         placeholder: Box<ResolvedAbility>,
         state: &GameState,
@@ -3946,6 +3962,7 @@ mod player_scope_tail_serde_tests {
             )),
             linked_exile_batch: vec![ObjectIncarnationRef::of(ObjectId(11), 2)],
             created_tokens,
+            zone_changed_this_way: None,
         }
     }
 
@@ -10666,7 +10683,9 @@ impl PendingCostMoveResume {
             PendingCostMoveResume::CollectEvidencePayment { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => true,
-                CollectEvidenceResume::Effect { .. } => false,
+                CollectEvidenceResume::Effect { .. } | CollectEvidenceResume::Resolution { .. } => {
+                    false
+                }
             },
             // Unless-costs and ward payments are made while an ability resolves
             // (CR 118.12), and a replacement's optional cost belongs to that
@@ -11432,6 +11451,7 @@ impl GameState {
                     match resume.as_ref() {
                         CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
                         CollectEvidenceResume::Effect { .. }
+                        | CollectEvidenceResume::Resolution { .. }
                         | CollectEvidenceResume::ManaAbility { .. } => None,
                     }
                 }
@@ -11480,6 +11500,7 @@ impl GameState {
                     match resume.as_mut() {
                         CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
                         CollectEvidenceResume::Effect { .. }
+                        | CollectEvidenceResume::Resolution { .. }
                         | CollectEvidenceResume::ManaAbility { .. } => None,
                     }
                 }
@@ -11658,9 +11679,20 @@ pub enum CollectEvidenceResume {
         #[serde(default)]
         source: SpellCostSource,
     },
+    /// Legacy effect-form resume: prompts serialized before the evidence
+    /// prompt became a resolution choice carry the rest of their ability in
+    /// `pending_ability` and resolve it after the payment. Kept so those
+    /// prompts load and finish as they were created; the resolver now emits
+    /// [`CollectEvidenceResume::Resolution`].
     Effect {
         pending_ability: Box<ResolvedAbility>,
     },
+    /// CR 701.59a + CR 608.2c: collect evidence as an effect of a resolving
+    /// spell or ability. The rest of that ability is parked on the resolution
+    /// stack behind the prompt, so the payment only hands back to that
+    /// continuation. `source_id` is the resolving ability's source, the cause
+    /// of the evidence exile.
+    Resolution { source_id: ObjectId },
     /// CR 605.2 + CR 701.59: Collect evidence paid as a mana ability's
     /// activation cost (Cryptex's `{T}, Collect evidence 3: Add one mana...`).
     /// Resumes the parked mana-ability activation with the chosen cards stamped
@@ -11873,7 +11905,9 @@ fn visit_cost_move_resume_events(
             CollectEvidenceResume::ManaAbility {
                 pending_mana_ability,
             } => visit_pending_mana_ability_events(pending_mana_ability, f),
-            CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {}
+            CollectEvidenceResume::Casting { .. }
+            | CollectEvidenceResume::Effect { .. }
+            | CollectEvidenceResume::Resolution { .. } => {}
         },
         PendingCostMoveResume::ManaAbilityPayment { pending, cursor } => {
             visit_pending_mana_ability_events(pending, f);
@@ -22971,6 +23005,7 @@ impl WaitingFor {
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => Some((pending_cast, Costs)),
                 CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::Resolution { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => None,
             },
             _ => None,
@@ -23010,6 +23045,7 @@ impl WaitingFor {
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_mut() {
                 CollectEvidenceResume::Casting { pending_cast, .. } => Some(pending_cast),
                 CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::Resolution { .. }
                 | CollectEvidenceResume::ManaAbility { .. } => None,
             },
             _ => None,
@@ -23271,9 +23307,9 @@ impl WaitingFor {
                 CollectEvidenceResume::ManaAbility {
                     pending_mana_ability,
                 } => Some(pending_mana_ability),
-                CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
-                    None
-                }
+                CollectEvidenceResume::Casting { .. }
+                | CollectEvidenceResume::Effect { .. }
+                | CollectEvidenceResume::Resolution { .. } => None,
             },
             WaitingFor::PayAmountChoice {
                 pending_mana_ability,
@@ -29628,6 +29664,8 @@ fn visit_collect_evidence_resume_chains<'a>(
         CollectEvidenceResume::Effect { pending_ability } => {
             f(pending_ability, SuspendedChainEvent::Ambient)
         }
+        // The parked continuation frame owns that chain and is visited there.
+        CollectEvidenceResume::Resolution { .. } => Ok(()),
         CollectEvidenceResume::ManaAbility {
             pending_mana_ability,
         } => visit_pending_mana_ability_chains(pending_mana_ability, f),
@@ -32703,7 +32741,8 @@ impl GameState {
                             pending_mana_ability,
                         } => pending_mana_ability.resumes_pending_cast(),
                         CollectEvidenceResume::Casting { .. }
-                        | CollectEvidenceResume::Effect { .. } => false,
+                        | CollectEvidenceResume::Effect { .. }
+                        | CollectEvidenceResume::Resolution { .. } => false,
                     }
                 }
                 PendingCostMoveResume::Cast { .. }
@@ -67805,6 +67844,7 @@ mod restored_exact_attack_authority_tests {
                         after_scope: node.clone(),
                         linked_exile_batch: vec![],
                         created_tokens: None,
+                        zone_changed_this_way: None,
                     });
                     state.park_ability_continuation(pending);
                     state.waiting_for.clone()

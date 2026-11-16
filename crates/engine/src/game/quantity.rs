@@ -4401,7 +4401,7 @@ fn reduce_property_values(values: impl Iterator<Item = i32>, function: Aggregate
 /// exile") rather than the generic objects in a zone. A conjunction is card-only
 /// when any conjunct is, a union only when every branch is, a complement takes
 /// its inner filter's population.
-fn filter_names_cards(filter: &TargetFilter) -> bool {
+pub(crate) fn filter_names_cards(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed
             .type_filters
@@ -5979,7 +5979,11 @@ fn resolve_ref(
         // `effects::publish_tracked_set`. Deliberately not routed through
         // `targeting::resolve_tracked_set_id`: that authority SKIPS empty sets, and
         // under mode scoping not skipping is the correct semantics here.
-        QuantityRef::FilteredTrackedSetSize { filter, caused_by } => {
+        QuantityRef::FilteredTrackedSetSize {
+            filter,
+            caused_by,
+            destination,
+        } => {
             // MED1: `QuantityRef` deserialization is derived, so this peer
             // of the `TrackedSet` member filter has no decode gate — the
             // parser builds only selected-free shapes, and this fail-closed
@@ -6047,7 +6051,16 @@ fn resolve_ref(
                                 .get(&oid)
                                 .map_or_else(|| read_live(oid), |lki| read_snapshot(oid, lki)),
                         };
-                    cause_ok && matches_filter
+                    // CR 614.6 + CR 701.17c: a destination-named count ("put into
+                    // a graveyard this way") counts only members that actually
+                    // arrived there — a replaced move never happened, so a card a
+                    // replacement sent to exile instead is not counted. The
+                    // member's CURRENT zone is the authority; the departure
+                    // snapshot above describes the zone it LEFT.
+                    let destination_ok = destination.is_none_or(|zone| {
+                        state.objects.get(&oid).is_some_and(|obj| obj.zone == zone)
+                    });
+                    cause_ok && matches_filter && destination_ok
                 })
                 .count();
             usize_to_i32_saturating(count)
@@ -12845,6 +12858,7 @@ mod tests {
             QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(other()),
                 caused_by: None,
+                destination: None,
             },
             QuantityRef::DistinctCounterKindsAmong { filter: other() },
             QuantityRef::CounterAddedThisTurn {
@@ -20543,6 +20557,7 @@ mod tests {
                     ),
                 )),
                 caused_by: None,
+                destination: None,
             };
             resolve_ref(
                 state,
@@ -23633,6 +23648,7 @@ mod tests {
                     qty: QuantityRef::FilteredTrackedSetSize {
                         filter: Box::new(filter),
                         caused_by: None,
+                        destination: None,
                     },
                 },
                 &ability,
@@ -23681,6 +23697,7 @@ mod tests {
         let qty = QuantityRef::FilteredTrackedSetSize {
             filter: Box::new(distinct),
             caused_by: None,
+            destination: None,
         };
         assert_eq!(
             resolve_ref(
@@ -27289,6 +27306,7 @@ mod tests {
                 qty: QuantityRef::FilteredTrackedSetSize {
                     filter: creature_filter.clone(),
                     caused_by,
+                    destination: None,
                 },
             };
             resolve_quantity(&state, &expr, PlayerId(0), ObjectId(999))

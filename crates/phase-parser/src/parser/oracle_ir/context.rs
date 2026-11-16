@@ -566,9 +566,9 @@ pub struct ParseContext {
     /// disambiguate from (Pinnacle Starcage's "put each card exiled with this
     /// artifact into its owner's graveyard, then create ... for each card put
     /// into a graveyard this way" — every exiled card lands in the SAME
-    /// graveyard pile, so the bare `TrackedSetSize` default is already
-    /// correct there). Set per effect-chain chunk from a lookback over
-    /// `builder.clauses()`, mirroring `bare_card_aggregate_source`. Consumed
+    /// graveyard pile, so the destination-count parse of the bare clause (the
+    /// tracked cards delivered to Graveyard, CR 614.6) applies there). Set per
+    /// effect-chain chunk from a lookback over `builder.clauses()`, mirroring `bare_card_aggregate_source`. Consumed
     /// by the Token "for each" dispatch (`oracle_effect::mod::try_parse_for_each_effect`)
     /// to bind a bare "card put into a/your/their graveyard this way" count to
     /// the dedicated `PutIntoGraveyard` cause only when a real Dig split

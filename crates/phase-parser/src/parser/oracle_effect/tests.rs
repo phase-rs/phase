@@ -11518,7 +11518,7 @@ fn effect_put_exiled_with_this_artifact_into_graveyard() {
 }
 
 #[test]
-fn effect_token_for_each_this_way_produces_tracked_set_size() {
+fn effect_token_for_each_this_way_produces_graveyard_destination_card_count() {
     let e = parse_effect(
             "create a 2/2 colorless Robot artifact creature token for each card put into a graveyard this way",
         );
@@ -11527,9 +11527,13 @@ fn effect_token_for_each_this_way_produces_tracked_set_size() {
             assert_eq!(
                 count,
                 QuantityExpr::Ref {
-                    qty: QuantityRef::TrackedSetSize
+                    qty: QuantityRef::FilteredTrackedSetSize {
+                        filter: Box::new(TargetFilter::Typed(TypedFilter::new(TypeFilter::Card))),
+                        caused_by: None,
+                        destination: Some(Zone::Graveyard),
+                    }
                 },
-                "count should be TrackedSetSize"
+                "CR 614.6: counts the cards that actually reached a graveyard"
             );
         }
         other => panic!("expected Token, got {other:?}"),
@@ -18585,6 +18589,7 @@ fn winds_of_abandon_iterated_subject_search_chain() {
                 QuantityRef::FilteredTrackedSetSize {
                     filter,
                     caused_by: Some(ThisWayCause::Exiled),
+                    destination: None,
                 },
         }) => match filter.as_ref() {
             TargetFilter::Typed(tf) => {

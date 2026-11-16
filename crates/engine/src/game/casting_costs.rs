@@ -13551,6 +13551,7 @@ fn exile_any_number_cost_reduction_capacity(
                     Some(QuantityRef::FilteredTrackedSetSize {
                         filter,
                         caused_by: Some(ThisWayCause::Exiled),
+                        destination: None,
                     }),
                 ..
             } = &definition.mode
@@ -30684,6 +30685,7 @@ its replicate cost was paid.)\nDraw a card.";
             dynamic_count: Some(QuantityRef::FilteredTrackedSetSize {
                 filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
                 caused_by: None,
+                destination: None,
             }),
             reach: crate::types::statics::CostReductionReach::SpillsToGeneric,
         })
