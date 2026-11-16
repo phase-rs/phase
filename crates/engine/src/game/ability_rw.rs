@@ -1541,6 +1541,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -2586,6 +2587,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
@@ -2731,6 +2733,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -2795,6 +2798,9 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         // and `writes_event_object` carriers).
         TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        // CR 603.10a + CR 608.2c: fail-closed — a per-ability record keyed to population
+        // members; a missed TRUE is the CR 603.3b under-prompt.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ChosenCard
@@ -3064,6 +3070,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -4531,6 +4538,7 @@ fn filter_prop_operand_reads(prop: &FilterProp) -> RwProfile {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -6334,10 +6342,6 @@ fn rw_effect(
         // ---- Control (SetMembership external) ----
         Effect::GainControl { target: _ }
         | Effect::GainControlAll { target: _ }
-        | Effect::GiveControl {
-            target: _,
-            recipient: _,
-        }
         | Effect::ExchangeControl {
             target_a: _,
             target_b: _,
@@ -6345,6 +6349,22 @@ fn rw_effect(
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            (p, Some(WriteScope::External))
+        }
+        // CR 603.10a + CR 608.2c: the handoff reads its object filter AND its
+        // recipient filter, and either can name a per-member-bound referent — the
+        // per-object assignment (`ChoiceAssignment`) is a record the resolving
+        // ability keyed to its own population members. Both are profiled through
+        // the one filter profiler (which also records the member-bound bit), so a
+        // same-event group of distinct sources cannot take the auto-order path.
+        Effect::GiveControl { target, recipient } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            flag_legacy_write_target(&mut p, target);
+            flag_member_bound_write_target(&mut p, target);
+            p.merge(rw_target_filter(target));
+            p.merge(rw_target_filter(recipient));
             (p, Some(WriteScope::External))
         }
 
@@ -7937,6 +7957,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer

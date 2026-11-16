@@ -153,7 +153,11 @@ fn prechange_allocation_order_and_rng_reference() {
                 }
             }
             let mut state = GameState::new(format.clone(), 2, 4910);
-            load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+            load_and_hydrate_decks(
+                &mut state,
+                &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+                Some(&db),
+            );
             assert_eq!(
                 state
                     .objects
@@ -271,7 +275,7 @@ fn normalization_is_lenient_section_bound_ordered_and_capped() {
     values.insert(3, json!({"printing": 12}));
     wire["player"]["printings"] = json!(values);
     list = serde_json::from_value(wire).unwrap();
-    let payload = resolve_deck_list(&db, &list);
+    let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
     assert_eq!(
         payload.player.printings,
         [
@@ -446,7 +450,7 @@ fn all_seats_sections_and_netted_prefixes_keep_their_own_streams() {
             ai_decks: seats,
             ..Default::default()
         };
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         assert_eq!(payload.player.main_deck[0].count, 4);
         let commander = format.command_zone_holds_decklist_commander();
         let signature = format.format == engine::types::format::GameFormat::Oathbreaker;
@@ -567,7 +571,11 @@ fn shared_piles_use_the_submitting_seat_even_when_stored_face_down() {
             format.archenemy_player = Some(PlayerId(2));
         }
         let mut state = GameState::new(format, 3, 4910);
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         let ids = if section == DeckSection::PlanarDeck {
             &state.planar_deck
         } else {
@@ -638,7 +646,11 @@ fn printing_sentinels_are_shuffled_with_faces_before_id_allocation() {
         };
         let run = || {
             let mut state = GameState::new(format.clone(), 2, 4910);
-            load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+            load_and_hydrate_decks(
+                &mut state,
+                &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+                Some(&db),
+            );
             let mut objects: Vec<_> = state
                 .objects
                 .values()
@@ -753,10 +765,18 @@ fn engine_replay_preserves_per_id_choices_including_submitted_dandan() {
             list.player.printings
         );
         let mut live = GameState::new(format.clone(), count, 4910);
-        load_and_hydrate_decks(&mut live, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut live,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         start(&mut live);
-        let replay = engine::game::replay::reconstruct_initial_state(&decoded, Some(&db))
-            .expect("reconstruct");
+        let replay = engine::game::replay::reconstruct_initial_state(
+            &decoded,
+            Some(&db),
+            &engine::database::ComboTable::default(),
+        )
+        .expect("reconstruct");
         let expected_printed = if format.format == engine::types::format::GameFormat::Dandan {
             43
         } else {
@@ -793,8 +813,12 @@ fn engine_replay_preserves_per_id_choices_including_submitted_dandan() {
         let decks = legacy.deck_data.as_mut().unwrap();
         decks.player.printings.clear();
         decks.opponent.printings.clear();
-        let legacy = engine::game::replay::reconstruct_initial_state(&legacy, Some(&db))
-            .expect("legacy reconstruct");
+        let legacy = engine::game::replay::reconstruct_initial_state(
+            &legacy,
+            Some(&db),
+            &engine::database::ComboTable::default(),
+        )
+        .expect("legacy reconstruct");
         assert!(legacy
             .objects
             .values()
@@ -847,7 +871,11 @@ fn synthetic_defaults_and_momir_emblems_never_take_submitted_art() {
             list.opponent.main_deck = names(&[("Island", 8)]);
         }
         let mut state = GameState::new(format.clone(), 2, 4910);
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(db, &list), Some(db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(db, &engine::database::ComboTable::default(), &list),
+            Some(db),
+        );
         match format.format {
             engine::types::format::GameFormat::Dandan => assert_eq!(state.objects.len(), 80),
             engine::types::format::GameFormat::Momir => {
@@ -951,7 +979,11 @@ fn loaded_cards_obey_projection_and_creation_only_concealment() {
         }
     }
     let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
-    load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+    load_and_hydrate_decks(
+        &mut state,
+        &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+        Some(&db),
+    );
     start(&mut state);
     let views = |state: &GameState, viewer: Option<PlayerId>| {
         let filtered = viewer.map_or_else(
@@ -1097,7 +1129,11 @@ fn printing_changes_wire_but_not_rules_or_next_rng_progression() {
     decorated.player.printings = vec![choice(DeckSection::MainDeck, "Forest", 3, "rules-neutral")];
     let run = |list: &DeckList| {
         let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), list),
+            Some(&db),
+        );
         start(&mut state);
         state
     };
@@ -1137,7 +1173,7 @@ fn incomplete_annotated_payload_panics_before_mutating_state() {
     let db = database();
     let mut list = reference_list();
     list.player.printings = vec![choice(DeckSection::MainDeck, "Forest", 1, "bound")];
-    let mut payload = resolve_deck_list(&db, &list);
+    let mut payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
     payload.player.printing_entry_names.clear();
     let mut state = GameState::new(FormatConfig::freeform(), 2, 4910);
     let before = serde_json::to_value(&state).unwrap();
@@ -1188,7 +1224,7 @@ fn format_gate_keeps_valid_and_invalid_name_deck_verdicts() {
                 },
                 ..Default::default()
             };
-            let payload = resolve_deck_list(&db, &list);
+            let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
             assert_eq!(payload.player.main_deck[0].count as usize, count);
             let result = validate_name_deck_for_format(
                 &db,
@@ -1265,7 +1301,7 @@ fn engine_qualified_only_printing_is_a_loaded_normalization_fixed_point() {
     };
     let expected = choice(DeckSection::MainDeck, key, 8, "qualified-art");
     for _ in 0..2 {
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         for seat in [&payload.player, &payload.opponent] {
             assert_eq!(seat.main_deck.len(), 1);
             assert_eq!(seat.main_deck[0].count, 8);
@@ -1358,7 +1394,11 @@ fn loaded_typed_shared_piles_hide_printings_until_their_reveal_transition() {
             ..Default::default()
         };
         let mut state = GameState::new(format, 3, 4910);
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         assert_eq!(state.objects.len(), 27);
         let pile = |state: &GameState| match section {
             DeckSection::PlanarDeck => state.planar_deck.iter().copied().collect::<Vec<_>>(),
@@ -1779,7 +1819,7 @@ mod post_load_creators {
             },
             ..Default::default()
         };
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         assert_eq!(payload.player.printings, [decoy, companion_row]);
 
         let mut state = GameState::new(FormatConfig::commander(), 2, 4910);
@@ -1938,7 +1978,7 @@ mod post_load_creators {
             },
             ..Default::default()
         };
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
         load_and_hydrate_decks(&mut state, &payload, Some(&db));
@@ -2452,7 +2492,7 @@ mod post_load_creators {
             },
             ..Default::default()
         };
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &engine::database::ComboTable::default(), &list);
         let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
         if handle == DatabaseHandle::Installed {
@@ -2597,7 +2637,11 @@ mod post_load_creators {
         };
         let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         start(&mut state);
         let mut runner = GameRunner::from_state(state);
 
@@ -2647,7 +2691,11 @@ mod post_load_creators {
         };
         let mut state = GameState::new(FormatConfig::commander(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         start(&mut state);
         let mut runner = GameRunner::from_state(state);
         let expected = tally(&[(Some("forest-art"), 20), (Some("commander-art"), 1)]);
@@ -2695,7 +2743,11 @@ mod post_load_creators {
         };
         let mut state = GameState::new(FormatConfig::standard(), 2, 4910);
         state.match_config.match_type = MatchType::Bo3;
-        load_and_hydrate_decks(&mut state, &resolve_deck_list(&db, &list), Some(&db));
+        load_and_hydrate_decks(
+            &mut state,
+            &resolve_deck_list(&db, &engine::database::ComboTable::default(), &list),
+            Some(&db),
+        );
         start(&mut state);
         let mut runner = GameRunner::from_state(state);
 

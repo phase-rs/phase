@@ -1,0 +1,407 @@
+{
+  "schema_version": 1,
+  "git_sha": "6b1a90d0a554",
+  "card_data_hash": "d34a39f8720b462e4ff3d9acb7e4e4797396f414",
+  "feed": "feeds/mtggoldfish-commander.json",
+  "coverage_authority": "card_face_gaps",
+  "seats": [
+    {
+      "label": "Y'shtola, Night's Blessed",
+      "difficulty": "Easy",
+      "tier": "core"
+    },
+    {
+      "label": "Atraxa, Praetors' Voice",
+      "difficulty": "Easy",
+      "tier": "core"
+    },
+    {
+      "label": "Fire Lord Azula",
+      "difficulty": "Easy",
+      "tier": "core"
+    },
+    {
+      "label": "Vivi Ornitier",
+      "difficulty": "Easy",
+      "tier": "core"
+    }
+  ],
+  "seeds": [
+    9503,
+    9504,
+    9505,
+    9506,
+    9507,
+    9508,
+    9509,
+    9510
+  ],
+  "games": [
+    {
+      "seed": 9503,
+      "measurement": {
+        "verdict": "measured",
+        "observation": {
+          "kind": "decided",
+          "turn": 83,
+          "winner": 1
+        },
+        "evidence": {
+          "seat_coverage": [
+            {
+              "total_unique": 97,
+              "supported_unique": 94,
+              "total_copies": 100,
+              "supported_copies": 97,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 72,
+              "supported_unique": 70,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 86,
+              "supported_unique": 84,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 100,
+              "supported_unique": 100,
+              "total_copies": 100,
+              "supported_copies": 100,
+              "unknown_names": 0
+            }
+          ],
+          "touched_unimplemented": []
+        }
+      }
+    },
+    {
+      "seed": 9504,
+      "measurement": {
+        "verdict": "measured",
+        "observation": {
+          "kind": "decided",
+          "turn": 48,
+          "winner": 0
+        },
+        "evidence": {
+          "seat_coverage": [
+            {
+              "total_unique": 97,
+              "supported_unique": 94,
+              "total_copies": 100,
+              "supported_copies": 97,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 72,
+              "supported_unique": 70,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 86,
+              "supported_unique": 84,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 100,
+              "supported_unique": 100,
+              "total_copies": 100,
+              "supported_copies": 100,
+              "unknown_names": 0
+            }
+          ],
+          "touched_unimplemented": []
+        }
+      }
+    },
+    {
+      "seed": 9505,
+      "measurement": {
+        "verdict": "measured",
+        "observation": {
+          "kind": "decided",
+          "turn": 44,
+          "winner": 0
+        },
+        "evidence": {
+          "seat_coverage": [
+            {
+              "total_unique": 97,
+              "supported_unique": 94,
+              "total_copies": 100,
+              "supported_copies": 97,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 72,
+              "supported_unique": 70,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 86,
+              "supported_unique": 84,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 100,
+              "supported_unique": 100,
+              "total_copies": 100,
+              "supported_copies": 100,
+              "unknown_names": 0
+            }
+          ],
+          "touched_unimplemented": []
+        }
+      }
+    },
+    {
+      "seed": 9506,
+      "measurement": {
+        "verdict": "measured",
+        "observation": {
+          "kind": "decided",
+          "turn": 55,
+          "winner": 2
+        },
+        "evidence": {
+          "seat_coverage": [
+            {
+              "total_unique": 97,
+              "supported_unique": 94,
+              "total_copies": 100,
+              "supported_copies": 97,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 72,
+              "supported_unique": 70,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 86,
+              "supported_unique": 84,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 100,
+              "supported_unique": 100,
+              "total_copies": 100,
+              "supported_copies": 100,
+              "unknown_names": 0
+            }
+          ],
+          "touched_unimplemented": []
+        }
+      }
+    },
+    {
+      "seed": 9507,
+      "measurement": {
+        "verdict": "measured",
+        "observation": {
+          "kind": "decided",
+          "turn": 44,
+          "winner": 3
+        },
+        "evidence": {
+          "seat_coverage": [
+            {
+              "total_unique": 97,
+              "supported_unique": 94,
+              "total_copies": 100,
+              "supported_copies": 97,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 72,
+              "supported_unique": 70,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 86,
+              "supported_unique": 84,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 100,
+              "supported_unique": 100,
+              "total_copies": 100,
+              "supported_copies": 100,
+              "unknown_names": 0
+            }
+          ],
+          "touched_unimplemented": []
+        }
+      }
+    },
+    {
+      "seed": 9508,
+      "measurement": {
+        "verdict": "measured",
+        "observation": {
+          "kind": "decided",
+          "turn": 39,
+          "winner": 2
+        },
+        "evidence": {
+          "seat_coverage": [
+            {
+              "total_unique": 97,
+              "supported_unique": 94,
+              "total_copies": 100,
+              "supported_copies": 97,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 72,
+              "supported_unique": 70,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 86,
+              "supported_unique": 84,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 100,
+              "supported_unique": 100,
+              "total_copies": 100,
+              "supported_copies": 100,
+              "unknown_names": 0
+            }
+          ],
+          "touched_unimplemented": []
+        }
+      }
+    },
+    {
+      "seed": 9509,
+      "measurement": {
+        "verdict": "measured",
+        "observation": {
+          "kind": "decided",
+          "turn": 37,
+          "winner": 2
+        },
+        "evidence": {
+          "seat_coverage": [
+            {
+              "total_unique": 97,
+              "supported_unique": 94,
+              "total_copies": 100,
+              "supported_copies": 97,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 72,
+              "supported_unique": 70,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 86,
+              "supported_unique": 84,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 100,
+              "supported_unique": 100,
+              "total_copies": 100,
+              "supported_copies": 100,
+              "unknown_names": 0
+            }
+          ],
+          "touched_unimplemented": []
+        }
+      }
+    },
+    {
+      "seed": 9510,
+      "measurement": {
+        "verdict": "measured",
+        "observation": {
+          "kind": "decided",
+          "turn": 34,
+          "winner": 2
+        },
+        "evidence": {
+          "seat_coverage": [
+            {
+              "total_unique": 97,
+              "supported_unique": 94,
+              "total_copies": 100,
+              "supported_copies": 97,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 72,
+              "supported_unique": 70,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 86,
+              "supported_unique": 84,
+              "total_copies": 100,
+              "supported_copies": 98,
+              "unknown_names": 0
+            },
+            {
+              "total_unique": 100,
+              "supported_unique": 100,
+              "total_copies": 100,
+              "supported_copies": 100,
+              "unknown_names": 0
+            }
+          ],
+          "touched_unimplemented": []
+        }
+      }
+    }
+  ],
+  "totals": {
+    "games": 8,
+    "measured": 8,
+    "withheld_pre_screen": 0,
+    "withheld_runtime": 0,
+    "wins": [
+      2,
+      1,
+      4,
+      1
+    ],
+    "draws": 0,
+    "censored": 0
+  }
+}

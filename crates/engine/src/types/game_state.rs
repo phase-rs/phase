@@ -12776,12 +12776,17 @@ pub struct PlayerDeckPool {
     pub registered_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
     pub current_scheme_deck: std::sync::Arc<Vec<DeckEntry>>,
-    /// The declared bracket tier for this player's deck. Used by the AI to
-    /// determine whether cEDH-specific policies apply (Phase 5 `ComboLinePolicy`,
-    /// Phase 6 `CedhKeepablesMulligan`). Defaults to `Core` for backward
-    /// compatibility with saved states and test fixtures that omit the field.
+    /// The bracket this player's deck owner declared; `None` means undeclared.
+    /// The AI reads [`Self::effective_bracket_tier`] instead of this declaration
+    /// directly. Saved states and fixtures that omit the field deserialize to `None`.
     #[serde(default)]
-    pub bracket_tier: CommanderBracketTier,
+    pub bracket_tier: Option<CommanderBracketTier>,
+    /// The estimator's bracket floor. `None` means no estimate was taken, such as
+    /// for a deck without a commander, a pre-phase payload, or a test fixture.
+    /// The AI must never read `bracket_tier` directly; it reads
+    /// [`Self::effective_bracket_tier`].
+    #[serde(default)]
+    pub estimated_bracket_tier: Option<CommanderBracketTier>,
     /// CR 203.1 + CR 206.1: the owner's printing record for this seat (display-only),
     /// filled at load and never written after it. Redacted with the lists it annotates
     /// (`visibility.rs`, CR 400.2 + CR 100.4).
@@ -12790,8 +12795,20 @@ pub struct PlayerDeckPool {
 }
 
 impl PlayerDeckPool {
+    /// The tier the AI acts on. The only read of bracket data any AI path may
+    /// perform: `bracket_tier` alone is the player's declaration and remains for
+    /// legality and display.
+    pub fn effective_bracket_tier(&self) -> crate::game::bracket_estimate::EffectiveBracketTier {
+        crate::game::bracket_estimate::effective_tier(
+            self.bracket_tier,
+            self.estimated_bracket_tier,
+        )
+    }
+}
+
+impl PlayerDeckPool {
     /// True when `other` holds every deck list in the same allocation with the
-    /// same seat and bracket, i.e. neither pool has written a list since one
+    /// same seat and brackets, i.e. neither pool has written a list since one
     /// was cloned from the other. Identity, not equality: true implies both
     /// serialize identically; false says nothing about content.
     pub(crate) fn shares_storage_with(&self, other: &Self) -> bool {
@@ -12811,6 +12828,7 @@ impl PlayerDeckPool {
             registered_scheme_deck,
             current_scheme_deck,
             bracket_tier,
+            estimated_bracket_tier,
             printings,
         } = self;
         // Named rather than written inline: `clippy::type_complexity` rejects the
@@ -12842,6 +12860,7 @@ impl PlayerDeckPool {
         };
         *player == other.player
             && *bracket_tier == other.bracket_tier
+            && *estimated_bracket_tier == other.estimated_bracket_tier
             && printings_shared
             && lists
                 .into_iter()
@@ -20306,6 +20325,15 @@ pub enum WaitingFor {
         /// pins that across every prompt the engine raises.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         free_entry: Option<crate::types::ability::FreeEntry>,
+        /// CR 608.2c + CR 608.2d: display-only identity of the object this
+        /// prompt's answer is for, when the instruction repeats once per member of
+        /// a population ("for each of those permanents, choose a different
+        /// opponent"). Latched from the repeat driver's member binding when the
+        /// prompt is raised, so the chooser sees which permanent the answer
+        /// assigns; the answer's recording authority remains the parked holder's
+        /// own binding and `source` is unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        decision_subject_id: Option<ObjectId>,
     },
     /// CR 608.2d + CR 608.2e: a player other than the controller (an opponent /
     /// the defending player) guesses a committed value or proposition during
@@ -27097,6 +27125,12 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub crew_history_this_turn: HashSet<crate::game::crew_payment::CrewHistoryPair>,
+    /// CR 701.14a + CR 701.14b: incarnations of creatures that fought this turn,
+    /// recorded only when the fight actually happens. Read by
+    /// `FilterProp::FoughtThisTurn`. Cleared at turn start.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub creatures_fought_this_turn: HashSet<ObjectIncarnationRef>,
     /// CR 606.1 + CR 606.3 + CR 603.4: Per-player count of loyalty-ability
     /// activations this turn. Incremented in
     /// `planeswalker::finalize_loyalty_activation` whenever any loyalty ability
@@ -36425,6 +36459,7 @@ impl GameState {
             crew_activated_this_turn: HashSet::new(),
             crew_resolved_this_turn: HashSet::new(),
             crew_history_this_turn: HashSet::new(),
+            creatures_fought_this_turn: HashSet::new(),
             loyalty_abilities_activated_this_turn: HashMap::new(),
             extra_loyalty_activations_this_turn: HashMap::new(),
             exerted_this_turn: std::collections::HashSet::new(),
@@ -38115,6 +38150,7 @@ impl GameState {
                     (!history.is_empty()).then_some((object_id, history))
                 })
                 .collect();
+        clone.retain_observable_fighters();
         if rank == LoopIdentityRank::Ranked {
             clone.canonicalize_loop_identities();
         }
@@ -38252,6 +38288,30 @@ impl GameState {
             .collect();
     }
 
+    /// CR 701.14a + CR 400.7: a fight entry is read only for the live object at the incarnation
+    /// that fought, or through a carried zone-change record's departing identity; any other
+    /// entry is spent history, not position.
+    fn retain_observable_fighters(&mut self) {
+        if self.creatures_fought_this_turn.is_empty() {
+            return;
+        }
+        let mut recorded = HashSet::new();
+        self.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::ZoneChanged { record, .. } = event {
+                if let Some(context) = record.trigger_source_context() {
+                    recorded.insert(context.identity.reference);
+                }
+            }
+        });
+        let objects = &self.objects;
+        self.creatures_fought_this_turn.retain(|fighter| {
+            recorded.contains(fighter)
+                || objects
+                    .get(&fighter.object_id)
+                    .is_some_and(|object| ObjectIncarnationRef::from_object(object) == *fighter)
+        });
+    }
+
     /// CR 104.4b + CR 608.2h: keeps only the `departed_stack_spells` records a spell-cast
     /// trigger on the stack or resolving can still name, plus every departure whose spell a
     /// `BecomesTarget` targeter still names (`targeting::event_referent_controller` reads
@@ -38382,8 +38442,9 @@ impl GameState {
     /// lists them, the attachment pins inside the snapshots
     /// `ResolvedAbility::for_each_loop_lki_snapshot_mut` visits, and the
     /// creation lookback event each keeps), the turn and combat block-history pairs
-    /// (CR 509.1g), the live incarnation of every object those or a tracked-set
-    /// origin (CR 608.2c) name, and the attachment incarnation pins the
+    /// (CR 509.1g), the kept fight entries (CR 701.14a), the live incarnation
+    /// of every object those or a tracked-set origin (CR 608.2c) name, and the
+    /// attachment incarnation pins the
     /// retained `lki_by_incarnation` snapshots carry. Ranks count down from the
     /// highest member, so the live incarnation anchors them: two positions
     /// minted at different times compare equal, while which incarnation each
@@ -38469,6 +38530,7 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                | GameEvent::PhaseChangedForPlayer { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }
@@ -38524,6 +38586,7 @@ impl GameState {
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
                 | GameEvent::EffectResolved { .. }
+                | GameEvent::Attached { .. }
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::AttackersDeclared { .. }
@@ -38832,6 +38895,9 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                // Synthetic per-player phase occurrence (shared-turn fan-out):
+                // carries only phase + player, no incarnation-bearing records.
+                | GameEvent::PhaseChangedForPlayer { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }
@@ -38890,6 +38956,7 @@ impl GameState {
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
                 | GameEvent::EffectResolved { .. }
+                | GameEvent::Attached { .. }
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::AttackersDeclared { .. }
@@ -39011,6 +39078,9 @@ impl GameState {
                 | GameEvent::TurnStarted { .. }
                 | GameEvent::ExtraTurnCreated { .. }
                 | GameEvent::PhaseChanged { .. }
+                // Synthetic per-player phase occurrence (shared-turn fan-out):
+                // carries only phase + player, no incarnation-bearing records.
+                | GameEvent::PhaseChangedForPlayer { .. }
                 | GameEvent::PriorityPassed { .. }
                 | GameEvent::SpellCast { .. }
                 | GameEvent::Mutated { .. }
@@ -39067,6 +39137,7 @@ impl GameState {
                 | GameEvent::PermanentSacrificed { .. }
                 | GameEvent::ControllerChanged { .. }
                 | GameEvent::EffectResolved { .. }
+                | GameEvent::Attached { .. }
                 | GameEvent::Unattached { .. }
                 | GameEvent::ContinuousEffectEnded { .. }
                 | GameEvent::BlockersDeclared { .. }
@@ -39452,10 +39523,12 @@ impl GameState {
             // snapshot, so that key ranks in the ledger's pool too.
             carrier_read.extend(combat.attacking_incarnations_this_combat.iter().copied());
         }
+        // CR 701.14a: fight entries are a bounded participant ledger too.
         for reference in self
             .crew_activated_this_turn
             .iter()
             .chain(self.crew_resolved_this_turn.iter())
+            .chain(self.creatures_fought_this_turn.iter())
         {
             present
                 .entry(reference.object_id)
@@ -39793,6 +39866,10 @@ impl GameState {
             std::mem::take(&mut self.crew_resolved_this_turn),
             &mut |reference| rank_incarnation(reference),
         );
+        self.creatures_fought_this_turn = rank_hash_set(
+            std::mem::take(&mut self.creatures_fought_this_turn),
+            &mut |reference| rank_incarnation(reference),
+        );
         self.crew_history_this_turn = rank_hash_set(
             std::mem::take(&mut self.crew_history_this_turn),
             &mut |pair| {
@@ -39941,6 +40018,7 @@ impl GameState {
             crew_activated_this_turn: _,
             crew_resolved_this_turn: _,
             crew_history_this_turn: _,
+            creatures_fought_this_turn: _,
             modal_modes_chosen_this_turn: _,
             modal_modes_chosen_this_game: _,
             attacker_declarations_this_turn: _,
@@ -42053,6 +42131,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         crew_activated_this_turn: _,
         crew_resolved_this_turn: _,
         crew_history_this_turn: _,
+        creatures_fought_this_turn: _,
         loyalty_abilities_activated_this_turn: _,
         extra_loyalty_activations_this_turn: _,
         exerted_this_turn: _,
@@ -42754,6 +42833,7 @@ impl PartialEq for GameState {
             && self.crew_activated_this_turn == other.crew_activated_this_turn
             && self.crew_resolved_this_turn == other.crew_resolved_this_turn
             && self.crew_history_this_turn == other.crew_history_this_turn
+            && self.creatures_fought_this_turn == other.creatures_fought_this_turn
             && self.loyalty_abilities_activated_this_turn
                 == other.loyalty_abilities_activated_this_turn
             && self.extra_loyalty_activations_this_turn == other.extra_loyalty_activations_this_turn
@@ -44694,6 +44774,12 @@ mod tests {
             ..pool.clone()
         };
         assert!(!other_seat.shares_storage_with(&pool));
+
+        let other_estimate = PlayerDeckPool {
+            estimated_bracket_tier: Some(CommanderBracketTier::Optimized),
+            ..pool.clone()
+        };
+        assert!(!other_estimate.shares_storage_with(&pool));
     }
 
     /// The retained printing record is part of storage identity: a clone shares it, an
@@ -55502,6 +55588,45 @@ mod tests {
         );
     }
 
+    /// An object live at `live` whose fight entry, at `fought`, sits beside a carried record
+    /// naming `named`.
+    fn fight_ledger_naming(live: u64, named: u64, fought: u64) -> GameState {
+        let (mut state, x) = records_naming(live, &[named]);
+        state
+            .creatures_fought_this_turn
+            .insert(ObjectIncarnationRef::of(x, fought));
+        state
+    }
+
+    /// CR 701.14a + CR 400.7: a fight entry the carried record names is ranked with it, so a
+    /// later mint compares equal, while an entry naming the live object stays distinct.
+    #[test]
+    fn normalize_for_loop_ranks_fight_ledger_incarnations() {
+        let early = fight_ledger_naming(3, 2, 2);
+        let late = fight_ledger_naming(8, 7, 7);
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(normalized_equal(&early, &late));
+        assert!(!normalized_equal(&early, &fight_ledger_naming(3, 2, 3)));
+        let normalized = early.normalize_for_loop();
+        let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(GameEvent::ZoneChanged { record, .. }),
+            ..
+        } = &normalized.stack[0].kind
+        else {
+            unreachable!("the fixture's trigger carries a zone change");
+        };
+        let named = record
+            .trigger_source_context
+            .as_ref()
+            .unwrap()
+            .identity
+            .reference;
+        assert_eq!(
+            normalized.creatures_fought_this_turn,
+            HashSet::from([named])
+        );
+    }
+
     // ---------------------------------------------------------------------
     // CR 400.7 + CR 104.4b: the bounded per-turn ledgers that pin a participant
     // by exact incarnation. Each row pairs a split direction (a later mint with
@@ -62685,6 +62810,35 @@ mod tests {
         let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
         assert!(pool.registered_companion.is_empty());
         assert!(pool.current_companion.is_empty());
+    }
+
+    #[test]
+    fn deck_pool_without_estimated_bracket_tier_defaults_to_none() {
+        let mut json = serde_json::to_value(PlayerDeckPool::default()).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("estimated_bracket_tier");
+
+        let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
+        assert_eq!(pool.estimated_bracket_tier, None);
+        assert_eq!(pool.bracket_tier, None);
+        assert_eq!(
+            pool.effective_bracket_tier().tier(),
+            crate::game::bracket_estimate::CommanderBracketTier::Core,
+            "a legacy pool with neither a declaration nor an estimate plays at Core"
+        );
+    }
+
+    /// An undeclared pool goes out on the full-game and P2P wire as an explicit
+    /// `null`, which a peer from before the nullable-bracket protocol bump cannot
+    /// decode. Current peers must read it back as undeclared.
+    #[test]
+    fn undeclared_deck_pool_round_trips_through_an_explicit_null() {
+        let json = serde_json::to_value(PlayerDeckPool::default()).unwrap();
+        assert!(json["bracket_tier"].is_null());
+
+        let pool: PlayerDeckPool = serde_json::from_value(json).unwrap();
+        assert_eq!(pool.bracket_tier, None);
     }
 
     #[test]

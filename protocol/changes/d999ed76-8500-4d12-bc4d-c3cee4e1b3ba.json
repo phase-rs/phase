@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Dack Fayden, Helping Hand: serialized SpellContext gains the per-object player assignment (object_player_assignment, pending_choice_member) and the choice reference set (prior_player_choices), and TargetFilter gains the ChoiceAssignment tag. An old peer drops the new context fields silently, losing a paused per-object handoff, and rejects the new tag in a stack or continuation that holds it. The NamedChoice wait also gains the optional decision_subject_id (the permanent a per-object choice assigns); an old peer ignores it and shows the generic prompt."
+}
