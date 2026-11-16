@@ -27,6 +27,7 @@ import {
 import { useGameDispatch } from "../../hooks/useGameDispatch";
 import { useIsMobile } from "../../hooks/useIsMobile";
 import { useFocusScopePortalBranch } from "../ui/FocusScope";
+import { formatCounterType } from "../../viewmodel/cardProps";
 
 // How a submenu's panel is rendered: stacked inline below its button (mobile,
 // where there is no horizontal room) or as a side flyout (tablet/desktop). The
@@ -113,6 +114,12 @@ const COMMON_KEYWORDS: readonly Keyword[] = [
   "Flash",
   "Defender",
 ];
+
+// CR 122.1a: +1/+1 and -1/-1 counters modify a creature's power and
+// toughness, and are the counters sandbox setups reach for most — offer them
+// on every battlefield creature even before it has one. Any other counter
+// type gets a row once the permanent carries it.
+const PT_COUNTER_TYPES: readonly CounterType[] = ["P1P1", "M1M1"];
 
 export function DebugCardContextMenu({
   surface,
@@ -436,22 +443,23 @@ function DebugCardContextMenuInner({
       {/* Counter actions */}
       {onBattlefield && (
         <div className="border-b border-gray-800 py-0.5">
-          {Object.entries(obj.counters ?? {})
-            .flatMap(([counterType, count]) => {
-              const current = count ?? 0;
-              return current > 0
-                ? [
-                    <CounterRow
-                      key={counterType}
-                      label={counterType}
-                      objectId={objectId}
-                      counterType={counterType}
-                      current={current}
-                      onDispatch={dispatchDebugKeepOpen}
-                    />,
-                  ]
-                : [];
-            })}
+          {[
+            ...new Set<CounterType>([
+              ...(isCreature ? PT_COUNTER_TYPES : []),
+              ...Object.entries(obj.counters ?? {}).flatMap(([counterType, count]) =>
+                (count ?? 0) > 0 ? [counterType] : [],
+              ),
+            ]),
+          ].map((counterType) => (
+            <CounterRow
+              key={counterType}
+              label={formatCounterType(counterType)}
+              objectId={objectId}
+              counterType={counterType}
+              current={obj.counters?.[counterType] ?? 0}
+              onDispatch={dispatchDebugKeepOpen}
+            />
+          ))}
         </div>
       )}
 
@@ -700,10 +708,11 @@ function CounterRow({
           role="menuitem"
           type="button"
           aria-label={`${label}: −1`}
+          disabled={current === 0}
           onClick={() =>
             onDispatch({ type: "ModifyCounters", data: { object_id: objectId, counter_type: counterType, delta: -1 } })
           }
-          className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400 transition-colors hover:bg-gray-700 hover:text-gray-200"
+          className="rounded bg-gray-800 px-1.5 py-0.5 text-gray-400 transition-colors hover:bg-gray-700 hover:text-gray-200 disabled:cursor-default disabled:opacity-40 disabled:hover:bg-gray-800 disabled:hover:text-gray-400"
         >
           −
         </button>

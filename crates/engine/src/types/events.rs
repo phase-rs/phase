@@ -828,6 +828,9 @@ impl EventObjectSnapshot {
             // CR 702.122c: the crew ledger is keyed by the subject's own
             // incarnation, which the snapshot carries (look-back arm in filter.rs).
             FilterProp::CrewedThisTurn { .. } => Supported,
+            // CR 701.14a: the fight ledger is keyed by the subject's own
+            // incarnation, which the snapshot carries (look-back arm in filter.rs).
+            FilterProp::FoughtThisTurn => Supported,
 
             // ---- embedded per-turn history ----
             FilterProp::WasDealtDamageThisTurn
@@ -1525,6 +1528,14 @@ pub enum GameEvent {
         source: ObjectIdentityBinding,
         returns: ObjectIdentityBinding,
     },
+    /// Un-card touch (no CR entry): `player` touched `object_id` (the client
+    /// reports the player's cursor entering the card). Consumed by
+    /// `TriggerMode::Touched` — "Whenever a player's skin or fingernail touches
+    /// this creature" (Vile Bile).
+    ObjectTouched {
+        player: PlayerId,
+        object_id: ObjectId,
+    },
     CounterRemoved {
         object_id: ObjectId,
         counter_type: CounterType,
@@ -1542,6 +1553,14 @@ pub enum GameEvent {
     },
     /// Digital-only: A card was conjured from outside the game into a zone.
     ObjectConjured {
+        object_id: ObjectId,
+        name: String,
+    },
+    /// CR 707.13: A copy of a card was created from its NAME rather than from an
+    /// object in a zone (Garth One-Eye). Separate from `ObjectConjured` because
+    /// the product is a copy, not a card: CR 704.5e sweeps it out of any zone but
+    /// the stack and the battlefield, and the log must not call it a conjure.
+    CardCopyCreated {
         object_id: ObjectId,
         name: String,
     },
@@ -1619,19 +1638,28 @@ pub enum GameEvent {
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
     },
-    /// CR 509.3c: An effect made an attacking creature become blocked, and it was
-    /// an unblocked creature at that time — the precondition for "becomes blocked"
-    /// triggers to fire from an effect-block.
-    /// CR 509.3d: A "becomes blocked BY A CREATURE" trigger, and any blocker-side
-    /// "whenever ~ blocks" trigger, must NOT fire from an effect-block — this event
-    /// is distinct from BlockersDeclared precisely so those matchers ignore it.
-    AttackerBecameBlockedByEffect {
+    /// CR 509.3c + CR 509.3e: An attacker-side becomes-blocked occurrence whose
+    /// referent is the ATTACKER. Raw form: an effect or an entering blocker
+    /// changed an unblocked attacker into a blocked attacker (the CR 509.3c
+    /// first transition; only the bare form consumes it). Narrowed form: a
+    /// `BecomesBlocked` trigger's CR 509.3e blocker-count crossing, emitted by
+    /// the matcher as the firing's context.
+    /// CR 509.3d + CR 509.4: It carries no blocker identity and never fires
+    /// qualified "becomes blocked by" or blocker-side "blocks" abilities; an
+    /// entering blocker supplies a separate per-creature event below.
+    #[serde(alias = "AttackerBecameBlockedByEffect")]
+    AttackerBecameBlocked {
         attacker: ObjectId,
+        /// CR 400.7 + CR 608.2k: the attacker's incarnation when it became
+        /// blocked, stamped by the emitter. `None` on legacy events, which
+        /// cannot discriminate a later object at the same id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attacker_incarnation: Option<u64>,
     },
-    /// CR 509.3d: A per-blocker `Blocks`/`BecomesBlocked`/`BlocksOrBecomesBlocked`
-    /// firing with an explicit blocker/attacker qualifier — carries both ids so
-    /// "that creature"/"the other creature" resolution never has to infer
-    /// orientation from event shape.
+    /// CR 509.3d: An attacker-side, qualified `BecomesBlocked` or
+    /// `BlocksOrBecomesBlocked` occurrence, from declaration or an entering
+    /// blocker. The explicit pair preserves "that creature" context orientation.
+    /// CR 509.4: This event never claims that the entering blocker itself blocked.
     AttackerBecameBlockedByFilteredBlocker {
         attacker: ObjectId,
         blocker: ObjectId,
@@ -1725,6 +1753,17 @@ pub enum GameEvent {
         #[serde(default)]
         card_ids: Vec<ObjectId>,
         card_names: Vec<String>,
+        /// CR 400.7 + CR 701.20a/d: the exact occurrence of each card at the
+        /// instant it was disclosed ([`GameState::disclosed_occurrences`]). The
+        /// action-boundary knowledge finalizer binds viewer knowledge to these,
+        /// never to whatever later occurrence reuses the storage id, so a card
+        /// reordered after its reveal in the same action stays hidden. Engine
+        /// bookkeeping: `filter_events_for_viewer` strips it. Empty on legacy
+        /// events, which then disclose nothing durable.
+        ///
+        /// [`GameState::disclosed_occurrences`]: crate::types::game_state::GameState::disclosed_occurrences
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        occurrences: Vec<ObjectIncarnationRef>,
     },
     /// CR 101.4 + CR 608.2c: Secretly-chosen numbers were published by a reveal
     /// instruction ("then all players reveal those numbers simultaneously" —
@@ -1902,9 +1941,11 @@ pub enum GameEvent {
     /// CR 103.1 / CR 706: The game-1 starting-player roll-off, emitted as one
     /// authoritative structured event so the contest can be rendered round by
     /// round (including tie rerolls) with no downstream re-derivation. `rounds`
-    /// preserves the round boundaries the engine computes; `winner` is the
-    /// engine's authoritative starting player (unique max of the final round, or
-    /// the lowest-seat fallback when tied at the reroll cap). Replaces the prior
+    /// preserves the round boundaries the engine computes; `winner` is the roll
+    /// winner (unique max of the final round, or the lowest-seat fallback when
+    /// tied at the reroll cap), who chooses who takes the first turn (CR 103.1);
+    /// under shared team turns the choice passes to that seat's side
+    /// representative (CR 103.1a). Replaces the prior
     /// flat per-roll `DieRolled` batch on the starting-player contest path; in-game
     /// die rolls still emit `DieRolled`.
     StartingPlayerContest {

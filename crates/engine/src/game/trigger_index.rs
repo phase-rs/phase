@@ -180,6 +180,8 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::Evolved => return (keys, true),
         // Un-card Gotcha: consumes the dedicated `GameEvent::GotchaSaid`; rare, so unclassified.
         TriggerMode::GotchaSaid => return (keys, true),
+        // Un-card touch: consumes the dedicated `GameEvent::ObjectTouched`; rare, so unclassified.
+        TriggerMode::Touched => return (keys, true),
         TriggerMode::ChangesController { .. } => push(TriggerEventKey::ChangesController),
         TriggerMode::LeavesBattlefield => push(TriggerEventKey::LeaveBattlefield(narrow)),
 
@@ -638,12 +640,16 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::Evolved { .. } => {}
         GameEvent::UnTellPerformed { .. }
         | GameEvent::PhraseSaid { .. }
-        | GameEvent::GotchaSaid { .. } => {}
+        | GameEvent::GotchaSaid { .. }
+        | GameEvent::ObjectTouched { .. } => {}
         GameEvent::ObjectIntensified { .. } => {}
         GameEvent::CounterRemoved { .. } => push(TriggerEventKey::CounterRemoved),
         GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => {
             push(TriggerEventKey::TokenCreated);
         }
+        // CR 111.1 + CR 707.13: a copy of a card created from a name is not a
+        // token, so it must not fire "whenever a token is created".
+        GameEvent::CardCopyCreated { .. } => {}
         GameEvent::CreatureDestroyed { .. } => push(TriggerEventKey::Destroyed),
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
@@ -659,7 +665,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::BlockersDeclared { .. } => push(TriggerEventKey::Blocks),
         // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so
         // "whenever ~ becomes blocked" triggers are indexed for it.
-        GameEvent::AttackerBecameBlockedByEffect { .. } => push(TriggerEventKey::Blocks),
+        GameEvent::AttackerBecameBlocked { .. } => push(TriggerEventKey::Blocks),
         GameEvent::AttackerBecameBlockedByFilteredBlocker { .. } => push(TriggerEventKey::Blocks),
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {}
         GameEvent::BecomesTarget { .. } => push(TriggerEventKey::BecomesTarget),
@@ -1012,10 +1018,11 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::GiveControl
         | EffectKind::RemoveFromCombat
         // CR 509.3c: the "becomes blocked" trigger from an effect-block is keyed
-        // off the `AttackerBecameBlockedByEffect` GameEvent (see the event→key
+        // off the `AttackerBecameBlocked` GameEvent (see the event→key
         // map above), not off `EffectResolved`, so this kind emits no key here.
         | EffectKind::BecomeBlocked
         | EffectKind::Conjure
+        | EffectKind::CreateCardCopyByName
         | EffectKind::Intensify
         | EffectKind::ApplyPerpetual
         | EffectKind::DraftFromSpellbook

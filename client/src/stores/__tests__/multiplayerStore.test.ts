@@ -852,6 +852,27 @@ describe("multiplayerStore", () => {
     });
   });
 
+  it("restores a remembered poison-counter threshold for a format with an individual threshold", () => {
+    const normalized = normalizeRememberedHostConfig({
+      format: "Commander",
+      formatConfig: { format: "Commander", poison_counter_threshold: 15 },
+    });
+
+    expect(normalized?.formatConfig.poison_counter_threshold).toBe(15);
+    // Reach guard: the rest of the config still comes from the defaults.
+    expect(normalized?.formatConfig.starting_life).toBe(FORMAT_DEFAULTS.Commander.starting_life);
+  });
+
+  it("ignores a remembered poison-counter threshold for Two-Headed Giant's team poison", () => {
+    const normalized = normalizeRememberedHostConfig({
+      format: "TwoHeadedGiant",
+      formatConfig: { format: "TwoHeadedGiant", poison_counter_threshold: 15 },
+    });
+
+    expect(normalized?.format).toBe("TwoHeadedGiant");
+    expect(normalized?.formatConfig.poison_counter_threshold).toBeNull();
+  });
+
   it("drops unknown persisted format names instead of indexing inherited object keys", () => {
     expect(normalizeRememberedHostConfig({ format: "toString" })).toBeNull();
   });
@@ -875,6 +896,7 @@ describe("multiplayerStore", () => {
       singleton: false,
       command_zone: false,
       commander_damage_threshold: null,
+      poison_counter_threshold: 10,
       range_of_influence: null,
       team_based: false,
       uses_commander: false,
@@ -1333,6 +1355,37 @@ describe("multiplayerStore", () => {
       data: { deck: Record<string, unknown> };
     };
     expect(frame.data.deck).not.toHaveProperty("bracket_tier");
+    expect(frame.data.deck).not.toHaveProperty("combo_declaration");
+  });
+
+  it("sends the owner's combo answer on the host deck and each AI seat's deck", async () => {
+    const hostAnswer = { kind: "none_intended" } as const;
+    const seatAnswer = { kind: "intended", window: "early_game" } as const;
+    useMultiplayerStore.getState().startHosting(
+      hostingSettings({
+        aiSeats: [{
+          seatIndex: 1,
+          difficulty: "Medium",
+          deckName: null,
+          deck: {
+            type: "DeckList",
+            data: { main_deck: ["Forest"], sideboard: [], commander: [], combo_declaration: seatAnswer },
+          },
+        }],
+      }),
+      { main_deck: ["Forest"], sideboard: [], commander: [], combo_declaration: hostAnswer },
+      HOST_URL,
+    );
+
+    await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+    const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+      data: {
+        deck: { combo_declaration?: unknown };
+        ai_seats: { deck: { data: { combo_declaration?: unknown } } }[];
+      };
+    };
+    expect(frame.data.deck.combo_declaration).toEqual(hostAnswer);
+    expect(frame.data.ai_seats[0].deck.data.combo_declaration).toEqual(seatAnswer);
   });
 
   describe("host deck hand-off carries every DeckData list", () => {

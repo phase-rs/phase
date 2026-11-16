@@ -23,6 +23,7 @@ function builtInConfig(): FormatConfig {
     singleton: true,
     command_zone: true,
     commander_damage_threshold: 21,
+    poison_counter_threshold: 10,
     range_of_influence: null,
     team_based: false,
     uses_commander: true,
@@ -47,6 +48,9 @@ function customRules(id = 0): CustomFormatRules {
       team_based: false,
       sideboard_policy: { type: "Limited", data: 15 },
       default_deck_copy_limit: { type: "UpTo", data: 4 },
+      // Present because the engine always emits it; the persisted-before-the-
+      // field case drops it explicitly in its own test below.
+      poison_counter_threshold: 10,
     },
     legality: {
       legal_sets: null,
@@ -78,6 +82,7 @@ function customConfig(id = 0): FormatConfig {
     singleton: false,
     command_zone: false,
     commander_damage_threshold: null,
+    poison_counter_threshold: 10,
     range_of_influence: null,
     team_based: false,
     uses_commander: false,
@@ -165,8 +170,24 @@ describe("isFormatConfigShape", () => {
     expect(isFormatConfigShape({ ...builtInConfig(), archenemy_player: null })).toBe(true);
   });
 
+  it("validates poison_counter_threshold, and accepts a config persisted without it", () => {
+    expect(isFormatConfigShape({ ...builtInConfig(), poison_counter_threshold: 15 })).toBe(true);
+    // Two-Headed Giant's engine value: no individual threshold.
+    expect(isFormatConfigShape({ ...builtInConfig(), poison_counter_threshold: null })).toBe(true);
+    expect(isFormatConfigShape({ ...builtInConfig(), poison_counter_threshold: "x" })).toBe(false);
+    // A blob written before the field existed: the engine migrates it on ingress.
+    const { poison_counter_threshold: _dropped, ...legacy } = builtInConfig();
+    expect(isFormatConfigShape(legacy)).toBe(true);
+  });
+
   it("rejects a malformed supplies_fixed_deck", () => {
     expect(isFormatConfigShape({ ...builtInConfig(), supplies_fixed_deck: "yes" })).toBe(false);
+  });
+
+  it("accepts the draft-session deck-size provenance and rejects an unknown one", () => {
+    expect(isFormatConfigShape({ ...builtInConfig(), deck_size_origin: "DraftSession" })).toBe(true);
+    expect(isFormatConfigShape({ ...builtInConfig(), deck_size_origin: "Registry" })).toBe(true);
+    expect(isFormatConfigShape({ ...builtInConfig(), deck_size_origin: "Host" })).toBe(false);
   });
 
   it("rejects a bare integer deck_size (the pre-DeckSizeRule wire shape)", () => {
@@ -341,6 +362,24 @@ describe("isCustomFormatRulesShape", () => {
         }),
       ).toBe(false);
     }
+  });
+
+  it("validates the structural poison_counter_threshold, and accepts a definition persisted without it", () => {
+    const rules = customRules();
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        structural: { ...rules.structural, poison_counter_threshold: 15 },
+      }),
+    ).toBe(true);
+    expect(
+      isCustomFormatRulesShape({
+        ...rules,
+        structural: { ...rules.structural, poison_counter_threshold: "x" },
+      }),
+    ).toBe(false);
+    const { poison_counter_threshold: _dropped, ...structuralWithout } = rules.structural;
+    expect(isCustomFormatRulesShape({ ...rules, structural: structuralWithout })).toBe(true);
   });
 
   it("accepts a definition persisted before the ante axis existed", () => {

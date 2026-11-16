@@ -13,17 +13,19 @@
 //!     ten or more poison counters loses the game (a separate SBA, not
 //!     exercised by this test).
 
+use engine::game::coverage::unimplemented_mechanics;
 use engine::game::effects::player_counter::preview_player_counter_addition;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCost, EffectKind, QuantityModification, ReplacementDefinition, ReplacementMode,
+    AbilityCost, Effect, EffectKind, QuantityModification, ReplacementDefinition, ReplacementMode,
     ReplacementPlayerScope,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::CardId;
+use engine::types::keywords::{Keyword, WardCost};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerCounterKind;
 use engine::types::replacements::ReplacementEvent;
@@ -1058,4 +1060,69 @@ fn serpent_society_ward_prohibition_scoped_to_the_source_controller_leaves_the_p
             .is_none_or(|obj| obj.zone != Zone::Battlefield),
         "paying must let the targeted destroy spell resolve"
     );
+}
+
+const AXEBANE_FEROX: &str = "Deathtouch, haste\n\
+Ward—Collect evidence 4. (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player exiles cards with total mana value 4 or greater from their graveyard.)";
+
+const AUNTIE_OOL: &str = "Ward—Blight 2. (To blight 2, a player puts two -1/-1 counters on a creature they control.)\n\
+Whenever one or more -1/-1 counters are put on a creature, draw a card if you control that creature. If you don't control it, its controller loses 1 life.";
+
+const OWLIN_SHIELDMAGE: &str = "Flying\n\
+Ward—Pay 3 life. (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays 3 life.)";
+
+/// CR 702.21a: a ward cost the parser cannot model is a coverage gap, never a
+/// ward whose cost pays nothing.
+#[test]
+fn unmodeled_ward_cost_is_a_parse_gap_not_a_free_ward() {
+    let mut scenario = GameScenario::new();
+    let axebane = scenario
+        .add_creature(P0, "Axebane Ferox", 4, 4)
+        .from_oracle_text_with_keywords(&["Deathtouch", "Haste", "Ward"], AXEBANE_FEROX)
+        .id();
+    let auntie = scenario
+        .add_creature(P0, "Auntie Ool, Cursewretch", 4, 4)
+        .from_oracle_text_with_keywords(&["Ward"], AUNTIE_OOL)
+        .id();
+    let owlin = scenario
+        .add_creature(P0, "Owlin Shieldmage", 3, 3)
+        .from_oracle_text_with_keywords(&["Flying", "Ward"], OWLIN_SHIELDMAGE)
+        .id();
+    let runner = scenario.build();
+    let objects = &runner.state().objects;
+
+    let owlin = &objects[&owlin];
+    assert!(owlin
+        .keywords
+        .contains(&Keyword::Ward(WardCost::PayLife(3))));
+    assert!(
+        unimplemented_mechanics(owlin).is_empty(),
+        "{:?}",
+        unimplemented_mechanics(owlin)
+    );
+
+    for (id, ward_line) in [
+        (axebane, "Ward—Collect evidence 4."),
+        (auntie, "Ward—Blight 2."),
+    ] {
+        let obj = &objects[&id];
+        assert!(
+            !obj.keywords.iter().any(|kw| matches!(kw, Keyword::Ward(_))),
+            "{ward_line}: {:?}",
+            obj.keywords
+        );
+        assert!(
+            obj.abilities.iter().any(|def| matches!(
+                &*def.effect,
+                Effect::Unimplemented { description: Some(d), .. } if d == ward_line
+            )),
+            "{ward_line}: {:?}",
+            obj.abilities
+        );
+        assert!(
+            unimplemented_mechanics(obj).contains(&"Effect: unknown".to_string()),
+            "{ward_line}: {:?}",
+            unimplemented_mechanics(obj)
+        );
+    }
 }

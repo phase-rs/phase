@@ -205,7 +205,7 @@ fn fallback_retarget_action_is_legal() {
 ///   frozen scope.
 #[test]
 fn fallback_multi_role_retarget_action_is_slot_legal() {
-    let mut runner = GameScenario::new().build();
+    let mut runner = GameScenario::new_n_player(3, 42).build();
 
     let role = ManaTargetRole::Both {
         // Slot 0 (recipient, surfaced first): only an opponent of P0, i.e. P1.
@@ -228,9 +228,10 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
         Zone::Stack,
     );
 
-    // Slot 0 holds P1, not P0 — so proposing `[P0]` would be a genuine change
-    // into a slot it is illegal for, rather than an exempt non-change.
-    let current_targets = vec![TargetRef::Player(P1), TargetRef::Player(P0)];
+    // Slot 0 holds P2, so P1 is a different legal opponent (CR 115.7a: a Single
+    // change must choose another target) and proposing `[P0]` would be a genuine
+    // change into a slot it is illegal for.
+    let current_targets = vec![TargetRef::Player(PlayerId(2)), TargetRef::Player(P0)];
     let ability = ResolvedAbility::new(
         Effect::Mana {
             produced: ManaProduction::Colorless {
@@ -280,7 +281,8 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
     // same per-slot pools a real prompt would store, matching
     // `retarget_prompt_softlock.rs`'s `multi_role_mana_single_retarget_
     // candidates_are_slot_legal` fixture: slot 0 (recipient, opponent-only)
-    // admits only P1; slot 1 (count source, any player) admits both.
+    // offers P1 as the different opponent; slot 1 (count source, any player)
+    // admits every player.
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
         keep_is_distinct: Vec::new(),
         player: P0,
@@ -299,7 +301,11 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
         ],
         slot_pools: vec![
             vec![TargetRef::Player(P1)],
-            vec![TargetRef::Player(P0), TargetRef::Player(P1)],
+            vec![
+                TargetRef::Player(P0),
+                TargetRef::Player(P1),
+                TargetRef::Player(PlayerId(2)),
+            ],
         ],
         legal_new_targets: vec![TargetRef::Player(P0), TargetRef::Player(P1)],
     };

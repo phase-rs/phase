@@ -1,6 +1,18 @@
 {
   "entries": [
     {
+      "id": 225,
+      "date": "2026-11-11",
+      "title": "Trample gets an \"assign the rest\" button",
+      "tags": [
+        "card-fixes",
+        "gameplay",
+        "interface"
+      ],
+      "body": "🛠️ Cards That Now Work Right\n• \"Target player shuffles up to N target cards\" now shuffles the chosen player's library, not yours (Gaea's Blessing, Dwell on the Past, Krosan Reclamation, Memory's Journey, Stream of Consciousness, Witness the Future, Rite of Renewal, Quandrix Command, Loaming Shaman)\n• Kaalia, Zenith Seeker can now pick the Demon and Dragon cards she reveals, not just the Angels\n• Fangorn, Tree Shepherd adds twice that much {G} when your Treefolk attack\n• \"Is exiled from the battlefield\" triggers no longer fire when a card is exiled from a graveyard or library (Soulherder, Market Gnome, Captain Marvel, Shooting Star)\n• Auto-pass now stops when your own ability would untap a mana source you can still tap, so loops like Basalt Monolith with Rings of Brighthearth work by hand\n\n⚔️ Combat & Gameplay\n• Trample damage assignment has an \"assign the rest\" button that puts all excess damage on the player, planeswalker or battle\n• The attack target picker shows how much unblocked damage is headed at each player, planeswalker and battle\n• Hovering an attacking creature shows what it's attacking, and stops naming a planeswalker or battle that has left combat\n• Long loop shortcuts (Smaug, Sprout token loops) resolve about twice as fast once the other players answer\n• Draft pods ask you to confirm before submitting your deck, and Casual pods can change decks between rounds\n• You can set the commander damage threshold when setting up a game against the AI\n\n🖥️ Interface\n• The \"Your priority\" box gets a green border whenever you can act, pulsing when Glow is on\n• Valid targets are marked by their outline alone, so Token and Copy badges stay visible while you choose targets\n• Export your deck from every deck view, including the stack view and the deck builder after a draft\n• Click Mode: press K to toggle it, find it in the Help sheet and Game menu, and add the first +1/+1 or -1/-1 counter to any creature\n• The deck builder now flags the same unsupported cards as the coverage report, including cards with lines the engine can't read yet",
+      "discordUrl": "https://discord.com/channels/1485498006781427802/1486432040332296424/1570285675192909915"
+    },
+    {
       "id": 224,
       "date": "2026-11-08",
       "title": "Horde Magic co-op mode arrives",

@@ -58,7 +58,7 @@ use engine::types::zones::Zone;
 use crate::ability_chain::collect_chain_effects;
 use crate::cast_facts::{collect_face_effects, is_direct_removal, EffectProfile};
 use crate::draft_eval::{dominant_colors, produced_color_count};
-use crate::features::mana_ramp::{chain_has_mana_effect, chain_searches_for_land};
+use crate::features::mana_ramp::{chain_has_mana_effect, target_filter_references_land};
 use crate::policies::effect_classify::{pt_value_is_non_negative, quantity_is_non_negative};
 
 /// Where in the draft a pick happens: which booster, and which pick within it.
@@ -1944,7 +1944,40 @@ fn is_removal_role(face: &CardFace, reading: RoleReading) -> bool {
 /// predicate for both class and deck role.
 fn is_mana_fixing(face: &CardFace, reading: RoleReading) -> bool {
     produced_color_count(face) >= 2
-        || (reading == RoleReading::Full && face.abilities.iter().any(chain_searches_for_land))
+        || (reading == RoleReading::Full
+            && face.abilities.iter().any(searches_own_library_for_land))
+}
+
+/// Whether the ability's chain searches a library its controller can choose to
+/// be their own for a land card (CR 701.23a). Fixing serves the drafter's own
+/// mana, so a search of another player's library (Eternal Dominion's "Search
+/// target opponent's library for an artifact, creature, enchantment, or land
+/// card") is not fixing.
+///
+/// This is the draft scorer's own reading, not the shared ramp authority in
+/// `features::mana_ramp`, which deck features and keepables rely on and which
+/// stays unchanged. A searcher bound to another declaration — the parent
+/// target's controller (Cleansing Wildfire), the companion player slot (Settle
+/// the Wreckage), a declared player — needs the runtime declaration shape to
+/// tell whether the drafter can be that player, which a printed face does not
+/// carry, so those fail closed here. An unrestricted "target player" (Fertilid's
+/// Favor) admits the caster (CR 601.2c).
+fn searches_own_library_for_land(ability: &AbilityDefinition) -> bool {
+    collect_chain_effects(ability).into_iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::SearchLibrary {
+                filter,
+                target_player: None
+                    | Some(
+                        TargetFilter::Controller
+                            | TargetFilter::SourceController
+                            | TargetFilter::Player
+                    ),
+                ..
+            } if target_filter_references_land(filter)
+        )
+    })
 }
 
 /// Whether the face has an activated mana ability (CR 605.1a). The whole chain
@@ -2172,6 +2205,8 @@ mod tests {
     use engine::types::mana::ManaColor;
     use engine::types::phase::Phase;
     use engine::types::statics::BlockExceptionKind;
+
+    use crate::features::mana_ramp::is_land_fetch_spell_parts;
 
     fn face(core: Vec<CoreType>, subtypes: &[&str]) -> CardFace {
         CardFace {
@@ -3393,6 +3428,94 @@ mod tests {
             0.45,
             "Arcane outranks the fixing award"
         );
+    }
+
+    /// The draft scorer's fixing reading counts a land search only when the
+    /// drafter can be the searcher. Eternal Dominion (SOK) searches "target
+    /// opponent's library", so its land alternative is not fixing; Fertilid's
+    /// Favor's unrestricted "target player" admits the caster (CR 601.2c).
+    /// Searches bound to another declaration (Cleansing Wildfire's "its
+    /// controller", Settle the Wreckage's "that player") fail closed in the
+    /// draft reading only: the shared ramp authority that deck features and
+    /// keepables read still counts all three as land-fetch spells.
+    #[test]
+    fn draft_fixing_reads_the_searcher_while_shared_ramp_is_unchanged() {
+        let p = DraftProfile::kamigawa_block();
+        let blue = vec!["U".to_string()];
+        let dominion = oracle_face(serde_json::json!({
+            "name": "Eternal Dominion",
+            "manaCost": "{7}{U}{U}{U}",
+            "manaValue": 10.0,
+            "colors": ["U"],
+            "type": "Sorcery",
+            "types": ["Sorcery"],
+            "keywords": ["Epic"],
+            "text": "Search target opponent's library for an artifact, creature, enchantment, or land card. Put that card onto the battlefield under your control. Then that player shuffles.\nEpic (For the rest of the game, you can't cast spells. At the beginning of each of your upkeeps, copy this spell except for its epic ability. You may choose a new target for the copy.)",
+        }));
+        // Positive guard: the search admits a land and names another library.
+        assert!(collect_face_effects(&dominion)
+            .iter()
+            .any(|effect| matches!(
+                effect,
+                Effect::SearchLibrary {
+                    filter,
+                    target_player: Some(_),
+                    ..
+                } if target_filter_references_land(filter)
+            )));
+        assert!(!is_mana_fixing(&dominion, RoleReading::Full));
+        assert!(!classify(&dominion).contains(&CardClass::ManaFixing));
+        assert!(!roles(&dominion).contains(&DeckRole::Fixing));
+        assert_eq!(
+            first_pick(p, &card("Eternal Dominion", "SOK", &blue, &dominion)).deck_need,
+            0.0,
+            "a search of an opponent's library fills no fixing need"
+        );
+
+        let favor = oracle_face(serde_json::json!({
+            "name": "Fertilid's Favor",
+            "manaCost": "{3}{G}",
+            "manaValue": 4.0,
+            "colors": ["G"],
+            "type": "Instant",
+            "types": ["Instant"],
+            "text": "Target player searches their library for a basic land card, puts it onto the battlefield tapped, then shuffles. Put two +1/+1 counters on up to one target artifact or creature.",
+        }));
+        assert!(is_mana_fixing(&favor, RoleReading::Full));
+
+        let wildfire = oracle_face(serde_json::json!({
+            "name": "Cleansing Wildfire",
+            "manaCost": "{1}{R}",
+            "manaValue": 2.0,
+            "colors": ["R"],
+            "type": "Sorcery",
+            "types": ["Sorcery"],
+            "text": "Destroy target land. Its controller may search their library for a basic land card, put it onto the battlefield tapped, then shuffle.\nDraw a card.",
+        }));
+        let settle = oracle_face(serde_json::json!({
+            "name": "Settle the Wreckage",
+            "manaCost": "{2}{W}{W}",
+            "manaValue": 4.0,
+            "colors": ["W"],
+            "type": "Instant",
+            "types": ["Instant"],
+            "text": "Exile all attacking creatures target player controls. That player may search their library for that many basic land cards, put those cards onto the battlefield tapped, then shuffle.",
+        }));
+        assert!(!is_mana_fixing(&wildfire, RoleReading::Full));
+        assert!(!is_mana_fixing(&settle, RoleReading::Full));
+
+        // The shared ramp authority keeps its own reading of every one of the
+        // caster-eligible searches.
+        for face in [&favor, &wildfire, &settle] {
+            assert!(
+                is_land_fetch_spell_parts(&face.card_type.core_types, &face.abilities),
+                "{} stays a shared land-fetch spell",
+                face.name
+            );
+        }
+        // Kodama's Reach and Sakura-Tribe Elder stay draft fixing.
+        assert!(is_mana_fixing(&kodama_s_reach(), RoleReading::Full));
+        assert!(is_mana_fixing(&sakura_tribe_elder(), RoleReading::Full));
     }
 
     #[test]
