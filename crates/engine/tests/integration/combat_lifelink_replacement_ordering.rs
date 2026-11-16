@@ -228,12 +228,13 @@ fn answer_ordering_prompts(runner: &mut GameRunner, first_source: &str) -> (usiz
                 // `first_source` is selected EVERY time it is applicable, not
                 // just on this call's first prompt. One call can span more than
                 // one life-gain event — a batch with two lifelink sources
-                // (CR 702.15e), or a first-strike batch whose resume runs the
-                // regular sub-step (CR 510.4) — and each such event opens its
-                // own first prompt. Keying on "the first prompt I see" would
-                // silently answer the SECOND event's opening choice with a bare
-                // index 0 and make each event's total depend on candidate order
-                // again.
+                // (CR 702.15e) — and each such event opens its own first
+                // prompt. (A first-strike batch's resume returns the CR 510.3
+                // priority window; the regular sub-step, CR 510.4, follows the
+                // next pass round in a later call.) Keying on "the first prompt
+                // I see" would silently answer the SECOND event's opening choice
+                // with a bare index 0 and make each event's total depend on
+                // candidate order again.
                 //
                 // When `first_source` is absent the prompt is a CR 616.1f repeat:
                 // CR 614.5 gives each effect one opportunity per event, so the
@@ -514,9 +515,12 @@ fn second_lifelink_source_in_batch_is_not_lost() {
 /// lifelinker parks in the FIRST-STRIKE batch; after the resume the defender
 /// must have taken both sub-steps' damage and P0 must have gained twice.
 ///
-/// REVERT-FAILING ASSERTION: `regular_damage_done` and the defender at 14.
-/// Omitting `resume_pending_combat_lifelink`'s `resolve_combat_damage`
-/// re-entry leaves the regular sub-step unrun.
+/// REVERT-FAILING ASSERTION: the `Priority` window right after the first answer
+/// (CR 510.3: the completed first-strike batch ends its step with the active
+/// player's priority, `regular_damage_done` still false, defender at 17), then
+/// the defender at 14 once that window is passed. If the resume returned no
+/// window, or the all-pass gate did not enter the regular sub-step from it, the
+/// window assertions or the final totals would fail.
 #[test]
 fn first_strike_pause_still_runs_the_regular_sub_step() {
     let mut scenario = GameScenario::new();
@@ -550,6 +554,20 @@ fn first_strike_pause_still_runs_the_regular_sub_step() {
     );
 
     let _ = answer_ordering_prompts(&mut runner, DOUBLER);
+    // CR 510.3 + CR 510.4: the resumed first-strike batch is complete; its step
+    // ends with the active player's priority window, and the regular sub-step has
+    // not begun.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "the completed first-strike batch ends with the active player's priority, got {:?}",
+        runner.state().waiting_for
+    );
+    let combat = runner.state().combat.as_ref().expect("combat is live");
+    assert!(combat.first_strike_done && !combat.regular_damage_done);
+    assert_eq!(runner.life(P1), 17, "CR 510.2: the first step dealt 3");
     advance_through_combat_damage(&mut runner);
     let _ = answer_ordering_prompts(&mut runner, DOUBLER);
 

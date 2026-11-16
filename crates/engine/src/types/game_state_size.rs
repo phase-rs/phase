@@ -125,6 +125,15 @@
 //! large rarely-populated field went inline, so the ceiling moves by the rule
 //! to 15,376.next_multiple_of(256) + 256 = 15,872.
 //!
+//! `GameState` re-measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
+//! 15,904 B when the canonical library-placement branch merged main: its
+//! `ProposedEvent::ZoneChange::library_placement` held a 96 B
+//! `Option<LibraryPosition>` inline, making `ProposedEvent` 288 B (200 B with
+//! the field boxed) and widening both `GameState` fields that hold one inline
+//! (`pending_replacement`, `pending_liminal_entry_resume`). Only library moves
+//! carry a placement, so the field is boxed (`Option<Box<LibraryPosition>>`);
+//! `GameState` then measures 15,728 B, under the unchanged 15,872 ceiling.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!

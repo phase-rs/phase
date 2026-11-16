@@ -21300,6 +21300,13 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some(sac_result);
     }
 
+    // CR 603.2 + CR 603.2c + CR 701.26: actor-side untap trigger with a step
+    // window ("whenever you untap one or more permanents during your untap
+    // step" — The Millennium Calendar, issue #10940).
+    if let Some(untap_result) = try_parse_untap_trigger(lower, &make_base) {
+        return Some(untap_result);
+    }
+
     if matches!(
         lower,
         "whenever a player cycles a card" | "when a player cycles a card"
@@ -25086,6 +25093,73 @@ fn try_parse_sacrifice_trigger(
     Some((TriggerMode::Sacrificed, def))
 }
 
+/// CR 603.2 + CR 603.2c + CR 701.26: actor-side untap trigger with a step
+/// window — "whenever you untap one or more permanents during your untap
+/// step" (The Millennium Calendar, issue #10940). The "one or more"
+/// quantifier marks the batched reading (CR 603.2c: one firing per
+/// simultaneous-untap batch; the subject headcount feeds `EventContextAmount`
+/// for "that many"); the trailing "during <window>" qualifier is part of the
+/// trigger event (CR 603.2) and peels through the shared
+/// [`peel_trailing_event_window`], with any untypeable remainder declining the
+/// head via [`has_untyped_event_window`] so the line stays honestly
+/// unsupported instead of firing ungated. `def.mode` is the fieldless
+/// `TriggerMode::Untaps` unit variant; `valid_card` is the controller-scoped
+/// subject filter; `def.batched` is set per-arm — the generic batching scan
+/// runs later in `parse_trigger_condition` (past which the sacrifice arm
+/// already returned), so per-arm is the established sibling pattern
+/// (mirroring the ChangesZoneAll arm). Returns None on any unmodeled tail.
+fn try_parse_untap_trigger(
+    lower: &str,
+    make_base: &dyn Fn() -> TriggerDefinition,
+) -> Option<(TriggerMode, TriggerDefinition)> {
+    // Strip "whenever "/"when " prefix.
+    let (event, ()) = alt((
+        value((), tag::<_, _, OracleError<'_>>("whenever ")),
+        value((), tag("when ")),
+    ))
+    .parse(lower)
+    .ok()?;
+
+    // Actor dispatch: only the controller-actor form is modeled. Any other
+    // actor ("an opponent untaps …", "a player untaps …") stays red.
+    let (after_verb, _) = tag::<_, _, OracleError<'_>>("you untap ")
+        .parse(event)
+        .ok()?;
+
+    // CR 603.2c: the "one or more " quantifier marks the batched reading;
+    // without it the head is not this trigger.
+    let (after_quantifier, _) = tag::<_, _, OracleError<'_>>("one or more ")
+        .parse(after_verb)
+        .ok()?;
+
+    let (filter, remainder) = parse_trigger_subject(after_quantifier, &mut ParseContext::default());
+    if remainder.len() == after_quantifier.len() {
+        return None;
+    }
+
+    // CR 603.2: the trailing "during <window>" qualifier is part of the
+    // trigger event, not an intervening "if". Peel it first; an unrecognized
+    // window declines the head so the line stays coverage-red rather than
+    // firing ungated. Anything else left over is unmodeled tail.
+    let (remainder, window) = peel_trailing_event_window(remainder);
+    if has_untyped_event_window(remainder) {
+        return None;
+    }
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+
+    let mut def = make_base();
+    def.mode = TriggerMode::Untaps;
+    // The "you untap …" actor binds the untapper to the trigger source's
+    // controller, so the subject filter is scoped to controller permanents —
+    // mirroring the "you tap … for mana" arm.
+    def.valid_card = Some(add_controller(filter, ControllerRef::You));
+    def.batched = true;
+    attach_event_window(&mut def, window);
+    Some((TriggerMode::Untaps, def))
+}
+
 // ---------------------------------------------------------------------------
 // Phase trigger combinators
 // ---------------------------------------------------------------------------
@@ -25499,9 +25573,12 @@ fn turn_window_condition(constraint: TriggerConstraint) -> Option<TriggerConditi
 /// CR 603.2 + CR 500.1 + CR 506.1: the "during <window>" qualifier of an
 /// event-trigger head — "during your turn" / "during an opponent's turn"
 /// (turn windows, via [`parse_during_turn_spec`]), "during combat" (the whole
-/// combat phase, CR 506.1), or "during the <step/phase>" (via
-/// `parse_phase_name_set`). The arms are leaf alternatives after the shared
-/// "during " prefix. NON-`all_consuming`: callers own any trailing text.
+/// combat phase, CR 506.1), "during the <step/phase>" (via
+/// `parse_phase_name_set`), or "during <possessive> untap step" (the single
+/// modeled step window: possessive via [`parse_turn_possessive_prefix`],
+/// step via the shared `parse_phase_name_set`). The arms are leaf
+/// alternatives after the shared "during " prefix. NON-`all_consuming`:
+/// callers own any trailing text.
 pub(crate) fn parse_event_window(input: &str) -> OracleResult<'_, TriggerCondition> {
     preceded(
         tag("during "),
@@ -25515,6 +25592,27 @@ pub(crate) fn parse_event_window(input: &str) -> OracleResult<'_, TriggerConditi
             map(preceded(tag("the "), parse_phase_name_set), |phases| {
                 TriggerCondition::CurrentPhaseIs { phases }
             }),
+            // CR 603.2 + CR 500.1: "during your untap step" — the possessive
+            // step window (The Millennium Calendar). The possessive maps
+            // through the shared turn-owner table
+            // ([`parse_turn_possessive_prefix`] + [`turn_window_condition`])
+            // and the step through the shared phase-name set; only the untap
+            // step is modeled, so any other step ("during your upkeep") stays
+            // untyped and the head stays coverage-red.
+            map(
+                pair(
+                    map_opt(parse_turn_possessive_prefix, turn_window_condition),
+                    verify(parse_phase_name_set, |phases: &Vec<Phase>| {
+                        *phases == [Phase::Untap]
+                    }),
+                ),
+                |(turn_window, phases)| {
+                    append_trigger_condition(
+                        Some(turn_window),
+                        TriggerCondition::CurrentPhaseIs { phases },
+                    )
+                },
+            ),
         )),
     )
     .parse(input)

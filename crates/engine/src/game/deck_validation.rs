@@ -16,8 +16,9 @@ use crate::types::custom_format::{
     passes_legacy_axis_gate, AntePolicy, CommandZoneMode, LegalityRules, SetCode,
 };
 use crate::types::format::{
-    CardPool, ChallengeDeck, CompanionSlot, DeckCopyLimit, DeckSizeSubject, DeckSupply,
-    FormatConfig, GameFormat, SelectedFormat, SideboardPolicy, SurvivorDeckFormat,
+    CardPool, ChallengeDeck, CompanionSlot, DeckCopyLimit, DeckSizeOverride, DeckSizeRule,
+    DeckSizeSubject, DeckSupply, FormatConfig, GameFormat, SelectedFormat, SideboardPolicy,
+    SurvivorDeckFormat,
 };
 use crate::types::keywords::{Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost};
@@ -1765,7 +1766,11 @@ fn evaluate_commander_with_format(
     // authority for min-vs-exact. Compared only through `accepts`, never by
     // hand — CR 903.13f(1) sets a minimum with NO maximum, which a literal
     // equality cannot express.
-    let deck_size = format_rules.deck_size;
+    // CR 903.5a: a commander face carrying the `deck_size_override`
+    // deck-construction marker set to `NoMaximum` (Whtz / Covert Blue Mage
+    // class) widens an exact rule to its minimum — the count side already
+    // includes the command-zone cards via `deck_size_subject_count`.
+    let deck_size = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     // CR 903.5e: the sideboard is dropped at game load for Commander-style
     // formats. Re-scope the request so singleton, color-identity, and legality
     // checks operate on the actual game deck.
@@ -2005,8 +2010,9 @@ fn evaluate_brawl(
 
     // CR 903.5a (via Brawl variant): the format's rule is authoritative for the
     // total card count (main + commander, accounting for commander listed in
-    // main) — never re-derive min-vs-exact here.
-    let deck_size = format_rules.deck_size;
+    // main) — never re-derive min-vs-exact here. A marker commander widens
+    // the exact rule to its minimum via `effective_deck_size_rule`.
+    let deck_size = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
     if !deck_size.accepts(total_cards) {
         reasons.push(format!(
@@ -2251,10 +2257,15 @@ fn evaluate_tiny_leaders(
         ));
     }
 
+    // CR 903.5a: the format's rule is authoritative — never re-derive it
+    // with `!=` here. A marker commander (Whtz / Covert Blue Mage class)
+    // widens the exact 50 to its minimum via `effective_deck_size_rule`.
+    let deck_size = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
-    if total_cards != 50 {
+    if !deck_size.accepts(total_cards) {
         reasons.push(format!(
-            "Tiny Leaders: Reborn deck must have exactly 50 main+commander cards (found {total_cards})"
+            "Tiny Leaders: Reborn deck must have {} main+commander cards (found {total_cards})",
+            deck_size.requirement_phrase()
         ));
     }
 
@@ -2619,10 +2630,15 @@ fn evaluate_oathbreaker(
     // so a composite-named ("Front // Back") Oathbreaker or signature spell
     // listed in the main deck by its front face is recognized as the same
     // physical card instead of being counted twice.
+    // CR 903.5a: the format's rule is authoritative — never re-derive it
+    // with `!=` here. A marker Oathbreaker widens the exact 60 to its
+    // minimum via `effective_deck_size_rule`.
+    let deck_size = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     let total_cards = deck_size_subject_count(format_rules.format.deck_size_subject(), db, request);
-    if total_cards != 60 {
+    if !deck_size.accepts(total_cards) {
         reasons.push(format!(
-            "Oathbreaker deck must have exactly 60 cards (found {total_cards})"
+            "Oathbreaker deck must have {} cards (found {total_cards})",
+            deck_size.requirement_phrase()
         ));
     }
 
@@ -3253,7 +3269,10 @@ fn quick_commander_check(
 ) -> QuickCheckResult {
     let legality_format = format_rules.format.legality_format();
     let format_label = format_rules.format.label();
-    let expected = format_rules.deck_size;
+    // CR 903.5a: the full-path twin in `evaluate_commander_with_format` —
+    // a marker commander (Whtz / Covert Blue Mage class) widens the exact
+    // rule to its minimum on both paths.
+    let expected = effective_deck_size_rule(db, format_rules.deck_size, &request.commander);
     let pairing = format_rules.format.commander_pairing();
     // CR 702.124g: at most two commanders. Pre-existing and unchanged by this
     // phase; named here so a later reader does not mistake draft-core's two
@@ -4135,6 +4154,36 @@ fn deck_size_subject_count(
                     .len()
                     .saturating_sub(signature_represented)
         }
+    }
+}
+
+/// CR 903.5a: the effective deck-size rule for a commander deck — `Exactly(n)`
+/// becomes `Minimum(n)` when any commander face carries the
+/// `deck_size_override` deck-construction marker set to `NoMaximum` (Whtz,
+/// the Bibliophile's "A deck with this commander has no maximum deck size";
+/// The Covert Blue Mage's "your starting deck can contain any number of
+/// cards beyond the maximum deck size"). Non-exact rules pass through
+/// unchanged: the marker lifts only the maximum, never the minimum. Unknown
+/// commander names resolve to no face and are ignored here — the legality
+/// gates report them separately. The subject stays `MainDeckAndCommanders`,
+/// so the count side is untouched; only the rule's acceptance widens.
+fn effective_deck_size_rule(
+    db: &CardDatabase,
+    base: DeckSizeRule,
+    commanders: &[String],
+) -> DeckSizeRule {
+    let DeckSizeRule::Exactly(n) = base else {
+        return base;
+    };
+    let any_no_maximum = commanders.iter().any(|name| {
+        db.get_face_by_name(&db.lookup_key(name))
+            .and_then(|face| face.deck_size_override)
+            .is_some_and(|override_value| matches!(override_value, DeckSizeOverride::NoMaximum))
+    });
+    if any_no_maximum {
+        DeckSizeRule::Minimum(n)
+    } else {
+        base
     }
 }
 
@@ -5303,6 +5352,64 @@ mod tests {
                     "commander": "legal"
                 }
             },
+            "whtz, the bibliophile": {
+                "name": "Whtz, the Bibliophile",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Legendary"],
+                    "core_types": ["Creature"],
+                    "subtypes": ["Homunculus"]
+                },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": "Rulebreaker — A deck with this commander has no maximum deck size.\n{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you had 200 or more cards in your starting deck.",
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": ["Rulebreaker"],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "color_identity": ["White", "Blue"],
+                "scryfall_oracle_id": null,
+                "no_maximum_deck_size": {"type": "NoMaximum"},
+                "legalities": {
+                    "standard": "legal",
+                    "commander": "legal"
+                }
+            },
+            "the covert blue mage": {
+                "name": "The Covert Blue Mage",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Legendary"],
+                    "core_types": ["Creature"],
+                    "subtypes": ["Homunculus"]
+                },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": "If The Covert Blue Mage is your commander, your starting deck can contain any number of cards beyond the maximum deck size. (For example, your deck can be 120 cards.)\nWhen The Covert Blue Mage enters, create a colorless Equipment artifact token named Covert Sunglasses. It has \"Equipped creature can't be blocked\" and equip {2}{W/U}.",
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "color_identity": ["White", "Blue"],
+                "scryfall_oracle_id": null,
+                "no_maximum_deck_size": {"type": "NoMaximum"},
+                "legalities": {
+                    "standard": "legal",
+                    "commander": "legal"
+                }
+            },
             "red card": {
                 "name": "Red Card",
                 "mana_cost": { "type": "NoCost" },
@@ -6306,6 +6413,308 @@ mod tests {
             result.commander.compatible,
             "expected compatible commander deck, got: {:?}",
             result.commander.reasons
+        );
+    }
+
+    fn whtz_commander_request(main_plains: usize) -> DeckCompatibilityRequest {
+        DeckCompatibilityRequest {
+            main_deck: expand("Plains", main_plains),
+            sideboard: Vec::new(),
+            commander: vec!["Whtz, the Bibliophile".to_string()],
+            companion: Vec::new(),
+            planar_deck: Vec::new(),
+            scheme_deck: Vec::new(),
+            signature_spell: Vec::new(),
+            selected_format: None,
+            selected_challenge_deck: None,
+            min_deck_size: None,
+            selected_match_type: None,
+            player_count: default_player_count(),
+            summary_only: false,
+            draft_set_codes: Vec::new(),
+        }
+    }
+
+    /// V5: the helper maps `Exactly(n)` to `Minimum(n)` iff any commander
+    /// face carries the marker — and the Whtz face is NOT an Oathbreaker
+    /// (`is_oathbreaker: false` by default), so a Whtz-led Oathbreaker deck
+    /// still fails the planeswalker gate even though the size rule widens.
+    #[test]
+    fn effective_deck_size_rule_widens_exact_for_marker_commanders() {
+        use crate::types::format::DeckSizeRule;
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+
+        assert_eq!(
+            effective_deck_size_rule(
+                &db,
+                DeckSizeRule::Exactly(60),
+                &["Whtz, the Bibliophile".to_string()],
+            ),
+            DeckSizeRule::Minimum(60)
+        );
+        assert_eq!(
+            effective_deck_size_rule(
+                &db,
+                DeckSizeRule::Exactly(100),
+                &["The Covert Blue Mage".to_string()],
+            ),
+            DeckSizeRule::Minimum(100)
+        );
+        assert_eq!(
+            effective_deck_size_rule(
+                &db,
+                DeckSizeRule::Exactly(100),
+                &["Grub Commander".to_string()],
+            ),
+            DeckSizeRule::Exactly(100),
+            "an unmarked commander keeps the exact rule"
+        );
+        assert_eq!(
+            effective_deck_size_rule(&db, DeckSizeRule::Minimum(60), &[]),
+            DeckSizeRule::Minimum(60),
+            "minimum rules and empty commander slots pass through untouched"
+        );
+
+        // Negative Oathbreaker row: the marker widens the 60-rule, but Whtz
+        // is not a legendary Planeswalker, so the deck still fails.
+        let whtz = db
+            .get_face_by_name("Whtz, the Bibliophile")
+            .expect("whtz face resolves");
+        assert!(
+            !whtz.is_oathbreaker,
+            "the fixture Whtz face must not be an Oathbreaker (is_oathbreaker: false)"
+        );
+        let mut request = whtz_commander_request(59);
+        request.signature_spell = vec!["Red Card".to_string()];
+        let unknown = collect_unknown_cards(&db, &request);
+        let check = evaluate_oathbreaker(
+            &db,
+            &request,
+            &unknown,
+            &crate::types::format::FormatConfig::oathbreaker(),
+        );
+        assert!(
+            !check.compatible,
+            "a non-planeswalker Oathbreaker must fail despite the widened size rule"
+        );
+        assert!(
+            check
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("must be a legendary Planeswalker")),
+            "expected the planeswalker gate, got: {:?}",
+            check.reasons
+        );
+    }
+
+    /// V1: a 120-card Whtz Commander deck is fully legal — the marker lifts
+    /// the CR 903.5a maximum while the 100-card minimum still holds.
+    #[test]
+    fn whtz_commander_accepts_120_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = whtz_commander_request(119);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result.commander.compatible,
+            "expected a compatible 120-card Whtz deck, got: {:?}",
+            result.commander.reasons
+        );
+    }
+
+    /// A 101-card Whtz Commander deck is legal too: the marker removes only
+    /// the maximum, so every size at or above the 100-card floor validates.
+    /// Pins the `Exactly(100)` → `Minimum(100)` widening at the first size
+    /// the legacy rule would reject.
+    #[test]
+    fn whtz_commander_accepts_101_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = whtz_commander_request(100);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result.commander.compatible,
+            "expected a compatible 101-card Whtz deck, got: {:?}",
+            result.commander.reasons
+        );
+    }
+
+    /// V4: the summary path agrees with the full path on the V1 list.
+    #[test]
+    fn whtz_quick_check_agrees_with_full_check_on_120_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = whtz_commander_request(119);
+        let unknown = collect_unknown_cards(&db, &request);
+
+        let full = evaluate_commander_with_format(
+            &db,
+            &request,
+            &unknown,
+            CommanderVariantRules::commander(),
+            &crate::types::format::FormatConfig::commander(),
+        );
+        let quick = quick_commander_check(
+            &db,
+            &request,
+            CommanderVariantRules::commander(),
+            &crate::types::format::FormatConfig::commander(),
+        );
+        assert!(full.compatible, "full path must accept: {:?}", full.reasons);
+        assert!(
+            quick.reason.is_none(),
+            "quick path must agree, got: {:?}",
+            quick.reason
+        );
+    }
+
+    /// V2: the marker lifts only the maximum — a 99-card Whtz deck still
+    /// fails the at-least-100 floor (the V1 guard).
+    #[test]
+    fn whtz_commander_still_rejects_99_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let request = whtz_commander_request(98);
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            !result.commander.compatible,
+            "a 99-card deck must fail the minimum even with the marker"
+        );
+        assert!(
+            result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("at least 100")),
+            "expected the minimum-size reason, got: {:?}",
+            result.commander.reasons
+        );
+        let quick = quick_commander_check(
+            &db,
+            &request,
+            CommanderVariantRules::commander(),
+            &crate::types::format::FormatConfig::commander(),
+        );
+        assert!(
+            quick.reason.is_some(),
+            "the summary path must reject the 99-card deck too"
+        );
+    }
+
+    /// V3: an unmarked commander keeps the exact rule — 101 cards fail.
+    /// Hostile: a partner pair where NEITHER face carries the marker fails
+    /// the same way (the marker is per-face, never per-deck).
+    #[test]
+    fn unmarked_commander_rejects_101_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut request = whtz_commander_request(100);
+        request.commander = vec!["Grub Commander".to_string()];
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            !result.commander.compatible,
+            "an unmarked 101-card deck must fail the exact rule"
+        );
+        assert!(
+            result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100")),
+            "expected the exact-size reason, got: {:?}",
+            result.commander.reasons
+        );
+
+        // Hostile: two unmarked partners at 101 — the size reason fires
+        // alongside the partner-pairing reason.
+        let mut hostile = whtz_commander_request(99);
+        hostile.commander = vec!["Grub Commander".to_string(), "Legal Commander".to_string()];
+        let hostile_result = evaluate_deck_compatibility(&db, &hostile);
+        assert!(
+            !hostile_result.commander.compatible,
+            "an unmarked partner pair at 101 must fail"
+        );
+        assert!(
+            hostile_result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100")),
+            "expected the exact-size reason even for partners, got: {:?}",
+            hostile_result.commander.reasons
+        );
+    }
+
+    /// V6: the Class B face (Covert Blue Mage) lifts the maximum the same
+    /// way — commander + 120 full-leg compatible on both paths.
+    #[test]
+    fn covert_blue_mage_commander_accepts_120_card_deck() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        let mut request = whtz_commander_request(119);
+        request.commander = vec!["The Covert Blue Mage".to_string()];
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result.commander.compatible,
+            "expected a compatible 120-card Covert deck, got: {:?}",
+            result.commander.reasons
+        );
+        let quick = quick_commander_check(
+            &db,
+            &request,
+            CommanderVariantRules::commander(),
+            &crate::types::format::FormatConfig::commander(),
+        );
+        assert!(
+            quick.reason.is_none(),
+            "quick path must agree, got: {:?}",
+            quick.reason
+        );
+    }
+
+    /// V7: Whtz in the MAIN deck (or as companion) does not lift the
+    /// maximum — only the commander slot's faces count. 101 cards fail.
+    #[test]
+    fn whtz_outside_commander_slot_does_not_lift_the_maximum() {
+        let db = CardDatabase::from_json_str(&test_db_json()).unwrap();
+        // Whtz in the main: 99 Plains + Whtz + another commander = 101.
+        let mut main = expand("Plains", 99);
+        main.push("Whtz, the Bibliophile".to_string());
+        let mut request = whtz_commander_request(0);
+        request.main_deck = main;
+        request.commander = vec!["Grub Commander".to_string()];
+
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            !result.commander.compatible,
+            "Whtz in the main deck must not lift the maximum"
+        );
+        assert!(
+            result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100")),
+            "expected the exact-size reason, got: {:?}",
+            result.commander.reasons
+        );
+
+        // Hostile: Whtz as companion + 101 elsewhere still fails.
+        let mut hostile = whtz_commander_request(100);
+        hostile.commander = vec!["Grub Commander".to_string()];
+        hostile.companion = vec!["Whtz, the Bibliophile".to_string()];
+        let hostile_result = evaluate_deck_compatibility(&db, &hostile);
+        assert!(
+            !hostile_result.commander.compatible,
+            "Whtz as companion must not lift the maximum"
+        );
+        assert!(
+            hostile_result
+                .commander
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("exactly 100")),
+            "expected the exact-size reason for the companion case, got: {:?}",
+            hostile_result.commander.reasons
         );
     }
 
