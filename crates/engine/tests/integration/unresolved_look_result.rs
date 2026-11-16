@@ -56,6 +56,7 @@ fn mill() -> Effect {
         count: q(1),
         target: declared(),
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     }
 }
 
@@ -112,6 +113,8 @@ fn reveal_until(any_number: bool) -> Effect {
 
 fn to_hand(target: TargetFilter) -> Effect {
     Effect::ChangeZone {
+        actor: engine::types::ability::LibraryInstructionActor::Controller,
+        library_shuffle: Default::default(),
         origin: None,
         destination: Zone::Hand,
         target,
@@ -730,6 +733,31 @@ row!(
             "the exiled card to hand"
         );
         assert!(o.p0_hand.is_empty(), "P0 hand {:?}", o.p0_hand);
+        assert_eq!(o.guard_counters, Some(1), "guard did not run");
+    }
+);
+// CR 608.2c + CR 400.7j: an earlier reveal (R1, P0's top card A) leaves its card in the reveal
+// ledger; the `ExileTop` that follows exiles P1's top card B. The dependent's "it" is B, the
+// immediate producer's result, never the earlier reveal's A.
+row!(
+    legal_exile_top_after_prior_reveal,
+    Case::new(exile_top(), Dependent::ParentTarget),
+    |o: &Outcome| {
+        assert_eq!(
+            o.last_revealed,
+            vec!["L0-3".to_string()],
+            "reach guard: R1 recorded P0's top card A"
+        );
+        assert_eq!(
+            o.p1_hand,
+            vec!["L1-3".to_string()],
+            "the exiled card B to hand"
+        );
+        assert!(
+            o.p0_hand.is_empty(),
+            "the earlier revealed card A moved: P0 hand {:?}",
+            o.p0_hand
+        );
         assert_eq!(o.guard_counters, Some(1), "guard did not run");
     }
 );

@@ -342,7 +342,7 @@ pub(crate) fn shared_life_members(state: &GameState, player: PlayerId) -> Vec<Pl
     }
 }
 
-pub(crate) fn shared_poison_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+pub fn shared_poison_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
     if has_shared_poison(state, player) {
         team_members(state, player)
     } else if super::players::is_alive(state, player) {
@@ -472,6 +472,22 @@ pub(crate) fn apnap_team_rank(state: &GameState, player: PlayerId) -> usize {
         .iter()
         .position(|group| group.contains(&player))
         .unwrap_or(groups.len())
+}
+
+/// CR 103.1a + CR 805.4: the living turn takers in seat order, one per side
+/// that takes shared team turns (its representative) and one per seat otherwise.
+pub(crate) fn turn_representatives(state: &GameState) -> Vec<PlayerId> {
+    let mut seen = BTreeSet::new();
+    state
+        .seat_order
+        .iter()
+        .copied()
+        .filter(|&player| super::players::is_alive(state, player))
+        .filter_map(|player| {
+            let representative = normalize_shared_turn_recipient(state, player);
+            seen.insert(representative).then_some(representative)
+        })
+        .collect()
 }
 
 pub(crate) fn normalize_shared_turn_recipient(state: &GameState, player: PlayerId) -> PlayerId {

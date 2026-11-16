@@ -110,6 +110,7 @@ import type {
 } from "./draftStore";
 import { DRAFT_DECK_SESSION_KEY } from "./draftStore";
 import { FORMAT_DEFAULTS } from "./multiplayerStore";
+import { draftSessionFormatConfig } from "../services/draftFormatConfig";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -334,6 +335,12 @@ interface MultiplayerDraftState {
   /** Full deck submitted during deckbuilding (mainDeck + lands). */
   submittedDeck: string[];
   submittedWorkspaceState: DraftWorkspaceState | null;
+  /**
+   * CR 702.139a: the companion the player's last accepted submission
+   * designated, or null. A later resubmission (between rounds) starts from it,
+   * so only an explicit removal in the builder clears the designation.
+   */
+  submittedCompanion: string | null;
   submittedPartition: DraftWorkspacePartition | null;
   intergameWorkspaceState: DraftWorkspaceState | null;
   matchPairing: DraftMatchLaunch | null;
@@ -441,7 +448,7 @@ interface MultiplayerDraftActions {
   retryWorkspaceSync: () => Promise<void>;
   setIntergameWorkspaceState: (next: DraftWorkspaceState) => void;
   /** Both: submit the built deck. */
-  submitDeck: (commanders?: string[]) => Promise<void>;
+  submitDeck: (commanders?: string[], companion?: string | null) => Promise<void>;
   /** Host: kick a player from the pod. */
   kickPlayer: (seat: number, reason?: string) => void;
   /** Host: pause the draft. */
@@ -1367,6 +1374,24 @@ function localLaunchDeck(launch: DraftMatchLaunch) {
   }
 }
 
+/**
+ * The pod-level state a match launch installs. The between-games seed is
+ * per-match: a new match's game-2 sideboarding starts from the deck
+ * registered for THAT match (the latest accepted submission, which a Casual
+ * pod may have revised between rounds — MTR 7.3), never from a prior match's
+ * sideboard configuration. A re-delivered start for the SAME match
+ * (reconnect) keeps the in-match configuration for the next game.
+ */
+function matchStartState(state: MultiplayerDraftState, launch: DraftMatchLaunch): Partial<MultiplayerDraftState> {
+  return {
+    matchPairing: launch,
+    phase: "matchInProgress",
+    intergameWorkspaceState: state.matchPairing?.matchId === launch.matchId
+      ? state.intergameWorkspaceState
+      : null,
+  };
+}
+
 function nameMultiset(names: readonly string[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
@@ -1381,17 +1406,58 @@ function sameNameMultiset(left: readonly string[], right: readonly string[]): bo
 }
 
 /**
- * The local workspace's partition when it projects the replay-accepted main deck, else null: a name-only
- * main deck cannot tell a drafted card from a virtual one of the same name.
+ * The local workspace and its partition when it projects the replay-accepted main deck, else null: a
+ * name-only main deck cannot tell a drafted card from a virtual one of the same name.
  */
 function recoveredSubmissionPartition(
   mainDeck: readonly string[],
   pool: DraftPlayerView["pool"],
-): DraftWorkspacePartition | null {
+): { workspace: DraftWorkspaceState; partition: DraftWorkspacePartition } | null {
   const { workspaceState } = useMultiplayerDraftStore.getState();
   if (!workspaceState) return null;
-  const partition = projectWorkspacePartition(reconcileWorkspaceState(workspaceState, pool), pool);
-  return sameNameMultiset(partition.mainDeck, mainDeck) ? partition : null;
+  const workspace = reconcileWorkspaceState(workspaceState, pool);
+  const partition = projectWorkspacePartition(workspace, pool);
+  return sameNameMultiset(partition.mainDeck, mainDeck) ? { workspace, partition } : null;
+}
+
+/**
+ * The single authority for recording a deck submission the host ACCEPTED: the deck, its partition and the
+ * companion it designated (CR 702.139a) are stored together, so a later re-edit (Casual RoundComplete)
+ * starts from exactly what was accepted and an unchanged resubmit cannot drop the companion. Both the
+ * ordinary submit path and the reconnect-recovery path (a replayed acceptance with no surviving caller)
+ * record through here. `nextView` is the host's post-submit view, installed with the workspace; a guest
+ * has none and only records the submission. A null `partition` (a recovered deck the local workspace
+ * cannot project) still records the accepted deck and companion.
+ */
+function recordAcceptedSubmission(input: {
+  view: DraftPlayerView;
+  nextView?: DraftPlayerView;
+  mainDeck: readonly string[];
+  partition: DraftWorkspacePartition | null;
+  workspace: DraftWorkspaceState | null;
+  commanders: readonly string[];
+  companion: string | null;
+}): void {
+  const patch: Partial<MultiplayerDraftState> = {
+    submittedDeck: [...input.mainDeck],
+    submittedPartition: input.partition,
+    submittedCompanion: input.companion,
+    ...(input.workspace ? { submittedWorkspaceState: cloneWorkspace(input.workspace) } : {}),
+  };
+  if (input.nextView && input.workspace) {
+    installWorkspace({ view: input.nextView, base: input.workspace, publish: false, patch });
+  } else {
+    useMultiplayerDraftStore.setState(patch);
+  }
+  if (input.partition) {
+    void autosaveDraftDeck({
+      view: input.view,
+      setCode: null,
+      partition: input.partition,
+      commanders: [...input.commanders],
+      companion: input.companion,
+    });
+  }
 }
 
 function disposeMatchController(): void {
@@ -1658,6 +1724,7 @@ const initialState: MultiplayerDraftState = {
   pairings: [],
   submittedDeck: [],
   submittedWorkspaceState: null,
+  submittedCompanion: null,
   submittedPartition: null,
   intergameWorkspaceState: null,
   matchPairing: null,
@@ -2385,33 +2452,39 @@ export const useMultiplayerDraftStore = create<
     set({ intergameWorkspaceState: workspace });
   },
 
-  submitDeck: async (commanders = []) => {
+  submitDeck: async (commanders = [], companion = null) => {
     const { role, view, workspaceState } = get();
     if (!view || !workspaceState) return;
     const workspace = reconcileWorkspaceState(workspaceState, view.pool);
     const partition = projectWorkspacePartition(workspace, view.pool);
 
     if (role === "host" && activeHostAdapter) {
-      const nextView = await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
-      installWorkspace({
-        view: nextView,
-        base: workspace,
-        publish: false,
-        patch: {
-          submittedDeck: partition.mainDeck,
-          submittedWorkspaceState: cloneWorkspace(workspace),
-          submittedPartition: partition,
-        },
+      const nextView = companion
+        ? await activeHostAdapter.submitDeck(partition.mainDeck, commanders, companion)
+        : await activeHostAdapter.submitDeck(partition.mainDeck, commanders);
+      recordAcceptedSubmission({
+        view,
+        nextView,
+        mainDeck: partition.mainDeck,
+        partition,
+        workspace,
+        commanders,
+        companion,
       });
-      void autosaveDraftDeck({ view, setCode: null, partition, commanders });
     } else if (role === "guest" && activeGuestAdapter) {
-      await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
-      set({
-        submittedDeck: partition.mainDeck,
-        submittedWorkspaceState: cloneWorkspace(workspace),
-        submittedPartition: partition,
+      if (companion) {
+        await activeGuestAdapter.submitDeck(partition.mainDeck, commanders, companion);
+      } else {
+        await activeGuestAdapter.submitDeck(partition.mainDeck, commanders);
+      }
+      recordAcceptedSubmission({
+        view,
+        mainDeck: partition.mainDeck,
+        partition,
+        workspace,
+        commanders,
+        companion,
       });
-      void autosaveDraftDeck({ view, setCode: null, partition, commanders });
     }
   },
 
@@ -2597,7 +2670,11 @@ export const useMultiplayerDraftStore = create<
         host.peer,
         host.onGuestConnected,
         launchView.seats.length,
-        FORMAT_DEFAULTS.CommanderDraft,
+        // CR 100.2b + CR 702.139b + CR 903.13f(1): the pod's own resolved minimum
+        // (a Commander Cube may raise it above 60), the same one submission
+        // validated the deck against, so admission and the pregame companion
+        // reveal measure Yorion against it too.
+        draftSessionFormatConfig(FORMAT_DEFAULTS.CommanderDraft, launchView.min_deck_size),
         // ENGINE-OWNED: read the view's config, never construct one. A frontend
         // inventing a `MatchConfig` is what the superseded `&match=bo1` URL did
         // wrong.
@@ -3010,6 +3087,13 @@ export const useMultiplayerDraftStore = create<
     if (!matchPairing) return null;
     const gameId = `draft-match-${matchPairing.matchId}`;
     if (matchAdapter) return gameId;
+    // CR 100.2b + CR 702.139b: the match runs under the pod's own resolved
+    // minimum deck size (a Cube may configure other than 40), which the
+    // engine's "minimum deck size" companion condition reads.
+    const matchFormatConfig = draftSessionFormatConfig(
+      DRAFT_MATCH_FORMAT_CONFIG,
+      get().view?.min_deck_size,
+    );
     // A pod session already detached has no pod left to host or report this match.
     if (!activeWorkspaceAdapter()) return null;
     if (matchStartInFlight?.matchId === matchPairing.matchId && !matchStartInFlight.abort.signal.aborted) return null;
@@ -3046,7 +3130,7 @@ export const useMultiplayerDraftStore = create<
           host.peer,
           host.onGuestConnected,
           2, // 1v1 match
-          DRAFT_MATCH_FORMAT_CONFIG,
+          matchFormatConfig,
           matchPairing.matchConfig,
           undefined,
           undefined,
@@ -3232,7 +3316,7 @@ export const useMultiplayerDraftStore = create<
         abort.signal.throwIfAborted();
         const initResult = await matchAdapter.initializeGame(
           { ...matchPairing.deckPayload, player, opponent, ai_decks: aiDecks },
-          DRAFT_MATCH_FORMAT_CONFIG,
+          matchFormatConfig,
           2,
           matchPairing.matchConfig,
         );
@@ -3628,6 +3712,15 @@ function installEventView(view: DraftPlayerView): void {
       standings: view.standings ?? [],
       currentRound: view.current_round ?? 0,
       pairings: view.pairings ?? [],
+      // CR 702.139a: the host-accepted designation is authoritative, so a
+      // reload or rejoin that lost the local record (or whose replayed command
+      // is already acknowledged and cleared) restores it from the view. Only a
+      // PRESENT value is applied: an absent field never erases a designation,
+      // which `recordAcceptedSubmission` clears when an accepted resubmit
+      // drops the companion.
+      ...(typeof view.submitted_companion === "string"
+        ? { submittedCompanion: view.submitted_companion }
+        : {}),
     },
   });
 }
@@ -3708,7 +3801,7 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
     case "matchStart":
       // A pairing replaced by another match ends the start bound to the old one.
       if (matchStartInFlight?.matchId !== event.launch.matchId) abandonMatchStart();
-      set({ matchPairing: event.launch, phase: "matchInProgress" });
+      set((state) => matchStartState(state, event.launch));
       void retryDraftSettlement(event.launch, "host");
       break;
     case "commanderLaunch":
@@ -3858,10 +3951,7 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
     case "matchStart":
       // A pairing replaced by another match ends the start bound to the old one.
       if (matchStartInFlight?.matchId !== event.launch.matchId) abandonMatchStart();
-      set({
-        matchPairing: event.launch,
-        phase: "matchInProgress",
-      });
+      set((state) => matchStartState(state, event.launch));
       void retryDraftSettlement(event.launch, "guest");
       break;
     case "commanderLaunch":
@@ -3934,8 +4024,15 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       // Informational — standings update comes via viewUpdated
       break;
     case "recoveredDeckSubmissionAccepted": {
-      const partition = recoveredSubmissionPartition(event.mainDeck, event.view.pool);
-      if (partition) void autosaveDraftDeck({ view: event.view, setCode: null, partition, commanders: event.commanders });
+      const recovered = recoveredSubmissionPartition(event.mainDeck, event.view.pool);
+      recordAcceptedSubmission({
+        view: event.view,
+        mainDeck: event.mainDeck,
+        partition: recovered?.partition ?? null,
+        workspace: recovered?.workspace ?? null,
+        commanders: event.commanders,
+        companion: event.companion ?? null,
+      });
       break;
     }
   }

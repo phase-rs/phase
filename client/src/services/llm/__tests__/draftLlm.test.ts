@@ -43,6 +43,7 @@ const PROFILE: LlmProfile = {
   model: "claude-sonnet-5",
   maxOutputTokens: null,
   temperature: null,
+  decisionContext: "selfContained",
   enabled: true,
 };
 

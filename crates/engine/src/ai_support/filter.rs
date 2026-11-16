@@ -682,6 +682,10 @@ struct ObjectFingerprint {
     face_down: bool,
     flipped: bool,
     transformed: bool,
+    /// CR 701.27g: `FilterProp::Transformed` (Incubation Triformer's target) reads
+    /// `transform::is_transformed_permanent`, which also reads `modal_back_face` and the stored
+    /// face; the raw `transformed` above does not carry them.
+    transformed_permanent: bool,
     defense: Option<u32>,
     class_level: Option<u8>,
     room_unlocks: Option<RoomUnlockState>,
@@ -821,6 +825,7 @@ fn object_fingerprint(state: &GameState, id: ObjectId) -> Option<ObjectFingerpri
         face_down: obj.face_down,
         flipped: obj.flipped,
         transformed: obj.transformed,
+        transformed_permanent: crate::game::transform::is_transformed_permanent(obj),
         defense: obj.defense,
         class_level: obj.class_level,
         room_unlocks: obj.room_unlocks,
@@ -1048,6 +1053,7 @@ fn filterprop_reads_only_candidate_fp(p: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::Another
@@ -1520,15 +1526,17 @@ fn legality_equivalence_key(
             let mut key = LegalityKey::new(LegalityClass::ActivateAbility, fp);
             key.ability_index = Some(*ability_index);
             key.payment_mode = Some(*payment_mode);
-            key.activations_this_turn = state
-                .activated_abilities_this_turn
-                .get(&(*source_id, *ability_index))
-                .copied()
+            // CR 602.5c: fold the per-acquisition budget; an unresolvable
+            // slot reads a missing entry as count 0.
+            let usage =
+                crate::game::restrictions::ability_usage_key(state, *source_id, *ability_index);
+            key.activations_this_turn = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_turn.get(usage).copied())
                 .unwrap_or(0);
-            key.activations_this_game = state
-                .activated_abilities_this_game
-                .get(&(*source_id, *ability_index))
-                .copied()
+            key.activations_this_game = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_game.get(usage).copied())
                 .unwrap_or(0);
             key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(source_id);
             // CR 400.7: an activated ability's mode history is the live source's.
@@ -1554,15 +1562,17 @@ fn legality_equivalence_key(
             let ability_index = selection.ability_index;
             key.ability_index = ability_index;
             let lookup_index = ability_index.unwrap_or(0);
-            key.activations_this_turn = state
-                .activated_abilities_this_turn
-                .get(&(object_id, lookup_index))
-                .copied()
+            // CR 602.5c: fold the per-acquisition budget; an unresolvable
+            // slot reads a missing entry as count 0.
+            let usage =
+                crate::game::restrictions::ability_usage_key(state, object_id, lookup_index);
+            key.activations_this_turn = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_turn.get(usage).copied())
                 .unwrap_or(0);
-            key.activations_this_game = state
-                .activated_abilities_this_game
-                .get(&(object_id, lookup_index))
-                .copied()
+            key.activations_this_game = usage
+                .as_ref()
+                .and_then(|usage| state.activated_abilities_this_game.get(usage).copied())
                 .unwrap_or(0);
             key.source_attacked_this_turn = state.creatures_attacked_this_turn.contains(&object_id);
             key.is_attacking = crate::game::restrictions::is_source_attacking(state, object_id);
@@ -1600,6 +1610,10 @@ fn legality_equivalence_key(
 mod tests {
     use super::*;
     use crate::ai_support::{candidate_actions, structurally_valid_named_choice_answer as hatch};
+    use crate::analysis::decision_template::IterationCount;
+    use crate::analysis::loop_check::{
+        CountedTake, OfferRoad, ShortcutProposal, ShortcutResponse, UnperformableCause,
+    };
     use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::layers::evaluate_layers;
     use crate::game::scenario::GameScenario;
@@ -2549,7 +2563,44 @@ mod tests {
         );
     }
 
-    /// #9: per-(source, ability) activation count is folded into the key.
+    /// CR 701.27g: whether a permanent is a transformed permanent is part of the
+    /// fingerprint, so Incubation Triformer ("Choose target transformed Phyrexian token you
+    /// control.") never shares a memoized target verdict between a modal double-faced card
+    /// back face up and the same card front face up. The two objects store the same other
+    /// face and differ only in `modal_back_face`, which no other fingerprint field reads.
+    #[test]
+    fn fingerprint_membership_guards_transformed_permanent() {
+        use crate::game::game_object::BackFaceData;
+        use crate::types::card::LayoutKind;
+        let mut s = GameState::new_two_player(5);
+        let a = make_object(&mut s, 100, 0, "Lisette, Dean of the Root");
+        let b = make_object(&mut s, 100, 0, "Lisette, Dean of the Root");
+        for id in [a, b] {
+            s.objects.get_mut(&id).unwrap().back_face = Some(BackFaceData {
+                name: "Valentin, Dean of the Vein".to_string(),
+                layout_kind: Some(LayoutKind::Modal),
+                ..Default::default()
+            });
+        }
+        assert_eq!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "control: two equal fresh objects share a fingerprint"
+        );
+
+        s.objects.get_mut(&b).unwrap().modal_back_face = true;
+        assert!(
+            crate::game::transform::is_transformed_permanent(&s.objects[&b]),
+            "reach guard: the modal back face up is a transformed permanent"
+        );
+        assert_ne!(
+            object_fingerprint(&s, a),
+            object_fingerprint(&s, b),
+            "whether it is a transformed permanent must be in the fingerprint"
+        );
+    }
+
+    /// #9: per-acquisition activation count is folded into the key.
     #[test]
     fn activation_count_is_folded_into_key() {
         let mut state = GameState::new_two_player(42);
@@ -2558,7 +2609,24 @@ mod tests {
         };
         let a = make_object(&mut state, 100, 0, "Squirrel");
         let b = make_object(&mut state, 100, 0, "Squirrel");
-        state.activated_abilities_this_turn.insert((a, 0), 1);
+        // CR 602.5c: the folded count is keyed by the resolved acquisition,
+        // so both objects hold the same printed ability and only `a`'s
+        // instance records a use.
+        for id in [a, b] {
+            std::sync::Arc::make_mut(
+                &mut state.objects.get_mut(&id).expect("just created").abilities,
+            )
+            .push(AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        let usage = crate::game::restrictions::ability_usage_key(&state, a, 0)
+            .expect("the printed ability resolves");
+        state.activated_abilities_this_turn.insert(usage, 1);
         let poison = LegalityPoisonGates::compute(&state);
         // Shared interner: a and b have identical fingerprints, so they intern
         // to the SAME class id — the keys must still differ purely on the folded
@@ -2587,7 +2655,7 @@ mod tests {
         assert!(ka.is_some() && kb.is_some());
         assert_ne!(
             ka, kb,
-            "activation count must be folded per (source, ability) into the key"
+            "activation count must be folded per acquisition into the key"
         );
     }
 
@@ -3253,7 +3321,7 @@ mod tests {
                 max: None,
                 distinctness: NumberDistinctness::Repeatable,
             },
-            ChoiceType::CardName,
+            ChoiceType::card_name(),
         ] {
             let mut by_rule = melody.clone();
             if let WaitingFor::NamedChoice {
@@ -3525,5 +3593,163 @@ mod tests {
             0,
             "`accept_with_probe` must answer an enumerated search selection without cloning"
         );
+    }
+
+    /// #10464: CR 732.2b/c — an opponent's accept-or-shorten answer is a PROMPT ANSWER, so the
+    /// prompt-answer authority must decide it. Without that arm the answer fell through to
+    /// `fallback_simulation`, which clones the state and APPLIES the answer: for the last
+    /// responder the Accept takes the whole shortcut, so a 1000-repetition loop paid a full
+    /// take to check legality and then paid it again to take it.
+    ///
+    /// The verdict asserts are reach guards; the per-method zero counters are the evidence.
+    /// `Shorten` is exercised at place 1 of a two-repetition proposal that still has a queued
+    /// responder, so the reducer advances the window instead of materializing a take — this row
+    /// measures the HATCH, not the drive.
+    #[test]
+    fn shortcut_response_hatch_is_wired_into_both_accept_methods() {
+        // CR 732.2c: one queued responder is what keeps an Accept on the advance path — the
+        // shortcut is taken only once the last player has answered. The count is two so place 1
+        // is a CR 732.2b shortening place the proposal admits.
+        let shortcut_state = || {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::RespondToShortcut {
+                player: PlayerId(0),
+                remaining_players: vec![PlayerId(1)],
+                proposal: ShortcutProposal {
+                    proposer: PlayerId(1),
+                    predicted_winner: None,
+                    count: IterationCount::Fixed(2),
+                    unbounded: Vec::new(),
+                    rising: Vec::new(),
+                    win_kind: None,
+                    win_kind_at: None,
+                    template: None,
+                    per_cycle: None,
+                    shortened_by: None,
+                    published_declaration: None,
+                    leading_aims: Vec::new(),
+                    road: OfferRoad::Ring,
+                    counted_take: Default::default(),
+                    period: Default::default(),
+                },
+            };
+            state
+        };
+        let candidate = |response| CandidateAction {
+            action: GameAction::RespondToShortcut { response },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
+        };
+
+        for response in [
+            ShortcutResponse::Accept,
+            ShortcutResponse::Shorten { at_iteration: 1 },
+        ] {
+            let state = shortcut_state();
+            let candidate = candidate(response);
+
+            // Reach guard + the `cheap ⊆ sim` half of the invariant: the authority admits it,
+            // and the probe the hatch replaces admits it too.
+            assert!(
+                crate::ai_support::structurally_valid_prompt_answer(&state, &candidate.action),
+                "the prompt-answer authority must admit {:?}",
+                candidate.action
+            );
+            assert!(
+                pass_oracle_accepts(&state, &candidate),
+                "SimulationFilter's probe must accept {:?}",
+                candidate.action
+            );
+
+            crate::game::perf_counters::reset();
+            assert!(SimulationFilter.accept(&state, &candidate));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().raw_validation_state_clones,
+                0,
+                "`accept` must answer a shortcut response without cloning the state"
+            );
+
+            crate::game::perf_counters::reset();
+            assert!(SimulationFilter.accept_with_probe(&state, &candidate, None));
+            assert_eq!(
+                crate::game::perf_counters::snapshot().raw_validation_state_clones,
+                0,
+                "`accept_with_probe` must answer a shortcut response without cloning the state"
+            );
+        }
+    }
+
+    /// The refused half of the same authority: a row per `Shorten` shape the reducer rejects,
+    /// paired with the probe. `cheap ⊆ sim` is pinned here in the direction that would otherwise
+    /// OFFER a place the reducer refuses — the failure the hatch would produce by admitting a
+    /// place after skipping the clone that used to reject it.
+    #[test]
+    fn shortcut_response_authority_refuses_every_reducer_refusal() {
+        let state_with = |count: IterationCount, counted_take: CountedTake| {
+            let mut state = GameState::new_two_player(42);
+            state.waiting_for = WaitingFor::RespondToShortcut {
+                player: PlayerId(0),
+                remaining_players: vec![PlayerId(1)],
+                proposal: ShortcutProposal {
+                    proposer: PlayerId(1),
+                    predicted_winner: None,
+                    count,
+                    unbounded: Vec::new(),
+                    rising: Vec::new(),
+                    win_kind: None,
+                    win_kind_at: None,
+                    template: None,
+                    per_cycle: None,
+                    shortened_by: None,
+                    published_declaration: None,
+                    leading_aims: Vec::new(),
+                    road: OfferRoad::Ring,
+                    counted_take,
+                    period: Default::default(),
+                },
+            };
+            state
+        };
+        let shorten = |at_iteration: u32| CandidateAction {
+            action: GameAction::RespondToShortcut {
+                response: ShortcutResponse::Shorten { at_iteration },
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Utility),
+        };
+
+        let budget = crate::game::engine::MAX_SHORTCUT_CYCLES;
+        for (label, count, counted_take, at_iteration) in [
+            // CR 732.2b: a place at the proposed count names no different choice.
+            (
+                "a place at the proposed count",
+                IterationCount::Fixed(2),
+                CountedTake::Performs,
+                2,
+            ),
+            // The drive's own ceiling, which the reducer refuses before the take.
+            (
+                "a place past the drive's budget",
+                IterationCount::Fixed(budget + 2),
+                CountedTake::Performs,
+                budget + 1,
+            ),
+            // CR 732.2a: a take that performs no repetition leaves place 0 the only place.
+            (
+                "a place on a take that refuses",
+                IterationCount::Fixed(2),
+                CountedTake::Unperformable(UnperformableCause::UncontainedChoice),
+                1,
+            ),
+        ] {
+            let state = state_with(count, counted_take);
+            let candidate = shorten(at_iteration);
+            assert!(
+                !crate::ai_support::structurally_valid_prompt_answer(&state, &candidate.action),
+                "the authority must refuse {label}"
+            );
+            assert!(
+                !pass_oracle_accepts(&state, &candidate),
+                "the probe must refuse {label} too, or the hatch offers what the reducer rejects"
+            );
+        }
     }
 }

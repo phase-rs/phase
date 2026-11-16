@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Add the CR 103.1 starting-player prompt and answer (WaitingFor::ChooseStartingPlayer, GameAction::ChooseStartingPlayer, InteractionActionCode::chooseStartingPlayer)"
+}

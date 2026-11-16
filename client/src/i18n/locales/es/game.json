@@ -204,6 +204,14 @@
         "label": "Etiqueta",
         "fallback": "Elección"
       }
+    },
+    "attacking": {
+      "you": "Te está atacando",
+      "player": "Atacando a {{player}}",
+      "yourPlaneswalker": "Atacando a tu planeswalker {{name}}",
+      "planeswalker": "Atacando al planeswalker {{name}} de {{player}}",
+      "battle": "Atacando a la batalla {{name}}",
+      "nothing": "Atacando, pero no a ningún jugador, planeswalker ni batalla"
     }
   },
   "actionButton": {
@@ -346,7 +354,6 @@
     "pickNone": "Ninguna",
     "underAttack_one": "Atacado por {{count}} criatura",
     "underAttack_other": "Atacado por {{count}} criaturas",
-    "target": "Objetivo",
     "token": "Ficha",
     "tokenTooltip": "Ficha que es una copia de una carta real",
     "copy": "Copia",
@@ -436,7 +443,12 @@
     "assignRemaining_other": "Asignar {{count}} más",
     "confirmDistribute_one": "Declarar {{count}} atacante",
     "confirmDistribute_other": "Declarar {{count}} atacantes",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totales de ataque",
+    "targetTotal_few": "{{count}} atacantes · {{damage}} de daño",
+    "targetTotal_many": "{{count}} atacantes · {{damage}} de daño",
+    "targetTotal_one": "{{count}} atacante · {{damage}} de daño",
+    "targetTotal_other": "{{count}} atacantes · {{damage}} de daño"
   },
   "fullControl": {
     "label": "Control",
@@ -562,7 +574,9 @@
     "dungeonTooltip": "Aventurándose en {{name}}",
     "poisonAriaLabel_one": "{{count}} contador de veneno",
     "poisonAriaLabel_other": "{{count}} contadores de veneno",
-    "poisonTooltip": "Contadores de veneno: {{count}}\nUn jugador con diez o más contadores de veneno pierde la partida.",
+    "poisonTooltip": "Contadores de veneno: {{count}}",
+    "poisonLossPlayer": "Un jugador con {{threshold}} o más contadores de veneno pierde la partida.",
+    "poisonLossTeam": "Un equipo con {{threshold}} o más contadores de veneno pierde la partida.",
     "energyAriaLabel_one": "{{count}} contador de energía",
     "energyAriaLabel_other": "{{count}} contadores de energía",
     "energyTooltip": "Contadores de energía: {{count}}\nLos contadores de energía son un recurso del jugador que las habilidades de cartas pueden gastar.",
@@ -659,6 +673,8 @@
     "commander": "Comandante",
     "commanderTitle": "Comandante: {{name}}",
     "commanderTitleTax": "Comandante: {{name}} (Impuesto: +{{tax}})",
+    "boss": "Jefe",
+    "bossTitle": "Jefe: {{name}}",
     "castCommander": "Lanza {{name}} — haz doble clic o arrastra para jugar",
     "castCommanderTax": "Lanza {{name}} (Impuesto: +{{tax}}) — haz doble clic o arrastra para jugar",
     "ninjutsuCommander": "Ninjutsu de comandante: {{name}} — haz clic para devolver un atacante no bloqueado a la mano y poner a este comandante en el campo de batalla girado y atacando",
@@ -822,7 +838,12 @@
     "lethalBadge": "Letal",
     "planeswalkerLoyalty": "Planeswalker (lealtad: {{loyalty}})",
     "defendingPlayerTrample": "Jugador defensor (Arrollar)",
-    "pwControllerTrample": "Controlador del PW (Arrollar sobre el PW)"
+    "pwControllerTrample": "Controlador del PW (Arrollar sobre el PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Asignar los {{count}} de daño restantes a {{target}}",
+    "assignRemainingTo_many": "Asignar los {{count}} de daño restantes a {{target}}",
+    "assignRemainingTo_one": "Asignar el {{count}} de daño restante a {{target}}",
+    "assignRemainingTo_other": "Asignar los {{count}} de daño restantes a {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1167,6 +1188,11 @@
       "drawFirst": "Robar primero",
       "drawFirstDescription": "Toma el robo extra en tu primer turno"
     },
+    "startingPlayer": {
+      "title": "Elige quién juega primero",
+      "playerPlaysFirst": "{{name}} juega primero",
+      "opponentChoosing": "{{name}} está eligiendo quién juega primero…"
+    },
     "mulligan": {
       "opponentDeciding": "El oponente está decidiendo su mano inicial…",
       "londonTitle": "Mulligan de Londres ({{count}} tomados)",
@@ -1189,7 +1215,10 @@
       "subtitleKeepWithBottom": "Conserva esta mano (pondrás {{count}} en el fondo) o haz mulligan de nuevo para 7 cartas nuevas.",
       "subtitleKeepFree": "Conserva esta mano (mulligan gratis — sin cartas al fondo de la biblioteca) o haz mulligan de nuevo para 7 cartas nuevas.",
       "subtitleOpeningFree": "Conserva esta mano o haz un mulligan gratis (sin cartas al fondo de la biblioteca).",
-      "subtitleOpeningOne": "Conserva esta mano o haz mulligan para 7 cartas nuevas (pondrás 1 en el fondo de la biblioteca tras quedarte con la mano)."
+      "subtitleOpeningOne": "Conserva esta mano o haz mulligan para 7 cartas nuevas (pondrás 1 en el fondo de la biblioteca tras quedarte con la mano).",
+      "onThePlay": "Juegas primero",
+      "onTheDraw": "Robas primero",
+      "takeTurn": "Juegas el turno {{turn}}"
     },
     "companion": {
       "eyebrow": "Antes de la partida",
@@ -1214,6 +1243,7 @@
       "draw": "EMPATE",
       "victory": "VICTORIA",
       "defeat": "DERROTA",
+      "complete": "FIN DE LA PARTIDA",
       "lifeSummary": "Tú: <player>{{playerLife}}</player> <sep>/</sep> Oponente: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turnos: {{count}}",
       "duration": "Duración: {{time}}",
@@ -1310,7 +1340,10 @@
         "Ticket": "ticket"
       },
       "generic": "un coste",
-      "pay": "Pagar {{cost}}"
+      "pay": "Pagar {{cost}}",
+      "draw": "roba una carta",
+      "drawCount_one": "roba {{count}} carta",
+      "drawCount_other": "roba {{count}} cartas"
     },
     "unlessPayment": {
       "defaultEffect": "Contrarrestar a menos que pagues",
@@ -1401,6 +1434,8 @@
     },
     "config": {
       "startingLife": "Vida inicial",
+      "commanderDamage": "Daño de comandante",
+      "poisonCounters": "Contadores de veneno",
       "players": "Jugadores",
       "whoGoesFirst": "Quién empieza",
       "firstPlayer": {
@@ -1514,7 +1549,9 @@
       "titleReveal": "Revelar de la mano",
       "titleOpponentHand": "Mano del oponente",
       "subtitleReveal": "Elige una carta para revelar, o rechaza",
-      "subtitleChoose": "Elige una carta"
+      "subtitleChoose": "Elige una carta",
+      "subtitleRevealAnyNumber": "Elige cualquier cantidad de cartas para revelar",
+      "subtitleChooseCount": "Elige {{count}} cartas"
     },
     "search": {
       "title": "Buscar en la biblioteca",
@@ -2101,6 +2138,10 @@
     "title": "Elegir destinatario del regalo",
     "subtitle": "Elige qué oponente recibe el regalo prometido."
   },
+  "costRecipient": {
+    "title": "Elige un oponente",
+    "subtitle": "Elige el oponente para este coste: {{cost}}."
+  },
   "entryController": {
     "title": "Elegir controlador al entrar",
     "subtitle": "Elige qué oponente controla este permanente al entrar."
@@ -2455,6 +2496,8 @@
       "zoneHand": "tu mano",
       "discard": "Descarta {{count}} {{cards}}",
       "exile": "Exilia {{count}} {{cards}} de {{zone}}",
+      "haveOpponentGainLife": "Haz que un oponente gane {{amount}} vidas",
+      "haveEachOtherPlayerGainLife": "Haz que cada otro jugador gane {{amount}} vidas",
       "reveal": "Muestra {{count}} {{cards}} de {{zone}}"
     }
   },
@@ -2620,6 +2663,7 @@
   },
   "outsideGame": {
     "fromExile": "Desde el exilio",
+    "fromCompanion": "Desde el compañero",
     "fromSideboard": "Desde el banquillo",
     "fromBoosterPack": "De un sobre de {{setCode}}",
     "fromCubeBoosterPack": "De un sobre del cube"

@@ -223,6 +223,14 @@ fn combat_board(name: &str, text: &str, accept: bool) -> CombatBoard {
     scenario.add_creature_from_oracle(P0, name, 3, 3, text);
     let c1 = scenario.add_creature(P0, "c1", 2, 2).id();
     let c2 = scenario.add_creature(P0, "c2", 2, 2).id();
+    // CR 118.3 + CR 608.2d: fund the {2} (and Neyith's {2}{R/G}, Green-payable)
+    // offers with battlefield lands so the declined legs run the genuine
+    // decline branch instead of being suppressed as unpayable. Accept legs
+    // sharing this helper are unaffected: extra untapped lands change no
+    // assertion they make.
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
     scenario.with_library_top(P0, &["L1", "L2"]);
     let mut runner = scenario.build();
     runner.advance_to_phase(Phase::BeginCombat);
@@ -291,6 +299,11 @@ fn lorthos_declined_declared_permanent_does_not_untap() {
         .id();
     let o1 = scenario.add_creature(P1, "o1", 2, 2).id();
     let o2 = scenario.add_creature(P1, "o2", 2, 2).id();
+    // CR 118.3 + CR 608.2d: fund the printed {8} (any color pays generic) so
+    // the declined leg runs the genuine decline branch.
+    for _ in 0..8 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
     let mut runner = scenario.build();
     for id in [o1, o2] {
         runner.state_mut().objects.get_mut(&id).unwrap().tapped = true;
@@ -816,6 +829,11 @@ fn syn_reanimate_that_declined_resolves_nothing() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "SynReThat", 3, 3, SYN_REANIMATE_THAT);
+    // CR 118.3 + CR 608.2d: fund the {2} offer (same rule as `combat_board`,
+    // which this setup does not share) so the decline is genuine.
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
     let bear = scenario.add_creature_to_graveyard(P0, "Gy Bear", 2, 2).id();
     let mut runner = scenario.build();
     runner.advance_to_phase(Phase::BeginCombat);
@@ -902,6 +920,10 @@ fn krenko_declined_creates_no_goblin() {
         })
         .id();
     scenario.with_mana_pool(P0, mana(1, ManaType::Colorless));
+    // CR 118.3 + CR 608.2d: fund the {R} offer with a Mountain (the pool
+    // colorless is consumed by the Shatter cast; the Mountain survives in the
+    // same PreCombatMain phase).
+    scenario.add_basic_land(P0, ManaColor::Red);
     let mut runner = scenario.build();
     grant_priority(&mut runner, P0);
     runner.cast(shatter).target_object(artifact).commit();
@@ -933,6 +955,9 @@ fn kalastria_highborn_declined_changes_no_life() {
         })
         .id();
     scenario.with_mana_pool(P0, mana(1, ManaType::Colorless));
+    // CR 118.3 + CR 608.2d: fund the {B} offer with a Swamp (same-phase
+    // survival, as in the Krenko leg above).
+    scenario.add_basic_land(P0, ManaColor::Black);
     let mut runner = scenario.build();
     grant_priority(&mut runner, P0);
     runner.cast(kill).target_object(vampire).commit();
@@ -953,6 +978,13 @@ fn hellkite_charger_declined_adds_no_combat_phase() {
     let hellkite = scenario
         .add_creature_from_oracle(P0, "Hellkite Charger", 5, 5, HELLKITE_CHARGER)
         .id();
+    // CR 118.3 + CR 608.2d: fund the exact printed {5}{R}{R} cost.
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Red);
+    }
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
     let mut runner = scenario.build();
     attack_with(&mut runner, hellkite);
     let events = drive(&mut runner, &[], false, vec![]);
@@ -1030,6 +1062,13 @@ fn kheru_lich_lord_declined_returns_nothing() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::Untap);
     scenario.add_creature_from_oracle(P0, "Kheru Lich Lord", 4, 4, KHERU_LICH_LORD);
+    // CR 118.3 + CR 608.2d: fund the printed {2}{B} with lands — pool funding
+    // would empty on the Untap→Upkeep transition (CR 106.4), so lands are
+    // mandatory, not stylistic.
+    scenario.add_basic_land(P0, ManaColor::Black);
+    for _ in 0..2 {
+        scenario.add_basic_land(P0, ManaColor::Green);
+    }
     let bear = scenario.add_creature_to_graveyard(P0, "Gy Bear", 2, 2).id();
     let mut runner = scenario.build();
     runner.advance_to_phase(Phase::Upkeep);

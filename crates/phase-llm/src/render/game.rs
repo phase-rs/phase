@@ -10,9 +10,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use engine::database::CardDatabase;
-use engine::game::combat::AttackTarget;
+use engine::game::combat::{AttackTarget, AttackerInfo, CombatParticipation};
+use engine::game::game_object::GameObject;
 use engine::game::mana_sources;
-use engine::types::game_state::GameState;
+use engine::types::game_state::{GameState, StackEntry};
 use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
 use engine::types::mana::ManaType;
@@ -83,7 +84,7 @@ pub fn render_board(
 
 /// `You` for the seat the prompt belongs to, `Player N` otherwise. One
 /// authority so the same seat never reads two ways in one prompt.
-fn seat_label(player: PlayerId, viewer: PlayerId) -> String {
+pub(crate) fn seat_label(player: PlayerId, viewer: PlayerId) -> String {
     if player == viewer {
         "You".to_string()
     } else {
@@ -144,19 +145,29 @@ fn push_stack(out: &mut String, state: &GameState, viewer: PlayerId) {
         return;
     }
     out.push_str("\n--- STACK (top resolves first) ---\n");
-    // CR 405.1: the stack is last-in, first-out; render it that way rather than
-    // in storage order, so "top" in the prompt means what it means in the rules.
-    for (index, entry) in state.stack.iter().rev().enumerate() {
-        let name = object_name(state, entry.id)
-            .or_else(|| object_name(state, entry.source_id))
-            .unwrap_or_else(|| "unknown".to_string());
+    for (number, entry, name) in stack_items(state) {
         out.push_str(&format!(
-            "{}. {} (controlled by {})\n",
-            index + 1,
-            name,
+            "{number}. {name} (controlled by {})\n",
             seat_label(entry.controller, viewer)
         ));
     }
+}
+
+/// The stack section's items, each with its number in the section and the name
+/// the section gives it.
+///
+/// CR 405.2 + CR 405.5: the last object put on the stack is on top and resolves
+/// first, so the items are numbered from the top rather than in storage order,
+/// and "top" in the prompt means what it means in the rules. An ability on the
+/// stack has no card (CR 405.1) and no entry in the object table, so it is
+/// named by its source.
+fn stack_items(state: &GameState) -> impl Iterator<Item = (usize, &StackEntry, String)> {
+    state.stack.iter().rev().enumerate().map(|(index, entry)| {
+        let name = object_name(state, entry.id)
+            .or_else(|| object_name(state, entry.source_id))
+            .unwrap_or_else(|| "unknown".to_string());
+        (index + 1, entry, name)
+    })
 }
 
 /// Effects already set to happen later: CR 603.7a delayed triggered abilities
@@ -190,32 +201,43 @@ fn push_combat(out: &mut String, state: &GameState, viewer: PlayerId) {
     out.push_str("\n--- COMBAT ---\n");
     for attacker in &combat.attackers {
         let name = object_name(state, attacker.object_id).unwrap_or_else(|| "unknown".to_string());
-        let target = match attacker.attack_target {
-            AttackTarget::Player(player) => seat_label(player, viewer),
-            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
-                object_name(state, id).unwrap_or_else(|| "unknown".to_string())
-            }
-        };
+        let target = attack_target_name(state, viewer, attacker.attack_target);
         let blockers = combat
             .blocker_assignments
             .get(&attacker.object_id)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| object_name(state, *id))
-                    .collect::<Vec<_>>()
-            })
+            .map(Vec::as_slice)
             .unwrap_or_default();
-        let blocked = if blockers.is_empty() {
-            if attacker.blocked {
-                // CR 509.1h: an attacker stays blocked even with no blockers left.
-                " — blocked (no blockers remain)".to_string()
-            } else {
-                " — unblocked".to_string()
-            }
-        } else {
-            format!(" — blocked by {}", blockers.join(", "))
-        };
-        out.push_str(&format!("{name} attacking {target}{blocked}\n"));
+        let blocked = blocked_status(state, attacker, blockers);
+        out.push_str(&format!("{name} attacking {target} — {blocked}\n"));
+    }
+}
+
+/// Whether an attacker is blocked, in the combat section's words: `blocked by
+/// Grizzly Bears`, `unblocked`, or `blocked (no blockers remain)`.
+fn blocked_status(state: &GameState, attacker: &AttackerInfo, blockers: &[ObjectId]) -> String {
+    let blockers: Vec<String> = blockers
+        .iter()
+        .filter_map(|id| object_name(state, *id))
+        .collect();
+    if !blockers.is_empty() {
+        return format!("blocked by {}", blockers.join(", "));
+    }
+    // CR 509.1h: an attacker stays blocked even with no blockers left.
+    if attacker.blocked {
+        "blocked (no blockers remain)".to_string()
+    } else {
+        "unblocked".to_string()
+    }
+}
+
+/// Who an attack is aimed at, in the combat section's words: a player by seat,
+/// a planeswalker or battle by name.
+fn attack_target_name(state: &GameState, viewer: PlayerId, target: AttackTarget) -> String {
+    match target {
+        AttackTarget::Player(player) => seat_label(player, viewer),
+        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
+            object_name(state, id).unwrap_or_else(|| "unknown".to_string())
+        }
     }
 }
 
@@ -479,58 +501,182 @@ fn permanent_line(
         return format!("object #{}", id.0);
     };
     let mut parts = vec![one_line(&object.name)];
-
-    let type_line = type_line_text(&object.card_types);
-    if !type_line.is_empty() {
-        parts.push(type_line);
-    }
-    if let (Some(power), Some(toughness)) = (object.power, object.toughness) {
-        parts.push(format!("{power}/{toughness}"));
-    }
-    if let Some(loyalty) = object.loyalty {
-        parts.push(format!("loyalty {loyalty}"));
-    }
-    parts.push(if object.tapped { "tapped" } else { "untapped" }.to_string());
-    if object.summoning_sick {
-        // CR 302.6: only matters for attacking and {T} abilities, but it is the
-        // single most common reason a plausible play is illegal.
-        parts.push("summoning sick".to_string());
-    }
-    if object.face_down {
-        parts.push("face down".to_string());
-    }
-    if object.damage_marked > 0 {
-        parts.push(format!("{} damage marked", object.damage_marked));
-    }
-    let counters = counter_text(object);
-    if !counters.is_empty() {
-        parts.push(counters);
-    }
-    if !object.attachments.is_empty() {
-        let attached: Vec<String> = object
-            .attachments
-            .iter()
-            .filter_map(|attached| object_name(state, *attached))
-            .collect();
-        if !attached.is_empty() {
-            parts.push(format!("attached: {}", attached.join(", ")));
-        }
-    }
-    if !object.keywords.is_empty() {
-        parts.push(
-            object
-                .keywords
-                .iter()
-                .map(|keyword| format!("{keyword:?}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-    }
+    parts.extend(permanent_facts(state, object).into_iter().flatten());
     let mut line = parts.join(" | ");
     if let Some(text) = oracle_text(object.name.as_str(), db, options) {
         line.push_str(&format!(" | \"{text}\""));
     }
     line
+}
+
+/// How many facts a battlefield line can state between a permanent's name and
+/// its rules text: one slot per entry of [`permanent_facts`].
+const PERMANENT_FACT_SLOTS: usize = 10;
+
+/// What a battlefield line states about a permanent between its name and its
+/// rules text, one slot per fact in the line's order, `None` where the line
+/// states nothing.
+///
+/// Fixed slots rather than a list, so two permanents' facts can be compared
+/// fact by fact: [`object_label`] names only the facts on which same-named
+/// permanents disagree.
+fn permanent_facts(
+    state: &GameState,
+    object: &GameObject,
+) -> [Option<String>; PERMANENT_FACT_SLOTS] {
+    let type_line = type_line_text(&object.card_types);
+    let counters = counter_text(object);
+    let attached: Vec<String> = object
+        .attachments
+        .iter()
+        .filter_map(|attached| object_name(state, *attached))
+        .collect();
+    let keywords: Vec<String> = object
+        .keywords
+        .iter()
+        .map(|keyword| format!("{keyword:?}"))
+        .collect();
+    [
+        (!type_line.is_empty()).then_some(type_line),
+        object
+            .power
+            .zip(object.toughness)
+            .map(|(power, toughness)| format!("{power}/{toughness}")),
+        object.loyalty.map(|loyalty| format!("loyalty {loyalty}")),
+        Some(if object.tapped { "tapped" } else { "untapped" }.to_string()),
+        // CR 302.6: only matters for attacking and {T} abilities, but it is the
+        // single most common reason a plausible play is illegal.
+        object.summoning_sick.then(|| "summoning sick".to_string()),
+        object.face_down.then(|| "face down".to_string()),
+        (object.damage_marked > 0).then(|| format!("{} damage marked", object.damage_marked)),
+        (!counters.is_empty()).then_some(counters),
+        (!attached.is_empty()).then(|| format!("attached: {}", attached.join(", "))),
+        (!keywords.is_empty()).then(|| keywords.join(", ")),
+    ]
+}
+
+/// How an option names one object: its name and whose it is, in the words
+/// this board uses, so the model can find it in the position. `None` when the
+/// state holds no such object.
+///
+/// - On the battlefield: `Name (controlled by You)`, as the battlefield lists
+///   it under its controller. When the board lists other permanents under the
+///   same name and controller, the facts on which they disagree follow, from
+///   their battlefield lines and from the combat section (`Name (controlled by
+///   Player 1, tapped)`, `Name (controlled by Player 1, blocking Hill Giant)`,
+///   `Name (controlled by You, attacking Player 1, unblocked)`). Two labels
+///   then read the same only when the permanents' battlefield lines and their
+///   places in combat are the same, so nothing the position shows tells them
+///   apart.
+/// - On the stack: its place in the stack's numbered list and its controller
+///   (`Name (stack item 1, controlled by You)`), since that list tells
+///   same-named spells apart only by place.
+/// - In any other zone: the zone and its owner (`Name (graveyard, owned by
+///   You)`), the board's words for exiled cards. Only a permanent or a spell
+///   has a controller (CR 108.4).
+///
+/// `state` is the viewer-filtered state the board is rendered from, so a label
+/// can name only what the board shows: a face-down permanent another player
+/// controls is `Hidden Card`, as on the battlefield.
+pub(crate) fn object_label(state: &GameState, viewer: PlayerId, id: ObjectId) -> Option<String> {
+    // The stack is looked up first: an ability on the stack has no entry in the
+    // object table, and is named and numbered as the stack section names it.
+    if let Some((number, entry, name)) = stack_items(state).find(|(_, entry, _)| entry.id == id) {
+        return Some(format!(
+            "{name} (stack item {number}, controlled by {})",
+            seat_label(entry.controller, viewer)
+        ));
+    }
+
+    let object = state.objects.get(&id)?;
+    let name = one_line(&object.name);
+    let owned_in = |zone: &str| format!("{zone}, owned by {}", seat_label(object.owner, viewer));
+    let whose = match object.zone {
+        Zone::Battlefield => {
+            let mut whose = vec![format!(
+                "controlled by {}",
+                seat_label(object.controller, viewer)
+            )];
+            whose.extend(distinguishing_facts(state, viewer, object, &name));
+            whose.join(", ")
+        }
+        // A spell object with no entry of its own on the stack.
+        Zone::Stack => format!(
+            "stack, controlled by {}",
+            seat_label(object.controller, viewer)
+        ),
+        Zone::Graveyard => owned_in("graveyard"),
+        Zone::Exile => owned_in("exile"),
+        Zone::Hand => owned_in("hand"),
+        Zone::Library => owned_in("library"),
+        Zone::Command => owned_in("command zone"),
+    };
+    Some(format!("{name} ({whose})"))
+}
+
+/// The facts on which the permanents the battlefield lists under `object`'s
+/// name and controller disagree, in the words the board states them: each one's
+/// battlefield line and its place in combat.
+///
+/// Rules text is left out: it is looked up by name, so it never tells
+/// same-named permanents apart.
+fn distinguishing_facts(
+    state: &GameState,
+    viewer: PlayerId,
+    object: &GameObject,
+    name: &str,
+) -> Vec<String> {
+    let label_facts = |permanent: &GameObject| {
+        let mut facts = permanent_facts(state, permanent).to_vec();
+        facts.push(combat_role(state, viewer, permanent.id));
+        facts
+    };
+    let namesakes: Vec<Vec<Option<String>>> = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|other| other.controller == object.controller && one_line(&other.name) == name)
+        .map(label_facts)
+        .collect();
+    label_facts(object)
+        .into_iter()
+        .enumerate()
+        .filter(|(slot, _)| {
+            namesakes
+                .iter()
+                .any(|facts| facts[*slot] != namesakes[0][*slot])
+        })
+        .filter_map(|(_, fact)| fact)
+        .collect()
+}
+
+/// What the combat section says a permanent is doing, in its words: `attacking
+/// Player 1, unblocked`, `blocking Hill Giant`. The battlefield line does not
+/// say it, so a blocker and a creature beside it, or a blocked attacker and an
+/// unblocked one, can share that line.
+///
+/// Read through the engine's combat-role authority,
+/// [`CombatParticipation::capture`].
+fn combat_role(state: &GameState, viewer: PlayerId, id: ObjectId) -> Option<String> {
+    let participation = CombatParticipation::capture(state, id);
+    if let Some(attacker) = participation.attacking {
+        return Some(format!(
+            "attacking {}, {}",
+            attack_target_name(state, viewer, attacker.attack_target),
+            blocked_status(state, &attacker, &participation.blocked_by)
+        ));
+    }
+    // CR 509.1g: a blocking creature remains one until it is removed from
+    // combat, even once the attackers it blocked have left.
+    let blocked: Vec<String> = participation
+        .blocking?
+        .iter()
+        .map(|attacker| object_name(state, *attacker).unwrap_or_else(|| "unknown".to_string()))
+        .collect();
+    if blocked.is_empty() {
+        return Some("blocking".to_string());
+    }
+    Some(format!("blocking {}", blocked.join(", ")))
 }
 
 /// A card in hand: what it is and what it costs, which is the pair that decides
@@ -563,7 +709,7 @@ fn card_line(
     line
 }
 
-fn counter_text(object: &engine::game::game_object::GameObject) -> String {
+fn counter_text(object: &GameObject) -> String {
     if object.counters.is_empty() {
         return String::new();
     }
@@ -801,6 +947,150 @@ mod tests {
         assert!(
             !rendered(&GameState::new(FormatConfig::standard(), 2, 3), PlayerId(1))
                 .contains("PENDING DELAYED TRIGGERS")
+        );
+    }
+
+    /// Issue #10939: an option names a permanent by name and controller, and
+    /// when the battlefield lists other permanents under that name and
+    /// controller, by the facts on which their lines disagree. Two labels then
+    /// read the same only when the battlefield gives the two permanents one
+    /// `×N` line.
+    #[test]
+    fn a_label_tells_same_named_permanents_apart_only_where_the_board_does() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let mut bears = |controller: PlayerId| {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                controller,
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            );
+            let object = state.objects.get_mut(&id).unwrap();
+            object.power = Some(2);
+            object.toughness = Some(2);
+            id
+        };
+        let mine = bears(PlayerId(0));
+        let untapped = bears(PlayerId(1));
+        let tapped = bears(PlayerId(1));
+        let twin = bears(PlayerId(1));
+        let damaged = bears(PlayerId(1));
+        state.objects.get_mut(&tapped).unwrap().tapped = true;
+        state.objects.get_mut(&damaged).unwrap().damage_marked = 1;
+
+        let viewer = PlayerId(0);
+        let visible = filter_state_for_viewer(&state, viewer);
+        let label = |id| object_label(&visible, viewer, id).unwrap();
+        // Alone under its controller: name and controller say it all.
+        assert_eq!(label(mine), "Grizzly Bears (controlled by You)");
+        // Tapped and damage tell the opponent's apart; P/T, shared by all of
+        // them, is left out.
+        assert_eq!(
+            label(untapped),
+            "Grizzly Bears (controlled by Player 1, untapped)"
+        );
+        assert_eq!(
+            label(tapped),
+            "Grizzly Bears (controlled by Player 1, tapped)"
+        );
+        assert_eq!(
+            label(damaged),
+            "Grizzly Bears (controlled by Player 1, untapped, 1 damage marked)"
+        );
+        // Interchangeable: the board itself shows them as one line.
+        assert_eq!(label(twin), label(untapped));
+        let board = rendered(&state, viewer);
+        assert!(
+            board.contains("Grizzly Bears | 2/2 | untapped ×2"),
+            "{board}"
+        );
+        assert!(board.contains("Grizzly Bears | 2/2 | tapped\n"), "{board}");
+    }
+
+    /// The battlefield line does not say which creature blocks, so a blocker
+    /// and an untapped creature beside it share it. Their labels add their
+    /// places in combat from the combat section.
+    #[test]
+    fn a_label_tells_a_blocker_from_the_same_named_creature_beside_it() {
+        use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let mut creature = |controller: PlayerId, name: &str| {
+            create_object(
+                &mut state,
+                CardId(1),
+                controller,
+                name.to_string(),
+                Zone::Battlefield,
+            )
+        };
+        let giant = creature(PlayerId(0), "Hill Giant");
+        let blocker = creature(PlayerId(1), "Grizzly Bears");
+        let bystander = creature(PlayerId(1), "Grizzly Bears");
+        // CR 508.1f + CR 509.1g: Hill Giant attacks Player 1 and one Grizzly
+        // Bears blocks it; blocking does not tap it.
+        let mut combat = CombatState::default();
+        combat.attackers.push(AttackerInfo::new(
+            giant,
+            AttackTarget::Player(PlayerId(1)),
+            PlayerId(1),
+        ));
+        combat.blocker_assignments.insert(giant, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![giant]);
+        state.combat = Some(combat);
+        state.objects.get_mut(&giant).unwrap().tapped = true;
+
+        let viewer = PlayerId(0);
+        let board = rendered(&state, viewer);
+        assert!(board.contains("Grizzly Bears | untapped ×2"), "{board}");
+        assert!(board.contains("blocked by Grizzly Bears"), "{board}");
+        let visible = filter_state_for_viewer(&state, viewer);
+        let label = |id| object_label(&visible, viewer, id).unwrap();
+        assert_eq!(
+            label(blocker),
+            "Grizzly Bears (controlled by Player 1, blocking Hill Giant)"
+        );
+        assert_eq!(label(bystander), "Grizzly Bears (controlled by Player 1)");
+        assert_eq!(
+            label(giant),
+            "Hill Giant (controlled by You)",
+            "alone under its controller, its attack needs no saying"
+        );
+    }
+
+    /// A label is read from the viewer-filtered state the board is rendered
+    /// from, so it names a face-down permanent another player controls only as
+    /// the board does.
+    #[test]
+    fn a_label_never_names_a_face_down_permanent_the_viewer_cannot_see() {
+        use engine::game::morph::apply_face_down_creature_characteristics;
+        use engine::game::printed_cards::snapshot_object_face;
+        use engine::types::ability::FaceDownProfile;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let morph = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Akroma, Angel of Fury".to_string(),
+            Zone::Battlefield,
+        );
+        // Turned face down as the engine does it: the CR 708.2a face-down
+        // 2/2, with its printed face kept in `back_face`.
+        let printed = snapshot_object_face(&state.objects[&morph]);
+        let object = state.objects.get_mut(&morph).unwrap();
+        apply_face_down_creature_characteristics(object, &FaceDownProfile::vanilla_2_2());
+        object.back_face = Some(printed);
+
+        let label =
+            |viewer| object_label(&filter_state_for_viewer(&state, viewer), viewer, morph).unwrap();
+        assert_eq!(label(PlayerId(0)), "Hidden Card (controlled by Player 1)");
+        assert!(rendered(&state, PlayerId(0)).contains("Hidden Card"));
+        // Its controller may look at it (CR 708.5), and its label says so.
+        assert_eq!(
+            label(PlayerId(1)),
+            "Akroma, Angel of Fury (controlled by You)"
         );
     }
 

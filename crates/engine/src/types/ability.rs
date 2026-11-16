@@ -183,7 +183,7 @@ impl ChosenAttribute {
             Self::BasicLandType(_) => ChoiceType::BasicLandType,
             Self::CardType(_) => ChoiceType::card_type(),
             Self::OddOrEven(_) => ChoiceType::OddOrEven,
-            Self::CardName(_) => ChoiceType::CardName,
+            Self::CardName(_) => ChoiceType::card_name(),
             // CR 101.4: the secret and the published number came from the same
             // `NumberRange` prompt; revealing changes visibility, not category.
             // CR 107.1a/b: recovering the CATEGORY from a stored value cannot
@@ -696,10 +696,12 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         // an object out of it (an unrestricted or battlefield origin) and sends
         // it somewhere else.
         Effect::ChangeZone {
+            actor: _,
             origin,
             destination,
             target,
             owner_library: _,
+            library_shuffle: _,
             enter_transformed: _,
             enters_under: _,
             enter_tapped: _,
@@ -711,6 +713,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
             enters_modified_if: _,
         }
         | Effect::ChangeZoneAll {
+            actor: _,
             origin,
             destination,
             target,
@@ -953,6 +956,7 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
         | Effect::RemoveFromCombat { .. }
         | Effect::BecomeBlocked { .. }
         | Effect::Conjure { .. }
+        | Effect::CreateCardCopyByName { .. }
         | Effect::ApplyPerpetual { .. }
         | Effect::Intensify { .. }
         | Effect::DraftFromSpellbook { .. }
@@ -963,8 +967,8 @@ pub(crate) fn battlefield_departure_slot(effect: &Effect) -> Option<&TargetFilte
     }
 }
 
-/// Mutable counterpart of [`mass_population_target`]. Kept adjacent so the two
-/// variant lists are read and edited together.
+/// Mutable counterpart of `phase_ast::types::ability::mass_population_target`;
+/// the two variant lists must stay identical.
 pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut TargetFilter> {
     match effect {
         Effect::ChangeZoneAll { target, .. }
@@ -975,6 +979,16 @@ pub(crate) fn mass_population_target_mut(effect: &mut Effect) -> Option<&mut Tar
         | Effect::GainControlAll { target, .. }
         | Effect::PumpAll { target, .. }
         | Effect::PutCounterAll { target, .. }
+        | Effect::RemoveCounter {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
+        | Effect::SetTapState {
+            scope: EffectScope::All,
+            target,
+            ..
+        }
         | Effect::DoublePTAll { target, .. } => Some(target),
         _ => None,
     }
@@ -1830,6 +1844,15 @@ pub struct SpellContext {
     /// `delayed_trigger::resolve`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outer_declared_players: Vec<(ChosenGroupId, PlayerId)>,
+    /// CR 608.2b + CR 603.7c: the referents of this delayed ability's creation snapshot
+    /// (`ResolvedAbility::targets`) that the creating chain announced only in target slots
+    /// that were illegal (or unjudged) as it resolved, each by the incarnation it had at
+    /// creation. An illegal target "fails to determine any such information". `targets`
+    /// keeps these entries, so positional `ParentTargetSlot` readers keep their numbering.
+    /// Stamped only by `delayed_trigger::resolve`; read by
+    /// `filter::combat_relation_subject_refs` (`AnaphoricTarget`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub creation_illegal_referents: Vec<ObjectIncarnationRef>,
     /// Digital-only Alchemy (no CR entry): the noted number this boon
     /// grant captured. Each "note ..." + "you get a one-time boon with
     /// [... the noted number ...]" resolution snapshots the noting
@@ -1898,8 +1921,11 @@ pub struct SpellContext {
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.
+    /// Boxed: the result carries a full LKI snapshot, is populated only for that
+    /// one hand-off, and the resolver keeps many `SpellContext`s live per chain
+    /// frame, so inline it widened every recursive frame by its size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub direct_discard_result: Option<DiscardedCardResult>,
+    pub direct_discard_result: Option<Box<DiscardedCardResult>>,
     /// CR 701.20e + CR 608.2c: Exact parent-produced cards forwarded to one
     /// immediate "for each" child. The child uses this snapshot as its
     /// iteration universe instead of an unqualified battlefield census.
@@ -2087,9 +2113,86 @@ pub struct SpellContext {
     /// batch-run context equality is unaffected. Not redacted from viewer states.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ability_provenance: Option<AbilityProvenance>,
+    /// CR 608.2c + CR 608.2d: players this ability's own `Choose(Player |
+    /// Opponent)` instructions have chosen earlier in this resolution — the
+    /// reference set a `DistinctFromPriorChoices` choice excludes. Travels with
+    /// the chain, its parked continuations and its parked repeat template.
+    /// Distinct from `ResolvedAbility::chosen_players`, the per-Choose anaphor
+    /// binding. Never fed by another object's choice.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prior_player_choices: Vec<PlayerId>,
+    /// CR 608.2c + CR 608.2d: the per-object player assignment this ability
+    /// has made while resolving — for each member of a population its
+    /// repetition iterated, the player its own choice chose for that member
+    /// ("for each of those permanents, choose …", read later as "the
+    /// permanent for which they were chosen"). Owned by the resolving ability;
+    /// written only by `ResolvedAbility::record_prior_player_choice`; travels
+    /// with the chain, its parked continuations and its parked repeat
+    /// template; never fed by another object's choice. Additive to
+    /// `prior_player_choices`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub object_player_assignment: Vec<ObjectPlayerAssignment>,
+    /// CR 608.2c + CR 608.2d: the member of the per-object repetition whose
+    /// player prompt this holder's answer settles. Written only by
+    /// `ResolvedAbility::bind_pending_choice_member`; consumed by
+    /// `ResolvedAbility::record_prior_player_choice`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_choice_member: Option<ObjectId>,
+    /// CR 603.2b + CR 102.1: the turn player a phase trigger bound its chain's `scoped_player` to
+    /// ("that player" anaphors to the player whose phase it is). Stamped only by
+    /// `ResolvedAbility::set_phase_turn_player_recursive`; cleared by every other binding
+    /// (`set_scoped_player_recursive`, the `player_scope` fan-out's seat binding). A node whose
+    /// `scoped_player` equals this is bound by its phase, not by an unfinished simultaneous
+    /// player-scope leg (CR 101.4), which is the distinction `entry_observation_deferred` reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase_turn_player: Option<crate::types::player::PlayerId>,
+}
+
+/// CR 608.2c + CR 608.2d: one entry of a per-object player assignment — the
+/// player this ability chose, while resolving, for one member of the
+/// population its repetition iterated ("for each of those permanents,
+/// choose …", read later as "the permanent for which they were chosen").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectPlayerAssignment {
+    pub object: ObjectId,
+    pub player: PlayerId,
 }
 
 impl SpellContext {
+    /// CR 608.2c + CR 608.2d: ordered, idempotent union of `other`'s player
+    /// choice records — the reference set and the per-object assignment —
+    /// into this context. The single place that lists the record fields, so
+    /// no carry site handles one record alone. A pending member binding is
+    /// not a record and is never carried by a union.
+    pub fn union_player_choice_records(&mut self, other: &SpellContext) {
+        for player in &other.prior_player_choices {
+            if !self.prior_player_choices.contains(player) {
+                self.prior_player_choices.push(*player);
+            }
+        }
+        for entry in &other.object_player_assignment {
+            if !self.object_player_assignment.contains(entry) {
+                self.object_player_assignment.push(*entry);
+            }
+        }
+    }
+
+    /// Whether this context carries either player choice record or a pending
+    /// member binding.
+    pub fn has_player_choice_records(&self) -> bool {
+        !self.prior_player_choices.is_empty()
+            || !self.object_player_assignment.is_empty()
+            || self.pending_choice_member.is_some()
+    }
+
+    /// CR 608.2c: empty both player choice records and the pending member
+    /// binding.
+    pub fn clear_player_choice_records(&mut self) {
+        self.prior_player_choices.clear();
+        self.object_player_assignment.clear();
+        self.pending_choice_member = None;
+    }
+
     pub fn record_additional_cost_payment(&mut self, origin: AdditionalCostOrigin, count: u32) {
         self.record_additional_cost_instance_payment(origin, 0, count);
     }
@@ -2427,13 +2530,15 @@ impl CopyCountStatus {
 /// (see the PR #5834/#5836 review that requested this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParentTargetMissingReason {
-    /// CR 401.5 (issue #1365): A `Dig` (or `RevealTop`) looked at an empty library. Consulted
-    /// by exact `ParentTarget` no-op guards: the `PutAtLibraryPosition` Dig-tail
-    /// seam (`put_on_top.rs`) avoids the generic self-fallback, and optional
-    /// cast/play operations avoid offering a nonexistent card regardless of
-    /// whether their driver is immediate or lingering.
-    /// Without the first guard, the Dig's own source (e.g. a reanimated
-    /// Thassa's Oracle) would move into the library it just found empty.
+    /// CR 609.3 + CR 608.2c (issue #1365): A `Dig` (or `RevealTop`) looked at an
+    /// empty library. Consulted by exact `ParentTarget` no-op guards: the
+    /// `PutAtLibraryPosition` Dig-tail seam (`put_on_top.rs`) avoids the generic
+    /// self-fallback, and optional cast/play operations avoid offering a
+    /// nonexistent card regardless of whether their driver is immediate or
+    /// lingering.
+    /// The guard also protects previously parsed chains that still carry a
+    /// separate placement step. Thassa's Oracle now parses the placement
+    /// into `Dig` itself.
     Dig,
     /// CR 609.3: A `ChooseFromZone` had no cards to choose from. Consumers
     /// that name the missing choice through `ParentTarget` (e.g. a chained
@@ -2899,6 +3004,23 @@ struct AttachTargetBindingsInner {
     attachment_candidates: Vec<ObjectIncarnationRef>,
 }
 
+impl AttachTargetBindings {
+    /// CR 400.7: every pin the binding holds, as `(object, incarnation)`, for
+    /// loop normalization to rank with the other ability pins.
+    pub(crate) fn for_each_incarnation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        if let Some(inner) = self.inner.as_deref_mut() {
+            for pin in inner
+                .attachment_targets
+                .iter_mut()
+                .chain(inner.host_target.iter_mut())
+                .chain(inner.attachment_candidates.iter_mut())
+            {
+                f(pin.object_id, &mut pin.incarnation);
+            }
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum AttachObjectBindingCompat {
@@ -3176,6 +3298,15 @@ pub struct ResolvedAbility {
     /// activation records nothing. Engine authority: never shown to a viewer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_record: Option<Box<crate::types::game_state::AbilityActivationRecord>>,
+    /// CR 602.2a + CR 602.2b: the activation's own usage key, announced
+    /// before any cost is paid (`casting::record_activation_announcement`)
+    /// and published to the turn/game journals only when the ability is
+    /// placed on the stack — so a reversed activation records nothing, and a
+    /// cost that moves the source cannot unresolve the slot. An existing
+    /// capture is never overwritten, and placement never recomputes it.
+    /// Engine authority: never shown to a viewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub announced_usage_key: Option<Box<crate::types::game_state::AbilityUsageKey>>,
     /// CR 608.2b: Declared target slots — numbered as
     /// `ability_utils::flatten_targets_in_chain` numbers this chain — whose
     /// target failed the legality check made as the chain began to resolve.
@@ -3662,6 +3793,9 @@ impl PartialEq for ResolvedAbility {
             chosen_target_slots: a_chosen_target_slots,
             activation_cost_reduction: a_activation_cost_reduction,
             activation_record: a_activation_record,
+            // Transport only: the announcement's own key rides the ability
+            // to the placement journal and never participates in equality.
+            announced_usage_key: _,
             illegal_target_slots: a_illegal_target_slots,
             unjudged_target_slots: a_unjudged_target_slots,
             illegal_local_target_slots: a_illegal_local_target_slots,
@@ -3741,6 +3875,8 @@ impl PartialEq for ResolvedAbility {
             chosen_target_slots: b_chosen_target_slots,
             activation_cost_reduction: b_activation_cost_reduction,
             activation_record: b_activation_record,
+            // Transport only: never participates in equality.
+            announced_usage_key: _,
             illegal_target_slots: b_illegal_target_slots,
             unjudged_target_slots: b_unjudged_target_slots,
             illegal_local_target_slots: b_illegal_local_target_slots,
@@ -4281,6 +4417,7 @@ impl ResolvedAbility {
             | Effect::RemoveFromCombat { .. }
             | Effect::BecomeBlocked { .. }
             | Effect::Conjure { .. }
+            | Effect::CreateCardCopyByName { .. }
             | Effect::ApplyPerpetual { .. }
             | Effect::Intensify { .. }
             | Effect::DraftFromSpellbook { .. }
@@ -4307,6 +4444,20 @@ impl ResolvedAbility {
         for (_, child) in self.child_links_mut() {
             child.record_duration_event_recursive(event);
         }
+    }
+
+    /// CR 610.3a + CR 610.3b: every "until" event latched on this ability or any sub/else branch,
+    /// in first-latched order — the read mirror of [`Self::record_duration_event_recursive`].
+    pub(crate) fn latched_duration_events(&self) -> Vec<DurationEvent> {
+        let mut latched = self.context.duration_events.clone();
+        for (_, child) in self.child_links() {
+            for event in child.latched_duration_events() {
+                if !latched.contains(&event) {
+                    latched.push(event);
+                }
+            }
+        }
+        latched
     }
 
     /// Clears the latched "until" events on this ability and every sub/else
@@ -4396,6 +4547,7 @@ impl ResolvedAbility {
             chosen_target_slots: ChosenTargetSlots::Unrecorded,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
@@ -4749,36 +4901,246 @@ impl ResolvedAbility {
     /// complete owned authorities together; retaining either a source context
     /// or a definition occurrence would reintroduce object-identity drift.
     pub fn clear_trigger_identity_recursive(&mut self) {
-        self.source_id = ObjectId(0);
-        self.source_incarnation = None;
-        self.trigger_source = None;
-        self.trigger_definition_ref = None;
-        self.force_block_attacker = None;
-        // CR 104.4b: the pin names an advancing incarnation of the triggering
-        // spell (CR 400.7), so it is cleared alongside the other per-instance
-        // identity fields above for the same loop-equality reason.
-        self.context.triggering_spell = None;
-        // CR 104.4b + CR 400.7: `normalize_for_loop` compares canonicalized
-        // clones for repeated-position equality, and the all-zone incarnation
-        // bump advances a pinned referent's epoch on every zone change. A
-        // pinned delayed trigger riding on a zone-cycling loop would otherwise
-        // carry a growing epoch into loop equality and never confirm a draw.
-        //
-        // CR 603.3b: the same stripping is correct for the other caller,
-        // `normalize_ability_identity`, which decides whether two triggered
+        self.clear_source_provenance();
+        // CR 603.3b: `normalize_ability_identity` decides whether two triggered
         // abilities are genuinely indistinguishable for auto-ordering — a
         // per-instance referent epoch is exactly the object identity that
-        // comparison must ignore. Both callers operate on clones, so no
-        // production pin is ever cleared. This is deliberately the opposite of
+        // comparison must ignore. It operates on clones, so no production pin
+        // is ever cleared. This is deliberately the opposite of
         // `inert_trigger_abilities_eq_ignoring_provenance` (`game/stack.rs`),
         // which DOES compare `target_incarnations`: there the question is
         // whether two abilities would resolve identically, and two pins at
-        // different epochs would not. Same field, different questions.
+        // different epochs would not. Same field, different questions. Loop
+        // equality asks a third one and keeps the pins: see
+        // `clear_source_provenance_for_loop_recursive`.
+        self.force_block_attacker = None;
         self.target_incarnations.clear();
         self.target_pins.clear();
         self.legacy_selected_target_incarnations.clear();
         for (_, child) in self.child_links_mut() {
             child.clear_trigger_identity_recursive();
+        }
+    }
+
+    /// The source provenance both structural comparisons erase from one node:
+    /// which object an otherwise identical ability came from, with the object
+    /// id itself.
+    fn clear_source_provenance(&mut self) {
+        self.source_id = ObjectId(0);
+        self.source_incarnation = None;
+        self.trigger_source = None;
+        self.trigger_definition_ref = None;
+        // CR 104.4b: the pin names an advancing incarnation of the triggering
+        // spell (CR 400.7), so it is cleared alongside the other per-instance
+        // identity fields above for the same loop-equality reason.
+        self.context.triggering_spell = None;
+    }
+
+    /// CR 104.4b + CR 400.7: the loop-equality form of
+    /// [`Self::clear_trigger_identity_recursive`]. It erases the same source
+    /// provenance and KEEPS every captured pin, because the resolver reads
+    /// whether a pin still names the live object (CR 603.7c: "if that object
+    /// left that zone and then returned, it's a new object and thus won't be
+    /// affected"). The pins' advancing epochs are ranked against the live
+    /// object by `GameState::canonicalize_lki_incarnations_for_loop`
+    /// ([`Self::for_each_loop_pin_mut`]), so a zone-cycling loop still
+    /// confirms while a live pin never compares equal to a stale one.
+    ///
+    /// The source's captured incarnation is such a pin too: `source_is_current`
+    /// and `self_ref_is_current` read it, so an ability whose source left and
+    /// returned does nothing to "this creature" (CR 400.7). It is KEPT on every
+    /// node whose source is `carrier_source`, the carrier's own source, which
+    /// is the object the visitor ranks it against; on a node of another source
+    /// it is erased with the rest of the provenance. A node an earlier pass
+    /// already normalized (its source erased to the null object) keeps what that
+    /// pass kept, so normalizing twice is normalizing once. A node whose source is a
+    /// different object than the carrier's (an ability built for another source) loses
+    /// the stamp with the rest of its provenance.
+    pub(crate) fn clear_source_provenance_for_loop_recursive(&mut self, carrier_source: ObjectId) {
+        let kept = (self.source_id == carrier_source || self.source_id == ObjectId(0))
+            .then_some(self.source_incarnation)
+            .flatten();
+        self.clear_source_provenance();
+        self.source_incarnation = kept;
+        for (_, child) in self.child_links_mut() {
+            child.clear_source_provenance_for_loop_recursive(carrier_source);
+        }
+    }
+
+    /// [`Self::clear_source_provenance_for_loop_recursive`] for a chain that
+    /// still needs one fact of a departed source: `carry` maps each node's own
+    /// source context (read before it is cleared) to the identity-free context
+    /// that node keeps instead of `None`.
+    pub(crate) fn clear_source_provenance_for_loop_carrying_source(
+        &mut self,
+        carrier_source: ObjectId,
+        carry: &impl Fn(&TriggerSourceContext) -> Option<TriggerSourceContext>,
+    ) {
+        let carried = self.trigger_source.as_ref().and_then(carry);
+        let kept = (self.source_id == carrier_source || self.source_id == ObjectId(0))
+            .then_some(self.source_incarnation)
+            .flatten();
+        self.clear_source_provenance();
+        self.source_incarnation = kept;
+        self.trigger_source = carried;
+        for (_, child) in self.child_links_mut() {
+            child.clear_source_provenance_for_loop_carrying_source(carrier_source, carry);
+        }
+    }
+
+    /// CR 400.7: every incarnation this chain captured for an object, as
+    /// `(object, incarnation)`, for loop normalization to rank with the other
+    /// carriers:
+    ///
+    /// - the keyed delayed-referent pins (CR 603.7c) and the positional
+    ///   announcement pins (CR 601.2c);
+    /// - the bound force-block attacker (CR 509.1c) and the granting object;
+    /// - the creation-time unavailable referents (CR 608.2b), which retain
+    ///   exact identity alongside the delayed snapshot's keyed pins;
+    /// - the boon and exile-until batches, and the objects a forwarding
+    ///   instruction produced or selected (CR 608.2c);
+    /// - the Attach bindings: attachments, host and candidates (CR 701.3a);
+    /// - the paid, effect-context and amassed-army object snapshots' own
+    ///   incarnations, and those of every captured `cost_paid_objects` record
+    ///   (CR 608.2h + CR 601.2h). `PartialEq` compares that list by object id
+    ///   only, so the loop comparators read its ranked incarnations through
+    ///   [`Self::paid_record_incarnations_for_loop`];
+    /// - three bare epochs of the SOURCE: the incarnation the source had when
+    ///   the ability was created or put on the stack (CR 400.7, read by
+    ///   `source_is_current`), the announcement epoch (CR 602.2a) and the noted
+    ///   mana payment's. A bare epoch names no object, so the caller supplies
+    ///   it: `source_id` is the CARRIER's source, which normalization leaves in
+    ///   place while it zeroes the ability's own; the first is kept only on
+    ///   nodes of that source
+    ///   ([`Self::clear_source_provenance_for_loop_recursive`]).
+    ///
+    /// Not visited here, each for a stated reason:
+    ///
+    /// - `trigger_source`, `trigger_definition_ref` and
+    ///   `context.triggering_spell` are erased with `source_id` by
+    ///   `clear_source_provenance`. A trigger's `source_incarnation` is the
+    ///   incarnation it observed its source at (`set_trigger_source_recursive`
+    ///   stamps it from `trigger_source.identity.reference`); an activation's is
+    ///   stamped at the stack push. That stamp survives and carries the source's
+    ///   liveness; the rest of `trigger_source` (its snapshot, zone and
+    ///   attachments) is erased;
+    /// - the last-known-information snapshots and the creation lookback event
+    ///   are walked by their own visitors
+    ///   ([`Self::for_each_loop_lki_snapshot_mut`],
+    ///   [`Self::for_each_creation_lookback_event_mut`]), because they hold
+    ///   records rather than one pin;
+    /// - `control_change_instruction` holds a capture id, not an incarnation:
+    ///   it keys a resolution-scoped table loop normalization clears, and a
+    ///   frame holding a resolution in progress is not loop-comparable;
+    /// - `cast_occurrence` is a journal coordinate, zeroed separately.
+    pub(crate) fn for_each_loop_pin_mut(
+        &mut self,
+        source_id: ObjectId,
+        f: &mut impl FnMut(ObjectId, &mut u64),
+    ) {
+        for incarnation in self
+            .source_incarnation
+            .iter_mut()
+            .chain(self.announced_source_incarnation.iter_mut())
+        {
+            f(source_id, incarnation);
+        }
+        for pin in self
+            .target_incarnations
+            .iter_mut()
+            .chain(self.target_pins.iter_mut().flatten())
+            .chain(self.force_block_attacker.iter_mut())
+            .chain(self.context.granting_object.iter_mut())
+            .chain(self.context.creation_illegal_referents.iter_mut())
+            .chain(self.context.boon_trigger_batch_objects.iter_mut())
+            .chain(self.context.exile_until_batch.iter_mut())
+            .chain(
+                self.context
+                    .forwarded_result_context
+                    .iter_mut()
+                    .flat_map(|context| context.object_incarnations.iter_mut()),
+            )
+            .chain(
+                self.context
+                    .pending_forwarded_zone_result
+                    .iter_mut()
+                    .flat_map(|result| result.selected.iter_mut().flatten()),
+            )
+        {
+            f(pin.object_id, &mut pin.incarnation);
+        }
+        self.context
+            .attach_target_bindings
+            .for_each_incarnation_mut(f);
+        for snapshot in self
+            .cost_paid_object
+            .iter_mut()
+            .chain(self.effect_context_object.iter_mut())
+            .chain(self.amassed_army_object.iter_mut())
+            .chain(
+                self.cost_paid_objects
+                    .iter_mut()
+                    .filter_map(CostPaidObjectRecord::snapshot_mut),
+            )
+        {
+            f(snapshot.object_id, &mut snapshot.incarnation);
+        }
+        if let Some(noted) = self.noted_mana_payment.as_mut() {
+            f(source_id, &mut noted.source_incarnation);
+        }
+        for (_, child) in self.child_links_mut() {
+            child.for_each_loop_pin_mut(source_id, f);
+        }
+    }
+
+    /// CR 608.2h + CR 400.7: every last-known-information snapshot this chain
+    /// carries, so loop normalization ranks the incarnations inside it (its
+    /// attachment pins) through the same visitor it uses for the stored
+    /// snapshots: the activation record's source, a discarded card's, and the
+    /// paid, effect-context and amassed-army objects', and every captured
+    /// `cost_paid_objects` record's.
+    pub(crate) fn for_each_loop_lki_snapshot_mut(
+        &mut self,
+        f: &mut impl FnMut(&mut crate::types::game_state::LKISnapshot),
+    ) {
+        if let Some(record) = self.activation_record.as_deref_mut() {
+            f(&mut record.source_lki);
+        }
+        if let Some(result) = self.context.direct_discard_result.as_mut() {
+            f(&mut result.lki);
+        }
+        for snapshot in self
+            .cost_paid_object
+            .iter_mut()
+            .chain(self.effect_context_object.iter_mut())
+            .chain(self.amassed_army_object.iter_mut())
+            .chain(
+                self.cost_paid_objects
+                    .iter_mut()
+                    .filter_map(CostPaidObjectRecord::snapshot_mut),
+            )
+        {
+            f(&mut snapshot.lki);
+        }
+        for (_, child) in self.child_links_mut() {
+            child.for_each_loop_lki_snapshot_mut(f);
+        }
+    }
+
+    /// CR 400.7 + CR 601.2h: the loop comparand of this chain's `cost_paid_objects`,
+    /// in order: the incarnation each captured record names (ranked by loop
+    /// normalization through [`Self::for_each_loop_pin_mut`]), `None` for a
+    /// membership-only record. `PartialEq` compares that list by object id only, so
+    /// without this a record whose object left and returned would compare equal to one
+    /// naming the live object, though `choose_from_zone` offers only the live one.
+    pub(crate) fn paid_record_incarnations_for_loop(&self, out: &mut Vec<Option<u64>>) {
+        out.extend(
+            self.cost_paid_objects
+                .iter()
+                .map(|record| record.snapshot().map(|snapshot| snapshot.incarnation)),
+        );
+        for (_, child) in self.child_links() {
+            child.paid_record_incarnations_for_loop(out);
         }
     }
 
@@ -5776,7 +6138,7 @@ impl ResolvedAbility {
     /// explicitly cleared so this one contingent fact cannot leak past its
     /// immediate consumer.
     pub fn set_direct_discard_result_for_immediate_node(&mut self, result: DiscardedCardResult) {
-        self.context.direct_discard_result = Some(result);
+        self.context.direct_discard_result = Some(Box::new(result));
         for (_, child) in self.child_links_mut() {
             child.clear_direct_discard_result_recursive();
         }
@@ -5819,8 +6181,34 @@ impl ResolvedAbility {
     /// local ability chain. This intentionally does not change `controller`.
     pub fn set_scoped_player_recursive(&mut self, player: PlayerId) {
         self.scoped_player = Some(player);
+        self.context.phase_turn_player = None;
         for (_, child) in self.child_links_mut() {
             child.set_scoped_player_recursive(player);
+        }
+    }
+
+    /// CR 603.2b + CR 102.1: bind a phase trigger's chain to the turn player whose phase it is.
+    /// Resolves exactly as `set_scoped_player_recursive` does, and additionally records that the
+    /// binding is the phase's, not a `player_scope` seat leg's (`SpellContext::phase_turn_player`).
+    pub fn set_phase_turn_player_recursive(&mut self, player: PlayerId) {
+        self.scoped_player = Some(player);
+        self.context.phase_turn_player = Some(player);
+        for (_, child) in self.child_links_mut() {
+            child.set_phase_turn_player_recursive(player);
+        }
+    }
+
+    /// CR 603.3c: carry `source`'s player binding onto this chain as the same kind of binding: a
+    /// phase trigger's turn-player binding stays one (`SpellContext::phase_turn_player`), any
+    /// other stays an instruction's.
+    pub fn carry_player_binding_recursive(&mut self, source: &ResolvedAbility) {
+        let Some(player) = source.scoped_player else {
+            return;
+        };
+        if source.context.phase_turn_player == Some(player) {
+            self.set_phase_turn_player_recursive(player);
+        } else {
+            self.set_scoped_player_recursive(player);
         }
     }
 
@@ -5995,6 +6383,83 @@ impl ResolvedAbility {
         for (_, child) in self.child_links_mut() {
             child.set_chosen_players_recursive(players);
         }
+    }
+
+    /// CR 608.2c + CR 608.2d: record a player this ability's own `Choose`
+    /// instruction just chose into its reference set and, when the answer
+    /// settles a per-object repetition (a member is bound on this holder),
+    /// into its object→player assignment — on this node and every child, so a
+    /// later `DistinctFromPriorChoices` choice anywhere in the rest of the
+    /// resolution excludes it and a later reader of the assignment finds it.
+    /// Consumes that binding.
+    pub fn record_prior_player_choice(&mut self, player: PlayerId) {
+        let mut answer = SpellContext {
+            prior_player_choices: vec![player],
+            ..SpellContext::default()
+        };
+        let member = self.context.pending_choice_member;
+        if let Some(object) = member {
+            answer
+                .object_player_assignment
+                .push(ObjectPlayerAssignment { object, player });
+        }
+        self.absorb_player_choice_records(&answer);
+        if member.is_some() {
+            self.clear_pending_choice_member_recursive();
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: ordered union of `from`'s player choice records
+    /// (reference set and per-object assignment) into this node and every
+    /// child (idempotent).
+    pub fn absorb_player_choice_records(&mut self, from: &SpellContext) {
+        self.context.union_player_choice_records(from);
+        for (_, child) in self.child_links_mut() {
+            child.absorb_player_choice_records(from);
+        }
+    }
+
+    /// Whether any node of this ability tree carries a player choice record
+    /// or a pending member binding.
+    pub fn has_player_choice_records_recursive(&self) -> bool {
+        self.context.has_player_choice_records()
+            || self
+                .child_links()
+                .any(|(_, child)| child.has_player_choice_records_recursive())
+    }
+
+    /// CR 608.2c: empty both player choice records and the pending member
+    /// binding on this node and every child — a new top-level resolution
+    /// starts with no prior choices, no assignment and no pending member of
+    /// its own.
+    pub fn clear_player_choice_records_recursive(&mut self) {
+        self.context.clear_player_choice_records();
+        for (_, child) in self.child_links_mut() {
+            child.clear_player_choice_records_recursive();
+        }
+    }
+
+    /// CR 608.2c + CR 608.2d: bind the member of a per-object repetition whose
+    /// player prompt this holder's answer settles. The single write of the
+    /// binding; set on the holder's root, which the recording authority reads.
+    pub fn bind_pending_choice_member(&mut self, member: ObjectId) {
+        self.context.pending_choice_member = Some(member);
+    }
+
+    fn clear_pending_choice_member_recursive(&mut self) {
+        self.context.pending_choice_member = None;
+        for (_, child) in self.child_links_mut() {
+            child.clear_pending_choice_member_recursive();
+        }
+    }
+
+    /// Whether `other` is part of the same resolving ability: every node,
+    /// parked continuation and repeat template of one resolving ability
+    /// carries its `source_id` and `ability_index`
+    /// (`apply_parent_chain_context` propagates the index), while a nested
+    /// replacement chain carries its own object's `source_id`.
+    pub fn shares_resolution_owner(&self, other: &ResolvedAbility) -> bool {
+        self.source_id == other.source_id && self.ability_index == other.ability_index
     }
 
     pub fn set_context_recursive(&mut self, context: SpellContext) {
@@ -6245,6 +6710,263 @@ mod tests {
         );
     }
 
+    /// A2.5: the ability-owned player-choice reference set is an additive,
+    /// default-skipped field — a populated set round-trips, an empty one is
+    /// not serialized, and a payload without the key reads as empty.
+    #[test]
+    fn spell_context_prior_player_choices_round_trip_and_default_skip() {
+        let populated = SpellContext {
+            prior_player_choices: vec![PlayerId(2)],
+            ..SpellContext::default()
+        };
+        let wire = serde_json::to_value(&populated).expect("context serializes");
+        assert_eq!(wire["prior_player_choices"], serde_json::json!([2]));
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(wire).expect("context deserializes"),
+            populated
+        );
+
+        let absent = serde_json::to_value(SpellContext::default()).expect("context serializes");
+        assert!(absent.get("prior_player_choices").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(absent)
+                .expect("a payload without the key deserializes")
+                .prior_player_choices,
+            Vec::<PlayerId>::new()
+        );
+    }
+
+    /// V3a.6u (A3.10): the per-object assignment and the pending member
+    /// binding are additive, default-skipped fields — populated, both
+    /// round-trip under their own keys; at their defaults neither key is
+    /// serialized; a payload without them reads as empty / `None`.
+    #[test]
+    fn spell_context_object_player_assignment_round_trip_and_default_skip() {
+        let populated = SpellContext {
+            object_player_assignment: vec![ObjectPlayerAssignment {
+                object: ObjectId(7),
+                player: PlayerId(2),
+            }],
+            pending_choice_member: Some(ObjectId(7)),
+            ..SpellContext::default()
+        };
+        let wire = serde_json::to_value(&populated).expect("context serializes");
+        assert_eq!(
+            wire["object_player_assignment"],
+            serde_json::json!([{ "object": 7, "player": 2 }])
+        );
+        assert_eq!(wire["pending_choice_member"], serde_json::json!(7));
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(wire).expect("context deserializes"),
+            populated
+        );
+
+        let absent = serde_json::to_value(SpellContext::default()).expect("context serializes");
+        assert!(absent.get("object_player_assignment").is_none());
+        assert!(absent.get("pending_choice_member").is_none());
+        let restored = serde_json::from_value::<SpellContext>(absent)
+            .expect("a payload without the keys deserializes");
+        assert!(restored.object_player_assignment.is_empty());
+        assert_eq!(restored.pending_choice_member, None);
+    }
+
+    /// V3b.8 (A3.14): `TargetFilter::ChoiceAssignment` is an additive variant
+    /// of the internally tagged enum — each projection round-trips under its
+    /// own `side`, a `GiveControl` carrying both round-trips equal, and an
+    /// existing variant's JSON still reads as before.
+    #[test]
+    fn choice_assignment_serde_round_trip() {
+        for (side, name) in [
+            (ChoiceAssignmentSide::Objects, "Objects"),
+            (ChoiceAssignmentSide::PlayerForObject, "PlayerForObject"),
+        ] {
+            let filter = TargetFilter::ChoiceAssignment { side };
+            let wire = serde_json::to_value(&filter).expect("filter serializes");
+            assert_eq!(
+                wire,
+                serde_json::json!({ "type": "ChoiceAssignment", "side": name })
+            );
+            assert_eq!(
+                serde_json::from_value::<TargetFilter>(wire).expect("filter deserializes"),
+                filter
+            );
+        }
+
+        let handoff = Effect::GiveControl {
+            target: TargetFilter::ChoiceAssignment {
+                side: ChoiceAssignmentSide::Objects,
+            },
+            recipient: TargetFilter::ChoiceAssignment {
+                side: ChoiceAssignmentSide::PlayerForObject,
+            },
+        };
+        let wire = serde_json::to_value(&handoff).expect("effect serializes");
+        assert_eq!(
+            serde_json::from_value::<Effect>(wire).expect("effect deserializes"),
+            handoff
+        );
+
+        assert_eq!(
+            serde_json::from_str::<TargetFilter>(r#"{"type":"TrackedSet","id":3}"#)
+                .expect("an existing variant still deserializes"),
+            TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(3)
+            }
+        );
+    }
+
+    /// V3a.10 (CR 608.2c + CR 608.2d): the recording authority and the carry
+    /// primitives cover both records and the binding. An answer given while a
+    /// member is bound joins the reference set and the assignment on every
+    /// node and consumes the binding everywhere; without a binding only the
+    /// reference set grows.
+    #[test]
+    fn player_choice_records_authority_and_carry_primitives() {
+        let node = || {
+            ResolvedAbility::new(
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let entry = |object: u64, player: u8| ObjectPlayerAssignment {
+            object: ObjectId(object),
+            player: PlayerId(player),
+        };
+        let mut tree = node().sub_ability(node());
+        tree.else_ability = Some(Box::new(node()));
+        let nodes = |tree: &ResolvedAbility| -> Vec<SpellContext> {
+            vec![
+                tree.context.clone(),
+                tree.sub_ability.as_ref().expect("sub").context.clone(),
+                tree.else_ability.as_ref().expect("else").context.clone(),
+            ]
+        };
+
+        // Without a binding: only the reference set grows.
+        tree.record_prior_player_choice(PlayerId(1));
+        for context in nodes(&tree) {
+            assert_eq!(context.prior_player_choices, [PlayerId(1)]);
+            assert!(context.object_player_assignment.is_empty());
+        }
+
+        // With a binding on the root: the entry lands on every node and the
+        // binding is consumed everywhere.
+        tree.bind_pending_choice_member(ObjectId(7));
+        assert!(tree.has_player_choice_records_recursive());
+        tree.record_prior_player_choice(PlayerId(2));
+        for context in nodes(&tree) {
+            assert_eq!(context.prior_player_choices, [PlayerId(1), PlayerId(2)]);
+            assert_eq!(context.object_player_assignment, [entry(7, 2)]);
+            assert_eq!(context.pending_choice_member, None);
+        }
+        // Idempotent: the same answer again adds nothing.
+        tree.record_prior_player_choice(PlayerId(2));
+        for context in nodes(&tree) {
+            assert_eq!(context.prior_player_choices, [PlayerId(1), PlayerId(2)]);
+            assert_eq!(context.object_player_assignment, [entry(7, 2)]);
+        }
+
+        // The absorb unions both records into every node, in order.
+        let from = SpellContext {
+            prior_player_choices: vec![PlayerId(2), PlayerId(3)],
+            object_player_assignment: vec![entry(7, 2), entry(8, 3)],
+            ..SpellContext::default()
+        };
+        tree.absorb_player_choice_records(&from);
+        for context in nodes(&tree) {
+            assert_eq!(
+                context.prior_player_choices,
+                [PlayerId(1), PlayerId(2), PlayerId(3)]
+            );
+            assert_eq!(context.object_player_assignment, [entry(7, 2), entry(8, 3)]);
+        }
+
+        // has_/clear_ cover each record and the binding on their own.
+        let mut lone = node().sub_ability(node());
+        assert!(!lone.has_player_choice_records_recursive());
+        lone.sub_ability
+            .as_mut()
+            .expect("sub")
+            .context
+            .object_player_assignment = vec![entry(9, 1)];
+        assert!(lone.has_player_choice_records_recursive());
+        lone.clear_player_choice_records_recursive();
+        assert!(!lone.has_player_choice_records_recursive());
+        lone.bind_pending_choice_member(ObjectId(9));
+        assert!(lone.has_player_choice_records_recursive());
+        lone.clear_player_choice_records_recursive();
+        assert_eq!(lone.context.pending_choice_member, None);
+        tree.clear_player_choice_records_recursive();
+        for context in nodes(&tree) {
+            assert!(!context.has_player_choice_records());
+        }
+    }
+
+    #[test]
+    fn spell_context_creation_illegal_referents_defaults_omits_empty_and_round_trips() {
+        for fixture in [
+            serde_json::json!({}),
+            serde_json::json!({"creation_illegal_referents": []}),
+        ] {
+            let context: SpellContext =
+                serde_json::from_value(fixture).expect("absent/empty record");
+            assert_eq!(
+                context.creation_illegal_referents,
+                Vec::<ObjectIncarnationRef>::new()
+            );
+            assert!(serde_json::to_value(&context)
+                .unwrap()
+                .get("creation_illegal_referents")
+                .is_none());
+        }
+        assert!(serde_json::to_value(SpellContext::default())
+            .unwrap()
+            .get("creation_illegal_referents")
+            .is_none());
+        let fixture = serde_json::json!({"creation_illegal_referents": [{"object_id": 11, "incarnation": 7}]});
+        let populated: SpellContext = serde_json::from_value(fixture).expect("populated record");
+        let pin = ObjectIncarnationRef::of(ObjectId(11), 7);
+        assert_eq!(populated.creation_illegal_referents, vec![pin]);
+        let encoded = serde_json::to_value(&populated).unwrap();
+        assert_eq!(
+            encoded["creation_illegal_referents"],
+            serde_json::json!([{"object_id": 11, "incarnation": 7}])
+        );
+        let decoded: SpellContext = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded, populated);
+        assert_eq!(decoded.creation_illegal_referents, vec![pin]);
+    }
+
+    #[test]
+    fn creation_illegal_referents_participate_in_loop_pin_visitation() {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(900),
+            crate::types::player::PlayerId(0),
+        );
+        ability.context.creation_illegal_referents =
+            vec![ObjectIncarnationRef::of(ObjectId(11), 7)];
+        let mut visited = Vec::new();
+        ability.for_each_loop_pin_mut(ObjectId(900), &mut |id, epoch| {
+            visited.push((id, *epoch));
+            *epoch = 3;
+        });
+        assert_eq!(visited, vec![(ObjectId(11), 7)]);
+        assert_eq!(
+            ability.context.creation_illegal_referents,
+            vec![ObjectIncarnationRef::of(ObjectId(11), 3)]
+        );
+    }
+
     #[test]
     fn spell_context_creation_lookback_round_trips() {
         let event = GameEvent::ZoneChanged {
@@ -6459,6 +7181,8 @@ mod tests {
     fn resolved_ability_duration_roundtrips() {
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Battlefield),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -6890,6 +7614,8 @@ mod tests {
         ) -> ResolvedAbility {
             let mut ability = ResolvedAbility::new(
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Graveyard),
                     destination: Zone::Battlefield,
                     target: TargetFilter::SelfRef,
