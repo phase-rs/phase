@@ -1923,10 +1923,15 @@ pub fn resolve(
         );
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
+        let owner = change_zone_member_owner(
+            logical_zone_change_group.logical_group_id,
+            anticipated_pause.as_ref(),
+        );
         match process_one_zone_move_with_terminal(
             state,
             &ctx,
             member,
+            owner,
             logical_zone_change_group.announced_members(),
             events,
         ) {
@@ -1998,22 +2003,19 @@ pub fn resolve(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZone retains its explicit delivery prefix");
+                let paused_current = crate::game::zone_pipeline::parked_member_boundary(
+                    state,
+                    logical_zone_change_group.logical_group_id,
+                    anticipated_pause,
+                    &events[delivery_start..],
+                )
+                .expect("zone-change pause must retain its exact boundary");
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
                         library_reorder: None,
                         pending_return_result_producer: None,
                         logical_zone_change_group,
-                        paused_current: Some(
-                            state
-                                .pending_zone_change_delivery_from_replacement()
-                                .or_else(|| {
-                                    anticipated_pause.map(|mut boundary| {
-                                        boundary.append_delivery_events(&events[delivery_start..]);
-                                        boundary
-                                    })
-                                })
-                                .expect("zone-change pause must retain its exact boundary"),
-                        ),
+                        paused_current: Some(paused_current),
                         remaining: members[i + 1..].to_vec(),
                         source_id: ctx.source_id,
                         controller: ctx.controller,
@@ -2433,13 +2435,29 @@ pub(crate) fn process_one_zone_move(
     events: &mut Vec<GameEvent>,
 ) -> ZoneMoveResult {
     // A single-object move belongs to no multi-member entry event.
-    process_one_zone_move_with_terminal(state, ctx, member, &[], events).into_zone_move_result()
+    process_one_zone_move_with_terminal(state, ctx, member, None, &[], events)
+        .into_zone_move_result()
+}
+
+/// CR 730.3 + CR 603.10a: the announcing owner of one ChangeZone-family
+/// member's move — the iteration's logical group and the member's pre-move
+/// incarnation. A merged member's component batch links to it.
+pub(crate) fn change_zone_member_owner(
+    group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    anticipated_pause: Option<&crate::types::game_state::PendingZoneChangeDelivery>,
+) -> Option<crate::game::zone_pipeline::MemberDeliveryOwner> {
+    anticipated_pause.map(|boundary| crate::game::zone_pipeline::MemberDeliveryOwner {
+        group,
+        member: boundary.member,
+        expected_event: None,
+    })
 }
 
 pub(crate) fn process_one_zone_move_with_terminal(
     state: &mut GameState,
     ctx: &ChangeZoneIterationCtx,
     member: &ChangeZoneMemberEntry,
+    owner: Option<crate::game::zone_pipeline::MemberDeliveryOwner>,
     // CR 614.4 + CR 614.12: the announced members of the entry event this member belongs to
     // (`LogicalZoneChangeGroup::announced_members`).
     event_members: &[ObjectIncarnationRef],
@@ -2501,6 +2519,7 @@ pub(crate) fn process_one_zone_move_with_terminal(
             performed_by: Some(ctx.performed_by),
             ownership_actor: Some(ctx.controller),
         },
+        owner,
         events,
     );
 
@@ -3659,6 +3678,10 @@ pub fn resolve_all(
         };
         let delivery_start = events.len();
         let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
+        let owner = change_zone_member_owner(
+            logical_zone_change_group.logical_group_id,
+            anticipated_pause.as_ref(),
+        );
         match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
             state,
             obj_id,
@@ -3688,6 +3711,7 @@ pub fn resolve_all(
                 performed_by: Some(performer),
                 ownership_actor: Some(ability.controller),
             },
+            owner,
             events,
         ) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
@@ -3732,6 +3756,15 @@ pub fn resolve_all(
                     &events[logical_group_event_start..],
                 )
                 .expect("paused ChangeZoneAll retains its explicit delivery prefix");
+                let paused_current = (!entry_target_choice).then(|| {
+                    crate::game::zone_pipeline::parked_member_boundary(
+                        state,
+                        logical_zone_change_group.logical_group_id,
+                        anticipated_pause,
+                        &events[delivery_start..],
+                    )
+                    .expect("replacement pause must retain its exact boundary")
+                });
                 state.push_change_zone_iteration_after_child(
                     crate::types::game_state::PendingChangeZoneIteration {
                         // CR 701.20d + CR 616.1: the whole-library reorder this
@@ -3740,17 +3773,7 @@ pub fn resolve_all(
                         library_reorder: library_reorder.take(),
                         pending_return_result_producer: None,
                         logical_zone_change_group,
-                        paused_current: (!entry_target_choice).then(|| {
-                            state
-                                .pending_zone_change_delivery_from_replacement()
-                                .or_else(|| {
-                                    anticipated_pause.map(|mut boundary| {
-                                        boundary.append_delivery_events(&events[delivery_start..]);
-                                        boundary
-                                    })
-                                })
-                                .expect("replacement pause must retain its exact boundary")
-                        }),
+                        paused_current,
                         // CR 122.1h: resumed members of a paused mass return still
                         // receive their counters (Shilgengar's finality counter).
                         // ChangeZoneAll carries no entry gate, so every member's
@@ -4498,8 +4521,14 @@ mod tests {
             enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             enters_attacking: false,
         };
-        let result =
-            process_one_zone_move_with_terminal(&mut state, &ctx, &member, &[], &mut Vec::new());
+        let result = process_one_zone_move_with_terminal(
+            &mut state,
+            &ctx,
+            &member,
+            None,
+            &[],
+            &mut Vec::new(),
+        );
         assert!(matches!(
             result,
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(
