@@ -7259,12 +7259,22 @@ mod tests {
             .add_land_from_oracle(P0, "Forest", "({T}: Add {G}.)")
             .with_subtypes(vec!["Forest"])
             .id();
+        let second = scenario
+            .add_land_from_oracle(P0, "Forest", "({T}: Add {G}.)")
+            .with_subtypes(vec!["Forest"])
+            .id();
         let auras: Vec<_> = (0..2).map(|_| scenario.add_enchantment_from_oracle(P0, "Fertile Ground",
             "Enchant land\nWhenever enchanted land is tapped for mana, its controller adds an additional one mana of any color.")
             .with_subtypes(vec!["Aura"]).with_mana_cost(parse_mtgjson_mana_cost("{1}{G}")).id()).collect();
         let mut runner = scenario.build();
         crate::game::effects::attach::attach_to(runner.state_mut(), auras[0], first);
+        crate::game::effects::attach::attach_to(runner.state_mut(), auras[1], second);
         crate::game::layers::evaluate_layers(runner.state_mut());
+        assert_eq!(runner.state().objects[&auras[1]].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().objects[&auras[1]].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(second))
+        );
         let action = activatable_mana_actions_for_player(runner.state(), P0).into_iter()
             .find(|action| matches!(action, GameAction::TapLandForMana { selection }
                 if selection.source.object_id == first
@@ -7278,8 +7288,11 @@ mod tests {
         assert!(state.pending_taps_for_mana_overrides.is_empty());
         let prefix = events.clone();
         let pool = state.players[0].mana_pool.clone();
-        let second = subtype_forest_with_priority(&mut state);
-        crate::game::effects::attach::attach_to(&mut state, auras[1], second);
+        assert_eq!(state.objects[&auras[1]].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&auras[1]].attached_to,
+            Some(crate::game::game_object::AttachTarget::Object(second))
+        );
         assert!(
             activatable_land_mana_options(&state, second, P0)
                 .iter()
