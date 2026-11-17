@@ -1477,9 +1477,13 @@ mod tests {
                     let ManaSourceOutput::Concrete(color) = selection.output else {
                         return None;
                     };
-                    // Reach guard: no planner combination carries the amount,
-                    // so the label can only have it from the engine's output.
-                    assert_eq!(selection.atomic_combination, None, "{selection:?}");
+                    // Reach guard: the engine records the complete same-color activation.
+                    // Keep that source contract alongside the exact rendered-mana checks.
+                    assert_eq!(
+                        selection.atomic_combination,
+                        Some(vec![color; 3]),
+                        "{selection:?}"
+                    );
                     Some((color, describe_action(&visible, VIEWER, action)))
                 }
                 _ => None,

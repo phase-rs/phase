@@ -4069,44 +4069,9 @@ fn collect_matching_triggers_inner(
             // tracking (`AbilityCondition::AbilityUseCountThisTurn`) can identify
             // "this ability" at resolution time.
             ability.ability_index = Some(trig_idx);
-            // CR 605.4a: A `TapsForMana` triggered mana ability coupled to an
-            // auto-tap event was already resolved inline during cost payment
-            // (`resolve_tap_mana_triggers_inline`), which flipped the event to
-            // `FromTapTriggersResolved`. The deferred scan must not resolve it
-            // again. Gated on `TapsForMana` mode so `ManaAdded`-mode mana
-            // abilities (not resolved at payment) still fire, on the resolved
-            // marker so manual `TapLandForMana` taps (still `FromTap`) still
-            // fire, and on `is_triggered_mana_ability` so non-mana `TapsForMana`
-            // triggers still fire (CR 603.3).
-            //
-            // CR 608.2d exemption: a multi-type mana-echo trigger is never
-            // skipped by this marker — Pass 1 deliberately leaves exactly that
-            // shape unresolved (it owes a SingleColor choice the bare loop
-            // cannot pause for), so skipping it here would drop the trigger
-            // instead of merely de-duplicating it. `echo_body_owes_type_choice`
-            // is the single authority both sites share, so the skip and the
-            // exemption cannot drift apart.
-            if matches!(
-                (trig_def.mode.clone(), event),
-                (
-                    TriggerMode::TapsForMana,
-                    GameEvent::TappedForMana {
-                        tap_state: ManaTapState::FromTapTriggersResolved,
-                        ..
-                    }
-                ) | (
-                    TriggerMode::ManaAbilityProduced,
-                    GameEvent::ManaAbilityProduced {
-                        trigger_state:
-                            crate::types::events::ManaAbilityTriggerState::InlineResolved,
-                        ..
-                    }
-                )
-            ) && super::mana_abilities::is_triggered_mana_ability(&ability, Some(event))
-                && !super::mana_abilities::echo_body_owes_type_choice(&ability, Some(event))
-            {
-                continue;
-            }
+            // CR 603.2d + CR 605.4a: already-inline mana occurrences remain
+            // discoverable here until trigger doubling has created any extra
+            // firings. Only the completed originals are removed afterward.
             let (modal, mode_abilities) = trig_def
                 .execute
                 .as_ref()
@@ -5534,6 +5499,63 @@ pub(super) fn inline_tap_mana_trigger_abilities(
     coupled
 }
 
+/// CR 605.4a: the inline pass settles every marked, choice-free coupled
+/// occurrence. A mixed tap echo additionally needs its exact selected trigger
+/// under the activation that produced this tap. Mana nodes are recorded even
+/// without a play trace; no optional observer history is consulted.
+fn inline_mana_trigger_already_resolved(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    event: &GameEvent,
+) -> bool {
+    let source_id = match event {
+        GameEvent::TappedForMana {
+            source_id,
+            tap_state: ManaTapState::FromTapTriggersResolved,
+            ..
+        } => Some(source_id),
+        GameEvent::ManaAbilityProduced {
+            trigger_state: crate::types::events::ManaAbilityTriggerState::InlineResolved,
+            ..
+        } => None,
+        _ => return false,
+    };
+    if !super::mana_abilities::echo_body_owes_type_choice(ability, Some(event)) {
+        return true;
+    }
+    // CR 608.2d: ManaAbilityProduced mixed echoes are not preselected by the
+    // source provider. Another event's journal entry cannot settle their choice.
+    let Some(source_id) = source_id else {
+        return false;
+    };
+    let Some(definition) = ability.trigger_definition_ref.as_ref() else {
+        return false;
+    };
+    let nodes = state.resolved_rules_journal.nodes();
+    let Some(activation) = nodes.iter().rev().find(|node| {
+        matches!(
+            &node.kind,
+            crate::types::resolved_commands::RulesExecutionNodeKind::ActivatedMana { source }
+                if source.object_id == *source_id
+        )
+    }) else {
+        return false;
+    };
+    nodes
+        .iter()
+        .rev()
+        .take_while(|node| node.identity != activation.identity)
+        .any(|node| {
+            node.bundle_parent == Some(activation.identity)
+                && matches!(
+                    &node.kind,
+                    crate::types::resolved_commands::RulesExecutionNodeKind::TriggeredMana {
+                        trigger: Some(trigger), ..
+                    } if trigger == definition
+                )
+        })
+}
+
 /// CR 605.4a: Resolve `TapsForMana` triggered mana abilities inline, immediately
 /// after the mana abilities that triggered them.
 ///
@@ -5630,21 +5652,26 @@ pub(super) fn resolve_tap_mana_triggers_inline(
         }
         for (definition_ref, ability) in coupled {
             // CR 608.2d + CR 106.12a: a mana-echo body resolving from a
-            // multi-type tap event owes the player a choice of exactly one
-            // type, and this bare loop has no pause/resume step — resolving
-            // those here would strand the prompt with no continuation (and
-            // cost-payment previews must never prompt). Leave them for the
-            // frame batch: the resolved-marker guard below exempts exactly
-            // this shape from the marker, and the fixed-point authority pauses
-            // for and resumes the choice there. Single-type echo still
-            // resolves here with no choice to make.
+            // multi-type tap event owes exactly one type. Resolve a valid
+            // preselection here; otherwise leave this occurrence for the
+            // fixed-point authority, which owns its real pause and resume.
+            // Other selected producers still resolve with their own choices.
             if super::mana_abilities::echo_body_owes_type_choice(&ability, Some(&tap_event)) {
-                continue;
+                let valid_selection = state
+                    .pending_taps_for_mana_overrides
+                    .get(&definition_ref)
+                    .is_some_and(|selection| match selection {
+                        ProductionOverride::SingleColor(color) => {
+                            super::mana_abilities::echo_distinct_types(&tap_event).contains(color)
+                        }
+                        ProductionOverride::Combination(_) => false,
+                    });
+                if !valid_selection {
+                    continue;
+                }
             }
-            // Look up the color override the auto-tap planner chose for this aura's
-            // triggered mana ability. Only non-None for AnyOneColor bonus triggers
-            // (Fertile Ground) when called from the auto-tap path; None for manual
-            // play and Fixed bonus triggers (Wild Growth already has no choice).
+            // Reuse the exact live occurrence's selected production, including
+            // a validated echo type. Unselected producers retain normal resolution.
             let color_override = state
                 .pending_taps_for_mana_overrides
                 .get(&definition_ref)
@@ -9443,7 +9470,26 @@ fn collect_pending_triggers_with_collection(
     // CR 614.12a + CR 603.2d + CR 603.10: trigger doubling observes
     // the same board as trigger discovery, before entry for payments and live
     // otherwise. Admission and occurrence accounting stay on the live session.
+    // CR 603.2d + CR 605.4a: coupled mana triggers resolved their original
+    // occurrence inline, but still trigger additional times. Preserve each
+    // original context through the doubling authority, then remove only that
+    // occurrence. Additional firings retain their own normal type choices.
+    let inline_resolved_mana: Vec<_> = pending
+        .iter()
+        .enumerate()
+        .filter_map(|(index, context)| {
+            let ability = &context.pending.ability;
+            context.pending.trigger_event.as_ref().and_then(|event| {
+                (super::mana_abilities::is_triggered_mana_ability(ability, Some(event))
+                    && inline_mana_trigger_already_resolved(state, ability, event))
+                .then_some(index)
+            })
+        })
+        .collect();
     apply_trigger_doubling(observation.read(state), &mut pending);
+    for index in inline_resolved_mana.into_iter().rev() {
+        pending.remove(index);
+    }
     pending = filter_auto_inert_noop_triggers(state, pending);
 
     // CR 800.4d: a departing permanent's own leaves-the-battlefield abilities
