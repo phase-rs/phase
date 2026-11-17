@@ -433,6 +433,174 @@ fn snow_mana_echo_nonland_kinnan_keeps_its_own_producer() {
 }
 
 #[test]
+fn selected_fixed_mixed_gyre_engineer_kinnan_echo_keeps_delney_additional_occurrence() {
+    const GYRE: &str = "{T}: Add {G}{U}.";
+    const KINNAN: &str = "Whenever you tap a nonland permanent for mana, add one mana of any type that permanent produced.\n{5}{G}{U}: Look at the top five cards of your library. You may put a non-Human creature card from among them onto the battlefield. Put the rest on the bottom of your library in a random order.";
+    const DELNEY: &str = "Creatures you control with power 2 or less can't be blocked by creatures with power 3 or greater.\nIf a triggered ability of a creature you control with power 2 or less triggers, that ability triggers an additional time.";
+    let mut s = board();
+    let engineer = s
+        .add_creature_from_oracle(P0, "Gyre Engineer", 1, 1, GYRE)
+        .with_subtypes(vec!["Vedalken", "Wizard"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{G}{U}"))
+        .id();
+    let kinnan = s
+        .add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Druid"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{G}{U}"))
+        .id();
+    let delney = s
+        .add_creature_from_oracle(P0, "Delney, Streetwise Lookout", 2, 2, DELNEY)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Scout"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{W}"))
+        .id();
+    let mut r = s.build();
+    evaluate_layers(r.state_mut());
+    // CR 302.6: this pre-existing, untapped creature can pay its tap cost.
+    assert!(!r.state().objects[&engineer].summoning_sick);
+    assert!(!r.state().objects[&engineer].tapped);
+    assert_eq!(r.state().objects[&kinnan].power, Some(2));
+    assert!(r.state().players[0].mana_pool.is_empty());
+    assert!(r.state().resolved_rules_journal.produced_mana().is_empty());
+    let selection = activatable_mana_source_selections(r.state(), P0)
+        .into_iter()
+        .find(|selection| {
+            selection.source.object_id == engineer
+                && matches!(selection.output, ManaSourceOutput::Concrete(_))
+                && selection.taps_for_mana.len() == 1
+                && selection.taps_for_mana[0].source.object_id == kinnan
+                && selection.taps_for_mana[0].production_override
+                    == engine::types::game_state::ProductionOverride::SingleColor(ManaType::Green)
+        })
+        .expect("the real provider offers Gyre Engineer with Kinnan's selected green echo");
+    let mut events = r
+        .act(GameAction::ActivateManaSource { selection })
+        .expect("the offered pre-existing Gyre Engineer must activate")
+        .events;
+    assert!(r.state().objects[&engineer].tapped);
+    // CR 106.3 + CR 605.3b: fixed GU resolves without a base-production prompt.
+    assert_eq!(production_count(&events, engineer, ManaType::Green), 1);
+    assert_eq!(production_count(&events, engineer, ManaType::Blue), 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event,
+                engine::types::events::GameEvent::AbilityActivated { source_id, .. }
+                    if *source_id == engineer
+            ))
+            .count(),
+        1
+    );
+    let produced = r.state().resolved_rules_journal.produced_mana();
+    assert_eq!(produced.len(), 3);
+    assert_eq!(
+        produced
+            .iter()
+            .filter(|record| record.unit.source_id == kinnan && record.unit.color == ManaType::Green)
+            .count(),
+        1
+    );
+    assert_eq!(r.state().players[0].mana_pool.total(), 3);
+    // CR 603.2d + CR 605.4a: only the original settles with the selected G;
+    // Delney's additional occurrence still chooses its own actual GU type.
+    let WaitingFor::ChooseManaColor {
+        player,
+        choice: ManaChoicePrompt::SingleColor { options },
+        ..
+    } = &r.state().waiting_for
+    else {
+        panic!("Delney's additional Kinnan occurrence must offer its independent GU choice");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(options.len(), 2);
+    assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
+    events.extend(
+        r.act(GameAction::ChooseManaColor {
+            choice: ManaChoice::SingleColor(ManaType::Blue),
+            count: 1,
+        })
+        .expect("the additional Kinnan occurrence may choose blue independently")
+        .events,
+    );
+    // CR 106.3 + CR 603.2d: exactly two distinct bonus units retain Kinnan
+    // as producer; neither the original nor the base activation is replayed.
+    let journal = &r.state().resolved_rules_journal;
+    assert_eq!(journal.produced_mana().len(), 4);
+    let bonuses: Vec<_> = journal
+        .produced_mana()
+        .iter()
+        .filter(|record| record.unit.source_id == kinnan)
+        .collect();
+    assert_eq!(bonuses.len(), 2);
+    assert_ne!(bonuses[0].producer, bonuses[1].producer);
+    assert_ne!(bonuses[0].unit.pip_id, bonuses[1].unit.pip_id);
+    for color in [ManaType::Green, ManaType::Blue] {
+        assert_eq!(
+            bonuses
+                .iter()
+                .filter(|record| record.unit.color == color)
+                .count(),
+            1
+        );
+        assert_eq!(
+            journal
+                .produced_mana()
+                .iter()
+                .filter(|record| record.unit.source_id == engineer && record.unit.color == color)
+                .count(),
+            1
+        );
+        let pool = &r.state().players[0].mana_pool;
+        assert_eq!(pool.count_color(color), 2);
+        for source in [engineer, kinnan] {
+            assert_eq!(
+                pool.units()
+                    .filter(|unit| unit.source_id == source
+                        && unit.color == color
+                        && unit.restrictions.is_empty())
+                    .count(),
+                1
+            );
+        }
+    }
+    assert_eq!(
+        journal
+            .nodes()
+            .iter()
+            .filter(|node| matches!(
+                &node.kind,
+                engine::types::resolved_commands::RulesExecutionNodeKind::ActivatedMana { source }
+                    if source.object_id == engineer
+            ))
+            .count(),
+        1
+    );
+    let bonus_nodes: Vec<_> = journal.nodes().iter().filter(|node| matches!(
+        &node.kind,
+        engine::types::resolved_commands::RulesExecutionNodeKind::TriggeredMana { source, .. }
+            if source.object_id == kinnan
+    )).collect();
+    assert_eq!(bonus_nodes.len(), 2);
+    assert!(bonus_nodes.iter().all(|node| node.produced_pips.len() == 1));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event,
+                engine::types::events::GameEvent::AbilityActivated { source_id, .. }
+                    if *source_id == engineer
+            ))
+            .count(),
+        1
+    );
+    assert!(r.state().objects[&engineer].tapped);
+    assert!(!r.state().objects[&kinnan].tapped);
+    assert!(!r.state().objects[&delney].tapped);
+    // CR 605.4a: the additional mana ability finishes without a stack entry.
+    assert_complete(&r, 4);
+}
+
+#[test]
 fn selected_mixed_kinnan_echo_keeps_delney_additional_occurrence() {
     kinnan_echo_occurrences(true, true, [ManaType::Green, ManaType::Blue]);
 }

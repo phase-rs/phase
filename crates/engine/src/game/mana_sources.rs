@@ -4221,8 +4221,15 @@ fn with_taps_for_mana_echo_options(
 }
 
 #[cfg(any(test, feature = "test-support"))]
+#[derive(Clone, Copy)]
+struct EchoOptionWorkState {
+    limits: (usize, usize),
+    maxima: (usize, usize),
+}
+
+#[cfg(any(test, feature = "test-support"))]
 std::thread_local! {
-    static ECHO_OPTION_WORK: std::cell::Cell<Option<((usize, usize), (usize, usize))>> =
+    static ECHO_OPTION_WORK: std::cell::Cell<Option<EchoOptionWorkState>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -4239,11 +4246,16 @@ pub fn with_echo_option_work_limit<T>(
             ECHO_OPTION_WORK.set(None);
         }
     }
-    assert!(ECHO_OPTION_WORK.replace(Some((limits, (0, 0)))).is_none());
+    assert!(ECHO_OPTION_WORK
+        .replace(Some(EchoOptionWorkState {
+            limits,
+            maxima: (0, 0),
+        }))
+        .is_none());
     let _reset = Reset;
     let result = action();
-    let (_, maxima) = ECHO_OPTION_WORK.get().expect("active echo work observer");
-    (result, maxima)
+    let observer = ECHO_OPTION_WORK.get().expect("active echo work observer");
+    (result, observer.maxima)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -4258,12 +4270,15 @@ fn record_echo_option_work(work: &mut (usize, usize), event: EchoOptionWork) {
         EchoOptionWork::Alternative => work.0 += 1,
         EchoOptionWork::Materialization => work.1 += 1,
     }
-    if let Some((limits, maxima)) = ECHO_OPTION_WORK.get() {
+    if let Some(EchoOptionWorkState { limits, maxima }) = ECHO_OPTION_WORK.get() {
         assert!(
             work.0 <= limits.0 && work.1 <= limits.1,
             "actual echo option expansion exceeded bound: {work:?} > {limits:?}"
         );
-        ECHO_OPTION_WORK.set(Some((limits, (maxima.0.max(work.0), maxima.1.max(work.1)))));
+        ECHO_OPTION_WORK.set(Some(EchoOptionWorkState {
+            limits,
+            maxima: (maxima.0.max(work.0), maxima.1.max(work.1)),
+        }));
     }
 }
 
