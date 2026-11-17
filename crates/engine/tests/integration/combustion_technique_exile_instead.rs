@@ -34,7 +34,7 @@ fn board(target_toughness: i32, lessons: usize) -> Board {
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_mana_pool(
         P0,
-        (0..4)
+        (0..6)
             .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
             .collect(),
     );
@@ -57,20 +57,10 @@ fn board(target_toughness: i32, lessons: usize) -> Board {
         .add_spell_to_hand_from_oracle(P0, "Combustion Technique", true, COMBUSTION_TECHNIQUE)
         .id();
     let shock = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Shock",
-            true,
-            "Shock deals 2 damage to target creature.",
-        )
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
         .id();
     let finisher = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Shock",
-            true,
-            "Shock deals 2 damage to target creature.",
-        )
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, "Shock deals 2 damage to any target.")
         .id();
     Board {
         runner: scenario.build(),
@@ -120,25 +110,32 @@ fn nonlethal_damage_leaves_the_creature_on_the_battlefield() {
     );
 }
 
-/// Paired positive + negative. POSITIVE reach-guard: the 4/4 survives the spell with 2
-/// damage marked, and a later Shock finishes it, so the rider (installed at resolution) must
-/// exile it. NEGATIVE, afterwards on the same board: an unrelated creature killed by the other
-/// Shock goes to the graveyard, so the replacement is scoped to the damaged creature only.
+/// Paired negative + positive, ordered so the negative is observed while the rider is live.
+/// NEGATIVE first: the 4/4 survives the spell with 2 damage marked, so the rider installed at
+/// resolution is still installed and unconsumed when Shock kills a bystander; that bystander
+/// must reach the graveyard, proving the replacement is scoped to the damaged creature only.
+/// POSITIVE: the other Shock finishes the damaged 4/4, so the rider must still exile it.
+/// Reversing the order would consume the rider on the target first and make the scoping
+/// assertion vacuous (`consume_on_apply`).
 #[test]
 fn replacement_is_live_on_the_target_and_scoped_to_it() {
     let mut b = board(4, 0);
     b.runner.cast(b.spell).target_object(b.target).resolve();
-    assert_eq!(b.runner.state().objects[&b.target].damage_marked, 2);
-    let finished = b.runner.cast(b.finisher).target_object(b.target).resolve();
     assert_eq!(
-        finished.zone_of(b.target),
-        Zone::Exile,
-        "the rider installed at resolution exiles the target when it later dies this turn"
+        b.runner.state().objects[&b.target].damage_marked,
+        2,
+        "CR 120.3e: the target survived the spell, so its rider is still installed"
     );
     let outcome = b.runner.cast(b.shock).target_object(b.bystander).resolve();
     assert_eq!(
         outcome.zone_of(b.bystander),
         Zone::Graveyard,
         "the replacement applies only to the damaged creature"
+    );
+    let finished = b.runner.cast(b.finisher).target_object(b.target).resolve();
+    assert_eq!(
+        finished.zone_of(b.target),
+        Zone::Exile,
+        "the rider installed at resolution exiles the target when it later dies this turn"
     );
 }

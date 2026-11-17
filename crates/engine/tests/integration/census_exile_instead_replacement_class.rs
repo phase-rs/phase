@@ -10,10 +10,10 @@
 //! Clause shape: "If that creature would die this turn, exile it instead." (CR 614.1a +
 //! CR 614.6), a replacement scoped to the one damaged/targeted creature. Each test: a target
 //! the spell kills (damage, or -5/-5 for Ob Nixilis's Cruelty) is exiled instead of dying.
-//! The shared `single_target` harness also checks that a different creature killed
-//! afterwards by an unrelated Shock reaches the graveyard (the replacement is scoped, not
-//! board-wide); Bouncer's Beatdown, the both-modes test and the planeswalker test (0 loyalty,
-//! CR 704.5i) have their own setups.
+//! The shared `single_target` harness proves scope on a second board where the target survives
+//! the spell: while that rider is installed and unconsumed, a different creature dying reaches
+//! the graveyard, and the damaged survivor's own later death is exiled. Bouncer's Beatdown, the
+//! both-modes test and the planeswalker test (0 loyalty, CR 704.5i) have their own setups.
 //!
 //! Deliberately NOT covered: "If a creature dealt damage this way would die ..." faces
 //! (Pillar of Flame, Annihilating Fire, ...). Their rider is not gated on damage having
@@ -25,7 +25,7 @@ use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-const SHOCK: &str = "Shock deals 2 damage to target creature.";
+const SHOCK: &str = "Shock deals 2 damage to any target.";
 
 /// Whether the spell under test is an instant or a sorcery (CR 304 / CR 307).
 #[derive(Clone, Copy)]
@@ -90,28 +90,52 @@ fn stage(c: &Case, name: &str) -> (GameScenario, ObjectId) {
     (scenario, spell)
 }
 
-/// Single-target spell: target toughness == damage -> exiled; unrelated later death ->
-/// graveyard.
+/// Single-target spell, two boards.
+/// * Lethal: target toughness == damage, so the target is exiled instead of dying.
+/// * Scope: the target survives the spell (`damage + 2` toughness), so its rider is still
+///   installed and unconsumed when an unrelated creature dies; that death must reach the
+///   graveyard, and the damaged survivor's own later death must still be exiled. Applying the
+///   rider to the target first would consume it (`consume_on_apply`) and prove nothing.
 fn single_target(c: Case, name: &str) {
     let (mut scenario, spell) = stage(&c, name);
     let target = scenario
         .add_creature(P1, "Target Bear", c.damage, c.damage)
         .id();
-    let bystander = scenario.add_creature(P1, "Bystander Bear", 2, 2).id();
-    let shock = scenario
-        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
-        .id();
-    let (mut runner, outcome) = cast_spell(scenario, spell, &c, &[target]);
+    let (_, outcome) = cast_spell(scenario, spell, &c, &[target]);
     assert_eq!(
         outcome.zone_of(target),
         Zone::Exile,
         "{name}: a creature that would die is exiled instead"
+    );
+
+    let (mut scenario, spell) = stage(&c, name);
+    let survivor = scenario
+        .add_creature(P1, "Survivor Bear", c.damage + 2, c.damage + 2)
+        .id();
+    let bystander = scenario.add_creature(P1, "Bystander Bear", 2, 2).id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .id();
+    let finisher = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .id();
+    let (mut runner, outcome) = cast_spell(scenario, spell, &c, &[survivor]);
+    assert_eq!(
+        outcome.zone_of(survivor),
+        Zone::Battlefield,
+        "{name}: the survivor outlives the spell, leaving its rider live"
     );
     let after = runner.cast(shock).target_object(bystander).resolve();
     assert_eq!(
         after.zone_of(bystander),
         Zone::Graveyard,
         "{name}: the replacement is scoped to the damaged creature only"
+    );
+    let finished = runner.cast(finisher).target_object(survivor).resolve();
+    assert_eq!(
+        finished.zone_of(survivor),
+        Zone::Exile,
+        "{name}: the damaged survivor's later death is still exiled"
     );
 }
 
@@ -163,29 +187,56 @@ single!(brutal_expulsion, "Brutal Expulsion",
 
 const BOUNCERS_BEATDOWN: &str = "This spell costs {2} less to cast if it targets a black permanent.\nBouncer's Beatdown deals X damage to target creature or planeswalker, where X is the greatest power among creatures you control. If that creature or planeswalker would die this turn, exile it instead.";
 
-/// X is the greatest power among creatures P0 controls (3): a 3-toughness target is exiled.
-#[test]
-fn bouncers_beatdown() {
+/// P0's greatest power is 3, so X is 3: P1 gets a `toughness`/`toughness` creature to target.
+fn beatdown_board(toughness: i32) -> (GameScenario, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature(P0, "Small", 1, 1);
     scenario.add_creature(P0, "Big", 3, 3);
-    let target = scenario.add_creature(P1, "Target Bear", 3, 3).id();
-    let bystander = scenario.add_creature(P1, "Bystander Bear", 2, 2).id();
+    let target = scenario
+        .add_creature(P1, "Target Bear", toughness, toughness)
+        .id();
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Bouncer's Beatdown", true, BOUNCERS_BEATDOWN)
         .id();
-    let shock = scenario
-        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
-        .id();
+    (scenario, spell, target)
+}
+
+/// X is the greatest power among creatures P0 controls (3): a 3-toughness target is exiled.
+#[test]
+fn bouncers_beatdown() {
+    let (scenario, spell, target) = beatdown_board(3);
     let mut runner = scenario.build();
     let outcome = runner.cast(spell).target_object(target).resolve();
     assert_eq!(outcome.zone_of(target), Zone::Exile);
+}
+
+/// The rider survives on a 5-toughness target (X = 3), so a bystander's death is a graveyard
+/// death while the damaged survivor's later Shock death is still exiled.
+#[test]
+fn bouncers_beatdown_rider_is_scoped_to_the_damaged_creature() {
+    let (mut scenario, spell, survivor) = beatdown_board(5);
+    let bystander = scenario.add_creature(P1, "Bystander Bear", 2, 2).id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .id();
+    let finisher = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+        .id();
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_object(survivor).resolve();
+    assert_eq!(outcome.zone_of(survivor), Zone::Battlefield);
     let after = runner.cast(shock).target_object(bystander).resolve();
     assert_eq!(
         after.zone_of(bystander),
         Zone::Graveyard,
         "the rider is scoped to the damaged creature"
+    );
+    let finished = runner.cast(finisher).target_object(survivor).resolve();
+    assert_eq!(
+        finished.zone_of(survivor),
+        Zone::Exile,
+        "the rider still exiles the damaged survivor"
     );
 }
 
