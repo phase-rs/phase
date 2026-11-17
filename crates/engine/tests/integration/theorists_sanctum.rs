@@ -40,10 +40,14 @@ fn theorists_sanctum_beholding_a_jace_enters_untapped() {
             card_id,
         })
         .expect("playing Theorist's Sanctum must be accepted");
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::ReplacementChoice { .. }
-    ));
+    let WaitingFor::ReplacementChoice { candidates, .. } = &runner.state().waiting_for else {
+        panic!(
+            "expected the optional Behold replacement choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    // CR 701.4a: the accept option names the behold action and its quality.
+    assert_eq!(candidates[0].description, "Behold a Jace");
 
     let result = runner
         .act(GameAction::ChooseReplacement { index: 0 })

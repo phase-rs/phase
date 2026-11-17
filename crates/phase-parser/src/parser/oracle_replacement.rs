@@ -248,7 +248,7 @@ fn parse_replacement_line_inner(
         return Some(def);
     }
 
-    // --- "As ~ enters, you may behold a [quality]. If you don't, it enters tapped." ---
+    // --- "As ~ enters, you may behold a [quality]. If you don't, ~ enters tapped." (Theorist's Sanctum) ---
     if let Some(def) = parse_as_enters_behold_tapped(&norm_lower, &normalized, &text) {
         return Some(def);
     }

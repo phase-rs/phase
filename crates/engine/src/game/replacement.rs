@@ -1864,6 +1864,43 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
                 format!("Get {count} {kind} counters")
             }
         }
+        // CR 701.4a: name the behold action and its quality ("Behold a Jace")
+        // so the accept option of an as-enters Behold choice is self-describing.
+        AbilityCost::Behold {
+            filter,
+            action,
+            count,
+            ..
+        } => {
+            let verb = match action {
+                crate::types::ability::BeholdCostAction::ChooseOrReveal => "Behold",
+                crate::types::ability::BeholdCostAction::ExileChosen => "Behold and exile",
+            };
+            let quality = match filter {
+                crate::types::ability::TargetFilter::Typed(typed) => {
+                    match typed.type_filters.as_slice() {
+                        [crate::types::ability::TypeFilter::Subtype(subtype)] => {
+                            Some(subtype.as_str())
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            match (quality, *count) {
+                (Some(quality), 1) => {
+                    let article = if quality.starts_with(['A', 'E', 'I', 'O', 'U']) {
+                        "an"
+                    } else {
+                        "a"
+                    };
+                    format!("{verb} {article} {quality}")
+                }
+                (Some(quality), count) => format!("{verb} {count} {quality}s"),
+                (None, 1) => format!("{verb} a matching object"),
+                (None, count) => format!("{verb} {count} matching objects"),
+            }
+        }
         AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
@@ -1882,7 +1919,6 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
         | AbilityCost::Exert
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
-        | AbilityCost::Behold { .. }
         | AbilityCost::Composite { .. }
         | AbilityCost::OneOf { .. }
         | AbilityCost::Waterbend { .. }
