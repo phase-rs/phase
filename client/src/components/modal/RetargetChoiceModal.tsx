@@ -177,13 +177,18 @@ export function RetargetChoiceModal({ data }: { data: RetargetChoice["data"] }) 
               {obj ? (
                 <CardImage {...objectImageProps(obj)} size="normal" />
               ) : (
-                <div className="flex h-44 w-32 items-center justify-center rounded-lg border border-white/15 bg-slate-800/80 px-3 text-center text-sm font-semibold text-slate-100">
+                // Card-sized like its neighbours below lg, where the strip sizes
+                // its cards to fill its height; from lg up it keeps its desktop
+                // size. A label too long for the tile wraps anywhere and, being
+                // safe-centred, loses its end rather than both its first and
+                // last lines.
+                <div className="flex h-[var(--card-h)] w-[var(--card-w)] lg:h-44 lg:w-32 items-center-safe justify-center overflow-hidden rounded-lg border border-white/15 bg-slate-800/80 px-3 text-center text-sm font-semibold text-slate-100 [overflow-wrap:anywhere]">
                   {targetLabel(target, objects)}
                 </div>
               )}
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-sky-500/20">
-                  <span className="rounded-full bg-sky-500/90 px-3 py-1 text-xs font-bold text-white">
+                  <span className="rounded-full bg-sky-500/90 px-3 py-1 text-center text-xs font-bold text-white [overflow-wrap:anywhere]">
                     {t("retargetChoice.badgeNewTarget")}
                   </span>
                 </div>

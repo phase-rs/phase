@@ -588,9 +588,9 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
               key={id}
               type="button"
               aria-label={obj.name}
-              className={`relative flex flex-col items-center gap-2 rounded-lg transition ${
+              className={`relative rounded-lg transition ${
                 isSelected
-                  ? "ring-2 ring-emerald-400/80"
+                  ? "z-10 ring-2 ring-emerald-400/80"
                   : "ring-1 ring-white/10 hover:ring-white/35"
               }`}
               initial={{ opacity: 0, y: 40, scale: 0.9 }}
@@ -601,17 +601,17 @@ function LearnModal({ data }: { data: LearnChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage {...objectImageProps(obj)} size="normal" />
-              <span
-                className={`rounded-full px-3 py-1 text-xs font-bold transition ${
-                  isSelected
-                    ? "bg-emerald-500/80 text-white"
-                    : "bg-slate-800/90 text-slate-300"
-                }`}
-              >
-                {isSelected
-                  ? t("cardChoice.badges.selected")
-                  : t("cardChoice.badges.choose")}
-              </span>
+              {/* Over the card, as every strip draws its selection: below lg
+                  the strip sizes its cards to fill its height, so anything
+                  stacked under a card would be cut off. The label wraps inside
+                  a narrow card rather than spilling onto its neighbours. */}
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
+                  <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-center text-xs font-bold text-white [overflow-wrap:anywhere]">
+                    {t("cardChoice.badges.selected")}
+                  </span>
+                </div>
+              )}
             </motion.button>
           );
         })}

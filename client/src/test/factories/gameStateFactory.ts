@@ -57,6 +57,8 @@ type OptionalEffectChoiceWaitingFor = Extract<
 >;
 type ChooseFromZoneChoiceWaitingFor = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
 type OpponentMayChoiceWaitingFor = Extract<WaitingFor, { type: "OpponentMayChoice" }>;
+type SearchChoiceWaitingFor = Extract<WaitingFor, { type: "SearchChoice" }>;
+type LearnChoiceWaitingFor = Extract<WaitingFor, { type: "LearnChoice" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
 
 /**
@@ -259,6 +261,29 @@ export const opponentMayChoiceWaitingForFactory =
       source_id: 1,
       description: undefined,
       remaining: [],
+    },
+  }));
+
+export class SearchChoiceWaitingForFactory extends PlayerWaitingForFactory<SearchChoiceWaitingFor> {}
+
+export const searchChoiceWaitingForFactory =
+  SearchChoiceWaitingForFactory.define((): SearchChoiceWaitingFor => ({
+    type: "SearchChoice",
+    data: {
+      player: 0,
+      cards: [],
+      count: 1,
+    },
+  }));
+
+export class LearnChoiceWaitingForFactory extends PlayerWaitingForFactory<LearnChoiceWaitingFor> {}
+
+export const learnChoiceWaitingForFactory =
+  LearnChoiceWaitingForFactory.define((): LearnChoiceWaitingFor => ({
+    type: "LearnChoice",
+    data: {
+      player: 0,
+      hand_cards: [],
     },
   }));
 
@@ -714,6 +739,14 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     return this.variant(chooseFromZoneChoiceWaitingForFactory.withData(data).build());
   }
 
+  searchChoice(data: Partial<SearchChoiceWaitingFor["data"]> = {}) {
+    return this.variant(searchChoiceWaitingForFactory.withData(data).build());
+  }
+
+  learnChoice(data: Partial<LearnChoiceWaitingFor["data"]> = {}) {
+    return this.variant(learnChoiceWaitingForFactory.withData(data).build());
+  }
+
   opponentMayChoice(data: Partial<OpponentMayChoiceWaitingFor["data"]> = {}) {
     return this.variant(opponentMayChoiceWaitingForFactory.withData(data).build());
   }
@@ -997,6 +1030,14 @@ export class GameStateFactory extends Factory<GameState> {
 
   chooseFromZoneChoice(data: Partial<ChooseFromZoneChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.chooseFromZoneChoice(data).build());
+  }
+
+  searchChoice(data: Partial<SearchChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.searchChoice(data).build());
+  }
+
+  learnChoice(data: Partial<LearnChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.learnChoice(data).build());
   }
 
   opponentMayChoice(data: Partial<OpponentMayChoiceWaitingFor["data"]> = {}) {
