@@ -7883,11 +7883,6 @@ pub fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Tri
         // is unanswerable rather than merely absent, so `None` is the honest
         // lowering and NOT an approximation that silently drops the anchor.
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
-        // CR 122.1f: defending player poison status bridges 1:1 to the trigger
-        // condition `DefendingPlayerIsPoisoned`. (Variant not yet in phase-ast)
-        // | StaticCondition::DefendingPlayerIsPoisoned => {
-        //     Some(TriggerCondition::DefendingPlayerIsPoisoned)
-        // }
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.
@@ -9384,23 +9379,6 @@ fn extract_if_condition_with_card_name(
             }
         }
     }
-
-    // CR 122.1f + CR 603.4: "if defending player is poisoned" — NOT YET SUPPORTED
-    // (TriggerCondition::DefendingPlayerIsPoisoned variant not yet in phase-ast)
-    // {
-    //     fn def_poisoned_prefix(i: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    //         let (i, _) = tag("if defending player is poisoned").parse(i)?;
-    //         Ok((i, ()))
-    //     }
-    //     if let Some((before, _, _)) = scan_preceded(&lower, def_poisoned_prefix) {
-    //         let pos = before.len();
-    //         let pattern_len = "if defending player is poisoned".len();
-    //         return IfExtraction::hoisted(
-    //             strip_condition_clause(text, pos, pattern_len),
-    //             TriggerCondition::DefendingPlayerIsPoisoned,
-    //         );
-    //     }
-    // }
 
     // CR 305.2a + CR 603.4: "if it wasn't the first land you played this turn" —
     // Fastbond's intervening-if. Evaluates to lands_played_this_turn >= 2
@@ -15921,22 +15899,15 @@ fn parse_object_recipient_filter(after_verb: &str) -> OracleResult<'_, TargetFil
     let (rest, ()) =
         value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
     let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
-    // CR 111.1: "token" is not a card type but an object property.
-    // Handle "to a token" / "to a tokens" as a TypedFilter with the Token property.
+    // CR 111.1: "token" is not a card type but an object property, so "to a
+    // token" is a TypedFilter with the Token property. The word boundary keeps
+    // longer words ("tokens", a hypothetical "tokenized") from matching.
     if let Ok((after_token, _)) =
-        alt((tag::<_, _, OracleError<'_>>("token"), tag("tokens"))).parse(rest)
+        terminated(tag::<_, _, OracleError<'_>>("token"), not(alpha1)).parse(rest)
     {
-        // Word-boundary guard: must be followed by end or non-alphanumeric.
-        if after_token.is_empty()
-            || after_token
-                .chars()
-                .next()
-                .is_some_and(|c| !c.is_alphanumeric() && c != '_')
-        {
-            let mut tf = TypedFilter::default();
-            tf.properties.push(FilterProp::Token);
-            return Ok((after_token, TargetFilter::Typed(tf)));
-        }
+        let mut tf = TypedFilter::default();
+        tf.properties.push(FilterProp::Token);
+        return Ok((after_token, TargetFilter::Typed(tf)));
     }
     // CR 509.1g + CR 120.3: optional state/combat-status adjective prefix on the
     // damage recipient — "a blocking creature" (Kusari-Gama), "an attacking
@@ -19082,8 +19053,9 @@ fn parse_damage_source_subject_shared(
     // misclassify the subject.
     let (rest, color) = opt(terminated(nom_primitives::parse_color, tag(" "))).parse(rest)?;
 
-    // CR 509.1g: a combat-status adjective narrows the damage source — "an
-    // attacking creature" (Glyph of Life). Delegates to the shared
+    // CR 508.1k / CR 509.1g: a combat-status adjective narrows the damage
+    // source — "an attacking creature" (Glyph of Life; CR 508.1k defines an
+    // attacking creature). Delegates to the shared
     // `parse_property_filter` authority, the same adjective loop the damage
     // recipient parser uses, so the source filter carries the combat state
     // instead of failing the head noun and dropping the qualifier. Passive
