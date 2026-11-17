@@ -1923,6 +1923,9 @@ fn apply_one_hero_event_step(
                 *card,
                 counter.clone(),
                 *count,
+                // CR 614.16: the hero event's counters are placed by a
+                // resolving effect.
+                crate::types::proposed_event::CounterCause::ResolvingEffect,
                 events,
             );
         }

@@ -50339,7 +50339,10 @@ pub mod tests {
                 actor: PlayerId(0),
                 object_id,
                 counter_type: CounterType::Plus1Plus1,
-                cause: crate::types::proposed_event::CounterCause::Other,
+                // Cause-neutral predicate under test (entry recorded or
+                // not); stamped as the resolving-effect placement the
+                // doc's Amass-army sibling row describes.
+                cause: crate::types::proposed_event::CounterCause::ResolvingEffect,
             },
             count: 1,
             applied: HashSet::new(),

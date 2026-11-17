@@ -1004,13 +1004,29 @@ fn serpent_society_ward_prohibition_scoped_to_the_source_controller_leaves_the_p
     // Paired reach guard: the prohibition really was installed AND really does
     // bite somebody — its partner is the same call for the payer.
     assert!(
-        preview_player_counter_addition(runner.state(), P0, P0, PlayerCounterKind::Poison, 5)
-            .is_prohibited(),
+        preview_player_counter_addition(
+            runner.state(),
+            P0,
+            P0,
+            PlayerCounterKind::Poison,
+            5,
+            // The Ward cost under test is a cost payment — fail closed.
+            engine::types::proposed_event::CounterCause::Other,
+        )
+        .is_prohibited(),
         "a `You`-scoped prohibition on a P0 source must bite P0"
     );
     assert!(
-        !preview_player_counter_addition(runner.state(), P1, P1, PlayerCounterKind::Poison, 5)
-            .is_prohibited(),
+        !preview_player_counter_addition(
+            runner.state(),
+            P1,
+            P1,
+            PlayerCounterKind::Poison,
+            5,
+            // The Ward cost under test is a cost payment — fail closed.
+            engine::types::proposed_event::CounterCause::Other,
+        )
+        .is_prohibited(),
         "a `You`-scoped prohibition on a P0 source must not bite P1"
     );
 

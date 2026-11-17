@@ -5235,6 +5235,9 @@ pub(super) fn apply_etb_counters(
             object_id,
             counter_type.clone(),
             *count,
+            // CR 614.16: entering-with-counters placements are
+            // replacement-driven entry modifications.
+            CounterCause::ReplacementOrPrevention,
             events,
         ) {
             let remaining = counters[index + 1..]
@@ -5246,7 +5249,9 @@ pub(super) fn apply_etb_counters(
                         object_id,
                         counter_type: counter_type.clone(),
                         count: *count,
-                        cause: CounterCause::Other,
+                        // CR 614.16: entering-with-counters placements are
+                        // replacement-driven entry modifications.
+                        cause: CounterCause::ReplacementOrPrevention,
                     }
                 })
                 .collect();
@@ -5890,7 +5895,9 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: target,
                 counter_type: CounterType::Plus1Plus1,
-                cause: CounterCause::Other,
+                // Emulated effect placement under test (untagged def:
+                // unobservable, but semantically an effect event).
+                cause: CounterCause::ResolvingEffect,
             },
             count: 2,
             applied: std::collections::HashSet::new(),

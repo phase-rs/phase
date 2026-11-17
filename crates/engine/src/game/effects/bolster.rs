@@ -7,6 +7,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::proposed_event::CounterCause;
 
 /// CR 701.39a: Bolster N.
 ///
@@ -74,6 +75,8 @@ pub fn resolve(
                 tied[0],
                 CounterType::Plus1Plus1,
                 n,
+                // CR 614.16: bolster's counters are placed by a resolving ability.
+                CounterCause::ResolvingEffect,
                 events,
             )
         {

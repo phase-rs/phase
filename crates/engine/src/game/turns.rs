@@ -3947,6 +3947,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
         .collect();
 
     // CR 614.1: Route through replacement pipeline so Vorinclex-class effects apply.
+    // CR 614.16: the lore placement is a turn-based action — fail closed.
     for (index, saga_id) in saga_ids.iter().copied().enumerate() {
         if !super::effects::counters::add_counter_with_replacement(
             state,
@@ -3954,6 +3955,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
             saga_id,
             CounterType::Lore,
             1,
+            CounterCause::Other,
             events,
         ) {
             let remaining = saga_ids[index + 1..]

@@ -23,6 +23,7 @@ pub(crate) fn add_energy_with_replacement(
     actor: PlayerId,
     player_id: PlayerId,
     amount: u32,
+    cause: CounterCause,
     events: &mut Vec<GameEvent>,
 ) -> bool {
     life::ordinary_settlement(
@@ -31,6 +32,7 @@ pub(crate) fn add_energy_with_replacement(
             actor,
             player_id,
             amount,
+            cause,
             UnrepresentablePolicy::IgnoreImpossible,
             events,
         ),
@@ -52,10 +54,11 @@ pub(crate) fn try_add_energy_with_replacement(
     actor: PlayerId,
     player_id: PlayerId,
     amount: u32,
+    cause: CounterCause,
     events: &mut Vec<GameEvent>,
 ) -> Result<bool, LifeChangeUnrepresentable> {
     life::within_rejecting_ingress_window(state, |state, policy| {
-        add_energy_core(state, actor, player_id, amount, policy, events)
+        add_energy_core(state, actor, player_id, amount, cause, policy, events)
     })
 }
 
@@ -67,6 +70,7 @@ fn add_energy_core(
     actor: PlayerId,
     player_id: PlayerId,
     amount: u32,
+    cause: CounterCause,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
 ) -> Result<bool, LifeChangeUnrepresentable> {
@@ -81,7 +85,7 @@ fn add_energy_core(
         placement: CounterPlacement::Energy {
             actor,
             player_id,
-            cause: CounterCause::Other,
+            cause,
         },
         count: amount,
         applied: HashSet::new(),
@@ -168,6 +172,8 @@ pub fn resolve_gain(
         ability.controller,
         ability.controller,
         amount,
+        // CR 614.16: resolving-effect placements are eligible.
+        CounterCause::ResolvingEffect,
         events,
     ) {
         super::counters::stash_pending_counter_additions(
@@ -368,8 +374,14 @@ mod tests {
         add_source(&mut state, QuantityModification::Plus { value: u32::MAX });
         let mut events = Vec::new();
 
-        let completed =
-            add_energy_with_replacement(&mut state, PlayerId(0), PlayerId(0), 1, &mut events);
+        let completed = add_energy_with_replacement(
+            &mut state,
+            PlayerId(0),
+            PlayerId(0),
+            1,
+            CounterCause::ResolvingEffect,
+            &mut events,
+        );
 
         assert!(completed);
         assert_eq!(state.players[0].energy, 0);
@@ -385,7 +397,14 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         add_source(&mut state, QuantityModification::Plus { value: 1 });
         let mut events = Vec::new();
-        add_energy_with_replacement(&mut state, PlayerId(0), PlayerId(0), 1, &mut events);
+        add_energy_with_replacement(
+            &mut state,
+            PlayerId(0),
+            PlayerId(0),
+            1,
+            CounterCause::ResolvingEffect,
+            &mut events,
+        );
         assert_eq!(state.players[0].energy, 2);
     }
 }

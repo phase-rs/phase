@@ -7892,6 +7892,8 @@ mod tests {
                 PlayerId(1),
                 PlayerCounterKind::Poison,
                 5,
+                // The unless-payment under test is a cost — fail closed.
+                crate::types::proposed_event::CounterCause::Other,
             )
             .is_prohibited(),
             "the `You`-scoped prohibition must bite its own controller"
@@ -7903,6 +7905,8 @@ mod tests {
                 PlayerId(0),
                 PlayerCounterKind::Poison,
                 5,
+                // The unless-payment under test is a cost — fail closed.
+                crate::types::proposed_event::CounterCause::Other,
             )
             .is_prohibited(),
             "the `You`-scoped prohibition must not bite P0"
@@ -8033,6 +8037,8 @@ mod tests {
                     PlayerId(0),
                     PlayerCounterKind::Poison,
                     5,
+                    // The unless-payment under test is a cost — fail closed.
+                    crate::types::proposed_event::CounterCause::Other,
                 )
                 .is_prohibited(),
                 "the prohibition must bite the prompted player"

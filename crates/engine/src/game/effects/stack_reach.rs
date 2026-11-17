@@ -1011,7 +1011,10 @@ fn proposed_events(
                         actor: bound.controller,
                         object_id: *id,
                         counter_type: counter_type.clone(),
-                        cause: CounterCause::Other,
+                        // CR 614.16: `PutCounter` / `MultiplyCounter` are
+                        // resolving-effect instructions (`Other` would
+                        // misclassify this reach candidate as cost/TBA).
+                        cause: CounterCause::ResolvingEffect,
                     },
                     count: 1,
                     applied: Default::default(),

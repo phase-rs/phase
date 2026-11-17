@@ -28,7 +28,8 @@ fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mu
                 .unwrap_or(PlayerId(0)),
             object_id: explorer_id,
             counter_type: CounterType::Plus1Plus1,
-            cause: CounterCause::Other,
+            // CR 614.16: explore's counter is placed by a resolving ability.
+            cause: CounterCause::ResolvingEffect,
         },
         count: 1,
         applied: HashSet::new(),

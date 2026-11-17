@@ -27,7 +27,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::player::{PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterCause, ProposedEvent};
 
 /// Source attributes needed for damage application (CR 120.3).
 /// Read from the source object before the mutable damage phase to avoid borrow conflicts.
@@ -851,6 +851,13 @@ pub(crate) fn apply_damage_after_replacement(
                     *obj_id,
                     CounterType::Minus1Minus1,
                     actual_amount,
+                    // CR 614.16: combat wither/infect is a turn-based-action
+                    // placement (`Other`); non-combat is a resolving effect.
+                    if is_combat {
+                        CounterCause::Other
+                    } else {
+                        CounterCause::ResolvingEffect
+                    },
                     events,
                 ) {
                     // CR 120.3d + CR 616.1: stash the post-counter remainder
@@ -943,6 +950,13 @@ pub(crate) fn apply_damage_after_replacement(
                     *player_id,
                     PlayerCounterKind::Poison,
                     actual_amount,
+                    // CR 614.16: combat infect is a turn-based-action
+                    // placement (`Other`); non-combat is a resolving effect.
+                    if is_combat {
+                        CounterCause::Other
+                    } else {
+                        CounterCause::ResolvingEffect
+                    },
                     events,
                 ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
                 {
@@ -993,6 +1007,8 @@ pub(crate) fn apply_damage_after_replacement(
                     *player_id,
                     PlayerCounterKind::Poison,
                     ctx.combat_damage_poison,
+                    // CR 614.16: combat toxic is a turn-based-action placement.
+                    CounterCause::Other,
                     events,
                 ) == player_counter::PlayerCounterAdditionOutcome::NeedsChoice
                 {

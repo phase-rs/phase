@@ -265,7 +265,9 @@ pub(crate) fn apply_precomputed_copy_values(
             object_id: recipient_id,
             counter_type,
             count,
-            cause: CounterCause::Other,
+            // CR 614.16: copy-entry exceptions are entering-with-counters
+            // placements (replacement-driven entry modification).
+            cause: CounterCause::ReplacementOrPrevention,
         })
         .collect();
         for (index, addition) in additions.iter().cloned().enumerate() {
@@ -274,7 +276,7 @@ pub(crate) fn apply_precomputed_copy_values(
                 object_id,
                 counter_type,
                 count,
-                ..
+                cause,
             } = addition
             else {
                 continue;
@@ -285,6 +287,7 @@ pub(crate) fn apply_precomputed_copy_values(
                 object_id,
                 counter_type,
                 count,
+                cause,
                 events,
             ) {
                 super::counters::stash_pending_counter_additions(

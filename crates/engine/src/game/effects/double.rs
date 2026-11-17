@@ -102,7 +102,8 @@ fn resolve_double_counters(
                 object_id: obj_id,
                 counter_type: ct,
                 count: current_count,
-                cause: CounterCause::Other,
+                // CR 614.16: the double instruction is a resolving effect.
+                cause: CounterCause::ResolvingEffect,
             });
         }
     }
@@ -114,7 +115,7 @@ fn resolve_double_counters(
             object_id,
             counter_type,
             count,
-            ..
+            cause,
         } = addition
         else {
             continue;
@@ -125,6 +126,7 @@ fn resolve_double_counters(
             object_id,
             counter_type,
             count,
+            cause,
             events,
         ) {
             super::counters::stash_pending_counter_additions(

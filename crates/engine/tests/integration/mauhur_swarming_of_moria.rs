@@ -211,6 +211,9 @@ fn mauhur_does_not_add_counters_to_unlisted_creature_types() {
         bear,
         CounterType::Plus1Plus1,
         1,
+        // The harness drives the authority as the effect placement the
+        // replacement under test modifies.
+        engine::types::proposed_event::CounterCause::ResolvingEffect,
         &mut events,
     ));
 

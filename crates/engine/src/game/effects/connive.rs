@@ -285,7 +285,8 @@ pub(crate) fn add_connive_counters(
             actor: conniver_object.controller,
             object_id: conniver.object_id(),
             counter_type: CounterType::Plus1Plus1,
-            cause: CounterCause::Other,
+            // CR 614.16: connive's counter is placed by a resolving ability.
+            cause: CounterCause::ResolvingEffect,
         },
         count,
         applied: HashSet::new(),

@@ -375,7 +375,9 @@ fn proliferate_addition_plan(
                         object_id: *obj_id,
                         counter_type: ct,
                         count: 1,
-                        cause: CounterCause::Other,
+                        // CR 614.16: proliferate (CR 701.27a) is a resolving
+                        // effect instruction.
+                        cause: CounterCause::ResolvingEffect,
                     });
                 }
             }
@@ -395,7 +397,9 @@ fn proliferate_addition_plan(
                                 player_id: *pid,
                                 counter_kind: kind,
                                 count: 1,
-                                cause: CounterCause::Other,
+                                // CR 614.16: proliferate (CR 701.27a) is a
+                                // resolving effect instruction.
+                                cause: CounterCause::ResolvingEffect,
                             });
                         }
                         PlayerCounterSource::Energy => {
@@ -403,7 +407,9 @@ fn proliferate_addition_plan(
                                 actor,
                                 player_id: *pid,
                                 count: 1,
-                                cause: CounterCause::Other,
+                                // CR 614.16: proliferate (CR 701.27a) is a
+                                // resolving effect instruction.
+                                cause: CounterCause::ResolvingEffect,
                             });
                         }
                     }
@@ -425,13 +431,14 @@ fn apply_counter_addition_plan_item(
             object_id,
             counter_type,
             count,
-            ..
+            cause,
         } => super::counters::add_counter_with_replacement(
             state,
             actor,
             object_id,
             counter_type,
             count,
+            cause,
             events,
         ),
         PendingCounterAddition::Player {
@@ -439,7 +446,7 @@ fn apply_counter_addition_plan_item(
             player_id,
             counter_kind,
             count,
-            ..
+            cause,
         } => {
             super::player_counter::add_player_counter_with_replacement(
                 state,
@@ -447,6 +454,7 @@ fn apply_counter_addition_plan_item(
                 player_id,
                 counter_kind,
                 count,
+                cause,
                 events,
             ) != super::player_counter::PlayerCounterAdditionOutcome::NeedsChoice
         }
@@ -454,8 +462,10 @@ fn apply_counter_addition_plan_item(
             actor,
             player_id,
             count,
-            ..
-        } => super::energy::add_energy_with_replacement(state, actor, player_id, count, events),
+            cause,
+        } => super::energy::add_energy_with_replacement(
+            state, actor, player_id, count, cause, events,
+        ),
     }
 }
 

@@ -32,6 +32,7 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::{GiftKind, Keyword};
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::CounterCause;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::resolution::OptionalEffectFrame;
 use crate::types::resolved_commands::ResolvedStackEntryFinalizeCommand;
@@ -7080,6 +7081,9 @@ pub(crate) fn handle_blight_choice(
             chosen[0],
             crate::types::counter::CounterType::Minus1Minus1,
             counters,
+            // CR 614.16: paying a casting cost is neither a resolving
+            // effect nor a replacement — fail closed.
+            CounterCause::Other,
             events,
         )
     {

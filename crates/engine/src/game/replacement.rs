@@ -29649,6 +29649,8 @@ mod tests {
             ObjectIncarnationRef::from_object(&state.objects[&bear]),
             CounterType::Minus1Minus1,
             1,
+            // The blight effect under test is a resolving effect.
+            CounterCause::ResolvingEffect,
         );
         assert!(preview.is_some_and(counters::CounterAdditionPreview::is_prohibited));
         assert!(
@@ -29948,6 +29950,9 @@ mod tests {
                     ObjectIncarnationRef::from_object(&state.objects[&case.object]),
                     CounterType::Minus1Minus1,
                     case.count,
+                    // Untagged defs under test: unobservable, stamped as the
+                    // effect placement the matrix emulates.
+                    CounterCause::ResolvingEffect,
                 )
                 .is_some_and(CounterAdditionPreview::is_prohibited),
                 case.forbidden,
