@@ -135,7 +135,6 @@ export function ReplacementModal() {
         title={t("replacement.title")}
         subtitle={t("replacement.chooseSubtitle")}
         size="md"
-        scrollable
       >
         <div className="px-3 py-3 lg:px-5 lg:py-5">
           <div className="flex flex-col gap-2">
@@ -186,7 +185,6 @@ export function ReplacementModal() {
           : t("replacement.orderSubtitleComposing")
       }
       size="md"
-      scrollable
       footer={
         <button
           type="button"

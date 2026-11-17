@@ -3610,7 +3610,6 @@ function AbilityChoiceModal() {
   return (
     <ChoiceModal
       title={localized?.name || obj.name}
-      scrollable
       footer={<CardTextReference text={localized?.oracle_text} />}
       subtitle={subtitle}
       previewCardName={obj.name}
