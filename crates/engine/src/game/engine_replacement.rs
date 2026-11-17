@@ -3323,7 +3323,7 @@ fn settle_token_entry_after_copy(
                     // created — the copy — not the pre-copy entrant. The batch's remaining
                     // tokens continue from the continuation captured before this settlement.
                     if let Some(spec) = entry.copy_resume.as_mut() {
-                        spec.values = Box::new(copy.values.clone());
+                        *spec.values = copy.values.clone();
                         spec.display = copy.display.clone();
                         if let Effect::BecomeCopy {
                             additional_modifications,
@@ -3356,19 +3356,23 @@ fn settle_token_entry_after_copy(
     }
 }
 
+/// The batch a liminal copy token belongs to: its owner, copy description, entry tapped
+/// state, entry counters and how many tokens remain after the one in flight.
+type LiminalCopyContinuation = (
+    PlayerId,
+    Box<crate::types::proposed_event::CopyTokenSpec>,
+    crate::types::proposed_event::EtbTapState,
+    Vec<(crate::types::counter::CounterType, u32)>,
+    u32,
+);
+
 /// CR 614.1a + CR 608.2c: the rest of a liminal copy-token batch once one entrant has
 /// been settled without the enter-as-a-copy entry tail (it was redirected or prevented):
 /// deliver the remaining tokens, then hand over to the enclosing compound token event and
 /// the CopyToken owner.
 fn finish_settled_copy_batch(
     state: &mut GameState,
-    copy_continuation: Option<(
-        PlayerId,
-        Box<crate::types::proposed_event::CopyTokenSpec>,
-        crate::types::proposed_event::EtbTapState,
-        Vec<(crate::types::counter::CounterType, u32)>,
-        u32,
-    )>,
+    copy_continuation: Option<LiminalCopyContinuation>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     if let Some((owner, copy, enter_tapped, enter_with_counters, remaining_count)) =
@@ -3409,9 +3413,9 @@ fn finish_settled_copy_batch(
     if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         return Ok(state.waiting_for.clone());
     }
-    return Ok(WaitingFor::Priority {
+    Ok(WaitingFor::Priority {
         player: state.active_player,
-    });
+    })
 }
 
 fn apply_copy_target_choice(
