@@ -174,7 +174,7 @@ fn pool_count(runner: &GameRunner, color: ManaType) -> usize {
 /// sub-cost and settles that selected echo inline. Catacombs' raw {U}{B}
 /// activation still owes its own, unselected production echo.
 #[test]
-fn nested_sub_cost_echo_choice_precedes_catacombs_production() {
+fn nested_sub_cost_echo_settles_inline_before_catacombs_production_echo_prompt() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_enchantment_from_oracle(P0, "Mirari's Wake", MIRARI_ECHO_ORACLE);

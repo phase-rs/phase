@@ -231,18 +231,20 @@ pub fn resolve(
     // gate, resolving with no interaction.
     // CR 106.12a + CR 608.2d: a preselected echo type is usable only if
     // the actual event produced it. A stale selection owes the normal choice.
-    let selected_echo = match (&state.current_triggered_mana_override, produced) {
-        (
-            Some(crate::types::game_state::ProductionOverride::SingleColor(color)),
-            ManaProduction::TriggerEventManaType,
-        ) if is_triggered_mana_inline => state
-            .current_trigger_event
-            .as_ref()
-            .map(crate::game::mana_abilities::echo_distinct_types)
-            .filter(|options| options.contains(color))
-            .map(|options| (options, *color)),
-        _ => None,
-    };
+    let selected_echo =
+        if is_triggered_mana_inline && matches!(produced, ManaProduction::TriggerEventManaType) {
+            match &state.current_triggered_mana_override {
+                Some(crate::types::game_state::ProductionOverride::SingleColor(color)) => state
+                    .current_trigger_event
+                    .as_ref()
+                    .map(crate::game::mana_abilities::echo_distinct_types)
+                    .filter(|options| options.contains(color))
+                    .map(|options| (options, *color)),
+                Some(crate::types::game_state::ProductionOverride::Combination(_)) | None => None,
+            }
+        } else {
+            None
+        };
     let echo_pause = (selected_echo.is_none()
         && crate::game::mana_abilities::echo_body_owes_type_choice(
             ability,

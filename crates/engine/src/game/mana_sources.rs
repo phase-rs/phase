@@ -45,6 +45,22 @@ use super::turn_control;
 
 pub use crate::types::mana::ManaSourcePenalty;
 
+/// The producer's potential colors, independently of a unit's chosen type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SourceColorCapability {
+    OneOrFewer,
+    TwoOrMore,
+}
+
+impl From<bool> for SourceColorCapability {
+    fn from(could_produce_two_or_more_colors: bool) -> Self {
+        match could_produce_two_or_more_colors {
+            false => Self::OneOrFewer,
+            true => Self::TwoOrMore,
+        }
+    }
+}
+
 /// One concrete mana unit a currently legal land-mana selection would produce.
 ///
 /// This is a read-only projection, not a `ManaUnit`: no pool identity, source
@@ -54,7 +70,7 @@ pub(crate) struct LiveManaOutputUnit {
     pub mana_type: ManaType,
     /// CR 106.3 + CR 106.7: retain the actual producer's potential colors,
     /// independently of the color selected for this unit.
-    pub source_could_produce_two_or_more_colors: bool,
+    pub source_color_capability: SourceColorCapability,
     /// CR 106.3 + CR 107.4h: the producing ability, including an Aura trigger,
     /// supplies the snow provenance of its own units.
     pub supertype: Option<crate::types::mana::ManaSupertype>,
@@ -862,7 +878,7 @@ fn live_base_mana_output(
     let Some(ability_index) = option.ability_index else {
         return vec![LiveManaOutputUnit {
             mana_type: option.mana_type,
-            source_could_produce_two_or_more_colors,
+            source_color_capability: source_could_produce_two_or_more_colors.into(),
             supertype: source_is_snow(state, option.object_id)
                 .then_some(crate::types::mana::ManaSupertype::Snow),
             restrictions: option.restrictions.clone(),
@@ -1070,7 +1086,7 @@ fn live_mana_output_units(
         .into_iter()
         .map(|mana_type| LiveManaOutputUnit {
             mana_type,
-            source_could_produce_two_or_more_colors,
+            source_color_capability: source_could_produce_two_or_more_colors.into(),
             supertype: source_is_snow(state, restriction_source_id)
                 .then_some(crate::types::mana::ManaSupertype::Snow),
             restrictions: restrictions.clone(),

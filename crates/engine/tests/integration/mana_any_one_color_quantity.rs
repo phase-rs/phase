@@ -432,6 +432,204 @@ fn snow_mana_echo_nonland_kinnan_keeps_its_own_producer() {
     snow_mana_echo_kinnan(true);
 }
 
+#[test]
+fn selected_mixed_kinnan_echo_keeps_delney_additional_occurrence() {
+    kinnan_echo_occurrences(true, true, [ManaType::Green, ManaType::Blue]);
+}
+
+#[test]
+fn selected_mixed_kinnan_echo_without_doubler_resolves_once() {
+    kinnan_echo_occurrences(true, false, [ManaType::Green, ManaType::Blue]);
+}
+
+#[test]
+fn unselected_mixed_kinnan_echo_keeps_each_independent_choice() {
+    kinnan_echo_occurrences(false, true, [ManaType::Green, ManaType::Blue]);
+    kinnan_echo_occurrences(false, false, [ManaType::Green, ManaType::Blue]);
+}
+
+#[test]
+fn same_type_kinnan_inline_echo_keeps_delney_additional_occurrence() {
+    for selected in [true, false] {
+        for with_delney in [true, false] {
+            kinnan_echo_occurrences(selected, with_delney, [ManaType::Green; 2]);
+        }
+    }
+}
+
+fn kinnan_echo_occurrences(selected: bool, with_delney: bool, base_types: [ManaType; 2]) {
+    const KINNAN: &str = "Whenever you tap a nonland permanent for mana, add one mana of any type that permanent produced.\n{5}{G}{U}: Look at the top five cards of your library. You may put a non-Human creature card from among them onto the battlefield. Put the rest on the bottom of your library in a random order.";
+    const DELNEY: &str = "Creatures you control with power 2 or less can't be blocked by creatures with power 3 or greater.\nIf a triggered ability of a creature you control with power 2 or less triggers, that ability triggers an additional time.";
+    const SHAMAN: &str = "{T}: Add two mana in any combination of colors. Spend this mana only to cast creature spells.\nFormidable — {9}{G}{G}, {T}: Each player's life total becomes the number of creatures they control. Activate only if creatures you control have total power 8 or greater.";
+    let mut s = board();
+    let kinnan = s
+        .add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Druid"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{G}{U}"))
+        .id();
+    let shaman = s
+        .add_creature_from_oracle(P0, "Shaman of Forgotten Ways", 2, 3, SHAMAN)
+        .with_subtypes(vec!["Human", "Shaman"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{G}"))
+        .id();
+    if with_delney {
+        s.add_creature_from_oracle(P0, "Delney, Streetwise Lookout", 2, 2, DELNEY)
+            .as_legendary()
+            .with_subtypes(vec!["Human", "Scout"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{2}{W}"));
+    }
+    let mut r = s.build();
+    let mixed = base_types[0] != base_types[1];
+    evaluate_layers(r.state_mut());
+    assert_eq!(r.state().objects[&kinnan].power, Some(2));
+    let action = if selected {
+        let selection = activatable_mana_source_selections(r.state(), P0)
+            .into_iter()
+            .find(|selection| {
+                selection.source.object_id == shaman
+                    && matches!(
+                        selection.output,
+                        ManaSourceOutput::DeferredColorChoice {
+                            quantity: ManaSourceQuantity::Fixed(2)
+                        }
+                    )
+                    && selection.taps_for_mana.iter().any(|choice| {
+                        choice.source.object_id == kinnan
+                            && choice.production_override
+                                == engine::types::game_state::ProductionOverride::SingleColor(
+                                    ManaType::Green,
+                                )
+                    })
+            })
+            .expect("the real source provider offers Shaman with Kinnan's selected green echo");
+        GameAction::ActivateManaSource { selection }
+    } else {
+        GameAction::ActivateAbility {
+            source_id: shaman,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        }
+    };
+    let mut events = r.act(action).unwrap().events;
+    let WaitingFor::ChooseManaColor {
+        player,
+        choice: ManaChoicePrompt::AnyCombination { count, options },
+        ..
+    } = &r.state().waiting_for
+    else {
+        panic!("Shaman's actual base production must choose two colors");
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*count, 2);
+    assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
+    events.extend(
+        r.act(GameAction::ChooseManaColor {
+            choice: ManaChoice::Combination(base_types.to_vec()),
+            count: 1,
+        })
+        .unwrap()
+        .events,
+    );
+    assert!(r.state().objects[&shaman].tapped);
+    assert_eq!(
+        production_count(&events, shaman, ManaType::Green),
+        if mixed { 1 } else { 2 }
+    );
+    assert_eq!(
+        production_count(&events, shaman, ManaType::Blue),
+        usize::from(mixed)
+    );
+    // CR 605.4a + CR 608.2d: the selected original settles inline. An
+    // unselected original and every additional occurrence choose separately.
+    // Choice-free fixed-point emissions are frame-local, so count actual
+    // journaled production rather than requiring those events to be republished.
+    let kinnan_count = |runner: &GameRunner, color| {
+        runner
+            .state()
+            .resolved_rules_journal
+            .produced_mana()
+            .iter()
+            .filter(|record| record.unit.source_id == kinnan && record.unit.color == color)
+            .count()
+    };
+    assert_eq!(
+        kinnan_count(&r, ManaType::Green),
+        if mixed {
+            usize::from(selected)
+        } else {
+            1 + usize::from(with_delney)
+        }
+    );
+    let choices = if !mixed {
+        vec![]
+    } else if selected {
+        if with_delney {
+            vec![ManaType::Blue]
+        } else {
+            vec![]
+        }
+    } else if with_delney {
+        vec![ManaType::Green, ManaType::Blue]
+    } else {
+        vec![ManaType::Green]
+    };
+    for color in choices {
+        let WaitingFor::ChooseManaColor {
+            player,
+            choice: ManaChoicePrompt::SingleColor { options },
+            ..
+        } = &r.state().waiting_for
+        else {
+            panic!("each unresolved Kinnan occurrence must offer its real echo choice");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(options.len(), 2);
+        assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
+        events.extend(
+            r.act(GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(color),
+                count: 1,
+            })
+            .unwrap()
+            .events,
+        );
+    }
+    // CR 603.2d: Delney adds one occurrence, rather than replaying the
+    // already resolved original or copying that occurrence's selected color.
+    assert_eq!(
+        kinnan_count(&r, ManaType::Green),
+        if mixed {
+            1
+        } else {
+            1 + usize::from(with_delney)
+        }
+    );
+    assert_eq!(
+        kinnan_count(&r, ManaType::Blue),
+        usize::from(mixed && with_delney)
+    );
+    assert_eq!(r.state().resolved_rules_journal.nodes().iter().filter(|node| matches!(
+        &node.kind,
+        engine::types::resolved_commands::RulesExecutionNodeKind::TriggeredMana { source, .. }
+            if source.object_id == kinnan
+    )).count(), 1 + usize::from(with_delney));
+    let pool = &r.state().players[0].mana_pool;
+    assert_eq!(
+        pool.units()
+            .filter(|unit| unit.source_id == shaman && !unit.restrictions.is_empty())
+            .count(),
+        2
+    );
+    assert_eq!(
+        pool.units()
+            .filter(|unit| unit.source_id == kinnan && unit.restrictions.is_empty())
+            .count(),
+        1 + usize::from(with_delney)
+    );
+    assert_complete(&r, 3 + usize::from(with_delney));
+}
+
 fn snow_mana_echo_kinnan(manual: bool) {
     const KINNAN: &str = "Whenever you tap a nonland permanent for mana, add one mana of any type that permanent produced.\n{5}{G}{U}: Look at the top five cards of your library. You may put a non-Human creature card from among them onto the battlefield. Put the rest on the bottom of your library in a random order.";
     let mut s = board();
@@ -1238,6 +1436,98 @@ fn assert_complete(r: &GameRunner, pool: usize) {
     assert!(r.state().stack.is_empty());
     assert!(matches!(r.state().waiting_for, WaitingFor::Priority { .. }));
     assert_eq!(r.state().players[0].mana_pool.total(), pool);
+}
+
+#[test]
+fn ashenmoor_liege_krrik_public_payment_preserves_total_life_budget() {
+    const KRRIK: &str = "({B/P} can be paid with either {B} or 2 life.)\nLifelink\nFor each {B} in a cost, you may pay 2 life rather than pay that mana.\nWhenever you cast a black spell, put a +1/+1 counter on K'rrik.";
+    const LIEGE: &str = "Other black creatures you control get +1/+1.\nOther red creatures you control get +1/+1.\nWhenever this creature becomes the target of a spell or ability an opponent controls, that player loses 4 life.";
+    let mut s = board();
+    s.with_life(P0, 3);
+    s.add_creature_from_oracle(P0, "K'rrik, Son of Yawgmoth", 2, 2, KRRIK)
+        .as_legendary()
+        .with_subtypes(vec!["Phyrexian", "Horror", "Minion"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{4}{B/P}{B/P}{B/P}"));
+    let liege = s
+        .add_creature_to_hand_from_oracle(P0, "Ashenmoor Liege", 4, 1, LIEGE)
+        .with_subtypes(vec!["Elemental", "Knight"])
+        .with_mana_cost(parse_mtgjson_mana_cost("{1}{B/R}{B/R}{B/R}"))
+        .id();
+    let wastes = s.add_land_from_oracle(P0, "Wastes", "{T}: Add {C}.").id();
+    let red_a = s.add_basic_land(P0, ManaColor::Red);
+    let red_b = s.add_basic_land(P0, ManaColor::Red);
+    let mut r = s.build();
+    evaluate_layers(r.state_mut());
+    for (source, color) in [
+        (wastes, ManaType::Colorless),
+        (red_a, ManaType::Red),
+        (red_b, ManaType::Red),
+    ] {
+        float_land(&mut r, source, color);
+    }
+    assert_complete(&r, 3);
+    assert_eq!(
+        engine::game::life_costs::max_phyrexian_life_payments(r.state(), P0),
+        1
+    );
+    assert!(
+        engine::game::static_abilities::player_life_payment_colors(r.state(), P0)
+            .contains(ManaColor::Black)
+    );
+    r.act(GameAction::CastSpell {
+        object_id: liege,
+        card_id: r.state().objects[&liege].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    })
+    .unwrap();
+    let WaitingFor::PhyrexianPayment {
+        player,
+        spell_object,
+        shards,
+    } = &r.state().waiting_for
+    else {
+        panic!("K'rrik must offer all three printed hybrid symbols as mana-or-life");
+    };
+    assert_eq!((*player, *spell_object), (P0, liege));
+    assert_eq!(shards.len(), 3);
+    assert!(shards
+        .iter()
+        .all(|shard| shard.options == ShardOptions::ManaOrLife));
+    let before = r.state().players[0].mana_pool.clone();
+    // CR 107.4f + CR 118.3: the real public guard refuses two life payments
+    // with only three life. This is a preservation control; the lower-level
+    // payer regression separately discriminates its early-return budget check.
+    assert!(r
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![
+                ShardChoice::PayLife,
+                ShardChoice::PayLife,
+                ShardChoice::PayMana
+            ],
+        })
+        .is_err());
+    assert_eq!(r.state().players[0].mana_pool, before);
+    assert_eq!(r.state().players[0].life, 3);
+    assert_eq!(r.state().objects[&liege].zone, Zone::Hand);
+    assert!(matches!(
+        r.state().waiting_for,
+        WaitingFor::PhyrexianPayment { player: P0, .. }
+    ));
+    r.act(GameAction::SubmitPhyrexianChoices {
+        choices: vec![
+            ShardChoice::PayLife,
+            ShardChoice::PayMana,
+            ShardChoice::PayMana,
+        ],
+    })
+    .expect("one life payment and both red units pay the full printed cost");
+    assert_eq!(r.state().objects[&liege].zone, Zone::Stack);
+    assert_eq!(r.state().objects[&liege].mana_spent_to_cast_amount, 3);
+    assert_eq!(r.state().players[0].life, 1);
+    r.advance_until_stack_empty();
+    assert_eq!(r.state().objects[&liege].zone, Zone::Battlefield);
+    assert_complete(&r, 0);
 }
 
 #[test]

@@ -44,7 +44,7 @@ use super::effects::counters::add_counter_with_replacement;
 use super::engine::EngineError;
 use super::mana_abilities;
 use super::mana_payment;
-use super::mana_sources::{self, ManaSourceOption};
+use super::mana_sources::{self, ManaSourceOption, SourceColorCapability};
 use super::priority;
 use super::restrictions;
 use super::stack;
@@ -16717,8 +16717,7 @@ fn option_units_for_context(
             .map(|unit| AutoTapUnit {
                 mana_type: unit.mana_type,
                 supertype: unit.supertype,
-                source_could_produce_two_or_more_colors: unit
-                    .source_could_produce_two_or_more_colors,
+                source_color_capability: unit.source_color_capability,
             })
             .collect();
     }
@@ -16732,7 +16731,7 @@ fn option_units_for_context(
         .map(|mana_type| AutoTapUnit {
             mana_type,
             supertype: None,
-            source_could_produce_two_or_more_colors: option.source_could_produce_two_or_more_colors,
+            source_color_capability: option.source_could_produce_two_or_more_colors.into(),
         })
         .collect()
 }
@@ -17982,7 +17981,7 @@ type AutoTapNeed = (Vec<ManaType>, bool, bool, bool, Option<ManaSupertype>);
 struct AutoTapUnit {
     mana_type: ManaType,
     supertype: Option<ManaSupertype>,
-    source_could_produce_two_or_more_colors: bool,
+    source_color_capability: SourceColorCapability,
 }
 
 impl AutoTapUnit {
@@ -17995,7 +17994,10 @@ impl AutoTapUnit {
         required_supertype: Option<ManaSupertype>,
     ) -> bool {
         (acceptable.is_empty() || acceptable.contains(&self.mana_type))
-            && (!requires_two_or_more_color_source || self.source_could_produce_two_or_more_colors)
+            && match self.source_color_capability {
+                SourceColorCapability::OneOrFewer => !requires_two_or_more_color_source,
+                SourceColorCapability::TwoOrMore => true,
+            }
             && required_supertype.is_none_or(|required| self.supertype == Some(required))
     }
 }
@@ -21806,7 +21808,7 @@ mod tests {
                 AutoTapUnit {
                     mana_type: ManaType::Colorless,
                     supertype: None,
-                    source_could_produce_two_or_more_colors: false,
+                    source_color_capability: SourceColorCapability::OneOrFewer,
                 };
                 2
             ]
@@ -21910,11 +21912,9 @@ mod tests {
         let groups =
             projected_mana_output(row, Some(&output)).expect("exact nonempty Maze projection");
         assert_eq!(groups.base.len(), 2);
-        assert!(groups
-            .base
-            .iter()
-            .all(|unit| unit.source_could_produce_two_or_more_colors
-                && !unit.restrictions.is_empty()));
+        assert!(groups.base.iter().all(|unit| unit.source_color_capability
+            == SourceColorCapability::TwoOrMore
+            && !unit.restrictions.is_empty()));
         assert_eq!(groups.triggers.len(), 1);
         assert_eq!(groups.triggers[0].0, trigger_refs[0]);
         assert_eq!(groups.triggers[0].1.len(), 2);
@@ -21923,7 +21923,7 @@ mod tests {
             .iter()
             .all(|unit| unit.mana_type == ManaType::Green
                 && unit.restrictions.is_empty()
-                && !unit.source_could_produce_two_or_more_colors));
+                && unit.source_color_capability == SourceColorCapability::OneOrFewer));
         let units = option_units_for_context(row, Some(&context), Some(&output));
         assert_eq!(
             units.len(),
@@ -21931,7 +21931,7 @@ mod tests {
             "positive reach: independent Aura units remain eligible"
         );
         assert!(units.iter().all(|unit| unit.mana_type == ManaType::Green
-            && !unit.source_could_produce_two_or_more_colors));
+            && unit.source_color_capability == SourceColorCapability::OneOrFewer));
         assert!(option_satisfies(
             row,
             &[],
@@ -21961,7 +21961,7 @@ mod tests {
         assert_eq!(lotus_units.len(), 3);
         assert!(lotus_units
             .iter()
-            .all(|unit| unit.source_could_produce_two_or_more_colors));
+            .all(|unit| unit.source_color_capability == SourceColorCapability::TwoOrMore));
         assert!(option_satisfies(
             lotus_row,
             &needs[0].0,
@@ -22111,7 +22111,10 @@ mod tests {
                 let groups = projected_mana_output(row, Some(&output)).unwrap();
                 assert_eq!(groups.base.len(), 1);
                 assert_eq!(groups.base[0].mana_type, ManaType::Colorless);
-                assert!(!groups.base[0].source_could_produce_two_or_more_colors);
+                assert_eq!(
+                    groups.base[0].source_color_capability,
+                    SourceColorCapability::OneOrFewer
+                );
             }
             let row = available
                 .iter()
@@ -22157,7 +22160,7 @@ mod tests {
                 assert_eq!(units.len(), count);
                 assert!(units.iter().all(|unit| unit.mana_type == ManaType::Green
                     && unit.restrictions.is_empty()
-                    && unit.source_could_produce_two_or_more_colors == flexible));
+                    && unit.source_color_capability == SourceColorCapability::from(flexible)));
             }
             let units = option_units_for_context(row, Some(&context), Some(&output));
             assert_eq!(
@@ -22186,7 +22189,10 @@ mod tests {
             let matching = auto_tap_matching_unit(&units, &needs[0]);
             assert_eq!(matching.is_some(), with_fertile);
             if let Some(matching) = matching {
-                assert!(units[matching].source_could_produce_two_or_more_colors);
+                assert_eq!(
+                    units[matching].source_color_capability,
+                    SourceColorCapability::TwoOrMore
+                );
             }
             assert_eq!(
                 score_combination(&units, &needs, &[false]),

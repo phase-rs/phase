@@ -1204,7 +1204,14 @@ pub(crate) fn reduce_cost_by_pool_with_fundability(
     fundable: Option<&dyn Fn(&ManaCost) -> bool>,
 ) -> ManaCost {
     #[cfg(test)]
-    let work_root = HybridWorkRoot::reducer(cost, fundable.is_some());
+    let work_root = HybridWorkRoot::reducer(
+        cost,
+        if fundable.is_some() {
+            ReductionFunding::RequireFundable
+        } else {
+            ReductionFunding::Unconstrained
+        },
+    );
     let (shards, generic) = match cost {
         ManaCost::NoCost
         | ManaCost::SelfManaCost
@@ -1221,13 +1228,7 @@ pub(crate) fn reduce_cost_by_pool_with_fundability(
     let mut memo = (fundable.is_some()
         && mana_spend_permission.is_none()
         && shards.iter().any(|&shard| {
-            let colors = match shard_to_mana_type(shard) {
-                ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => {
-                    Some((a, b))
-                }
-                ShardRequirement::ColorlessHybrid(color) => Some((ManaType::Colorless, color)),
-                _ => None,
-            };
+            let colors = hybrid_halves(shard_to_mana_type(shard));
             colors.is_some_and(|(a, b)| {
                 pool.count_where(|unit| {
                     is_eligible_color_unit(unit, a, spell) || is_eligible_color_unit(unit, b, spell)
@@ -1273,7 +1274,7 @@ struct PaymentContinuation<'a> {
 struct PaymentClass {
     color: ManaType,
     supertype: Option<crate::types::mana::ManaSupertype>,
-    source_could_produce_two_or_more_colors: bool,
+    source_color_capability: super::mana_sources::SourceColorCapability,
     restrictions: Vec<ManaRestriction>,
 }
 
@@ -1291,7 +1292,7 @@ impl From<&ManaShape> for PaymentClass {
         Self {
             color: *color,
             supertype: *supertype,
-            source_could_produce_two_or_more_colors: *source_could_produce_two_or_more_colors,
+            source_color_capability: (*source_could_produce_two_or_more_colors).into(),
             restrictions: restrictions.clone(),
         }
     }
@@ -1932,10 +1933,17 @@ thread_local! {
 }
 
 #[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReductionFunding {
+    Unconstrained,
+    RequireFundable,
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 struct HybridReductionWork {
     cost: ManaCost,
-    fundable: bool,
+    funding: ReductionFunding,
     requests: usize,
     entry_clones: usize,
     alternative_entries: usize,
@@ -2007,7 +2015,10 @@ fn record_hybrid_work(event: HybridWorkEvent) {
                     HybridWorkEvent::ReducerAlternativeEntry => root.alternative_entries += 1,
                     HybridWorkEvent::ReducerAlternativeClone => root.alternative_clones += 1,
                     HybridWorkEvent::ResidualHit => root.reuse += 1,
-                    _ => unreachable!(),
+                    HybridWorkEvent::PaymentEntry
+                    | HybridWorkEvent::PaymentAlternativeClone
+                    | HybridWorkEvent::CountRejection
+                    | HybridWorkEvent::FailedKeyHit => unreachable!(),
                 }
             }
             HybridWorkEvent::PaymentEntry
@@ -2025,7 +2036,11 @@ fn record_hybrid_work(event: HybridWorkEvent) {
                     }
                     HybridWorkEvent::CountRejection => attempt.count_rejections += 1,
                     HybridWorkEvent::FailedKeyHit => attempt.failed_key_hits += 1,
-                    _ => unreachable!(),
+                    HybridWorkEvent::ReducerRequest
+                    | HybridWorkEvent::ReducerEntryClone
+                    | HybridWorkEvent::ReducerAlternativeEntry
+                    | HybridWorkEvent::ReducerAlternativeClone
+                    | HybridWorkEvent::ResidualHit => unreachable!(),
                 }
             }
         }
@@ -2034,19 +2049,25 @@ fn record_hybrid_work(event: HybridWorkEvent) {
 
 /// Stack-scoped attribution also isolates nested Z proofs and independent retries.
 #[cfg(test)]
+enum HybridWorkRootKind {
+    Reduction,
+    Selector,
+}
+
+#[cfg(test)]
 struct HybridWorkRoot {
-    reduction: bool,
+    kind: HybridWorkRootKind,
     id: Option<usize>,
     previous: Option<usize>,
 }
 
 #[cfg(test)]
 impl HybridWorkRoot {
-    fn reducer(cost: &ManaCost, fundable: bool) -> Self {
+    fn reducer(cost: &ManaCost, funding: ReductionFunding) -> Self {
         HYBRID_PAYMENT_WORK.with_borrow_mut(|work| {
             let Some(work) = work else {
                 return Self {
-                    reduction: true,
+                    kind: HybridWorkRootKind::Reduction,
                     id: None,
                     previous: None,
                 };
@@ -2055,7 +2076,7 @@ impl HybridWorkRoot {
             let previous = work.current_reduction.replace(id);
             work.reductions.push(HybridReductionWork {
                 cost: cost.clone(),
-                fundable,
+                funding,
                 requests: 0,
                 entry_clones: 0,
                 alternative_entries: 0,
@@ -2064,7 +2085,7 @@ impl HybridWorkRoot {
                 residual: None,
             });
             Self {
-                reduction: true,
+                kind: HybridWorkRootKind::Reduction,
                 id: Some(id),
                 previous,
             }
@@ -2075,7 +2096,7 @@ impl HybridWorkRoot {
         HYBRID_PAYMENT_WORK.with_borrow_mut(|work| {
             let Some(work) = work else {
                 return Self {
-                    reduction: false,
+                    kind: HybridWorkRootKind::Selector,
                     id: None,
                     previous: None,
                 };
@@ -2095,7 +2116,7 @@ impl HybridWorkRoot {
                 failed_key_hits: 0,
             });
             Self {
-                reduction: false,
+                kind: HybridWorkRootKind::Selector,
                 id: Some(id),
                 previous,
             }
@@ -2117,10 +2138,9 @@ impl Drop for HybridWorkRoot {
         if self.id.is_some() {
             HYBRID_PAYMENT_WORK.with_borrow_mut(|work| {
                 if let Some(work) = work {
-                    if self.reduction {
-                        work.current_reduction = self.previous;
-                    } else {
-                        work.current_selector = self.previous;
+                    match self.kind {
+                        HybridWorkRootKind::Reduction => work.current_reduction = self.previous,
+                        HybridWorkRootKind::Selector => work.current_selector = self.previous,
                     }
                 }
             });
@@ -2192,13 +2212,7 @@ fn reduce_cost_by_pool_from(
         // different requirements unpaid. Ask the existing source planner
         // about the completed whole-cost residual, retaining the old preferred
         // residual if neither allocation is fundable. All spending is scratch.
-        let hybrid_halves = match shard_to_mana_type(shard) {
-            ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => {
-                Some((a, b))
-            }
-            ShardRequirement::ColorlessHybrid(color) => Some((ManaType::Colorless, color)),
-            _ => None,
-        };
+        let hybrid_halves = hybrid_halves(shard_to_mana_type(shard));
         if let Some(((a, b), accepts)) = hybrid_halves.zip(fundable).filter(|((a, b), _)| {
             !any_color
                 && scratch.count_where(|unit| {
@@ -2857,6 +2871,11 @@ fn pay_cost_with_demand_and_choices_from(
                     )?;
                     spent.extend(suffix_spent);
                     life_payments.extend(suffix_life);
+                    // CR 107.4f + CR 118.3: the suffix budget cannot forgive
+                    // life already committed by the prefix. Check the whole payment.
+                    if max_life_payments.is_some_and(|limit| life_payments.len() > limit) {
+                        return Err(PaymentError::InsufficientMana);
+                    }
                     return Ok((spent, life_payments));
                 }
             }
@@ -3064,6 +3083,11 @@ fn pay_cost_with_demand_and_choices_from(
                     )?;
                     spent.extend(suffix_spent);
                     life_payments.extend(suffix_life);
+                    // CR 107.4f + CR 118.3: the suffix budget cannot forgive
+                    // life already committed by the prefix. Check the whole payment.
+                    if max_life_payments.is_some_and(|limit| life_payments.len() > limit) {
+                        return Err(PaymentError::InsufficientMana);
+                    }
                     return Ok((spent, life_payments));
                 }
             }
@@ -3124,6 +3148,11 @@ fn pay_cost_with_demand_and_choices_from(
                             )?;
                             spent.extend(suffix_spent);
                             life_payments.extend(suffix_life);
+                            // CR 107.4f + CR 118.3: the suffix budget cannot forgive
+                            // life already committed by the prefix. Check the whole payment.
+                            if max_life_payments.is_some_and(|limit| life_payments.len() > limit) {
+                                return Err(PaymentError::InsufficientMana);
+                            }
                             return Ok((spent, life_payments));
                         }
                         .ok_or(PaymentError::InsufficientMana)?;
@@ -3179,6 +3208,13 @@ fn pay_cost_with_demand_and_choices_from(
                                 ) {
                                     spent.extend(suffix_spent);
                                     life_payments.extend(suffix_life);
+                                    // CR 107.4f + CR 118.3: the suffix budget cannot forgive
+                                    // life already committed by the prefix. Check the whole payment.
+                                    if max_life_payments
+                                        .is_some_and(|limit| life_payments.len() > limit)
+                                    {
+                                        return Err(PaymentError::InsufficientMana);
+                                    }
                                     return Ok((spent, life_payments));
                                 }
                                 None
@@ -4214,6 +4250,22 @@ pub(crate) enum ShardRequirement {
     TwoGenericHybridPhyrexian(ManaType),
 }
 
+/// CR 107.4e + CR 107.4f: the two single-mana halves searched by the
+/// residual reducer. Two-generic hybrids retain their separate generic route.
+fn hybrid_halves(requirement: ShardRequirement) -> Option<(ManaType, ManaType)> {
+    match requirement {
+        ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => Some((a, b)),
+        ShardRequirement::ColorlessHybrid(color) => Some((ManaType::Colorless, color)),
+        ShardRequirement::Single(_)
+        | ShardRequirement::Phyrexian(_)
+        | ShardRequirement::TwoGenericHybrid(_)
+        | ShardRequirement::Snow
+        | ShardRequirement::TwoOrMoreColorSource
+        | ShardRequirement::X
+        | ShardRequirement::TwoGenericHybridPhyrexian(_) => None,
+    }
+}
+
 /// CR 107.4f: Promote a `ShardRequirement` to the Phyrexian-shape fusion if
 /// the paying player has a `PayLifeAsColoredMana` grant for the shard's color.
 /// Returns the input unchanged when no grant applies (or when the shard has
@@ -5122,7 +5174,7 @@ mod tests {
         source_id: ObjectId,
         pip_id: ManaPipId,
         supertype: Option<crate::types::mana::ManaSupertype>,
-        source_could_produce_two_or_more_colors: bool,
+        source_color_capability: super::super::mana_sources::SourceColorCapability,
         restrictions: Vec<ManaRestriction>,
         grants: Vec<ManaSpellGrant>,
         expiry: Option<ManaExpiry>,
@@ -5136,8 +5188,7 @@ mod tests {
                 source_id: unit.source_id,
                 pip_id: unit.pip_id,
                 supertype: unit.supertype,
-                source_could_produce_two_or_more_colors: unit
-                    .source_could_produce_two_or_more_colors,
+                source_color_capability: unit.source_could_produce_two_or_more_colors.into(),
                 restrictions: unit.restrictions.clone(),
                 grants: unit.grants.clone(),
                 expiry: unit.expiry,
@@ -5158,6 +5209,99 @@ mod tests {
             }],
             expiry: Some(ManaExpiry::EndOfTurn),
         }
+    }
+
+    #[test]
+    fn hybrid_explicit_mana_early_return_enforces_prefix_life_budget() {
+        assert_hybrid_prefix_life_budget(&[
+            ShardChoice::PayLife,
+            ShardChoice::PayLife,
+            ShardChoice::PayMana,
+        ]);
+    }
+
+    #[test]
+    fn hybrid_automatic_mana_early_return_enforces_prefix_life_budget() {
+        // A partial vector is an existing helper-domain input: the final
+        // hybrid uses its automatic-mana arm, the fourth early-return site.
+        assert_hybrid_prefix_life_budget(&[ShardChoice::PayLife, ShardChoice::PayLife]);
+    }
+
+    fn assert_hybrid_prefix_life_budget(choices: &[ShardChoice]) {
+        // Ashenmoor Liege's printed cost under K'rrik's real black-life
+        // permission supplies three hybrid-Phyrexian requirements. Its public
+        // cast preservation test is in mana_any_one_color_quantity.rs. This
+        // direct production payer API test bypasses the public vector-count
+        // guard deliberately, to test the payer's own life-budget contract.
+        let cost = crate::types::mana::parse_mtgjson_mana_cost("{1}{B/R}{B/R}{B/R}");
+        let mut life_colors = crate::types::mana::LifePaymentColors::EMPTY;
+        life_colors.insert(ManaColor::Black);
+        let pool = ManaPool::from_units(
+            [
+                ManaType::Colorless,
+                ManaType::Red,
+                ManaType::Red,
+                ManaType::Red,
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(index, color)| ManaUnit {
+                pip_id: ManaPipId(index as u64 + 1),
+                ..make_unit(color)
+            })
+            .collect(),
+        );
+        let before = fingerprint(&pool.units().collect::<Vec<_>>());
+        let select = |choices: Option<&[ShardChoice]>, budget| {
+            select_mana_payment_with_life_budget(
+                &pool,
+                &cost,
+                None,
+                None,
+                None,
+                choices,
+                life_colors,
+                &[],
+                budget,
+            )
+        };
+        for budget in [Some(2), None] {
+            let (spent, life) = select(Some(choices), budget).unwrap();
+            assert_eq!(spent.len(), 2);
+            assert_eq!(life.len(), 2);
+        }
+        for choices in [
+            vec![
+                ShardChoice::PayLife,
+                ShardChoice::PayMana,
+                ShardChoice::PayMana,
+            ],
+            vec![
+                ShardChoice::PayMana,
+                ShardChoice::PayLife,
+                ShardChoice::PayMana,
+            ],
+            vec![
+                ShardChoice::PayMana,
+                ShardChoice::PayMana,
+                ShardChoice::PayLife,
+            ],
+        ] {
+            let (spent, life) = select(Some(&choices), Some(1)).unwrap();
+            assert_eq!(spent.len(), 3);
+            assert_eq!(life.len(), 1);
+        }
+        let (spent, life) = select(None, Some(0)).unwrap();
+        assert_eq!(spent.len(), 4);
+        assert!(life.is_empty());
+        assert_eq!(fingerprint(&pool.units().collect::<Vec<_>>()), before);
+        // CR 107.4f + CR 118.3: saturating the suffix budget at zero
+        // cannot authorize the prefix's two already selected life payments.
+        assert_eq!(
+            select(Some(choices), Some(1)),
+            Err(PaymentError::InsufficientMana)
+        );
+        assert_eq!(fingerprint(&pool.units().collect::<Vec<_>>()), before);
     }
 
     const DJINN_ILLUMINATUS_ORACLE: &str = "({U/R} can be paid with either {U} or {R}.)\nFlying\nEach instant and sorcery spell you cast has replicate. The replicate cost is equal to its mana cost. (When you cast it, copy it for each time you paid its replicate cost. You may choose new targets for the copies.)";
@@ -5591,13 +5735,16 @@ mod tests {
         fixture.runner.act(GameAction::PassPriority).unwrap();
         let work = take_hybrid_work();
         assert!(work.reductions.iter().any(|root| root.cost == *cost
-            && !root.fundable
+            && root.funding == ReductionFunding::Unconstrained
             && root.residual == Some(ManaCost::NoCost)));
-        assert!(work.reductions.iter().all(|root| !root.fundable
-            && root.requests == 0
-            && root.entry_clones == 0
-            && root.alternative_entries == 0
-            && root.alternative_clones == 0));
+        assert!(work
+            .reductions
+            .iter()
+            .all(|root| root.funding == ReductionFunding::Unconstrained
+                && root.requests == 0
+                && root.entry_clones == 0
+                && root.alternative_entries == 0
+                && root.alternative_clones == 0));
         assert!(!work.selectors.is_empty());
         for attempt in &work.selectors {
             assert_eq!(attempt.cost, *cost);
@@ -5679,11 +5826,11 @@ mod tests {
         assert!(work
             .reductions
             .iter()
-            .any(|root| !root.fundable && root.cost == *cost));
+            .any(|root| root.funding == ReductionFunding::Unconstrained && root.cost == *cost));
         let roots: Vec<_> = work
             .reductions
             .iter()
-            .filter(|root| root.fundable)
+            .filter(|root| root.funding == ReductionFunding::RequireFundable)
             .collect();
         assert!(
             !roots.is_empty(),
@@ -5925,7 +6072,7 @@ mod tests {
         assert!(work
             .reductions
             .iter()
-            .filter(|root| root.fundable)
+            .filter(|root| root.funding == ReductionFunding::RequireFundable)
             .all(|root| root.requests <= 121
                 && root.entry_clones <= 121
                 && root.alternative_clones <= 80));
@@ -6555,7 +6702,7 @@ mod tests {
             false
         };
         let reduce = |pool: &ManaPool, memo: &mut Option<HybridResidualMemo>| {
-            let root = HybridWorkRoot::reducer(&root_cost, true);
+            let root = HybridWorkRoot::reducer(&root_cost, ReductionFunding::RequireFundable);
             let result = reduce_cost_by_pool_from(
                 pool,
                 continuation,
@@ -6755,7 +6902,7 @@ mod tests {
         let reduce = |pool: &ManaPool,
                       demand: Option<&ColorDemand>,
                       memo: &mut Option<HybridResidualMemo>| {
-            let root = HybridWorkRoot::reducer(&root_cost, true);
+            let root = HybridWorkRoot::reducer(&root_cost, ReductionFunding::RequireFundable);
             let result = reduce_cost_by_pool_from(
                 pool,
                 continuation,
@@ -7070,7 +7217,7 @@ mod tests {
         let mut residuals = Some(residuals);
         let reject = |_: &ManaCost| false;
         let reduce = |pool: &ManaPool, memo: &mut Option<HybridResidualMemo>| {
-            let root = HybridWorkRoot::reducer(&cost, true);
+            let root = HybridWorkRoot::reducer(&cost, ReductionFunding::RequireFundable);
             let result = reduce_cost_by_pool_from(
                 pool,
                 reduction,
