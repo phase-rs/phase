@@ -5,8 +5,8 @@ mod copy;
 mod evoke;
 pub mod filter;
 mod payment_continuation;
+mod payment_surplus;
 mod prospective_mana;
-mod shortcut_efficacy;
 mod swarm;
 mod targeted_exchange;
 
@@ -72,16 +72,25 @@ pub use filter::{
     BasicLegalityFilter, CandidateFilter, FilterCost, FilterPipeline, SimulationFilter,
 };
 pub use payment_continuation::{
-    classify_payment_continuation, witness_payment_continuation, witness_payment_continuations,
-    witness_targeted_cast_offer, AcceptedPaymentSuccessor, PaymentContinuationBatch,
-    PaymentContinuationBatchStatus, PaymentContinuationIndeterminate, PaymentContinuationRoot,
-    PaymentContinuationState, PaymentContinuationStep, PaymentContinuationUnsupported,
-    TargetedCastVerdict, TargetedCastWitness, PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
-    PAYMENT_CONTINUATION_MAX_ROOTS, TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS,
+    classify_payment_continuation, finalizes_in_one_step, witness_payment_continuation,
+    witness_payment_continuations, witness_targeted_cast_offer, AcceptedPaymentSuccessor,
+    PaymentContinuationBatch, PaymentContinuationBatchStatus, PaymentContinuationIndeterminate,
+    PaymentContinuationRoot, PaymentContinuationState, PaymentContinuationStep,
+    PaymentContinuationUnsupported, TargetedCastVerdict, TargetedCastWitness, WitnessedStepTrace,
+    PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS, PAYMENT_CONTINUATION_MAX_ROOTS,
+    TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS,
 };
 #[cfg(feature = "test-support")]
 pub use payment_continuation::{
     witness_payment_continuations_with_counters, PaymentContinuationWitnessCounters,
+};
+pub use payment_surplus::{
+    surplus_mana_activation, AppliedActivation, PaymentSurplusDecision, PaymentSurplusSeeds,
+    SurplusManaActivation, SurplusNotCertified,
+};
+#[cfg(feature = "test-support")]
+pub use payment_surplus::{
+    surplus_mana_activation_with_counters, units_spend_equivalent, SurplusCertificateCounters,
 };
 pub use prospective_mana::{
     certify_fetch_then_cast, certify_pact_plan, controls_exact_fetchland, is_pact_payment_ability,
@@ -267,7 +276,12 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
             }
         }
         ConvokeMode::Waterbend => {
-            obj.is_waterbend_eligible(*player) && *mana_type == ManaType::Colorless
+            // CR 701.67a: a waterbend tap pays one generic mana of the cost, so
+            // it pays colorless only and is legal only while generic mana is
+            // left for a tap to pay.
+            obj.is_waterbend_eligible(*player)
+                && *mana_type == ManaType::Colorless
+                && crate::game::casting::waterbend_taps_remaining(state, *player) > 0
         }
         ConvokeMode::Improvise => {
             obj.is_improvise_eligible(*player) && *mana_type == ManaType::Colorless
@@ -325,7 +339,11 @@ pub(crate) fn structurally_valid_named_choice_answer(
     // CR 201.4 + CR 107.1a/b: card names (CR 201.4) and free-entry numbers
     // (CR 107.1a/b) are supplied by the player and validated by rule rather than
     // by option membership, so they stay on the simulation.
-    if matches!(choice_type, ChoiceType::CardName) || choice_type.free_entry().is_some() {
+    // A closed card-name domain (Garth One-Eye) publishes its options and is
+    // validated by membership like any enumerated choice.
+    if matches!(choice_type, ChoiceType::CardName { options, .. } if options.is_empty())
+        || choice_type.free_entry().is_some()
+    {
         return false;
     }
 
@@ -349,10 +367,11 @@ pub(crate) fn structurally_valid_named_choice_answer(
     }
 }
 
-/// CR 608.2d + CR 614.12a + CR 701.23a: Whether the pending prompt's submission
-/// guard admits `action`, decided without mutating the game, for a library search
-/// selection ([`structurally_valid_search_selection`]) or a named choice from the
-/// prompt's enumerated domain ([`structurally_valid_named_choice_answer`]).
+/// CR 608.2d + CR 614.12a + CR 701.23a + CR 732.2a + CR 732.2b: Whether the pending prompt's
+/// submission guard admits `action`, decided without mutating the game, for a library
+/// search selection ([`structurally_valid_search_selection`]), a named choice from the
+/// prompt's enumerated domain ([`structurally_valid_named_choice_answer`]), or a declaration or answer
+/// to a loop-shortcut offer ([`structurally_valid_shortcut_response`]).
 /// `true` means the guard admits the answer; `false` means it rejects it or the
 /// shape is not modeled here.
 ///
@@ -375,6 +394,48 @@ pub(crate) fn structurally_valid_named_choice_answer(
 pub fn structurally_valid_prompt_answer(state: &GameState, action: &GameAction) -> bool {
     structurally_valid_search_selection(state, action)
         || structurally_valid_named_choice_answer(state, action)
+        || structurally_valid_shortcut_response(state, action)
+}
+
+/// CR 732.2a–c: whether the pending loop-shortcut window admits `action` as the proposer's
+/// declaration or a responder's answer, decided without mutating the game; a declaration handed
+/// back is not admitted. Every refusal of a responder's answer is a `Shorten`; `Accept` names no
+/// place, so it passes every pre-take guard.
+///
+/// PRE-TAKE GUARDS ARE THE WHOLE CLAIM. An admitted answer can still fail when applied: a
+/// `Shorten` at place 0 elides the rest of the poll and takes it at once, the last responder's
+/// answer takes it too, and that take can be rejected after the guards (a life change outside the
+/// engine's range, `LifeChangeUnrepresentable`) or fall back to manual play without an error (a
+/// departed proposer, whose guard restores priority). That is the same class as an
+/// admitted named choice whose life gain is unrepresentable — the authority's contract is that an
+/// admitted answer is one the PROMPT admits, not one the engine can execute, which is why phase-ai's
+/// chooser simulates the single answer it submits and re-decides on a rejection
+/// (`ai_driver_replaces_a_submitted_creature_type_the_engine_rejects`). On this shape the rejection
+/// is pinned by
+/// `public_recorded_period_replay_rejects_later_life_counter_overflow_atomically`, whose hostile
+/// overflowing gain makes a public `Accept` return that error and restore its entry state.
+///
+/// CALLS THE REDUCER'S OWN STEP AUTHORITY, not a restatement of it:
+/// [`crate::game::engine::shortcut_step`], which `handle_declare_shortcut` and
+/// `handle_respond_to_shortcut` take with performed evidence, read here with measured evidence, so
+/// the hatch performs no repetition and takes nothing. That price is why the hatch exists: the
+/// probe APPLIES the answer, so for the last responder an `Accept` materializes the entire
+/// shortcut, which then materializes again when the real answer is applied (issue #10464). A
+/// `Shorten` naming no different choice (CR 732.2b) is admitted here, since only the take decides
+/// it, and refused when committed.
+///
+/// `false` for `WaitingFor::RespondToPrecastCopyShortcut`: that window carries no proposal summary,
+/// so there is no place and no counted take here to read, and it stays on the simulation path.
+pub(crate) fn structurally_valid_shortcut_response(state: &GameState, action: &GameAction) -> bool {
+    matches!(
+        crate::game::engine::shortcut_step(
+            state,
+            action,
+            crate::game::engine::ShortcutEvidence::Measured
+        ),
+        Some(Ok(crate::game::engine::ShortcutStep::Polls { .. }
+            | crate::game::engine::ShortcutStep::Takes))
+    )
 }
 
 fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
@@ -410,6 +471,22 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
     };
 
     match (&state.waiting_for, action) {
+        // CR 732.2b: the reducer's own refusal of a responder's place.
+        (
+            WaitingFor::RespondToShortcut {
+                player, proposal, ..
+            },
+            GameAction::RespondToShortcut {
+                response: crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration },
+            },
+        ) => crate::game::engine::shorten_refusal(
+            state,
+            proposal,
+            *player,
+            *at_iteration,
+            crate::game::engine::ShortcutEvidence::Measured,
+        )
+        .is_some(),
         (WaitingFor::Priority { player }, _) if *player != acting_player => true,
         (WaitingFor::Priority { .. }, GameAction::CastSpell { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::Foretell { object_id, .. })
@@ -600,6 +677,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             let mut exile_dup = false;
             let mut pack_slots_seen: HashSet<usize> = HashSet::new();
             let mut pack_slot_dup = false;
+            let mut companion_selections = 0usize;
             for selection in selections {
                 match selection {
                     OutsideGameSelection::Sideboard { sideboard_index } => {
@@ -615,8 +693,14 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                             pack_slot_dup = true;
                         }
                     }
+                    OutsideGameSelection::Companion => companion_selections += 1,
                 }
             }
+            let bad_companion = companion_selections > 1
+                || (companion_selections == 1
+                    && !choices.iter().any(|choice| {
+                        matches!(choice.source, OutsideGameChoiceSource::Companion { .. })
+                    }));
             let bad_sideboard = sideboard_counts.iter().any(|(idx, count)| {
                 choices
                     .iter()
@@ -642,7 +726,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                     OutsideGameChoiceSource::BoosterPack { pack_slot: slot, .. } if slot == pack_slot
                 ))
             });
-            !valid_count || exile_dup || pack_slot_dup || bad_sideboard || bad_exile || bad_pack_slot
+            !valid_count
+                || exile_dup
+                || pack_slot_dup
+                || bad_sideboard
+                || bad_exile
+                || bad_pack_slot
+                || bad_companion
         }
         (WaitingFor::PairChoice { choices, .. }, GameAction::ChoosePair { partner }) => {
             partner.is_some_and(|partner| !choices.contains(&partner))
@@ -672,6 +762,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         )
         | (WaitingFor::MulliganDecision { .. }, GameAction::MulliganDecision { .. })
         | (WaitingFor::BetweenGamesChoosePlayDraw { .. }, GameAction::ChoosePlayDraw { .. })
+        | (WaitingFor::ChooseStartingPlayer { .. }, GameAction::ChooseStartingPlayer { .. })
         | (WaitingFor::TopOrBottomChoice { .. }, GameAction::ChooseTopOrBottom { .. })
         | (WaitingFor::ClashChooseOpponent { .. }, GameAction::ChooseClashOpponent { .. })
         | (
@@ -763,6 +854,7 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 player: _,
                 cards,
                 optional,
+                cardinality,
                 ..
             },
             GameAction::SelectCards { cards: chosen },
@@ -771,7 +863,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             if *optional && chosen.is_empty() {
                 false
             } else {
-                selection_mismatch(chosen, cards, Some(1))
+                // CR 608.2d: the published cardinality bounds the selection —
+                // exactly `count` cards, or (CR 107.1c) any subset for "any number".
+                let exact_count = match cardinality {
+                    crate::types::ability::ObjectSelectionCardinality::Exactly { count } => {
+                        Some(*count as usize)
+                    }
+                    crate::types::ability::ObjectSelectionCardinality::AnyNumber => None,
+                };
+                selection_mismatch(chosen, cards, exact_count)
             }
         }
         (
@@ -961,6 +1061,24 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         ) => {
             let exact = if *up_to { None } else { Some(*count) };
             selection_mismatch(chosen, cards, exact) || (*up_to && chosen.len() > *count)
+        }
+        // Turtle Team-Up: like DiscardChoice, plus the contribution floor
+        // (Krang's minimum) when `up_to`.
+        | (
+            WaitingFor::HeroEventChoice {
+                player: _,
+                cards,
+                count,
+                up_to,
+                min,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            let exact = if *up_to { None } else { Some(*count) };
+            selection_mismatch(chosen, cards, exact)
+                || (*up_to && chosen.len() > *count)
+                || (*up_to && chosen.len() < *min)
         }
         (
             WaitingFor::DrawnThisTurnTopdeckChoice {
@@ -1464,6 +1582,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::TurnFaceUp { .. }
         | GameAction::SubmitSideboard { .. }
         | GameAction::ChoosePlayDraw { .. }
+        | GameAction::ChooseStartingPlayer { .. }
         | GameAction::ChooseOption { .. }
         | GameAction::SubmitVoteCandidate { .. }
         | GameAction::SubmitSpellbookDraft { .. }
@@ -1503,6 +1622,7 @@ fn classify_flat_priority_action(action: &GameAction) -> FlatPriorityActionClass
         | GameAction::ChooseRoomDoor { .. }
         | GameAction::TapForConvoke { .. }
         | GameAction::HarmonizeTap { .. }
+        | GameAction::ChooseSecretAgendaNames { .. }
         | GameAction::DeclareCompanion { .. }
         | GameAction::CompanionToHand
         | GameAction::DiscoverChoice { .. }
@@ -1600,13 +1720,8 @@ fn has_activatable_sacrifice_for_mana(state: &GameState) -> bool {
 /// The mana activations [`has_activatable_sacrifice_for_mana`] counts, as
 /// items rather than as a yes/no.
 ///
-/// SINGLE AUTHORITY for the predicate. `smart_shortcut_response`'s stage 2 has
-/// to classify exactly the actions stage 1 counted, and stage 1 counts these —
-/// which the flat `legal_actions` list structurally cannot contain (they live
-/// in `legal_actions_by_object` only). Re-testing the same shape at that call
-/// site would be a parallel copy free to drift, so the call site consumes this
-/// iterator and `mana_actions_include_meaningful_sacrifice` is defined as its
-/// emptiness.
+/// SINGLE AUTHORITY for the predicate; `mana_actions_include_meaningful_sacrifice`
+/// is defined as its emptiness.
 fn meaningful_sacrifice_mana_actions<'a>(
     state: &'a GameState,
     object_mana_actions: &'a [GameAction],
@@ -1655,18 +1770,10 @@ pub fn has_meaningful_priority_action(state: &GameState, actions: &[GameAction])
         || has_activatable_sacrifice_for_mana(state)
 }
 
-/// The probe [`smart_shortcut_response`] folds over: `state` re-parked at
-/// `polled_player`'s priority with auto-pass cleared and layers flushed, plus
-/// that state's flat priority actions. Mirrors
+/// `state` re-parked at `polled_player`'s priority with auto-pass cleared and
+/// layers flushed, plus that state's flat priority actions. Mirrors
 /// `game::engine`'s `no_living_player_has_meaningful_priority_action` recipe,
 /// scoped to the single polled player.
-///
-/// Public because the shortcut tests' reach-guards must assert on THIS list and
-/// THIS state. A private copy of the recipe in a test silently starts measuring
-/// a different action set — and a different `has_meaningful_priority_action`
-/// answer, since that predicate's sacrifice-for-mana rung only fires while
-/// `waiting_for` is `Priority`, which is true of the probe state and false of
-/// the `RespondToShortcut` state the caller holds.
 pub fn shortcut_probe(
     state: &GameState,
     polled_player: PlayerId,
@@ -1683,189 +1790,43 @@ pub fn shortcut_probe(
     (probe, actions)
 }
 
-/// The actions [`smart_shortcut_response`]'s stage 2 classifies, given a probe
-/// state and the flat priority list stage 1 read.
-///
-/// COVERAGE INVARIANT — stage 2 must classify every action stage 1 counted as
-/// meaningful. The flat list does not satisfy that on its own:
-/// [`has_meaningful_priority_action`] is a disjunction, and its second rung
-/// ([`has_activatable_sacrifice_for_mana`]) reads `state`, not `actions`, so it
-/// counts sacrifice-for-mana activations that `legal_actions` structurally omits
-/// (they live in `legal_actions_by_object` only — see issue #544). Folding stage
-/// 2 over the flat list alone therefore lets a seat whose ONLY meaningful action
-/// is such an activation Accept BY OMISSION: an action stage 2 never sees
-/// reaches no arm, so `shortcut_efficacy`'s fail-closed `_ => MayInterfere`
-/// default cannot protect it, and a false Accept is the direction the module doc
-/// says can lose a game.
-///
-/// `activatable_object_mana_actions` is gated on `waiting_for` — the probe state
-/// is re-parked at `Priority`, which is the same gate
-/// `has_activatable_sacrifice_for_mana` passes there, so the two stages read the
-/// SAME sweep. The added items come from
-/// [`meaningful_sacrifice_mana_actions`], the single authority stage 1's rung is
-/// also defined in terms of; re-testing the shape here would be a parallel copy
-/// free to drift.
-///
-/// Deliberately does NOT add the whole mana sweep, only the subset stage 1
-/// counts: a plain land tap is not a meaningful priority action to stage 1, and
-/// widening past that would buy `Shorten`s stage 1 never asked for.
-///
-/// Public for the same reason [`shortcut_probe`] is: the shortcut tests'
-/// coverage row must assert on THIS set, and a private copy of the recipe would
-/// silently start measuring a different one.
-pub fn stage_two_action_set(
-    probe_state: &GameState,
-    flat_actions: &[GameAction],
-) -> Vec<GameAction> {
-    let mana_actions = activatable_object_mana_actions(probe_state);
-    flat_actions
-        .iter()
-        .chain(meaningful_sacrifice_mana_actions(
-            probe_state,
-            &mana_actions,
-        ))
-        .cloned()
-        .collect()
-}
-
-/// PR-7 Phase 4c (LOW-2): CR 732.2b/c + CR 104.4b — an AI opponent polled on an
-/// OPTIONAL or bounded loop shortcut. The win is a loss condition for every
-/// polled opponent (single-faller: see `interactive_loop_bridge`'s Path A gate,
-/// CR 104.2a).
-///
-/// SINGLE AUTHORITY, and what it does NOT cover. MEASURED — production (i.e.
-/// non-`#[cfg(test)]`) code under `crates/*/src/` builds a
-/// `GameAction::RespondToShortcut` value at exactly four places:
-///   * `ai_support::candidates::candidate_actions_broad_with_probe`,
-///   * `phase_ai::projection::resolve_choice`,
-///   * `phase_ai::search::fallback_action` — these three are AI seats and all
-///     route here, so the heuristic cannot drift between them; and
-///   * `game::interaction::materialize_shortcut_reply_response`, which turns a
-///     HUMAN player's submitted `InteractionShortcutReply` into the action. That
-///     one is deliberately NOT covered: running a stated human choice through an
-///     AI heuristic would overwrite it. It is also the only site that can emit a
-///     non-zero `at_iteration` — every AI site emits `Shorten { at_iteration: 0 }`.
-///
-/// `candidate_actions_broad_with_probe` additionally routes
-/// `WaitingFor::RespondToPrecastCopyShortcut` here and maps the answer onto
-/// `PrecastCopyShortcutResponse`, so this function answers BOTH accept-or-shorten
-/// windows. That is intended: both windows ask the identical question — is a real
-/// priority window worth taking here — so a seat whose only action cannot touch
-/// the loop should decline both. `shorten_efficacy.rs`'s
-/// `v8_precast_window_takes_the_same_efficacy_answer` measures that window rather
-/// than assuming it.
-///
-/// TWO STAGES.
-///
-/// **Stage 1 — POSSIBILITY, byte-identical to the shipped predicate.** Reuses
-/// the exact `no_living_player_has_meaningful_priority_action` probe recipe
-/// (`game::engine`), scoped to the single polled player. No meaningful priority
-/// action ⇒ Accept, exactly as before. `has_meaningful_priority_action` is
-/// wired into the CR 732.5 NON-COMPULSION rule —
-/// "No player can be forced to perform an action that would end a loop other
-/// than actions called for by objects involved in the loop" — and is untouched
-/// here.
-///
-/// **Stage 2 — EFFICACY (AI POLICY, no CR licence claimed).** CR 732.2b grants
-/// an unconditioned accept-or-shorten option and CR 732.2c requires only that a
-/// shortening player's next choice be
-/// *different*, which a fetchland activation already satisfies; nothing in the
-/// Comprehensive Rules states an efficacy criterion. This stage is therefore
-/// policy, and it declines to burn a real priority window on a response that
-/// cannot change the outcome:
-///   - arm (A): the offer's own predicted result already crowns this seat, so
-///     shortening moves the game away from a win it already holds;
-///   - arm (B): every action stage 1 counted as meaningful is confined to this
-///     seat's own resources (`shortcut_efficacy::any_action_may_interfere`), so
-///     no available choice touches the loop. Scoped to what stage 1 counted, not
-///     to "every action this seat could take": the stage-2 set is a SUPERSET of,
-///     and never smaller than, what stage 1 counted — the flat list enters
-///     whole, so it also carries actions the stage-1 fold
-///     (`flat_actions_have_meaningful_priority`) does not count as meaningful,
-///     `PassPriority` and mana-ability activations among them, and extra items
-///     can only push toward `MayInterfere`. See the coverage invariant at the
-///     call below; the wider phrasing would claim coverage of shapes neither
-///     stage enumerates.
-///
-/// Otherwise the seat still Shortens and gets its window — at the place 0 every AI site emits,
-/// the shortened proposal admits no place, so the shortcut is taken at once and CR 732.2b's new
-/// ending point IS that window, held by this seat.
-///
-/// READ-ORDER: the proposal is read off the ORIGINAL `state`, before
-/// [`shortcut_probe`] re-parks its clone at `Priority` — the probe state carries
-/// no offer at all, so reading the crown from it would make arm (A) dead code.
-/// That same read supplies the CR 732.2b precondition ahead of both stages: a
-/// proposal admitting no place cannot be answered by naming one, so the seat
-/// Accepts rather than emitting a verdict `apply()` refuses.
-pub fn smart_shortcut_response(
+/// CR 732.2c: the priority state `seat` reaches when the reducer takes `shorten` and every later
+/// responder accepts, with the divergence latch cleared so a pass stays answerable there; `None`
+/// unless the take latches `seat` at its own priority.
+pub fn shortened_priority_state(
     state: &GameState,
-    polled_player: PlayerId,
-) -> crate::analysis::loop_check::ShortcutResponse {
-    // Both accept-or-shorten windows are named, so neither is answered by
-    // accident. The wildcard is not removable — `WaitingFor` has 128 variants and
-    // enumerating 126 `=> None` arms here would be noise, not a guard — and this
-    // two-named-arms + `_` shape is the module's existing idiom for the same
-    // question (`game::precast_copy_shortcut::normalize_untrusted_restore`,
-    // `::rekey_after_trusted_restore`).
-    let (crowned_winner, shortening_places) = match &state.waiting_for {
-        WaitingFor::RespondToShortcut { proposal, .. } => (
-            proposal.predicted_winner,
-            Some(proposal.shortening_places()),
-        ),
-        // STRUCTURAL, not an oversight: `RespondToPrecastCopyShortcut` carries no
-        // proposal summary and therefore neither a `predicted_winner` field nor a
-        // range, so the pre-cast route has no crown to read and arm (A) is
-        // inapplicable rather than skipped, and the precondition below is inert
-        // there. Stage 1 and arm (B) do apply, and both run below.
-        WaitingFor::RespondToPrecastCopyShortcut { .. } => (None, None),
-        _ => (None, None),
-    };
-
-    // CR 732.2b: a shortening responder names "a place where they will make a game
-    // choice that's different than what's been proposed", so the place must be one
-    // the proposal admits. A proposal of zero repetitions proposes no choice, its
-    // range holds no place, and `apply()` refuses every `Shorten` against it, place
-    // 0 included. Accept is then the only answer this seat can give that the reducer
-    // will take: `ai_support::candidates` builds exactly one candidate here and
-    // validates it against the reducer, so a verdict naming an excluded place is
-    // dropped rather than refused on submit, leaving the polled seat no legal action
-    // at all. Reading the range here answers for every ingress that reaches the
-    // window — the declare path's own mint and a restored `WaitingFor` alike.
-    if shortening_places.is_some_and(|places| places.is_empty()) {
-        return crate::analysis::loop_check::ShortcutResponse::Accept;
+    seat: PlayerId,
+    shorten: &GameAction,
+) -> Option<GameState> {
+    let _probe = crate::game::engine::SimulationProbeGuard::enter();
+    let mut scratch = state.clone();
+    let mut answer = shorten.clone();
+    loop {
+        crate::game::engine::apply_as_current(&mut scratch, answer).ok()?;
+        answer = match &scratch.waiting_for {
+            WaitingFor::RespondToShortcut { .. } => GameAction::RespondToShortcut {
+                response: crate::analysis::loop_check::ShortcutResponse::Accept,
+            },
+            WaitingFor::RespondToPrecastCopyShortcut { epoch, .. } => {
+                GameAction::PrecastCopyShortcut {
+                    epoch: *epoch,
+                    response: crate::types::actions::PrecastCopyShortcutResponse::Accept,
+                }
+            }
+            _ => break,
+        };
     }
-
-    let (probe, actions) = shortcut_probe(state, polled_player);
-    if !has_meaningful_priority_action(probe.state(), &actions) {
-        // CR 732.2c: nothing to do — agree to take the shortcut.
-        return crate::analysis::loop_check::ShortcutResponse::Accept;
-    }
-
-    // Arm (A). Keyed on `predicted_winner`, never `proposer`: CR 732.2a lets a
-    // player propose a shortcut whose outcome crowns someone else, and the
-    // proposer is excluded from the APNAP response queue anyway.
-    if crowned_winner == Some(polled_player) {
-        return crate::analysis::loop_check::ShortcutResponse::Accept;
-    }
-
-    // Arm (B). No bounded/unbounded exemption: an `IterationCount::Fixed(n)`
-    // offer ends the game just as surely as an `UntilLethal` one, so both
-    // classes take the identical rule.
-    //
-    // The fold reads [`stage_two_action_set`], never the bare flat `actions` —
-    // see that function for the coverage invariant and what folding over the
-    // flat list alone would silently Accept.
-    if shortcut_efficacy::any_action_may_interfere(
-        probe.state(),
-        polled_player,
-        &stage_two_action_set(probe.state(), &actions),
-    ) {
-        // CR 732.2b: name an earlier stopping point — take my window instead of losing.
-        crate::analysis::loop_check::ShortcutResponse::Shorten { at_iteration: 0 }
-    } else {
-        crate::analysis::loop_check::ShortcutResponse::Accept
-    }
+    (scratch.precast_shortcut_runtime.must_diverge == Some(seat)
+        && scratch.waiting_for == WaitingFor::Priority { player: seat })
+    .then(|| {
+        scratch.precast_shortcut_runtime.must_diverge = None;
+        scratch
+    })
 }
+
+/// The place an AI responder shortens at: one repetition, so the proposer sees their loop land
+/// before the AI answers it (a play-style choice, not a rule).
+pub const AI_SHORTEN_PLACE: u32 = 1;
 
 fn auto_passes_initial_priority_by_default(state: &GameState) -> bool {
     state.stack.is_empty() && matches!(state.phase, Phase::Upkeep | Phase::Draw)
@@ -2077,7 +2038,8 @@ fn beneficial_mana_tap_trigger_hold(
 /// - Initial upkeep/draw priority without an explicit phase stop (MTGA-style)
 /// - Player's own spell/ability is on top of the stack (MTGA-style: let your
 ///   own spells resolve without pausing), unless resolving it can remove a
-///   mana source the player can activate now
+///   mana source the player can activate now, or it is their own activated
+///   ability and would waste an untap on its own untapped mana source
 ///
 /// This centralizes the "meaningful action" classification in the engine so
 /// frontends don't need to inspect game objects or card types.
@@ -2139,8 +2101,9 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // meaningful-action hold below, including the issue #4388 opponent-turn
     // mana-window hold (MTGA parity). CR 117.1d + CR 605.3a: an own object
     // that can move one of the player's activatable mana sources off the
-    // battlefield holds instead — the rungs below never count a mana activation
-    // as meaningful, so falling through would still pass that window.
+    // battlefield holds instead, and so does an own activated ability that
+    // would waste an untap on its own source — the rungs below never count a mana
+    // activation as meaningful, so falling through would still pass that window.
     match standing_priority_pass(state, player, state.stack.back()) {
         StandingPriorityPass::Withheld | StandingPriorityPass::Held => return false,
         StandingPriorityPass::Granted => return true,
@@ -2295,6 +2258,12 @@ pub fn auto_pass_recommended_for_viewer(
 ) -> bool {
     crate::game::turn_control::is_authorized_submitter(state, viewer)
         && auto_pass_recommended(state, actions)
+}
+
+/// CR 702.24a: whether the open unless-payment prompt continues a repeated
+/// payment already begun, so paying is its only answer.
+pub fn unless_payment_only_continues(state: &GameState) -> bool {
+    crate::game::engine_payment_choices::awaits_payment_continuation(state)
 }
 
 /// Returns the legal actions for the current game state.
@@ -3102,6 +3071,14 @@ pub fn stuck_decision_diagnostic(state: &GameState) -> Option<StuckDecisionDiagn
 
 fn mana_action_player(state: &GameState) -> Option<PlayerId> {
     match &state.waiting_for {
+        // CR 605.3a: an unless payment of draws asks for no mana, at its offer
+        // and at its continuation; `refuse_mana_at_draw_only_payment` refuses
+        // the same actions.
+        WaitingFor::UnlessPayment { .. }
+            if crate::game::engine_payment_choices::unless_prompt_asks_for_no_mana(state) =>
+        {
+            None
+        }
         WaitingFor::Priority { player }
         | WaitingFor::ManaPayment { player, .. }
         | WaitingFor::ManaAbilityManaPayment { player, .. }
@@ -3712,6 +3689,7 @@ mod tests {
             total: 1,
             targets: vec![TargetRef::Object(target)],
             unit: DistributionUnit::Damage,
+            scope: crate::types::game_state::DistributionScope::AnnouncedTargets,
         };
 
         let actions = legal_actions(&state);
@@ -4288,6 +4266,8 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
+                    repeat: None,
                 },
                 false,
             ),
@@ -4317,8 +4297,9 @@ mod tests {
             player: PlayerId(0),
         };
 
+        // CR 723.5: the builder issues no pass the reducer's submitter guard refuses.
         let raw_candidates = candidate_actions(&state);
-        assert!(raw_candidates
+        assert!(!raw_candidates
             .iter()
             .any(|candidate| { matches!(candidate.action, GameAction::PassPriority) }));
 
@@ -6449,6 +6430,8 @@ mod tests {
             trigger_event: None,
             effect_description: Some("counter target spell".to_string()),
             remaining: vec![],
+            affected_object: None,
+            repeat: None,
         };
 
         // Reach-guard: the waiting state is genuinely non-`Priority`.
@@ -6976,6 +6959,7 @@ mod tests {
         // A "choose a player" prompt (CR 601.2b) with NO offered options — the
         // engine can produce no legal `ChooseOption`, so no submitter can act.
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::Labeled { options: vec![] },

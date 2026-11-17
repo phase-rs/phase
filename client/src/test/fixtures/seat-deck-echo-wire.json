@@ -18,7 +18,10 @@
           "contraption_deck": [],
           "sticker_sheets": [],
           "signature_spell": [],
-          "bracket_tier": "core"
+          "bracket_tier": null,
+          "combo_declaration": {
+            "kind": "undeclared"
+          }
         }
       }
     }
@@ -44,7 +47,10 @@
           "contraption_deck": [],
           "sticker_sheets": [],
           "signature_spell": [],
-          "bracket_tier": "core"
+          "bracket_tier": null,
+          "combo_declaration": {
+            "kind": "undeclared"
+          }
         }
       }
     }
@@ -68,7 +74,10 @@
           "contraption_deck": [],
           "sticker_sheets": [],
           "signature_spell": [],
-          "bracket_tier": "optimized"
+          "bracket_tier": "optimized",
+          "combo_declaration": {
+            "kind": "undeclared"
+          }
         }
       }
     }
@@ -93,7 +102,10 @@
           "contraption_deck": [],
           "sticker_sheets": [],
           "signature_spell": [],
-          "bracket_tier": "core"
+          "bracket_tier": null,
+          "combo_declaration": {
+            "kind": "undeclared"
+          }
         }
       }
     }
@@ -118,7 +130,10 @@
           "contraption_deck": [],
           "sticker_sheets": [],
           "signature_spell": [],
-          "bracket_tier": "core"
+          "bracket_tier": null,
+          "combo_declaration": {
+            "kind": "undeclared"
+          }
         }
       }
     }

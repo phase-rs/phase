@@ -139,7 +139,9 @@ fn batroc_counters_after_kicks(kicks: u32, decoy_kicks: Option<u32>) -> u32 {
     while let WaitingFor::OptionalCostChoice { .. } = &runner.state().waiting_for {
         let pay = paid < kicks;
         runner
-            .act(GameAction::DecideOptionalCost { pay })
+            .act(GameAction::DecideOptionalCost {
+                index: if pay { 0 } else { 1 },
+            })
             .expect("P0 decides the multikicker");
         if pay {
             paid += 1;

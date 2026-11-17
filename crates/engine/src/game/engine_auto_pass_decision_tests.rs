@@ -2653,9 +2653,34 @@ fn own_bounce_of_your_land(forest_tapped: bool) -> GameState {
 #[test]
 fn recheck_session_pauses_an_own_top_held_for_a_removable_mana_source() {
     // The look-ahead: with an own inert entry above the bounce, the skipped
-    // window over the bounce is authorized only when nothing can be lost.
+    // window over the bounce is authorized only when nothing can be lost. The
+    // bounce is a trigger here (Guildless Commons: "When this land enters,
+    // return a land you control to its owner's hand."), since a spell resolves
+    // alone and its window is never looked ahead to.
     for (forest_tapped, limit) in [(false, 1), (true, 2)] {
         let mut state = own_bounce_of_your_land(forest_tapped);
+        let spell = state.stack.pop_back().expect("the bounce is on the stack");
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = spell.kind
+        else {
+            unreachable!("own_bounce_of_your_land pushes a spell with an ability");
+        };
+        state.stack.push_back(StackEntry {
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: spell.source_id,
+                ability,
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Guildless Commons".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+            ..spell
+        });
         push_simple_stack_entry(&mut state, 30_502, PlayerId(0));
         install_recheck_session(&mut state, &[PlayerId(1)]);
         assert_eq!(
@@ -2707,6 +2732,206 @@ fn until_end_of_turn_breaks_on_an_own_top_held_for_a_removable_mana_source() {
             assert!(is_break(&decision), "untapped Forest: the window is held");
         } else {
             assert!(is_pass(&decision), "tapped Forest: own top passes");
+        }
+    }
+}
+
+/// Basalt Monolith, verbatim.
+const BASALT_MONOLITH: &str = "This artifact doesn't untap during your untap step.\n{T}: Add {C}{C}{C}.\n{3}: Untap this artifact.";
+
+/// P0's Basalt Monolith, untapped or tapped, with its own "{3}: Untap this
+/// artifact." alone on the stack.
+fn own_basalt_untap(monolith_tapped: bool) -> GameState {
+    let mut scenario = crate::game::scenario::GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let monolith = scenario
+        .add_artifact_from_oracle(PlayerId(0), "Basalt Monolith", BASALT_MONOLITH)
+        .id();
+    let mut state = scenario.build().state().clone();
+    state.objects.get_mut(&monolith).unwrap().tapped = monolith_tapped;
+    state.stack.push_back(StackEntry {
+        id: ObjectId(30_601),
+        source_id: monolith,
+        controller: PlayerId(0),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id: monolith,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Untap,
+                },
+                Vec::new(),
+                monolith,
+                PlayerId(0),
+            )),
+        },
+    });
+    state
+}
+
+/// CR 701.26b + CR 605.3a: an own activated ability that would waste an untap
+/// on its untapped mana source is `Held`, so a
+/// rechecking session pauses an unverified representative's live window. No
+/// skipped window is authorized over it, as over any activated ability, which
+/// resolves alone.
+#[test]
+fn recheck_session_pauses_an_own_top_held_for_a_wasted_untap() {
+    // The look-ahead: with an own inert entry above the untap, the boundary
+    // stops before the activation either way. It resolves alone, so its window
+    // is read when it comes, not ahead of time.
+    for monolith_tapped in [false, true] {
+        let mut state = own_basalt_untap(monolith_tapped);
+        push_simple_stack_entry(&mut state, 30_602, PlayerId(0));
+        install_recheck_session(&mut state, &[PlayerId(1)]);
+        assert_eq!(
+            stack_resolution_session_authorized_limit(&state),
+            Some(1),
+            "Monolith tapped: {monolith_tapped}"
+        );
+    }
+
+    let mut held = own_basalt_untap(false);
+    install_recheck_session(&mut held, &[PlayerId(1)]);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut held,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::PauseRetained
+    ));
+
+    // Control: with Monolith tapped the untap is not wasted, so the own-object
+    // standing pass authorizes the window again.
+    let mut granted = own_basalt_untap(true);
+    install_recheck_session(&mut granted, &[PlayerId(1)]);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut granted,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
+    ));
+}
+
+/// Pushes P0's activated ability `id`, Basalt Monolith's "{3}: Untap this
+/// artifact" shape: a fresh source untapping itself.
+fn push_own_self_untap_activation(state: &mut GameState, id: u64) {
+    let source_id = ObjectId(id);
+    state.stack.push_back(StackEntry {
+        id: source_id,
+        source_id,
+        controller: PlayerId(0),
+        kind: StackEntryKind::ActivatedAbility {
+            source_id,
+            ability: Box::new(ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Untap,
+                },
+                Vec::new(),
+                source_id,
+                PlayerId(0),
+            )),
+        },
+    });
+}
+
+/// A spell or an activated ability never joins a resolver batch, so the
+/// look-ahead neither reads a window over one nor runs past it: a stack of
+/// queued activations is one window per entry under either session policy, and
+/// a run of inert entries above one stops before it.
+#[test]
+fn authorized_limit_does_not_look_past_an_activated_ability() {
+    for policy in [
+        StackResolutionPolicy::Committed,
+        StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
+    ] {
+        let mut activations = priority_state();
+        for id in 30_701..=30_703 {
+            push_own_self_untap_activation(&mut activations, id);
+        }
+        install_stack_resolution_session(
+            &mut activations,
+            BTreeSet::from([PlayerId(0), PlayerId(1)]),
+            StackResolutionBudget::Unlimited,
+            policy,
+            BTreeMap::new(),
+        );
+        assert_eq!(
+            stack_resolution_session_authorized_limit(&activations),
+            Some(1),
+            "{policy:?}: queued activations"
+        );
+
+        let mut inert_above = priority_state();
+        push_own_self_untap_activation(&mut inert_above, 30_711);
+        for id in 30_712..=30_713 {
+            push_simple_stack_entry(&mut inert_above, id, PlayerId(0));
+        }
+        install_stack_resolution_session(
+            &mut inert_above,
+            BTreeSet::from([PlayerId(0), PlayerId(1)]),
+            StackResolutionBudget::Unlimited,
+            policy,
+            BTreeMap::new(),
+        );
+        inert_above
+            .stack_resolution_session
+            .as_mut()
+            .expect("the session was just installed")
+            .verified_pass_representatives
+            .extend([PlayerId(0), PlayerId(1)]);
+        assert_eq!(
+            stack_resolution_session_authorized_limit(&inert_above),
+            Some(2),
+            "{policy:?}: the inert run above the activation"
+        );
+    }
+}
+
+/// CR 117.3d: Resolve All is consent to resolve the stack, so a `Committed`
+/// session passes through the window the rechecking session pauses at.
+#[test]
+fn committed_session_passes_through_an_own_top_held_for_a_wasted_untap() {
+    let mut state = own_basalt_untap(false);
+    install_stack_resolution_session(
+        &mut state,
+        BTreeSet::from([PlayerId(0), PlayerId(1)]),
+        StackResolutionBudget::Unlimited,
+        StackResolutionPolicy::Committed,
+        BTreeMap::new(),
+    );
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut state,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
+    ));
+}
+
+/// CR 117.1d + CR 605.3a: a turn-boundary session breaks on an own top that is
+/// `Held` for a wasted untap, and keeps passing own tops otherwise.
+#[test]
+fn until_end_of_turn_breaks_on_an_own_top_held_for_a_wasted_untap() {
+    for (monolith_tapped, expect_break) in [(false, true), (true, false)] {
+        let mut state = own_basalt_untap(monolith_tapped);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        let decision = priority_auto_pass_decision(&state, PlayerId(0));
+        if expect_break {
+            assert!(is_break(&decision), "untapped Monolith: the window is held");
+        } else {
+            assert!(is_pass(&decision), "tapped Monolith: own top passes");
         }
     }
 }

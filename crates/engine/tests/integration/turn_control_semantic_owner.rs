@@ -394,6 +394,8 @@ fn a_controlled_seats_land_tap_undoes_during_an_unless_payment() {
         trigger_event: None,
         effect_description: Some("unless payment witness".to_string()),
         remaining: vec![],
+        affected_object: None,
+        repeat: None,
     };
     assert_seat_submits_through(&runner, P1, P0);
 

@@ -75,17 +75,19 @@ it("keeps the starting-player result visible after the renderer throws", async (
     rounds: [[{ playerId: 0, value: 17 }, { playerId: 1, value: 4 }]],
     rolls: [{ playerId: 0, value: 17 }, { playerId: 1, value: 4 }],
     turnOrder: [
-      { slot_index: 0, player: 0, turn_number: 1, is_viewer: true, is_starting_player: true },
-      { slot_index: 1, player: 1, turn_number: 2, is_viewer: false, is_starting_player: false },
+      { slot_index: 0, player: 0, turn_number: 1, is_viewer: true },
+      { slot_index: 1, player: 1, turn_number: 2, is_viewer: false },
     ],
+    viewerTurnNumber: 2,
   } as unknown as DiceRollPayload);
   expect(renderer).toHaveBeenCalled();
   expect(reportBoundaryError).toHaveBeenCalled();
-  // The caption, the rolled values and the turn order all come from the static fallback.
-  expect(screen.getByText(/you play first/i)).toBeInTheDocument();
+  // The caption and the rolled values come from the static fallback; a stale payload's turn rows are not presented.
+  expect(screen.getByText(/you won the roll/i)).toBeInTheDocument();
   expect(screen.getAllByText("17").length).toBeGreaterThan(0);
   expect(screen.getAllByText("4").length).toBeGreaterThan(0);
-  expect(screen.getByText(/turn order/i)).toBeInTheDocument();
+  expect(screen.queryByText(/turn order/i)).toBeNull();
+  expect(screen.queryByText(/take turn/i)).toBeNull();
 });
 
 it("keeps the coin outcome visible after the coin renderer throws", async () => {

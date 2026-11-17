@@ -75,6 +75,12 @@ impl TacticalPolicy for TutorPolicy {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test witness: search-choice selections scored on this thread.
+    pub(crate) static SEARCH_SELECTIONS_SCORED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Score one whole `SelectCards` selection the engine issued for a search.
 ///
 /// Whole-selection rather than per-card, because a multi-card search is
@@ -96,6 +102,8 @@ pub(crate) fn score_search_choice_selection(
     ai_player: PlayerId,
     chosen: &[ObjectId],
 ) -> f64 {
+    #[cfg(test)]
+    SEARCH_SELECTIONS_SCORED.with(|c| c.set(c.get() + 1));
     let available_mana = crate::zone_eval::available_mana(state, ai_player);
     let intent = crate::eval::strategic_intent(state, ai_player);
     let mana_constrained = materially_mana_constrained_state(state, ai_player);

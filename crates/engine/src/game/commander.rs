@@ -702,7 +702,12 @@ mod tests {
         );
 
         let (mut departed, cmd_id, mut events) = build();
-        crate::game::elimination::eliminate_player(&mut departed, PlayerId(1), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut departed,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert_eq!(
             departed.objects[&cmd_id].zone,
             Zone::Exile,
@@ -1844,6 +1849,7 @@ mod tests {
             is_commander: true,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],

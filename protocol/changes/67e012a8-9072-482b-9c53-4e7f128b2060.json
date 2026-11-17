@@ -1,0 +1,6 @@
+{
+  "surfaces": [
+    "lobby"
+  ],
+  "reason": "Tournament deck submission for server-hosted play: a new SubmitTournamentDeck LobbyClientMessage (client to broker, carrying a DeckData) and a deck_submitted readiness flag on PlayerSummary (broker to client). Both additive; an older reader ignores the new field and no broker rejects an absent one. minimumLobby stays at 2."
+}

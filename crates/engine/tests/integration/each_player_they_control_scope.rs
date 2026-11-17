@@ -17,14 +17,12 @@
 //! CR 119.5: a "becomes [N]" effect sets each affected player's life total.
 //! CR 120.3: damage to each player is dealt to each player in turn.
 
-use engine::game::effects::life::resolve_set_life_total;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityKind, ControllerRef, Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
+    AbilityKind, ControllerRef, Effect, QuantityExpr, QuantityRef, TargetFilter,
 };
 use engine::types::format::FormatConfig;
-use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -39,6 +37,8 @@ const SHAMAN_ACTIVATED: &str = "Each player's life total becomes the number of c
 const WORLDFIRE_LIFE: &str = "Each player's life total becomes 1.";
 const REPAY_IN_KIND: &str =
     "Each player's life total becomes the lowest life total among all players.";
+const WORLDFIRE: &str =
+    "Exile all permanents. Exile all cards from all hands and graveyards. Each player's life total becomes 1.";
 const OKETRA: &str = "Your life total becomes equal to your starting life total.";
 
 /// Extract the `controller` of the lone `ObjectCount` quantity in `amount`.
@@ -208,11 +208,10 @@ fn acidic_soil_damages_each_player_by_their_own_land_count() {
 /// (count → `You`) OR the resolver fix (amount resolved once, pre-loop, from the
 /// caster's perspective) sets BOTH players to the caster's count (3) and fails.
 ///
-/// The `AllPlayers`-scoped `SetLifeTotal` is not a targeted spell, so it is
-/// resolved through the public resolver directly (mirroring the in-crate
-/// `set_life_total_all_players_sets_every_player_no_target` unit test) over a
-/// battlefield staged by `GameScenario`. The PARSED Biorhythm effect is used
-/// verbatim, so the per-player `ScopedPlayer` count is exercised end-to-end.
+/// Cast through the production announcement path with an empty target list:
+/// CR 115.1a makes Biorhythm untargeted (its text never says "target"), so the
+/// announcement must not demand a target slot (phase-rs/phase#10455). At the
+/// pre-fix base this cast is rejected with "No legal targets available".
 ///
 /// CR 119.5: life total is set to the per-player creature count.
 #[test]
@@ -226,15 +225,13 @@ fn biorhythm_sets_each_player_life_to_their_own_creature_count() {
     }
     scenario.add_vanilla(P1, 1, 1);
 
-    // Use the parsed Biorhythm effect (ScopedPlayer creature count).
-    let def = parse_effect_chain(BIORHYTHM, AbilityKind::Spell);
-    let effect = (*def.effect).clone();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Biorhythm", false, BIORHYTHM)
+        .with_mana_cost(ManaCost::zero())
+        .id();
 
     let mut runner = scenario.build();
-    let state = runner.state_mut();
-    let ability = ResolvedAbility::new(effect, vec![], ObjectId(1), P0);
-    let mut events = Vec::new();
-    resolve_set_life_total(state, &ability, &mut events).unwrap();
+    runner.cast(spell).resolve();
 
     // P0 life -> 3 (its own creatures), P1 life -> 1 (its own creature).
     assert_eq!(
@@ -255,13 +252,23 @@ fn biorhythm_sets_each_player_life_to_their_own_creature_count() {
 /// heroes' shared 60, so every side is set to 10. Reverting the seat-1
 /// dedup-key fix collapses the archenemy into the heroes' key and reads 60:
 /// the archenemy would rise to 60 and fail below.
+///
+/// Cast through the production announcement path with an empty target list
+/// (CR 115.1a: "each player's life total becomes …" names no target), which the
+/// pre-fix base rejects with "No legal targets available" (phase-rs/phase#10455).
 #[test]
 fn repay_in_kind_seat_one_archenemy_sets_all_sides_to_ten() {
     let mut config = FormatConfig::archenemy_commander();
     config.archenemy_player = Some(PlayerId(1));
     let mut scenario = GameScenario::new_with_format(config, 4, 42);
+    // The archenemy's seat is the active player in this harness, so the cast is
+    // announced from that seat — the production path only casts for the player
+    // holding priority, and the life-total assertion is caster-independent.
     scenario.at_phase(Phase::PreCombatMain);
-    let source = scenario.add_creature(P0, "Caster Bear", 1, 1).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(PlayerId(1), "Repay in Kind", false, REPAY_IN_KIND)
+        .with_mana_cost(ManaCost::zero())
+        .id();
     let mut runner = scenario.build();
 
     // Archenemy at 10; heroes splitting a shared 60.
@@ -270,11 +277,7 @@ fn repay_in_kind_seat_one_archenemy_sets_all_sides_to_ten() {
     runner.state_mut().players[2].life = 20;
     runner.state_mut().players[3].life = 20;
 
-    let def = parse_effect_chain(REPAY_IN_KIND, AbilityKind::Spell);
-    let effect = (*def.effect).clone();
-    let ability = ResolvedAbility::new(effect, vec![], source, P0);
-    let mut events = Vec::new();
-    resolve_set_life_total(runner.state_mut(), &ability, &mut events).unwrap();
+    runner.cast(spell).resolve();
 
     let state = runner.state();
     assert_eq!(
@@ -286,4 +289,29 @@ fn repay_in_kind_seat_one_archenemy_sets_all_sides_to_ten() {
         heroes_shared, 10,
         "the heroes' shared total is set to the minimum 10"
     );
+}
+
+/// CR 119.5: Worldfire's "Each player's life total becomes 1" is the FIXED
+/// amount arm of the `AllPlayers` `SetLifeTotal` resolver, which the Biorhythm
+/// and Repay in Kind tests (both dynamic amounts) do not exercise. It is also an
+/// untargeted `AllPlayers` spell, so it casts through the same announcement path
+/// (CR 115.1a) that this change fixed; at the pre-fix base the cast is rejected
+/// with "No legal targets available".
+#[test]
+fn worldfire_casts_through_the_production_path_and_sets_every_player_to_one() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Worldfire", false, WORLDFIRE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    // Distinct starting totals, so "every player becomes 1" is not vacuous.
+    runner.state_mut().players[0].life = 20;
+    runner.state_mut().players[1].life = 7;
+
+    runner.cast(spell).resolve();
+
+    assert_eq!(runner.life(P0), 1, "P0 set to 1 from 20");
+    assert_eq!(runner.life(P1), 1, "P1 set to 1 from 7");
 }

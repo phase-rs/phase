@@ -533,6 +533,8 @@ fn printed_counter_prompt_with_redirects(
                 .execute(AbilityDefinition::new(
                     AbilityKind::Spell,
                     Effect::ChangeZone {
+                        actor: engine::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
                         origin: None,
                         destination,
                         target: TargetFilter::SelfRef,
@@ -1130,7 +1132,12 @@ fn answered_unless_prompt_after_the_active_player_left_gives_priority_to_the_nex
             engine::types::phase::TurnDirection::Normal
         );
         // CR 800.4a: P0 leaves through the engine's elimination authority.
-        engine::game::elimination::eliminate_player(runner.state_mut(), P0, &mut Vec::new());
+        engine::game::elimination::eliminate_player(
+            runner.state_mut(),
+            P0,
+            engine::types::events::LossReason::Conceded,
+            &mut Vec::new(),
+        );
         assert!(runner.state().players[0].is_eliminated);
         assert!(runner.state().game_end.is_none());
         assert_eq!(runner.state().active_player, P0);

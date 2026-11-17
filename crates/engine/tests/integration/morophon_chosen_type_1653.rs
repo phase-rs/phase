@@ -111,6 +111,7 @@ fn morophon_creature_type_choice_marks_layers_dirty() {
 
     let source = crate::support::exact_named_choice_source(runner.state(), morophon);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: P0,
         choice_type: ChoiceType::creature_type(),
@@ -157,9 +158,10 @@ fn card_name_choice_marks_layers_dirty_for_chosen_name_static() {
 
     let choice_source = crate::support::exact_named_choice_source(runner.state(), source);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: P0,
-        choice_type: ChoiceType::CardName,
+        choice_type: ChoiceType::card_name(),
         options: Vec::new(),
         source: Some(choice_source),
         persist_player: None,

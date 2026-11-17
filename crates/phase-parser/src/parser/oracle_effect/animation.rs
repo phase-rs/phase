@@ -5,7 +5,7 @@ use nom::bytes::complete::{tag, tag_no_case, take_till, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
 use nom::combinator::{eof, opt, peek, recognize, value};
 use nom::multi::{many0, separated_list1};
-use nom::sequence::{pair, preceded};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::super::oracle_nom::error::{oracle_err, OracleError, OracleResult};
@@ -19,7 +19,7 @@ use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
-use crate::types::card_type::{CoreType, Supertype};
+use crate::types::card_type::{noncreature_subtype_set, CoreType, Supertype};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
@@ -62,23 +62,26 @@ pub(crate) fn parse_animation_spec(text: &str, _ctx: &mut ParseContext) -> Optio
     spec.supertypes = leading_supertypes;
     rest = after_supertypes;
 
-    // CR 107.3c: "X/X where X is ~'s power" — X is bound to a dynamic quantity
-    // (source's power), NOT the cost paid. This pattern must be detected BEFORE
-    // the X-cost activation path (parse_cost_x_become_pt_prefix) to avoid the
-    // false match that would emit CostXPaid (which evaluates to 0 for triggers).
-    // Covers Obuun, Mul Daya Ancestor and similar patterns.
-    // allow-noncombinator: case-insensitive phrase scan - nom lacks case-insensitive take_until
-    if let Some(where_x_pos) = rest.to_lowercase().find("where x is ") {
-        // Trim whitespace first so the trailing comma (from ", where X is") is
-        // exposed for removal. Without this, "reach, " keeps the comma because
-        // trim_end_matches(',') doesn't see past the trailing space.
-        let before_where = rest[..where_x_pos].trim().trim_end_matches(',').trim();
-        let after_where = &rest[where_x_pos + "where x is ".len()..];
+    // CR 107.3c + CR 107.3i: an explicit binder defines the same X for both
+    // P/T slots. Interpret the complete quantity expression before considering
+    // the announced-X fallback (Sage of the Maze, Obuun, Cactus Preserve).
+    if let Some((before_where, _, after_where)) = nom_primitives::scan_preceded(rest, |input| {
+        terminated(
+            tag_no_case::<_, _, OracleError<'_>>("where x is"),
+            alt((multispace1, eof)),
+        )
+        .parse(input)
+    }) {
+        // Trim whitespace before the comma so it cannot leak into keywords.
+        let before_where = before_where.trim().trim_end_matches(',').trim();
+        let after_where = after_where.trim();
+        if after_where.is_empty() {
+            return None;
+        }
         let after_where_lower = after_where.to_lowercase();
         rest = parse_cost_x_become_pt_prefix(before_where).unwrap_or(before_where);
 
-        let (_, qty) = nom_quantity::parse_quantity_ref_complete(&after_where_lower).ok()?;
-        let dynamic_qty = QuantityExpr::Ref { qty };
+        let dynamic_qty = super::lower::parse_where_x_quantity_expression(&after_where_lower)?;
         spec.dynamic_power = Some(dynamic_qty.clone());
         spec.dynamic_toughness = Some(dynamic_qty);
     }
@@ -553,6 +556,10 @@ fn parse_animation_supertype(input: &str) -> OracleResult<'_, AnimationTypeToken
 /// tokens (`X` in "X/X"), lowercase connectives (`and`, `gets`, `gains`,
 /// `until`), and mid-word positions (if followed by `/`, `:`, digits, etc.).
 fn parse_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    peek(satisfy(|c: char| c.is_ascii_uppercase())).parse(input)?;
+    if let Ok(parsed) = parse_registered_animation_subtype(input) {
+        return Ok(parsed);
+    }
     let (rest, word) = recognize(pair(
         // First char: capital letter.
         satisfy(|c: char| c.is_ascii_uppercase()),
@@ -599,6 +606,9 @@ fn parse_animation_type_sequence(input: &str) -> OracleResult<'_, Vec<AnimationT
 /// expression (e.g., trigger-effect text that has been pre-lowercased by the
 /// oracle_trigger pipeline).
 fn parse_animation_subtype_loose(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    if let Ok(parsed) = parse_registered_animation_subtype(input) {
+        return Ok(parsed);
+    }
     let (rest, word) = recognize(pair(
         satisfy(|c: char| c.is_ascii_alphabetic()),
         pair(
@@ -615,6 +625,25 @@ fn parse_animation_subtype_loose(input: &str) -> OracleResult<'_, AnimationTypeT
     )))
     .parse(rest)?;
     Ok((rest, AnimationTypeToken::Subtype(word.to_string())))
+}
+
+/// CR 205.3: registered subtype words identify subtypes.
+/// Plural canonicalization is a parser convention, not a rules equivalence.
+/// Retain this grammar's punctuation boundary even when the registry accepts
+/// a broader word boundary, and consume multiword subtypes as one token.
+fn parse_registered_animation_subtype(input: &str) -> OracleResult<'_, AnimationTypeToken> {
+    let Some((canonical, consumed)) = super::super::oracle_util::parse_subtype(input) else {
+        return Err(oracle_err(input));
+    };
+    let rest = &input[consumed..];
+    let (rest, _) = peek(alt((
+        eof,
+        recognize(satisfy(|c: char| {
+            c.is_whitespace() || matches!(c, ',' | '.' | ';' | ')' | '!' | '?')
+        })),
+    )))
+    .parse(rest)?;
+    Ok((rest, AnimationTypeToken::Subtype(canonical)))
 }
 
 /// Case-insensitive type-token parser: core type / supertype / subtype,
@@ -864,7 +893,16 @@ fn parse_animation_type_parts(text: &str, infer_creature: bool) -> (Vec<Supertyp
     if core_types.is_empty() && subtypes.is_empty() {
         return (supertypes, Vec::new());
     }
-    if core_types.is_empty() && infer_creature {
+    // CR 205.3 + CR 301.7: a P/T with no stated card type makes the object a
+    // creature only when its subtypes are creature types. A subtype that the
+    // card-type rules assign to another type (Vehicle, Treasure, Equipment)
+    // keeps that type's object noncreature: a Vehicle is a creature only while
+    // crewed.
+    let only_noncreature_subtypes = !subtypes.is_empty()
+        && subtypes
+            .iter()
+            .all(|subtype| noncreature_subtype_set(subtype).is_some());
+    if core_types.is_empty() && infer_creature && !only_noncreature_subtypes {
         push_unique_string(&mut core_types, "Creature");
     }
 
@@ -1037,6 +1075,127 @@ pub(crate) fn parse_animation_conjunct_keywords(tail: &str) -> Option<Vec<Keywor
 #[cfg(test)]
 mod test_den_bugbear {
     use super::*;
+    use crate::parser::parse_oracle_text;
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, Duration, Effect, TargetFilter, TypeFilter,
+    };
+
+    /// CR 205.3 + CR 301.7: a stated P/T with only a noncreature subtype does
+    /// not make the object a creature; a creature subtype still does. New New
+    /// York's printed line gives noncreature artifacts the Vehicle subtype and
+    /// a 3/3 P/T, and they become creatures only when crewed.
+    #[test]
+    fn animation_pt_with_a_noncreature_subtype_does_not_infer_creature() {
+        assert_eq!(
+            parse_animation_type_parts("Vehicles in addition to their other types", true).1,
+            vec!["Vehicle".to_string()]
+        );
+        assert_eq!(
+            parse_animation_type_parts("Treasure", true).1,
+            vec!["Treasure".to_string()]
+        );
+        assert_eq!(
+            parse_animation_type_parts("Dragon", true).1,
+            vec!["Creature".to_string(), "Dragon".to_string()],
+            "a creature subtype still implies a creature"
+        );
+
+        // The plural form (New New York) and the singular form with a Vehicle
+        // exclusion in the subject (Ghirapur) are different grammar branches.
+        for (name, line, power, toughness, crew) in [
+            (
+                "New New York",
+                "At the beginning of combat on your turn, until end of turn, noncreature artifacts you control become 3/3 Vehicles in addition to their other types and gain flying, haste, and crew 1.",
+                3,
+                3,
+                1,
+            ),
+            (
+                "Ghirapur",
+                "At the beginning of combat on your turn, until end of turn, each noncreature, non-Vehicle artifact you control becomes a 5/3 Vehicle in addition to its other types and gains trample, haste, and crew 2.",
+                5,
+                3,
+                2,
+            ),
+        ] {
+            let parsed = parse_oracle_text(line, name, &[], &["Plane".into()], &[]);
+            let trigger = parsed.triggers.first().expect("the combat trigger");
+            let Some(execute) = trigger.execute.as_ref() else {
+                panic!("{name}: the trigger carries its animation");
+            };
+            let Effect::GenericEffect {
+                static_abilities, ..
+            } = execute.effect.as_ref()
+            else {
+                panic!("{name}: expected an animation effect, got {:?}", execute.effect);
+            };
+            let modifications: Vec<_> = static_abilities
+                .iter()
+                .flat_map(|s| &s.modifications)
+                .collect();
+            assert!(
+                modifications.contains(&&ContinuousModification::AddSubtype {
+                    subtype: "Vehicle".into()
+                }),
+                "{name}: the objects become Vehicles: {modifications:?}"
+            );
+            assert!(
+                !modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddType {
+                        core_type: CoreType::Creature
+                    }
+                )),
+                "{name}: a Vehicle is not a creature until crewed: {modifications:?}"
+            );
+            assert!(
+                modifications.contains(&&ContinuousModification::SetPower { value: power }),
+                "{name}: {modifications:?}"
+            );
+            assert!(
+                modifications.contains(&&ContinuousModification::SetToughness { value: toughness }),
+                "{name}: {modifications:?}"
+            );
+            assert!(
+                modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Crew { power: got, .. }
+                    } if *got == crew
+                )),
+                "{name}: crew {crew}: {modifications:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn animation_registered_subtypes_are_canonical_and_word_bounded() {
+        for (printed, canonical) in [
+            ("Warriors", "Warrior"),
+            ("Elves", "Elf"),
+            ("Time Lords", "Time Lord"),
+        ] {
+            let (_, token) = parse_animation_subtype(printed).expect("registered subtype");
+            assert!(matches!(token, AnimationTypeToken::Subtype(ref name) if name == canonical));
+            let descriptor = format!("{printed} in addition to their other types");
+            assert_eq!(
+                parse_becomes_type_modifications(&descriptor),
+                vec![ContinuousModification::AddSubtype {
+                    subtype: canonical.into()
+                }]
+            );
+            assert_eq!(
+                parse_becomes_type_modifications(&descriptor.to_lowercase()),
+                vec![ContinuousModification::AddSubtype {
+                    subtype: canonical.into()
+                }]
+            );
+        }
+        assert!(parse_animation_subtype("warriors").is_err());
+        assert!(parse_animation_subtype("Warriors3/3").is_err());
+        assert!(parse_animation_subtype("Warriors:").is_err());
+        assert!(parse_animation_subtype("Noveltype").is_ok());
+    }
 
     /// #2917 (CR 305.7 / 613.1d): a trailing "that's still a land" rider must
     /// not truncate the keyword list. Nissa, Who Shakes the World grants the
@@ -1696,6 +1855,115 @@ mod test_den_bugbear {
             spec.types.contains(&"Plant".to_string()),
             "must include Plant"
         );
+    }
+
+    /// SHAPE — Sage of the Maze defines one composite X for both P/T slots.
+    /// CR 107.3c + CR 107.3i: the text defines X; both instances share its value.
+    #[test]
+    fn animation_where_x_expression_shape_and_malformed_binders() {
+        let spec = parse_animation_spec(
+            "an X/X Citizen creature with haste in addition to its other types, where X is twice the number of Gates you control",
+            &mut ParseContext::default(),
+        )
+        .expect("Sage of the Maze's verbatim descriptor must parse");
+        let Some(QuantityExpr::Multiply { factor: 2, inner }) = &spec.dynamic_power else {
+            panic!(
+                "expected a doubled Gate count, got {:?}",
+                spec.dynamic_power
+            );
+        };
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(filter),
+                },
+        } = inner.as_ref()
+        else {
+            panic!("expected a typed object count, got {inner:?}");
+        };
+        assert!(filter
+            .type_filters
+            .contains(&TypeFilter::Subtype("Gate".into())));
+        // CR 109.5: 'you' refers to this ability's controller.
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert_eq!(spec.dynamic_power, spec.dynamic_toughness);
+        assert_eq!((spec.power, spec.toughness), (None, None));
+        assert!(spec.types.contains(&"Creature".into()));
+        assert!(spec.types.contains(&"Citizen".into()));
+        // allow-raw-authority: parser-output keyword vector, with no live GameState
+        assert!(spec.keywords.contains(&Keyword::Haste));
+
+        // Robustness inputs, not invented Oracle: an explicit empty/broken
+        // binder must not be reinterpreted as announced mana X.
+        for malformed in [
+            "an X/X Citizen creature with haste, where X is ",
+            "an X/X Citizen creature with haste, where X is",
+            "an X/X Citizen creature with haste, where X is twice",
+        ] {
+            assert!(
+                parse_animation_spec(malformed, &mut ParseContext::default()).is_none(),
+                "{malformed}"
+            );
+        }
+        // The marker must end at a word boundary, not inside 'island'.
+        let non_marker = parse_animation_spec(
+            "an X/X creature, where X island",
+            &mut ParseContext::default(),
+        )
+        .expect("a non-marker does not introduce an explicit X binder");
+        assert_eq!(
+            non_marker.dynamic_power,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid
+            })
+        );
+    }
+
+    /// SHAPE — full printed Sage text must retain the animation's target,
+    /// duration and restriction, not merely its separate mana ability.
+    #[test]
+    fn sage_of_the_maze_full_oracle_animation_shape() {
+        let parsed = parse_oracle_text(
+            "{T}: Add two mana in any combination of colors.\n{T}: Until end of turn, target land you control becomes an X/X Citizen creature with haste in addition to its other types, where X is twice the number of Gates you control. Activate only as a sorcery.\nTap an untapped Gate you control: Untap this creature.",
+            "Sage of the Maze", &[], &["Creature".into()], &["Elf".into(), "Wizard".into()],
+        );
+        let animation = parsed.abilities.get(1).expect("second printed ability");
+        // CR 602.5d: this animation retains sorcery timing.
+        assert!(animation.is_sorcery_speed());
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+            ..
+        } = animation.effect.as_ref()
+        else {
+            panic!(
+                "expected a real animation effect, got {:?}",
+                animation.effect
+            );
+        };
+        // CR 611.2a: the effect lasts until end of turn.
+        assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+        let Some(TargetFilter::Typed(target)) = target else {
+            panic!("expected a controlled-land target");
+        };
+        assert!(target.type_filters.contains(&TypeFilter::Land));
+        assert_eq!(target.controller, Some(ControllerRef::You));
+        let modifications: Vec<_> = static_abilities
+            .iter()
+            .flat_map(|s| &s.modifications)
+            .collect();
+        let power = modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::SetPowerDynamic { value } => Some(value),
+                _ => None,
+            })
+            .expect("dynamic power survives full parsing");
+        assert!(matches!(power, QuantityExpr::Multiply { factor: 2, .. }));
+        assert!(modifications.iter().any(
+            |m| matches!(m, ContinuousModification::SetToughnessDynamic { value } if value == power)
+        ));
     }
 
     /// CR 107.3c: "X/X where X is ~'s power" — X is bound to the source's power,

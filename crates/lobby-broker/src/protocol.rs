@@ -373,8 +373,8 @@ pub struct TournamentRequestId(pub u64);
 ///       CR 608.2g: Finale of Promise, Collected Conjuring). An older peer
 ///       would leave the spell on the stack in no zone after the window, so
 ///       full-game and P2P refuse the mismatch (wire 92). The same bump adds
-///       `WaitingFor::SpellCopyOrderChoice` and
-///       `PendingRepeatIteration.copy_order_fixed` (CR 405.3: the controller
+///       `WaitingFor::MemberOrderChoice` and
+///       `PendingRepeatIteration.order_fixed` (CR 405.3: the controller
 ///       orders a batch of spell copies).
 /// 109 — CR 201.5a granter binding: `ObjectScope::GrantingObject` and
 ///      `ObjectScope::SpecificObject`, `TargetFilter::GrantingObject { bound }`,
@@ -1238,6 +1238,21 @@ pub const MIN_SUPPORTED_PROTOCOL: u32 = PROTOCOL_VERSION.saturating_sub(1);
 /// broker's window went disjoint from the shipped client's. This constant is
 /// the fix — it moves only for reasons the lobby can actually observe.
 ///
+/// 22 — Tournament deck submission for server-hosted play: a new
+///      `SubmitTournamentDeck` [`LobbyClientMessage`] (client → broker, carrying
+///      a `DeckData`) — the "a lobby variant is added" trigger — and a
+///      `deck_submitted` readiness flag added to `PlayerSummary` (broker →
+///      client, on `TournamentUpdate`/`GetTournament`) — the "a field is added"
+///      trigger. The deck itself is private and never projected.
+///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move: both are additive (an
+///      older reader ignores the new `PlayerSummary` field, and no broker rejects
+///      an absent one), and no client emits `SubmitTournamentDeck` until the
+///      hosted-play UI ships behind its own client-side capability floor.
+/// 21 — `DeckData`/`PlayerDeckList` gain an optional name-keyed printings
+///      sidecar (owner-chosen card printings, display-only). Merged from main
+///      (`protocol/changes/e1e92950-…json`); additive, so
+///      [`MIN_SUPPORTED_LOBBY_PROTOCOL`] does not move. Listed here so the jump
+///      from 20 to this message's 22 is traceable.
 /// 19 — Prospective: no lobby variant or field changes shape in this
 ///      commit. Moved ahead of the `PlanechaseCommander` `GameFormat`
 ///      variant, on the same terms as 11 and 16 (see those entries for the
@@ -1682,6 +1697,13 @@ pub struct PlayerSummary {
     pub player_key: String,
     pub display_name: String,
     pub dropped: bool,
+    /// Whether this entrant has submitted a deck for server-hosted play
+    /// ([`crate::tournament::TournamentManager::submit_deck`]) — a readiness flag
+    /// the client renders (e.g. "deck submitted" / "deck needed"). Only the
+    /// boolean crosses the wire: the deck itself is private and NEVER projected,
+    /// so an opponent cannot see a decklist before the match.
+    #[serde(default)]
+    pub deck_submitted: bool,
 }
 
 impl From<&crate::tournament::TournamentPlayer> for PlayerSummary {
@@ -1690,6 +1712,7 @@ impl From<&crate::tournament::TournamentPlayer> for PlayerSummary {
             player_key: player.player_key.clone(),
             display_name: player.display_name.clone(),
             dropped: player.dropped,
+            deck_submitted: player.deck.is_some(),
         }
     }
 }
@@ -1838,6 +1861,7 @@ impl From<&crate::tournament::TournamentMeta> for TournamentView {
                         player_key: key.clone(),
                         display_name: key.clone(),
                         dropped: false,
+                        deck_submitted: false,
                     }
                 })
         };
@@ -1867,6 +1891,12 @@ impl From<&crate::tournament::TournamentMeta> for TournamentView {
 /// `serde_json::from_str` — that routes unknown tags to the reject path.
 /// (No `PartialEq`: `DeckData` is not `PartialEq`, matching the canonical
 /// `ClientMessage`, which is also not `PartialEq`.)
+// clippy::large_enum_variant: `CreateGameWithSettings` is the outlier. This
+// enum is a short-lived per-frame deserialize target that is matched and
+// destructured at once, never stored or queued, so boxing that variant's fields
+// buys nothing but call-site churn. (Same allow as the canonical
+// `ClientMessage`; this subset's variant balance trips the lint on its own.)
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum LobbyClientMessage {
@@ -1894,7 +1924,11 @@ pub enum LobbyClientMessage {
         player_count: u8,
         #[serde(default)]
         match_config: MatchConfig,
-        #[serde(default)]
+        /// Relayed to the host's build only, so decoded as the host's engine wrote it.
+        #[serde(
+            default,
+            deserialize_with = "FormatConfig::deserialize_recorded_option"
+        )]
         format_config: Option<FormatConfig>,
         #[serde(default)]
         room_name: Option<String>,
@@ -2042,6 +2076,21 @@ pub enum LobbyClientMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request_id: Option<TournamentRequestId>,
     },
+    /// Player-gated: submit (or resubmit) the token owner's deck for
+    /// server-hosted play. Held privately on the entrant until the server spawns
+    /// their pairing's table; the tournament enforces no deck legality. The token
+    /// need only belong to a seated, non-dropped entrant (not to any particular
+    /// pairing) — a deck is per-event, not per-pairing.
+    SubmitTournamentDeck {
+        code: String,
+        player_token: String,
+        deck: DeckData,
+        /// This caller's [`TournamentRequestId`]. See
+        /// [`LobbyClientMessage::StartTournamentRound`] — same additive,
+        /// optional shape, same `None`-means-uncorrelated meaning.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<TournamentRequestId>,
+    },
     /// Player-gated: drop the token's owner from the event.
     DropFromTournament {
         code: String,
@@ -2114,6 +2163,7 @@ impl LobbyClientMessage {
         match self {
             Self::StartTournamentRound { request_id, .. }
             | Self::ReportMatchResult { request_id, .. }
+            | Self::SubmitTournamentDeck { request_id, .. }
             | Self::DropFromTournament { request_id, .. }
             | Self::EndTournament { request_id, .. } => *request_id,
             Self::ClientHello { .. }
@@ -2372,6 +2422,20 @@ pub enum ParsedFrame {
     /// bounds in [`crate::validation`]. Carries a human-readable reason for the
     /// `Error` reply.
     Malformed(String),
+    /// A fully-deserialized, correlated tournament action whose field values
+    /// failed validation. Unlike [`Self::Malformed`] — a bare `Error` the
+    /// correlated client authority ignores — this carries the request id so the
+    /// shell answers with a correlated `TournamentActionRejected`, settling the
+    /// client's pending submission instead of leaving it to time out. Only a
+    /// frame that adopts the optional correlation contract AND is routinely
+    /// trippable by a non-hostile client (today: `SubmitTournamentDeck`, whose
+    /// `DeckData` can legitimately approach the per-list caps) takes this path; an
+    /// uncorrelated (`None`) one keeps [`Self::Malformed`]. This mirrors the
+    /// native boundary's split in `server_core::wire_rejection_message`.
+    RejectedTournamentAction {
+        request_id: TournamentRequestId,
+        reason: String,
+    },
     /// The frame's `type` is not a known lobby tag. The shell routes this to
     /// the same reject path as a mode-disabled message.
     UnknownTag(String),
@@ -2405,6 +2469,7 @@ fn is_known_lobby_tag(tag: &str) -> bool {
             | "GetTournament"
             | "StartTournamentRound"
             | "ReportMatchResult"
+            | "SubmitTournamentDeck"
             | "DropFromTournament"
             | "EndTournament"
             | "RenewTournamentCredential"
@@ -2437,9 +2502,29 @@ pub fn parse_lobby_client_message(text: &str) -> ParsedFrame {
     match serde_json::from_str::<LobbyClientMessage>(&reconstructed) {
         Ok(msg) => match crate::validation::validate_lobby_message(&msg) {
             Ok(()) => ParsedFrame::Message(Box::new(msg)),
-            Err(reason) => ParsedFrame::Malformed(reason),
+            Err(reason) => correlated_tournament_rejection(&msg, reason),
         },
         Err(e) => ParsedFrame::Malformed(e.to_string()),
+    }
+}
+
+/// Route a validation refusal on a fully-deserialized frame to a correlated
+/// [`ParsedFrame::RejectedTournamentAction`] when the frame is a routinely-
+/// trippable tournament action that adopted the correlation contract, and to a
+/// bare [`ParsedFrame::Malformed`] otherwise. The native boundary makes the same
+/// split in `server_core::wire_rejection_message`; keeping both in step is what
+/// lets a correlated `SubmitTournamentDeck` settle identically on either
+/// transport.
+fn correlated_tournament_rejection(msg: &LobbyClientMessage, reason: String) -> ParsedFrame {
+    match msg {
+        LobbyClientMessage::SubmitTournamentDeck {
+            request_id: Some(request_id),
+            ..
+        } => ParsedFrame::RejectedTournamentAction {
+            request_id: *request_id,
+            reason,
+        },
+        _ => ParsedFrame::Malformed(reason),
     }
 }
 
@@ -2563,6 +2648,47 @@ mod tests {
         ));
     }
 
+    /// The Worker transport boundary: a fully-deserialized `SubmitTournamentDeck`
+    /// whose deck fails its bounds carries its `request_id` through the refusal as
+    /// a correlated [`ParsedFrame::RejectedTournamentAction`] (so the broker-wasm
+    /// shell answers with a correlated `TournamentActionRejected`), while the
+    /// uncorrelated (`None`) frame keeps the bare [`ParsedFrame::Malformed`].
+    /// REVERT-FAIL: route the `Some` case back to `Malformed` and the exact-id
+    /// assertion fails.
+    #[test]
+    fn oversized_tournament_deck_preserves_request_id_through_refusal() {
+        let over_bounds = || engine::starter_decks::DeckData {
+            main_deck: vec!["Forest".to_string(); crate::inbound_guard::MAX_MAIN_DECK_ENTRIES + 1],
+            ..Default::default()
+        };
+        let request_id = TournamentRequestId(7);
+        let correlated = LobbyClientMessage::SubmitTournamentDeck {
+            code: "TOUR01".to_string(),
+            player_token: "tok".to_string(),
+            deck: over_bounds(),
+            request_id: Some(request_id),
+        };
+        let frame = serde_json::to_string(&correlated).expect("serialize");
+        match parse_lobby_client_message(&frame) {
+            ParsedFrame::RejectedTournamentAction {
+                request_id: got, ..
+            } => assert_eq!(got, request_id),
+            other => panic!("expected RejectedTournamentAction, got {other:?}"),
+        }
+
+        let uncorrelated = LobbyClientMessage::SubmitTournamentDeck {
+            code: "TOUR01".to_string(),
+            player_token: "tok".to_string(),
+            deck: over_bounds(),
+            request_id: None,
+        };
+        let frame = serde_json::to_string(&uncorrelated).expect("serialize");
+        assert!(matches!(
+            parse_lobby_client_message(&frame),
+            ParsedFrame::Malformed(_)
+        ));
+    }
+
     // --- Tournament wire surface (lobby protocol 4) -----------------------
 
     use crate::tournament::{
@@ -2611,6 +2737,7 @@ mod tests {
                     ),
                     display_name: "Alice".to_string(),
                     dropped: false,
+                    deck: None,
                 },
                 TournamentPlayer {
                     player_key: "key-b".to_string(),
@@ -2620,6 +2747,7 @@ mod tests {
                     ),
                     display_name: "Bob".to_string(),
                     dropped: true,
+                    deck: None,
                 },
             ],
             pairings: vec![TournamentPairing {
@@ -2711,6 +2839,10 @@ mod tests {
                 r#"{"type":"ReportMatchResult","data":{"code":"TOUR01","pairing_id":0,"player_token":"tok","outcome":{"Decisive":{"winner":"key-a","game_wins":{"key-a":2,"key-b":1}}}}}"#,
             ),
             (
+                "SubmitTournamentDeck",
+                r#"{"type":"SubmitTournamentDeck","data":{"code":"TOUR01","player_token":"tok","deck":{"main_deck":["Island","Forest"]}}}"#,
+            ),
+            (
                 "DropFromTournament",
                 r#"{"type":"DropFromTournament","data":{"code":"TOUR01","player_token":"tok"}}"#,
             ),
@@ -2730,6 +2862,10 @@ mod tests {
             (
                 "ReportMatchResult (correlated)",
                 r#"{"type":"ReportMatchResult","data":{"code":"TOUR01","pairing_id":0,"player_token":"tok","outcome":{"Decisive":{"winner":"key-a","game_wins":{"key-a":2,"key-b":1}}},"request_id":43}}"#,
+            ),
+            (
+                "SubmitTournamentDeck (correlated)",
+                r#"{"type":"SubmitTournamentDeck","data":{"code":"TOUR01","player_token":"tok","deck":{"main_deck":["Island","Forest"]},"request_id":44}}"#,
             ),
             (
                 "DropFromTournament (correlated)",
@@ -3036,15 +3172,21 @@ mod tests {
                 outcome: PodOutcome::Draw,
                 request_id: Some(TournamentRequestId(2)),
             },
+            LobbyClientMessage::SubmitTournamentDeck {
+                code: "TOUR01".to_string(),
+                player_token: "tok".to_string(),
+                deck: DeckData::default(),
+                request_id: Some(TournamentRequestId(3)),
+            },
             LobbyClientMessage::DropFromTournament {
                 code: "TOUR01".to_string(),
                 player_token: "tok".to_string(),
-                request_id: Some(TournamentRequestId(3)),
+                request_id: Some(TournamentRequestId(4)),
             },
             LobbyClientMessage::EndTournament {
                 code: "TOUR01".to_string(),
                 organizer_token: "tok".to_string(),
-                request_id: Some(TournamentRequestId(4)),
+                request_id: Some(TournamentRequestId(5)),
             },
         ];
         for (i, msg) in gated.iter().enumerate() {
@@ -3314,8 +3456,14 @@ mod tests {
     /// (point replies) legitimately do.
     #[test]
     fn broadcast_tournament_messages_never_carry_a_token() {
-        let meta = meta_fixture();
+        let mut meta = meta_fixture();
+        const PRIVATE_CARD: &str = "private-deck-card-do-not-leak";
+        meta.players[0].deck = Some(DeckData {
+            main_deck: vec![PRIVATE_CARD.to_string()],
+            ..Default::default()
+        });
         let view = TournamentView::from(&meta);
+        assert!(view.players[0].deck_submitted);
         let broadcasts = [
             LobbyServerMessage::TournamentUpdate {
                 code: meta.code.clone(),
@@ -3334,6 +3482,10 @@ mod tests {
             for secret in [ORGANIZER_SECRET, PLAYER_A_SECRET, PLAYER_B_SECRET] {
                 assert!(!json.contains(secret), "{json} leaked {secret}");
             }
+            assert!(
+                !json.contains(PRIVATE_CARD),
+                "{json} leaked a submitted deck"
+            );
         }
     }
 
@@ -3488,6 +3640,47 @@ mod tests {
                 other => panic!("expected CreateGameWithSettings, got {other:?}"),
             },
             other => panic!("expected Message, got {other:?}"),
+        }
+    }
+
+    /// The deck carriers' `bracket_tier` is nullable from lobby protocol 17: an
+    /// explicit `null` and an omitted field both decode as undeclared, never as a
+    /// declared Core, and a named tier still decodes as declared. The lobby moved
+    /// because `DeckData`'s field type changed. A broker below 17 would reject a
+    /// `null` frame, but no client sends one: `brokerClient` registers and joins
+    /// with an empty, tier-less deck.
+    #[test]
+    fn deck_carriers_decode_a_null_or_omitted_bracket_tier_as_undeclared() {
+        use engine::game::bracket_estimate::CommanderBracketTier;
+
+        let deck_tier = |frame: &str| match parse_lobby_client_message(frame) {
+            ParsedFrame::Message(msg) => match *msg {
+                LobbyClientMessage::CreateGameWithSettings { deck, .. }
+                | LobbyClientMessage::JoinGameWithPassword { deck, .. } => deck.bracket_tier,
+                other => panic!("expected a deck carrier, got {other:?}"),
+            },
+            other => panic!("expected Message, got {other:?}"),
+        };
+        for (deck, expected) in [
+            (r#"{"main_deck":[],"bracket_tier":null}"#, None),
+            (r#"{"main_deck":[]}"#, None),
+            (
+                r#"{"main_deck":[],"bracket_tier":"core"}"#,
+                Some(CommanderBracketTier::Core),
+            ),
+        ] {
+            let create = format!(
+                r#"{{"type":"CreateGameWithSettings","data":{{"deck":{deck},"display_name":"Host","public":true,"password":null,"timer_seconds":null}}}}"#
+            );
+            let join = format!(
+                r#"{{"type":"JoinGameWithPassword","data":{{"game_code":"ABC123","deck":{deck},"display_name":"Guest","password":null}}}}"#
+            );
+            assert_eq!(
+                deck_tier(&create),
+                expected,
+                "CreateGameWithSettings {deck}"
+            );
+            assert_eq!(deck_tier(&join), expected, "JoinGameWithPassword {deck}");
         }
     }
 
