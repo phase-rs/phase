@@ -1,4 +1,4 @@
-use crate::game::effects::deal_damage::{run_object_damage_batch, DamageContext};
+use crate::game::effects::deal_damage::{run_object_damage_batch, DamageContext, DamageTail};
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -167,17 +167,27 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_fight_damage(state, ability, events).map(|_| ())
+}
+
+/// CR 701.14a + CR 608.2f + CR 608.2c: a fight's two directions as one damage batch, reporting
+/// who places its tail.
+pub(crate) fn resolve_fight_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     crate::game::replacement::with_damage_batch(state, ability, |state| {
         resolve_fight(state, ability, events)
     })
 }
 
-/// The body of [`resolve`], run inside the fight's damage batch.
+/// The body of [`resolve_fight_damage`], run inside the fight's damage batch.
 fn resolve_fight(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<DamageTail, EffectError> {
     // CR 701.14a: Resolve the two fighters.
     // - "~ fights target creature" / "it fights target …": one chosen object target;
     //   the subject (~ / enchanted creature) is the other fighter.
@@ -195,7 +205,7 @@ fn resolve_fight(
                 source_id: ability.source_id,
                 subject: None,
             });
-            return Ok(());
+            return Ok(DamageTail::Caller);
         }
     };
 
@@ -206,7 +216,7 @@ fn resolve_fight(
             source_id: ability.source_id,
             subject: None,
         });
-        return Ok(());
+        return Ok(DamageTail::Caller);
     }
 
     // CR 701.14a + CR 120.8: past the CR 701.14b checks both creatures fight,

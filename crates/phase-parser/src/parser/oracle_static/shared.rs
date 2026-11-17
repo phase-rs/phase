@@ -5,7 +5,7 @@ use super::anthem::rewrite_self_pronoun_subject;
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
-use crate::types::ability::BlockPairDirection;
+use crate::types::ability::{BlockPairDirection, PlayerScope};
 use nom::bytes::complete::is_not;
 use nom::character::complete::anychar;
 use nom::combinator::{map_opt, not, success, value};
@@ -904,7 +904,11 @@ impl GrantedCastKeywordKind {
 /// pass binds each one once the affected set is known. Binding is **per
 /// quantity**, keyed on the scope the parser recorded for that individual
 /// counter read, so a static that reads counters on `~` AND on its recipient
-/// keeps both referents: the explicit `Source` read is never touched.
+/// keeps both referents: the explicit `Source` read is never touched. The
+/// counter-kind census of a pronoun ("for each kind of counter on it") reaches
+/// this pass as a `SelfRef` placeholder — from the anthem / continuous route's
+/// deferred entry, or from a combat tax on the source permanent itself — and is
+/// bound by the same pass (see `bind_anaphoric_counter_ref`).
 ///
 /// This is the quantity-axis twin of `StaticCondition::RecipientHasCounters`
 /// (the recipient analog of `HasCounters` on the condition axis) — the two
@@ -970,11 +974,37 @@ fn bind_anaphoric_counters_in_condition(cond: &mut StaticCondition, bound: Objec
 
 /// CR 608.2k: The leaf binder — retargets a deferred counter anaphor and leaves
 /// every other `QuantityRef` and every already-bound scope untouched.
+///
+/// Two pronoun forms reach it. The counter COUNT ("for each +1/+1 counter on
+/// it") parks the pronoun on `ObjectScope::Anaphoric`. The counter-KIND census
+/// ("for each kind of counter on it/them") arrives as `SelfRef`: the
+/// placeholder the anthem / continuous route's deferred entry
+/// (`oracle_quantity::parse_for_each_clause_deferred`) emits for a pronoun of
+/// either number, or a combat tax's census, which `parse_combat_tax_body` reads
+/// only for a tax on the source permanent itself (so it stays `SelfRef`). Every
+/// other entry declines the pronoun census, and an explicit "~" is declined by
+/// every census entry.
+///
+/// CR 611.3a + CR 613.4c: a self-scoped static keeps `SelfRef` (the pronoun
+/// names the source). In a per-recipient static the pronoun names each affected
+/// object, so the census is rebound to the identity filter that follows the
+/// recipient (`FilterProp::Another` is recipient-relative while a recipient is
+/// bound, `game::filter`). The rebound filter is no longer `SelfRef`, so a second
+/// lowering pass leaves it untouched.
 fn bind_anaphoric_counter_ref(qty: &mut QuantityRef, bound: ObjectScope) {
-    if let QuantityRef::CountersOn { scope, .. } = qty {
-        if *scope == ObjectScope::Anaphoric {
+    match qty {
+        QuantityRef::CountersOn { scope, .. } if *scope == ObjectScope::Anaphoric => {
             *scope = bound;
         }
+        QuantityRef::DistinctCounterKindsAmong { filter }
+            if bound == ObjectScope::Recipient && matches!(filter, TargetFilter::SelfRef) =>
+        {
+            *filter =
+                TargetFilter::Typed(TypedFilter::permanent().properties(vec![FilterProp::Not {
+                    prop: Box::new(FilterProp::Another),
+                }]));
+        }
+        _ => {}
     }
 }
 
@@ -1059,15 +1089,14 @@ fn continuous_modification_dynamic_quantity_mut(
 
 /// CR 608.2k: Bind every **deferred** counter anaphor in a dynamic magnitude to
 /// `bound`. Mirrors `rebind_anaphoric_object_scope` (`oracle_effect/mod.rs`),
-/// the effect-side authority for the same pronoun, and touches only
-/// `ObjectScope::Anaphoric` — an explicit `Source` (`~`) or `Target` ("that
-/// creature") counter read in the same expression keeps its own referent.
+/// the effect-side authority for the same pronoun, and touches only the pronoun
+/// forms `bind_anaphoric_counter_ref` names — an explicit `Source` (`~`) or
+/// `Target` ("that creature") counter read in the same expression keeps its own
+/// referent.
 fn bind_anaphoric_counters(expr: &mut QuantityExpr, bound: ObjectScope) {
     match expr {
-        QuantityExpr::Ref {
-            qty: QuantityRef::CountersOn { scope, .. },
-        } if *scope == ObjectScope::Anaphoric => *scope = bound,
-        QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::Ref { qty } => bind_anaphoric_counter_ref(qty, bound),
+        QuantityExpr::Fixed { .. } => {}
         QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
@@ -1230,6 +1259,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -4333,6 +4363,21 @@ pub(crate) fn parse_affected_scoped_static_condition(
     }
 }
 
+/// Check if a static condition is `PlayerIsPoisoned { DefendingPlayer }`.
+/// Chained Throatseeker's printed "can't attack unless defending player is
+/// poisoned" is a valid attack restriction (CR 508.1c), but the engine does
+/// not yet evaluate a poison condition against each candidate defender during
+/// attack legality, so such a rider stays `Unrecognized` as an honest gap.
+fn is_defending_player_poisoned_for_attack_restriction(cond: &StaticCondition) -> bool {
+    matches!(
+        cond,
+        StaticCondition::PlayerIsPoisoned {
+            player: PlayerScope::DefendingPlayer
+        }
+    ) || matches!(cond, StaticCondition::Not { condition } if is_defending_player_poisoned_for_attack_restriction(condition))
+        || matches!(cond, StaticCondition::And { conditions } | StaticCondition::Or { conditions } if conditions.iter().any(is_defending_player_poisoned_for_attack_restriction))
+}
+
 /// Parse the trailing " unless [condition]" clause of a combat-restriction
 /// static. Delegates `Not`-wrapping (with the `UnlessPay` raw-passthrough
 /// exception) to the shared `parse_unless_condition` combinator so the static
@@ -4349,6 +4394,17 @@ pub(crate) fn parse_unless_static_condition(
     let original = unless_text.original.trim().trim_end_matches('.');
     let lower = original.to_lowercase();
     if let Ok((_, condition)) = nom_condition::parse_unless_condition(&lower) {
+        // CR 508.1c + CR 122.1f: "defending player is poisoned" is a valid attack
+        // restriction, but candidate-defender attack-legality evaluation does not
+        // support a poison condition yet. Keep the rider `Unrecognized` so the
+        // restriction remains an honest gap.
+        if is_defending_player_poisoned_for_attack_restriction(&condition) {
+            return Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::Unrecognized {
+                    text: format!("unless {original}"),
+                }),
+            });
+        }
         return Some(condition);
     }
     // CR 611.3a: "gets +X/+X unless <condition>" applies the grant precisely when

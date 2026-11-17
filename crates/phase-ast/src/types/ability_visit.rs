@@ -1428,6 +1428,7 @@ pub(crate) fn static_condition(condition: &$($mut_)? StaticCondition, v: &mut im
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::DuringYourTurn

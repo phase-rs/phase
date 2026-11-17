@@ -50,7 +50,7 @@ pub use crate::types::mana::ManaSourcePenalty;
 /// This is a read-only projection, not a `ManaUnit`: no pool identity, source
 /// bookkeeping, or spend grants exist until the activation resolves.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LiveManaOutputUnit {
+pub struct LiveManaOutputUnit {
     pub mana_type: ManaType,
     pub restrictions: Vec<ManaRestriction>,
 }
@@ -791,6 +791,60 @@ pub(crate) fn live_mana_output_for_option(
     output
 }
 
+/// How a mana action's own reducer revalidates its frozen selection.
+type SelectionResolver =
+    fn(&GameState, PlayerId, &ManaSourceSelection) -> Result<ManaSourceOption, EngineError>;
+
+/// CR 106.3 + CR 605.3a: The exact mana a mana action would produce if taken
+/// now, read without mutating game state.
+///
+/// The two public mana actions carry deliberately different selection forms,
+/// so each is resolved through the authority its own reducer uses:
+///
+/// - `TapLandForMana` is minted by `activatable_mana_actions_for_player` from
+///   `ManaSourceOption::semantic_selection`, one *concrete* row per producible
+///   color, and is executed by `handle_tap_land_for_mana` via
+///   `live_land_mana_option_for_selection`.
+/// - `ActivateManaSource` is minted from `activatable_mana_source_selections`,
+///   whose `manual_selection_for_option` intentionally collapses a flexible
+///   source to `Colorless` + `DeferredColorChoice` so the ordinary mana-choice
+///   resolver asks for the color, and is executed by
+///   `activate_mana_source_selection` via `live_mana_source_option_for_selection`.
+///
+/// Resolving one through the other's authority can never match a flexible
+/// source, which silently produced an unlabelled action (issue #6944: City of
+/// Brass), so each action stays paired with its own reducer's resolver.
+///
+/// `None` for any other action; for a stale or no-longer-legal selection,
+/// matching the reducer's own refusal to activate it; and for a deferred color
+/// choice, whose output the post-cost mana-choice resolver decides (CR 106.1a +
+/// CR 106.1b: no type is selected yet).
+pub fn produced_mana_for_action(
+    state: &GameState,
+    action: &GameAction,
+) -> Option<Vec<LiveManaOutputUnit>> {
+    let (selection, resolve) = match action {
+        GameAction::TapLandForMana { selection } => (
+            selection,
+            live_land_mana_option_for_selection as SelectionResolver,
+        ),
+        GameAction::ActivateManaSource { selection } => (
+            selection,
+            live_mana_source_option_for_selection as SelectionResolver,
+        ),
+        _ => return None,
+    };
+    let player = state.objects.get(&selection.source.object_id)?.controller;
+    let option = resolve(state, player, selection).ok()?;
+    if matches!(
+        selection.output,
+        ManaSourceOutput::DeferredColorChoice { .. }
+    ) {
+        return None;
+    }
+    Some(live_mana_output_for_option(state, player, &option))
+}
+
 fn live_base_mana_output(
     state: &GameState,
     player: PlayerId,
@@ -1408,6 +1462,79 @@ pub(crate) fn cost_conclusively_payable_by_cheap_gate(cost: &Option<AbilityCost>
 /// `Sacrifice` nested inside a `Composite`, for any target filter.
 fn cost_includes_sacrifice(cost: &Option<AbilityCost>) -> bool {
     cost_has_component(cost, |c| matches!(c, AbilityCost::Sacrifice(_)))
+}
+
+/// CR 605.1a + CR 118.3: the most a player's mana abilities do with objects
+/// other than their own source, for holding objects for another leg of a cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum OtherObjectUse {
+    #[default]
+    None,
+    /// Some cost taps another object (Springleaf Drum).
+    Taps,
+    /// Some cost sacrifices, exiles or returns another object (Ashnod's Altar,
+    /// Krark-Clan Ironworks, Priest of Yawgmoth).
+    Consumes,
+}
+
+/// CR 106.1: whether some mana ability's amount reads the game state (Gaea's
+/// Cradle class).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ProductionAmount {
+    #[default]
+    Fixed,
+    BoardDependent,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ManaAbilityReach {
+    pub(crate) other_objects: OtherObjectUse,
+    pub(crate) production: ProductionAmount,
+}
+
+pub(crate) fn player_mana_ability_reach(state: &GameState, player: PlayerId) -> ManaAbilityReach {
+    let mut reach = ManaAbilityReach::default();
+    let abilities = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == player)
+        .flat_map(|obj| obj.abilities.iter())
+        .filter(|ability| {
+            ability.kind == AbilityKind::Activated && mana_abilities::is_mana_ability(ability)
+        });
+    for ability in abilities {
+        let other_objects = if cost_consumes_other_object(&ability.cost) {
+            OtherObjectUse::Consumes
+        } else if cost_has_component(&ability.cost, |c| {
+            matches!(c, AbilityCost::TapCreatures { .. })
+        }) {
+            OtherObjectUse::Taps
+        } else {
+            OtherObjectUse::None
+        };
+        reach.other_objects = reach.other_objects.max(other_objects);
+        if let Effect::Mana { produced, .. } = &*ability.effect {
+            produced.for_each_quantity_expr(&mut |quantity| {
+                if !matches!(quantity, QuantityExpr::Fixed { .. }) {
+                    reach.production = ProductionAmount::BoardDependent;
+                }
+            });
+        }
+    }
+    reach
+}
+
+/// CR 118.3: whether paying this cost sacrifices, exiles or returns an object
+/// other than the ability's source.
+fn cost_consumes_other_object(cost: &Option<AbilityCost>) -> bool {
+    cost_has_component(cost, |c| match c {
+        AbilityCost::Sacrifice(cost) => cost.target != TargetFilter::SelfRef,
+        AbilityCost::Exile { filter, .. } | AbilityCost::ReturnToHand { filter, .. } => {
+            !matches!(filter, Some(TargetFilter::SelfRef))
+        }
+        _ => false,
+    })
 }
 
 /// Fold an `Option<u16>` sum with saturation and non-fixed poisoning.
@@ -2386,10 +2513,15 @@ fn mana_ability_allowed_for_payment(
 
 /// Which payment estimate a mana capacity serves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CapacityUse {
+pub(crate) enum CapacityUse {
     /// Castability: colored shards are assigned first, and a color chosen on
     /// activation is charged for what that color adds.
     Castability,
+    /// CR 601.2g-h: an alternative cost's reservation probe. As `Castability`,
+    /// except that a repeatable consuming mana ability (Ashnod's Altar) is sized
+    /// by its eligible fuel; the probe's held objects can't be sacrificed, so
+    /// they aren't fuel.
+    ReservedOffer,
     /// The {X} ceiling sums capacities with no per-color accounting, so a
     /// source whose amount depends on the color it is activated for (Nyx Lotus
     /// with unequal devotion) is left out: the ceiling fails closed.
@@ -2434,12 +2566,31 @@ pub(crate) fn feasible_mana_capacity_for_cast(
     payment_context: Option<&PaymentContext<'_>>,
     casting_spell: Option<ObjectId>,
 ) -> u32 {
+    cast_mana_capacity(
+        state,
+        object_id,
+        controller,
+        payment_context,
+        casting_spell,
+        CapacityUse::Castability,
+    )
+}
+
+/// [`feasible_mana_capacity_for_cast`] under the estimate `capacity_use` names.
+pub(crate) fn cast_mana_capacity(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    payment_context: Option<&PaymentContext<'_>>,
+    casting_spell: Option<ObjectId>,
+    capacity_use: CapacityUse,
+) -> u32 {
     mana_capacity(
         state,
         object_id,
         controller,
         payment_context,
-        CapacityUse::Castability,
+        capacity_use,
         casting_spell,
     )
 }
@@ -2474,17 +2625,91 @@ fn mana_capacity(
                 )
         })
         .filter_map(|(_, ability)| {
-            usable_mana_ability_net(
+            let net = usable_mana_ability_net(
                 state,
                 object_id,
                 controller,
                 ability,
                 capacity_use,
                 casting_spell,
-            )
+            )?;
+            Some(if capacity_use == CapacityUse::ReservedOffer {
+                net.saturating_mul(repeatable_consuming_activations(
+                    state, object_id, controller, ability,
+                ))
+            } else {
+                net
+            })
         })
         .max()
         .unwrap_or(0)
+}
+
+/// CR 601.2g + CR 605.3a: how many times a repeatable consuming mana ability
+/// (Ashnod's Altar's "Sacrifice a creature: Add {C}{C}.") can be activated
+/// during one payment: its eligible fuel, through the shared sacrifice gate,
+/// divided by the count each activation sacrifices. An ability with a tap or
+/// untap cost, an activation restriction, any other cost component, or an
+/// amount that reads the game counts once.
+fn repeatable_consuming_activations(
+    state: &GameState,
+    object_id: ObjectId,
+    controller: PlayerId,
+    ability: &AbilityDefinition,
+) -> u32 {
+    if has_tap_component(&ability.cost)
+        || has_untap_component(&ability.cost)
+        || !ability.activation_restrictions.is_empty()
+    {
+        return 1;
+    }
+    let components = match &ability.cost {
+        Some(AbilityCost::Composite { costs }) => costs.as_slice(),
+        Some(leaf) => std::slice::from_ref(leaf),
+        None => return 1,
+    };
+    let mut sacrifice = None;
+    for component in components {
+        match component {
+            AbilityCost::Sacrifice(cost)
+                if cost.target != TargetFilter::SelfRef && sacrifice.is_none() =>
+            {
+                sacrifice = Some(cost)
+            }
+            AbilityCost::Mana { .. } => {}
+            _ => return 1,
+        }
+    }
+    let Some((sacrifice, count)) = sacrifice.and_then(|cost| {
+        cost.requirement
+            .fixed_count()
+            .filter(|&count| count > 0)
+            .map(|count| (cost, count))
+    }) else {
+        return 1;
+    };
+    let Effect::Mana { produced, .. } = &*ability.effect else {
+        return 1;
+    };
+    let mut fixed = true;
+    produced.for_each_quantity_expr(&mut |quantity| {
+        fixed &= matches!(quantity, QuantityExpr::Fixed { .. });
+    });
+    if !fixed {
+        return 1;
+    }
+    let fuel = super::casting::find_eligible_sacrifice_targets(
+        state,
+        controller,
+        object_id,
+        None,
+        &sacrifice.target,
+    )
+    .len();
+    u32::try_from(fuel)
+        .unwrap_or(u32::MAX)
+        .div_euclid(count)
+        .max(1)
 }
 
 /// CR 605.1a: An activated mana ability.

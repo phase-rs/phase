@@ -475,8 +475,8 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         // matcher dispatch returns `None` for them. Skip entirely — neither
         // a key nor unclassified routing.
         TriggerMode::StateCondition => return (SmallVec::new(), false),
-        // CR 904.9: resolved by the scan hook
-        // (`archenemy::resolve_pending_as_set_in_motion_choices`), never
+        // CR 904.9: choices are made by the scheme action (the precombat-main arm,
+        // `archenemy::resolve_pending_as_set_in_motion_choices`), never
         // through event-driven dispatch. Neither a key nor unclassified.
         TriggerMode::AsSetInMotion => return (SmallVec::new(), false),
         // No matcher registered; never fires through events.
@@ -509,13 +509,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
-        GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
-        // CR 805.4d: a fanned occurrence indexes under its phase like the
-        // production event (synthetic occurrences never enter the batch, but
-        // the key must exist if one is ever indexed).
-        GameEvent::PhaseChangedForPlayer { phase, .. } => {
-            push(TriggerEventKey::BeginningOfPhase(*phase))
-        }
+        GameEvent::PhaseChanged { phase } | GameEvent::PhaseChangedFor { phase, .. } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
         GameEvent::StickerPlaced { .. } => {}
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
@@ -808,14 +802,14 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         EffectKind::Renown => push(TriggerEventKey::Renowned),
         EffectKind::Monstrosity => push(TriggerEventKey::BecomesMonstrous),
         EffectKind::ManifestDread => push(TriggerEventKey::ManifestDreadResolved),
-        EffectKind::DayTimeChange => push(TriggerEventKey::DayNightChanged),
         EffectKind::PutSticker | EffectKind::ApplySticker => {}
         // All other variants: not dispatched on by any production
         // EffectResolved matcher (verified against `trigger_matchers.rs` 1-3216).
         // Explicit `&[]`-equivalent arms — a future contributor who adds a
         // new EffectResolved-dispatching matcher will force this match to be
         // re-classified.
-        EffectKind::Attach
+        EffectKind::DayTimeChange
+        | EffectKind::Attach
         | EffectKind::AttachAll
         | EffectKind::Equip
         | EffectKind::StartYourEngines

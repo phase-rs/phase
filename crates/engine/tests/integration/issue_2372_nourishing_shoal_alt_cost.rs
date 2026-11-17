@@ -68,7 +68,7 @@ fn nourishing_shoal_cast_surfaces_pitch_alternative_choice() {
         matches!(
             result.waiting_for,
             WaitingFor::OptionalCostChoice {
-                cost: AdditionalCost::Choice(_, _),
+                cost: AdditionalCost::Choice(_),
                 ..
             }
         ),
@@ -94,7 +94,7 @@ fn nourishing_shoal_pitch_exile_binds_x_and_gains_life() {
         .expect("cast");
 
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept pitch cost");
 
     assert!(
@@ -172,12 +172,12 @@ fn nourishing_shoal_pitch_under_a_cost_increase_binds_x_and_pays_it() {
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::OptionalCostChoice {
-            cost: AdditionalCost::Choice(_, _),
+            cost: AdditionalCost::Choice(_),
             ..
         }
     ));
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accept pitch cost");
     runner
         .act(GameAction::SelectCards {

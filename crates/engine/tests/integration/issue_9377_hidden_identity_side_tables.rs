@@ -102,7 +102,7 @@ fn commit_cast(runner: &mut GameRunner, spell: ObjectId, target: Option<TargetRe
             // Capsize's Buyback is an optional additional cost; decline it.
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: false })
+                    .act(GameAction::DecideOptionalCost { index: 1 })
                     .expect("declining an optional cost must be accepted");
             }
             other => panic!("unexpected waiting_for while committing cast: {other:?}"),
@@ -2981,6 +2981,7 @@ fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         ..
     } = &raw.waiting_for
     else {
@@ -3032,6 +3033,7 @@ fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
             trigger_event: view_event,
             effect_description: view_description,
             remaining: view_remaining,
+            affected_object: view_affected,
             ..
         } = &view.waiting_for
         else {
@@ -3045,6 +3047,10 @@ fn frost_titan_tax_prompt_blanks_hidden_mana_source() {
             "{label}: description kept"
         );
         assert_eq!(view_remaining, remaining, "{label}: remaining kept");
+        assert_eq!(
+            view_affected, affected_object,
+            "{label}: affected object kept"
+        );
         assert_eq!(view_effect.source_id, pending_effect.source_id, "{label}");
         assert_eq!(view_effect.controller, pending_effect.controller, "{label}");
         assert_eq!(view_effect.effect, pending_effect.effect, "{label}");

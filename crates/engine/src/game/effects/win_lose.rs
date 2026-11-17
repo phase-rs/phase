@@ -90,7 +90,7 @@ pub fn resolve_lose(
     Ok(())
 }
 
-/// CR 104.2b + CR 104.3e: Resolve "win the game" — the winner's opponents lose.
+/// CR 104.2b + CR 104.1: Resolve "win the game" — the winner's opponents lose.
 ///
 /// Winner resolution (in priority order):
 /// 1. If `Effect::WinTheGame.target` names a context-ref subject, that
@@ -102,7 +102,7 @@ pub fn resolve_lose(
 ///    game" reading).
 ///
 /// After resolving the winner, all opponents of the winner are eliminated
-/// (CR 104.3e), unless the winner is under `CantWinTheGame` (CR 104.2b).
+/// (CR 104.1), unless the winner is under `CantWinTheGame` (CR 104.2b).
 pub fn resolve_win(
     state: &mut GameState,
     ability: &ResolvedAbility,

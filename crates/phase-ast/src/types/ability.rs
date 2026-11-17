@@ -8681,6 +8681,10 @@ pub enum TargetFilter {
     /// `ScopedPlayer`'s sentinel role for "each player's library". It never survives into
     /// a finished `AbilityDefinition`: `lift_distributive_exile_top_scope` rewrites it to
     /// `Controller` and stamps `AbilityDefinition.player_scope = Some(PlayerFilter::Opponent)`.
+    ///
+    /// THIRD ROLE (CR 118.12a): as `UnlessPayModifier.payer` it is the "unless any opponent
+    /// pays ..." poll (Sword-Point Diplomacy) — each opponent in APNAP order, the first to
+    /// pay prevents the effect, mirroring `AllPlayers` for "any player pays".
     Opponent,
     SelfRef,
     /// CR 201.5a: The specific object that GRANTED the ability this filter lives
@@ -9078,10 +9082,10 @@ pub enum TargetFilter {
     /// enchant ability (defined per CR 303.4a), and CR 608.2c requires reading
     /// the whole sentence to bind each anaphor to its true referent at resolution.
     ///
-    /// Never persisted as a `ResolvedAbility` field: it is concretized eagerly,
-    /// in place, to `SpecificObject { id }` in the `forward_result` block of
-    /// `effects/mod.rs`, at the one point where the pre-rebind `source_id` and
-    /// the about-to-be-mutated sub-ability clone coexist.
+    /// A `GenericEffect` static's `affected` is concretized to `SpecificObject { id }`
+    /// in the `forward_result` block of `effects/mod.rs`; an `Attach` attachment
+    /// stays `OriginalSource` and resolves live against the trigger source's
+    /// incarnation (CR 400.7).
     ///
     /// Unlike the current ability's primary `SelfRef` or a moved-object
     /// `ParentTarget`, this pins the pre-rebind producer for legacy grants.
@@ -10038,6 +10042,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -10902,6 +10907,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -11057,7 +11063,8 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// against a `BattlefieldEntryRecord`?
 ///
 /// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types::game_state::BattlefieldEntryRecord`). Every other
+/// supertypes / colors / keywords / controller / face_state`
+/// (`types::game_state::BattlefieldEntryRecord`). Every other
 /// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
 /// matcher fails closed at the `FilterProp` match's fail-closed arm inside
 /// `battlefield_entry_matches_filter`'s `TargetFilter::Typed` case, and at the fail-closed
@@ -11065,7 +11072,7 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// a silent constant 0 — but see the `Or` exception documented beside that function's
 /// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
 /// instead. Measured: 100
-/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
+/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 5.
 ///
 /// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
 /// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
@@ -11076,8 +11083,8 @@ pub fn filter_reads_declared_slot(filter: &TargetFilter) -> bool {
 /// `ledger_guard_agrees_with_matcher` (test, `crate::game::restrictions`).
 ///
 /// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
-/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
-/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
+/// / `record.name` TODAY — one matcher arm plus one line here. `Token`/`NonToken` and `Tapped`
+/// need a new snapshot field on `BattlefieldEntryRecord`.
 ///
 /// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
 /// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
@@ -11097,6 +11104,7 @@ pub fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
                         FilterProp::HasColor { .. }
                             | FilterProp::InZone { .. }
                             | FilterProp::WithKeyword { .. }
+                            | FilterProp::FaceDown
                             | FilterProp::Another
                     )
                 })
@@ -13216,6 +13224,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::StartingLifeTotal { player, .. }
+        | QuantityRef::StartingDeckSize { player, .. }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
@@ -14109,6 +14118,19 @@ pub enum QuantityRef {
         )]
         player: PlayerScope,
     },
+    /// CR 103.2a + CR 702.139b: The card count of the scoped player's
+    /// submitted starting deck (library + command-zone decklist cards,
+    /// single-counted), latched into `Player::starting_deck_size` at deck
+    /// load. Read by Whtz, the Bibliophile's activation discount ("if you had
+    /// 200 or more cards in your starting deck"). Past-tense "had" is
+    /// deliberate: the latch never changes mid-game.
+    StartingDeckSize {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 701.57a: The mana-value limit `N` of the discover that fired the
     /// current "whenever you discover" trigger — read from
     /// `GameState::last_discover_value`. Curator of Sun's Creation: "discover
@@ -14478,6 +14500,17 @@ pub enum QuantityRef {
         filter: Box<TargetFilter>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         caused_by: Option<ThisWayCause>,
+        /// CR 614.6 + CR 701.17c: the zone a member must have ACTUALLY arrived
+        /// in for "<verb phrase> this way" to count it — "put into a graveyard
+        /// this way" names the graveyard as the destination, so a milled card
+        /// that a replacement (Rest in Peace, Leyline of the Void) sent to exile
+        /// instead was never put into a graveyard and is not counted. `None`
+        /// (the action-named forms — "milled this way", "sacrificed this way" —
+        /// and the Locke-style reference to the milled cards wherever they are)
+        /// admits a member in any zone. Read against the member's CURRENT zone,
+        /// never its departure snapshot (which is the zone it LEFT).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        destination: Option<Zone>,
     },
     /// CR 608.2c + CR 107.3e + CR 202.3: Reduce a numeric property
     /// over the most recent chain tracked set (sum/max/min), reading the same set as
@@ -15120,6 +15153,7 @@ impl QuantityRef {
             | QuantityRef::CardsDrawnLastTurn { player }
             | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::StartingDeckSize { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
             | QuantityRef::PlayerChosenNumber { player }
@@ -15305,6 +15339,7 @@ impl QuantityRef {
             | QuantityRef::GraveyardSize { .. }
             | QuantityRef::LifeAboveStarting
             | QuantityRef::StartingLifeTotal { .. }
+            | QuantityRef::StartingDeckSize { .. }
             | QuantityRef::TriggeringDiscoverValue
             | QuantityRef::TriggeringScryLookCount
             | QuantityRef::TriggeringScryBottomCount
@@ -15392,6 +15427,7 @@ impl QuantityRef {
             | QuantityRef::CardsDrawnLastTurn { player }
             | QuantityRef::OpponentSpellsCastSinceLastTurn { player }
             | QuantityRef::StartingLifeTotal { player }
+            | QuantityRef::StartingDeckSize { player }
             | QuantityRef::BattlefieldEntriesThisTurn { player, .. }
             | QuantityRef::LandsPlayedThisTurn { player, .. }
             | QuantityRef::PlayerChosenNumber { player }
@@ -15711,6 +15747,19 @@ fn is_player_relation_all(relation: &PlayerRelation) -> bool {
     matches!(relation, PlayerRelation::All)
 }
 
+/// Back-compat default for `PlayerFilter::OpponentDealtDamage`'s `relation`
+/// field. Legacy data serialized before the field existed encoded the
+/// opponents-only semantics, so an absent `relation` must deserialize to
+/// `Opponent` — NOT `All`, which would newly qualify the controller and
+/// misresolve reloaded games/scenarios.
+fn player_relation_opponent() -> PlayerRelation {
+    PlayerRelation::Opponent
+}
+
+fn is_player_relation_opponent(relation: &PlayerRelation) -> bool {
+    matches!(relation, PlayerRelation::Opponent)
+}
+
 fn target_zone_count_scope_default() -> ControllerRef {
     ControllerRef::TargetOpponent
 }
@@ -15792,18 +15841,19 @@ pub enum PlayerFilter {
     /// effect recipient filter. Rampant Frogantua class: "+10/+10 for each
     /// player who has lost the game".
     HasLostTheGame,
-    /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each opponent who was dealt
-    /// damage this turn matching `kind`, optionally restricted to damage from a
-    /// source matching `source`. Resolved against `state.damage_dealt_this_turn`
-    /// records whose `target = Player(p.id)` and whose combat status matches
-    /// `kind` (CR 120.2a combat / CR 120.2b noncombat / `Any` = either).
-    /// `kind = CombatOnly` + `source = None` counts any combat-damage source
-    /// (Tymna the Weaver); `kind = Any` counts any damage combat or noncombat
-    /// (Furious Spinesplitter, You've Been Caught Stealing); `source = Some(f)`
-    /// (CR 120.9) further restricts to opponents dealt matching damage by a
-    /// source matching `f` — matched against each record's CR 608.2i look-back
-    /// source snapshot, so the source's qualities are checked as they were at
-    /// damage time (Estinien Varlineau: "by ~ or a Dragon").
+    /// CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i: Each player in `relation`
+    /// who was dealt damage this turn matching `kind`, optionally restricted
+    /// to damage from a source matching `source`. Resolved against
+    /// `state.damage_dealt_this_turn` records whose `target = Player(p.id)`
+    /// and whose combat status matches `kind` (CR 120.2a combat / CR 120.2b
+    /// noncombat / `Any` = either). `kind = CombatOnly` + `source = None`
+    /// counts any combat-damage source (Tymna the Weaver); `kind = Any` counts
+    /// any damage combat or noncombat (Furious Spinesplitter, You've Been
+    /// Caught Stealing); `source = Some(f)` (CR 120.9) further restricts to
+    /// players dealt matching damage by a source matching `f` — matched
+    /// against each record's CR 608.2i look-back source snapshot, so the
+    /// source's qualities are checked as they were at damage time (Estinien
+    /// Varlineau: "by ~ or a Dragon").
     ///
     /// `min_sources` (CR 120.9) requires damage from at least that many DISTINCT
     /// matching sources ("was dealt combat damage by three or more Pirates this
@@ -15811,6 +15861,15 @@ pub enum PlayerFilter {
     /// counted by `DamageRecord::source_id` across the matching records; the
     /// default `1` preserves the historical "≥1 matching source" semantics for
     /// every existing card.
+    ///
+    /// `relation` selects the candidate population. Clauses naming an opponent
+    /// ("for each opponent dealt …", Tymna) emit `Opponent`; clauses with no
+    /// opponent word ("a player who was dealt …", Beckett; "whose controller
+    /// was dealt …", Steel Hellkite — CR 608.2c reads the English as written)
+    /// emit `All`, so a damaged player who later gains control of the source
+    /// still qualifies. The name stays `OpponentDealtDamage` (and the
+    /// historical `player != controller` gate stays for `Opponent`) so existing
+    /// card-data and saves resolve byte-identically; only `All` widens.
     #[serde(alias = "OpponentDealtCombatDamage")]
     OpponentDealtDamage {
         /// CR 120.2a/120.2b: which damage kind counts. Defaults to `CombatOnly`
@@ -15824,6 +15883,14 @@ pub enum PlayerFilter {
         /// `1` (any matching source) for back-compat; Beckett sets `3`.
         #[serde(default = "default_one", skip_serializing_if = "is_one")]
         min_sources: u32,
+        /// CR 102.2 + CR 608.2c: which players may qualify. Defaults to
+        /// `Opponent` on absence (preserving the historical opponents-only
+        /// gate for legacy data) and is omitted from serialized output then.
+        #[serde(
+            default = "player_relation_opponent",
+            skip_serializing_if = "is_player_relation_opponent"
+        )]
+        relation: PlayerRelation,
     },
     /// CR 508.6: Each opponent that `subject` attacked (declared one or more
     /// creatures attacking, per CR 508.1b; CR 508.5 resolves planeswalker/battle
@@ -16293,7 +16360,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::CommanderManaValue { .. }
         // Player-scoped quantities.
         | QuantityRef::HandSize { .. } | QuantityRef::LifeTotal { .. } | QuantityRef::GraveyardSize { .. }
-        | QuantityRef::StartingLifeTotal { .. } | QuantityRef::LifeLostThisTurn { .. } | QuantityRef::PartySize { .. }
+        | QuantityRef::StartingLifeTotal { .. } | QuantityRef::StartingDeckSize { .. } | QuantityRef::LifeLostThisTurn { .. } | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. } | QuantityRef::LifeGainedThisTurn { .. } | QuantityRef::CardsDrawnThisTurn { .. }
         | QuantityRef::CardsDrawnLastTurn { .. }
         | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
@@ -17936,6 +18003,24 @@ pub enum StaticCondition {
     OpponentPoisonAtLeast {
         count: u32,
     },
+    /// CR 122.1f + CR 109.5: True when `player` has one or more poison counters
+    /// (CR 122.1f defines "poisoned"). `player` is the CR 109.5 subject axis:
+    /// - `PlayerScope::Controller` ← "you are poisoned"
+    /// - `PlayerScope::Opponent` ← "an opponent is poisoned"
+    /// - `PlayerScope::DefendingPlayer` ← "defending player is poisoned"
+    ///   (CR 508.5 names the player the attacking creature is attacking)
+    /// - `PlayerScope::ScopedPlayer` ← "that player is poisoned" (anaphor)
+    ///
+    /// Mirrors `StaticCondition::IsMonarch` and `TriggerCondition::IsPoisoned`
+    /// in axis parameterization. An unresolvable scope makes the condition
+    /// UNANSWERABLE at evaluation time.
+    PlayerIsPoisoned {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 118.12a + CR 508.1d + CR 509.1c: "unless [player] pays [cost]" — an optional cost
     /// condition attached to a combat restriction (attack tax / block tax).
     ///
@@ -18220,6 +18305,7 @@ impl StaticCondition {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -18335,6 +18421,7 @@ impl StaticCondition {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
             | StaticCondition::DuringOpponentsTurn
@@ -18571,6 +18658,7 @@ impl StaticCondition {
             | StaticCondition::WasStartingPlayer { .. }
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -18693,6 +18781,7 @@ impl StaticCondition {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -21145,9 +21234,9 @@ pub enum AdditionalCost {
         )]
         repeatability: AdditionalCostRepeatability,
     },
-    /// "[cost A] or [cost B]" — player must pay exactly one.
-    /// Choosing the first cost sets `additional_cost_paid = true`.
-    Choice(AbilityCost, AbilityCost),
+    /// "[cost A] or [cost B] or [cost C]..." — player must pay exactly one.
+    /// Choosing any cost sets `additional_cost_paid = true`.
+    Choice(Vec<AbilityCost>),
     /// Mandatory additional cost (e.g., "As an additional cost, waterbend {5}").
     Required(AbilityCost),
 }
@@ -29005,6 +29094,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::LifeTotal { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::StartingDeckSize { player }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }
         | QuantityRef::Speed { player }
@@ -37290,6 +37380,11 @@ pub struct AbilityDefinition {
     /// false. See `SiblingCondition`. `Dependent` (default) preserves today's
     /// behavior; `ReplicatedOrBranch` marks per-item keyword-list replication.
     pub sibling_condition: SiblingCondition,
+    /// CR 608.2c: whether this node is its own instruction or a further target
+    /// slot of the instruction its preceding sibling began. See
+    /// [`InstructionJoin`]. `Own` (default) for every node a list splitter did
+    /// not produce.
+    pub instruction_join: InstructionJoin,
     /// CR 608.2c + CR 614.1a: see [`UnloweredGuard`]. Always `None` on a finished parse.
     pub unlowered_guard: Option<UnloweredGuard>,
     /// Typed intent for SearchLibrary clauses that exile the found card face down.
@@ -37683,6 +37778,8 @@ struct AbilityDefinitionRepr<'a> {
     iteration_kind_binding: &'a Option<IterationKindBinding>,
     #[serde(skip_serializing_if = "SiblingCondition::is_default")]
     sibling_condition: SiblingCondition,
+    #[serde(skip_serializing_if = "InstructionJoin::is_own")]
+    instruction_join: InstructionJoin,
     #[serde(skip_serializing_if = "Option::is_none")]
     unlowered_guard: &'a Option<UnloweredGuard>,
     #[serde(skip_serializing_if = "ExileConcealment::is_public")]
@@ -37745,6 +37842,7 @@ impl Serialize for AbilityDefinition {
             entry_onset,
             iteration_kind_binding,
             sibling_condition,
+            instruction_join,
             unlowered_guard,
             face_down_in_exile,
             granting_object,
@@ -37798,6 +37896,7 @@ impl Serialize for AbilityDefinition {
             entry_onset: *entry_onset,
             iteration_kind_binding,
             sibling_condition: *sibling_condition,
+            instruction_join: *instruction_join,
             unlowered_guard,
             face_down_in_exile: *face_down_in_exile,
             granting_object,
@@ -37931,6 +38030,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     sibling_condition: SiblingCondition,
     #[serde(default)]
+    instruction_join: InstructionJoin,
+    #[serde(default)]
     unlowered_guard: Option<UnloweredGuard>,
     #[serde(default)]
     face_down_in_exile: ExileConcealment,
@@ -37997,6 +38098,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             entry_onset: de.entry_onset,
             iteration_kind_binding: de.iteration_kind_binding,
             sibling_condition: de.sibling_condition,
+            instruction_join: de.instruction_join,
             unlowered_guard: de.unlowered_guard,
             face_down_in_exile: de.face_down_in_exile,
             granting_object: de.granting_object,
@@ -38160,6 +38262,32 @@ impl SiblingCondition {
     /// `skip_serializing_if` predicate — the default needs no JSON byte.
     pub fn is_default(cond: &Self) -> bool {
         matches!(cond, Self::Dependent)
+    }
+}
+
+/// CR 608.2c: whether a chained node is its own instruction or one slot of the
+/// target list its previous sibling opened. "Destroy target artifact, target
+/// creature, target enchantment, and target land" (Decimate) is one instruction
+/// lowered as four chained `Destroy` nodes; every node after the first is a
+/// `ListSlot`. Minted only by the parser's list splitters
+/// (`multi_target_list::try_split_multi_target_list` and the verbless conjunct
+/// of `try_split_targeted_compound`), never by a "then" chain, which is a
+/// sequence of separate instructions. Orthogonal to `SubAbilityLink`, whose
+/// `ContinuationStep` covers both "," and "then" joins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum InstructionJoin {
+    /// The node is an instruction of its own.
+    #[default]
+    Own,
+    /// The node is a further target slot of the instruction its immediately
+    /// preceding sibling began (same verb, same sentence).
+    ListSlot,
+}
+
+impl InstructionJoin {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_own(join: &Self) -> bool {
+        matches!(join, Self::Own)
     }
 }
 
@@ -38352,6 +38480,7 @@ impl AbilityDefinition {
             entry_onset: ContinuousEffectOnset::WhenFollowed,
             iteration_kind_binding: None,
             sibling_condition: SiblingCondition::Dependent,
+            instruction_join: InstructionJoin::Own,
             unlowered_guard: None,
             face_down_in_exile: ExileConcealment::Public,
             granting_object: None,
@@ -40400,6 +40529,22 @@ pub enum TriggerCondition {
         )]
         player: PlayerScope,
     },
+    /// CR 122.1f + CR 508.5 + CR 603.4: "if defending player is poisoned" —
+    /// true when `player` has one or more poison counters. CR 122.1f DEFINES
+    /// "poisoned": a player with one or more poison counters. CR 508.5 names the
+    /// player an attacking creature is attacking, so the printed "defending
+    /// player" on an attack trigger is [`PlayerScope::DefendingPlayer`].
+    ///
+    /// Checked at fire time and again as the ability resolves (CR 603.4),
+    /// mirroring `IsMonarch`. The poison read is the TEAM total (CR 810.10a),
+    /// exactly as `QuantityRef::TargetControllerCounter`'s poison arm reads it
+    /// for "its controller is poisoned" (Corrupted Resolve).
+    ///
+    /// An unresolvable scope makes the condition UNANSWERABLE, not false:
+    /// `triggers::check_trigger_condition_with_source` rejects the whole
+    /// condition at its entry boundary so `Not` cannot invert a missing anchor
+    /// into a firing trigger.
+    IsPoisoned { player: PlayerScope },
     /// Digital-only Alchemy (no CR entry): "if you have a boon" is true when
     /// `player` holds at least one unconsumed one-time boon (a
     /// `DelayedTriggerKind::Boon` entry they control). Checked at fire time
@@ -40733,6 +40878,7 @@ impl TriggerCondition {
     pub fn evaluation_anchor(&self) -> Option<TriggerConditionAnchor<'_>> {
         match self {
             TriggerCondition::IsMonarch { player } => Some(TriggerConditionAnchor::Player(player)),
+            TriggerCondition::IsPoisoned { player } => Some(TriggerConditionAnchor::Player(player)),
             TriggerCondition::AddedManaWithThisAbilityThisTurn => {
                 Some(TriggerConditionAnchor::OwnTriggerDefinition)
             }
@@ -41483,6 +41629,9 @@ pub struct TriggerDefinition {
     pub damage_kind: DamageKindFilter,
     #[serde(default)]
     pub secondary: bool,
+    /// CR 805.4d: on a `TriggerMode::Phase` trigger, the per-player scope of its step ("each
+    /// player's", "each opponent's", an enchanted player's): per-player firing is decided by
+    /// the typed scope the parser records, never inferred from effect shape.
     #[serde(default)]
     pub valid_target: Option<TargetFilter>,
     /// CR 115.1: The player leaf of a becomes-target trigger's SUBJECT (e.g. the
@@ -46189,6 +46338,35 @@ mod tests {
         );
 
         let scoped = QuantityRef::StartingLifeTotal {
+            player: PlayerScope::ScopedPlayer,
+        };
+        let json = serde_json::to_string(&scoped).expect("serializes scoped payload");
+        assert_eq!(
+            serde_json::from_str::<QuantityRef>(&json).expect("scoped payload round-trips"),
+            scoped,
+        );
+    }
+
+    #[test]
+    fn starting_deck_size_scope_defaults_for_legacy_json_and_round_trips() {
+        // CR 103.2a + CR 702.139b: Whtz, the Bibliophile's latched
+        // starting-deck count. Legacy unit payloads default to controller
+        // scope, exactly like the sibling StartingLifeTotal axis.
+        let legacy: QuantityRef = serde_json::from_str(r#"{"type":"StartingDeckSize"}"#)
+            .expect("legacy unit payload defaults to controller scope");
+        assert_eq!(
+            legacy,
+            QuantityRef::StartingDeckSize {
+                player: PlayerScope::Controller,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&legacy).expect("serializes legacy controller payload"),
+            r#"{"type":"StartingDeckSize"}"#,
+            "controller scope must preserve the legacy serialized shape",
+        );
+
+        let scoped = QuantityRef::StartingDeckSize {
             player: PlayerScope::ScopedPlayer,
         };
         let json = serde_json::to_string(&scoped).expect("serializes scoped payload");
@@ -52487,6 +52665,9 @@ mod monarch_subject_axis_tests {
                 player: player.clone(),
             },
             QuantityRef::StartingLifeTotal {
+                player: player.clone(),
+            },
+            QuantityRef::StartingDeckSize {
                 player: player.clone(),
             },
             QuantityRef::LifeLostThisTurn {

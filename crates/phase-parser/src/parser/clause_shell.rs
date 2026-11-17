@@ -81,8 +81,61 @@ use super::oracle_ir::ast::is_play_from_exile_lifetime_duration;
 use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::bridge::nom_on_lower;
 use crate::types::ability::{
-    AbilityCondition, Duration, OpponentMayScope, PlayerFilter, QuantityExpr,
+    AbilityCondition, AbilityDefinition, Duration, Effect, OpponentMayScope, PlayerFilter,
+    PlayerScope, QuantityExpr,
 };
+
+/// CR 118.12 + CR 115.10a: bind the possessive in an *offered* payment's amount
+/// to the player being offered it, at the point where the shell's subject is
+/// known.
+///
+/// "Any player may pay half their life, rounded up" — the "their" is the
+/// responder's, because the shell's own subject is the responder. A
+/// third-person possessive otherwise lowers to [`PlayerScope::Target`], which is
+/// the right encoding when the ability really does announce a player target
+/// (Astarion's "life they lost this turn" resolves against its target), but in
+/// this shell there is no such target and the anaphor would dangle — resolving
+/// to 0, making the cost free and firing the "If a player does" rider for
+/// nothing.
+///
+/// This is the single authority for that binding, and it lives here rather than
+/// at runtime deliberately. The runtime cannot tell the two cases apart: it read
+/// "no player in `ability.targets`" as proof that no player target was
+/// announced, but `ability_with_event_context_targets` also populates those
+/// slots from the triggering event, and CR 115.10a distinguishes an affected
+/// object or player from a target. So an event-hydrated slot made the runtime
+/// skip a rebind it owed. The shell knows the answer unambiguously; the event
+/// does not.
+///
+/// Visits BOTH operands, matching the where-X pass in
+/// `oracle_effect/lower.rs`, which already binds `scale` before `cost`. The
+/// previous runtime rewrite destructured `Effect::PayCost { payer, cost, .. }`
+/// and so silently skipped `scale` — a per-object scaled amount kept its
+/// dangling anaphor.
+pub(crate) fn bind_offered_payment_possessive(def: &mut AbilityDefinition) {
+    let Effect::PayCost { cost, scale, .. } = def.effect.as_mut() else {
+        return;
+    };
+    if let Some(times) = scale.as_mut() {
+        rebind_dangling_possessive_to_responder(times);
+    }
+    cost.for_each_quantity_expr_mut(&mut rebind_dangling_possessive_to_responder);
+}
+
+/// CR 118.12: rewrite a dangling third-person possessive onto the scoped player.
+///
+/// Goes through the traversal authorities (`each_ref_mut` -> `player_scope_mut`)
+/// rather than matching one cost shape, so every quantity-bearing cost in the
+/// class is covered.
+fn rebind_dangling_possessive_to_responder(expr: &mut QuantityExpr) {
+    expr.each_ref_mut(&mut |qty| {
+        if let Some(scope) = qty.player_scope_mut() {
+            if *scope == PlayerScope::Target {
+                *scope = PlayerScope::ScopedPlayer;
+            }
+        }
+    });
+}
 
 /// Synthesized attributes accumulated by `peel_clause` as it strips
 /// structural slots off the head of a clause.

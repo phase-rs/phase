@@ -796,6 +796,7 @@ pub(crate) fn move_rest_then(
                 reqs,
                 Some(library_reorder),
                 completion,
+                None,
                 events,
             )
         }

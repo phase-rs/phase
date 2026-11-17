@@ -3775,11 +3775,11 @@ function DefilerPaymentModal() {
       title={t("gamePage.defiler.title")}
       subtitle={t("gamePage.defiler.subtitle", { lifeCost: life_cost })}
       options={[
-        { id: "pay", label: t("gamePage.defiler.payLife", { lifeCost: life_cost }) },
-        { id: "skip", label: t("gamePage.defiler.decline") },
+        { id: "0", label: t("gamePage.defiler.payLife", { lifeCost: life_cost }) },
+        { id: "1", label: t("gamePage.defiler.decline") },
       ]}
       onChoose={(id) =>
-        dispatch({ type: "DecideOptionalCost", data: { pay: id === "pay" } })
+        dispatch({ type: "DecideOptionalCost", data: { index: id === "0" ? 0 : 1 } })
       }
       onClose={() => dispatch({ type: "CancelCast" })}
     />
@@ -4091,6 +4091,14 @@ function UnlessPaymentPanel() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  // CR 118.12a: the engine names the object the payment decides (each revealed
+  // card of a Sword-Point Diplomacy loop), so the payer knows what they protect.
+  const affectedObjectId =
+    waitingFor?.type === "UnlessPayment" ? waitingFor.data.affected_object : undefined;
+  const affectedObject = useGameStore((s) =>
+    affectedObjectId != null ? s.gameState?.objects[affectedObjectId] : undefined,
+  );
+  const inspectHoverProps = useInspectHoverProps();
   const drawCost = useGameStore((s) => s.gameState?.derived?.unless_draw_cost);
 
   if (waitingFor?.type !== "UnlessPayment") return null;
@@ -4124,6 +4132,14 @@ function UnlessPaymentPanel() {
               size="sm"
             />
           </h3>
+          {affectedObject && affectedObjectId != null && (
+            <p
+              className="-mt-2 mb-3 text-center text-xs font-medium text-gray-400"
+              {...inspectHoverProps(affectedObjectId)}
+            >
+              {affectedObject.name}
+            </p>
+          )}
           <div className="flex justify-center gap-3">
             <button
               onClick={() =>
@@ -4162,9 +4178,13 @@ function UnlessPaymentChooseCostModal() {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const waitingFor = useGameStore((s) => s.waitingFor);
+  const objects = useGameStore((s) => s.gameState?.objects);
 
   if (waitingFor?.type !== "UnlessPaymentChooseCost") return null;
 
+  const affectedObjectId = waitingFor.data.affected_object;
+  const affectedObject =
+    affectedObjectId != null ? objects?.[affectedObjectId] : undefined;
   const costs = waitingFor.data.costs as Array<{
     type: string;
     cost?: { type: string; shards?: string[]; generic?: number };
@@ -4182,6 +4202,8 @@ function UnlessPaymentChooseCostModal() {
   return (
     <ChoiceModal
       title={t("gamePage.unlessPayment.titleChooseOne", { effect })}
+      subtitle={affectedObject?.name}
+      previewObjectId={affectedObject ? affectedObjectId : undefined}
       options={[
         ...branchOptions,
         { id: "decline", label: t("gamePage.unlessPayment.takeEffect") },

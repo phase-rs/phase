@@ -4447,6 +4447,15 @@ fn parse_type_phrase_folding_unbound<'a>(
         pos += consumed;
     }
 
+    // CR 109.4 + CR 608.2i: "whose controller <look-back> this turn"
+    // possessive-relative controller predicate (Steel Hellkite #3248). Sibling to the
+    // "that …" relative clause below; disjoint prefixes, so the order is grouping-only.
+    // Refuses (leaving the tail unconsumed) for predicates outside the shared leaf set.
+    if let Some((prop, consumed)) = parse_whose_controller_suffix(&lower[pos..]) {
+        properties.push(prop);
+        pos += consumed;
+    }
+
     // "that share(s) a creature type" / "that has/have [keyword]" relative clause.
     if let Some((that_props, consumed)) = parse_that_clause_suffix(&lower[pos..], Some(ctx)) {
         properties.extend(that_props);
@@ -9471,9 +9480,8 @@ fn parse_ownership_or_controller_suffix(
     // PlayerFilter rather than setting *controller. Object-side bridge into the
     // PlayerFilter enum. Longest-match-first in the verb alt (mirrors the
     // duration guard in oracle_effect/lower.rs).
-    // NOTE: the numeric "three or more" is a DEFERRED coverage gap — the bridge
-    // carries the combat-damage-by-a-Pirate semantics (≥1); the count threshold
-    // is intentionally not enforced yet. Do NOT silently over-narrow.
+    // NOTE: the numeric "three or more" threshold is carried as `min_sources`
+    // and enforced as a distinct-source count at runtime.
     if let Ok((rest, pf)) = parse_controller_predicate_clause(own_ctrl) {
         properties.push(FilterProp::ControllerMatches {
             player: Box::new(pf),
@@ -9493,19 +9501,43 @@ fn parse_ownership_or_controller_suffix(
 /// <look-back> this turn" into a `PlayerFilter`. This is the object-axis analogue
 /// of the whole `PlayerFilter` enum: it recognizes a controller predicate and
 /// hands it to `FilterProp::ControllerMatches`, so ANY player look-back can scope
-/// a target's controller. Longest-match-first in the verb `alt`. The trailing
-/// " this turn" is required so the whole relative clause is consumed.
-///
-/// Supported predicates (each a leaf of the `alt`, composed — not enumerated):
-///   - "was dealt combat damage by [<N> or more ]<subtype>" →
-///     `OpponentDealtDamage { CombatOnly, Some(Typed(subtype)), min_sources: N }`
-///     (Admiral Beckett Brass: "by three or more Pirates" → `min_sources = 3`).
-///     The "<N> or more" threshold IS enforced (distinct-source count at runtime).
-///   - "was dealt combat damage" (no source) → `OpponentDealtDamage {
-///     CombatOnly, None, min_sources: 1 }`.
-///   - "lost life" → `OpponentLostLife` (sibling unlocked by the bridge).
+/// a target's controller. The predicate leaves are shared with the
+/// possessive-relative entry (`parse_whose_controller_predicate_clause`).
 fn parse_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, _) = tag("controlled by a player who ").parse(input)?;
+    parse_controller_predicate_leaves(input)
+}
+
+/// CR 109.4 + CR 608.2i: possessive-relative entry to the controller-predicate
+/// bridge — "whose controller <look-back> this turn" (Steel Hellkite: "each nonland
+/// permanent with mana value X whose controller was dealt combat damage by this
+/// creature this turn"). Same shared leaves and trailing-" this turn" requirement as
+/// `parse_controller_predicate_clause`; predicates outside the leaf set refuse.
+fn parse_whose_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilter> {
+    let (input, _) = tag("whose controller ").parse(input)?;
+    parse_controller_predicate_leaves(input)
+}
+
+/// Shared controller-predicate leaves for both subject forms ("controlled by a player
+/// who …" and "whose controller …"). Longest-match-first in the verb `alt`. The
+/// trailing " this turn" is required so the whole relative clause is consumed.
+///
+/// Supported predicates (each a leaf of the `alt`, composed — not enumerated):
+///   - "was dealt combat damage by [<N> or more ]<source>" →
+///     `OpponentDealtDamage { CombatOnly, Some(source), min_sources: N, All }`
+///     (Admiral Beckett Brass: "by three or more Pirates" → `min_sources = 3`;
+///     Steel Hellkite: "by this creature" → `Some(SelfRef)`, `min_sources = 1`).
+///     The "<N> or more" threshold IS enforced (distinct-source count at runtime).
+///   - "was dealt combat damage" (no source) → `OpponentDealtDamage {
+///     CombatOnly, None, min_sources: 1, All }`.
+///   - "lost life" → `OpponentLostLife` (sibling unlocked by the bridge).
+///
+/// CR 608.2c: neither subject form ("a player who …", "whose controller …")
+/// names an opponent, so the damage leaves emit `relation: All` — the damaged
+/// player qualifies even if it later controls the source (Steel Hellkite +
+/// Ray of Command). Explicit "opponent … dealt damage" grammar routes through
+/// `oracle_quantity` and keeps `Opponent`.
+pub(crate) fn parse_controller_predicate_leaves(input: &str) -> OracleResult<'_, PlayerFilter> {
     // Each leaf leaves the remainder positioned just before the trailing
     // " this turn" (leading space intact), which the outer combinator consumes
     // uniformly so the whole relative clause is required.
@@ -9517,6 +9549,7 @@ fn parse_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilt
                 kind: DamageKindFilter::CombatOnly,
                 source: None,
                 min_sources: 1,
+                relation: PlayerRelation::All,
             },
             terminated(tag("was dealt combat damage"), peek(tag(" this turn"))),
         ),
@@ -9568,6 +9601,8 @@ fn parse_controller_dealt_combat_damage_by(input: &str) -> OracleResult<'_, Play
             kind: DamageKindFilter::CombatOnly,
             source: Some(Box::new(source)),
             min_sources,
+            // CR 608.2c: no opponent word in this grammar (see the leaves doc).
+            relation: PlayerRelation::All,
         },
     ))
 }
@@ -9724,6 +9759,9 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 /// `nom::Err::Error`, so dispatch falls through to the `TRACKED_SET_PHRASES`
 /// table, which keeps "the exiled card" → `TrackedSet` for the common
 /// effect-exile case.
+///
+/// CR 608.2c + CR 701.68c: the filter also names an object an earlier
+/// instruction of the same resolution bound, as "the blighted creature" does.
 fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -9740,6 +9778,16 @@ fn parse_cost_paid_object_reference<'a>(
                 ),
             ),
             |i| parse_exile_cost_paid_object(i, ctx),
+            // CR 701.68c: "the blighted creature" is the object chosen when blighting.
+            // A possessive ("the blighted creature's controller") names something else.
+            value(
+                (),
+                (
+                    tag("the "),
+                    |i| parse_word_bounded(i, "blighted creature"),
+                    not(tag("'")),
+                ),
+            ),
         )),
     )
     .parse(input)
@@ -10145,6 +10193,35 @@ pub(crate) fn parse_bare_was_dealt_damage_suffix(text: &str) -> Option<(FilterPr
     }
     Some((
         FilterProp::WasDealtDamageThisTurn,
+        leading_ws + (trimmed.len() - rest.len()),
+    ))
+}
+
+/// CR 109.4 + CR 608.2i: "whose controller <look-back> this turn" possessive-relative
+/// controller predicate on a target noun phrase (Steel Hellkite: "each nonland
+/// permanent with mana value X whose controller was dealt combat damage by this
+/// creature this turn"). Delegates the predicate to the shared controller-predicate
+/// leaves, so every leaf the "controlled by a player who" bridge supports is accepted
+/// here; any other predicate (Dwarven Sea Clan / Seasinger "controls an Island",
+/// Lullmage's Domination graveyard count) refuses with `None` and the cascade leaves
+/// the tail unconsumed, preserving those cards' current behavior.
+pub(crate) fn parse_whose_controller_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (rest, pf) = parse_whose_controller_predicate_clause(trimmed).ok()?;
+    // Word-boundary check: accept end-of-string or any non-alphanumeric terminator
+    // so a longer continuation cannot misfire (mirrors the bare-damage suffix above).
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+    Some((
+        FilterProp::ControllerMatches {
+            player: Box::new(pf),
+        },
         leading_ws + (trimmed.len() - rest.len()),
     ))
 }
@@ -11780,18 +11857,20 @@ enum ZonePrep {
 /// Qualifier preceding the zone word. Distinguishes ownership-bearing qualifiers
 /// ("an opponent's", "your") from plain determiners ("a", "the") and bare forms.
 /// The `Bare` variant is a zero-width match, so `parse_zone_qual` always succeeds.
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum ZoneQual {
-    /// "an opponent's ", "each opponent's " — produces `Owned{Opponent}`.
-    Opponent,
+    /// A possessive that binds the zone's owner — produces `Owned{owner}`
+    /// (CR 108.3: cards in a player's zone are owned by that player):
+    /// - "an opponent's ", "each opponent's " → `Opponent`
+    /// - "target player's " → `TargetPlayer`
+    /// - "their " → `ScopedPlayer` (in an each-player iteration the
+    ///   third-person possessive binds to the iterated player)
+    /// - "defending player's " → `DefendingPlayer` (CR 508.5a: one specific
+    ///   defending player, never any player)
+    Owner(ControllerRef),
     /// "your " — sets `ControllerRef::You` on the parent filter.
     You,
-    /// "target player's " — produces `Owned{TargetPlayer}`.
-    TargetPlayer,
-    /// "their " — produces `Owned{ScopedPlayer}`; in an each-player iteration
-    /// the third-person possessive binds to the iterated player.
-    Their,
-    /// "its owner's ", "that player's ", "defending player's ", "each player's ".
+    /// "its owner's ", "that player's ", "each player's ", "a player's ".
     /// No ownership constraint emitted; referent is resolved by context upstream.
     OtherPoss,
     /// "the chosen player's " — the player persisted on the source via an earlier
@@ -11903,7 +11982,7 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
         return None;
     }
     match qualifier {
-        ZoneQual::OtherPoss | ZoneQual::TargetPlayer => return None,
+        ZoneQual::OtherPoss | ZoneQual::Owner(ControllerRef::TargetPlayer) => return None,
         ZoneQual::Plain => {
             // This adapter admits only the singular unowned object form. The
             // shared grammar still owns adjective/plural/selection spellings.
@@ -11924,8 +12003,9 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
                 controller: controller?,
             });
         }
-        // CR 108.3 + CR 404.1: retain the shared grammar's opponent/iteration owner.
-        ZoneQual::Opponent | ZoneQual::Their => {}
+        // CR 108.3 + CR 404.1 + CR 508.5a: retain the shared grammar's
+        // opponent/iteration/defending-player owner.
+        ZoneQual::Owner(_) => {}
     }
     Some((props, leading_ws + lower.len() - rest.len()))
 }
@@ -12021,84 +12101,27 @@ fn parse_zone_suffix_nom(
         (i, vec![zone])
     };
 
-    let out = if zones.len() > 1 {
-        // Multi-zone disjunction: use InAnyZone
-        match qual {
-            ZoneQual::Opponent => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::You => (
-                vec![FilterProp::InAnyZone { zones }],
-                Some(ControllerRef::You),
-            ),
-            ZoneQual::ChosenPlayer => (
-                vec![FilterProp::InAnyZone { zones }],
-                Some(ControllerRef::SourceChosenPlayer),
-            ),
-            ZoneQual::TargetPlayer => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::TargetPlayer,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::Their => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::ScopedPlayer,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InAnyZone { zones }], None),
-        }
+    // A disjunction ("from your graveyard or from your hand") names any
+    // of its zones; a single zone phrase names exactly that zone.
+    let zone_prop = if let [zone] = zones.as_slice() {
+        FilterProp::InZone { zone: *zone }
     } else {
-        // Single zone: use InZone
-        let zone = zones[0];
-        match qual {
-            ZoneQual::Opponent => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    },
-                    FilterProp::InZone { zone },
-                ],
-                None,
-            ),
-            ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
-            ZoneQual::ChosenPlayer => (
-                vec![FilterProp::InZone { zone }],
-                Some(ControllerRef::SourceChosenPlayer),
-            ),
-            ZoneQual::TargetPlayer => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::TargetPlayer,
-                    },
-                    FilterProp::InZone { zone },
-                ],
-                None,
-            ),
-            ZoneQual::Their => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::ScopedPlayer,
-                    },
-                    FilterProp::InZone { zone },
-                ],
-                None,
-            ),
-            ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InZone { zone }], None),
-        }
+        FilterProp::InAnyZone { zones }
+    };
+    let out = match &qual {
+        // CR 108.3: cards in a player's zone are owned by that player.
+        ZoneQual::Owner(owner) => (
+            vec![
+                FilterProp::Owned {
+                    controller: owner.clone(),
+                },
+                zone_prop,
+            ],
+            None,
+        ),
+        ZoneQual::You => (vec![zone_prop], Some(ControllerRef::You)),
+        ZoneQual::ChosenPlayer => (vec![zone_prop], Some(ControllerRef::SourceChosenPlayer)),
+        ZoneQual::OtherPoss | ZoneQual::Plain => (vec![zone_prop], None),
     };
 
     Ok((i, (out.0, out.1, qual)))
@@ -12107,21 +12130,28 @@ fn parse_zone_suffix_nom(
 fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQual> {
     alt((
         value(
-            ZoneQual::Opponent,
+            ZoneQual::Owner(ControllerRef::Opponent),
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
         // CR 613.1: must precede the `Plain` "the " arm so "the chosen player's "
         // isn't consumed as a bare "the " article.
         value(ZoneQual::ChosenPlayer, tag("the chosen player's ")),
-        value(ZoneQual::TargetPlayer, tag("target player's ")),
-        value(ZoneQual::Their, tag("their ")),
+        value(
+            ZoneQual::Owner(ControllerRef::TargetPlayer),
+            tag("target player's "),
+        ),
+        value(ZoneQual::Owner(ControllerRef::ScopedPlayer), tag("their ")),
+        // CR 508.5a: "defending player's" binds one specific defending player.
+        value(
+            ZoneQual::Owner(ControllerRef::DefendingPlayer),
+            tag("defending player's "),
+        ),
         value(
             ZoneQual::OtherPoss,
             alt((
                 tag("its owner's "),
                 tag("that player's "),
-                tag("defending player's "),
                 tag("each player's "),
                 // CR 404.1: "a player's graveyard" names a zone without binding an
                 // owner (Lodestone Bauble), so it contributes `InZone` alone.
@@ -12253,6 +12283,72 @@ mod tests {
                 format!("{ctx:?}"),
                 before,
                 "a refusal must not mutate context"
+            );
+        }
+    }
+
+    /// Steel Hellkite (#3248) probe: the by-leaf's `parse_target` delegation must
+    /// yield a `SelfRef` source for the normalized "~" ("by this creature").
+    #[test]
+    fn dealt_combat_damage_by_self_reference_yields_self_ref_source() {
+        let (rest, pf) =
+            parse_controller_dealt_combat_damage_by("was dealt combat damage by ~ this turn")
+                .expect("by-~ must parse");
+        assert_eq!(rest, " this turn");
+        assert!(
+            matches!(
+                &pf,
+                PlayerFilter::OpponentDealtDamage {
+                    source: Some(src),
+                    min_sources: 1,
+                    ..
+                } if matches!(&**src, TargetFilter::SelfRef)
+            ),
+            "expected a SelfRef damage source, got {pf:?}"
+        );
+    }
+
+    /// Steel Hellkite (#3248): the "whose controller" arm consumes the damage
+    /// look-back (positive control for the refusal test below).
+    #[test]
+    fn whose_controller_suffix_consumes_damage_lookback() {
+        let text = " whose controller was dealt combat damage by ~ this turn";
+        let (prop, consumed) =
+            parse_whose_controller_suffix(text).expect("damage look-back must parse");
+        assert_eq!(consumed, text.len());
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::ControllerMatches { player }
+                    if matches!(
+                        &**player,
+                        PlayerFilter::OpponentDealtDamage {
+                            kind: DamageKindFilter::CombatOnly,
+                            source: Some(src),
+                            min_sources: 1,
+                            // CR 608.2c: "whose controller …" names no opponent.
+                            relation: PlayerRelation::All,
+                        } if matches!(&**src, TargetFilter::SelfRef)
+                    )
+            ),
+            "expected ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(SelfRef), 1, All}}}}, got {prop:?}"
+        );
+    }
+
+    /// Steel Hellkite (#3248): the "whose controller" arm refuses predicates outside
+    /// the shared leaf set without consuming input — Dwarven Sea Clan / Seasinger
+    /// ("controls an Island") and Lullmage's Domination (graveyard count) keep their
+    /// current behavior, and non-controller "whose" forms never reach this arm.
+    #[test]
+    fn whose_controller_suffix_refuses_non_lookback_predicates() {
+        for text in [
+            " whose controller controls an island",
+            " whose controller has eight or more cards in their graveyard",
+            " whose power is 5",
+        ] {
+            assert!(
+                parse_whose_controller_suffix(text).is_none(),
+                "{text:?} must be refused"
             );
         }
     }
@@ -17525,6 +17621,28 @@ mod tests {
         let (filter, rest) = parse_target("the sacrificed creature");
         assert_eq!(filter, TargetFilter::CostPaidObject);
         assert!(rest.is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn the_blighted_creature_is_an_effect_bound_object_reference() {
+        // CR 701.68c: the phrase names the object chosen when blighting.
+        let (filter, rest) = parse_target("the blighted creature");
+        assert_eq!(filter, TargetFilter::CostPaidObject);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
+
+        let (plural, _) = parse_target("the blighted creatures");
+        assert_ne!(
+            plural,
+            TargetFilter::CostPaidObject,
+            "the referent is one object, so the plural must not bind it"
+        );
+
+        let (possessive, _) = parse_target("the blighted creature's controller");
+        assert_ne!(
+            possessive,
+            TargetFilter::CostPaidObject,
+            "a possessive names another object, so it must reach the possessive arms"
+        );
     }
 
     #[test]
@@ -24449,7 +24567,7 @@ mod tests {
     #[test]
     fn parse_target_bare_their_graveyard_scopes_to_owner() {
         // Part B bare-possessive path: bare "their graveyard" must match the
-        // owner-scoped shape produced by parse_zone_suffix_nom's ZoneQual::Their.
+        // owner-scoped shape produced by parse_zone_suffix_nom's ZoneQual::Owner(ScopedPlayer).
         let (f, _) = parse_target("their graveyard");
         let tf = typed_leg(&f).expect("typed filter");
         assert_eq!(tf.controller, None);
@@ -26284,6 +26402,11 @@ mod exile_graveyard_source_shape {
             ("from an opponent's graveyard", ControllerRef::Opponent),
             ("from each opponent's graveyard", ControllerRef::Opponent),
             ("from their graveyard", ControllerRef::ScopedPlayer),
+            // CR 508.5a: one specific defending player owns the named graveyard.
+            (
+                "from defending player's graveyard",
+                ControllerRef::DefendingPlayer,
+            ),
         ] {
             let (public, ctrl, count) = parse_zone_suffix(phrase).unwrap();
             assert_eq!(ctrl, None);
@@ -26324,6 +26447,42 @@ mod exile_graveyard_source_shape {
         assert_eq!(count, "from your graveyard or from your hand".len());
     }
 
+    /// CR 508.5a + CR 108.3: "defending player's <zone>" binds the zone's owner
+    /// to the one defending player, for every zone word and for disjunctions.
+    #[test]
+    fn defending_player_zone_qualifier_binds_the_defending_owner() {
+        let owner = FilterProp::Owned {
+            controller: ControllerRef::DefendingPlayer,
+        };
+        for (phrase, zone) in [
+            ("from defending player's graveyard", Zone::Graveyard),
+            ("in defending player's graveyard", Zone::Graveyard),
+            ("from defending player's hand", Zone::Hand),
+            ("in defending player's library", Zone::Library),
+        ] {
+            let (props, ctrl, count) = parse_zone_suffix(phrase).unwrap();
+            assert_eq!(ctrl, None, "{phrase}");
+            assert_eq!(
+                props,
+                vec![owner.clone(), FilterProp::InZone { zone }],
+                "{phrase}"
+            );
+            assert_eq!(count, phrase.len(), "{phrase}");
+        }
+        let phrase = "from defending player's graveyard or from defending player's hand";
+        let (props, ctrl, _) = parse_zone_suffix(phrase).unwrap();
+        assert_eq!(ctrl, None);
+        assert_eq!(
+            props,
+            vec![
+                owner,
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Hand]
+                }
+            ]
+        );
+    }
+
     #[test]
     fn shape_adapter_declines_other_zones_owners_prepositions_and_selections() {
         assert!(parse_exile_graveyard_source("from your graveyard").is_some());
@@ -26335,7 +26494,6 @@ mod exile_graveyard_source_shape {
             "from target player's graveyard",
             "from its owner's graveyard",
             "from that player's graveyard",
-            "from defending player's graveyard",
             "from each player's graveyard",
             "from a player's graveyard",
             "in your graveyard",
