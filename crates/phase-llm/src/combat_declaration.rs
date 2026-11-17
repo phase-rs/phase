@@ -12,22 +12,26 @@
 //! A chat model is offered what a human seat is offered: each pair the pending
 //! declaration lists, read from the prompt the engine raised
 //! (`valid_attack_targets_by_attacker`, `valid_block_targets`), as one numbered
-//! option, and it answers with every pair it declares. Whether those pairs make
-//! a legal declaration is the engine's call, made by its completion authority
-//! ([`complete_attacker_proposal`], [`complete_blocker_proposal`]): a
-//! declaration it would change is refused, never replaced by one the model did
-//! not choose.
+//! option, and it answers with every pair it declares. Each line names its
+//! creatures as the board does, numbering any that would read alike, and says
+//! what the prompt requires of them. Whether those pairs make a legal
+//! declaration is the engine's call, made by its completion authority
+//! ([`complete_attacker_proposal`], [`complete_blocker_proposal`]) under the
+//! posture the engine's own candidates are completed under, which refuses any
+//! cost to attack or block: a declaration it would change is refused, never
+//! replaced by one the model did not choose. A pair that carries such a cost is
+//! therefore not offered.
 //!
 //! A System One provider (Jev) answers by ranking options and cannot name a
 //! set of them, so it keeps choosing one of the engine's candidates
 //! ([`crate::game_decision`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use engine::game::combat::{
-    complete_attacker_proposal, complete_blocker_proposal, validate_attack_declaration,
-    validate_blockers_for_player, AttackTarget, BlockRequirement, CombatRequirement,
-    CombatTaxPosture,
+    complete_attacker_proposal, complete_blocker_proposal, compute_attack_tax, compute_block_tax,
+    validate_attack_declaration, validate_blockers_for_player, AttackTarget, BlockRequirement,
+    CombatRequirement, CombatTaxPosture,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -36,12 +40,14 @@ use engine::types::player::PlayerId;
 
 use crate::error::{LlmError, LlmResult};
 use crate::prompt::option_value;
-use crate::render::action::{describe_attack, describe_block};
+use crate::render::action::DeclarationNames;
 
-/// Why the engine changed a declaration its own validator accepts: under
-/// [`CombatTaxPosture::Refuse`] the completion drops any declaration that
-/// carries a cost to attack or block (CR 508.1h + CR 509.1d).
-const TAXED_DECLARATION: &str = "it carries a cost to attack or block";
+/// Why the engine refused a declaration its validator accepts. Under
+/// [`CombatTaxPosture::Refuse`] the completion changes only a declaration that
+/// carries a cost to attack or block, and no pair that carries one is offered
+/// ([`DeclarationPairs::pending`]), so this is a fallback, not an expected
+/// outcome.
+const CHANGED_BY_COMPLETION: &str = "the engine's completion changes it";
 
 /// A combat declaration a chat model composes, with the options it is shown.
 #[derive(Debug)]
@@ -165,7 +171,8 @@ enum DeclarationPairs {
 }
 
 impl DeclarationPairs {
-    /// The pairs of the declaration the engine is waiting on `owner` to make.
+    /// The pairs of the declaration the engine is waiting on `owner` to make,
+    /// less any that carry a cost to attack or block.
     ///
     /// Read in the prompt's own order (its `Vec`s, never a map's iteration
     /// order), because the option lines, and the fingerprint taken over them,
@@ -195,6 +202,11 @@ impl DeclarationPairs {
                         };
                         targets.iter().map(move |&target| (attacker, target))
                     })
+                    // CR 508.1d + CR 508.1h: a pair that carries a cost to
+                    // attack is never accepted under the refusing posture, so
+                    // it is not offered. The engine's quote is per creature,
+                    // so a pair without one adds none to a declaration.
+                    .filter(|&pair| compute_attack_tax(state, &[pair]).is_none())
                     .collect();
                 Some(Self::Attacks {
                     attacks,
@@ -218,6 +230,9 @@ impl DeclarationPairs {
                             .flatten()
                             .map(move |&attacker| (blocker, attacker))
                     })
+                    // CR 509.1c + CR 509.1d: likewise a pair that carries a
+                    // cost to block.
+                    .filter(|&pair| compute_block_tax(state, &[pair]).is_none())
                     .collect();
                 Some(Self::Blocks {
                     defender: *player,
@@ -248,20 +263,14 @@ impl DeclarationPairs {
     /// One label per pair, named as `viewer` sees the board in `visible`,
     /// with what the prompt requires of its creatures.
     fn labels(&self, visible: &GameState, viewer: PlayerId) -> Vec<String> {
+        let names = DeclarationNames::new(visible, viewer, &self.objects());
         match self {
             Self::Attacks {
                 attacks,
                 requirements,
             } => attacks
                 .iter()
-                .map(|&(attacker, target)| {
-                    describe_attack(
-                        visible,
-                        viewer,
-                        (attacker, target),
-                        requirements.get(&attacker),
-                    )
-                })
+                .map(|&pair| names.attack(pair, requirements.get(&pair.0)))
                 .collect(),
             Self::Blocks {
                 blocks,
@@ -270,17 +279,39 @@ impl DeclarationPairs {
                 ..
             } => blocks
                 .iter()
-                .map(|&(blocker, attacker)| {
-                    describe_block(
-                        visible,
-                        viewer,
-                        (blocker, attacker),
-                        requirements.get(&blocker),
-                        minimums.get(&attacker),
-                    )
-                })
+                .map(|&pair| names.block(pair, requirements.get(&pair.0), minimums.get(&pair.1)))
                 .collect(),
         }
+    }
+
+    /// Every object the pairs name, once each, in the order they first
+    /// appear: the order objects that read alike are numbered in.
+    fn objects(&self) -> Vec<ObjectId> {
+        let mut objects = Vec::new();
+        let mut seen = HashSet::new();
+        let mut name = |id: ObjectId| {
+            if seen.insert(id) {
+                objects.push(id);
+            }
+        };
+        match self {
+            Self::Attacks { attacks, .. } => {
+                for &(attacker, target) in attacks {
+                    name(attacker);
+                    match target {
+                        AttackTarget::Player(_) => {}
+                        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => name(id),
+                    }
+                }
+            }
+            Self::Blocks { blocks, .. } => {
+                for &(blocker, attacker) in blocks {
+                    name(blocker);
+                    name(attacker);
+                }
+            }
+        }
+        objects
     }
 
     /// The declaration the pairs at `chosen` make, or why the engine refuses
@@ -291,7 +322,8 @@ impl DeclarationPairs {
     /// restriction and obeys as many requirements as any declaration could.
     /// Under [`CombatTaxPosture::Refuse`] it also changes any declaration that
     /// carries a cost to attack or block (CR 508.1h + CR 509.1d), as the
-    /// engine's own candidates are completed.
+    /// engine's own candidates are completed; [`Self::pending`] offers no pair
+    /// that carries one.
     fn declare(&self, state: &GameState, chosen: &[usize]) -> Result<GameAction, String> {
         match self {
             Self::Attacks { attacks: pairs, .. } => {
@@ -308,7 +340,7 @@ impl DeclarationPairs {
                 }
                 Err(validate_attack_declaration(state, &attacks, &[])
                     .err()
-                    .unwrap_or_else(|| TAXED_DECLARATION.to_string()))
+                    .unwrap_or_else(|| CHANGED_BY_COMPLETION.to_string()))
             }
             Self::Blocks {
                 defender,
@@ -331,7 +363,7 @@ impl DeclarationPairs {
                 }
                 Err(validate_blockers_for_player(state, *defender, &assignments)
                     .err()
-                    .unwrap_or_else(|| TAXED_DECLARATION.to_string()))
+                    .unwrap_or_else(|| CHANGED_BY_COMPLETION.to_string()))
             }
         }
     }
@@ -639,9 +671,9 @@ mod tests {
         assert_eq!(blockers_of(&runner, bears), vec![ogre]);
     }
 
-    /// CR 509.1a: several creatures can block one attacker. Neither of the
-    /// seat's creatures kills the Craw Wurm alone; together they deal 5 to
-    /// its 4 toughness.
+    /// CR 509.1a: each blocking creature chooses one attacker to block, so
+    /// several can choose the same one. Neither of the seat's creatures kills
+    /// the Craw Wurm alone; together they deal 5 to its 4 toughness.
     #[test]
     fn a_seat_double_blocks_an_attacker_without_evasion() {
         let mut scenario = GameScenario::new();
@@ -816,12 +848,12 @@ mod tests {
         );
     }
 
-    /// CR 508.1d + CR 508.1h: attacking past Ghostly Prison costs mana. The
-    /// seat's declarations are completed as the engine's own candidates are,
-    /// refusing any cost to attack, so the taxed attack is refused while the
-    /// free one beside it is declared.
+    /// CR 508.1d + CR 508.1h: attacking past Ghostly Prison costs mana. A
+    /// seat's declaration is completed as the engine's own candidates are,
+    /// refusing any cost to attack, so the taxed attack is not offered, while
+    /// the free one beside it is declared.
     #[test]
-    fn an_attack_that_carries_a_cost_is_refused() {
+    fn an_attack_that_carries_a_cost_is_not_offered() {
         let mut scenario = GameScenario::new_n_player(3, 42);
         scenario.at_phase(Phase::PreCombatMain);
         let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
@@ -829,17 +861,30 @@ mod tests {
         let mut runner = scenario.build();
         pass_to_declaration(&mut runner);
 
+        // Reach guard: the engine's prompt lists the taxed attack among the
+        // attacks the Bears can make.
+        let WaitingFor::DeclareAttackers {
+            valid_attack_targets_by_attacker: Some(by_attacker),
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("the engine asks for attackers with its per-attacker map");
+        };
+        assert!(by_attacker[&bears].contains(&AttackTarget::Player(P1)));
+
         let (contract, request) = decision(&runner, P0);
-        let taxed = option_number(
-            &request,
-            "Grizzly Bears (controlled by You) attacks Player 1",
+        assert!(
+            !request
+                .prompt
+                .user
+                .contains("Grizzly Bears (controlled by You) attacks Player 1"),
+            "{}",
+            request.prompt.user
         );
         let free = option_number(
             &request,
             "Grizzly Bears (controlled by You) attacks Player 2",
         );
-        let detail = refusal(answer(&runner, &contract, &request, &[taxed]));
-        assert!(detail.ends_with(TAXED_DECLARATION), "{detail}");
         assert_eq!(
             answer(&runner, &contract, &request, &[free]).expect("an untaxed attack"),
             GameAction::DeclareAttackers {
@@ -941,6 +986,102 @@ mod tests {
         );
     }
 
+    /// A block beside one a requirement forces: the engine's candidates hold
+    /// only the Razorgrass Screen's block, which used to make the decision
+    /// look forced, but the Gray Ogre may join it and the two kill the Hill
+    /// Giant.
+    #[test]
+    fn a_block_beside_a_required_block_is_offered() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        let screen = scenario
+            .add_creature(P1, "Razorgrass Screen", 2, 1)
+            .from_oracle_text_with_keywords(&["Defender"], RAZORGRASS_SCREEN)
+            .id();
+        let ogre = scenario.add_creature(P1, "Gray Ogre", 2, 2).id();
+        let mut runner = scenario.build();
+        attack_player_one(&mut runner, &[giant]);
+
+        let (contract, request) = decision(&runner, P1);
+        assert_eq!(contract.candidates.len(), 1, "{:?}", contract.candidates);
+        let declared = answer(
+            &runner,
+            &contract,
+            &request,
+            &[
+                option_number(
+                    &request,
+                    "Razorgrass Screen (controlled by You) blocks Hill Giant (controlled by \
+                     Player 0); it must block if able",
+                ),
+                option_number(
+                    &request,
+                    "Gray Ogre (controlled by You) blocks Hill Giant (controlled by Player 0)",
+                ),
+            ],
+        )
+        .expect("both blocking obeys the requirement");
+        assert!(!offered_as_candidate(&contract, &declared));
+
+        apply(&mut runner, &contract, declared);
+        let mut both = vec![screen, ogre];
+        both.sort_unstable();
+        assert_eq!(blockers_of(&runner, giant), both);
+    }
+
+    /// Two attackers and two blockers that read alike on the board are
+    /// numbered in the declaration, so the seat can block each attacker with
+    /// a different creature instead of naming one of them twice.
+    #[test]
+    fn creatures_that_read_alike_are_numbered_so_each_can_be_named() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let attackers = [
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+            scenario.add_creature(P0, "Grizzly Bears", 2, 2).id(),
+        ];
+        let blockers = [
+            scenario.add_creature(P1, "Gray Ogre", 2, 2).id(),
+            scenario.add_creature(P1, "Gray Ogre", 2, 2).id(),
+        ];
+        let mut runner = scenario.build();
+        attack_player_one(&mut runner, &attackers);
+
+        let (contract, request) = decision(&runner, P1);
+        let declared = answer(
+            &runner,
+            &contract,
+            &request,
+            &[
+                option_number(
+                    &request,
+                    "Gray Ogre (controlled by You) #1 blocks Grizzly Bears (controlled by \
+                     Player 0) #1",
+                ),
+                option_number(
+                    &request,
+                    "Gray Ogre (controlled by You) #2 blocks Grizzly Bears (controlled by \
+                     Player 0) #2",
+                ),
+            ],
+        )
+        .expect("one blocker on each attacker is a legal declaration");
+        assert!(!offered_as_candidate(&contract, &declared));
+
+        apply(&mut runner, &contract, declared);
+        let mut blocking = Vec::new();
+        for attacker in attackers {
+            let on_this_one = blockers_of(&runner, attacker);
+            assert_eq!(on_this_one.len(), 1, "each Grizzly Bears is blocked once");
+            blocking.extend(on_this_one);
+        }
+        blocking.sort_unstable();
+        let mut both = blockers.to_vec();
+        both.sort_unstable();
+        assert_eq!(blocking, both, "by different Gray Ogres");
+    }
+
     /// Jev ranks the options it is asked about and cannot name a set, so it is
     /// asked about the engine's candidates, as before, and its answer binds to
     /// the candidate it chose.
@@ -982,7 +1123,10 @@ mod tests {
             .candidates
             .iter()
             .position(|candidate| {
-                matches!(&candidate.action, GameAction::DeclareAttackers { attacks, .. } if attacks.len() == 2)
+                matches!(
+                    &candidate.action,
+                    GameAction::DeclareAttackers { attacks, .. } if attacks.len() == 2
+                )
             })
             .expect("the engine offers the attack with everything");
         let key = &keys[both];

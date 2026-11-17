@@ -45,6 +45,9 @@ pub struct GameDecisionRequest {
     /// to [`select_action`] so a decision that moved on is refused instead of
     /// misapplied.
     pub fingerprint: String,
+    /// How many options the chat prompt numbers. For a combat declaration
+    /// these are its pairs; a System One question is asked over the frame's
+    /// options, the engine's candidates.
     pub option_count: usize,
     /// The parts of this decision a message-thread continue is rendered from.
     update: ThreadUpdateParts,
@@ -534,11 +537,13 @@ pub fn build_game_decision_prompt(
     // nothing; the caller takes it through the heuristic path instead, which
     // `UnsupportedDecision` already means and does not count as a failure.
     //
-    // The engine's candidates decide this for a combat declaration too: they
-    // hold the empty declaration and each single attack or block, every one
-    // completed to a legal declaration, so one candidate means they all
-    // completed to the same declaration.
-    if options.candidates.len() == 1 {
+    // The count is of the options the chat prompt numbers. For a combat
+    // declaration those are its pairs, not the engine's candidates: the
+    // candidates sample the legal declarations, and one candidate can leave
+    // another legal declaration unsampled (a block beside one a requirement
+    // forces). A System One provider, asked over the candidates, refuses a
+    // question with fewer than two itself (`wire::system_one_request`).
+    if options.chat_lines().len() < 2 {
         return Err(LlmError::UnsupportedDecision {
             detail: "only one legal option; there is nothing to decide".to_string(),
         });
@@ -693,6 +698,9 @@ pub struct LlmActionSelection {
 }
 
 /// Bind a chat completion back to an engine action.
+///
+/// A chat completion only: a System One answer names one of the engine's
+/// candidates, and only [`select_action_from_response`] reads one.
 ///
 /// Refuses on any mismatch rather than approximating: a moved-on decision, an
 /// out-of-range index, an undecodable reply, or a combat declaration the
