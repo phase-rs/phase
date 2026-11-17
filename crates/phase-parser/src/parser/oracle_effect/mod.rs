@@ -22555,7 +22555,7 @@ fn refine_put_at_library_position(
 }
 
 /// CR 608.2c: a mass zone exile whose owner is a subject possessive
-/// ("their hand") but whose clause has no subject, printed or carried, names
+/// ("their hand") but whose clause has no subject other than the caster, printed or carried, names
 /// the player the chain last introduced. Bound through the shared antecedent
 /// binder; with no antecedent it fails closed rather than reading the caster.
 fn bind_subjectless_zone_owner(effect: &mut Effect, ctx: &ParseContext, original_clause: &str) {
@@ -53226,9 +53226,10 @@ fn parse_effect_chain_ir_body(
                 );
             }
         }
-        // A printed subject was already applied by `lower_subject_predicate_ast`
-        // and a carried one just above; only a clause with neither (and no player
-        // scope) binds its subject possessive from the chain's player antecedent.
+        // A printed non-caster subject was already applied by
+        // `lower_subject_predicate_ast` and a carried one just above; a clause with
+        // neither, or whose printed subject is the caster ("you"), and no player
+        // scope binds its subject possessive from the chain's player antecedent.
         if inherited_player_subject.is_none() && player_scope.is_none() {
             bind_subjectless_zone_owner(&mut clause.effect, ctx, normalized_text);
         }
