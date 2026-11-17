@@ -2243,11 +2243,36 @@ fn mana_payment_direct_actions(
             .filter_map(|object_id| state.objects.get(object_id))
             .filter(|object| !crate::game::restrictions::object_cant_tap(state, object.id))
             .map(|object| match mode {
-                ConvokeMode::Convoke if object.is_convoke_eligible(player) => {
+                ConvokeMode::Convoke
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        object,
+                        player,
+                        ConvokeMode::Convoke,
+                    ) =>
+                {
                     1usize.saturating_add(object.color.len())
                 }
-                ConvokeMode::Waterbend if object.is_waterbend_eligible(player) => 1,
-                ConvokeMode::Improvise if object.is_improvise_eligible(player) => 1,
+                ConvokeMode::Waterbend
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        object,
+                        player,
+                        ConvokeMode::Waterbend,
+                    ) =>
+                {
+                    1
+                }
+                ConvokeMode::Improvise
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        object,
+                        player,
+                        ConvokeMode::Improvise,
+                    ) =>
+                {
+                    1
+                }
                 ConvokeMode::Convoke | ConvokeMode::Waterbend | ConvokeMode::Improvise => 0,
                 ConvokeMode::Delve => unreachable!("delve counted from all zone objects"),
             })
@@ -2320,7 +2345,14 @@ fn mana_payment_direct_actions(
                     continue;
                 }
                 match mode {
-                    ConvokeMode::Convoke if object.is_convoke_eligible(player) => {
+                    ConvokeMode::Convoke
+                        if crate::game::casting::tap_payment_eligible(
+                            state,
+                            object,
+                            player,
+                            ConvokeMode::Convoke,
+                        ) =>
+                    {
                         actions.push(GameAction::TapForConvoke {
                             object_id: *object_id,
                             mana_type: ManaType::Colorless,
@@ -2340,14 +2372,26 @@ fn mana_payment_direct_actions(
                     }
                     // CR 701.67a: no tap past the waterbend cost's generic count.
                     ConvokeMode::Waterbend
-                        if object.is_waterbend_eligible(player) && waterbend_taps_remaining > 0 =>
+                        if crate::game::casting::tap_payment_eligible(
+                            state,
+                            object,
+                            player,
+                            ConvokeMode::Waterbend,
+                        ) && waterbend_taps_remaining > 0 =>
                     {
                         actions.push(GameAction::TapForConvoke {
                             object_id: *object_id,
                             mana_type: ManaType::Colorless,
                         });
                     }
-                    ConvokeMode::Improvise if object.is_improvise_eligible(player) => {
+                    ConvokeMode::Improvise
+                        if crate::game::casting::tap_payment_eligible(
+                            state,
+                            object,
+                            player,
+                            ConvokeMode::Improvise,
+                        ) =>
+                    {
                         actions.push(GameAction::TapForConvoke {
                             object_id: *object_id,
                             mana_type: ManaType::Colorless,

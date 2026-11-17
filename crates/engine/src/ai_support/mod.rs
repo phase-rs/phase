@@ -257,7 +257,12 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
             state.is_delve_selectable(*player, *object_id) && *mana_type == ManaType::Colorless
         }
         ConvokeMode::Convoke => {
-            if !obj.is_convoke_eligible(*player) {
+            if !crate::game::casting::tap_payment_eligible(
+                state,
+                obj,
+                *player,
+                ConvokeMode::Convoke,
+            ) {
                 return false;
             }
             if let Some(color) = mana_sources::mana_type_to_color(*mana_type) {
@@ -279,12 +284,13 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
             // CR 701.67a: a waterbend tap pays one generic mana of the cost, so
             // it pays colorless only and is legal only while generic mana is
             // left for a tap to pay.
-            obj.is_waterbend_eligible(*player)
+            crate::game::casting::tap_payment_eligible(state, obj, *player, ConvokeMode::Waterbend)
                 && *mana_type == ManaType::Colorless
                 && crate::game::casting::waterbend_taps_remaining(state, *player) > 0
         }
         ConvokeMode::Improvise => {
-            obj.is_improvise_eligible(*player) && *mana_type == ManaType::Colorless
+            crate::game::casting::tap_payment_eligible(state, obj, *player, ConvokeMode::Improvise)
+                && *mana_type == ManaType::Colorless
         }
     }
 }

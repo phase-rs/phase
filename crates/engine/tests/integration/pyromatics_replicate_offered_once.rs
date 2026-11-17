@@ -159,6 +159,25 @@ fn stopgap_board() -> Board {
     }
 }
 
+/// How the caster answers an optional-cost offer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaymentDecision {
+    Pay,
+    Decline,
+}
+
+impl PaymentDecision {
+    /// The `DecideOptionalCost` answer: option 0 pays, option 1 declines.
+    fn action(self) -> GameAction {
+        GameAction::DecideOptionalCost {
+            index: match self {
+                Self::Pay => 0,
+                Self::Decline => 1,
+            },
+        }
+    }
+}
+
 /// One answered prompt of the cast.
 #[derive(Debug, PartialEq, Eq)]
 enum Prompt {
@@ -169,12 +188,12 @@ enum Prompt {
         origin: AdditionalCostOrigin,
         ordinal: Option<u32>,
         paid: u32,
-        pay: bool,
+        decision: PaymentDecision,
     },
     /// A one-shot optional cost (conspire, bargain) and the answer.
     Once {
         origin: AdditionalCostOrigin,
-        pay: bool,
+        decision: PaymentDecision,
     },
     PayCost,
     Target,
@@ -182,9 +201,9 @@ enum Prompt {
 
 /// Casts the board's spell at the victim, paying replicate instance `i`
 /// `pays[i]` times and answering every one-shot optional cost with
-/// `pay_once`; returns every prompt answered until the cast completes.
-fn cast(board: &mut Board, pays: &[u32], pay_once: bool) -> Vec<Prompt> {
-    cast_restoring_after(board, pays, pay_once, None)
+/// `once`; returns every prompt answered until the cast completes.
+fn cast(board: &mut Board, pays: &[u32], once: PaymentDecision) -> Vec<Prompt> {
+    cast_restoring_after(board, pays, once, None)
 }
 
 /// The engine's own save/undo/P2P restore pipeline.
@@ -206,7 +225,7 @@ fn round_trip(runner: &GameRunner) -> GameRunner {
 fn cast_restoring_after(
     board: &mut Board,
     pays: &[u32],
-    pay_once: bool,
+    once: PaymentDecision,
     restore_after: Option<usize>,
 ) -> Vec<Prompt> {
     let card_id = board.runner.state().objects[&board.spell].card_id;
@@ -243,27 +262,25 @@ fn cast_restoring_after(
                     .additional_cost_queue
                     .first()
                     .map(|instance| instance.origin_ordinal);
-                let pay = pays
-                    .get(ordinal.unwrap_or(0) as usize)
-                    .is_some_and(|wanted| times_kicked < *wanted);
+                let wanted = pays.get(ordinal.unwrap_or(0) as usize).copied();
+                let decision = match wanted {
+                    Some(wanted) if times_kicked < wanted => PaymentDecision::Pay,
+                    _ => PaymentDecision::Decline,
+                };
                 trail.push(Prompt::Replicate {
                     origin,
                     ordinal,
                     paid: times_kicked,
-                    pay,
+                    decision,
                 });
-                GameAction::DecideOptionalCost {
-                    index: if pay { 0 } else { 1 },
-                }
+                decision.action()
             }
             WaitingFor::OptionalCostChoice { origin, .. } => {
                 trail.push(Prompt::Once {
                     origin,
-                    pay: pay_once,
+                    decision: once,
                 });
-                GameAction::DecideOptionalCost {
-                    index: if pay_once { 0 } else { 1 },
-                }
+                once.action()
             }
             WaitingFor::PayCost { choices, count, .. } => {
                 trail.push(Prompt::PayCost);
@@ -309,7 +326,11 @@ fn offers(ordinal: u32, pays: u32) -> impl Iterator<Item = Prompt> {
         origin: AdditionalCostOrigin::Replicate,
         ordinal: Some(ordinal),
         paid,
-        pay: paid < pays,
+        decision: if paid < pays {
+            PaymentDecision::Pay
+        } else {
+            PaymentDecision::Decline
+        },
     })
 }
 
@@ -381,7 +402,7 @@ fn copies_per_trigger(board: &mut Board) -> Vec<usize> {
 fn targeted_replicate_is_offered_once_before_targets() {
     for pays in 0..=2u32 {
         let mut board = pyromatics_board(Beside::Nothing);
-        let trail = cast(&mut board, &[pays], false);
+        let trail = cast(&mut board, &[pays], PaymentDecision::Decline);
 
         let mut expected: Vec<Prompt> = offers(0, pays).collect();
         expected.push(Prompt::Target);
@@ -406,7 +427,7 @@ fn targeted_replicate_is_offered_once_before_targets() {
 #[test]
 fn targeted_replicate_saved_mid_announcement_is_offered_once() {
     let mut board = pyromatics_board(Beside::Nothing);
-    let trail = cast_restoring_after(&mut board, &[2], false, Some(1));
+    let trail = cast_restoring_after(&mut board, &[2], PaymentDecision::Decline, Some(1));
 
     let mut expected: Vec<Prompt> = offers(0, 2).collect();
     expected.push(Prompt::Target);
@@ -421,7 +442,7 @@ fn targeted_replicate_saved_mid_announcement_is_offered_once() {
 #[test]
 fn printed_and_granted_replicate_on_a_targeted_spell_are_each_offered_once() {
     let mut board = pyromatics_board(Beside::Djinn);
-    let trail = cast(&mut board, &[1, 2], false);
+    let trail = cast(&mut board, &[1, 2], PaymentDecision::Decline);
 
     let mut expected: Vec<Prompt> = offers(0, 1).chain(offers(1, 2)).collect();
     expected.push(Prompt::Target);
@@ -475,7 +496,7 @@ fn respond_with_bolt(board: &mut Board, bolt: ObjectId, target: ObjectId) {
 #[test]
 fn granted_replicate_payments_survive_the_grantor_dying() {
     let mut board = pyromatics_board(Beside::DjinnAndBolts);
-    let trail = cast(&mut board, &[1, 2], false);
+    let trail = cast(&mut board, &[1, 2], PaymentDecision::Decline);
     let mut expected: Vec<Prompt> = offers(0, 1).chain(offers(1, 2)).collect();
     expected.push(Prompt::Target);
     assert_eq!(trail, expected);
@@ -506,13 +527,13 @@ fn granted_replicate_payments_survive_the_grantor_dying() {
 #[test]
 fn conspire_is_announced_with_replicate_before_targets() {
     let mut board = pyromatics_board(Beside::Wort);
-    let trail = cast(&mut board, &[1], true);
+    let trail = cast(&mut board, &[1], PaymentDecision::Pay);
 
     let mut expected: Vec<Prompt> = offers(0, 1).collect();
     expected.extend([
         Prompt::Once {
             origin: AdditionalCostOrigin::Other,
-            pay: true,
+            decision: PaymentDecision::Pay,
         },
         Prompt::PayCost,
         Prompt::Target,
@@ -534,13 +555,13 @@ fn conspire_is_announced_with_replicate_before_targets() {
 #[test]
 fn bargain_is_announced_with_granted_replicate_before_targets() {
     let mut board = stopgap_board();
-    let trail = cast(&mut board, &[1], true);
+    let trail = cast(&mut board, &[1], PaymentDecision::Pay);
 
     let mut expected: Vec<Prompt> = offers(0, 1).collect();
     expected.extend([
         Prompt::Once {
             origin: AdditionalCostOrigin::Bargain,
-            pay: true,
+            decision: PaymentDecision::Pay,
         },
         Prompt::PayCost,
         Prompt::Target,

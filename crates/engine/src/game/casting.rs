@@ -23660,7 +23660,7 @@ fn can_pay_with_tap_payment_mode(
             // CR 702.126a: Improvise lets players tap untapped artifacts to pay generic mana.
             let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
-                if obj.is_improvise_eligible(player) {
+                if tap_payment_eligible(state, obj, player, ConvokeMode::Improvise) {
                     pool.add(crate::types::mana::ManaUnit::convoke_payment(
                         crate::types::mana::ManaType::Colorless,
                         object_id,
@@ -23672,7 +23672,7 @@ fn can_pay_with_tap_payment_mode(
         ConvokeMode::Waterbend => {
             let mut pool = payment_pool;
             for (&object_id, obj) in &state.objects {
-                if obj.is_waterbend_eligible(player) {
+                if tap_payment_eligible(state, obj, player, ConvokeMode::Waterbend) {
                     pool.add(crate::types::mana::ManaUnit::new(
                         crate::types::mana::ManaType::Colorless,
                         object_id,
@@ -23689,7 +23689,7 @@ fn can_pay_with_tap_payment_mode(
                 .objects
                 .iter()
                 .filter_map(|(_, obj)| {
-                    if !obj.is_convoke_eligible(player) {
+                    if !tap_payment_eligible(state, obj, player, ConvokeMode::Convoke) {
                         return None;
                     }
                     let mut choices = vec![crate::types::mana::ManaType::Colorless];
@@ -27972,6 +27972,28 @@ pub(crate) fn find_eligible_remove_counter_for_cost_targets(
             })
         })
         .collect()
+}
+
+/// CR 702.51a + CR 702.126a + CR 701.67a + CR 601.2h: whether `obj` can be
+/// tapped to pay the in-flight spell's mana through `mode` (convoke, improvise,
+/// waterbend). The single tap-payment eligibility seam: the object's own shape
+/// check plus the payment reservation, so a permanent held for the spell's
+/// deferred tap cost (`restrictions::payment_tap_reserved`) is neither counted
+/// toward affordability nor offered nor accepted. Delve exiles graveyard cards
+/// rather than tapping, so it is never tap-eligible.
+pub(crate) fn tap_payment_eligible(
+    state: &GameState,
+    obj: &crate::game::game_object::GameObject,
+    player: PlayerId,
+    mode: ConvokeMode,
+) -> bool {
+    let shape = match mode {
+        ConvokeMode::Convoke => obj.is_convoke_eligible(player),
+        ConvokeMode::Waterbend => obj.is_waterbend_eligible(player),
+        ConvokeMode::Improvise => obj.is_improvise_eligible(player),
+        ConvokeMode::Delve => false,
+    };
+    shape && !super::restrictions::payment_tap_reserved(state, obj.id)
 }
 
 pub(super) fn find_eligible_tap_creatures_for_cost(

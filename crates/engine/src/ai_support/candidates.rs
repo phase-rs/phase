@@ -6206,7 +6206,12 @@ fn mana_payment_actions(
             match mode {
                 // CR 701.67a: no tap past the waterbend cost's generic count.
                 ConvokeMode::Waterbend
-                    if obj.is_waterbend_eligible(player) && waterbend_taps_remaining > 0 =>
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Waterbend,
+                    ) && waterbend_taps_remaining > 0 =>
                 {
                     // Waterbend: always colorless
                     actions.push(candidate(
@@ -6218,7 +6223,14 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Improvise if obj.is_improvise_eligible(player) => {
+                ConvokeMode::Improvise
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Improvise,
+                    ) =>
+                {
                     // CR 702.126a: Improvise pays generic mana — always colorless.
                     actions.push(candidate(
                         GameAction::TapForConvoke {
@@ -6229,7 +6241,14 @@ fn mana_payment_actions(
                         Some(player),
                     ));
                 }
-                ConvokeMode::Convoke if obj.is_convoke_eligible(player) => {
+                ConvokeMode::Convoke
+                    if crate::game::casting::tap_payment_eligible(
+                        state,
+                        obj,
+                        player,
+                        ConvokeMode::Convoke,
+                    ) =>
+                {
                     // CR 702.51a: Colorless (for generic) always available
                     actions.push(candidate(
                         GameAction::TapForConvoke {

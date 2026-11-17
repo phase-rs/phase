@@ -2146,7 +2146,10 @@ fn tap_creature_candidates<'a>(
             return false;
         }
         state.objects.get(&id).is_some_and(|o| {
-            o.controller == player && !o.tapped && matches_target_filter(state, id, filter, &ctx)
+            o.controller == player
+                && !o.tapped
+                && !super::restrictions::payment_tap_reserved(state, id)
+                && matches_target_filter(state, id, filter, &ctx)
         })
     })
 }

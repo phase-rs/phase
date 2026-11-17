@@ -2275,6 +2275,13 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
     {
         return false;
     }
+    // CR 601.2h: a source held for the in-flight spell's deferred tap cost
+    // can't also be tapped for that spell's mana.
+    if mana_sources::has_tap_component(&ability_def.cost)
+        && crate::game::restrictions::payment_tap_reserved(state, source_id)
+    {
+        return false;
+    }
     // CR 107.6: A {Q}-cost mana ability requires a currently-tapped source — an
     // already-untapped permanent can't be untapped to pay the cost (Pili-Pala).
     if mana_sources::has_untap_component(&ability_def.cost) && !obj.tapped {
@@ -6248,6 +6255,11 @@ fn tap_creature_cost_choice(
                 return false;
             };
             if obj.zone != Zone::Battlefield || obj.controller != player || obj.tapped {
+                return false;
+            }
+            // CR 601.2h: a creature held for the in-flight spell's deferred tap
+            // cost can't pay this mana ability's tap cost too.
+            if crate::game::restrictions::payment_tap_reserved(state, id) {
                 return false;
             }
             matches_target_filter(
