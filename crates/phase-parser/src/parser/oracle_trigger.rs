@@ -70,8 +70,8 @@ use super::oracle_target::{
 };
 use super::oracle_util::{
     canonicalize_subtype_name, is_core_type_name, is_non_subtype_subject_name, merge_or_filters,
-    normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
-    strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
+    normalize_card_name_refs, parse_number, parse_ordinal, parse_ordinal_list, parse_subtype,
+    strip_after, strip_reminder_text, TextPair, GRANTING_SELF_PLACEHOLDER,
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::ManaProduction;
@@ -23442,25 +23442,16 @@ fn try_parse_nth_draw_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefini
 }
 
 fn parse_nth_draw_ordinal(after: &str) -> Option<(u32, Comparator, &str)> {
-    let (first, mut rest) = parse_ordinal(after)?;
-    let mut last = first;
-    let mut has_disjunction = false;
-    loop {
-        let Ok((after_or, ())) = value((), tag::<_, _, OracleError<'_>>("or ")).parse(rest) else {
-            break;
-        };
-        let (next, remainder) = parse_ordinal(after_or)?;
-        if next != last.checked_add(1)? {
-            return None;
+    let (ordinals, rest) = parse_ordinal_list(after)?;
+    match ordinals.as_slice() {
+        [single] => Some((*single, Comparator::EQ, rest)),
+        [first, .., last] => {
+            let contiguous = ordinals
+                .windows(2)
+                .all(|pair| pair[0].checked_add(1) == Some(pair[1]));
+            (contiguous && *first == 1).then_some((*last, Comparator::LE, rest))
         }
-        last = next;
-        rest = remainder;
-        has_disjunction = true;
-    }
-    if has_disjunction {
-        (first == 1).then_some((last, Comparator::LE, rest))
-    } else {
-        Some((first, Comparator::EQ, rest))
+        [] => None,
     }
 }
 
