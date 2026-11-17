@@ -573,6 +573,8 @@ pub(crate) fn parse_quantity_ref_with_context(
                     // Count context ("for each opponent dealt …") has no
                     // "N or more distinct sources" restriction — default 1.
                     min_sources: 1,
+                    // This grammar names an opponent explicitly — keep `Opponent`.
+                    relation: PlayerRelation::Opponent,
                 },
             });
         }
@@ -3947,6 +3949,8 @@ fn parse_for_each_clause_with_they_controller(
                 source: source.map(Box::new),
                 // Count context has no "N or more distinct sources" restriction — default 1.
                 min_sources: 1,
+                // This grammar names an opponent explicitly — keep `Opponent`.
+                relation: PlayerRelation::Opponent,
             },
         });
     }
@@ -5573,6 +5577,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{CombatOnly}}"
@@ -5598,6 +5604,8 @@ mod tests {
                         kind: DamageKindFilter::Any,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{Any}}"
@@ -5619,6 +5627,8 @@ mod tests {
                         kind: DamageKindFilter::NoncombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must consume as OpponentDealtDamage{{NoncombatOnly}}"
@@ -6698,6 +6708,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }
             }
@@ -6719,6 +6731,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }
             }
@@ -6752,6 +6766,8 @@ mod tests {
                             kind: DamageKindFilter::CombatOnly,
                             source: None,
                             min_sources: 1,
+                            // Opponent grammar — keep `Opponent`.
+                            relation: PlayerRelation::Opponent,
                         },
                     }
                 },
@@ -6788,6 +6804,8 @@ mod tests {
                     })),
 
                     min_sources: 1,
+                    // Opponent grammar — keep `Opponent`.
+                    relation: PlayerRelation::Opponent,
                 },
             }
         );
@@ -6809,6 +6827,8 @@ mod tests {
                     source: Some(Box::new(TargetFilter::SelfRef)),
 
                     min_sources: 1,
+                    // Opponent grammar — keep `Opponent`.
+                    relation: PlayerRelation::Opponent,
                 },
             }
         );
@@ -6831,6 +6851,8 @@ mod tests {
                         kind: DamageKindFilter::CombatOnly,
                         source: None,
                         min_sources: 1,
+                        // Opponent grammar — keep `Opponent`.
+                        relation: PlayerRelation::Opponent,
                     },
                 }),
                 "phrase {phrase:?} must parse to unfiltered OpponentDealtDamage"

@@ -411,7 +411,12 @@ fn v7cd_single_remaining_recipient_auto_binds_without_prompt() {
     scenario.add_basic_land(P0, ManaColor::Green);
     let mut runner = scenario.build();
     let mut events = Vec::new();
-    engine::game::elimination::eliminate_player(runner.state_mut(), P2, &mut events);
+    engine::game::elimination::eliminate_player(
+        runner.state_mut(),
+        P2,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
     assert!(
         runner.state().players[2].is_eliminated,
         "setup: P2 eliminated"
@@ -1083,7 +1088,12 @@ fn v11_non_candidate_answer_is_refused_without_mutation() {
     scenario.add_basic_land(P0, ManaColor::Green);
     let mut runner = scenario.build();
     let mut events = Vec::new();
-    engine::game::elimination::eliminate_player(runner.state_mut(), P3, &mut events);
+    engine::game::elimination::eliminate_player(
+        runner.state_mut(),
+        P3,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
     let prompt = to_recipient_prompt(&mut runner, inv, bear);
     let WaitingFor::ChooseGiftRecipient { candidates, .. } = &prompt else {
         unreachable!()
