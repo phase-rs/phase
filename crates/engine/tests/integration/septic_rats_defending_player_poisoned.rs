@@ -114,6 +114,11 @@ fn septic_rats_pumps_when_the_defending_player_is_poisoned() {
 /// the attacker, so 2/2 is the discriminating result.
 #[test]
 fn septic_rats_does_not_pump_when_only_another_opponent_is_poisoned() {
+    let (mut reach_runner, reach_rats) = setup([0, 1, 0]);
+    assert!(
+        declare_attack(&mut reach_runner, reach_rats, P1),
+        "reach guard: the matching fixture's attack trigger must reach the stack"
+    );
     let (mut runner, rats) = setup([0, 0, 1]);
     assert!(
         !declare_attack(&mut runner, rats, P1),

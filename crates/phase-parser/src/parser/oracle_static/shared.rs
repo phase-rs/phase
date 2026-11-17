@@ -5,7 +5,7 @@ use super::anthem::rewrite_self_pronoun_subject;
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
-use crate::types::ability::BlockPairDirection;
+use crate::types::ability::{BlockPairDirection, PlayerScope};
 use nom::bytes::complete::is_not;
 use nom::character::complete::anychar;
 use nom::combinator::{map_opt, not, success, value};
@@ -1259,6 +1259,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -4370,6 +4371,20 @@ pub(crate) fn parse_affected_scoped_static_condition(
 /// `affected` is the host static's affected set, threaded to
 /// `parse_affected_scoped_static_condition` so the gate's anaphoric "it" binds
 /// to the source only for a SelfRef static (CR 611.3a).
+/// Check if a static condition is `PlayerIsPoisoned { DefendingPlayer }`, which
+/// is not a valid condition for static attack restrictions (CR 508.5: the
+/// defending player is not defined until attackers are committed). Such
+/// conditions must remain `Unrecognized` to preserve an honest gap.
+fn is_defending_player_poisoned_for_attack_restriction(cond: &StaticCondition) -> bool {
+    matches!(
+        cond,
+        StaticCondition::PlayerIsPoisoned {
+            player: PlayerScope::DefendingPlayer
+        }
+    ) || matches!(cond, StaticCondition::Not { condition } if is_defending_player_poisoned_for_attack_restriction(condition))
+        || matches!(cond, StaticCondition::And { conditions } | StaticCondition::Or { conditions } if conditions.iter().any(is_defending_player_poisoned_for_attack_restriction))
+}
+
 pub(crate) fn parse_unless_static_condition(
     tp: &TextPair<'_>,
     affected: Option<&TargetFilter>,
@@ -4378,6 +4393,17 @@ pub(crate) fn parse_unless_static_condition(
     let original = unless_text.original.trim().trim_end_matches('.');
     let lower = original.to_lowercase();
     if let Ok((_, condition)) = nom_condition::parse_unless_condition(&lower) {
+        // CR 508.5 + CR 122.1f: "defending player is poisoned" is not a valid
+        // static attack restriction condition because the defending player is
+        // not known until attackers are declared. Defer to the Unrecognized path
+        // so the restriction remains an honest gap.
+        if is_defending_player_poisoned_for_attack_restriction(&condition) {
+            return Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::Unrecognized {
+                    text: format!("unless {original}"),
+                }),
+            });
+        }
         return Some(condition);
     }
     // CR 611.3a: "gets +X/+X unless <condition>" applies the grant precisely when

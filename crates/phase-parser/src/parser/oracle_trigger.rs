@@ -7668,6 +7668,12 @@ pub fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Tri
         StaticCondition::IsMonarch { player } => Some(TriggerCondition::IsMonarch {
             player: player.clone(),
         }),
+        // CR 122.1f + CR 109.5 + CR 603.4: "player is poisoned" bridges
+        // directly, carrying its subject scope (Controller, Opponent,
+        // ScopedPlayer, DefendingPlayer). Mirrors IsMonarch axis.
+        StaticCondition::PlayerIsPoisoned { player } => Some(TriggerCondition::IsPoisoned {
+            player: player.clone(),
+        }),
         // CR 726.3: Initiative status bridges directly.
         StaticCondition::IsInitiative => Some(TriggerCondition::IsInitiative),
         // CR 725.1: "there is no monarch" bridges directly.
@@ -9258,44 +9264,6 @@ fn extract_if_condition_with_card_name(
         };
     }
 
-    // CR 122.1f + CR 508.5 + CR 603.4: "if [the] defending player is poisoned"
-    // — Septic Rats' attack intervening-if. CR 122.1f DEFINES "poisoned" as one
-    // or more poison counters; CR 508.5 names the player the attacking creature
-    // is attacking, so the referent is `PlayerScope::DefendingPlayer` and the
-    // runtime read goes through the same CR 508.5 door as every other
-    // defending-player quantity (`combat::defending_player_cr508_5`).
-    //
-    // This deliberately does NOT live in the shared `parse_inner_condition`
-    // grammar: on a static attack restriction (Chained Throatseeker, "can't
-    // attack unless defending player is poisoned") the defending player is not
-    // known before attackers are committed, so that rider must stay an honest
-    // `Unrecognized` gap until attack legality can evaluate a candidate
-    // defender (see
-    // `chained_throatseeker_defending_player_poisoned_preserved_not_decomposed`).
-    {
-        fn parse_defending_player_poisoned(input: &str) -> OracleResult<'_, ()> {
-            let (input, _) = tag("if ").parse(input)?;
-            let (input, _) = opt(tag("the ")).parse(input)?;
-            value((), tag("defending player is poisoned")).parse(input)
-        }
-        // CR 603.4: an intervening-if IMMEDIATELY follows the trigger condition,
-        // so only the LEADING position is hoisted; a later sentence's "if" is
-        // ordinary resolution text and stays in the effect chain.
-        if let Some((before, _, rest)) = scan_preceded(&lower, parse_defending_player_poisoned)
-            .filter(|(before, _, _)| before.trim().is_empty())
-        {
-            if nom_primitives::peek_clause_terminator(rest.trim_start()).is_ok() {
-                let clause_len = lower.len() - before.len() - rest.len();
-                return IfExtraction::hoisted(
-                    strip_condition_clause(text, before.len(), clause_len),
-                    TriggerCondition::IsPoisoned {
-                        player: PlayerScope::DefendingPlayer,
-                    },
-                );
-            }
-        }
-    }
-
     // CR 509.1a + CR 603.4: "if defending player controls no [type]"
     // Nom combinator prefix dispatch + parse_type_phrase_folding for the remainder.
     {
@@ -9404,7 +9372,25 @@ fn extract_if_condition_with_card_name(
         |c| c,
     ) {
         InterveningExtraction::Hoisted(stripped, condition) => {
-            return IfExtraction::hoisted(stripped, *condition);
+            // CR 508.5 + CR 122.1f + CR 603.4: for attack triggers, the
+            // shared grammar may produce PlayerIsPoisoned with scopes other than
+            // DefendingPlayer (Controller, Opponent, ScopedPlayer). Only the
+            // defending player is meaningful for an attack intervening-if, so
+            // reject other scopes to keep Chained Throatseeker's static attack
+            // restriction an honest Unrecognized gap.
+            let should_accept = if let Some(_scope) = attack_scope {
+                match condition.as_ref() {
+                    TriggerCondition::IsPoisoned { player } => {
+                        *player == PlayerScope::DefendingPlayer
+                    }
+                    _ => true,
+                }
+            } else {
+                true
+            };
+            if should_accept {
+                return IfExtraction::hoisted(stripped, *condition);
+            }
         }
         InterveningExtraction::RefusedLeadingGuard => {
             return IfExtraction::refused(text);
