@@ -6,12 +6,14 @@
 //! flag, no `DamageDealt`, no CR 120.1 record, no lifelink — the resume below
 //! preserves the leg across the pause, exactly once, on the non-combat path.
 //!
-//! CR 614.16 (M3): combat wither is dealt by the CR 510.2 turn-based action,
-//! not by a resolving effect, so the effect-worded Doubling Season no longer
-//! applies in combat — combat rows converge on the single-candidate
-//! Constrictor-only outcome with no prompt. The two-modifier CR 616.1 pause
-//! coverage lives on the non-combat rows (Puncture Blast, Village Pillagers
-//! ETB), where the resolving effect keeps both modifiers applicable.
+//! CR 614.16 (M3+M4): combat wither is dealt by the CR 510.2 turn-based
+//! action, not by a resolving effect, so round 1 admits only the bare-worded
+//! Constrictor — whose modification then promotes the placement (M4),
+//! admitting the effect-worded Doubling Season in round 2. Combat rows
+//! converge on the sequential Constrictor-then-DS outcome with no prompt. The
+//! two-modifier CR 616.1 pause coverage lives on the non-combat rows (Puncture
+//! Blast, Village Pillagers ETB), where the resolving effect keeps both
+//! modifiers applicable from round 1.
 //!
 //! Fixture note (see the executor report): the reviewed plan paired Solemnity
 //! prevention with the Constrictor modifier, but CR 614.17c ("if an event
@@ -24,15 +26,18 @@
 //! Rows (every Oracle string below is verbatim card-data export text, except
 //! the bare-`"Wither"` source shorthand documented at `WITHER_ORACLE`, and
 //! the explicit keyword hints documented at `DARKSTEEL_COLOSSUS_ORACLE`):
-//! - combat Constrictor-only under Doubling Season + Constrictor (V9): no
-//!   prompt, `DamageDealt` + record exactly once, lifelink exactly once,
-//!   deathtouch flag exactly once with no marking; the victim is an
-//!   indestructible Darksteel Colossus (CR 702.12) so its survival under a
-//!   deathtouch source is rules-correct (the #11019 SBA gap is not pinned).
-//! - V1 hostile: Ripper + Doubling Season + Constrictor combat lands 3,
-//!   proving per-def gating (Doubling Season inapplicable, Constrictor +1).
+//! - combat Constrictor-then-Doubling-Season under Doubling Season +
+//!   Constrictor (V9): no prompt, `DamageDealt` + record exactly once,
+//!   lifelink exactly once, deathtouch flag exactly once with no marking; the
+//!   victim is an indestructible Darksteel Colossus (CR 702.12) so its
+//!   survival under a deathtouch source is rules-correct (the #11019 SBA gap
+//!   is not pinned).
+//! - V1 hostile: Ripper + Doubling Season + Constrictor combat lands 6,
+//!   proving sequential eligibility (Constrictor +1 first, promoting the
+//!   placement so Doubling Season doubles second — simultaneous eligibility
+//!   would prompt since Plus-vs-Times is order-material).
 //! - V0 Necroskitter second vehicle: wither-keyworded, exercising the same
-//!   `has_wither || has_infect` arm, now Constrictor-only in combat.
+//!   `has_wither || has_infect` arm, now Constrictor-then-DS in combat.
 //! - V12 Constrictor-only single candidate: no prompt, remainder inline.
 //! - non-combat single target (Puncture Blast) + multi target (Village
 //!   Pillagers ETB, remaining chain resumes after the pause).
@@ -325,9 +330,9 @@ fn answer_all_counter_orders(
 
 /// Shared combat board: P0 holds Doubling Season + Winding Constrictor + an
 /// indestructible Darksteel Colossus (11/11, so the modified wither counters
-/// never kill it by toughness either — CR 614.16 leaves Doubling Season
-/// inapplicable in combat, so Butcher's 4 damage lands Constrictor-only 5;
-/// see the order math in each row); P1 holds a wither attacker granted
+/// never kill it by toughness either — Butcher's 4 damage lands
+/// Constrictor-then-DS 10; see the order math in each row); P1 holds a wither
+/// attacker granted
 /// deathtouch + lifelink directly (no Equip drive — the wither flag still
 /// comes from the real wither card, isolating the mechanism under test).
 ///
@@ -360,20 +365,24 @@ fn combat_board(
 }
 
 /// CR 120.3d + CR 614.16 + CR 120.1 + CR 702.15b + CR 702.2b, combat
-/// (V9): Doubling Season is inapplicable to the combat wither leg (CR 510.2
-/// turn-based action, not a resolving effect), so Winding Constrictor is the
-/// single candidate and auto-applies with no CR 616.1 prompt — the leg runs
-/// inline with its deathtouch flag, `DamageDealt` event, CR 120.1 record, and
-/// lifelink, exactly once.
+/// (V9): the combat wither leg stamps `Other` (CR 510.2 turn-based action, not
+/// a resolving effect), so round 1 has a single candidate — Winding
+/// Constrictor auto-applies with no CR 616.1 prompt — and the modified
+/// placement then admits Doubling Season in round 2 (CR 614.16 second clause),
+/// again unopposed. The leg runs inline with its deathtouch flag,
+/// `DamageDealt` event, CR 120.1 record, and lifelink, exactly once.
 ///
-/// Order math (4 wither damage): Constrictor-only 4+1 = 5 counters. The 11/11
-/// Colossus survives (11-5=6), and CR 702.12 indestructible makes that
-/// survival rules-correct under deathtouch (the pre-existing SBA gap filed
-/// as #11019 is not pinned here).
+/// Order math (4 wither damage): Constrictor 4+1 = 5, then Doubling Season
+/// 5*2 = 10 counters. The 11/11 Colossus survives (11-10=1), and CR 702.12
+/// indestructible makes that survival rules-correct under deathtouch (the
+/// pre-existing SBA gap filed as #11019 is not pinned here).
 ///
-/// REVERT-FAILING ASSERTIONS: pre-tag the leg pauses on a two-candidate CR
-/// 616.1 prompt, so the no-prompt guard fails and the count is 9 or 10 (not
-/// 5). The two-modifier pause coverage lives on the non-combat rows below.
+/// REVERT-FAILING ASSERTIONS: at base the Constrictor's modification keeps the
+/// `Other` cause, so Doubling Season stays inapplicable and the count is 5
+/// (not 10). (Pre-tag the leg paused on a two-candidate CR 616.1 prompt with
+/// 9 or 10; the corrected 10 equals one pre-tag order — the no-prompt guard is
+/// what discriminates determinism now.) The two-modifier pause coverage lives
+/// on the non-combat rows below.
 #[test]
 fn combat_wither_with_inapplicable_doubling_applies_constrictor_only() {
     let mut scenario = GameScenario::new();
@@ -389,11 +398,11 @@ fn combat_wither_with_inapplicable_doubling_applies_constrictor_only() {
         &[(colossus, butcher)],
     );
 
-    // V9: a single applicable replacement auto-applies — no CR 616.1 prompt
-    // may ever open on this path.
+    // V9: a single applicable replacement per round auto-applies — no CR 616.1
+    // prompt may ever open on this path.
     assert!(
         prompt(&runner).is_none(),
-        "CR 614.16 must leave Doubling Season inapplicable in combat, so no ordering prompt opens, got {:?}",
+        "sequential single candidates must auto-apply with no ordering prompt, got {:?}",
         runner.state().waiting_for
     );
     advance_past_combat_damage(&mut runner);
@@ -407,12 +416,12 @@ fn combat_wither_with_inapplicable_doubling_applies_constrictor_only() {
         runner.state().stack.is_empty(),
         "the stack must be empty after combat"
     );
-    // V9: Constrictor-only lands exactly 5 counters (4+1) — Doubling Season
-    // contributes nothing in combat.
+    // V9: Constrictor 4+1 = 5, then Doubling Season doubles 5 -> 10 — the
+    // modified placement admits the effect-worded doubler (CR 614.16).
     assert_eq!(
         counter_count(&runner, colossus, &CounterType::Minus1Minus1),
-        5,
-        "Constrictor-only must add one to the 4 wither damage with no doubling"
+        10,
+        "Constrictor-then-Doubling-Season must land 10 counters on the 4 wither damage"
     );
     // The inline leg emits DamageDealt + the CR 120.1 record exactly once.
     let dealt = damage_dealt_events(outcome.events(), &target, true);
@@ -469,14 +478,23 @@ fn combat_wither_with_inapplicable_doubling_applies_constrictor_only() {
 
 /// CR 614.16 multi-authority hostile (V1): Sickle Ripper's 2 wither combat
 /// damage to a Darksteel Colossus under Doubling Season + Winding Constrictor
-/// lands exactly 3 counters — the effect-worded doubler is inapplicable in
-/// combat while the bare-worded Constrictor still applies (+1), proving the
-/// gate is per-def, not placement-scoped. No CR 616.1 prompt opens (single
-/// candidate auto-applies).
+/// lands exactly 6 counters. Round 1: the combat leg stamps `Other` (CR 510.2
+/// turn-based action), so only the bare-worded Constrictor applies (2+1 = 3)
+/// and promotes the placement's cause; round 2: the effect-worded Doubling
+/// Season becomes eligible on the replacement-made placement (CR 614.16
+/// second clause) and doubles 3 -> 6.
 ///
-/// REVERT-FAILING: pre-tag both modifiers apply (9 or 10 with a prompt on the
-/// Butcher board; 5 or 6 here with a prompt), so the no-prompt guard and the
-/// count of 3 both redden.
+/// DS-first is impossible, not a choice: Plus-vs-Times is order-material
+/// (Additive vs Multiplicative commute classes), so had Doubling Season been
+/// eligible in round 1 alongside the Constrictor, a CR 616.1 prompt would have
+/// opened. The no-prompt guard + count 6 together prove the Constrictor
+/// applied alone first and Doubling Season became eligible only after the
+/// promotion — this row is the sequential-eligibility proof the R1 activation
+/// row cites (Times x Times commute, so R1's own count + no-prompt cannot
+/// prove it).
+///
+/// REVERT-FAILING: at base the Constrictor's modification keeps the `Other`
+/// cause, so Doubling Season stays inapplicable and the count is 3 (not 6).
 #[test]
 fn combat_wither_doubling_plus_constrictor_lands_three() {
     let mut scenario = GameScenario::new();
@@ -519,8 +537,8 @@ fn combat_wither_doubling_plus_constrictor_lands_three() {
     );
     assert_eq!(
         counter_count(&runner, colossus, &CounterType::Minus1Minus1),
-        3,
-        "CR 614.16: only the Constrictor applies in combat, so the 2 wither damage lands 3 counters"
+        6,
+        "CR 614.16: the Constrictor 2->3 promotes the placement, then Doubling Season doubles 3->6"
     );
     let dealt = damage_dealt_events(outcome.events(), &target, true);
     assert_eq!(
@@ -553,11 +571,13 @@ fn combat_wither_doubling_plus_constrictor_lands_three() {
 /// V0 second-vehicle arm-identity row (N1): Necroskitter is wither-keyworded
 /// (not Butcher), exercising the same `has_wither || has_infect` arm. Asserts
 /// the inline `DamageDealt` + record; lifelink/flag siblings live in the
-/// Constrictor-only row above. CR 614.16 leaves Doubling Season inapplicable
-/// in combat, so the leg lands Constrictor-only with no prompt.
+/// Constrictor row above. The combat leg stamps `Other`, so round 1 applies
+/// the Constrictor alone (1+1 = 2, promoting the placement) and round 2
+/// applies Doubling Season (2*2 = 4) — sequential single candidates, no prompt.
 ///
-/// REVERT-FAILING ASSERTIONS: pre-tag the leg pauses on a two-candidate CR
-/// 616.1 prompt, so the no-prompt guard fails and the count is 3 or 4 (not 2).
+/// REVERT-FAILING ASSERTIONS: at base the Constrictor's modification keeps the
+/// `Other` cause, so Doubling Season stays inapplicable and the count is 2
+/// (not 4).
 #[test]
 fn necroskitter_second_vehicle_arm_identity() {
     let mut scenario = GameScenario::new();
@@ -587,11 +607,12 @@ fn necroskitter_second_vehicle_arm_identity() {
     );
     advance_past_combat_damage(&mut runner);
 
-    // Order math (1 wither damage, Constrictor-only): 1+1 = 2 counters.
+    // Order math (1 wither damage): Constrictor 1+1 = 2, then Doubling
+    // Season 2*2 = 4 counters.
     assert_eq!(
         counter_count(&runner, shieldmate, &CounterType::Minus1Minus1),
-        2,
-        "Constrictor-only must add one to the 1 wither damage with no doubling"
+        4,
+        "Constrictor-then-Doubling-Season must land 4 counters on the 1 wither damage"
     );
     let dealt = damage_dealt_events(outcome.events(), &target, true);
     assert_eq!(
@@ -1037,8 +1058,9 @@ fn assert_oracle(db: &CardDatabase, name: &str, oracle: &str) {
 /// M2-F1 Gideon witness board: P0 holds Gideon of the Trials; P1 holds Sickle
 /// Ripper (2/1 wither) and a Bonecrusher Giant whose Stomp face turns Gideon's
 /// prevention shield off for the turn (CR 615.12). With `pause_mods`, P0 also
-/// holds Doubling Season + Winding Constrictor so the wither leg pauses on a
-/// CR 616.1 choice. Returns Gideon, Ripper, the Giant, and the mod pair.
+/// holds Doubling Season + Winding Constrictor so the wither leg runs the
+/// Constrictor-then-DS sequence inline (no CR 616.1 prompt — sequential single
+/// candidates). Returns Gideon, Ripper, the Giant, and the mod pair.
 fn gideon_board(
     scenario: &mut GameScenario,
     db: &'static CardDatabase,
@@ -1194,18 +1216,27 @@ fn gideon_wither_inline_records_no_excess() {
 }
 
 /// CR 120.10 + CR 614.16 (V9): the same wither leg under Doubling Season +
-/// Winding Constrictor no longer pauses — Doubling Season is inapplicable in
-/// combat, so the Constrictor auto-applies inline. The event must still
-/// report `excess: 0`, proving the single-candidate combat path measures
-/// against the pre-damage loyalty (3), not the live post-damage value (1).
+/// Winding Constrictor runs inline with no prompt — round 1 applies the
+/// Constrictor alone (2+1 = 3, promoting the placement), round 2 applies
+/// Doubling Season (3*2 = 6). The event must still report `excess: 0`,
+/// proving the combat path measures against the pre-damage loyalty (3), not
+/// the live post-damage value (1).
 ///
-/// The 3 Constrictor-only counters leave the 4/4 Gideon at toughness 1, so
-/// Gideon survives with loyalty 1 — asserted as survival (contrast the
-/// pre-tag destruction at 5 doubled counters).
+/// The 6 counters leave the 4/4 Gideon at toughness -2, so Gideon dies to SBA
+/// 704.5f — asserted as Graveyard (contrast the base survival at 3 counters).
+/// The 6 is asserted on the `CounterAdded` event stream, never on the
+/// graveyard object: counters leave with the zone change (CR 122.2), so
+/// post-combat `counter_count` reads 0.
 ///
-/// REVERT-FAILING ASSERTIONS: pre-tag the leg pauses on a two-candidate CR
-/// 616.1 prompt, so the no-prompt guard fails, the count is 5 or 6 (not 3),
-/// and Gideon dies (not survives).
+/// Loyalty is intentionally unasserted post-combat: the battlefield-exit
+/// cleanup reverts `loyalty` to `base_loyalty` (CR 613.1 + CR 400.7,
+/// `revert_layered_characteristics_to_base` via `zones.rs`), and the scenario
+/// builder seeds `loyalty` without `base_loyalty`, so the graveyard row reads
+/// `None` — an off-battlefield fixture artifact, not a rules value (CR 400.7:
+/// the graveyard card is a new object).
+///
+/// REVERT-FAILING ASSERTIONS: at base the Constrictor's modification keeps the
+/// `Other` cause, so the count is 3 (not 6) and Gideon survives (not dies).
 #[test]
 fn gideon_wither_constrictor_only_reads_predamage_loyalty() {
     let db = load_db().expect("card db");
@@ -1246,11 +1277,40 @@ fn gideon_wither_constrictor_only_reads_predamage_loyalty() {
         runner.state().stack.is_empty(),
         "the stack must be empty after combat"
     );
-    // CR 120.3d: 2 wither damage plus the Constrictor's one = 3 counters.
+    // CR 120.3d + CR 614.16: Constrictor 2+1 = 3, then Doubling Season
+    // 3*2 = 6 — asserted on the `CounterAdded` event stream, which carries
+    // the post-replacement count. This combat has a single wither leg
+    // (gideon->ripper is non-wither damage), so exactly one such event fires.
+    let added: Vec<&GameEvent> = outcome
+        .events()
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                GameEvent::CounterAdded {
+                    object_id,
+                    counter_type: CounterType::Minus1Minus1,
+                    ..
+                } if *object_id == gideon
+            )
+        })
+        .collect();
+    assert_eq!(
+        added.len(),
+        1,
+        "the wither leg must emit exactly one CounterAdded for Gideon"
+    );
+    assert!(
+        matches!(added[0], GameEvent::CounterAdded { count: 6, .. }),
+        "CR 614.16: Constrictor 2->3 then Doubling Season 3->6 must place 6 counters, got {:?}",
+        added[0]
+    );
+    // CR 122.2 trap-guard: counters leave with the zone change, so the dead
+    // Gideon's object carries none post-combat.
     assert_eq!(
         counter_count(&runner, gideon, &CounterType::Minus1Minus1),
-        3,
-        "Constrictor-only must add one to the 2 wither damage with no doubling"
+        0,
+        "CR 122.2: Gideon's counters must not survive the battlefield->graveyard move"
     );
     let dealt = damage_dealt_events(outcome.events(), &target, true);
     assert_eq!(
@@ -1275,16 +1335,12 @@ fn gideon_wither_constrictor_only_reads_predamage_loyalty() {
         1,
         "CR 120.1 must record the inline leg exactly once"
     );
-    // CR 120.3c: planeswalker damage removes loyalty (3 -> 1).
-    assert_eq!(
-        runner.state().objects[&gideon].loyalty,
-        Some(1),
-        "the 2 damage must leave Gideon at one loyalty"
-    );
+    // Loyalty intentionally unasserted (see the doc comment): the exit
+    // cleanup reverts it to the scenario-unset `base_loyalty` (`None` here).
     assert_eq!(
         runner.state().objects[&gideon].zone,
-        Zone::Battlefield,
-        "Gideon must survive (4/4 with 3 counters, loyalty 1)"
+        Zone::Graveyard,
+        "SBA 704.5f: the 4/4 Gideon with 6 counters (toughness -2) must die"
     );
 }
 
@@ -1486,6 +1542,72 @@ fn loyalty_cost_under_doubling_season_is_not_doubled() {
             "{label}: the [+1] loyalty cost must land exactly (4 under Doubling Season per CR 614.16, 5 under cause-blind Vorinclex), got {loyalty:?}"
         );
     }
+}
+
+/// CR 606.4 + CR 614.16 second clause (M4-F1 closes-when): activating Gideon's
+/// [+1] under Doubling Season + Vorinclex, Monstrous Raider lands +4 loyalty
+/// (3 -> 7). The 1-counter cost (CR 606.4, `Other` cause) is doubled to 2 by
+/// the cause-blind Vorinclex ("you would put"), and that replacement-made
+/// placement then satisfies Doubling Season's "an effect would put" via CR
+/// 614.16's "they also apply if another replacement or prevention effect does
+/// so", doubling 2 -> 4. Round trace: round 1 {Vorinclex} auto-applies (DS
+/// gated out), round 2 {DS} auto-applies on the promoted placement — a
+/// singleton each round, so no CR 616.1 prompt opens.
+///
+/// Caveat: both doublers parse "twice that many" to `Times{2}`, and
+/// Times x Times commute, so simultaneous round-1 eligibility would also yield
+/// 7 with no prompt — the count + no-prompt here do NOT prove sequential
+/// eligibility. That proof lives in
+/// `combat_wither_doubling_plus_constrictor_lands_three`, where Plus-vs-Times
+/// is order-material (simultaneous eligibility would prompt).
+///
+/// REVERT-FAILING: at base the modified placement keeps its `Other` cause, so
+/// Doubling Season stays inapplicable and loyalty reads `Some(5)`, not
+/// `Some(7)`.
+#[test]
+fn loyalty_cost_under_doubling_season_and_vorinclex_compounds_to_seven() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let gideon = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Gideon of the Trials",
+            "Gideon",
+            3,
+            GIDEON_OF_THE_TRIALS_ORACLE,
+        )
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    scenario.add_creature_from_oracle(P0, "Vorinclex, Monstrous Raider", 6, 6, VORINCLEX_ORACLE);
+
+    let mut runner = scenario.build();
+    give_priority(&mut runner, P0);
+    runner.activate(gideon, 0).resolve();
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the activation must settle to priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must be empty after the activation"
+    );
+    let loyalty = runner.state().objects[&gideon].loyalty;
+    assert!(
+        loyalty.is_some_and(|l| l > 3),
+        "reach-guard: the [+1] must resolve and raise loyalty, got {loyalty:?}"
+    );
+    assert!(
+        prompt(&runner).is_none(),
+        "singleton candidates each round must auto-apply with no CR 616.1 prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        loyalty,
+        Some(7),
+        "CR 614.16: Vorinclex 1->2 then Doubling Season 2->4 must land the [+1] at 7 loyalty, got {loyalty:?}"
+    );
 }
 
 /// Elspeth Conquers Death's VERBATIM Oracle text (card-data export; Saga).

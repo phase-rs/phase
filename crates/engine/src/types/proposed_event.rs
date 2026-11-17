@@ -384,6 +384,42 @@ impl CounterPlacement {
     }
 }
 
+impl ProposedEvent {
+    /// CR 614.16: promote a counter placement's [`CounterCause`] to
+    /// [`CounterCause::ReplacementOrPrevention`] once a replacement modifies
+    /// it. "If an effect would put one or more counters" replacements "also
+    /// apply if another replacement or prevention effect does so, even if the
+    /// original event being modified wasn't itself an effect" — so the
+    /// modified placement is effect-eligible whatever its original cause was
+    /// (cost payment and turn-based actions stamp `Other`, which fails the
+    /// gate until a replacement touches the placement). Callers are the
+    /// counter appliers that return a modified placement (`add_counter_applier`'s
+    /// three `Modified` arms and `apply_compleated_replacement`); every other
+    /// shape — including the move's remove stage, which is not a "put" — is
+    /// returned unchanged.
+    pub fn promote_counter_placement_cause(mut event: ProposedEvent) -> ProposedEvent {
+        match &mut event {
+            ProposedEvent::AddCounter { placement, .. } => match placement {
+                CounterPlacement::Object { cause, .. }
+                | CounterPlacement::Player { cause, .. }
+                | CounterPlacement::Energy { cause, .. } => {
+                    *cause = CounterCause::ReplacementOrPrevention;
+                }
+            },
+            ProposedEvent::MoveCounter {
+                stage: CounterMoveStage::Add,
+                cause,
+                ..
+            } => {
+                *cause = CounterCause::ReplacementOrPrevention;
+            }
+            ProposedEvent::MoveCounter { .. } => {}
+            _ => {}
+        }
+        event
+    }
+}
+
 /// CR 707.2 + CR 707.5: Copy-token creation payload carried by the same
 /// `CreateToken` proposed event that ordinary token creation uses for
 /// replacement effects. `TokenSpec` remains the replacement-visible probe

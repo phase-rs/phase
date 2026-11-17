@@ -753,7 +753,7 @@ fn apply_compleated_replacement(
                 source_id: rid.source,
                 event_type: ReplacementEvent::AddCounter.to_string(),
             });
-            ProposedEvent::AddCounter {
+            ProposedEvent::promote_counter_placement_cause(ProposedEvent::AddCounter {
                 placement: CounterPlacement::Object {
                     actor,
                     object_id,
@@ -762,7 +762,7 @@ fn apply_compleated_replacement(
                 },
                 count: count.saturating_sub(life_paid.saturating_mul(2)),
                 applied,
-            }
+            })
         }
         other => other,
     }
@@ -5333,11 +5333,13 @@ fn add_counter_applier(
             count,
             applied,
         } => match scale_event_quantity(count, &modification) {
-            ScaledQuantity::Scaled(count) => ApplyResult::Modified(ProposedEvent::AddCounter {
-                placement,
-                count,
-                applied,
-            }),
+            ScaledQuantity::Scaled(count) => ApplyResult::Modified(
+                ProposedEvent::promote_counter_placement_cause(ProposedEvent::AddCounter {
+                    placement,
+                    count,
+                    applied,
+                }),
+            ),
             ScaledQuantity::Prevented => ApplyResult::Prevented,
             ScaledQuantity::Unrepresentable => record_quantity_overflow(
                 state,
@@ -5357,11 +5359,13 @@ fn add_counter_applier(
             placement: placement @ CounterPlacement::Object { .. },
             count,
             applied,
-        } => ApplyResult::Modified(ProposedEvent::AddCounter {
-            placement,
-            count: new_count(count),
-            applied,
-        }),
+        } => ApplyResult::Modified(ProposedEvent::promote_counter_placement_cause(
+            ProposedEvent::AddCounter {
+                placement,
+                count: new_count(count),
+                applied,
+            },
+        )),
         ProposedEvent::MoveCounter {
             actor,
             source_id,
@@ -5372,17 +5376,19 @@ fn add_counter_applier(
             stage: CounterMoveStage::Add,
             cause,
             applied,
-        } => ApplyResult::Modified(ProposedEvent::MoveCounter {
-            actor,
-            source_id,
-            destination_id,
-            counter_type,
-            remove_count,
-            add_count: new_count(add_count),
-            stage: CounterMoveStage::Add,
-            cause,
-            applied,
-        }),
+        } => ApplyResult::Modified(ProposedEvent::promote_counter_placement_cause(
+            ProposedEvent::MoveCounter {
+                actor,
+                source_id,
+                destination_id,
+                counter_type,
+                remove_count,
+                add_count: new_count(add_count),
+                stage: CounterMoveStage::Add,
+                cause,
+                applied,
+            },
+        )),
         event => ApplyResult::Modified(event),
     }
 }
@@ -23443,6 +23449,230 @@ mod tests {
             ),
             "stacked copies must both reject an Other placement"
         );
+    }
+
+    /// CR 614.16 (M4): `add_counter_applier` promotes a modified placement's
+    /// cause to `ReplacementOrPrevention` on all four placement shapes
+    /// (Object, Player, Energy, MoveCounter-Add), for every
+    /// `QuantityModification` kind. The scaled count in each assertion is the
+    /// positive control (the applier ran, not a pass-through); the `Prevent`
+    /// arm yields `Prevented` (no placement to promote) and the
+    /// `Unrepresentable` arm leaves the event unchanged. Hand-built defs over
+    /// hand-built events: the unit-level arm proof, complementing the
+    /// production rows (R1–R5).
+    #[test]
+    fn add_counter_applier_promotes_placement_cause_on_modify() {
+        use crate::types::player::PlayerCounterKind;
+
+        let run = |modification: QuantityModification, event: ProposedEvent| {
+            let mut state = test_state_with_object(
+                ObjectId(10),
+                Zone::Battlefield,
+                vec![life_qmod_def(ReplacementEvent::AddCounter, modification)],
+            );
+            add_counter_applier(
+                event,
+                ReplacementId {
+                    source: ObjectId(10),
+                    index: 0,
+                },
+                &mut state,
+                &mut Vec::new(),
+            )
+        };
+        let placement_cause = |placement: &CounterPlacement| match placement {
+            CounterPlacement::Object { cause, .. }
+            | CounterPlacement::Player { cause, .. }
+            | CounterPlacement::Energy { cause, .. } => *cause,
+        };
+        let add_object = |cause, count| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(30),
+                counter_type: CounterType::Plus1Plus1,
+                cause,
+            },
+            count,
+            applied: HashSet::new(),
+        };
+        let add_player = |cause, count| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                counter_kind: PlayerCounterKind::Poison,
+                cause,
+            },
+            count,
+            applied: HashSet::new(),
+        };
+        let add_energy = |cause, count| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Energy {
+                actor: PlayerId(0),
+                player_id: PlayerId(0),
+                cause,
+            },
+            count,
+            applied: HashSet::new(),
+        };
+        let move_add = |cause, add_count| ProposedEvent::MoveCounter {
+            actor: PlayerId(0),
+            source_id: ObjectId(30),
+            destination_id: ObjectId(31),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 3,
+            add_count,
+            stage: CounterMoveStage::Add,
+            cause,
+            applied: HashSet::new(),
+        };
+
+        // All four placement shapes promote under Times{2}; the scaled count
+        // proves the applier ran.
+        for (label, event, expected) in [
+            ("object", add_object(CounterCause::Other, 3), 6),
+            ("player", add_player(CounterCause::Other, 3), 6),
+            ("energy", add_energy(CounterCause::Other, 3), 6),
+        ] {
+            match run(QuantityModification::Times { factor: 2 }, event) {
+                ApplyResult::Modified(ProposedEvent::AddCounter {
+                    placement, count, ..
+                }) => {
+                    assert_eq!(count, expected, "{label}: the applier must scale the count");
+                    assert_eq!(
+                        placement_cause(&placement),
+                        CounterCause::ReplacementOrPrevention,
+                        "{label}: the modified placement must promote its cause"
+                    );
+                }
+                other => panic!("{label}: expected a modified AddCounter, got {other:?}"),
+            }
+        }
+        match run(
+            QuantityModification::Times { factor: 2 },
+            move_add(CounterCause::Other, 3),
+        ) {
+            ApplyResult::Modified(ProposedEvent::MoveCounter {
+                add_count, cause, ..
+            }) => {
+                assert_eq!(add_count, 6, "move-add: the applier must scale add_count");
+                assert_eq!(
+                    cause,
+                    CounterCause::ReplacementOrPrevention,
+                    "move-add: the modified placement must promote its cause"
+                );
+            }
+            other => panic!("move-add: expected a modified MoveCounter, got {other:?}"),
+        }
+
+        // Every modification kind promotes (object shape, count 4).
+        for (label, modification, expected) in [
+            ("times", QuantityModification::Times { factor: 2 }, 8),
+            ("half", QuantityModification::Half, 2),
+            ("plus", QuantityModification::Plus { value: 1 }, 5),
+            ("minus", QuantityModification::Minus { value: 1 }, 3),
+        ] {
+            match run(modification, add_object(CounterCause::Other, 4)) {
+                ApplyResult::Modified(ProposedEvent::AddCounter {
+                    placement, count, ..
+                }) => {
+                    assert_eq!(count, expected, "{label}: the applier must scale the count");
+                    assert_eq!(
+                        placement_cause(&placement),
+                        CounterCause::ReplacementOrPrevention,
+                        "{label}: the modified placement must promote its cause"
+                    );
+                }
+                other => panic!("{label}: expected a modified AddCounter, got {other:?}"),
+            }
+        }
+
+        // Prevent suppresses the placement outright (CR 614.6) — no placement
+        // to promote.
+        assert!(
+            matches!(
+                run(
+                    QuantityModification::Prevent,
+                    add_object(CounterCause::Other, 3)
+                ),
+                ApplyResult::Prevented
+            ),
+            "Prevent must yield Prevented, not a modified placement"
+        );
+
+        // Unrepresentable leaves the event (count and cause) unchanged; the
+        // pipeline halts at the loop head on the overflow record.
+        match run(
+            QuantityModification::Plus { value: 1 },
+            add_energy(CounterCause::Other, u32::MAX),
+        ) {
+            ApplyResult::Modified(ProposedEvent::AddCounter {
+                placement, count, ..
+            }) => {
+                assert_eq!(count, u32::MAX, "overflow must leave the count unchanged");
+                assert_eq!(
+                    placement_cause(&placement),
+                    CounterCause::Other,
+                    "overflow must leave the cause unchanged"
+                );
+            }
+            other => panic!("overflow must return the event unchanged, got {other:?}"),
+        }
+
+        // Hostile: the move's remove stage is not a placement and passes
+        // through unscaled and unpromoted.
+        match run(
+            QuantityModification::Times { factor: 2 },
+            ProposedEvent::MoveCounter {
+                actor: PlayerId(0),
+                source_id: ObjectId(30),
+                destination_id: ObjectId(31),
+                counter_type: CounterType::Plus1Plus1,
+                remove_count: 3,
+                add_count: 3,
+                stage: CounterMoveStage::Remove,
+                cause: CounterCause::Other,
+                applied: HashSet::new(),
+            },
+        ) {
+            ApplyResult::Modified(ProposedEvent::MoveCounter {
+                stage: CounterMoveStage::Remove,
+                cause,
+                remove_count,
+                add_count,
+                ..
+            }) => {
+                assert_eq!(
+                    (remove_count, add_count),
+                    (3, 3),
+                    "the remove stage must pass through unscaled"
+                );
+                assert_eq!(
+                    cause,
+                    CounterCause::Other,
+                    "the remove stage must pass through unpromoted"
+                );
+            }
+            other => panic!("remove stage must pass through, got {other:?}"),
+        }
+
+        // Hostile: a zero count is still a modification — Modified with a
+        // promoted cause (the matcher keeps it ineligible downstream).
+        match run(
+            QuantityModification::Times { factor: 2 },
+            add_object(CounterCause::Other, 0),
+        ) {
+            ApplyResult::Modified(ProposedEvent::AddCounter {
+                placement, count, ..
+            }) => {
+                assert_eq!(count, 0, "zero-count must stay zero");
+                assert_eq!(
+                    placement_cause(&placement),
+                    CounterCause::ReplacementOrPrevention,
+                    "zero-count must still promote its cause"
+                );
+            }
+            other => panic!("zero-count must stay Modified, got {other:?}"),
+        }
     }
 
     #[test]
