@@ -103327,8 +103327,12 @@ fn die_exile_rider_carries_the_subjects_card_type_noun() {
             "{oracle}"
         );
     }
-    // The "~" spelling of the same anaphors. No printed card reaches the creature
-    // form through this detector; it shares the noun grammar, so it is pinned here.
+    // The "~" spelling of the same anaphors. Torch the Tower prints the permanent
+    // form ("If a permanent dealt damage by Torch the Tower would die this turn,
+    // exile it instead."). No printed card reaches the creature form through this
+    // detector; the nearest, Kumano, Master Yamabushi ("If a creature dealt damage
+    // by Kumano this turn would die, exile it instead."), uses a different word
+    // order this detector rejects. It shares the noun grammar, so it is pinned here.
     assert_eq!(
         try_parse_die_exile_rider(
             "if a creature dealt damage by ~ would die this turn, exile it instead.",

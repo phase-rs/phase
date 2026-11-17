@@ -920,8 +920,7 @@ fn anger_of_the_gods_exiles_a_creature_that_received_redirected_damage() {
 /// to Liliana of the Veil (loyalty 3) leaves her in the graveyard, since she is not
 /// "a creature"; a second Touch of the Void on a Grizzly Bears exiles it, which is
 /// the positive reach-guard that the rider is live on this route. Touch of the Void
-/// is built from its verbatim Oracle text (as Anger is) because the committed
-/// integration fixture holds its pre-fix parse.
+/// is built from its verbatim Oracle text (as Anger is).
 #[test]
 fn touch_of_the_void_on_a_planeswalker_does_not_exile_it() {
     let db = shared_card_db().expect("integration card fixture must load");
