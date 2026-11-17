@@ -211,8 +211,7 @@ struct Script {
     convoke: Vec<ObjectId>,
     /// Creatures whose convoke is attempted (on a copy) when the payment step opens.
     probe_convoke: Vec<ObjectId>,
-    /// Mana abilities the player activates when the payment step opens, each
-    /// with the permanent its cost taps or sacrifices.
+    /// Mana abilities the player activates at payment, with each one's payer.
     mana_abilities: Vec<(ObjectId, Option<ObjectId>)>,
     completion: Completion,
 }
@@ -244,8 +243,7 @@ struct Run {
     /// The AI's convoke candidates, and the probed creatures the engine refused.
     convoke_candidates: Vec<ObjectId>,
     convoke_refused: Vec<ObjectId>,
-    /// Creatures the `HarmonizeTapChoice` offered, and whether a payment root
-    /// was published while it was open.
+    /// The `HarmonizeTapChoice` offer, its root, and whether one was published.
     harmonize_offer: Option<Vec<ObjectId>>,
     harmonize_inline_root: Option<Vec<ObjectId>>,
     harmonize_published_root: Option<bool>,
@@ -255,15 +253,15 @@ struct Run {
     x_max: Option<u32>,
     held_at_x: Option<Vec<ObjectId>>,
     tapped_at_x: Option<Vec<bool>>,
-    /// What the payment-step mana ability's cost prompt offered the player,
-    /// and what the AI would select there.
+    /// A mana ability's cost prompt: offered to the player, selected by the AI.
     mana_ability_offer: Option<Vec<ObjectId>>,
     ai_prompt_offer: Option<Vec<ObjectId>>,
-    /// Mana sources offered to the player and to the AI when payment opened,
-    /// and the mana actions the player took.
+    /// Mana sources offered to the player and the AI; the player's mana actions.
     human_sources: Vec<ObjectId>,
     ai_sources: Vec<ObjectId>,
     mana_actions: Vec<GameAction>,
+    /// Restricted mana units in P0's pool after each mana action.
+    restricted_after: Vec<usize>,
 }
 
 /// The engine's own save/undo/P2P restore pipeline.
@@ -441,8 +439,23 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, script: &Script, watch: &[Obje
                     }
                 }
                 if script.completion == Completion::Refused {
-                    let refused = runner.act(GameAction::PassPriority);
-                    assert!(refused.is_err(), "the payment is refused: {refused:?}");
+                    // CR 601.2h: the commit refuses the tap, and changes nothing.
+                    let view = |r: &GameRunner| {
+                        let s = r.state();
+                        let pool = &s.players[0].mana_pool;
+                        let zone = s.objects[&spell].zone;
+                        format!(
+                            "{:?}",
+                            (&s.pending_cast, pool, &s.waiting_for, zone, &s.stack)
+                        )
+                    };
+                    let before = view(runner);
+                    let refused = runner.act(GameAction::PassPriority).expect_err("refused");
+                    assert!(
+                        format!("{refused:?}").contains("can no longer pay it"),
+                        "{refused:?}"
+                    );
+                    assert_eq!(view(runner), before);
                     return run;
                 }
                 GameAction::PassPriority
@@ -514,7 +527,11 @@ fn activate(runner: &mut GameRunner, source: ObjectId, pays_with: Option<ObjectI
                 count: 1,
             },
             WaitingFor::ManaAbilityManaPayment { .. } => GameAction::PassPriority,
-            _ => return,
+            _ => {
+                let units = runner.state().players[0].mana_pool.units();
+                let restricted = units.filter(|unit| !unit.restrictions.is_empty()).count();
+                return run.restricted_after.push(restricted);
+            }
         };
     }
 }
@@ -624,9 +641,8 @@ fn assert_conspire_paid(board: &mut PyromaticsBoard, run: &Run) {
     );
 }
 
-/// CR 601.2b + CR 601.2c + CR 601.2h (Matt's F1 witness): conspire is
-/// announced before targets, its Goblins stay untapped through target
-/// declaration and the Auto payment, and are tapped once when the cost is paid.
+/// CR 601.2b + CR 601.2c + CR 601.2h: conspire's Goblins stay untapped through
+/// targets and the Auto payment, and are tapped once when the cost is paid.
 #[test]
 fn conspire_selected_before_targets_taps_when_the_cost_is_paid() {
     let mut board = pyromatics_board();
@@ -872,6 +888,7 @@ struct DruidBoard {
     victim: ObjectId,
     goblins: Vec<ObjectId>,
     druids: Vec<ObjectId>,
+    mountain: ObjectId,
 }
 
 /// One Mountain and `druids` mature Zhur-Taa Druids beside Pyromatics, Wort
@@ -879,7 +896,7 @@ struct DruidBoard {
 fn druid_board(druids: usize) -> DruidBoard {
     let (mut scenario, victim, _, goblins) = table(2);
     let druids = (0..druids).map(|_| add_druid(&mut scenario)).collect();
-    scenario.add_basic_land(P0, ManaColor::Red);
+    let mountain = scenario.add_basic_land(P0, ManaColor::Red);
     let pyromatics = pyromatics(&mut scenario);
     DruidBoard {
         runner: scenario.build(),
@@ -887,6 +904,7 @@ fn druid_board(druids: usize) -> DruidBoard {
         victim,
         goblins,
         druids,
+        mountain,
     }
 }
 
@@ -915,9 +933,8 @@ fn tapped_for_mana(run: &Run, id: ObjectId) -> Option<usize> {
     )
 }
 
-/// CR 601.2g + CR 601.2h: mana abilities are activated before costs are paid.
-/// With an empty pool, the unheld Druid taps for mana before the held Goblins
-/// are tapped for conspire.
+/// CR 601.2g + CR 601.2h: with an empty pool, the unheld Druid taps for mana
+/// before the held Goblins are tapped for conspire.
 #[test]
 fn mana_is_activated_before_held_creatures_are_tapped() {
     let mut board = druid_board(1);
@@ -961,9 +978,8 @@ fn creature_held_for_conspire_is_not_tapped_for_mana() {
 // Other routes
 // ---------------------------------------------------------------------------
 
-/// CR 601.2h + CR 702.153a: the same creature pays conspire (tap) and casualty
-/// (sacrifice). It stays untapped through target selection, is tapped, then
-/// sacrificed; casualty and conspire each copy the spell.
+/// CR 601.2h + CR 702.153a: one creature pays conspire (tap) then casualty
+/// (sacrifice), untapped through targets; each copies the spell.
 #[test]
 fn creature_tapped_for_conspire_is_then_sacrificed_for_casualty() {
     let (mut scenario, victim, _, goblins) = table(1);
@@ -1042,8 +1058,7 @@ fn teamwork_announced_before_targets_taps_when_the_cost_is_paid() {
 }
 
 /// CR 107.4f + CR 601.2h: Gut Shot's Phyrexian choice pauses payment with the
-/// held Goblins still untapped and still held (RF4-1 closure 5); answering it
-/// pays, tapping each once.
+/// Goblins untapped and held; answering it taps each once.
 #[test]
 fn phyrexian_payment_pause_keeps_the_selection_held() {
     let (mut scenario, victim, _, goblins) = table(2);
@@ -1076,10 +1091,8 @@ fn phyrexian_payment_pause_keeps_the_selection_held() {
     assert!(runner.state().pending_cast.is_none());
 }
 
-/// CR 702.180a + CR 601.2h (probe H, RF4-1 closure 3): Channeled Dragonfire
-/// cast for its harmonize cost under Djinn + Wort. The harmonize offer excludes
-/// the Goblins held for conspire and offers the unheld creature; while it is
-/// open only the prompt's own root exists; answering it completes the cast.
+/// CR 702.180a + CR 601.2h: Channeled Dragonfire harmonized under Djinn + Wort
+/// offers the unheld creature, not the held Goblins, and publishes no root.
 #[test]
 fn harmonize_does_not_offer_creatures_held_for_conspire() {
     let (mut scenario, victim, _, goblins) = table(2);
@@ -1138,11 +1151,9 @@ fn myr(
         .id()
 }
 
-/// CR 601.2h + CR 208.1: teamwork's total power is checked again when the cost
-/// is paid. Gold Myr (2 power with Myr Galvanizer) pays Cruel Alliance's
-/// teamwork 2; sacrificing the Galvanizer to Krark-Clan Ironworks during payment
-/// leaves it at 1, and the payment is refused. Sacrificing the Ironworks
-/// itself instead keeps it at 2, and the cast completes.
+/// CR 601.2h + CR 208.1: Gold Myr pays teamwork 2 at 2 power (Myr Galvanizer);
+/// sacrificing the Galvanizer to Krark-Clan Ironworks during payment leaves it
+/// at 1 and the payment is refused. Sacrificing the Ironworks instead completes.
 #[test]
 fn teamwork_selection_is_revalidated_when_the_cost_is_paid() {
     for (completion, power) in [(Completion::Refused, 1), (Completion::Completes, 2)] {
@@ -1181,11 +1192,8 @@ fn teamwork_selection_is_revalidated_when_the_cost_is_paid() {
     }
 }
 
-/// CR 107.3 + CR 601.2f: a creature held for conspire is not tapped for X, but
-/// its own non-tap mana ability still counts toward X. Heat Ray under Djinn +
-/// Wort, conspire paid with Wort and Thermopod: X = 1 is offered because
-/// Thermopod can sacrifice an unheld Goblin for {R}, and the cast completes.
-/// The control holds a Goblin instead of Thermopod.
+/// CR 107.3 + CR 601.2f: Thermopod held for conspire still counts its
+/// sacrifice mana toward Heat Ray's X (X = 1); the control holds a Goblin.
 #[test]
 fn held_creature_still_counts_its_non_tap_mana_toward_x() {
     // Case 0 holds Thermopod; case 1, the control, holds a Goblin instead.
@@ -1234,10 +1242,8 @@ fn held_creature_still_counts_its_non_tap_mana_toward_x() {
 // The player's own mana activations (CR 601.2g + CR 605.3a)
 // ---------------------------------------------------------------------------
 
-/// CR 601.2g + CR 605.3a + CR 107.6 (Matt's closing row): Pili-Pala, held for
-/// Cruel Alliance's teamwork, is tapped for {C}{C} through Grand Architect;
-/// that mana pays Pili-Pala's own {2},{Q}, which untaps it; it is tapped again
-/// for teamwork when the cost is paid.
+/// CR 601.2g + CR 605.3a + CR 107.6: Pili-Pala, held for teamwork, taps for
+/// {C}{C} through Grand Architect, pays its own {2},{Q}, and taps for teamwork.
 #[test]
 fn held_creature_can_tap_for_mana_and_untap_before_the_commit() {
     let mut scenario = GameScenario::new();
@@ -1271,6 +1277,8 @@ fn held_creature_can_tap_for_mana_and_untap_before_the_commit() {
 
     assert_eq!(run.tapped_at_targets, Some(vec![false]));
     assert_eq!(run.mana_ability_offer, Some(vec![architect, pili]));
+    // The Architect's restricted {C}{C} exists, then pays Pili-Pala's {2}.
+    assert_eq!(run.restricted_after, vec![2, 0]);
     let untapped = run.events.iter().position(
         |event| matches!(event, GameEvent::PermanentUntapped { object_id, .. } if *object_id == pili),
     );
@@ -1285,9 +1293,8 @@ fn held_creature_can_tap_for_mana_and_untap_before_the_commit() {
     assert_eq!(paid[0].origin, AdditionalCostOrigin::Teamwork);
 }
 
-/// CR 601.2h: a held creature the player tapped for mana and didn't untap
-/// can't pay the deferred tap when the cost is paid. The automatic payer and
-/// the AI never offer it; the player is offered it.
+/// CR 601.2h: a held Druid the player tapped for mana (only the player is offered
+/// it) can't pay the deferred tap; the commit refuses.
 #[test]
 fn held_creature_still_tapped_at_the_commit_is_refused() {
     let mut board = druid_board(1);
@@ -1296,7 +1303,8 @@ fn held_creature_still_tapped_at_the_commit_is_refused() {
     script.payment_mode = CastPaymentMode::Manual;
     script.pay_once = vec![AdditionalCostOrigin::Other];
     script.selections = vec![vec![druid, goblin]];
-    script.mana_abilities = vec![(druid, None)];
+    // The Druid and the Mountain pay {1}{R}; the commit then refuses the tap.
+    script.mana_abilities = vec![(druid, None), (board.mountain, None)];
     script.completion = Completion::Refused;
     let watch = [druid, goblin];
     let run = cast(&mut board.runner, board.pyromatics, &script, &watch);
@@ -1305,9 +1313,8 @@ fn held_creature_still_tapped_at_the_commit_is_refused() {
     assert_eq!(tapped(&board.runner, &[druid, goblin]), vec![true, false]);
 }
 
-/// CR 107.3 + CR 601.2f: a Druid held for conspire doesn't count toward X.
-/// Heat Ray under Djinn + Wort, replicate declined, conspire with Wort and the
-/// Druid (held: X up to 0) or with Wort and a Goblin (Druid free: X up to 1).
+/// CR 107.3 + CR 601.2f: Heat Ray under Djinn + Wort; a Druid held for conspire
+/// doesn't count toward X (0), a free one does (1).
 #[test]
 fn held_creature_does_not_count_its_tap_mana_toward_x() {
     // Case 0 holds the Druid; case 1 holds a Goblin and leaves the Druid free.
@@ -1337,12 +1344,9 @@ fn held_creature_does_not_count_its_tap_mana_toward_x() {
     }
 }
 
-/// CR 605.3a + CR 601.2g: Springleaf Drum's "tap an untapped creature you
-/// control" cost during Pyromatics' payment. Case 0: Wort and the only Goblin
-/// are both held. The player is offered the Drum and its prompt offers both;
-/// the AI isn't offered the Drum; Wort tapped for the Drum then can't pay
-/// conspire. Case 1: a second Goblin is free. The AI is offered the Drum and
-/// would pay with the free Goblin only; the player's prompt offers all three.
+/// CR 605.3a + CR 601.2g: Springleaf Drum during Pyromatics' payment. Case 0,
+/// all held: only the player is offered it, and Wort tapped for it is refused at
+/// the commit. Case 1, a free Goblin: the AI would pay with that Goblin only.
 #[test]
 fn held_creatures_pay_a_mana_ability_tap_cost_only_by_the_players_choice() {
     for case in 0..2 {
@@ -1376,11 +1380,8 @@ fn held_creatures_pay_a_mana_ability_tap_cost_only_by_the_players_choice() {
     }
 }
 
-/// CR 305.6 + CR 601.2g + CR 601.2h: Dryad Arbor's intrinsic "{T}: Add {G}"
-/// while it's held for conspire on Giant Growth (Djinn + Wort, replicate
-/// declined). The player is offered the land tap (no printed ability) and it
-/// is accepted; the payment is then refused because Arbor is still tapped.
-/// Without the tap the cast completes and Arbor is tapped once, for conspire.
+/// CR 305.6 + CR 601.2g + CR 601.2h: Dryad Arbor held for conspire on Giant
+/// Growth may be tapped for {G} by the player; the commit then refuses.
 #[test]
 fn held_land_creature_taps_for_its_intrinsic_mana_by_the_players_choice() {
     for completion in [Completion::Refused, Completion::Completes] {
