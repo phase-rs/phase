@@ -4897,6 +4897,16 @@ mod quoted_token_static_trailing_comma_tests {
         );
     }
 
+    fn assert_grants_trigger(statics: &[StaticDefinition], token: &str) {
+        assert!(
+            statics
+                .iter()
+                .flat_map(|def| def.modifications.iter())
+                .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })),
+            "{token}: expected a GrantTrigger modification, got {statics:?}"
+        );
+    }
+
     fn assert_cant_block(statics: &[StaticDefinition], token: &str) {
         assert!(
             statics.iter().any(|def| def.mode == StaticMode::CantBlock),
@@ -4916,16 +4926,22 @@ mod quoted_token_static_trailing_comma_tests {
         static_abilities
     }
 
-    /// CR 111.3 + CR 613.4c: Oracle prints a token's quoted static followed by a
+    /// CR 111.3 + CR 613.4c: Oracle prints a token's quoted ability followed by a
     /// sentence comma that sits INSIDE the closing quote ("... you control,"). The
-    /// comma is clause punctuation, not part of the static, so `push_parsed_statics`
-    /// must yield the same statics with and without it. Verbatim token clauses
-    /// (Scryfall Oracle text) for each shape that prints the inner comma:
-    /// a for-each `+1/+1` body ending the quote (Vren, the Relentless; The Bear Force
-    /// Pilot; The Bear Force Pilot Runner) and a keyword-like restriction body
-    /// (Tangled Colony; The Mycotyrant). Those two rows stop at the quoted body: their
-    /// "where X is ..." riders need the surrounding trigger context, which is a separate
-    /// concern from the comma.
+    /// comma is clause punctuation, not part of the ability, so `push_parsed_statics`
+    /// must yield the same result with and without it. Each row is the verbatim
+    /// printed token clause (Scryfall Oracle text) of one card:
+    /// - Vren, the Relentless, The Bear Force Pilot and The Bear Force Pilot Runner:
+    ///   a for-each `+1/+1` static body ending the quote.
+    /// - The Mycotyrant: a keyword-like restriction static body ("This token can't
+    ///   block,"), including its "where X is ..." rider and reminder text.
+    /// - Tend the Pests: a granted triggered ability ("When this token dies, you gain
+    ///   1 life,"), which reaches the `classify_quoted_inner` fallback fed by the same
+    ///   comma strip.
+    ///
+    /// Tangled Colony is excluded: its "where X is the amount of damage dealt to it
+    /// this turn" rider is unsupported, so production never sends its quoted body to
+    /// `push_parsed_statics`.
     #[test]
     fn quoted_token_static_ignores_trailing_sentence_comma() {
         type Check = fn(&[StaticDefinition], &str);
@@ -4953,18 +4969,18 @@ mod quoted_token_static_trailing_comma_tests {
                 assert_dynamic_for_each_count,
             ),
             (
-                "Tangled Colony",
-                "Create X 1/1 black Rat creature tokens with ",
+                "The Mycotyrant",
+                "create X 1/1 black Fungus creature tokens with ",
                 "This token can't block",
-                "",
+                " where X is the number of times you descended this turn. (You descend each time a permanent card is put into your graveyard from anywhere.)",
                 assert_cant_block,
             ),
             (
-                "The Mycotyrant",
-                "Create X 1/1 black Fungus creature tokens with ",
-                "This token can't block",
-                "",
-                assert_cant_block,
+                "Tend the Pests",
+                "Create X 1/1 black and green Pest creature tokens with ",
+                "When this token dies, you gain 1 life",
+                " where X is the sacrificed creature's power.",
+                assert_grants_trigger,
             ),
         ];
         for (token, prefix, body, suffix, check) in rows {
