@@ -4662,10 +4662,9 @@ pub(crate) fn priority_actions_with_probe(
     // CR 805.4a + CR 805.5a: under the shared team turns option the active
     // TEAM takes the turn, and any member may act when the team has priority.
     // Sorcery-speed gates (land, foretell, plot, room unlock) treat every
-    // living teammate of the active player as active.
-    let is_active = state.active_player == player
-        || (state.format_config.topology().has_shared_team_turns()
-            && crate::game::topology::team_members(state, state.active_player).contains(&player));
+    // living teammate of the active player as active, through the shared
+    // membership authority.
+    let is_active = crate::game::restrictions::acts_on_active_turn(state, player);
     let activation_restriction_gates =
         crate::game::restrictions::ActivationRestrictionStaticGates::compute(state);
 

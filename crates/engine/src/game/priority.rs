@@ -290,16 +290,18 @@ pub fn pass_priority_legality(state: &GameState, player: PlayerId) -> Result<(),
     // CR 805.5a: any living teammate may pass when the team holds priority —
     // the window parks on the representative, but the reducer records the
     // acting member's pass individually. Without this, the guard rejects
-    // exactly the passes the reducer's teammate arm accepts.
-    let teammate_of_holder = match &state.waiting_for {
+    // exactly the passes the reducer's teammate arm accepts. The holder
+    // itself is excluded so the CR 723.5 submitter-sync check below still
+    // fires for it on shared windows.
+    let strict_teammate_of_holder = match &state.waiting_for {
         WaitingFor::Priority { player: holder }
-            if super::topology::side_takes_shared_turn(state, *holder) =>
+            if *holder != player && super::topology::side_takes_shared_turn(state, *holder) =>
         {
             super::topology::team_members(state, *holder).contains(&player)
         }
         _ => false,
     };
-    if !teammate_of_holder
+    if !strict_teammate_of_holder
         && state.priority_player != turn_control::authorized_submitter_for_player(state, player)
     {
         return Err(EngineError::NotYourPriority);
@@ -1232,6 +1234,19 @@ mod tests {
         );
         assert!(matches!(
             pass_priority_legality(&state, PlayerId(2)),
+            Err(EngineError::NotYourPriority)
+        ));
+
+        // The holder itself still goes through the submitter-sync check: a
+        // desynced priority_player rejects even on a shared window.
+        let mut desynced = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        desynced.active_player = PlayerId(0);
+        desynced.priority_player = PlayerId(2);
+        desynced.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(matches!(
+            pass_priority_legality(&desynced, PlayerId(0)),
             Err(EngineError::NotYourPriority)
         ));
     }

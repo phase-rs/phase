@@ -7,6 +7,7 @@ use engine::ai_support;
 use engine::game::casting::can_foretell_card;
 use engine::game::combat::{AttackerInfo, CombatState};
 use engine::game::engine as game_engine;
+use engine::game::game_object::RoomDoor;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{Effect, ResolvedAbility};
@@ -639,5 +640,100 @@ fn ai_teammate_verified_pass_leaves_representative_unpassed_and_able_to_respond(
             GameAction::CastSpell { object_id, .. } if *object_id == counterspell
         )),
         "P0 must be offered Counterspell in response, got {actions:?}"
+    );
+}
+
+/// CR 709.5e + CR 805.5a: a teammate may unlock their own Room's door on the
+/// team's turn while priority parks on the representative — the candidate
+/// offer and the reducer validate agree. Regression: the offer went
+/// team-aware while the validator still required the exact active player,
+/// so the teammate's unlock was offered and then refused.
+#[test]
+fn teammate_room_unlock_offered_and_applies_on_team_priority() {
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut sc = team_turn_board();
+    // Greenhouse {2}{G} // Rickety Gazebo {3}{G}: unlock the {2}{G} left door.
+    let room = sc.add_real_card(P1, "Greenhouse", Zone::Battlefield, db);
+    sc.with_mana_pool(
+        P1,
+        vec![
+            ManaUnit::new(ManaType::Green, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = sc.build();
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+
+    // Premise: fully locked on entry (neither half cast).
+    assert!(
+        !runner.state().objects[&room]
+            .room_unlocks
+            .unwrap_or_default()
+            .is_unlocked(RoomDoor::Left),
+        "premise: the left door starts locked"
+    );
+    // Offered to the teammate on the parked window.
+    let (actions, _, _) = ai_support::legal_actions_for_viewer(runner.state(), P1);
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            GameAction::UnlockRoomDoor { object_id, door }
+                if *object_id == room && *door == RoomDoor::Left
+        )),
+        "P1 must be offered their Room's left door, got {actions:?}"
+    );
+    // Hostile (custody gate): the representative cannot unlock P1's Room.
+    let rep_err = game_engine::apply(
+        runner.state_mut(),
+        P0,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .expect_err("P0 must not unlock P1's Room");
+    assert!(
+        format!("{rep_err:?}").contains("controller"),
+        "unexpected rejection (want the custody gate): {rep_err:?}"
+    );
+
+    // Applies as the teammate through the authenticated boundary.
+    let before = runner.state().players[1].mana_pool.total();
+    game_engine::apply(
+        runner.state_mut(),
+        P1,
+        GameAction::UnlockRoomDoor {
+            object_id: room,
+            door: RoomDoor::Left,
+        },
+    )
+    .expect("teammate room unlock must be accepted on team priority");
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ManaPayment { .. } => {
+                game_engine::apply(runner.state_mut(), P1, GameAction::PassPriority)
+                    .expect("mana payment finalizes");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.pass_holding_team().expect("settle passes");
+            }
+            other => panic!("unexpected prompt while unlocking: {other:?}"),
+        }
+    }
+    assert!(
+        runner.state().objects[&room]
+            .room_unlocks
+            .unwrap_or_default()
+            .is_unlocked(RoomDoor::Left),
+        "the left door must unlock"
+    );
+    assert_eq!(
+        before - runner.state().players[1].mana_pool.total(),
+        3,
+        "CR 709.5e: the unlock pays the half's {{2}}{{G}}"
     );
 }

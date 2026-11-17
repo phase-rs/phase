@@ -202,7 +202,7 @@ pub fn eligible_ai_decision(
         WaitingFor::ChooseFromZoneChoice { .. } => owners.clone(),
         WaitingFor::BeholdChoice { .. } => owners.clone(),
         WaitingFor::EmpowerJaceChoice { .. } => owners.clone(),
-        WaitingFor::SpellCopyOrderChoice { .. } => owners.clone(),
+        WaitingFor::MemberOrderChoice { .. } => owners.clone(),
         WaitingFor::ChooseOneOfBranch { .. } => owners.clone(),
         WaitingFor::ConniveDiscard { .. } => owners.clone(),
         WaitingFor::DiscardChoice { .. } => owners.clone(),
