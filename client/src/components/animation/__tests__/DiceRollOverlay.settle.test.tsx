@@ -179,6 +179,29 @@ describe("DiceRollOverlay reveals a roll's result when it lands", () => {
     expect(useUiStore.getState().diceRoll).toBeNull();
   });
 
+  it("shows stalled dice as landed static faces, with their badges and the ignored die marked", async () => {
+    render(<DiceRollOverlay />);
+    const roll: DiceRollPayload = {
+      kind: "die",
+      sides: 20,
+      context: "ability",
+      rolls: [{ playerId: 0, value: 14 }, { playerId: 0, value: 4, ignored: true }],
+    };
+    await showRoll(roll);
+
+    // The dice never report a landing.
+    await advance(DICE_ROLL_LANDING_TIMEOUT_MS - 1);
+    expect(screen.queryByText("14")).toBeNull();
+    await advance(1);
+    // Each value shows on its static face and on its landed badge.
+    expect(screen.getAllByText("14")).toHaveLength(2);
+    expect(screen.getAllByText("4")).toHaveLength(2);
+    expect(screen.getByText(/ignored/i)).toBeInTheDocument();
+
+    await advance(DICE_RESULT_HOLD_MS);
+    expect(useUiStore.getState().diceRoll).toBeNull();
+  });
+
   it("starts an in-game roll's countdown only once its last die lands", async () => {
     render(<DiceRollOverlay />);
     const roll = twoDiceRoll();

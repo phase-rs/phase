@@ -197,7 +197,7 @@ export const DICE_RESULT_MIN_HOLD_MS = 800;
 /** Base minimum time an ability roll stays on screen from when it shows,
  *  before the animation speed multiplier: about one tumble plus the result's
  *  beat. A result that shows at once (the static face under reduced motion or
- *  without WebGL) gets the time an animated roll takes. */
+ *  without WebGL) gets about the time an animated roll takes. */
 export const DICE_ROLL_MIN_DURATION_MS = 2400;
 
 /** Wall-clock wait for an ability roll's landing report, after which its

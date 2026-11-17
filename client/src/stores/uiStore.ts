@@ -190,8 +190,9 @@ function stallDiceRoll(): void {
 }
 
 // Count down once the active roll's result shows: the read beat, and never
-// sooner than DICE_ROLL_MIN_DURATION_MS after the roll showed, so a result
-// that shows at once (a static face) stays as long as an animated roll does.
+// sooner than DICE_ROLL_MIN_DURATION_MS × speed after the roll showed, so a
+// result that shows at once (a static face) stays about as long as an animated
+// roll does.
 // Speed is re-read here so a live Animation Speed change (incl. switching to
 // instant, which closes at once) applies to the countdown.
 function startDiceResultHold(): void {
