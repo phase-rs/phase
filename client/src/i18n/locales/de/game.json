@@ -153,7 +153,7 @@
     "unimplemented": "Nicht implementiert: {{mechanics}}",
     "dfc": "DFC",
     "tapped": "Getappt",
-    "reloadArt": "Zum Neuladen des Bilds tippen"
+    "reloadArt": "Zum Neuladen des Artworks tippen"
   },
   "preview": {
     "holdCtrlBack": "Strg halten für Rückseite",
@@ -163,6 +163,7 @@
     "report": "Problem melden",
     "reported": "Gemeldet ✓",
     "reportNotSent": "Nicht gesendet",
+    "reloadArt": "Artwork neu laden",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",

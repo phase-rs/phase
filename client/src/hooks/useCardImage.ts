@@ -13,6 +13,7 @@ import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import { nextImageSourceIndex } from "./imageSourceLadder.ts";
 import {
   BoundedCache,
+  holdFailedCardArt,
   useCardArtReload,
   useCardImage as useLegacyCardImage,
 } from "./useLegacyCardImage.ts";
@@ -81,7 +82,12 @@ function admittedPrinting(authority: OwnerArtAuthority, input: OwnerInput) {
     : null;
 }
 
-function presentationResult(presentation: OwnerPresentation, advanceFailedSource: (src: string) => void): ImageResult {
+function presentationResult(
+  presentation: OwnerPresentation,
+  advanceFailedSource: (src: string) => void,
+  reload: (() => void) | undefined,
+  failedArtOracleId: string | undefined,
+): ImageResult {
   const source = presentation.sources[presentation.index] ?? null;
   return {
     src: source?.src ?? null,
@@ -91,13 +97,15 @@ function presentationResult(presentation: OwnerPresentation, advanceFailedSource
     isRotated: presentation.isRotated,
     isFlip: presentation.isFlip,
     advanceFailedSource,
+    reload,
+    failedArtOracleId,
   };
 }
 
 /**
  * Revalidate generation/admission immediately before each overlay-initiated repository API call. A repository call initiated while admitted may finish its internal initialization, subscription, resolution and revision retry after admission is lost; those operations are not cancellable through the existing API. The overlay must start no further calls and must discard stale results before presentation, caching or publication.
  */
-function useOwnerCardImageOverlay(input: OwnerInput | null): ImageResult | null {
+function useOwnerCardImageOverlay(input: OwnerInput | null, reload: (() => void) | undefined): ImageResult | null {
   const readerRef = useRef<OwnerArtCatalogReader | null>(null);
   const latest = useRef(input);
   latest.current = input;
@@ -252,7 +260,19 @@ function useOwnerCardImageOverlay(input: OwnerInput | null): ImageResult | null 
   }, [inputKey]);
 
   const selected = presentation?.key === currentKey ? presentation : warm;
-  return selected ? presentationResult(selected, (src) => advanceRef.current(selected.key, src)) : null;
+  if (!selected || !input) return null;
+  // An admitted printing's image URL is built from catalog data already in
+  // memory, so a ladder that ends with no art and no failed source has no image
+  // to load: terminal, and a reload could only land there again. Only a failed
+  // source makes owner art failed art, online or offline.
+  const recordedFailure = selected.failed.size > 0;
+  const showsFailedArt = recordedFailure && selected.remoteDone && !selected.sources[selected.index]?.src;
+  return presentationResult(
+    selected,
+    (src) => advanceRef.current(selected.key, src),
+    recordedFailure ? reload : undefined,
+    showsFailedArt ? input.oracleId : undefined,
+  );
 }
 
 /**
@@ -306,9 +326,20 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): I
       faceIndex, setCode, collectorNumber, size, language, offline,
     };
   }
-  const overlay = useOwnerCardImageOverlay(input);
-  if (!overlay) return normal;
-  // Offline, the owner ladder never goes remote, so a reload could only land
-  // on the same fallback.
-  return { ...overlay, reload: offline ? undefined : ownerArt.reload };
+  const overlay = useOwnerCardImageOverlay(input, ownerArt.reload);
+  // Whether some surface of the card failed is the card's, read under the owner
+  // art's own oracle id, and another surface's failure is worth a reload too.
+  const result = overlay
+    ? {
+        ...overlay,
+        cardArtFailed: ownerArt.failed,
+        reload: overlay.reload ?? (ownerArt.failed ? ownerArt.reload : undefined),
+      }
+    : normal;
+  // A surface counts toward `cardArtFailed` by what it shows: owner art that
+  // arrives over a failed default printing releases that failure. The oracle id
+  // only coordinates that count, so it stays out of the returned result.
+  const { failedArtOracleId, ...shown } = result;
+  useEffect(() => (failedArtOracleId ? holdFailedCardArt(failedArtOracleId) : undefined), [failedArtOracleId]);
+  return shown;
 }

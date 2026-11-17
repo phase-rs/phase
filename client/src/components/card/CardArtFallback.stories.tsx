@@ -1,5 +1,6 @@
 import type { CSSProperties } from "react";
 import type { Meta, StoryObj } from "@storybook/react-vite";
+import { fn } from "storybook/test";
 
 import { CardArtFallback } from "./CardArtFallback.tsx";
 import { getBevelBorderStyle } from "./cardFrame.ts";
@@ -20,7 +21,7 @@ const meta = {
     style: getBevelBorderStyle(["Colorless"]),
   },
   argTypes: {
-    variant: { control: "inline-radio", options: ["fullCard", "artCrop"] },
+    variant: { control: "inline-radio", options: ["fullCard", "artCrop", "preview", "peek"] },
   },
   decorators: [
     (Story) => (
@@ -68,5 +69,20 @@ export const LongName: Story = {
     name: "Rhys the Redeemed, Emissary of the Wren-Kin Assembly",
     oracleText: undefined,
     style: getBevelBorderStyle(["Green", "White"]),
+  },
+};
+
+/**
+ * The mobile preview's card-sized tile: its text reads at the preview's size,
+ * and a card whose art failed to load offers a one-tap reload under it.
+ */
+export const PreviewWithReload: Story = {
+  args: {
+    name: "Etherium Sculptor",
+    oracleText: "Artifact spells you cast cost {1} less to cast.",
+    style: getBevelBorderStyle(["Blue"]),
+    variant: "preview",
+    className: "aspect-[488/680] w-80 rounded-lg",
+    onReload: fn(),
   },
 };

@@ -163,6 +163,7 @@
     "report": "Informar de un problema",
     "reported": "Informado ✓",
     "reportNotSent": "No enviado",
+    "reloadArt": "Recargar ilustración",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",

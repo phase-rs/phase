@@ -9,14 +9,21 @@ const SCULPTOR_ART = "https://img.example/oracle-etherium-sculptor.jpg";
 const MITE = "oracle-haywire-mite";
 const MITE_ART = "https://img.example/oracle-haywire-mite.jpg";
 
-/** Real hook over a remote-only resolution: no installed art, and every oracle
- *  id resolves to a remote image named after it. */
-async function setup() {
-  const fetchCardImageAssetByOracleId = vi.fn(async (oracleId: string) => ({
-    src: `https://img.example/${oracleId}.jpg`,
-    isRotated: false,
-    semantic: { oracleId, faceIndex: 0, alias: oracleId },
-  }));
+/** Image sizes whose card lookup rejects, as when a download fails. */
+const failingLookupSizes = new Set<string>();
+
+/** Real hook over a mocked resolution: every oracle id resolves to a remote
+ *  image named after it, and `installedSrc`, when given, is installed art the
+ *  local stage finds first. */
+async function setup(installedSrc?: string) {
+  const fetchCardImageAssetByOracleId = vi.fn(async (oracleId: string, _faceName?: string, size?: string) => {
+    if (failingLookupSizes.has(size ?? "normal")) throw new Error("lookup failed");
+    return {
+      src: `https://img.example/${oracleId}.jpg`,
+      isRotated: false,
+      semantic: { oracleId, faceIndex: 0, alias: oracleId },
+    };
+  });
   vi.doMock("../../services/scryfall.ts", () => ({
     deriveImageUrl: (url: string) => url,
     fetchCardImageAsset: vi.fn(),
@@ -40,12 +47,22 @@ async function setup() {
     visualPackRepository: {
       currentRevision: () => "0",
       subscribe: () => () => {},
-      resolve: vi.fn(async ({ allowRemote, remote }: { allowRemote: boolean; remote?: { src: string } }) => ({
-        revision: "0",
-        sources: allowRemote && remote
-          ? [{ kind: "remote" as const, src: remote.src }, { kind: "fallback" as const, src: null }]
-          : [{ kind: "fallback" as const, src: null }],
-      })),
+      resolve: vi.fn(async ({ allowRemote, remote }: { allowRemote: boolean; remote?: { src: string } }) => {
+        const installed = installedSrc
+          ? [{
+              kind: "installed" as const,
+              src: installedSrc,
+              assetKey: "asset:v1:canonical_card:QQ",
+              packId: "deck_library",
+              catalogRoot: "a".repeat(64),
+            }]
+          : [];
+        const remoteSources = allowRemote && remote ? [{ kind: "remote" as const, src: remote.src }] : [];
+        return {
+          revision: "0",
+          sources: [...installed, ...remoteSources, { kind: "fallback" as const, src: null }],
+        };
+      }),
     },
   }));
   const { useCardImage } = await import("../useCardImage.ts");
@@ -63,6 +80,7 @@ async function settle() {
 
 describe("useCardImage art reload (#11008)", () => {
   beforeEach(() => {
+    failingLookupSizes.clear();
     vi.resetModules();
     vi.restoreAllMocks();
     vi.doUnmock("../../services/scryfall.ts");
@@ -131,7 +149,90 @@ describe("useCardImage art reload (#11008)", () => {
     expect(mite.result.current).toMatchObject({ src: null, isLoading: false });
   });
 
-  it("offers no reload while offline, where the lookup never goes remote", async () => {
+  it("keeps the art of a healthy surface of the same card on screen through the reload", async () => {
+    const env = await setup();
+    const tile = renderHook(() => env.useCardImage("Etherium Sculptor", { oracleId: SCULPTOR, size: "art_crop" }));
+    const healthySrcs: Array<string | null> = [];
+    const preview = renderHook(() => {
+      const image = env.useCardImage("Etherium Sculptor", { oracleId: SCULPTOR });
+      healthySrcs.push(image.src);
+      return image;
+    });
+    await waitFor(() => expect(tile.result.current.src).toBe(SCULPTOR_ART));
+    await waitFor(() => expect(preview.result.current.src).toBe(SCULPTOR_ART));
+    act(() => tile.result.current.advanceFailedSource?.(SCULPTOR_ART));
+    expect(tile.result.current).toMatchObject({ src: null, isLoading: false });
+
+    // Reach guard: the reload does restart the healthy surface's request too.
+    const lookups = env.fetchCardImageAssetByOracleId.mock.calls.length;
+    healthySrcs.length = 0;
+    act(() => tile.result.current.reload?.());
+    await waitFor(() => expect(tile.result.current.src).toBe(SCULPTOR_ART));
+    await settle();
+    // Each surface's new request looks the art up again.
+    expect(env.fetchCardImageAssetByOracleId.mock.calls.length).toBeGreaterThanOrEqual(lookups + 2);
+    expect(healthySrcs.length).toBeGreaterThan(0);
+    expect(healthySrcs).not.toContain(null);
+  });
+
+  // A battlefield tile asks for a smaller image than the preview, so the
+  // preview's own request never sees the tile's failure.
+  it("tells a healthy surface that another surface of the card failed, until the reload", async () => {
+    const env = await setup();
+    const tile = renderHook(() => env.useCardImage("Etherium Sculptor", { oracleId: SCULPTOR, size: "art_crop" }));
+    const preview = renderHook(() => env.useCardImage("Etherium Sculptor", { oracleId: SCULPTOR }));
+    await waitFor(() => expect(tile.result.current.src).toBe(SCULPTOR_ART));
+    await waitFor(() => expect(preview.result.current.src).toBe(SCULPTOR_ART));
+    expect(preview.result.current.cardArtFailed).toBe(false);
+
+    act(() => tile.result.current.advanceFailedSource?.(SCULPTOR_ART));
+    await waitFor(() => expect(preview.result.current.cardArtFailed).toBe(true));
+    expect(preview.result.current.src).toBe(SCULPTOR_ART);
+
+    // The preview's reload restarts the tile, which then holds no failure.
+    act(() => preview.result.current.reload?.());
+    await waitFor(() => expect(tile.result.current.src).toBe(SCULPTOR_ART));
+    await waitFor(() => expect(preview.result.current.cardArtFailed).toBe(false));
+
+    // A surface that leaves the screen takes its failure with it.
+    act(() => tile.result.current.advanceFailedSource?.(SCULPTOR_ART));
+    await waitFor(() => expect(preview.result.current.cardArtFailed).toBe(true));
+    tile.unmount();
+    await waitFor(() => expect(preview.result.current.cardArtFailed).toBe(false));
+  });
+
+  it("counts a surface whose lookup failed, not only one whose image failed", async () => {
+    const env = await setup();
+    failingLookupSizes.add("art_crop");
+    const tile = renderHook(() => env.useCardImage("Etherium Sculptor", { oracleId: SCULPTOR, size: "art_crop" }));
+    const preview = renderHook(() => env.useCardImage("Etherium Sculptor", { oracleId: SCULPTOR }));
+
+    // Reach guard: the tile's lookup settled with no art while the preview's loaded.
+    await waitFor(() => expect(tile.result.current).toMatchObject({ src: null, isLoading: false }));
+    await waitFor(() => expect(preview.result.current.src).toBe(SCULPTOR_ART));
+    await waitFor(() => expect(preview.result.current.cardArtFailed).toBe(true));
+
+    failingLookupSizes.clear();
+    act(() => preview.result.current.reload?.());
+    await waitFor(() => expect(tile.result.current.src).toBe(SCULPTOR_ART));
+    await waitFor(() => expect(preview.result.current.cardArtFailed).toBe(false));
+  });
+
+  it("reloads failed installed art offline", async () => {
+    const installedArt = "/installed-sculptor.jpg";
+    const env = await setup(installedArt);
+    env.useConnectivityStore.setState({ forcedOffline: true });
+    const { result } = renderHook(() => env.useCardImage("Etherium Sculptor", { oracleId: SCULPTOR }));
+    await waitFor(() => expect(result.current.src).toBe(installedArt));
+    act(() => result.current.advanceFailedSource?.(installedArt));
+    expect(result.current).toMatchObject({ src: null, isLoading: false });
+    expect(result.current.reload).toBeTypeOf("function");
+
+    act(() => result.current.reload?.());
+    await waitFor(() => expect(result.current.src).toBe(installedArt));
+  });
+
+  it("offers no reload offline when no source failed, as nothing could load", async () => {
     const env = await setup();
     env.useConnectivityStore.setState({ forcedOffline: true });
     const { result } = renderHook(() => env.useCardImage("Etherium Sculptor", { oracleId: SCULPTOR }));

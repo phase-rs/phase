@@ -163,6 +163,7 @@
     "report": "Report a problem",
     "reported": "Reported ✓",
     "reportNotSent": "Not sent",
+    "reloadArt": "Reload art",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",

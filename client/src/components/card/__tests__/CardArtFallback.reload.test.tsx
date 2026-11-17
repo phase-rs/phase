@@ -1,52 +1,18 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { useCardImage } from "../../../hooks/useCardImage.ts";
-import { useGameStore } from "../../../stores/gameStore.ts";
-import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
-import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
-import { ArtCropCard } from "../ArtCropCard.tsx";
 import { CardArtFallback } from "../CardArtFallback.tsx";
-import { CardImage } from "../CardImage.tsx";
 
-// Regression tests for #11008: an artless tile offers a one-tap reload where
-// the tile owns its taps, and the tap never reaches the surface around it.
-
-vi.mock("../../../hooks/useCardImage.ts", () => ({
-  useCardBackImage: vi.fn(() => ({ src: "card-back.png", isLoading: false })),
-  useCardImage: vi.fn(),
-}));
-
-vi.mock("../../../hooks/useEngineCardData.ts", () => ({
-  useEngineCardData: () => null,
-  useLocalizedCardName: (name: string | null) => name,
-}));
+// Regression tests for #11008: the mobile preview's artless tile offers a
+// one-tap reload, the tap never reaches the preview around it, and its text
+// reads at the preview's size.
 
 const CARD_NAME = "Etherium Sculptor";
 const RULES_TEXT = "Artifact spells you cast cost {1} less to cast.";
 const RELOAD = "Tap to reload art";
 
-/** The settled artless result: the art failed and the lookup is over. */
-function failedArt(reload: () => void) {
-  return { src: null, isLoading: false, isRotated: false, isFlip: false, reload };
-}
-
-function placeSculptorOnBattlefield(): number {
-  const card = gameObjectFactory
-    .creature(1, 2)
-    .onBattlefield()
-    .named(CARD_NAME)
-    .build({ printed_ref: { oracle_id: "oracle-etherium-sculptor", face_name: CARD_NAME } });
-  useGameStore.setState({
-    gameState: gameStateFactory.withPlayers(0, 1).withObjects(card).build(),
-  });
-  return card.id;
-}
-
 afterEach(() => {
   cleanup();
-  vi.clearAllMocks();
-  useGameStore.setState({ gameState: null });
 });
 
 describe("CardArtFallback reload", () => {
@@ -56,7 +22,13 @@ describe("CardArtFallback reload", () => {
     const onSurfaceClick = vi.fn();
     render(
       <div onPointerDown={onSurfacePointerDown} onClick={onSurfaceClick}>
-        <CardArtFallback name={CARD_NAME} oracleText={RULES_TEXT} className="h-40 w-28" onReload={onReload} />
+        <CardArtFallback
+          name={CARD_NAME}
+          oracleText={RULES_TEXT}
+          variant="preview"
+          className="h-96 w-72"
+          onReload={onReload}
+        />
       </div>,
     );
 
@@ -78,7 +50,9 @@ describe("CardArtFallback reload", () => {
   });
 
   it("keeps the button outside the image role, so assistive tech can reach it", () => {
-    render(<CardArtFallback name={CARD_NAME} oracleText={RULES_TEXT} className="h-40 w-28" onReload={vi.fn()} />);
+    render(
+      <CardArtFallback name={CARD_NAME} oracleText={RULES_TEXT} variant="preview" className="h-96 w-72" onReload={vi.fn()} />,
+    );
 
     const tile = screen.getByRole("img", { name: CARD_NAME });
     expect(tile).toHaveTextContent("less to cast.");
@@ -86,64 +60,25 @@ describe("CardArtFallback reload", () => {
   });
 
   it("draws no button without a reload", () => {
-    render(<CardArtFallback name={CARD_NAME} className="h-40 w-28" />);
+    render(<CardArtFallback name={CARD_NAME} variant="preview" className="h-96 w-72" />);
 
     expect(screen.getByRole("img", { name: CARD_NAME })).toHaveTextContent(CARD_NAME);
     expect(screen.queryByRole("button")).toBeNull();
   });
 
-  // happy-dom applies no CSS, so where the button shows is pinned by class: a
-  // container query on the tile's width keeps it off tiles too small for it.
-  it("shows a full card's button under the name only on a tile wide enough for both", () => {
-    const { container } = render(<CardArtFallback name={CARD_NAME} className="h-40 w-28" onReload={vi.fn()} />);
+  // happy-dom applies no CSS, so the text size is pinned by class.
+  it("sets the preview tile's name and rules text larger than a board tile's", () => {
+    const { rerender } = render(<CardArtFallback name={CARD_NAME} oracleText={RULES_TEXT} className="h-40 w-28" />);
+    // The tile's text is its name, then its rules text.
+    const boardText = screen.getByRole("img", { name: CARD_NAME });
+    expect(boardText.firstElementChild).toHaveClass("text-xs");
+    expect(boardText.lastElementChild).toHaveClass("text-[10px]");
+    expect(boardText.lastElementChild).toHaveTextContent("less to cast.");
 
-    expect(container.firstElementChild).toHaveClass("@container");
-    expect(screen.getByRole("button", { name: RELOAD })).toHaveClass("hidden", "@min-[4rem]:block");
-    expect(screen.getByRole("img", { name: CARD_NAME })).not.toHaveClass("@min-[6rem]:sr-only");
-  });
-
-  it("lets an art crop's button take the name's place only where it fits", () => {
-    const { container } = render(
-      <CardArtFallback name={CARD_NAME} variant="artCrop" className="h-16 w-20" onReload={vi.fn()} />,
-    );
-
-    expect(container.firstElementChild).toHaveClass("@container");
-    expect(screen.getByRole("button", { name: RELOAD })).toHaveClass("hidden", "@min-[6rem]:block");
-    // Below the threshold the name stays on the tile; above it, it stays the
-    // tile's label for assistive tech.
-    expect(screen.getByRole("img", { name: CARD_NAME })).toHaveClass("@min-[6rem]:sr-only");
-  });
-});
-
-describe("ArtCropCard art reload", () => {
-  it("offers the reload only when the caller opts in", () => {
-    const reload = vi.fn();
-    vi.mocked(useCardImage).mockReturnValue(failedArt(reload));
-    const objectId = placeSculptorOnBattlefield();
-    const { rerender } = render(<ArtCropCard objectId={objectId} />);
-
-    // Reach guard: the artless tile is on screen without the opt-in.
-    expect(screen.getByRole("img", { name: CARD_NAME })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: RELOAD })).toBeNull();
-
-    rerender(<ArtCropCard objectId={objectId} offerArtReload />);
-    fireEvent.click(screen.getByRole("button", { name: RELOAD }));
-    expect(reload).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("CardImage art reload", () => {
-  it("offers the reload only when the caller opts in", () => {
-    const reload = vi.fn();
-    vi.mocked(useCardImage).mockReturnValue(failedArt(reload));
-    const { rerender } = render(<CardImage cardName={CARD_NAME} />);
-
-    // Reach guard: the artless tile is on screen without the opt-in.
-    expect(screen.getByRole("img", { name: CARD_NAME })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: RELOAD })).toBeNull();
-
-    rerender(<CardImage cardName={CARD_NAME} offerArtReload />);
-    fireEvent.click(screen.getByRole("button", { name: RELOAD }));
-    expect(reload).toHaveBeenCalledTimes(1);
+    rerender(<CardArtFallback name={CARD_NAME} oracleText={RULES_TEXT} variant="preview" className="h-96 w-72" />);
+    const previewText = screen.getByRole("img", { name: CARD_NAME });
+    expect(previewText.firstElementChild).toHaveClass("text-base");
+    expect(previewText.lastElementChild).toHaveClass("text-sm");
+    expect(previewText.lastElementChild).toHaveTextContent("less to cast.");
   });
 });

@@ -20,12 +20,6 @@ import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./c
 
 interface ArtCropCardProps {
   objectId: number;
-  /**
-   * Offers "Tap to reload art" on the art fallback tile. The caller decides,
-   * because the tile must own its taps: on a phone the battlefield tile's tap
-   * belongs to the game.
-   */
-  offerArtReload?: boolean;
 }
 
 const PT_COLORS: Record<PTColor, string> = {
@@ -34,7 +28,7 @@ const PT_COLORS: Record<PTColor, string> = {
   white: "text-[#111]",
 };
 
-export const ArtCropCard = memo(function ArtCropCard({ objectId, offerArtReload = false }: ArtCropCardProps) {
+export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const counterDisplay = useCounterDisplay(objectId);
@@ -63,12 +57,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId, offerArtReload 
   // does. Without a marker the card back is rendered exactly as before.
   const faceDownMarker = faceDownMarkerRef(obj?.face_down ?? false, obj?.face_down_cause);
   const imageIsToken = renderCardBack ? faceDownMarker !== null : isToken;
-  const {
-    src: cardSrc,
-    isLoading: cardLoading,
-    advanceFailedSource,
-    reload,
-  } = useCardImage(renderCardBack ? "" : imageLookup.name, {
+  const { src: cardSrc, isLoading: cardLoading, advanceFailedSource } = useCardImage(renderCardBack ? "" : imageLookup.name, {
     size: imageIsToken ? "normal" : "art_crop",
     faceIndex: imageLookup.faceIndex,
     isToken: renderCardBack ? faceDownMarker !== null : isToken,
@@ -121,8 +110,10 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId, offerArtReload 
     }
   }
 
-  // Genuinely still resolving art — pulse until the async lookup settles.
-  if (!renderCardBack && isLoading) {
+  // Genuinely still resolving art: pulse until the async lookup settles. A
+  // card re-resolving its art (a reload of the same card elsewhere, a printings
+  // fetch) keeps showing its last good image, which the hook hands back as `src`.
+  if (!renderCardBack && isLoading && !src) {
     return (
       <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
         <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
@@ -217,12 +208,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId, offerArtReload 
                   className="absolute inset-0 w-full h-full object-cover"
                 />
               ) : (
-                <CardArtFallback
-                  name={cardName}
-                  variant="artCrop"
-                  className="absolute inset-0 w-full h-full"
-                  onReload={offerArtReload ? reload : undefined}
-                />
+                <CardArtFallback name={cardName} variant="artCrop" className="absolute inset-0 w-full h-full" />
               )}
 
               <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/50 to-transparent pointer-events-none" />

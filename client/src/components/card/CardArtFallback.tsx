@@ -4,11 +4,13 @@ import { useTranslation } from "react-i18next";
 import { RichLabel } from "../mana/RichLabel.tsx";
 
 /**
- * Render scale for the fallback tile. Mirrors the `artCrop` / `fullCard`
+ * Render scale for the fallback tile. `artCrop` and `fullCard` mirror the
  * variant vocabulary `SummoningSicknessOverlay` already uses, so the two
- * battlefield render modes name themselves the same way everywhere.
+ * battlefield render modes name themselves the same way everywhere. `preview`
+ * is the mobile preview's card-sized tile, whose text must read at a glance,
+ * and `peek` the compact peek's, which closes on any scroll or touch move.
  */
-export type CardArtFallbackVariant = "artCrop" | "fullCard";
+export type CardArtFallbackVariant = "artCrop" | "fullCard" | "preview" | "peek";
 
 export interface CardArtFallbackProps {
   /** Card/token name, shown as the tile heading and `aria-label`. */
@@ -26,35 +28,61 @@ export interface CardArtFallbackProps {
    */
   variant?: CardArtFallbackVariant;
   /**
-   * Offers a "Tap to reload art" button that loads the art again. Pass it only
-   * where the tile owns its taps: the button can't sit inside another button,
-   * and on a phone's battlefield tile it would take the tap meant for the game.
+   * Offers a "Tap to reload art" button that loads the art again. Only the
+   * `preview` tile takes it: it owns its taps and has room for a 44px button,
+   * where a board tile's tap belongs to the game and the peek closes on a tap.
    */
   onReload?: () => void;
 }
 
-/**
- * The reload button needs a 44px row, which a small tile doesn't have, so a
- * container query on the tile's width shows it only where it fits; a smaller
- * tile keeps its name and shows no button. Width stands in for height because
- * each surface keeps its shape. A battlefield art tile is 4:3 or taller, so
- * when its art box's content is 6rem wide, the content is about 52px tall:
- * room for the button alone (the frame header shows the name). A 5:7 card
- * whose content is 4rem wide has about 98px: room for the name and the button,
- * whose label wraps to as many as five lines in a longer language. The label
- * grows to `text-xs` only on a large tile such as the mobile preview.
- */
-const reloadButtonClassByVariant = {
-  artCrop: "hidden @min-[6rem]:block text-[10px]",
-  fullCard: "mt-1 hidden @min-[4rem]:block text-[10px] @min-[12rem]:text-xs",
-} as const satisfies Record<CardArtFallbackVariant, string>;
+/** Classes per scale. `body` lays out the name and rules text; `rules` is null
+ *  where the tile shows the name alone. */
+const tileClassesByVariant = {
+  artCrop: {
+    tile: "p-1",
+    body: "justify-center",
+    name: "text-[9px] font-semibold text-gray-100 leading-tight text-center break-words",
+    rules: null,
+    rulesSymbolSize: "xs",
+  },
+  fullCard: {
+    tile: "p-2",
+    body: "",
+    name: "text-xs font-semibold text-gray-100 mb-1 truncate",
+    rules: "text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden",
+    rulesSymbolSize: "xs",
+  },
+  preview: {
+    tile: "p-4",
+    body: "",
+    name: "text-base font-semibold text-gray-100 mb-2",
+    // The preview's tile can be short on a landscape phone, so long rules
+    // text scrolls rather than being cut off.
+    rules: "min-h-0 flex-1 overflow-y-auto overscroll-contain text-sm text-gray-300 whitespace-pre-wrap leading-snug",
+    rulesSymbolSize: "sm",
+  },
+  // A scroll would close the peek, so its rules text clips instead.
+  peek: {
+    tile: "p-4",
+    body: "",
+    name: "text-base font-semibold text-gray-100 mb-2",
+    rules: "text-sm text-gray-300 whitespace-pre-wrap leading-snug overflow-hidden",
+    rulesSymbolSize: "sm",
+  },
+} as const satisfies Record<CardArtFallbackVariant, {
+  tile: string;
+  body: string;
+  name: string;
+  rules: string | null;
+  rulesSymbolSize: "xs" | "sm";
+}>;
 
 /**
  * Deliberate text tile shown when a card/token has no renderable art — either
  * because art resolution produced no src (issue #6156: tokens with no official
  * paper printing, e.g. Kibo, Uktabi Prince's Banana) or because the resolved
- * image failed to load. A failed load is remembered, so the tile can offer a
- * one-tap reload (#11008); it never retries on its own.
+ * image failed to load. A failed load is remembered, so the mobile preview's
+ * tile offers a one-tap reload (#11008); it never retries on its own.
  *
  * Shared by the two board renderers: `CardImage` (full-card board and modals)
  * and `ArtCropCard` (the *default* battlefield renderer) route both their "no
@@ -77,49 +105,30 @@ export function CardArtFallback({
   onReload,
 }: CardArtFallbackProps) {
   const { t } = useTranslation("game");
-  const isArtCrop = variant === "artCrop";
-  const offersReload = onReload != null;
-  // Where the button shows, an art crop has room for it or the name, not both;
-  // the name then stays only as the label for assistive tech.
-  const nameGivesWayClass = isArtCrop && offersReload ? "@min-[6rem]:sr-only" : "";
+  const classes = tileClassesByVariant[variant];
 
   return (
     <div
-      className={[
-        className,
-        "bg-gray-800 shadow-md overflow-hidden flex flex-col",
-        isArtCrop ? "justify-center p-1" : "p-2",
-        offersReload ? "@container" : "",
-      ].join(" ")}
+      className={`${className} bg-gray-800 shadow-md overflow-hidden flex flex-col ${classes.tile}`}
       style={style}
     >
       {/* The image role sits on the text alone: an `img` hides whatever it
           contains from assistive tech, and the reload button must stay
           reachable. */}
-      <div
-        role="img"
-        aria-label={name}
-        className={`flex min-h-0 flex-1 flex-col overflow-hidden ${isArtCrop ? "justify-center" : ""} ${nameGivesWayClass}`}
-      >
-        <div
-          className={
-            isArtCrop
-              ? "text-[9px] font-semibold text-gray-100 leading-tight text-center break-words"
-              : "text-xs font-semibold text-gray-100 mb-1 truncate"
-          }
-        >
+      <div role="img" aria-label={name} className={`flex min-h-0 flex-1 flex-col overflow-hidden ${classes.body}`}>
+        <div className={classes.name}>
           {name}
         </div>
-        {!isArtCrop && oracleText && (
-          <div className="text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden">
-            <RichLabel text={oracleText} size="xs" />
+        {classes.rules && oracleText && (
+          <div className={classes.rules}>
+            <RichLabel text={oracleText} size={classes.rulesSymbolSize} />
           </div>
         )}
       </div>
       {onReload && (
-        // `min-h-11` keeps the touch target at least 44px tall. The surface
-        // around the tile (a permanent, a preview) acts on the same tap, so the
-        // button stops both its pointerdown and its click.
+        // `min-h-11` keeps the touch target at least 44px tall. The preview
+        // around the tile dismisses on a tap, so the button stops both its
+        // pointerdown and its click.
         <button
           type="button"
           onPointerDown={(event) => event.stopPropagation()}
@@ -128,9 +137,8 @@ export function CardArtFallback({
             onReload();
           }}
           className={[
-            "min-h-11 w-full shrink-0 rounded-md bg-black/40 px-2 font-semibold leading-tight break-words",
-            "text-gray-100 ring-1 ring-white/20 hover:bg-black/60",
-            reloadButtonClassByVariant[variant],
+            "mt-2 min-h-11 w-full shrink-0 rounded-md bg-black/40 px-3 text-sm font-semibold",
+            "leading-tight text-gray-100 ring-1 ring-white/20 hover:bg-black/60",
           ].join(" ")}
         >
           {t("card.reloadArt")}

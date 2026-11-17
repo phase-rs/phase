@@ -155,6 +155,23 @@ describe("CardImage art fallback (issue #6156)", () => {
     expect(screen.getByLabelText("Loading Lightning Bolt")).toBeInTheDocument();
   });
 
+  // #11008: a reload of the same card elsewhere re-resolves this surface too.
+  // The hook hands back the card's last good image while it does, and the
+  // surface keeps showing it instead of flashing the pulse.
+  it("keeps showing the card's art while it re-resolves", () => {
+    mockUseCardImage.mockReturnValue({
+      src: "https://example.invalid/reveillark.png",
+      isLoading: true,
+      isRotated: false,
+      isFlip: false,
+    });
+
+    render(<CardImage cardName="Reveillark" />);
+
+    expect(document.querySelector("img")).toHaveAttribute("src", "https://example.invalid/reveillark.png");
+    expect(screen.queryByLabelText("Loading Reveillark")).toBeNull();
+  });
+
   it("keeps the unimplemented-mechanics badge visible on the fallback tile", () => {
     // The fallback is swapped in place of the <img> rather than early-returned,
     // so the overlay badges survive. An artless card losing its "!" warning

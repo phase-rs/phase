@@ -12,7 +12,8 @@ import { CardPreview } from "../CardPreview.tsx";
 
 // Regression tests for #11008: the long-press preview of a card whose art
 // failed was a blank panel with only the name. It now shows the rules text and
-// offers a one-tap reload.
+// offers a one-tap reload, and the desktop preview's Alt-pinned panel offers
+// the reload beside Report.
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardBackImage: vi.fn(() => ({ src: "card-back.png", isLoading: false })),
@@ -26,16 +27,19 @@ const engineFaces = vi.hoisted(() => new Map<string, { name: string; oracle_text
 
 vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useEngineCardData: vi.fn((name: string | null) => (name == null ? null : engineFaces.get(name) ?? null)),
-  useCardParseDetails: () => null,
+  // An empty parse is still a parse: the Alt-pinned panel needs one to open.
+  useCardParseDetails: (name: string | null) => (name == null ? null : []),
   useCardRulings: () => [],
 }));
 
-// The mobile long-press preview is the subject: force the mobile branch.
+const viewport = vi.hoisted(() => ({ isMobile: true }));
+
 vi.mock("../../../hooks/useIsMobile.ts", () => ({
-  useIsMobile: () => true,
+  useIsMobile: () => viewport.isMobile,
 }));
 
 const RELOAD = "Tap to reload art";
+const DESKTOP_RELOAD = "Reload art";
 
 function failedArt(reload: () => void) {
   return { src: null, isLoading: false, isRotated: false, isFlip: false, reload };
@@ -60,6 +64,7 @@ function sculptor(): GameObject {
 }
 
 beforeEach(() => {
+  viewport.isMobile = true;
   engineFaces.clear();
   engineFaces.set(SCULPTOR, { name: SCULPTOR, oracle_text: "Artifact spells you cast cost {1} less to cast." });
   vi.mocked(useCardImage).mockImplementation(() => failedArt(vi.fn()));
@@ -70,7 +75,7 @@ afterEach(() => {
   vi.clearAllMocks();
   useGameStore.setState({ gameId: null, gameMode: null, gameState: null, spellCosts: {} });
   useUiStore.getState().dismissPreview();
-  useUiStore.setState({ inspectedObjectId: null });
+  useUiStore.setState({ inspectedObjectId: null, altHeld: false });
 });
 
 describe("CardPreview artless mobile tile", () => {
@@ -118,14 +123,13 @@ describe("CardPreview artless mobile tile", () => {
   });
 
   it("names the tile in the language of its rules text", () => {
-    engineFaces.set(SCULPTOR, {
-      name: "エーテリウムの彫刻家",
-      oracle_text: "あなたが唱えるアーティファクト・呪文は{1}少ないコストで唱えられる。",
-    });
+    // A localized name and a placeholder for its printed text, as in
+    // CardImage.test's localized tile.
+    engineFaces.set(SCULPTOR, { name: "エーテリウムの彫刻家", oracle_text: "日本語の印刷本文" });
     inspect(sculptor());
     render(<CardPreview cardName={SCULPTOR} />);
 
-    expect(screen.getByRole("img", { name: "エーテリウムの彫刻家" })).toHaveTextContent("少ないコストで唱えられる。");
+    expect(screen.getByRole("img", { name: "エーテリウムの彫刻家" })).toHaveTextContent("日本語の印刷本文");
   });
 
   // A hidden face's art is the card back, so the artless tile, and with it
@@ -151,20 +155,77 @@ describe("CardPreview artless mobile tile", () => {
     expect(screen.queryByRole("button", { name: RELOAD })).toBeNull();
   });
 
+  it("never offers another surface's reload for a face-down card the viewer may not see", () => {
+    const hidden = gameObjectFactory
+      .creature(2, 2)
+      .onBattlefield()
+      .named("")
+      .build({
+        face_down: true,
+        face_down_cause: "Morph",
+        printed_ref: { oracle_id: "secret-oracle-id", face_name: "Hooded Hydra" },
+      });
+    // Like the real hook, only a lookup by oracle id can carry that card's
+    // failure and reload; the Morph marker's art loads.
+    vi.mocked(useCardImage).mockImplementation((_name, options) => ({
+      src: "morph-marker.png",
+      isLoading: false,
+      isRotated: false,
+      isFlip: false,
+      ...(options?.oracleId ? { reload: vi.fn(), cardArtFailed: true } : {}),
+    }));
+    inspect(hidden);
+    render(<CardPreview cardName="Morph" />);
+
+    // Reach guard: the marker's art is what the preview shows.
+    expect(screen.getByAltText("Morph")).toHaveAttribute("src", "morph-marker.png");
+    for (const [, options] of vi.mocked(useCardImage).mock.calls) {
+      expect(options?.oracleId).not.toBe("secret-oracle-id");
+    }
+    expect(screen.queryByRole("button", { name: DESKTOP_RELOAD })).toBeNull();
+  });
+
   it("shows a token's own rules text without a card lookup", () => {
     const token = gameObjectFactory
       .artifact()
       .onBattlefield()
-      .named("Test Token")
+      .named("Food")
       .build({
         display_source: "Token",
-        token_rules_text: "Sacrifice this token: You gain 2 life.",
+        token_rules_text: "{2}, {T}, Sacrifice this token: You gain 3 life.",
       });
     inspect(token);
-    render(<CardPreview cardName="Test Token" />);
+    render(<CardPreview cardName="Food" />);
 
-    expect(screen.getByRole("img", { name: "Test Token" })).toHaveTextContent("You gain 2 life.");
-    expect(useEngineCardData).not.toHaveBeenCalledWith("Test Token");
+    expect(screen.getByRole("img", { name: "Food" })).toHaveTextContent("You gain 3 life.");
+    expect(useEngineCardData).not.toHaveBeenCalledWith("Food");
+  });
+
+  // A battlefield tile asks for a smaller image, so its failure never reaches
+  // the preview's own request: the image result says the card failed elsewhere.
+  it("offers a pill to reload another surface whose art failed while this one loaded", () => {
+    const reload = vi.fn();
+    const onDismiss = vi.fn();
+    const loadedArt = { src: "etherium-sculptor.png", isLoading: false, isRotated: false, isFlip: false, reload };
+    vi.mocked(useCardImage).mockImplementation(() => ({ ...loadedArt, cardArtFailed: false }));
+    inspect(sculptor());
+    const { rerender } = render(<CardPreview cardName={SCULPTOR} onDismiss={onDismiss} />);
+
+    // Reach guard: the preview's own art and its strip are on screen, with no
+    // pill while no surface of the card failed.
+    expect(screen.getByAltText(SCULPTOR)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Report a problem" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: DESKTOP_RELOAD })).toBeNull();
+
+    vi.mocked(useCardImage).mockImplementation(() => ({ ...loadedArt, cardArtFailed: true }));
+    rerender(<CardPreview cardName={SCULPTOR} onDismiss={onDismiss} />);
+    const pill = screen.getByRole("button", { name: DESKTOP_RELOAD });
+    expect(pill).toHaveClass("min-h-11");
+    expect(pill.closest("[data-card-preview-actions]")).not.toBeNull();
+    fireEvent.pointerDown(pill);
+    fireEvent.click(pill);
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(onDismiss).not.toHaveBeenCalled();
   });
 
   it("keeps the rules text but no reload on the compact peek, which dismisses on any tap", () => {
@@ -172,7 +233,56 @@ describe("CardPreview artless mobile tile", () => {
     render(<CardPreview cardName={SCULPTOR} mobileLayout="compact" />);
 
     // Reach guard: the artless tile, with its text, is what rendered.
-    expect(screen.getByRole("img", { name: SCULPTOR })).toHaveTextContent("less to cast.");
+    const tile = screen.getByRole("img", { name: SCULPTOR });
+    expect(tile).toHaveTextContent("less to cast.");
     expect(screen.queryByRole("button", { name: RELOAD })).toBeNull();
+    // A scroll closes the peek, so its rules text clips rather than scrolls.
+    expect(tile.lastElementChild).toHaveClass("overflow-hidden");
+    expect(tile.lastElementChild).not.toHaveClass("overflow-y-auto");
+  });
+});
+
+describe("CardPreview Alt-pinned panel (desktop)", () => {
+  beforeEach(() => {
+    viewport.isMobile = false;
+    useUiStore.setState({ altHeld: true });
+  });
+
+  it("offers the reload beside Report when the card's art failed", () => {
+    const reload = vi.fn();
+    vi.mocked(useCardImage).mockImplementation(() => failedArt(reload));
+    inspect(sculptor());
+    render(<CardPreview cardName={SCULPTOR} />);
+
+    // Reach guard: the pinned panel, with its Report button, is what rendered.
+    expect(screen.getByRole("button", { name: "Report a problem" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: DESKTOP_RELOAD }));
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no reload while the card's art is on screen", () => {
+    vi.mocked(useCardImage).mockImplementation(() => ({
+      src: "etherium-sculptor.png", isLoading: false, isRotated: false, isFlip: false, reload: vi.fn(),
+    }));
+    inspect(sculptor());
+    render(<CardPreview cardName={SCULPTOR} />);
+
+    // Reach guard: the pinned panel, with its Report button, is what rendered.
+    expect(screen.getByRole("button", { name: "Report a problem" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: DESKTOP_RELOAD })).toBeNull();
+  });
+
+  it("offers the reload when another surface of the card failed while this one loaded", () => {
+    const reload = vi.fn();
+    vi.mocked(useCardImage).mockImplementation(() => ({
+      src: "etherium-sculptor.png", isLoading: false, isRotated: false, isFlip: false, reload, cardArtFailed: true,
+    }));
+    inspect(sculptor());
+    render(<CardPreview cardName={SCULPTOR} />);
+
+    // Reach guard: the pinned panel, with its Report button, is what rendered.
+    expect(screen.getByRole("button", { name: "Report a problem" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: DESKTOP_RELOAD }));
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 });
