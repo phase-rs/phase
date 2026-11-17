@@ -15561,6 +15561,20 @@ mod poison_condition_scan_tests {
                 !axes.event && !axes.sibling.is_read(),
                 "the predicate alone reads no event or sibling axis ({player:?})"
             );
+            // The static sibling (`StaticCondition::PlayerIsPoisoned`) feeds the
+            // same dependency model and must classify identically.
+            let static_condition = StaticCondition::PlayerIsPoisoned {
+                player: player.clone(),
+            };
+            let static_axes = scan_static_condition(&static_condition, ScanMode::Conservative);
+            assert!(
+                static_axes.projected,
+                "the static sibling arm marks the same projected read ({player:?})"
+            );
+            assert!(
+                !static_axes.event && !static_axes.sibling.is_read(),
+                "the static sibling arm reads no other axis ({player:?})"
+            );
         }
     }
 }

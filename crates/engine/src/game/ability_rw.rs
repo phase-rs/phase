@@ -11316,6 +11316,15 @@ mod poison_condition_rw_tests {
                 profile, expected,
                 "a poison read is a player-state read ({player:?})"
             );
+            // The static sibling (`StaticCondition::PlayerIsPoisoned`) feeds the
+            // same ordering model and must record the same player read.
+            let static_profile = rw_static_condition(&StaticCondition::PlayerIsPoisoned {
+                player: player.clone(),
+            });
+            assert_eq!(
+                static_profile, expected,
+                "the static sibling arm records the same player read ({player:?})"
+            );
         }
     }
 }
