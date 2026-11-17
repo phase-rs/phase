@@ -1995,38 +1995,14 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     filtered.for_each_trigger_event_carrier_mut(&mut |event| {
         redact_ability_triggered_causes(event, &held_entry_hidden_ids)
     });
-    if let WaitingFor::TriggerTargetSelection {
-        trigger_event,
-        trigger_events,
-        ..
-    } = &mut filtered.waiting_for
-    {
-        for event in trigger_event.iter_mut().chain(trigger_events.iter_mut()) {
-            redact_ability_triggered_causes(event, &held_entry_hidden_ids);
-        }
-    }
-    // CR 400.2 + CR 708.5: the prompts that copy the resolving trigger's event carry an
-    // observer's `AbilityTriggered` event too, so the nested cause records are redacted
-    // against the same face-down-aware set.
-    if let WaitingFor::UnlessPayment {
-        trigger_event: Some(event),
-        ..
-    }
-    | WaitingFor::UnlessPaymentChooseCost {
-        trigger_event: Some(event),
-        ..
-    }
-    | WaitingFor::ChooseObjectsSelection {
-        trigger_event: Some(event),
-        ..
-    }
-    | WaitingFor::EachPlayerCopyChosenSelection {
-        trigger_event: Some(event),
-        ..
-    } = &mut filtered.waiting_for
-    {
-        redact_ability_triggered_causes(event, &held_entry_hidden_ids);
-    }
+    // CR 400.2 + CR 708.5: the prompts that copy the resolving trigger's event, and the paused
+    // mana abilities a payment prompt carries, hold an observer's `AbilityTriggered` event too:
+    // one traversal redacts every nested cause record against the face-down-aware set.
+    filtered
+        .waiting_for
+        .for_each_prompt_trigger_event_mut(&mut |event| {
+            redact_ability_triggered_causes(event, &held_entry_hidden_ids)
+        });
     match &mut filtered.waiting_for {
         WaitingFor::TriggerTargetSelection {
             trigger_event,

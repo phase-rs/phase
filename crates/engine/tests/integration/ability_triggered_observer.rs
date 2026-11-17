@@ -931,6 +931,109 @@ fn v21d_unless_payment_prompt_hides_the_face_down_cause() {
     );
 }
 
+/// V21e (CR 400.2 + CR 708.5): P0 pays Proctor's unless-payment by activating a mana
+/// ability that pauses at a color choice. The paused activation keeps the unless-payment
+/// resume, and that resume keeps the observer's event, so the `ChooseManaColor` prompt
+/// carries the nested face-down cause too. It is hidden from P0 like every other carrier.
+#[test]
+fn v21e_paused_mana_ability_resume_hides_the_face_down_cause() {
+    use engine::types::game_state::{
+        CastPaymentMode, ManaAbilityResume, ManaChoiceContext, ManaChoicePrompt, PendingManaAbility,
+    };
+    let (runner, proctor, _warden) = manifest_board();
+    let firing = observer_firings(runner.state(), proctor)
+        .first()
+        .cloned()
+        .expect("reach guard: Proctor observed Soul Warden's trigger");
+    let prompt_cause_names = |state: &GameState| -> Vec<String> {
+        match &state.waiting_for {
+            WaitingFor::ChooseManaColor {
+                context: ManaChoiceContext::ManaAbility(pending),
+                ..
+            } => match &pending.resume {
+                ManaAbilityResume::UnlessPayment {
+                    trigger_event: Some(GameEvent::AbilityTriggered { causes, .. }),
+                    ..
+                } => causes
+                    .iter()
+                    .map(|cause| match cause {
+                        GameEvent::ZoneChanged { record, .. } => record.name.clone(),
+                        other => panic!("unexpected cause {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("expected the unless-payment resume, got {other:?}"),
+            },
+            other => panic!("expected the paused mana-ability prompt, got {other:?}"),
+        }
+    };
+    let mut state = runner.state().clone();
+    state.waiting_for = WaitingFor::ChooseManaColor {
+        player: P0,
+        choice: ManaChoicePrompt::SingleColor {
+            options: vec![engine::types::mana::ManaType::White],
+        },
+        context: ManaChoiceContext::ManaAbility(Box::new(PendingManaAbility {
+            player: P0,
+            source_id: proctor,
+            ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
+            ability_index: Some(0),
+            rules_execution_node: None,
+            color_override: None,
+            resume: ManaAbilityResume::UnlessPayment {
+                outer_player: None,
+                cost: Box::new(engine::types::ability::AbilityCost::Mana {
+                    cost: engine::types::mana::ManaCost::generic(2),
+                }),
+                pending_effect: Box::new(engine::types::ability::ResolvedAbility::new(
+                    engine::types::ability::Effect::Draw {
+                        count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    Vec::new(),
+                    proctor,
+                    P0,
+                )),
+                trigger_event: Some(firing),
+                effect_description: None,
+                remaining: Vec::new(),
+                affected_object: None,
+                repeat: None,
+            },
+            cost_move_resume: None,
+            chosen_tappers: None,
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
+            chosen_x: None,
+            collected_evidence: Vec::new(),
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            cost_removed_counters: None,
+            batch_siblings: Vec::new(),
+        })),
+    };
+    // Reach guard: the authoritative prompt names the manifested card.
+    assert_eq!(
+        prompt_cause_names(&state),
+        vec!["Grizzly Bears".to_string()]
+    );
+    assert_eq!(
+        prompt_cause_names(&filter_state_for_viewer(&state, P1)),
+        vec!["Grizzly Bears".to_string()],
+        "the manifest's controller may look at it (CR 708.5)"
+    );
+    assert_eq!(
+        prompt_cause_names(&filter_state_for_viewer(&state, P0)),
+        vec![HIDDEN_CARD_NAME.to_string()],
+        "an opponent may not learn the face-down card through a paused mana ability's resume"
+    );
+}
+
 /// V21a: the client event stream never carries `causes`, for any viewer.
 #[test]
 fn v21a_event_stream_carries_no_causes() {

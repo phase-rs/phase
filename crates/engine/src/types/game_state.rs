@@ -12536,6 +12536,82 @@ fn visit_mana_ability_resume_events(
     }
 }
 
+impl WaitingFor {
+    /// CR 400.2 + CR 603.2: every trigger event a prompt itself holds, so a per-viewer
+    /// projection reaches all of them through one traversal: the prompts that copy the
+    /// resolving trigger's event, and the paused mana abilities (with their unless-payment
+    /// resume) a payment prompt carries. The prompt-held counterpart of
+    /// [`GameState::for_each_trigger_event_carrier_mut`], which covers the state-level
+    /// carriers.
+    pub(crate) fn for_each_prompt_trigger_event_mut(&mut self, f: &mut impl FnMut(&mut GameEvent)) {
+        match self {
+            WaitingFor::TriggerTargetSelection {
+                trigger_event,
+                trigger_events,
+                ..
+            } => {
+                trigger_event.iter_mut().for_each(&mut *f);
+                trigger_events.iter_mut().for_each(&mut *f);
+            }
+            WaitingFor::UnlessPayment {
+                trigger_event: Some(event),
+                ..
+            }
+            | WaitingFor::UnlessPaymentChooseCost {
+                trigger_event: Some(event),
+                ..
+            }
+            | WaitingFor::ChooseObjectsSelection {
+                trigger_event: Some(event),
+                ..
+            }
+            | WaitingFor::EachPlayerCopyChosenSelection {
+                trigger_event: Some(event),
+                ..
+            } => f(event),
+            WaitingFor::PayManaAbilityMana {
+                pending_mana_ability,
+                ..
+            }
+            | WaitingFor::ManaAbilityManaPayment {
+                pending_mana_ability,
+                ..
+            } => visit_pending_mana_ability_events(pending_mana_ability, f),
+            WaitingFor::PayAmountChoice {
+                pending_mana_ability,
+                ..
+            }
+            | WaitingFor::RevealChoice {
+                pending_mana_ability,
+                ..
+            } => {
+                if let Some(pending) = pending_mana_ability.as_deref_mut() {
+                    visit_pending_mana_ability_events(pending, f);
+                }
+            }
+            WaitingFor::ChooseManaColor {
+                context: ManaChoiceContext::ManaAbility(pending),
+                ..
+            } => visit_pending_mana_ability_events(pending, f),
+            WaitingFor::PayCost {
+                resume: CostResume::ManaAbility { mana_ability },
+                ..
+            } => visit_pending_mana_ability_events(mana_ability, f),
+            WaitingFor::CollectEvidenceChoice { resume, .. } => {
+                if let CollectEvidenceResume::ManaAbility {
+                    pending_mana_ability,
+                } = resume.as_mut()
+                {
+                    visit_pending_mana_ability_events(pending_mana_ability, f);
+                }
+            }
+            // Every other prompt holds no trigger event: it is a field-by-field choice with
+            // no resolving trigger's event or paused mana ability behind it.
+            _ => {}
+        }
+    }
+}
+
 impl ManaAbilityResume {
     /// CR 601.2g-h: Whether this mana ability was activated while paying a
     /// cast's or activation's cost, so finishing it returns to that payment
