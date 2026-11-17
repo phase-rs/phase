@@ -15,7 +15,7 @@ use super::card_printing::SharedPrinting;
 use super::card_type::{CardType, CoreType, Supertype};
 use super::display_only::DisplayOnly;
 pub use super::event_kinds::{ActivatedAbilityKind, BendingType, ClashResult, PlayerActionKind};
-use super::game_state::{LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
+use super::game_state::{InstructionLead, LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
 use super::identifiers::{
     CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId,
 };
@@ -1568,6 +1568,15 @@ pub enum GameEvent {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        /// CR 608.2c + CR 603.2c: how many events of the instruction that
+        /// removed the counters precede this one, so two removals of one
+        /// resolution that came from different instructions are two events
+        /// ("Whenever one or more counters are removed" triggers once for each)
+        /// while removals of one instruction are one simultaneous event. `None`
+        /// when no watched instruction was open at the emit site; such removals
+        /// are indistinguishable and group together.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        instruction_lead: Option<InstructionLead>,
     },
     TokenCreated {
         object_id: ObjectId,

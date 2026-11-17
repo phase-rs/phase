@@ -177,6 +177,58 @@ fn meandering_towershell_returns_attacking_at_its_controllers_next_declare_attac
     assert!(runner.state().delayed_triggers.is_empty());
 }
 
+/// CR 400.7: Murder in response to "Whenever this creature attacks, exile it"
+/// leaves a graveyard card that is a new object; the attack trigger's "it"
+/// names nothing, so it is not exiled and nothing returns it on the next turn.
+#[test]
+fn meandering_towershell_destroyed_in_response_stays_in_the_graveyard() {
+    let mut scenario = scenario();
+    let towershell = scenario
+        .add_creature_from_oracle(P0, "Meandering Towershell", 5, 9, MEANDERING_TOWERSHELL)
+        .id();
+    let bear = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let murder = add_spell(
+        &mut scenario,
+        "Murder",
+        true,
+        MURDER,
+        vec![ManaCostShard::Black, ManaCostShard::Black],
+        1,
+    );
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+    let mut runner = scenario.build();
+
+    pass_until(&mut runner, awaiting_declaration);
+    let first_turn = runner.state().turn_number;
+    runner
+        .declare_attackers(&[(towershell, AttackTarget::Player(P1))])
+        .expect("Meandering Towershell can attack");
+    pass_until(&mut runner, |r| {
+        matches!(r.state().waiting_for, WaitingFor::Priority { .. }) && !r.state().stack.is_empty()
+    });
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach: the attack trigger is on the stack"
+    );
+    cast(&mut runner, murder, towershell);
+    assert_eq!(zone(&runner, towershell), Zone::Graveyard);
+
+    pass_until(&mut runner, |r| {
+        r.state().turn_number > first_turn
+            && r.state().active_player == P0
+            && awaiting_declaration(r)
+    });
+    runner
+        .declare_attackers(&[(bear, AttackTarget::Player(P1))])
+        .expect("the bear can attack");
+    drain_stack(&mut runner);
+    assert_eq!(zone(&runner, towershell), Zone::Graveyard);
+    assert!(!attacking(&runner, towershell));
+}
+
 #[test]
 fn a_sole_returned_attacker_after_an_empty_declaration_deals_combat_damage() {
     let mut scenario = scenario();
