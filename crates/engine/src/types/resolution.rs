@@ -24,14 +24,16 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AbilityOnsetRecord, ChangeZoneMemberEntry, CostResume, DrainStatus, DrawSequenceStack,
-    GameState, GameStateDecode, GameStateDecodeMode, ParentTargetOccurrences, PayCostKind,
-    PendingBatchDeliveries, PendingChangeZoneIteration, PendingChooseOneOf, PendingConniveReentry,
-    PendingContinuation, PendingCopyTokenResolution, PendingCounterAdditionQueue,
-    PendingCounterMoveQueue, PendingCounterRemoval, PendingCounterRemovalInFlight,
-    PendingCounterRemovalQueue, PendingDebugCardEntries, PendingEachPlayerCopyChosen,
-    PendingLifeTotalAssignment, PendingMultiDraw, PendingPerCategoryZoneChoice,
-    PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
-    PendingVoteBallotIteration, PostReplacementDrain, PostReplacementDrainDispatch,
+    GameState, GameStateDecode, GameStateDecodeMode, LogicalZoneChangeGroup,
+    LogicalZoneChangeTerminalOutcome, ParentTargetOccurrences, PayCostKind, PendingBatchDeliveries,
+    PendingChangeZoneIteration, PendingChooseOneOf, PendingComponentDeliveryParent,
+    PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
+    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemoval,
+    PendingCounterRemovalInFlight, PendingCounterRemovalQueue, PendingDebugCardEntries,
+    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
+    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
+    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
+    PendingZoneChangeDelivery, PostReplacementDrain, PostReplacementDrainDispatch,
     PostReplacementDrainStack, PostReplacementFrameId, RepeatIterationChoice, ResidentDrainPolicy,
     ResolvingTriggerContext, WaitingFor, ABILITY_ONSET_RECORD_FIELD,
 };
@@ -88,6 +90,32 @@ pub struct RepeatedOptionalPaymentFrame {
     pub optional_cost_payments_this_resolution: u32,
 }
 
+/// CR 101.4 + CR 608.2d: the responders a continuing any-player poll still owes
+/// an offer, carried while the accepted action's own child prompt owns the stack
+/// top.
+///
+/// CR 101.4 polls every eligible player, so an acceptance whose action stays
+/// available (see `acceptance_leaves_the_option_open`) must still reach the
+/// responders after it. When the accepted action resolves to completion the next
+/// offer is installed immediately and this is never set. When that action
+/// instead suspends on a prompt of its own — a CR 616.1 replacement-ordering
+/// choice, say — the poll cannot also own the prompt (only one frame may), so
+/// the cursor parks here and arms once the frames above it are gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkedOpponentMayPoll {
+    /// The responder owed the next offer.
+    pub next: PlayerId,
+    /// The responders after `next`, in CR 101.4 turn order.
+    pub remaining: Vec<PlayerId>,
+    /// The prompt's decision subject, preserved verbatim so the re-offer asks
+    /// the same question about the same object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_subject_id: Option<ObjectId>,
+    pub source_id: ObjectId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// The complete parked optional-effect authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OptionalEffectFrame {
@@ -107,6 +135,15 @@ pub struct OptionalEffectFrame {
     /// prompt, including save/reload before its named result is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    /// `Some` when this frame is a parked any-player poll cursor rather than a
+    /// live offer: it owns no prompt, so its gate is [`FrameGate::AfterChild`]
+    /// and it arms in `resume_resolution_frames` once the frames above it are
+    /// gone. Mirrors [`CipherEncodeStage::Parked`] and
+    /// [`RepeatedOptionalPaymentFrame::pending`], whose gates are likewise a
+    /// direct choice only while they actually hold a live offer. Legacy saves
+    /// default to `None`, i.e. an ordinary live offer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_poll: Option<Box<ParkedOpponentMayPoll>>,
 }
 
 /// CR 705.1 + CR 614.1a: where a coin-flip run paused for a Krark's Thumb keep choice.
@@ -769,6 +806,13 @@ pub struct PendingCipherEncode {
     pub creatures: Vec<ObjectId>,
 }
 
+/// CR 800.4a: one logical zone-change owner a player-left-game sweep retires a
+/// member from: a parked batch delivery or a paused `ChangeZone` iteration.
+pub(crate) enum ZoneChangeOwnerMut<'a> {
+    Batch(&'a mut PendingBatchDeliveries),
+    ChangeZone(&'a mut PendingChangeZoneIteration),
+}
+
 /// The ChangeZone owner plus the only sidecar that is not already embedded in
 /// `PendingChangeZoneIteration`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -953,6 +997,18 @@ impl ResolutionFrame {
                 pending: Some(_),
                 ..
             }) => FrameGate::DirectChoice(DirectChoiceGate::RepeatedOptionalPayment),
+            // CR 101.4 + the single-prompt-owner invariant: a parked poll cursor
+            // carries the responders still owed an offer while the accepted
+            // action's OWN prompt owns the stack top. It raises nothing in that
+            // role — the child does — so it waits on that child like every other
+            // `AfterChild` owner, exactly as a past-cursor-0 `DieRoll` and a
+            // `Parked` Cipher offer do. Reporting `DirectChoice` here would
+            // demand the top frame match an `OpponentMayChoice` that is not, and
+            // must not be, the active prompt.
+            Self::OptionalEffect(OptionalEffectFrame {
+                parked_poll: Some(_),
+                ..
+            }) => FrameGate::AfterChild,
             Self::OptionalEffect(_) => FrameGate::DirectChoice(DirectChoiceGate::OptionalEffect),
             Self::CoinFlip(_) => FrameGate::DirectChoice(DirectChoiceGate::CoinFlipKeep),
             // CR 706.6 + CR 706.3a: the die-roll frame serves two distinct
@@ -1951,6 +2007,360 @@ impl ResolutionStack {
         match self.frames.last_mut() {
             Some(ResolutionFrame::BatchDelivery(frame)) => Some(frame),
             Some(_) | None => None,
+        }
+    }
+
+    /// The logical zone-change owner a frame carries, with its current pause:
+    /// a `BatchDelivery` or a paused `ChangeZone` iteration. These are the two
+    /// owners that can announce a merged permanent's departure (CR 730.3).
+    fn zone_change_owner(
+        frame: &ResolutionFrame,
+    ) -> Option<(&LogicalZoneChangeGroup, Option<&PendingZoneChangeDelivery>)> {
+        match frame {
+            ResolutionFrame::BatchDelivery(batch) => Some((
+                &batch.logical_zone_change_group,
+                batch.paused_current.as_ref(),
+            )),
+            ResolutionFrame::ChangeZone(frame) => frame.pending.as_ref().map(|pending| {
+                (
+                    &pending.logical_zone_change_group,
+                    pending.paused_current.as_ref(),
+                )
+            }),
+            _ => None,
+        }
+    }
+
+    /// CR 730.3 + CR 800.4a: a component child's link names its immediate
+    /// announcing owner. That owner either still awaits the delegated member
+    /// (its pause captures the link's exact key) or already retired the member
+    /// because its player left the game, in which case the link remains the
+    /// owner's resume obligation.
+    fn validate_component_parent(
+        child: &PendingBatchDeliveries,
+        owner_group: &LogicalZoneChangeGroup,
+        owner_paused: Option<&PendingZoneChangeDelivery>,
+    ) -> Result<(), ResolutionStackError> {
+        let valid = child.component_delivery_parent.as_ref().is_some_and(|link| {
+            let owner_state = match owner_group.member_outcome(link.member) {
+                Some(LogicalZoneChangeTerminalOutcome::Pending) => {
+                    owner_paused.is_some_and(|paused| {
+                        paused.captures(link.member, &link.expected_event)
+                            && paused.terminal_completion.is_none()
+                    })
+                }
+                Some(LogicalZoneChangeTerminalOutcome::AbandonedByPlayerLeft) => owner_paused
+                    .is_none_or(|paused| !paused.captures(link.member, &link.expected_event)),
+                Some(_) | None => false,
+            };
+            link.parent_group_id == owner_group.logical_group_id
+                && link.parent_group_id != child.logical_zone_change_group.logical_group_id
+                && owner_state
+                && matches!(&link.expected_event, crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if *object_id == link.member.object_id)
+                && child.logical_zone_change_group.prospective_battlefield_members.iter()
+                    .any(|member| member.identity == link.member)
+                // CR 603.2c: what the owner collected before a departure is an
+                // occurrence its child holds or has handed back to it.
+                && owner_group.collected_before_departure.iter().all(|collected| {
+                    child
+                        .logical_zone_change_group
+                        .all_origin_occurrences
+                        .iter()
+                        .chain(owner_group.all_origin_occurrences.iter())
+                        .any(|occurrence| {
+                            crate::types::game_state::CollectedZoneChange::of(&occurrence.event)
+                                == Some(*collected)
+                        })
+                })
+        });
+        if valid {
+            Ok(())
+        } else {
+            Err(ResolutionStackError::InvalidPayload {
+                frame: FrameKind::BatchDelivery,
+                message: "component delivery does not identify its immediate original owner".into(),
+            })
+        }
+    }
+
+    /// CR 730.3 + CR 800.4a: the objects the active batch delivery still holds —
+    /// its paused member and its undelivered tail. For a merged permanent's
+    /// component batch, linked to an announcing owner or not, the absorbed
+    /// components among them are in no zone list until delivered, yet they are
+    /// objects their owner owns.
+    pub(crate) fn active_batch_held_objects(&self) -> Vec<ObjectId> {
+        let Some(ResolutionFrame::BatchDelivery(batch)) = self.last() else {
+            return Vec::new();
+        };
+        batch
+            .paused_current
+            .iter()
+            .map(|paused| paused.member.object_id)
+            .chain(batch.remaining.iter().copied())
+            .chain(batch.requests.iter().map(|request| request.object_id))
+            .collect()
+    }
+
+    /// The parked logical zone-change owners whose occurrences a generic trigger
+    /// scan must not rediscover: the active owner and, under a merged
+    /// permanent's linked component child, the announcing owner beneath it.
+    pub(crate) fn parked_zone_change_owners(
+        &self,
+    ) -> Vec<(&LogicalZoneChangeGroup, Option<&PendingZoneChangeDelivery>)> {
+        let Some(top) = self.frames.top() else {
+            return Vec::new();
+        };
+        let Some(active) = self.frames.get(top).and_then(Self::zone_change_owner) else {
+            return Vec::new();
+        };
+        let announcing_owner = match self.frames.get(top) {
+            Some(ResolutionFrame::BatchDelivery(child)) => {
+                child.component_delivery_parent.as_ref().and_then(|link| {
+                    self.frames
+                        .below(top)
+                        .and_then(|below| self.frames.get(below))
+                        .and_then(Self::zone_change_owner)
+                        .filter(|(group, _)| group.logical_group_id == link.parent_group_id)
+                })
+            }
+            _ => None,
+        };
+        std::iter::once(active).chain(announcing_owner).collect()
+    }
+
+    /// The member the active logical zone-change owner is currently paused on,
+    /// if it is paused on one.
+    pub(crate) fn active_zone_change_owner_pause(&self) -> Option<ObjectIncarnationRef> {
+        self.last()
+            .and_then(Self::zone_change_owner)
+            .and_then(|(_, paused)| paused.map(|paused| paused.member))
+    }
+
+    /// Whether the active frame is a parked logical zone-change owner: a batch
+    /// delivery (including a merged permanent's component child) or a paused
+    /// `ChangeZone` iteration.
+    pub(crate) fn active_zone_change_owner_is_parked(&self) -> bool {
+        self.last().and_then(Self::zone_change_owner).is_some()
+    }
+
+    /// CR 616.1 + CR 730.3: the active logical zone-change owner (a batch
+    /// delivery or a paused `ChangeZone` iteration) whose current pause is this
+    /// exact member and event — the owner a resumed delivery belongs to.
+    pub(crate) fn active_owner_parking(
+        &self,
+        member: ObjectIncarnationRef,
+        expected_event: &ProposedEvent,
+    ) -> Option<crate::types::identifiers::LogicalZoneChangeGroupId> {
+        let (group, paused) = Self::zone_change_owner(self.last()?)?;
+        paused
+            .is_some_and(|paused| {
+                paused.captures(member, expected_event) && paused.terminal_completion.is_none()
+            })
+            .then_some(group.logical_group_id)
+    }
+
+    /// CR 730.3: the group of the announcing owner a settled component child
+    /// hands its departure back to — the frame now on top of the stack.
+    pub(crate) fn component_owner_group_mut(
+        &mut self,
+        link: &PendingComponentDeliveryParent,
+    ) -> Result<&mut LogicalZoneChangeGroup, ResolutionStackError> {
+        let group = match self.frames.last_mut() {
+            Some(ResolutionFrame::BatchDelivery(batch)) => &mut batch.logical_zone_change_group,
+            Some(ResolutionFrame::ChangeZone(frame)) => {
+                &mut frame
+                    .pending
+                    .as_mut()
+                    .ok_or(ResolutionStackError::NoActiveChild)?
+                    .logical_zone_change_group
+            }
+            Some(_) => return Err(ResolutionStackError::NoActiveChild),
+            None => return Err(ResolutionStackError::Empty),
+        };
+        if group.logical_group_id == link.parent_group_id {
+            Ok(group)
+        } else {
+            Err(ResolutionStackError::NoActiveChild)
+        }
+    }
+
+    /// Access only the active owner or the explicitly linked immediate parent.
+    pub(crate) fn batch_delivery_owner_mut(
+        &mut self,
+        group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) -> Result<&mut PendingBatchDeliveries, ResolutionStackError> {
+        let top = self.frames.top().ok_or(ResolutionStackError::Empty)?;
+        let slot = match self.frames.get(top) {
+            Some(ResolutionFrame::BatchDelivery(batch))
+                if batch.logical_zone_change_group.logical_group_id == group =>
+            {
+                top
+            }
+            Some(ResolutionFrame::BatchDelivery(child)) => {
+                let below = self
+                    .frames
+                    .below(top)
+                    .ok_or(ResolutionStackError::NoActiveChild)?;
+                let Some(ResolutionFrame::BatchDelivery(parent)) = self.frames.get(below) else {
+                    return Err(ResolutionStackError::NoActiveChild);
+                };
+                Self::validate_component_parent(
+                    child,
+                    &parent.logical_zone_change_group,
+                    parent.paused_current.as_ref(),
+                )?;
+                if parent.logical_zone_change_group.logical_group_id != group {
+                    return Err(ResolutionStackError::NoActiveChild);
+                }
+                below
+            }
+            _ => return Err(ResolutionStackError::NoActiveChild),
+        };
+        let Some(ResolutionFrame::BatchDelivery(batch)) = self.frames.get_mut(slot) else {
+            unreachable!()
+        };
+        Ok(batch)
+    }
+
+    /// Install a synchronous original owner below its explicitly named child,
+    /// or replace that same owner when its next member delegates a delivery or
+    /// pauses again.
+    pub(crate) fn park_batch_owner(
+        &mut self,
+        pending: PendingBatchDeliveries,
+    ) -> Result<(), ResolutionStackError> {
+        let group = pending.logical_zone_change_group.logical_group_id;
+        let linked = self.active_batch_delivery().is_some_and(|child| {
+            child
+                .component_delivery_parent
+                .as_ref()
+                .is_some_and(|link| link.parent_group_id == group)
+        });
+        if !linked {
+            // An owner this group already parked is replaced in place by its
+            // group identity: the active frame, or a battlefield batch's
+            // pre-entry snapshot owner (CR 614.12) that a member's move left
+            // beneath child frames of its own, which stay above it.
+            if self.batch_delivery_slot_for_group(group).is_some() {
+                return self.replace_batch_delivery_for_group(pending);
+            }
+            self.push_batch_delivery(pending);
+            return Ok(());
+        }
+        Self::validate_component_parent(
+            self.active_batch_delivery().expect("checked child"),
+            &pending.logical_zone_change_group,
+            pending.paused_current.as_ref(),
+        )?;
+        let existing = self.frames.iter().filter(|frame| matches!(frame, ResolutionFrame::BatchDelivery(batch) if batch.logical_zone_change_group.logical_group_id == group)).count();
+        if existing > 1 {
+            return Err(ResolutionStackError::NoActiveChild);
+        }
+        if existing == 1 {
+            // A resumed owner re-parks over its previous frame, which still
+            // holds the pause it is replacing. The owner is identified by its
+            // group in the frame immediately beneath the new child — never a
+            // buried frame — and the child was validated above against the
+            // pending that replaces it, not against that stale pause.
+            let top = self.frames.top().ok_or(ResolutionStackError::Empty)?;
+            let beneath_child =
+                self.frames
+                    .below(top)
+                    .and_then(|below| match self.frames.get(below) {
+                        Some(ResolutionFrame::BatchDelivery(owner)) => {
+                            Some(owner.logical_zone_change_group.logical_group_id)
+                        }
+                        _ => None,
+                    });
+            if beneath_child != Some(group) {
+                return Err(ResolutionStackError::NoActiveChild);
+            }
+        }
+        let child = self.take_active_batch_delivery()?.expect("checked child");
+        if existing == 1 {
+            self.replace_active_batch_delivery(pending)?;
+        } else {
+            self.push_batch_delivery(pending);
+        }
+        self.push_batch_delivery(child);
+        Ok(())
+    }
+
+    /// CR 800.4a: visit the active logical zone-change owners a departing
+    /// player's member may belong to — the active `BatchDelivery` or paused
+    /// `ChangeZone` iteration, or, under an active component child, that child
+    /// and the announcing owner immediately beneath it (either kind). The
+    /// visitor never searches for a buried owner.
+    pub(crate) fn visit_active_zone_change_owners_mut(
+        &mut self,
+        mut visit: impl FnMut(ZoneChangeOwnerMut<'_>),
+    ) {
+        let Some(top) = self.frames.top() else {
+            return;
+        };
+        let link = match self.frames.get(top) {
+            Some(ResolutionFrame::BatchDelivery(child)) => child.component_delivery_parent.clone(),
+            _ => None,
+        };
+        if let Some(link) = link {
+            if let Some(below) = self.frames.below(top) {
+                match self.frames.get_mut(below) {
+                    Some(ResolutionFrame::BatchDelivery(parent))
+                        if parent.logical_zone_change_group.logical_group_id
+                            == link.parent_group_id =>
+                    {
+                        visit(ZoneChangeOwnerMut::Batch(parent.as_mut()));
+                    }
+                    Some(ResolutionFrame::ChangeZone(frame)) => {
+                        if let Some(parent) = frame.pending.as_mut().filter(|pending| {
+                            pending.logical_zone_change_group.logical_group_id
+                                == link.parent_group_id
+                        }) {
+                            visit(ZoneChangeOwnerMut::ChangeZone(parent));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        match self.frames.get_mut(top) {
+            Some(ResolutionFrame::BatchDelivery(batch)) => {
+                visit(ZoneChangeOwnerMut::Batch(batch.as_mut()));
+            }
+            Some(ResolutionFrame::ChangeZone(frame)) => {
+                if let Some(pending) = frame.pending.as_mut() {
+                    visit(ZoneChangeOwnerMut::ChangeZone(pending));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// CR 616.1 + CR 800.4a: clear a component-delivery handoff only when its
+    /// announcing owner frame is no longer immediately beneath it. A handoff
+    /// whose owner retired the delegated member because its player left the
+    /// game stays: it is that owner's obligation to resume its own tail once
+    /// the child settles.
+    pub(crate) fn retire_orphaned_component_delivery_parent(&mut self) {
+        let owners: Vec<_> = self
+            .frames
+            .iter()
+            .map(|frame| Self::zone_change_owner(frame).map(|(group, _)| group.logical_group_id))
+            .collect();
+        for (index, frame) in self.frames.iter_mut().enumerate() {
+            let ResolutionFrame::BatchDelivery(child) = frame else {
+                continue;
+            };
+            let Some(link) = child.component_delivery_parent.as_ref() else {
+                continue;
+            };
+            let owner_present = index
+                .checked_sub(1)
+                .and_then(|below| owners.get(below).copied().flatten())
+                == Some(link.parent_group_id);
+            if !owner_present {
+                child.component_delivery_parent = None;
+            }
         }
     }
 
@@ -4019,6 +4429,11 @@ impl ResolutionStack {
 
     /// Install an outer continuation immediately below the active child.
     ///
+    /// CR 730.3 + CR 608.2c: a merged permanent's component child and the
+    /// owner immediately beneath it that announced the departure are one
+    /// operation, so an outer continuation goes below that owner; the owner's
+    /// own instruction completes before the next instruction begins.
+    ///
     /// There is deliberately no fallback insertion position: callers that do
     /// not have an active child must first trace the real nesting relationship.
     pub fn insert_parent_of_active(
@@ -4029,7 +4444,19 @@ impl ResolutionStack {
             .frames
             .top()
             .ok_or(ResolutionStackError::NoActiveChild)?;
-        self.frames.insert_below(active, frame);
+        let announcing_owner = match self.frames.get(active) {
+            Some(ResolutionFrame::BatchDelivery(child)) => {
+                child.component_delivery_parent.as_ref().and_then(|link| {
+                    let below = self.frames.below(active)?;
+                    Self::zone_change_owner(self.frames.get(below)?)
+                        .is_some_and(|(group, _)| group.logical_group_id == link.parent_group_id)
+                        .then_some(below)
+                })
+            }
+            _ => None,
+        };
+        self.frames
+            .insert_below(announcing_owner.unwrap_or(active), frame);
         Ok(())
     }
 
@@ -4229,6 +4656,67 @@ impl ResolutionStack {
         let mut direct_choice_count = 0;
         let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
+            // CR 603.2c: an owner with no linked component child above it has
+            // been handed everything it collected before a departure, so each
+            // such record names one of its own occurrences. (A linked child's
+            // owner is checked with the child, below.)
+            if let Some((group, _)) = Self::zone_change_owner(frame) {
+                let linked_child_above = self.frames.iter().nth(index + 1).is_some_and(|above| {
+                    matches!(above, ResolutionFrame::BatchDelivery(child)
+                    if child.component_delivery_parent.as_ref().is_some_and(|link| {
+                        link.parent_group_id == group.logical_group_id
+                    }))
+                });
+                let unknown = group.collected_before_departure.iter().any(|collected| {
+                    !group.all_origin_occurrences.iter().any(|occurrence| {
+                        crate::types::game_state::CollectedZoneChange::of(&occurrence.event)
+                            == Some(*collected)
+                    })
+                });
+                if !linked_child_above && unknown {
+                    return Err(ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::BatchDelivery,
+                        message:
+                            "a zone-change owner records a departure it does not hold as collected"
+                                .into(),
+                    });
+                }
+            }
+            if let ResolutionFrame::BatchDelivery(child) = frame {
+                if let Some(link) = &child.component_delivery_parent {
+                    let owner = index
+                        .checked_sub(1)
+                        .and_then(|i| self.frames.iter().nth(i))
+                        .and_then(Self::zone_change_owner);
+                    let Some((owner_group, owner_paused)) = owner else {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::BatchDelivery,
+                            message: "component delivery has no immediate announcing owner".into(),
+                        });
+                    };
+                    Self::validate_component_parent(child, owner_group, owner_paused)?;
+                    for id in [
+                        link.parent_group_id,
+                        child.logical_zone_change_group.logical_group_id,
+                    ] {
+                        if self
+                            .frames
+                            .iter()
+                            .filter(|frame| {
+                                Self::zone_change_owner(frame)
+                                    .is_some_and(|(group, _)| group.logical_group_id == id)
+                            })
+                            .count()
+                            != 1
+                        {
+                            return Err(ResolutionStackError::InvalidPayload {
+                                frame: FrameKind::BatchDelivery,
+                                message: "duplicate component delivery group".into(),
+                            });
+                        }
+                    }
+                }
+            }
             if matches!(frame.gate(), FrameGate::DirectChoice(_)) {
                 direct_choice_count += 1;
                 if index + 1 != self.frames.len() {
@@ -5444,6 +5932,133 @@ pub struct ResolutionStateWire {
     state: GameState,
 }
 
+#[cfg(test)]
+mod replacement_library_placement_versioned_tests {
+    use super::*;
+    use crate::types::ability::LibraryPosition;
+    use crate::types::game_state::replacement_library_placement_wire_tests::{
+        assert_placement, change_carriers, nested_states, state_with_pending,
+    };
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn replacement_library_placement_all_supported_versions_preserve_authority() {
+        let top = serde_json::to_value(LibraryPosition::Top).unwrap();
+        let bottom = serde_json::to_value(LibraryPosition::Bottom).unwrap();
+        for state in std::iter::once(state_with_pending()).chain(nested_states()) {
+            for version in LEGACY_RESOLUTION_STATE_WIRE_VERSION..=RESOLUTION_STATE_WIRE_VERSION {
+                for current in [None, Some(Value::Null), Some(bottom.clone())] {
+                    for mirror in [None, Some(Value::Null), Some(top.clone())] {
+                        let expected: Option<LibraryPosition> = serde_json::from_value(
+                            current
+                                .clone()
+                                .unwrap_or_else(|| mirror.clone().unwrap_or(Value::Null)),
+                        )
+                        .unwrap();
+                        let mut wire = if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
+                            serde_json::to_value(&state).unwrap()
+                        } else {
+                            serde_json::to_value(ResolutionStateWire::from_game_state(
+                                state.clone(),
+                            ))
+                            .unwrap()
+                        };
+                        wire["resolution_state_version"] = Value::from(version);
+                        change_carriers(
+                            &mut wire,
+                            current.as_ref(),
+                            mirror.as_ref(),
+                            Zone::Library,
+                        );
+                        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                            .unwrap()
+                            .into_game_state();
+                        assert_placement(&restored, expected);
+                        let current_wire = serde_json::to_value(
+                            ResolutionStateWire::from_game_state(restored.clone()),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            current_wire["resolution_state_version"],
+                            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+                        );
+                        let again = serde_json::from_value::<ResolutionStateWire>(current_wire)
+                            .unwrap()
+                            .into_game_state();
+                        assert_eq!(restored, again);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_library_placement_versioned_rejects_invalid_current_and_future_wire() {
+        for state in std::iter::once(state_with_pending()).chain(nested_states()) {
+            let wire = serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap();
+            assert!(serde_json::from_value::<ResolutionStateWire>(wire.clone()).is_ok());
+            let mut invalid = wire.clone();
+            change_carriers(
+                &mut invalid,
+                Some(&serde_json::json!({"type": "NotAPosition"})),
+                Some(&serde_json::json!({"type": "Top"})),
+                Zone::Library,
+            );
+            assert!(serde_json::from_value::<ResolutionStateWire>(invalid).is_err());
+            let mut future = wire;
+            future["resolution_state_version"] = Value::from(RESOLUTION_STATE_WIRE_VERSION + 1);
+            assert!(serde_json::from_value::<ResolutionStateWire>(future).is_err());
+        }
+    }
+
+    #[test]
+    fn replacement_library_placement_keeps_legacy_and_current_parent_frame() {
+        for mut state in std::iter::once(state_with_pending()).chain(nested_states()) {
+            let spell = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(3),
+                crate::types::player::PlayerId(0),
+                "parent spell".into(),
+                Zone::Stack,
+            );
+            let parent = PendingSpellResolution {
+                object_id: spell,
+                controller: crate::types::player::PlayerId(0),
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                cast_from_zone: None,
+                cast_controller: None,
+                cast_timing_permission: None,
+                spell_targets: Vec::new(),
+                actual_mana_spent: 0,
+                kickers_paid: Vec::new(),
+                additional_cost_payment_count: 0,
+                additional_cost_payments: Vec::new(),
+                convoked_creatures: Vec::new(),
+            };
+            let mut legacy = serde_json::to_value(&state).unwrap();
+            legacy["pending_spell_resolution"] = serde_json::to_value(&parent).unwrap();
+            legacy["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+            state.resolution_stack.push_spell_resolution(parent.clone());
+            let current =
+                serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap();
+            for mut wire in [legacy, current] {
+                change_carriers(
+                    &mut wire,
+                    None,
+                    Some(&serde_json::json!({"type": "Top"})),
+                    Zone::Library,
+                );
+                let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                    .unwrap()
+                    .into_game_state();
+                assert_placement(&restored, Some(LibraryPosition::Top));
+                assert_eq!(restored.active_spell_resolution(), Some(&parent));
+                assert_eq!(restored.resolution_stack.len(), 1);
+            }
+        }
+    }
+}
+
 impl ResolutionStateWire {
     pub fn from_game_state(state: GameState) -> Self {
         Self { state }
@@ -5613,6 +6228,12 @@ impl ResolutionStateWire {
             // V1 reader compatibility path: historical keys are consumed here
             // and projected into typed frames before runtime state is restored.
             GameStateDecodeMode::ResolutionWireV1 => {
+                // v1 delivery-owner roots: only this reader may name them, so it runs the
+                // replacement library-placement migration that associates owners through them.
+                crate::types::game_state::migrate_legacy_replacement_library_placement(
+                    &mut value,
+                    &["pending_batch_deliveries", "pending_change_zone_iteration"],
+                )?;
                 if value
                     .get("pending_coin_flip")
                     .is_some_and(|frame| !frame.is_null())
@@ -6452,6 +7073,7 @@ impl LegacyOptionalEffectWire {
             return Ok(None);
         };
         Ok(Some(OptionalEffectFrame {
+            parked_poll: None,
             ability,
             trigger_event: self.pending_optional_trigger_event,
             // Legacy wire predates the plural batch; empty is the correct default
@@ -6917,19 +7539,21 @@ mod tests {
     use crate::types::game_state::{
         CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, ExiledStopInput, GameRng,
         GameState, OfferedBatchCustody, PendingBatchDeliveries, PendingChooseOneOf,
-        PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
-        PendingCounterRemovalQueue, PendingEachPlayerCopyChosen, PendingLifeTotalAssignment,
-        PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
-        PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
-        PendingZoneChangeDelivery, PersistedGameState, PostReplacementDrain, RandomDraw,
-        RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry, StackEntryKind,
-        ZoneDeliveryExileTracking, ZoneMoveCompletion,
+        PendingComponentDeliveryParent, PendingCopyTokenResolution, PendingCounterAdditionQueue,
+        PendingCounterMoveQueue, PendingCounterRemovalQueue, PendingEachPlayerCopyChosen,
+        PendingLifeTotalAssignment, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
+        PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution,
+        PendingVoteBallotIteration, PendingZoneChangeDelivery, PersistedGameState,
+        PostReplacementDrain, RandomDraw, RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry,
+        StackEntryKind, ZoneDeliveryExileTracking, ZoneMoveCompletion,
     };
     use crate::types::mana::ManaCost;
     use crate::types::phase::Phase;
     use rand::Rng;
 
-    use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
+    use crate::types::identifiers::{
+        CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef,
+    };
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
@@ -7155,6 +7779,7 @@ mod tests {
             .expect("empty batch group retains its pre-delivery latch");
         ResolutionFrame::BatchDelivery(Box::new(PendingBatchDeliveries {
             library_reorder: None,
+            component_delivery_parent: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -7171,6 +7796,176 @@ mod tests {
             deferred_events: Vec::new(),
             pre_entry_battlefield: None,
         }))
+    }
+
+    fn component_batch_pair(
+        seed: u64,
+    ) -> (
+        ResolutionStack,
+        crate::types::identifiers::ObjectIncarnationRef,
+        ProposedEvent,
+    ) {
+        let mut state = GameState::new_two_player(seed);
+        let object = crate::game::zones::create_object(
+            &mut state,
+            CardId(seed),
+            PlayerId(0),
+            "component".to_string(),
+            Zone::Battlefield,
+        );
+        let identity = ObjectIncarnationRef::of(object, state.objects[&object].incarnation);
+        let event = ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Library, None);
+        let mut parent_group = state.allocate_logical_zone_change_group(&[object]);
+        parent_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("parent group latches");
+        let parent_group_id = parent_group.logical_group_id;
+        let mut child_group = state.allocate_logical_zone_change_group(&[object]);
+        child_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("child group latches");
+        let batch = |group, paused_current, relation| PendingBatchDeliveries {
+            library_reorder: None,
+            component_delivery_parent: relation,
+            logical_zone_change_group: group,
+            paused_current,
+            remaining: Vec::new(),
+            destination: Zone::Library,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+            pre_entry_battlefield: None,
+        };
+        let parent = batch(
+            parent_group,
+            Some(PendingZoneChangeDelivery::new(identity, event.clone())),
+            None,
+        );
+        let child = batch(
+            child_group,
+            None,
+            Some(PendingComponentDeliveryParent {
+                parent_group_id,
+                member: identity,
+                expected_event: event.clone(),
+            }),
+        );
+        let mut stack = ResolutionStack::default();
+        stack.push_inner(ResolutionFrame::BatchDelivery(Box::new(parent)));
+        stack.push_inner(ResolutionFrame::BatchDelivery(Box::new(child)));
+        (stack, identity, event)
+    }
+
+    #[test]
+    fn component_delivery_relation_requires_exact_parent_and_member() {
+        let waiting = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let (valid, identity, event) = component_batch_pair(310);
+        valid
+            .validate(&waiting)
+            .expect("the exact parent/child relation validates");
+
+        let (mut wrong_event, _, _) = component_batch_pair(311);
+        wrong_event
+            .active_batch_delivery_mut()
+            .expect("child owns the top")
+            .component_delivery_parent
+            .as_mut()
+            .expect("child retains its relation")
+            .expected_event = ProposedEvent::zone_change(
+            crate::types::identifiers::ObjectId(9_998),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            None,
+        );
+        assert!(
+            wrong_event.validate(&waiting).is_err(),
+            "a different expected event does not identify the parent boundary"
+        );
+
+        let (mut wrong_incarnation, _, _) = component_batch_pair(312);
+        wrong_incarnation
+            .active_batch_delivery_mut()
+            .expect("child owns the top")
+            .component_delivery_parent
+            .as_mut()
+            .expect("child retains its relation")
+            .member = crate::types::identifiers::ObjectIncarnationRef::of(
+            identity.object_id,
+            identity.incarnation + 1,
+        );
+        assert!(
+            wrong_incarnation.validate(&waiting).is_err(),
+            "a same-id new incarnation cannot stand in for the parked member"
+        );
+
+        let (mut missing_parent, _, _) = component_batch_pair(314);
+        let child = missing_parent
+            .take_active_batch_delivery()
+            .expect("child owns the top")
+            .expect("child frame exists");
+        let mut lone_child = ResolutionStack::default();
+        lone_child.push_batch_delivery(child);
+        assert!(
+            lone_child.validate(&waiting).is_err(),
+            "a relation without its immediate batch parent is rejected"
+        );
+
+        let (mut duplicate_group, _, _) = component_batch_pair(315);
+        let owner = duplicate_group
+            .batch_delivery_owner_mut(
+                duplicate_group
+                    .active_batch_delivery()
+                    .expect("child owns the top")
+                    .component_delivery_parent
+                    .as_ref()
+                    .expect("child retains its relation")
+                    .parent_group_id,
+            )
+            .expect("the parent is addressable")
+            .clone();
+        duplicate_group.push_batch_delivery(owner);
+        assert!(
+            duplicate_group.validate(&waiting).is_err(),
+            "one logical component group cannot be installed twice"
+        );
+
+        let (mut mismatched_member, _, _) = component_batch_pair(316);
+        let parent_group = mismatched_member
+            .active_batch_delivery()
+            .expect("child owns the top")
+            .component_delivery_parent
+            .as_ref()
+            .expect("child retains its relation")
+            .parent_group_id;
+        let mismatched_owner = crate::types::identifiers::ObjectIncarnationRef::of(
+            event_object_id(&event),
+            identity.incarnation + 1,
+        );
+        mismatched_member
+            .batch_delivery_owner_mut(parent_group)
+            .expect("the parent is addressable")
+            .paused_current = Some(PendingZoneChangeDelivery::new(mismatched_owner, event));
+        assert!(
+            mismatched_member.validate(&waiting).is_err(),
+            "the parent's paused member must be the delegated incarnation"
+        );
+
+        fn event_object_id(event: &ProposedEvent) -> crate::types::identifiers::ObjectId {
+            match event {
+                ProposedEvent::ZoneChange { object_id, .. } => *object_id,
+                _ => unreachable!(),
+            }
+        }
     }
 
     /// A `BatchDelivery` owner parked on the resumed member's pre-choice key.
@@ -8160,6 +8955,7 @@ mod tests {
 
         let mut optional_effect = ResolutionStack::default();
         optional_effect.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(resolved_draw(6)),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -8249,6 +9045,7 @@ mod tests {
         optional_state.waiting_for = waiting_for;
         let mut optional_frames = ResolutionStack::default();
         optional_frames.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(resolved_draw(10)),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -8335,6 +9132,7 @@ mod tests {
 
     fn opponent_may_owner_frame() -> ResolutionFrame {
         ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(resolved_draw(7)),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -8903,6 +9701,7 @@ mod tests {
     fn validation_admits_the_live_direct_choice_owner_above_a_paused_drain_pair() {
         let optional_effect_frame = || {
             ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                parked_poll: None,
                 ability: Box::new(resolved_draw(81)),
                 trigger_event: None,
                 trigger_events: Vec::new(),
@@ -9034,6 +9833,7 @@ mod tests {
         let mut optional = restore_v1_optional_effect_fixture(
             optional,
             OptionalEffectFrame {
+                parked_poll: None,
                 ability: Box::new(resolved_draw(102)),
                 trigger_event: None,
                 trigger_events: Vec::new(),
@@ -9318,6 +10118,7 @@ mod tests {
             .expect("empty batch group retains its pre-delivery latch");
         let pending = PendingBatchDeliveries {
             library_reorder: None,
+            component_delivery_parent: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -10305,7 +11106,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: ZoneDeliveryExileTracking::None,
@@ -10459,6 +11259,7 @@ mod tests {
         };
         let mut buried_optional_frames = ResolutionStack::default();
         buried_optional_frames.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(resolved_draw(151)),
             trigger_event: None,
             trigger_events: Vec::new(),

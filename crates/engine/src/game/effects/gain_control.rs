@@ -2609,7 +2609,7 @@ then lose that much life.";
         use crate::game::ability_rw::ability_rw_profile;
         use crate::game::ability_scan::{
             ability_reads_projected_resource, ability_reads_sibling_mutable,
-            ability_uses_event_context,
+            ability_uses_event_context, ScanMode,
         };
         use crate::types::identifiers::TrackedSetId;
 
@@ -2655,13 +2655,16 @@ then lose that much life.";
             PlayerId(0),
         );
         assert!(
-            ability_uses_event_context(&event_reader),
+            ability_uses_event_context(&event_reader, ScanMode::Conservative),
             "positive control: the event axis fires"
         );
 
         let HandoffBoard { a, b, source, .. } = handoff_board();
         let handoff = handoff_ability(source, vec![entry(a, P1), entry(b, P2)], vec![]);
-        assert!(!ability_uses_event_context(&handoff));
+        assert!(!ability_uses_event_context(
+            &handoff,
+            ScanMode::Conservative
+        ));
         assert!(!ability_reads_projected_resource(&handoff));
         assert!(!ability_reads_sibling_mutable(&handoff));
         let profile = ability_rw_profile(&handoff);
