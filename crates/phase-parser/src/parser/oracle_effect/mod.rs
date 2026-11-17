@@ -56858,6 +56858,10 @@ fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> 
             // in APNAP order; the first to pay prevents the effect (Cleansing,
             // the Rhystic cycle, Soul Strings).
             value(TargetFilter::AllPlayers, tag("any player pays ")),
+            // CR 118.12a: "unless any opponent pays ..." — every opponent of the
+            // controller is polled in APNAP order; the first to pay prevents the
+            // effect (Sword-Point Diplomacy).
+            value(TargetFilter::Opponent, tag("any opponent pays ")),
         )),
     )
     .parse(input)

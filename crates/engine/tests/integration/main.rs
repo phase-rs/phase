@@ -278,6 +278,7 @@ mod stored_may_decline_trigger_uses_stack;
 mod strategic_betrayal_6505;
 pub mod support;
 mod swallow_optional_you_may;
+mod sword_point_diplomacy_any_opponent_pays;
 mod target_instance_identity_9280;
 mod terra_herald_optional_prompt;
 mod tezzeret_cruel_captain_emblem;
