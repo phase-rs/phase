@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useMediaQuery } from "../useMediaQuery.ts";
@@ -49,13 +49,14 @@ function createFakeScreen() {
   };
 }
 
-let screen: ReturnType<typeof createFakeScreen>;
+let fakeScreen: ReturnType<typeof createFakeScreen>;
 
 beforeEach(() => {
-  screen = createFakeScreen();
+  fakeScreen = createFakeScreen();
 });
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
 });
 
@@ -64,10 +65,10 @@ describe("useMediaQuery", () => {
     const { result } = renderHook(() => useMediaQuery(LANDSCAPE));
     expect(result.current).toBe(false);
 
-    screen.change(LANDSCAPE, true);
+    fakeScreen.change(LANDSCAPE, true);
     expect(result.current).toBe(true);
 
-    screen.change(LANDSCAPE, false);
+    fakeScreen.change(LANDSCAPE, false);
     expect(result.current).toBe(false);
   });
 
@@ -79,7 +80,7 @@ describe("useMediaQuery", () => {
         // The screen turns after the first render has read the query, before
         // anything has subscribed, so no `change` event reaches the hook.
         turned = true;
-        screen.answer(LANDSCAPE, true);
+        fakeScreen.answer(LANDSCAPE, true);
       }
       return matches;
     });
@@ -90,7 +91,7 @@ describe("useMediaQuery", () => {
   });
 
   it("answers a new query on its first render, and moves its listener to it", () => {
-    screen.answer(LANDSCAPE, true);
+    fakeScreen.answer(LANDSCAPE, true);
     const answersPerRender: boolean[] = [];
     const { rerender } = renderHook(
       ({ query }: { query: string }) => {
@@ -101,7 +102,7 @@ describe("useMediaQuery", () => {
       { initialProps: { query: PORTRAIT } },
     );
     expect(answersPerRender[answersPerRender.length - 1]).toBe(false);
-    expect(screen.listenerCount(PORTRAIT)).toBe(1);
+    expect(fakeScreen.listenerCount(PORTRAIT)).toBe(1);
 
     answersPerRender.length = 0;
     rerender({ query: LANDSCAPE });
@@ -110,17 +111,17 @@ describe("useMediaQuery", () => {
     // included: none paints the old query's answer.
     expect(answersPerRender.length).toBeGreaterThan(0);
     expect(answersPerRender.every((matches) => matches)).toBe(true);
-    expect(screen.listenerCount(PORTRAIT)).toBe(0);
-    expect(screen.listenerCount(LANDSCAPE)).toBe(1);
+    expect(fakeScreen.listenerCount(PORTRAIT)).toBe(0);
+    expect(fakeScreen.listenerCount(LANDSCAPE)).toBe(1);
   });
 
   it("stops listening when unmounted", () => {
     const { unmount } = renderHook(() => useMediaQuery(LANDSCAPE));
     // Reach guard: it was listening.
-    expect(screen.listenerCount(LANDSCAPE)).toBe(1);
+    expect(fakeScreen.listenerCount(LANDSCAPE)).toBe(1);
 
     unmount();
 
-    expect(screen.listenerCount(LANDSCAPE)).toBe(0);
+    expect(fakeScreen.listenerCount(LANDSCAPE)).toBe(0);
   });
 });

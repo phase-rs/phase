@@ -37,7 +37,8 @@ export interface ChoiceOption {
  *   footer in a right column. The dialog widens to hold both, and the prompt
  *   comes out far shorter than stacked. It needs a preview to fill the left
  *   column, and stacks without one. While the card's art loads, the left
- *   column holds only the hint, so the layout does not jump when it arrives.
+ *   column keeps its place (holding the hint on a touch screen), so the
+ *   prompt does not collapse to stacked and back when the art arrives.
  *   Its height budget assumes the standard rules-text band; a taller band (a
  *   Saga's) makes the card column taller.
  */
