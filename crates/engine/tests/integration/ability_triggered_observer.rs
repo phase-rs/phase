@@ -1034,6 +1034,113 @@ fn v21e_paused_mana_ability_resume_hides_the_face_down_cause() {
     );
 }
 
+/// V21f (CR 400.2 + CR 708.5): a discard-cost mana ability (Skirge Familiar) activated while
+/// paying Proctor's unless-payment pauses at a `PayCost` discard prompt whose `resume` holds
+/// the observer's event. The `PayCost` rebuild re-clones that authoritative resume for a
+/// viewer without private access to the payer, so the nested face-down cause must be
+/// redacted after the rebuild, not before it.
+#[test]
+fn v21f_pay_cost_discard_resume_hides_the_face_down_cause() {
+    use engine::types::game_state::{
+        CastPaymentMode, CostResume, ManaAbilityResume, PayCostKind, PendingManaAbility,
+    };
+    let (runner, proctor, _warden) = manifest_board();
+    let firing = observer_firings(runner.state(), proctor)
+        .first()
+        .cloned()
+        .expect("reach guard: Proctor observed Soul Warden's trigger");
+    let prompt_cause_names = |state: &GameState| -> Vec<String> {
+        match &state.waiting_for {
+            WaitingFor::PayCost {
+                resume: CostResume::ManaAbility { mana_ability },
+                ..
+            } => match &mana_ability.resume {
+                ManaAbilityResume::UnlessPayment {
+                    trigger_event: Some(GameEvent::AbilityTriggered { causes, .. }),
+                    ..
+                } => causes
+                    .iter()
+                    .map(|cause| match cause {
+                        GameEvent::ZoneChanged { record, .. } => record.name.clone(),
+                        other => panic!("unexpected cause {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("expected the unless-payment resume, got {other:?}"),
+            },
+            other => panic!("expected the discard-cost prompt, got {other:?}"),
+        }
+    };
+    let mut state = runner.state().clone();
+    state.waiting_for = WaitingFor::PayCost {
+        player: P1,
+        kind: PayCostKind::Discard,
+        choices: Vec::new(),
+        count: 1,
+        min_count: 1,
+        resume: CostResume::ManaAbility {
+            mana_ability: Box::new(PendingManaAbility {
+                player: P1,
+                source_id: proctor,
+                ability_snapshot: None,
+                announced_source_incarnation: None,
+                announced_usage_key: None,
+                ability_index: Some(0),
+                rules_execution_node: None,
+                color_override: None,
+                resume: ManaAbilityResume::UnlessPayment {
+                    outer_player: None,
+                    cost: Box::new(engine::types::ability::AbilityCost::Mana {
+                        cost: engine::types::mana::ManaCost::generic(2),
+                    }),
+                    pending_effect: Box::new(engine::types::ability::ResolvedAbility::new(
+                        engine::types::ability::Effect::Draw {
+                            count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                            target: TargetFilter::Controller,
+                        },
+                        Vec::new(),
+                        proctor,
+                        P1,
+                    )),
+                    trigger_event: Some(firing),
+                    effect_description: None,
+                    remaining: Vec::new(),
+                    affected_object: None,
+                    repeat: None,
+                },
+                cost_move_resume: None,
+                chosen_tappers: None,
+                chosen_discards: Vec::new(),
+                chosen_mana_payment: None,
+                payment_mode: CastPaymentMode::Auto,
+                pinned_pool_units: Vec::new(),
+                chosen_counter_counts: Vec::new(),
+                chosen_x: None,
+                collected_evidence: Vec::new(),
+                chosen_exiled: Vec::new(),
+                chosen_sacrificed_battlefield: Vec::new(),
+                cost_paid_object: None,
+                cost_removed_counters: None,
+                batch_siblings: Vec::new(),
+            }),
+        },
+    };
+    // Reach guard: the authoritative prompt names the manifested card.
+    assert_eq!(
+        prompt_cause_names(&state),
+        vec!["Grizzly Bears".to_string()]
+    );
+    assert_eq!(
+        prompt_cause_names(&filter_state_for_viewer(&state, P1)),
+        vec!["Grizzly Bears".to_string()],
+        "the manifest's controller may look at it (CR 708.5)"
+    );
+    assert_eq!(
+        prompt_cause_names(&filter_state_for_viewer(&state, P0)),
+        vec![HIDDEN_CARD_NAME.to_string()],
+        "an opponent may not learn the face-down card through a PayCost resume"
+    );
+}
+
 /// V21a: the client event stream never carries `causes`, for any viewer.
 #[test]
 fn v21a_event_stream_carries_no_causes() {
