@@ -676,12 +676,17 @@ fn legal_new_targets_for_entry(state: &GameState, entry: &StackEntry) -> Vec<Tar
     // flat pool is instead the union of every opponent's own legal set.
     // Positions themselves are non-exact at the addressing layer, so this
     // superset cannot authorize an illegal application.
+    // Never fall through when the union is empty: the generic branch below reads
+    // the printed filter against `pool_controller`, which for a fanout is the
+    // retargeting spell's controller and offers the whole table. An empty union
+    // is the honest answer, and `retarget_prompt_is_dischargeable` then resolves
+    // the prompt as a no-change (CR 115.7a: a target that cannot be changed to
+    // another legal target is unchanged).
     if crate::game::ability_utils::is_per_opponent_target_fanout(active_ability) {
-        let options =
-            crate::game::ability_utils::per_opponent_fanout_retarget_options(state, active_ability);
-        if !options.is_empty() {
-            return options;
-        }
+        return crate::game::ability_utils::per_opponent_fanout_retarget_options(
+            state,
+            active_ability,
+        );
     }
 
     // CR 115.7: Standard targeted spell/ability — re-evaluate its own declared

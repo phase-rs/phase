@@ -5,9 +5,10 @@
 
 use engine::game::game_object::PhaseOutCause;
 use engine::game::phasing::phase_out_object;
-use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -347,39 +348,32 @@ const SHUKO: &str = "Equipped creature gets +1/+0.\nEquip {0}";
 /// Pacifism — verbatim Oracle text.
 const PACIFISM: &str = "Enchant creature\nEnchanted creature can't attack or block.";
 
-/// CR 702.26g/h + CR 115.1 + CR 608.2c: the printed Barn chaos ability resolves
-/// through the engine's normal entry points — the "for each opponent" target
-/// prompt, real target submission, and a real planeswalk. One opponent's choice
-/// is a host with printed Shuko attached; the other opponent's choice is a
-/// Pacifism attached to that same host. Both chosen permanents bind the
-/// can't-phase-in restriction and the delayed phase-in. The Pacifism phases out
-/// indirectly with the host (CR 702.26h); the incidental Shuko is never added
-/// to the delayed population and stays phased out until its host phases in.
-#[test]
-fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
+/// The printed Barn board: a planechase game with The Doctor's Childhood Barn
+/// face up and a second plane waiting, P1 controlling the chosen host and the
+/// incidental printed Shuko attached to it, P2 controlling the chosen Pacifism
+/// (also attached, so the host's phase-out cascades it, CR 702.26h).
+struct BarnBoard {
+    runner: GameRunner,
+    barn: ObjectId,
+    host: ObjectId,
+    aura: ObjectId,
+    equipment: ObjectId,
+}
+
+fn barn_board() -> BarnBoard {
     use engine::database::synthesis::synthesize_planechase;
     use engine::game::deck_loading::create_planar_deck_card;
-    use engine::game::effects::phase_out::resolve_phase_in;
-    use engine::game::planechase::{
-        chaos_ensues, restamp_planar_objects_to_controller, PlanarDieFace,
-    };
-    use engine::game::triggers::process_triggers;
+    use engine::game::planechase::restamp_planar_objects_to_controller;
     use engine::parser::oracle::parse_oracle_text;
     use engine::types::card::CardFace;
     use engine::types::card_type::CoreType;
-    use engine::types::events::GameEvent;
     use engine::types::format::FormatConfig;
-    use engine::types::game_state::{GameRng, RandomDraw};
     use engine::types::player::PlayerId;
-    use rand::Rng;
 
     let p2 = PlayerId(2);
     let mut scenario = GameScenario::new_with_format(FormatConfig::planechase(), 3, 11);
     scenario.at_phase(Phase::PreCombatMain);
 
-    // P1 controls the chosen host and the incidental printed Shuko attached to
-    // it. P2 controls the chosen Pacifism, also attached to the host, so the
-    // host's phase-out cascades it (CR 702.26h).
     let chosen_host = scenario.add_creature(P1, "Chosen Host", 3, 3).id();
     let chosen_aura = scenario
         .add_enchantment_from_oracle(p2, "Pacifism", PACIFISM)
@@ -433,9 +427,6 @@ fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
         engine::game::layers::mark_layers_full(state);
 
         let barn = create_planar_deck_card(state, &face, P0);
-        // The active plane lives face up in the command zone; the rest of the
-        // planar deck is a separate face-down stack. A second plane keeps the
-        // planeswalk below from being a self-planeswalk.
         state.planar_deck.retain(|id| *id != barn);
         state.objects.get_mut(&barn).unwrap().face_down = false;
         state.command_zone.push_back(barn);
@@ -459,18 +450,28 @@ fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
         "the second plane must be waiting in the planar deck"
     );
 
-    // CR 901.9b: chaos ensues and the printed trigger raises its target prompt.
-    let mut events = Vec::new();
-    chaos_ensues(runner.state_mut(), &mut events);
-    process_triggers(runner.state_mut(), &events);
+    BarnBoard {
+        runner,
+        barn,
+        host: chosen_host,
+        aura: chosen_aura,
+        equipment: incidental_equipment,
+    }
+}
 
-    let mut prompted_slots = None;
+/// CR 901.9b: raise the printed chaos ability and return its announced slots.
+fn open_barn_prompt(
+    runner: &mut GameRunner,
+    events: &mut Vec<GameEvent>,
+) -> Vec<engine::types::game_state::TargetSelectionSlot> {
+    use engine::game::planechase::chaos_ensues;
+    use engine::game::triggers::process_triggers;
+
+    chaos_ensues(runner.state_mut(), events);
+    process_triggers(runner.state_mut(), events);
     for _ in 0..20 {
         match runner.state().waiting_for.clone() {
-            WaitingFor::TriggerTargetSelection { target_slots, .. } => {
-                prompted_slots = Some(target_slots);
-                break;
-            }
+            WaitingFor::TriggerTargetSelection { target_slots, .. } => return target_slots,
             WaitingFor::Priority { .. } => {
                 events.extend(
                     runner
@@ -482,7 +483,159 @@ fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
             other => panic!("unexpected prompt before Barn target selection: {other:?}"),
         }
     }
-    let target_slots = prompted_slots.expect("Barn's chaos trigger must raise a target prompt");
+    panic!("Barn's chaos trigger must raise a target prompt");
+}
+
+/// CR 115.6 + CR 115.1 + CR 608.2c: each opponent's "up to one" slot is an
+/// INDEPENDENT optional choice. Declining the first opponent's slot through the
+/// production walk (`GameAction::ChooseTarget { target: None }`) must leave the
+/// later opponent's already-announced permanent selected — the header pairing
+/// keys each object to the opponent that declared it, so the declined slot
+/// cannot consume the other opponent's pick.
+#[test]
+fn childhood_barn_declining_one_opponents_slot_keeps_the_other() {
+    use engine::types::player::PlayerId;
+
+    let BarnBoard {
+        mut runner,
+        host: chosen_host,
+        aura: chosen_aura,
+        equipment: incidental_equipment,
+        ..
+    } = barn_board();
+    let p2 = PlayerId(2);
+
+    let mut events = Vec::new();
+    let target_slots = open_barn_prompt(&mut runner, &mut events);
+    assert_eq!(
+        target_slots.len(),
+        4,
+        "Barn must declare a header + object slot per opponent, got {target_slots:?}"
+    );
+
+    // Decline the FIRST opponent's optional object slot through the walk.
+    let outcome = runner
+        .act(GameAction::ChooseTarget { target: None })
+        .expect("declining an up-to-one slot is legal (CR 115.6)");
+    events.extend(outcome.events);
+    // Then pick the SECOND opponent's Pacifism.
+    let outcome = runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(chosen_aura)),
+        })
+        .expect("the second opponent's Pacifism is a legal pick");
+    events.extend(outcome.events);
+
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "unexpected prompt while Barn's chaos ability resolves: {:?}",
+            runner.state().waiting_for
+        );
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority through Barn's chaos ability")
+                .events,
+        );
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "Barn's chaos ability must resolve"
+    );
+
+    let phased_out = |object_id: ObjectId| {
+        events.iter().find_map(|event| match event {
+            GameEvent::PermanentPhasedOut {
+                object_id: event_id,
+                indirect,
+            } if *event_id == object_id => Some(*indirect),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        phased_out(chosen_aura),
+        Some(false),
+        "the second opponent's pick is a CHOSEN permanent, so it phases out directly \
+         (CR 702.26b) — the declined slot must not swallow it"
+    );
+    assert_eq!(
+        phased_out(chosen_host),
+        None,
+        "the declined opponent's permanent was never targeted"
+    );
+    assert_eq!(
+        phased_out(incidental_equipment),
+        None,
+        "Shuko is incidental to a permanent that was never chosen"
+    );
+
+    // The delayed phase-in binds exactly the one chosen permanent.
+    let delayed_targets: Vec<ObjectId> = runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .flat_map(|trigger| trigger.ability.targets.iter())
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    assert_eq!(
+        delayed_targets,
+        vec![chosen_aura],
+        "only the surviving pick is bound, got {delayed_targets:?}"
+    );
+    assert!(
+        runner.state().objects[&chosen_aura].is_phased_out(),
+        "the chosen permanent is phased out"
+    );
+    assert!(
+        !runner.state().objects[&chosen_host].is_phased_out(),
+        "the declined opponent's host is untouched"
+    );
+    // Keep the opponent id meaningful even if the fixture changes seats.
+    assert_eq!(
+        runner.state().objects[&chosen_aura].controller,
+        p2,
+        "reach guard: the pick belongs to the second opponent"
+    );
+}
+
+/// CR 702.26g/h + CR 115.1 + CR 608.2c: the printed Barn chaos ability resolves
+/// through the engine's normal entry points — the "for each opponent" target
+/// prompt, real target submission, and a real planeswalk. One opponent's choice
+/// is a host with printed Shuko attached; the other opponent's choice is a
+/// Pacifism attached to that same host. Both chosen permanents bind the
+/// can't-phase-in restriction and the delayed phase-in. The Pacifism phases out
+/// indirectly with the host (CR 702.26h); the incidental Shuko is never added
+/// to the delayed population and stays phased out until its host phases in.
+#[test]
+fn childhood_barn_binds_selected_objects_not_incidental_attachments() {
+    use engine::game::effects::phase_out::resolve_phase_in;
+    use engine::game::planechase::PlanarDieFace;
+    use engine::types::game_state::{GameRng, RandomDraw};
+    use engine::types::player::PlayerId;
+    use rand::Rng;
+
+    let BarnBoard {
+        mut runner,
+        barn,
+        host: chosen_host,
+        aura: chosen_aura,
+        equipment: incidental_equipment,
+        ..
+    } = barn_board();
+
+    // CR 901.9b: chaos ensues and the printed trigger raises its target prompt.
+    let mut events = Vec::new();
+    let target_slots = open_barn_prompt(&mut runner, &mut events);
+    let p2 = PlayerId(2);
 
     // CR 601.2c + CR 115.1: "for each opponent, choose up to one target nonland
     // permanent that opponent controls" declares one target per opponent. Each

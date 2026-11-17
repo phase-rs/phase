@@ -8514,11 +8514,19 @@ fn per_opponent_fanout_object_filter_as(
     // must be bound too, or the pool offers the caster's own permanents.
     Some(match player {
         ControllerRef::You => scope_unbound_filter_controller(&filter, player),
-        bound => rewrite_relative_controller(
-            &filter,
-            &|controller| matches!(controller, ControllerRef::You),
-            &bound,
-        ),
+        bound => {
+            // Both forms must be bound: the printed anaphor may have lowered as
+            // `You` (rebind it) or with no controller at all (scope it). Leaving
+            // either one free makes the pool table-wide, which admits the
+            // retargeting spell's own controller's permanents at an opponent's
+            // slot and then loses the legal original target (CR 115.7a).
+            let rewritten = rewrite_relative_controller(
+                &filter,
+                &|controller| matches!(controller, ControllerRef::You),
+                &bound,
+            );
+            scope_unbound_filter_controller(&rewritten, bound)
+        }
     })
 }
 
@@ -8667,14 +8675,26 @@ fn validate_per_opponent_target_fanout_targets(
     ability
         .targets
         .iter()
-        .map(|target| match target {
+        .enumerate()
+        .map(|(position, target)| match target {
             TargetRef::Player(player_id) => {
                 current_player = Some(*player_id);
                 OccurrenceVerdict::Dropped
             }
-            TargetRef::Object(_) => legal_or_dropped(current_player.is_some_and(|player_id| {
-                per_opponent_fanout_legal_object_targets(state, ability, player_id).contains(target)
-            })),
+            // CR 400.7 + CR 608.2b: the occurrence must still be the object that
+            // was ANNOUNCED there. A fanout slot's pool is recomputed live, so
+            // without the announced incarnation a target that left and returned
+            // (Cloudshift) — same storage id, still in the header opponent's
+            // pool — would read as legal and the ability would act on an object
+            // it never targeted. `target_is_current_at` is the announced-identity
+            // authority the per-slot validator (`occurrences_legal_for_slot`)
+            // already consults; this arm is its fanout counterpart.
+            TargetRef::Object(_) => legal_or_dropped(
+                current_player.is_some_and(|player_id| {
+                    per_opponent_fanout_legal_object_targets(state, ability, player_id)
+                        .contains(target)
+                }) && target_is_current_at(ability, position, state),
+            ),
         })
         .collect()
 }
@@ -24334,13 +24354,11 @@ mod tests {
             "opponent two's pick must survive opponent one's board changing"
         );
 
-        // (b) The controller declines opponent one's optional object slot.
-        // This is the STORED shape such a walk produces when both headers were
-        // announced and only opponent two's pick was chosen (the production
-        // decline path itself is covered by the Barn integration test and by
-        // `per_opponent_binder_autofill`); the vector is the two headers plus
-        // opponent two's pick, which must still be judged against opponent
-        // two.
+        // (b) The controller declines opponent one's optional object slot. This
+        // is the STORED shape that walk produces — two auto-filled headers plus
+        // opponent two's pick — hand-built here so the header pairing is proved
+        // in isolation. The production walk for it is
+        // `galadriels_dismissal_kicked_phasing::childhood_barn_declining_one_opponents_slot_keeps_the_other`.
         let mut declined_optional = repeated_per_opponent_object_choice(
             TargetFilter::Typed(TypedFilter::permanent()),
             TargetChoiceTiming::Stack,
@@ -24389,6 +24407,125 @@ mod tests {
                 !per_opponent_fanout_retarget_options(&state, &ability)
                     .contains(&TargetRef::Object(controller_creature)),
                 "the caster's creature is never a legal new target for any fanout slot"
+            );
+        }
+    }
+
+    /// CR 400.7 + CR 608.2b: the fanout validator must compare against the
+    /// ANNOUNCED incarnation, not just the live pool. A target that left and
+    /// returned keeps its storage id and stays in the header opponent's pool, so
+    /// a pool-only check calls it legal and the ability acts on an object it
+    /// never targeted (Cloudshift in response to the Barn's chaos ability).
+    #[test]
+    fn per_opponent_fanout_drops_an_occurrence_whose_announced_object_departed() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let opp_one_creature = create_creature(&mut state, PlayerId(1), CardId(1), "Opp One");
+        let opp_two_creature = create_creature(&mut state, PlayerId(2), CardId(2), "Opp Two");
+        let mut ability = repeated_per_opponent_object_choice(
+            TargetFilter::Typed(TypedFilter::permanent()),
+            TargetChoiceTiming::Stack,
+        );
+        ability.targets = vec![
+            TargetRef::Player(PlayerId(1)),
+            TargetRef::Object(opp_one_creature),
+            TargetRef::Player(PlayerId(2)),
+            TargetRef::Object(opp_two_creature),
+        ];
+        // Positional announced pins: the header positions hold none.
+        ability.target_pins = vec![
+            None,
+            Some(
+                crate::types::identifiers::ObjectIncarnationRef::from_object(
+                    &state.objects[&opp_one_creature],
+                ),
+            ),
+            None,
+            Some(
+                crate::types::identifiers::ObjectIncarnationRef::from_object(
+                    &state.objects[&opp_two_creature],
+                ),
+            ),
+        ];
+        assert_eq!(
+            validate_per_opponent_target_fanout_targets(&state, &ability),
+            vec![
+                OccurrenceVerdict::Dropped,
+                OccurrenceVerdict::Legal,
+                OccurrenceVerdict::Dropped,
+                OccurrenceVerdict::Legal,
+            ],
+            "reach guard: both picks are legal while their announced objects are current"
+        );
+
+        // Cloudshift: leave and return, same storage id, still in the pool.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, opp_one_creature, Zone::Exile, &mut events);
+        crate::game::zones::move_to_zone(
+            &mut state,
+            opp_one_creature,
+            Zone::Battlefield,
+            &mut events,
+        );
+        assert_eq!(
+            state.objects[&opp_one_creature].controller,
+            PlayerId(1),
+            "reach guard: the returned object is still in the header opponent's pool"
+        );
+        assert_eq!(
+            validate_per_opponent_target_fanout_targets(&state, &ability),
+            vec![
+                OccurrenceVerdict::Dropped,
+                OccurrenceVerdict::Dropped,
+                OccurrenceVerdict::Dropped,
+                OccurrenceVerdict::Legal,
+            ],
+            "the departed-and-returned occurrence is a NEW object (CR 400.7); the other opponent is untouched"
+        );
+    }
+
+    /// CR 109.4 + CR 115.7a: a retarget slot pool must bind BOTH anaphor forms.
+    /// The printed "that opponent controls" may lower as `You` or with no
+    /// controller; leaving the unbound form free makes the pool table-wide, so
+    /// the retargeting spell's own controller's permanents are admitted at an
+    /// opponent's slot and the legal original target is lost.
+    #[test]
+    fn per_opponent_fanout_slot_pool_binds_an_unbound_printed_controller() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let caster_creature =
+            create_creature(&mut state, PlayerId(0), CardId(1), "Controller Creature");
+        let opp_one_creature = create_creature(&mut state, PlayerId(1), CardId(2), "Opp One");
+        let opp_two_creature = create_creature(&mut state, PlayerId(2), CardId(3), "Opp Two");
+        let ability = repeated_per_opponent_object_choice(
+            TargetFilter::Typed(TypedFilter::permanent()),
+            TargetChoiceTiming::Stack,
+        );
+        // The `SpecificPlayer` flavor is what `emit_fanout_objects` stores as a
+        // slot's enforcement filter, and `change_targets::slot_pool` evaluates it
+        // with the RETARGETING spell's controller (PlayerId(0) here), never the
+        // header opponent.
+        for (bound, expected) in [
+            (PlayerId(1), opp_one_creature),
+            (PlayerId(2), opp_two_creature),
+        ] {
+            let filter = per_opponent_fanout_object_filter_as(
+                &ability,
+                ControllerRef::SpecificPlayer { id: bound },
+            )
+            .expect("fanout filter");
+            let pool = crate::game::targeting::find_legal_targets_for_ability_with_controller(
+                &state,
+                &filter,
+                &ability,
+                PlayerId(0),
+            );
+            assert_eq!(
+                pool,
+                vec![TargetRef::Object(expected)],
+                "the slot pool is exactly the bound opponent's set for {bound:?}"
+            );
+            assert!(
+                !pool.contains(&TargetRef::Object(caster_creature)),
+                "the retargeting controller's own permanent must never be in a fanout slot pool"
             );
         }
     }
