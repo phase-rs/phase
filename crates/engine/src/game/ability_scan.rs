@@ -6038,6 +6038,9 @@ fn scan_delayed_trigger_condition(c: &DelayedTriggerCondition, mode: ScanMode) -
         // The same coordinate plus the identity of one added phase
         // (`ExtraPhaseId`). Neither reaches a filter or a quantity.
         DelayedTriggerCondition::AtBeginningOfAddedPhase { phase: _, entry: _ } => Axes::NONE,
+        // The same coordinate plus the identity of one granted extra turn
+        // (`ExtraTurnId`). Neither reaches a filter or a quantity.
+        DelayedTriggerCondition::AtBeginningOfGrantedTurn { phase: _, turn: _ } => Axes::NONE,
         // CR 603.7c: a delayed triggered ability that refers to a particular object.
         // `object_id` is already resolved, so there is no filter to walk and no
         // population whose size a growing class could move.
@@ -14453,6 +14456,7 @@ mod tests {
             DelayedTriggerCondition::AtNextPhase { .. }
             | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
             | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+            | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
             | DelayedTriggerCondition::WhenLeavesPlay { .. } => (false, false, false),
             DelayedTriggerCondition::WhenDies { .. }
             | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }

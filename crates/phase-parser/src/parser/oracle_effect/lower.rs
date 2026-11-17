@@ -8580,18 +8580,18 @@ pub(super) fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerC
                 binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
             },
         ),
-        // CR 603.7a + CR 104.3e: anaphoric "that turn's end step" — the extra
-        // turn granted by the parent clause (the controller's next turn), so
-        // the controller's next end step. Suffix companion of the prefix arm
-        // in `strip_temporal_prefix`. Used by Final Fortune / Last Chance /
+        // CR 603.7a + CR 500.7: anaphoric "that turn's end step" — the extra
+        // turn granted by an earlier clause of the chain. The parser leaves the
+        // turn unbound (`turn: None`); `delayed_trigger::resolve` binds it to
+        // the turn that instruction granted, and the chain seam only keeps this
+        // reading when such a clause precedes it (`temporal_antecedent_is_proven`).
+        // Suffix companion of the prefix arm in `strip_temporal_prefix`. Used by Final Fortune / Last Chance /
         // Warrior's Oath / Chance for Glory.
         (
             " at the beginning of that turn's end step",
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
+            DelayedTriggerCondition::AtBeginningOfGrantedTurn {
                 phase: Phase::End,
-                player: crate::types::player::PlayerId(0),
-                gate: crate::types::ability::TurnGate::None,
-                binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                turn: None,
             },
         ),
         // CR 514.3a + CR 603.7a: "at the beginning of the next cleanup step"
@@ -8761,21 +8761,18 @@ pub(crate) fn strip_temporal_prefix(text: &str) -> (&str, Option<DelayedTriggerC
                 },
                 tag("at the beginning of the end step on your next turn, "),
             ),
-            // CR 603.7a + CR 104.3e: "at the beginning of that turn's end step"
+            // CR 603.7a + CR 500.7: "at the beginning of that turn's end step"
             // is the anaphoric form used by the extra-turn-with-a-cost cards
             // (Final Fortune, Last Chance, Warrior's Oath, Chance for Glory):
             // "Take an extra turn after this one. At the beginning of that
-            // turn's end step, you lose the game." "That turn" is the just-
-            // granted extra turn — the controller's next turn — so this is the
-            // controller's next end step, identical to the "your next end step"
-            // arm above. PlayerId(0) is rewritten to ability.controller at
-            // resolve time.
+            // turn's end step, you lose the game." "That turn" is the extra turn
+            // the earlier clause granted. The turn is bound at resolve time
+            // (`turn: None` here) and the chain seam only keeps this reading when
+            // an extra-turn clause precedes it.
             value(
-                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                DelayedTriggerCondition::AtBeginningOfGrantedTurn {
                     phase: Phase::End,
-                    player: crate::types::player::PlayerId(0),
-                    gate: crate::types::ability::TurnGate::None,
-                    binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+                    turn: None,
                 },
                 tag("at the beginning of that turn's end step, "),
             ),
@@ -16770,17 +16767,15 @@ mod tests {
         );
     }
 
-    /// CR 603.7a + CR 104.3e: the anaphoric "at the beginning of that turn's end
+    /// CR 603.7a + CR 500.7: the anaphoric "at the beginning of that turn's end
     /// step" (extra-turn-with-a-cost cards) is recognized by both temporal
-    /// recognizers, mapping to the controller's next end step — identical to the
-    /// existing "your next end step" arm.
+    /// recognizers as the end step of a granted turn, left unbound (`turn: None`)
+    /// until the delayed trigger is created.
     #[test]
-    fn that_turns_end_step_temporal_resolves_to_controller_next_end_step() {
-        let expected = DelayedTriggerCondition::AtNextPhaseForPlayer {
+    fn that_turns_end_step_temporal_names_the_granted_turn() {
+        let expected = DelayedTriggerCondition::AtBeginningOfGrantedTurn {
             phase: Phase::End,
-            player: crate::types::player::PlayerId(0),
-            gate: crate::types::ability::TurnGate::None,
-            binding: crate::types::ability::DelayedTriggerPlayerBinding::Controller,
+            turn: None,
         };
 
         let (rest, cond) =
@@ -16955,9 +16950,9 @@ mod tests {
                 matches!(
                     e,
                     Effect::CreateDelayedTrigger {
-                        condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                        condition: DelayedTriggerCondition::AtBeginningOfGrantedTurn {
                             phase: Phase::End,
-                            ..
+                            turn: None,
                         },
                         effect,
                         ..
