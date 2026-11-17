@@ -12732,6 +12732,10 @@ pub struct PendingManaAbility {
     pub announced_usage_key: Option<AbilityUsageKey>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_override: Option<ProductionOverride>,
+    /// CR 106.3 + CR 608.2d: selected triggered producers belong to this
+    /// activation through cost and color pauses; their amounts remain live.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected_taps_for_mana: Vec<crate::types::mana::TapsForManaSelection>,
     pub resume: ManaAbilityResume,
     /// CR 605.3b + CR 616.1: An auto-tapped mana source normally returns to
     /// its immediate caller. If one of its own cost moves pauses, this is the
@@ -52077,6 +52081,7 @@ mod tests {
                         color_override: None,
                         resume: ManaAbilityResume::Priority,
                         cost_move_resume: None,
+                        selected_taps_for_mana: Vec::new(),
                         chosen_tappers,
                         chosen_discards: Vec::new(),
                         chosen_mana_payment: None,
@@ -52195,6 +52200,7 @@ mod tests {
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
+                    selected_taps_for_mana: Vec::new(),
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
@@ -59298,6 +59304,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     repeat: None,
                 },
                 cost_move_resume: None,
+                selected_taps_for_mana: Vec::new(),
                 chosen_tappers: None,
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
@@ -62734,6 +62741,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
+                    selected_taps_for_mana: Vec::new(),
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,
@@ -62983,6 +62991,98 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
         assert!(!modal_face.allows_cancel_cast());
     }
 
+    #[test]
+    fn selected_tap_mana_choices_roundtrip_and_legacy_omission_is_empty() {
+        use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
+        use crate::types::mana::TapsForManaSelection;
+        let mut pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: ObjectId(8),
+            ability_index: Some(1),
+            rules_execution_node: None,
+            ability_snapshot: None,
+            announced_source_incarnation: Some(3),
+            announced_usage_key: None,
+            color_override: Some(ProductionOverride::SingleColor(ManaType::Blue)),
+            selected_taps_for_mana: Vec::new(),
+            resume: ManaAbilityResume::Priority,
+            cost_move_resume: None,
+            chosen_tappers: None,
+            chosen_discards: Vec::new(),
+            chosen_mana_payment: None,
+            payment_mode: CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
+            chosen_counter_counts: Vec::new(),
+            chosen_x: None,
+            collected_evidence: Vec::new(),
+            chosen_exiled: Vec::new(),
+            chosen_sacrificed_battlefield: Vec::new(),
+            cost_paid_object: None,
+            cost_removed_counters: None,
+            batch_siblings: Vec::new(),
+        };
+        let empty = serde_json::to_value(&pending).unwrap();
+        assert!(empty.get("selected_taps_for_mana").is_none());
+        let old: PendingManaAbility = serde_json::from_value(empty).unwrap();
+        assert!(old.selected_taps_for_mana.is_empty());
+        let selected = vec![TapsForManaSelection {
+            source: ObjectIncarnationRef::of(ObjectId(9), 4),
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 2,
+            },
+            production_override: ProductionOverride::SingleColor(ManaType::Green),
+        }];
+        pending.selected_taps_for_mana = selected.clone();
+        let full = serde_json::to_value(&pending).unwrap();
+        let restored: PendingManaAbility = serde_json::from_value(full.clone()).unwrap();
+        assert_eq!(restored.selected_taps_for_mana, selected);
+        let child = PendingManaAbility {
+            source_id: ObjectId(10),
+            selected_taps_for_mana: Vec::new(),
+            resume: ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability: Box::new(pending),
+            },
+            ..restored
+        };
+        let child: PendingManaAbility =
+            serde_json::from_value(serde_json::to_value(child).unwrap()).unwrap();
+        assert!(child.selected_taps_for_mana.is_empty());
+        let ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } = child.resume
+        else {
+            panic!("the parent frame must survive");
+        };
+        assert_eq!(pending_mana_ability.selected_taps_for_mana, selected);
+        // A legacy serde reader accepts an unknown field but loses the choice.
+        // This is a semantic-loss witness, not execution of a historical engine;
+        // the appended full/wire record makes those peers incompatible.
+        #[derive(serde::Deserialize, serde::Serialize)]
+        struct LegacyChoiceReader {
+            source_id: ObjectId,
+            color_override: Option<ProductionOverride>,
+        }
+        let legacy: LegacyChoiceReader = serde_json::from_value(full.clone()).unwrap();
+        assert_eq!(legacy.source_id, ObjectId(8));
+        assert_eq!(
+            legacy.color_override,
+            Some(ProductionOverride::SingleColor(ManaType::Blue))
+        );
+        assert!(serde_json::to_value(legacy)
+            .unwrap()
+            .get("selected_taps_for_mana")
+            .is_none());
+        let mut legacy_projection = full;
+        legacy_projection
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_taps_for_mana");
+        let legacy_projection: PendingManaAbility =
+            serde_json::from_value(legacy_projection).unwrap();
+        assert!(legacy_projection.selected_taps_for_mana.is_empty());
+    }
+
     /// CR 605.3b + CR 704.3: a mana ability's own prompts are part of its
     /// activation, so no state-based action check runs there, even though they
     /// aren't cast states for display or `CancelCast`.
@@ -62999,6 +63099,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -67913,6 +68014,7 @@ mod restored_exact_attack_authority_tests {
             color_override: None,
             resume,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,

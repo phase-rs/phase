@@ -19780,6 +19780,7 @@ mod tests {
                     color_override: None,
                     resume: ManaAbilityResume::Priority,
                     cost_move_resume: None,
+                    selected_taps_for_mana: Vec::new(),
                     chosen_tappers: None,
                     chosen_discards: Vec::new(),
                     chosen_mana_payment: None,

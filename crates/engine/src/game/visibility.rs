@@ -4522,6 +4522,7 @@ fn redact_pending_mana_ability_payment(
     // key is engine authority — never shown to a viewer. The single
     // choke point: every owner call site routes through here.
     pending.announced_usage_key = None;
+    pending.selected_taps_for_mana.clear();
     // CR 400.2 + CR 613.1f: the activation-time definition snapshot is a
     // stamped clone like the TCE grant payloads — a mana ability a hidden-zone
     // provider donated (Thranduil holding a graveyard Elf's ability) names the
@@ -8588,6 +8589,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -8602,6 +8604,75 @@ mod tests {
             cost_removed_counters: None,
             batch_siblings: Vec::new(),
         })
+    }
+
+    #[test]
+    fn viewer_projection_omits_selected_mana_producers_in_nested_pending_activations() {
+        use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
+        let selected = crate::types::mana::TapsForManaSelection {
+            source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(910), 4),
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 1,
+            },
+            production_override: crate::types::game_state::ProductionOverride::SingleColor(
+                crate::types::mana::ManaType::Green,
+            ),
+        };
+        let mut parent = dummy_pending_mana_ability(PlayerId(0), ObjectId(911));
+        parent.selected_taps_for_mana.push(selected.clone());
+        let mut child = dummy_pending_mana_ability(PlayerId(0), ObjectId(912));
+        child
+            .selected_taps_for_mana
+            .push(crate::types::mana::TapsForManaSelection {
+                source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(913), 7),
+                production_override: crate::types::game_state::ProductionOverride::SingleColor(
+                    crate::types::mana::ManaType::Blue,
+                ),
+                ..selected
+            });
+        assert_ne!(parent.selected_taps_for_mana, child.selected_taps_for_mana);
+        child.resume = ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability: parent,
+        };
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ManaAbilityManaPayment {
+            player: PlayerId(0),
+            pending_mana_ability: child,
+        };
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let projected = filter_state_for_viewer(&state, viewer);
+            let WaitingFor::ManaAbilityManaPayment {
+                pending_mana_ability,
+                ..
+            } = &projected.waiting_for
+            else {
+                panic!("projection retains the existing public prompt");
+            };
+            assert!(pending_mana_ability.selected_taps_for_mana.is_empty());
+            let ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } = &pending_mana_ability.resume
+            else {
+                panic!("projection retains the parent shape");
+            };
+            assert!(pending_mana_ability.selected_taps_for_mana.is_empty());
+        }
+        let WaitingFor::ManaAbilityManaPayment {
+            pending_mana_ability,
+            ..
+        } = &state.waiting_for
+        else {
+            unreachable!()
+        };
+        assert_eq!(pending_mana_ability.selected_taps_for_mana.len(), 1);
+        let ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } = &pending_mana_ability.resume
+        else {
+            unreachable!()
+        };
+        assert_eq!(pending_mana_ability.selected_taps_for_mana.len(), 1);
     }
 
     #[test]
