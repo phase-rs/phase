@@ -1027,6 +1027,7 @@ pub(crate) fn tap_permanent_for_cost(
             "This permanent can't become tapped".to_string(),
         ));
     }
+    // Backstop: tap_payment_eligible, the tap-cost prompt and the mana-ability readers hold first.
     if payment_tap_reserved(state, id) {
         return Err(EngineError::ActionNotAllowed(
             "This permanent is held to pay the spell's tap cost".to_string(),

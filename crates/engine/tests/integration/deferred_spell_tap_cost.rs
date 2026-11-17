@@ -4,6 +4,7 @@
 //! window (CR 601.2g), are held for that payment, and are tapped when the total
 //! cost is paid. Oracle text is verbatim from Scryfall.
 
+use engine::game::mana_abilities::is_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AdditionalCost, AdditionalCostOrigin, AdditionalCostRepeatability, TargetRef,
@@ -11,12 +12,13 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, CastingVariant, ConvokeMode, PersistedGameState, PersistedRestoreFinalization,
-    ShardChoice, WaitingFor,
+    CastPaymentMode, CastingVariant, ConvokeMode, ManaChoice, PersistedGameState,
+    PersistedRestoreFinalization, ShardChoice, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 const WORT: &str = "When Wort enters, create two 1/1 red and green Goblin Warrior creature \
@@ -39,6 +41,14 @@ const FIERY_TEMPER: &str = "Fiery Temper deals 3 damage to any target.\nMadness 
 const GUT_SHOT: &str =
     "({R/P} can be paid with either {R} or 2 life.)\nGut Shot deals 1 damage to any target.";
 const CHANNELED_DRAGONFIRE: &str = "Channeled Dragonfire deals 2 damage to any target.\nHarmonize {5}{R}{R} (You may cast this card from your graveyard for its harmonize cost. You may tap a creature you control to reduce that cost by {X}, where X is its power. Then exile this spell.)";
+const MYR_GALVANIZER: &str =
+    "Other Myr creatures you control get +1/+1.\n{1}, {T}: Untap each other Myr you control.";
+const GOLD_MYR: &str = "{T}: Add {W}.";
+const KRARK_CLAN_IRONWORKS: &str = "Sacrifice an artifact: Add {C}{C}.";
+const HEAT_RAY: &str = "Heat Ray deals X damage to target creature.";
+const THERMOPOD: &str = "{S}: This creature gains haste until end of turn. ({S} can be paid with one mana from a snow source.)\nSacrifice a creature: Add {R}.";
+const SPRINGLEAF_DRUM: &str =
+    "{T}, Tap an untapped creature you control: Add one mana of any color.";
 
 const RED: [ManaColor; 1] = [ManaColor::Red];
 const RED_GREEN: [ManaColor; 2] = [ManaColor::Red, ManaColor::Green];
@@ -93,32 +103,41 @@ fn victim(scenario: &mut GameScenario) -> ObjectId {
         .id()
 }
 
-/// A board with P1's victim, Wort and `goblins` Goblin Warriors, optionally
-/// Djinn Illuminatus.
-fn table(djinn: bool, goblins: usize) -> (GameScenario, ObjectId, Option<ObjectId>, Vec<ObjectId>) {
+/// A board with P1's victim, Wort and `goblins` Goblin Warriors.
+fn table(goblins: usize) -> (GameScenario, ObjectId, ObjectId, Vec<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let victim = victim(&mut scenario);
-    add_wort(&mut scenario);
-    let djinn = djinn.then(|| add_djinn(&mut scenario));
+    let wort = add_wort(&mut scenario);
     let goblins = add_goblins(&mut scenario, goblins);
-    (scenario, victim, djinn, goblins)
+    (scenario, victim, wort, goblins)
 }
 
+/// A red instant in P0's hand.
 fn red_spell(
     scenario: &mut GameScenario,
     name: &str,
-    instant: bool,
     mana_cost: ManaCost,
     keywords: &[&str],
     oracle: &str,
 ) -> ObjectId {
     scenario
-        .add_spell_to_hand(P0, name, instant)
+        .add_spell_to_hand(P0, name, true)
         .with_mana_cost(mana_cost)
         .with_color(RED.to_vec())
         .from_oracle_text_with_keywords(keywords, oracle)
         .id()
+}
+
+fn pyromatics(scenario: &mut GameScenario) -> ObjectId {
+    let mana_cost = cost(1, &[ManaCostShard::Red]);
+    red_spell(
+        scenario,
+        "Pyromatics",
+        mana_cost,
+        &["Replicate"],
+        PYROMATICS,
+    )
 }
 
 /// How the caster answers an optional-cost offer.
@@ -146,12 +165,33 @@ enum Prompt {
     Once(AdditionalCostOrigin, PaymentDecision),
     PayCost,
     Target,
+    X,
     Harmonize,
     Phyrexian,
     ManaPayment,
 }
 
+/// How target selection is answered.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AtTargets {
+    #[default]
+    Choose,
+    /// Save and restore through the production serializer, then choose.
+    RestoreThenChoose,
+    /// Cancel the cast instead of completing it.
+    Cancel,
+}
+
+/// Whether finishing the payment is accepted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Completion {
+    #[default]
+    Completes,
+    Refused,
+}
+
 /// How each prompt of a cast is answered.
+#[derive(Default)]
 struct Script {
     payment_mode: CastPaymentMode,
     /// Replicate payments (every instance), then declined.
@@ -160,31 +200,26 @@ struct Script {
     pay_once: Vec<AdditionalCostOrigin>,
     /// The selections for each `PayCost` prompt, in order.
     selections: Vec<Vec<ObjectId>>,
-    target: ObjectId,
+    target: Option<ObjectId>,
+    x: u32,
     harmonize_with: Option<ObjectId>,
-    /// Save and restore through the production serializer at target selection.
-    restore_at_targets: bool,
+    at_targets: AtTargets,
     /// Creatures tapped for convoke at the payment step.
     convoke: Vec<ObjectId>,
     /// Creatures whose convoke is attempted (on a copy) when the payment step opens.
     probe_convoke: Vec<ObjectId>,
-    /// Cancel the cast at target selection instead of completing it.
-    cancel_at_targets: bool,
+    /// A mana ability activated when the payment step opens, and the
+    /// permanent its cost taps or sacrifices.
+    mana_ability: Option<(ObjectId, ObjectId)>,
+    completion: Completion,
 }
 
 impl Script {
     fn new(target: ObjectId) -> Self {
+        let target = Some(target);
         Self {
-            payment_mode: CastPaymentMode::Auto,
-            replicate: 0,
-            pay_once: Vec::new(),
-            selections: Vec::new(),
             target,
-            harmonize_with: None,
-            restore_at_targets: false,
-            convoke: Vec::new(),
-            probe_convoke: Vec::new(),
-            cancel_at_targets: false,
+            ..Self::default()
         }
     }
 }
@@ -213,6 +248,10 @@ struct Run {
     harmonize_published_root: Option<bool>,
     /// The deferred selection `state.pending_cast` held at the Phyrexian prompt.
     root_at_phyrexian: Option<Vec<ObjectId>>,
+    /// The largest X offered.
+    x_max: Option<u32>,
+    /// What the payment-step mana ability's cost prompt offered.
+    mana_ability_offer: Option<Vec<ObjectId>>,
 }
 
 /// The engine's own save/undo/P2P restore pipeline.
@@ -239,7 +278,7 @@ fn root_selection(runner: &GameRunner) -> Option<Vec<ObjectId>> {
         .state()
         .pending_cast
         .as_ref()
-        .map(|pending| pending.deferred_tapped_permanents.clone())
+        .map(|pending| pending.deferred_tap_ids().collect())
 }
 
 /// Casts `spell`, answering every prompt from `script` through public actions,
@@ -304,19 +343,24 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, script: &Script, watch: &[Obje
                 }
             }
             WaitingFor::TargetSelection { .. } => {
-                if script.restore_at_targets && !restored {
+                if script.at_targets == AtTargets::RestoreThenChoose && !restored {
                     restored = true;
                     *runner = round_trip(runner);
                 }
                 run.prompts.push(Prompt::Target);
                 run.tapped_at_targets = Some(tapped(runner, watch));
-                if script.cancel_at_targets {
+                if script.at_targets == AtTargets::Cancel {
                     runner.act(GameAction::CancelCast).expect("cancel");
                     return run;
                 }
                 GameAction::ChooseTarget {
-                    target: Some(TargetRef::Object(script.target)),
+                    target: script.target.map(TargetRef::Object),
                 }
+            }
+            WaitingFor::ChooseXValue { max, .. } => {
+                run.prompts.push(Prompt::X);
+                run.x_max = Some(max);
+                GameAction::ChooseX { value: script.x }
             }
             WaitingFor::HarmonizeTapChoice {
                 eligible_creatures,
@@ -325,7 +369,7 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, script: &Script, watch: &[Obje
             } => {
                 run.prompts.push(Prompt::Harmonize);
                 run.harmonize_offer = Some(eligible_creatures);
-                run.harmonize_inline_root = Some(pending_cast.deferred_tapped_permanents.clone());
+                run.harmonize_inline_root = Some(pending_cast.deferred_tap_ids().collect());
                 run.harmonize_published_root = Some(runner.state().pending_cast.is_some());
                 GameAction::HarmonizeTap {
                     creature_id: script.harmonize_with,
@@ -374,6 +418,15 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, script: &Script, watch: &[Obje
                             .expect("an unreserved creature convokes");
                         run.events.extend(result.events);
                     }
+                    if let Some((source, pays_with)) = script.mana_ability {
+                        let offer = activate(runner, source, pays_with, &mut run.events);
+                        run.mana_ability_offer = Some(offer);
+                    }
+                }
+                if script.completion == Completion::Refused {
+                    let refused = runner.act(GameAction::PassPriority);
+                    assert!(refused.is_err(), "the payment is refused: {refused:?}");
+                    return run;
                 }
                 GameAction::PassPriority
             }
@@ -396,6 +449,48 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, script: &Script, watch: &[Obje
     );
     assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
     run
+}
+
+/// Activates `source`'s mana ability, paying its cost with `pays_with`;
+/// returns what the cost prompt offered.
+fn activate(
+    runner: &mut GameRunner,
+    source: ObjectId,
+    pays_with: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Vec<ObjectId> {
+    let abilities = &runner.state().objects[&source].abilities;
+    let ability_index = abilities
+        .iter()
+        .position(is_mana_ability)
+        .expect("a mana ability");
+    let mut action = GameAction::ActivateAbility {
+        source_id: source,
+        ability_index,
+        payment_mode: CastPaymentMode::Auto,
+    };
+    let mut offer = Vec::new();
+    loop {
+        events.extend(
+            runner
+                .act(action)
+                .expect("the mana ability activates")
+                .events,
+        );
+        action = match runner.state().waiting_for.clone() {
+            WaitingFor::PayCost { choices, .. } => {
+                offer = choices;
+                GameAction::SelectCards {
+                    cards: vec![pays_with],
+                }
+            }
+            WaitingFor::ChooseManaColor { .. } => GameAction::ChooseManaColor {
+                choice: ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            },
+            _ => return offer,
+        };
+    }
 }
 
 /// CR 701.26a: how many times `id` became tapped during the cast.
@@ -422,12 +517,7 @@ fn copies(runner: &mut GameRunner, spell: ObjectId) -> usize {
             .state()
             .stack
             .iter()
-            .filter(|entry| {
-                !matches!(
-                    entry.kind,
-                    engine::types::game_state::StackEntryKind::Spell { .. }
-                )
-            })
+            .filter(|entry| !matches!(entry.kind, StackEntryKind::Spell { .. }))
             .count();
         let action = match runner.state().waiting_for.clone() {
             WaitingFor::CopyRetarget { .. } => GameAction::KeepAllCopyTargets,
@@ -465,15 +555,8 @@ struct PyromaticsBoard {
 }
 
 fn pyromatics_board() -> PyromaticsBoard {
-    let (mut scenario, victim, _, goblins) = table(false, 2);
-    let pyromatics = red_spell(
-        &mut scenario,
-        "Pyromatics",
-        true,
-        cost(1, &[ManaCostShard::Red]),
-        &["Replicate"],
-        PYROMATICS,
-    );
+    let (mut scenario, victim, _, goblins) = table(2);
+    let pyromatics = pyromatics(&mut scenario);
     pool(&mut scenario, ManaType::Red, 12);
     PyromaticsBoard {
         runner: scenario.build(),
@@ -554,7 +637,7 @@ fn conspire_creatures_stay_untapped_through_the_manual_payment_window() {
 fn conspire_selection_survives_a_restore_at_target_selection() {
     let mut board = pyromatics_board();
     let mut script = conspire_script(&board);
-    script.restore_at_targets = true;
+    script.at_targets = AtTargets::RestoreThenChoose;
     let run = cast(&mut board.runner, board.pyromatics, &script, &board.goblins);
 
     assert_eq!(run.prompts, conspire_trail());
@@ -568,7 +651,7 @@ fn conspire_selection_survives_a_restore_at_target_selection() {
 fn cancelled_conspire_cast_recasts_cleanly() {
     let mut board = pyromatics_board();
     let mut script = conspire_script(&board);
-    script.cancel_at_targets = true;
+    script.at_targets = AtTargets::Cancel;
     let cancelled = cast(&mut board.runner, board.pyromatics, &script, &board.goblins);
     assert_eq!(cancelled.prompts, conspire_trail());
     assert!(matches!(
@@ -578,7 +661,7 @@ fn cancelled_conspire_cast_recasts_cleanly() {
     assert_eq!(tapped(&board.runner, &board.goblins), vec![false, false]);
     assert!(board.runner.state().pending_cast.is_none());
 
-    script.cancel_at_targets = false;
+    script.at_targets = AtTargets::Choose;
     let run = cast(&mut board.runner, board.pyromatics, &script, &board.goblins);
     assert_eq!(run.prompts, conspire_trail());
     for goblin in &board.goblins {
@@ -599,20 +682,20 @@ struct TacticsBoard {
     victim: ObjectId,
     wort: ObjectId,
     djinn: ObjectId,
-    goblin: Option<ObjectId>,
+    goblins: Vec<ObjectId>,
 }
 
-fn tactics_board(with_goblin: bool) -> TacticsBoard {
+/// Team Tactics with Wort, Djinn Illuminatus and `goblins` Goblin Warriors.
+fn tactics_board(goblins: usize) -> TacticsBoard {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let victim = victim(&mut scenario);
     let wort = add_wort(&mut scenario);
     let djinn = add_djinn(&mut scenario);
-    let goblin = with_goblin.then(|| add_goblins(&mut scenario, 1)[0]);
+    let goblins = add_goblins(&mut scenario, goblins);
     let tactics = red_spell(
         &mut scenario,
         "Team Tactics",
-        true,
         cost(1, &[ManaCostShard::Red]),
         &[],
         TEAM_TACTICS,
@@ -624,7 +707,7 @@ fn tactics_board(with_goblin: bool) -> TacticsBoard {
         victim,
         wort,
         djinn,
-        goblin,
+        goblins,
     }
 }
 
@@ -632,7 +715,7 @@ fn tactics_board(with_goblin: bool) -> TacticsBoard {
 /// only Djinn left untapped, conspire's two-creature cost is not offered.
 #[test]
 fn creature_held_for_teamwork_makes_conspire_unofferable() {
-    let mut board = tactics_board(false);
+    let mut board = tactics_board(0);
     let mut script = Script::new(board.victim);
     script.replicate = 1;
     script.pay_once = vec![AdditionalCostOrigin::Teamwork, AdditionalCostOrigin::Other];
@@ -654,14 +737,21 @@ fn creature_held_for_teamwork_makes_conspire_unofferable() {
     assert_eq!(run.tapped_at_targets, Some(vec![false, false]));
     assert_eq!(taps(&run, board.wort), 1);
     assert_eq!(taps(&run, board.djinn), 0);
+    assert_eq!(spent(&board.runner, 12), 4, "{{1}}{{R}} + one replicate");
+    // One replicate copy. Found, not fixed: a granted-Conspire trigger also
+    // fires here off the teamwork payment (aggregate `additional_cost_paid`).
+    let replicate_triggers = board.runner.state().stack.iter().filter(|entry| {
+        matches!(&entry.kind, StackEntryKind::TriggeredAbility { description: Some(d), .. } if d == "Replicate")
+    });
+    assert_eq!(replicate_triggers.count(), 1, "one replicate copy trigger");
 }
 
 /// CR 601.2h: with a Goblin held for teamwork, conspire's prompt offers exactly
 /// Wort and Djinn; each is tapped once when the cost is paid.
 #[test]
 fn creature_held_for_teamwork_is_not_offered_to_conspire() {
-    let mut board = tactics_board(true);
-    let goblin = board.goblin.expect("the Goblin");
+    let mut board = tactics_board(1);
+    let goblin = board.goblins[0];
     let mut script = Script::new(board.victim);
     script.replicate = 1;
     script.pay_once = vec![AdditionalCostOrigin::Teamwork, AdditionalCostOrigin::Other];
@@ -690,6 +780,7 @@ fn creature_held_for_teamwork_is_not_offered_to_conspire() {
     for id in watch {
         assert_eq!(taps(&run, id), 1);
     }
+    assert_eq!(spent(&board.runner, 12), 4, "{{1}}{{R}} + one replicate");
     assert_eq!(
         copies(&mut board.runner, board.tactics),
         2,
@@ -705,12 +796,12 @@ fn creature_held_for_teamwork_is_not_offered_to_conspire() {
 /// for conspire can't convoke; an unheld creature does, and the cast completes.
 #[test]
 fn creatures_held_for_conspire_cant_convoke() {
-    let (mut scenario, victim, _, goblins) = table(true, 2);
+    let (mut scenario, victim, _, goblins) = table(2);
+    add_djinn(&mut scenario);
     let helper = creature(&mut scenario, "Convoking Helper", 2, &RED);
     let stoke = red_spell(
         &mut scenario,
         "Stoke the Flames",
-        true,
         cost(2, &[ManaCostShard::Red, ManaCostShard::Red]),
         &[],
         STOKE_THE_FLAMES,
@@ -759,7 +850,7 @@ struct DruidBoard {
 /// One Mountain and `druids` mature Zhur-Taa Druids beside Pyromatics, Wort
 /// and two Goblins; P0's pool is empty.
 fn druid_board(druids: usize) -> DruidBoard {
-    let (mut scenario, victim, _, goblins) = table(false, 2);
+    let (mut scenario, victim, _, goblins) = table(2);
     let druids = (0..druids)
         .map(|_| {
             scenario
@@ -769,14 +860,7 @@ fn druid_board(druids: usize) -> DruidBoard {
         })
         .collect();
     scenario.add_basic_land(P0, ManaColor::Red);
-    let pyromatics = red_spell(
-        &mut scenario,
-        "Pyromatics",
-        true,
-        cost(1, &[ManaCostShard::Red]),
-        &["Replicate"],
-        PYROMATICS,
-    );
+    let pyromatics = pyromatics(&mut scenario);
     DruidBoard {
         runner: scenario.build(),
         pyromatics,
@@ -843,15 +927,14 @@ fn creature_held_for_conspire_is_not_tapped_for_mana() {
 /// sacrificed; casualty and conspire each copy the spell.
 #[test]
 fn creature_tapped_for_conspire_is_then_sacrificed_for_casualty() {
-    let (mut scenario, victim, djinn, goblins) = table(true, 1);
-    let (djinn, goblin) = (djinn.expect("Djinn"), goblins[0]);
+    let (mut scenario, victim, _, goblins) = table(1);
+    let (djinn, goblin) = (add_djinn(&mut scenario), goblins[0]);
     scenario
         .add_creature_from_oracle(P0, "Anhelo, the Painter", 3, 3, ANHELO)
         .with_color(vec![ManaColor::Blue, ManaColor::Black, ManaColor::Red]);
     let temper = red_spell(
         &mut scenario,
         "Fiery Temper",
-        true,
         cost(1, &[ManaCostShard::Red, ManaCostShard::Red]),
         &[],
         FIERY_TEMPER,
@@ -924,11 +1007,11 @@ fn teamwork_announced_before_targets_taps_when_the_cost_is_paid() {
 /// pays, tapping each once.
 #[test]
 fn phyrexian_payment_pause_keeps_the_selection_held() {
-    let (mut scenario, victim, _, goblins) = table(true, 2);
+    let (mut scenario, victim, _, goblins) = table(2);
+    add_djinn(&mut scenario);
     let gut_shot = red_spell(
         &mut scenario,
         "Gut Shot",
-        true,
         cost(0, &[ManaCostShard::PhyrexianRed]),
         &[],
         GUT_SHOT,
@@ -960,7 +1043,8 @@ fn phyrexian_payment_pause_keeps_the_selection_held() {
 /// open only the prompt's own root exists; answering it completes the cast.
 #[test]
 fn harmonize_does_not_offer_creatures_held_for_conspire() {
-    let (mut scenario, victim, _, goblins) = table(true, 2);
+    let (mut scenario, victim, _, goblins) = table(2);
+    add_djinn(&mut scenario);
     let helper = creature(&mut scenario, "Harmonizing Helper", 3, &RED);
     let dragonfire = scenario
         .add_spell_to_graveyard(P0, "Channeled Dragonfire", false)
@@ -968,8 +1052,9 @@ fn harmonize_does_not_offer_creatures_held_for_conspire() {
         .with_color(RED.to_vec())
         .from_oracle_text_with_keywords(&["Harmonize"], CHANNELED_DRAGONFIRE)
         .id();
-    // CR 601.2b: the declaration is offered only when the unreduced harmonize
-    // total is payable; the tap reduction is chosen at payment.
+    // Current engine limitation: optional-declaration offerability does not
+    // account for the later Harmonize reduction. Fund the unreduced total so
+    // this row reaches Conspire and the Harmonize offer.
     pool(&mut scenario, ManaType::Red, 7);
     let mut runner = scenario.build();
 
@@ -994,4 +1079,146 @@ fn harmonize_does_not_offer_creatures_held_for_conspire() {
     for goblin in &goblins {
         assert_eq!(taps(&run, *goblin), 1);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Payment-time state
+// ---------------------------------------------------------------------------
+
+fn myr(
+    scenario: &mut GameScenario,
+    player: PlayerId,
+    name: &str,
+    power: i32,
+    oracle: &str,
+) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(player, name, power, power, oracle)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Myr"])
+        .id()
+}
+
+/// CR 601.2h + CR 208.1: teamwork's total power is checked again when the cost
+/// is paid. Gold Myr (2 power with Myr Galvanizer) pays Cruel Alliance's
+/// teamwork 2; sacrificing the Galvanizer to Krark-Clan Ironworks during payment
+/// leaves it at 1, and the payment is refused. Sacrificing the Ironworks
+/// itself instead keeps it at 2, and the cast completes.
+#[test]
+fn teamwork_selection_is_revalidated_when_the_cost_is_paid() {
+    for (completion, power) in [(Completion::Refused, 1), (Completion::Completes, 2)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = myr(&mut scenario, P1, "Gold Myr", 1, GOLD_MYR);
+        let galvanizer = myr(&mut scenario, P0, "Myr Galvanizer", 2, MYR_GALVANIZER);
+        let gold_myr = myr(&mut scenario, P0, "Gold Myr", 1, GOLD_MYR);
+        let ironworks = scenario
+            .add_artifact_from_oracle(P0, "Krark-Clan Ironworks", KRARK_CLAN_IRONWORKS)
+            .id();
+        let alliance = scenario
+            .add_spell_to_hand(P0, "Cruel Alliance", false)
+            .with_mana_cost(cost(2, &[ManaCostShard::Black]))
+            .with_color(vec![ManaColor::Black])
+            .from_oracle_text_with_keywords(&[], CRUEL_ALLIANCE)
+            .id();
+        pool(&mut scenario, ManaType::Black, 1);
+        let mut runner = scenario.build();
+
+        let paid = completion == Completion::Completes;
+        let sacrificed = if paid { ironworks } else { galvanizer };
+        let mut script = Script::new(victim);
+        script.payment_mode = CastPaymentMode::Manual;
+        script.pay_once = vec![AdditionalCostOrigin::Teamwork];
+        script.selections = vec![vec![gold_myr]];
+        script.mana_ability = Some((ironworks, sacrificed));
+        script.completion = completion;
+        let run = cast(&mut runner, alliance, &script, &[gold_myr]);
+
+        assert_eq!(run.tapped_at_targets, Some(vec![false]));
+        assert_eq!(runner.state().objects[&sacrificed].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&gold_myr].power, Some(power));
+        assert_eq!(taps(&run, gold_myr), usize::from(paid));
+        assert_eq!(runner.state().objects[&gold_myr].tapped, paid);
+    }
+}
+
+/// CR 107.3 + CR 601.2f: a creature held for conspire is not tapped for X, but
+/// its own non-tap mana ability still counts toward X. Heat Ray under Djinn +
+/// Wort, conspire paid with Wort and Thermopod: X = 1 is offered because
+/// Thermopod can sacrifice an unheld Goblin for {R}, and the cast completes.
+/// The control holds a Goblin instead of Thermopod.
+#[test]
+fn held_creature_still_counts_its_non_tap_mana_toward_x() {
+    // Case 0 holds Thermopod; case 1, the control, holds a Goblin instead.
+    for case in 0..2 {
+        let (mut scenario, _, wort, goblins) = table(2);
+        add_djinn(&mut scenario);
+        let thermopod = scenario
+            .add_creature_from_oracle(P0, "Thermopod", 4, 3, THERMOPOD)
+            .with_color(RED.to_vec())
+            .id();
+        let target = myr(&mut scenario, P1, "Gold Myr", 1, GOLD_MYR);
+        let heat_ray = red_spell(
+            &mut scenario,
+            "Heat Ray",
+            cost(0, &[ManaCostShard::X, ManaCostShard::Red]),
+            &[],
+            HEAT_RAY,
+        );
+        pool(&mut scenario, ManaType::Red, 1);
+        let mut runner = scenario.build();
+
+        let partner = [thermopod, goblins[1]][case];
+        let mut script = Script::new(target);
+        script.payment_mode = CastPaymentMode::Manual;
+        script.pay_once = vec![AdditionalCostOrigin::Other];
+        script.selections = vec![vec![wort, partner]];
+        script.x = 1;
+        script.mana_ability = Some((thermopod, goblins[0]));
+        let run = cast(&mut runner, heat_ray, &script, &[wort, partner]);
+
+        let declared = run.prompts.iter().position(|p| *p == Prompt::PayCost);
+        let announced = run.prompts.iter().position(|p| *p == Prompt::X);
+        assert!(
+            declared < announced,
+            "reach: conspire is held when X is announced: {:?}",
+            run.prompts
+        );
+        assert!(run.x_max >= Some(1), "X = 1 is offered: {:?}", run.x_max);
+        assert_eq!(runner.state().objects[&goblins[0]].zone, Zone::Graveyard);
+        assert_eq!(taps(&run, wort), 1);
+        assert_eq!(taps(&run, partner), 1);
+    }
+}
+
+/// CR 605.3a + CR 601.2h: Springleaf Drum's "tap an untapped creature you
+/// control" cost, activated during Pyromatics' payment, offers the unheld Wort
+/// but neither Goblin held for conspire.
+#[test]
+fn creatures_held_for_conspire_cant_pay_a_mana_ability_tap_cost() {
+    let (mut scenario, victim, wort, goblins) = table(2);
+    let drum = scenario
+        .add_artifact_from_oracle(P0, "Springleaf Drum", SPRINGLEAF_DRUM)
+        .id();
+    let pyromatics = pyromatics(&mut scenario);
+    pool(&mut scenario, ManaType::Red, 2);
+    let mut runner = scenario.build();
+
+    let mut script = Script::new(victim);
+    script.payment_mode = CastPaymentMode::Manual;
+    script.pay_once = vec![AdditionalCostOrigin::Other];
+    script.selections = vec![goblins.clone()];
+    script.mana_ability = Some((drum, wort));
+    let run = cast(&mut runner, pyromatics, &script, &goblins);
+
+    let offer = run
+        .mana_ability_offer
+        .as_ref()
+        .expect("reach: the Drum's cost prompt");
+    assert!(offer.contains(&wort), "the unheld Wort is offered");
+    for goblin in &goblins {
+        assert!(!offer.contains(goblin), "a held Goblin is not offered");
+        assert_eq!(taps(&run, *goblin), 1, "tapped once, for conspire");
+    }
+    assert_eq!(taps(&run, wort), 1, "tapped for the Drum");
 }

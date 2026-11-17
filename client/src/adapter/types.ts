@@ -2596,7 +2596,7 @@ export interface PendingCast {
   deferred_sacrificed_permanents?: DeferredSpellSacrifice[];
   // CR 601.2b + CR 601.2h: creatures selected before targets for a spell tap
   // cost, tapped at the payment commit. Absent when none.
-  deferred_tapped_permanents?: ObjectId[];
+  deferred_tapped_permanents?: { object_ids: ObjectId[]; cost: SerializedAbilityCost }[];
   // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
   // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
   pinned_pool_units?: number[];

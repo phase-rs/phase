@@ -1995,6 +1995,7 @@ pub(super) fn handle_tap_creatures_for_spell_cost(
     mode: TapCreaturesSelectionMode,
     creatures: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<casting_costs::SpellCostPayment<'_>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     casting_costs::handle_tap_creatures_for_spell_cost(
@@ -2006,6 +2007,7 @@ pub(super) fn handle_tap_creatures_for_spell_cost(
         mode,
         creatures,
         chosen,
+        paid_cost,
         events,
     )
 }

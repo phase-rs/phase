@@ -9841,6 +9841,15 @@ pub enum DeferredSpellSacrifice {
     All { filter: TargetFilter },
 }
 
+/// CR 601.2b + CR 601.2h: a spell tap cost selected before the spell's targets
+/// and tapped at the payment commit. `cost` is the tap cost being paid; the
+/// commit revalidates the selection against it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredSpellTap {
+    pub object_ids: Vec<ObjectId>,
+    pub cost: AbilityCost,
+}
+
 impl DeferredSpellSacrifice {
     pub fn selected_object(&self) -> Option<ObjectId> {
         match self {
@@ -10268,7 +10277,7 @@ pub struct PendingCast {
     /// tapped at the payment commit, after the mana-ability window, and are
     /// held for that payment until then (`holds_tap_reservation`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deferred_tapped_permanents: Vec<ObjectId>,
+    pub deferred_tapped_permanents: Vec<DeferredSpellTap>,
     /// CR 118.3a: Player-directed pin hints recorded during
     /// `WaitingFor::ManaPayment`. Each id names a pool `ManaUnit` the caster
     /// prefers to spend first; pins are priority hints, not removals — the unit
@@ -11403,7 +11412,14 @@ impl PendingCast {
     /// that payment commits. The single membership test behind
     /// `restrictions::payment_tap_reserved`.
     pub fn holds_tap_reservation(&self, id: ObjectId) -> bool {
-        self.deferred_tapped_permanents.contains(&id)
+        self.deferred_tap_ids().any(|held| held == id)
+    }
+
+    /// Every permanent held for this spell's deferred tap costs.
+    pub fn deferred_tap_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.deferred_tapped_permanents
+            .iter()
+            .flat_map(|tap| tap.object_ids.iter().copied())
     }
 
     /// CR 601.2g + CR 601.2h: whether a non-mana cost selected earlier is paid

@@ -5054,20 +5054,39 @@ fn commit_deferred_spell_taps(
     debug_assert!(
         selected
             .iter()
+            .flat_map(|tap| &tap.object_ids)
             .all(|id| !super::restrictions::payment_tap_reserved(state, *id)),
         "the payment commit must not see its own reservation"
     );
-    for id in selected {
-        let payable = state.objects.get(&id).is_some_and(|obj| {
-            obj.zone == Zone::Battlefield && obj.controller == player && !obj.tapped
-        });
-        if !payable {
+    for tap in selected {
+        // CR 601.2h: the selection must still pay its cost now: each creature
+        // still matches the cost's filter, untapped under the payer's control,
+        // and an aggregate total still meets its threshold (CR 208.1).
+        let still_payable = super::casting::find_tap_creatures_cost(&tap.cost).is_some_and(
+            |(requirement, filter)| {
+                let eligible = super::casting::find_eligible_tap_creatures_for_cost(
+                    state,
+                    player,
+                    pending.object_id,
+                    pending.ability.context.granting_object,
+                    &tap.cost,
+                    filter,
+                );
+                let n = tap.object_ids.len();
+                let mode = requirement.selection_mode();
+                validate_tap_creatures_selection(state, n, n, mode, &eligible, &tap.object_ids)
+                    .is_ok()
+            },
+        );
+        if !still_payable {
             return Err(EngineError::ActionNotAllowed(
-                "A creature selected to pay this spell's tap cost can no longer be tapped"
+                "The creatures selected to pay this spell's tap cost can no longer pay it"
                     .to_string(),
             ));
         }
-        super::restrictions::tap_permanent_for_cost(state, id, events)?;
+        for id in tap.object_ids {
+            super::restrictions::tap_permanent_for_cost(state, id, events)?;
+        }
     }
     Ok(())
 }
@@ -7316,6 +7335,13 @@ fn validate_tap_creatures_selection(
     Ok(())
 }
 
+/// CR 601.2b + CR 601.2h: whether a spell tap cost selected now is tapped at
+/// the payment commit rather than at selection: it was announced before the
+/// spell's targets.
+fn defers_spell_tap_cost(pending: &PendingCast) -> bool {
+    pending.deferred_target_selection && pending.activation_ability_index.is_none()
+}
+
 /// CR 118.3 + CR 701.26a: Complete the tap-creatures cost after player selection.
 ///
 /// CR 601.2b + CR 601.2c + CR 601.2h: a spell tap cost chosen before the
@@ -7333,11 +7359,22 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
     mode: TapCreaturesSelectionMode,
     legal_creatures: &[ObjectId],
     chosen: &[ObjectId],
+    paid_cost: Option<SpellCostPayment<'_>>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if pending.deferred_target_selection && pending.activation_ability_index.is_none() {
+    if defers_spell_tap_cost(&pending) {
+        let cost = paid_cost
+            .map(|payment| payment.cost.clone())
+            .ok_or_else(|| {
+                EngineError::InvalidAction("A deferred tap cost must name its cost".to_string())
+            })?;
         validate_tap_creatures_selection(state, min_count, count, mode, legal_creatures, chosen)?;
-        pending.deferred_tapped_permanents.extend_from_slice(chosen);
+        pending
+            .deferred_tapped_permanents
+            .push(crate::types::game_state::DeferredSpellTap {
+                object_ids: chosen.to_vec(),
+                cost,
+            });
     } else {
         pay_tap_creatures_selection(
             state,
@@ -13062,15 +13099,25 @@ fn pay_additional_cost_with_source(
                     (PayCostKind::TapCreatures { mode }, eligible.len(), 0)
                 }
             };
+            // CR 601.2h: a deferred selection keeps the cost it pays, so the
+            // payment commit can revalidate it.
+            let spell = Box::new(pending);
+            let resume = if defers_spell_tap_cost(&spell) {
+                CostResume::SpellCost {
+                    spell,
+                    cost: Box::new(cost.clone()),
+                    source: cost_source,
+                }
+            } else {
+                CostResume::Spell { spell }
+            };
             return Ok(WaitingFor::PayCost {
                 player,
                 kind,
                 choices: eligible,
                 count,
                 min_count,
-                resume: CostResume::Spell {
-                    spell: Box::new(pending),
-                },
+                resume,
             });
         }
         AbilityCost::Reveal {
@@ -14422,7 +14469,7 @@ pub(super) struct CostLockInput {
     pub alternative_cost_election: crate::types::game_state::SpellAlternativeCostElection,
     /// CR 601.2b + CR 601.2h: tap-cost selections made before targets, still
     /// unpaid and held until the payment commit.
-    pub deferred_tapped_permanents: Vec<ObjectId>,
+    pub deferred_tapped_permanents: Vec<crate::types::game_state::DeferredSpellTap>,
 }
 
 impl CostLockInput {
@@ -18626,9 +18673,6 @@ pub(super) fn max_x_value_excluding(
         .battlefield
         .iter()
         .filter(|id| !excluded_sources.contains(id))
-        // CR 601.2h: a permanent held for the spell's deferred tap cost pays
-        // that cost, not this one.
-        .filter(|&&id| !super::restrictions::payment_tap_reserved(state, id))
         .map(|&id| {
             let mana = mana_sources::x_ceiling_mana_capacity(
                 state,
@@ -20875,7 +20919,10 @@ mod tests {
             ability,
             ManaCost::zero(),
         );
-        root.deferred_tapped_permanents = held.iter().copied().map(ObjectId).collect();
+        root.deferred_tapped_permanents = vec![crate::types::game_state::DeferredSpellTap {
+            object_ids: held.iter().copied().map(ObjectId).collect(),
+            cost: AbilityCost::Tap,
+        }];
         root
     }
 

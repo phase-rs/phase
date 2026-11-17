@@ -13434,6 +13434,7 @@ fn apply_non_priority_pass_action(
                             *mode,
                             choices,
                             &chosen,
+                            paid_cost,
                             &mut events,
                         )?
                     }
