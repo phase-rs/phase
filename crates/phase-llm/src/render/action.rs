@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 use engine::analysis::decision_template::AnnouncementSubject;
 use engine::game::combat::AttackTarget;
 use engine::game::game_object::AttachTarget;
+use engine::game::mana_sources::produced_mana_for_action;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -419,26 +420,29 @@ impl ActionIds<'_> {
     ///
     /// `selection` is the engine's key for one live activation (`value` its
     /// serialized form), and parts of it describe nothing: the source's
-    /// incarnation (CR 400.7), and `mana_type`, which repeats a concrete
-    /// output and, while the color is still to be chosen, is an inert
-    /// colorless marker. The mana is read as the client's mana-source chooser
-    /// reads it (`manaSourceOutputDisplay` in
-    /// `client/src/components/mana/ManaPaymentUI.tsx`): a color chosen on
-    /// activation, else the whole atomic combination (a filter land's
-    /// `{W}{U}`, with any aura's bonus mana appended, which is also all that
-    /// `taps_for_mana` adds), else the one concrete type.
+    /// incarnation (CR 400.7), and `mana_type`, which is one representative
+    /// type of the output and, while the color is still to be chosen, an inert
+    /// colorless marker.
+    ///
+    /// CR 106.3: the mana is what the activation would add, read from the
+    /// engine's own authority, `mana_sources::produced_mana_for_action`, which
+    /// resolves the selection as the action's reducer does. That is every unit
+    /// (Lotus Field's `{R}{R}{R}`, Sol Ring's `{C}{C}`, a filter land's
+    /// `{W}{U}`), not the one type the selection names. A color still to be
+    /// chosen on activation is said to be. A concrete selection the engine no
+    /// longer resolves, or resolves to no mana, names no live activation, so
+    /// its yield is unknown and no mana is stated.
     fn mana_source(&self, selection: &ManaSourceSelection, value: &Value) -> String {
         let mana = match selection.output {
             ManaSourceOutput::DeferredColorChoice {
                 quantity: ManaSourceQuantity::Fixed(amount),
-            } => format!("{amount}, color chosen on activation"),
+            } => Some(format!("{amount}, color chosen on activation")),
             ManaSourceOutput::DeferredColorChoice {
                 quantity: ManaSourceQuantity::Variable,
-            } => "amount and color set on activation".to_string(),
-            ManaSourceOutput::Concrete(produced) => match &selection.atomic_combination {
-                Some(combination) => mana_symbols(combination.iter().copied()),
-                None => mana_symbols(std::iter::once(produced)),
-            },
+            } => Some("amount and color set on activation".to_string()),
+            ManaSourceOutput::Concrete(_) => produced_mana_for_action(self.state, self.action)
+                .filter(|produced| !produced.is_empty())
+                .map(|produced| mana_symbols(produced.iter().map(|unit| unit.mana_type))),
         };
         // The walk words the restrictions and the penalty as it words any
         // other engine value.
@@ -453,7 +457,9 @@ impl ActionIds<'_> {
         if let Some(index) = selection.ability_index {
             facts.push(format!("Ability Index {index}"));
         }
-        facts.push(format!("Mana {mana}"));
+        if let Some(mana) = mana {
+            facts.push(format!("Mana {mana}"));
+        }
         if selection.penalty != ManaSourcePenalty::None {
             facts.push(format!("Penalty {}", walked("penalty")));
         }
@@ -1396,10 +1402,10 @@ mod tests {
     /// Issue #10997: a mana option printed the engine's whole selection
     /// (`Atomic Combination none, Mana Type White, Output Data White, Type
     /// Concrete, Penalty None, ..., Source Incarnation 2, ...`). The engine's
-    /// own selection for a Plains now reads as the mana it makes.
+    /// own land-tap action for a Plains now reads as the mana it makes.
     #[test]
     fn a_lands_mana_option_names_the_mana_it_makes() {
-        use engine::game::mana_sources::activatable_mana_source_selections;
+        use engine::game::mana_sources::activatable_mana_actions_for_player;
         use engine::game::scenario::GameScenario;
         use engine::game::visibility::filter_state_for_viewer;
         use engine::types::mana::ManaColor;
@@ -1411,22 +1417,16 @@ mod tests {
         let runner = scenario.build();
         let visible = filter_state_for_viewer(runner.state(), VIEWER);
 
-        let selections = activatable_mana_source_selections(runner.state(), VIEWER);
-        let [selection] = selections.as_slice() else {
-            panic!("a Plains offers one activation: {selections:?}");
+        let actions = activatable_mana_actions_for_player(runner.state(), VIEWER);
+        let [action @ GameAction::TapLandForMana { .. }] = actions.as_slice() else {
+            panic!("a Plains offers one land tap: {actions:?}");
         };
-        let label = describe_action(
-            &visible,
-            VIEWER,
-            &GameAction::TapLandForMana {
-                selection: selection.clone(),
-            },
-        );
+        let label = describe_action(&visible, VIEWER, action);
         assert!(
             label.starts_with("Tap Land For Mana (Selection: "),
             "{label}"
         );
-        assert!(label.contains("Mana {W}"), "{label}");
+        assert!(label.contains("Mana {W},"), "{label}");
         assert!(
             label.contains("Source Plains (controlled by You)"),
             "{label}"
@@ -1441,6 +1441,111 @@ mod tests {
         ] {
             assert!(!label.contains(internal), "{internal} in {label}");
         }
+    }
+
+    /// CR 106.3: a mana option states every mana the activation adds. Lotus
+    /// Field's land tap for red named one `{R}`, the one type its selection
+    /// carries, though the engine adds three.
+    #[test]
+    fn a_mana_option_states_all_the_mana_it_adds() {
+        use engine::game::mana_sources::activatable_mana_actions_for_player;
+        use engine::game::scenario::GameScenario;
+        use engine::game::visibility::filter_state_for_viewer;
+        use engine::types::mana::ManaType;
+        use engine::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let lotus = scenario
+            .add_land_from_oracle(
+                VIEWER,
+                "Lotus Field",
+                "Hexproof\nThis land enters tapped.\nWhen this land enters, sacrifice two \
+                 lands.\n{T}: Add three mana of any one color.",
+            )
+            .id();
+        let runner = scenario.build();
+        let state = runner.state();
+        let visible = filter_state_for_viewer(state, VIEWER);
+        assert!(!state.objects[&lotus].tapped, "Lotus Field can be tapped");
+
+        // The engine's own land-tap actions for Lotus Field, one per color.
+        let labels: Vec<(ManaType, String)> = activatable_mana_actions_for_player(state, VIEWER)
+            .iter()
+            .filter_map(|action| match action {
+                GameAction::TapLandForMana { selection } => {
+                    let ManaSourceOutput::Concrete(color) = selection.output else {
+                        return None;
+                    };
+                    // Reach guard: no planner combination carries the amount,
+                    // so the label can only have it from the engine's output.
+                    assert_eq!(selection.atomic_combination, None, "{selection:?}");
+                    Some((color, describe_action(&visible, VIEWER, action)))
+                }
+                _ => None,
+            })
+            .collect();
+        let red = labels
+            .iter()
+            .find(|(color, _)| *color == ManaType::Red)
+            .map(|(_, label)| label)
+            .unwrap_or_else(|| panic!("Lotus Field offers a red land tap: {labels:?}"));
+        assert!(red.starts_with("Tap Land For Mana (Selection: "), "{red}");
+        assert!(red.contains("Mana {R}{R}{R},"), "{red}");
+        assert!(
+            red.contains("Source Lotus Field (controlled by You)"),
+            "{red}"
+        );
+        // One row per color, each its own three mana.
+        assert_eq!(labels.len(), 5, "{labels:?}");
+        let distinct: std::collections::BTreeSet<&String> =
+            labels.iter().map(|(_, label)| label).collect();
+        assert_eq!(distinct.len(), 5, "{labels:?}");
+    }
+
+    /// The same authority reads an artifact's `ActivateManaSource`
+    /// activation: Sol Ring's option states both `{C}` it adds.
+    #[test]
+    fn a_mana_artifacts_option_states_all_the_mana_it_adds() {
+        use engine::game::mana_sources::activatable_mana_source_selections;
+        use engine::game::scenario::GameScenario;
+        use engine::game::visibility::filter_state_for_viewer;
+        use engine::types::mana::ManaType;
+        use engine::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_artifact_from_oracle(VIEWER, "Sol Ring", "{T}: Add {C}{C}.");
+        let runner = scenario.build();
+        let visible = filter_state_for_viewer(runner.state(), VIEWER);
+
+        let selections = activatable_mana_source_selections(runner.state(), VIEWER);
+        let [selection] = selections.as_slice() else {
+            panic!("Sol Ring offers one activation: {selections:?}");
+        };
+        // Reach guard: a concrete selection, which the label reads through the
+        // engine's output rather than as a color still to be chosen. The
+        // planner records Sol Ring's two mana as one atomic combination row.
+        assert_eq!(
+            selection.output,
+            ManaSourceOutput::Concrete(ManaType::Colorless)
+        );
+        assert_eq!(
+            selection.atomic_combination,
+            Some(vec![ManaType::Colorless; 2])
+        );
+        let label = describe_action(
+            &visible,
+            VIEWER,
+            &GameAction::ActivateManaSource {
+                selection: selection.clone(),
+            },
+        );
+        assert!(label.contains("Mana {C}{C},"), "{label}");
+        assert!(
+            label.contains("Source Sol Ring (controlled by You)"),
+            "{label}"
+        );
     }
 
     /// While a source's color is still to be chosen, the engine marks the
@@ -1515,18 +1620,20 @@ mod tests {
         );
     }
 
-    /// A filter land's rows share a mana type and differ in the combination
-    /// they make, a painland's colored row carries its damage, and Cavern of
-    /// Souls' colored mana carries its spend restriction. Each reads as such.
+    /// A painland's colored activation carries its damage, Cavern of Souls'
+    /// colored mana its spend restriction, and Selvala's an amount set on
+    /// activation; each option says so. These are manual activations whose
+    /// color is chosen on activation, so their selections carry everything
+    /// the label states.
     #[test]
-    fn mana_options_keep_what_tells_them_apart() {
+    fn mana_options_state_their_penalty_and_restrictions() {
         use engine::game::create_object;
         use engine::types::identifiers::ObjectIncarnationRef;
         use engine::types::mana::{ManaRestriction, ManaType};
         use engine::types::zones::Zone;
 
         let mut board = board();
-        let mut land = |name: &str| {
+        let mut permanent = |name: &str| {
             create_object(
                 &mut board.state,
                 CardId(80),
@@ -1535,87 +1642,77 @@ mod tests {
                 Zone::Battlefield,
             )
         };
-        // "{W/U}, {T}: Add {W}{W}, {W}{U}, or {U}{U}."
-        let gate = land("Mystic Gate");
         // "{T}: Add {W} or {U}. This land deals 1 damage to you."
-        let wastes = land("Adarkar Wastes");
+        let wastes = permanent("Adarkar Wastes");
         // "{T}: Add one mana of any color. Spend this mana only to cast a
         // creature spell of the chosen type, and that spell can't be
         // countered."
-        let cavern = land("Cavern of Souls");
+        let cavern = permanent("Cavern of Souls");
         // "{G}, {T}: Add X mana in any combination of colors, where X is the
         // greatest power among creatures you control."
-        let selvala = land("Selvala, Heart of the Wilds");
+        let selvala = permanent("Selvala, Heart of the Wilds");
+        // Dark Depths has no mana ability, so no live activation matches a
+        // concrete selection of it.
+        let depths = permanent("Dark Depths");
 
-        let selection = |source: ObjectId, produced: ManaType| ManaSourceSelection {
+        let selection = |source: ObjectId, quantity: ManaSourceQuantity| ManaSourceSelection {
             source: ObjectIncarnationRef::of(source, 2),
             ability_index: Some(1),
-            mana_type: produced,
-            output: ManaSourceOutput::Concrete(produced),
+            mana_type: ManaType::Colorless,
+            output: ManaSourceOutput::DeferredColorChoice { quantity },
             atomic_combination: None,
             restrictions: Vec::new(),
             penalty: ManaSourcePenalty::None,
             taps_for_mana: Vec::new(),
         };
-        let tapped = |chosen: ManaSourceSelection| {
-            described(&board, GameAction::TapLandForMana { selection: chosen })
+        let activated = |chosen: ManaSourceSelection| {
+            described(&board, GameAction::ActivateManaSource { selection: chosen })
         };
-
-        let combination = |colors: Vec<ManaType>| ManaSourceSelection {
-            atomic_combination: Some(colors),
-            ..selection(gate, ManaType::White)
-        };
-        let white_white = tapped(combination(vec![ManaType::White, ManaType::White]));
-        let white_blue = tapped(combination(vec![ManaType::White, ManaType::Blue]));
-        assert_eq!(
-            white_blue,
-            "Tap Land For Mana (Selection: Ability Index 1, Mana {W}{U}, \
-             Source Mystic Gate (controlled by You))"
-        );
-        assert_ne!(white_white, white_blue);
 
         let painful = ManaSourceSelection {
             penalty: ManaSourcePenalty::DealsDamageOnResolution {
                 fixed_amount: Some(1),
             },
-            ..selection(wastes, ManaType::Blue)
+            ..selection(wastes, ManaSourceQuantity::Fixed(1))
         };
         assert_eq!(
-            tapped(painful),
-            "Tap Land For Mana (Selection: Ability Index 1, Mana {U}, \
+            activated(painful),
+            "Activate Mana Source (Selection: Ability Index 1, \
+             Mana 1, color chosen on activation, \
              Penalty Deals Damage On Resolution Fixed Amount 1, \
              Source Adarkar Wastes (controlled by You))"
         );
 
         let restricted = ManaSourceSelection {
             restrictions: vec![ManaRestriction::OnlyForCreatureType("Angel".to_string())],
-            ..selection(cavern, ManaType::White)
+            ..selection(cavern, ManaSourceQuantity::Fixed(1))
         };
         assert_eq!(
-            tapped(restricted),
-            "Tap Land For Mana (Selection: Ability Index 1, Mana {W}, \
+            activated(restricted),
+            "Activate Mana Source (Selection: Ability Index 1, \
+             Mana 1, color chosen on activation, \
              Restrictions Only For Creature Type Angel, \
              Source Cavern of Souls (controlled by You))"
         );
 
-        // An amount the engine works out on activation, of colors chosen
-        // then, with the colorless marker in `mana_type`.
-        let variable = ManaSourceSelection {
-            output: ManaSourceOutput::DeferredColorChoice {
-                quantity: ManaSourceQuantity::Variable,
-            },
-            ..selection(selvala, ManaType::Colorless)
-        };
         assert_eq!(
-            described(
-                &board,
-                GameAction::ActivateManaSource {
-                    selection: variable
-                }
-            ),
+            activated(selection(selvala, ManaSourceQuantity::Variable)),
             "Activate Mana Source (Selection: Ability Index 1, \
              Mana amount and color set on activation, \
              Source Selvala, Heart of the Wilds (controlled by You))"
+        );
+
+        // A concrete selection no live activation matches has no known yield,
+        // and the option states no mana rather than the one type it names.
+        let stale = ManaSourceSelection {
+            mana_type: ManaType::Black,
+            output: ManaSourceOutput::Concrete(ManaType::Black),
+            ..selection(depths, ManaSourceQuantity::Fixed(1))
+        };
+        assert_eq!(
+            described(&board, GameAction::TapLandForMana { selection: stale }),
+            "Tap Land For Mana (Selection: Ability Index 1, \
+             Source Dark Depths (controlled by You))"
         );
     }
 }
