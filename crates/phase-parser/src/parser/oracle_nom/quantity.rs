@@ -7548,15 +7548,15 @@ fn parse_number_of_objects_exiled_under_controller_this_turn(
     ))
     .parse(rest)?;
     let (rest, _) = tag(" this turn").parse(rest)?;
-    let TargetFilter::Typed(typed) = filter else {
-        return Err(oracle_err(input));
-    };
+    // CR 109.4: shared controller injection (also adds the battlefield-presence
+    // property, matching `from_zone` on the zone-change record), as used by the
+    // sibling `parse_died_under_control_this_turn`.
     Ok((
         rest,
         QuantityRef::ZoneChangeCountThisTurn {
             from: Some(Zone::Battlefield),
             to: Some(Zone::Exile),
-            filter: TargetFilter::Typed(typed.controller(controller)),
+            filter: super::condition::inject_controller(filter, controller),
         },
     ))
 }
@@ -9432,28 +9432,40 @@ mod tests {
     #[test]
     fn zone_change_count_exiled_under_controller_supports_type_and_number_forms() {
         // Only Vren, the Relentless prints this shape ("...the number of creatures that were exiled under your opponents' control this turn"); the singular, "your" and artifact rows exercise the combinator's axes, not printed cards.
-        for (phrase, filter) in [
+        for (phrase, filter, controller) in [
             (
                 "creatures that were exiled under your opponents' control this turn",
-                TypedFilter::creature().controller(ControllerRef::Opponent),
+                TypedFilter::creature(),
+                ControllerRef::Opponent,
             ),
             (
                 "creature that was exiled under your opponent's control this turn",
-                TypedFilter::creature().controller(ControllerRef::Opponent),
+                TypedFilter::creature(),
+                ControllerRef::Opponent,
             ),
             (
                 "artifacts that were exiled under your control this turn",
-                TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                TypedFilter::new(TypeFilter::Artifact),
+                ControllerRef::You,
             ),
             (
                 "creatures that were exiled under your opponents\u{2019} control this turn",
-                TypedFilter::creature().controller(ControllerRef::Opponent),
+                TypedFilter::creature(),
+                ControllerRef::Opponent,
             ),
         ] {
+            // CR 109.4: expectation built through the shared injector, which also
+            // adds `InZone { Battlefield }` (== the record's `from_zone`).
+            let expected_filter =
+                super::super::condition::inject_controller(TargetFilter::Typed(filter), controller);
+            assert!(
+                matches!(&expected_filter, TargetFilter::Typed(t) if t.properties.contains(&FilterProp::InZone { zone: Zone::Battlefield })),
+                "phrase {phrase:?}"
+            );
             let expected = QuantityRef::ZoneChangeCountThisTurn {
                 from: Some(Zone::Battlefield),
                 to: Some(Zone::Exile),
-                filter: TargetFilter::Typed(filter),
+                filter: expected_filter,
             };
             let (rest, quantity) = parse_number_of_inner(phrase).expect("exiled object count");
             assert_eq!(rest, "", "phrase {phrase:?}");
