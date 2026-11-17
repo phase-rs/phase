@@ -108,9 +108,6 @@ function useHudClearanceWidth(
         // A chip's own sheet (the phase-stop sheet) mounts inside the row as a
         // fixed overlay; it is not a chip, so its width does not count.
         if (window.getComputedStyle(chip).position === "fixed") continue;
-        // Chips come and go and change width with what they say, so each pass
-        // observes the chips present now (observing one twice is a no-op).
-        resizeObserver?.observe(chip);
         widestChip = Math.max(widestChip, chip.getBoundingClientRect().width);
       }
       setMaxWidth(
@@ -123,13 +120,30 @@ function useHudClearanceWidth(
       );
     };
 
-    // Size changes: the plate's badges, Manual and Undo appearing, the rail's
-    // action buttons (they lift the row), and the board rows around the HUD.
+    // Size changes: the chips (they change width with what they say), the
+    // plate's badges, Manual and Undo appearing, the rail's action buttons
+    // (they lift the row), and the board rows around the HUD.
     const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
     const boardRows = boardColumn ? Array.from(boardColumn.children) : [];
-    for (const element of [row, rail, playerHud, sideControls, ...boardRows]) {
+    const chips = Array.from(row.children);
+    for (const element of [row, rail, playerHud, sideControls, ...boardRows, ...chips]) {
       if (element) resizeObserver?.observe(element);
     }
+    // Chips mount and unmount as the game moves on, sometimes without resizing
+    // the row. Follow them here rather than from inside the resize callback,
+    // which would hand ResizeObserver new targets mid-delivery.
+    const chipObserver = new MutationObserver((records) => {
+      for (const record of records) {
+        for (const added of record.addedNodes) {
+          if (added instanceof Element) resizeObserver?.observe(added);
+        }
+        for (const removed of record.removedNodes) {
+          if (removed instanceof Element) resizeObserver?.unobserve(removed);
+        }
+      }
+      measure();
+    });
+    chipObserver.observe(row, { childList: true });
     // Moves: DraggableWidget applies drag offsets and box scale as inline
     // transforms, which move a widget without any resize or scroll event.
     const styleObserver = new MutationObserver(measure);
@@ -141,6 +155,7 @@ function useHudClearanceWidth(
 
     return () => {
       resizeObserver?.disconnect();
+      chipObserver.disconnect();
       styleObserver.disconnect();
       window.removeEventListener("resize", measure);
       setMaxWidth(undefined);
