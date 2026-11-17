@@ -333,6 +333,12 @@ fn run_post_action_pipeline_core(
     // just-emitted `SpellCast` still has to join the terminal batch before B's
     // parked trigger drains.
     if !skip_trigger_scan || state.pending_resolution_completion.is_some() {
+        if !skip_trigger_scan {
+            // CR 603.2 + CR 613.1b: control changes the layer pass derived during
+            // this action join this scan, so they are collected with the action's
+            // other events as one CR 603.3b batch.
+            super::layers::publish_layer_control_changes(state, events);
+        }
         // A paused logical zone-change owner has already Segment-collected its
         // retained ZoneChanged occurrences into deferred trigger contexts. Do
         // not rediscover those records through the generic post-action scan;
@@ -661,6 +667,13 @@ fn run_post_action_pipeline_core(
     // inert with it rather than needing a second guard.
     if state.game_end.is_none() {
         check_exile_returns(state, events);
+        // CR 117.5 + CR 603.2: a control change derived since the scan above
+        // (an exile return re-attaching an Aura) joins this boundary's batch
+        // through the collection below, before placement. Under any other wait
+        // the action-return drain collects it.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            super::layers::publish_layer_control_changes(state, events);
+        }
     }
     if events.len() > events_before_exile_returns {
         let exile_return_events: Vec<_> = events[events_before_exile_returns..].to_vec();

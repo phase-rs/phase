@@ -1812,6 +1812,10 @@
       "title": "Kopien ordnen",
       "subtitle": "Wähle den Zauberspruch, dessen Kopie als Nächstes auf den Stapel kommt"
     },
+    "memberOrder": {
+      "title": "Karten sortieren",
+      "subtitle": "Wähle, welche Karte als Nächstes behandelt wird"
+    },
     "collectEvidence": {
       "title": "Beweise sammeln",
       "subtitle": "Schicke Karten aus deinem Friedhof mit einem Gesamtmanawert von {{minimum}} oder mehr ins Exil"

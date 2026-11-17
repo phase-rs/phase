@@ -173,7 +173,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
-        | WaitingFor::SpellCopyOrderChoice { .. }
+        | WaitingFor::MemberOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
@@ -1632,6 +1632,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // stack entry, continuation) holds a key.
     filtered.control_change_observations.clear();
     filtered.control_change_captures.clear();
+    // Engine working memory, empty at every action-return boundary.
+    filtered.layer_control_changes.clear();
+    filtered.announced_control_changes.clear();
     // Deferred life-cost owners can embed a complete PendingCast, including
     // hidden card and target context. The projected WaitingFor is the only
     // viewer-facing interaction surface.
@@ -6917,6 +6920,7 @@ mod tests {
                     trigger_event: Some(event.clone()),
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
                     repeat: None,
                 },
             ),
@@ -6930,6 +6934,7 @@ mod tests {
                     effect_description: None,
                     remaining_choices: Vec::new(),
                     chosen: Vec::new(),
+                    affected_object: None,
                 },
             ),
             (
@@ -7439,6 +7444,7 @@ mod tests {
             trigger_event: Some(fixture.event.clone()),
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
         pending.cost_move_resume = Some(ManaAbilityResume::EffectPayCost {
@@ -7505,6 +7511,7 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
                     repeat: None,
                 }),
             ),
@@ -7520,6 +7527,7 @@ mod tests {
                     effect_description: None,
                     remaining_choices: Vec::new(),
                     chosen: Vec::new(),
+                    affected_object: None,
                 }),
             ),
             (
@@ -8514,6 +8522,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
