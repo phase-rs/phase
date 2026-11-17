@@ -7304,7 +7304,20 @@ fn replacement_valid_card_matches(
         || (matches!(event, ProposedEvent::TokenEntry { .. })
             && repl_def.event == ReplacementEvent::Moved)
     {
-        return matches_target_filter_on_battlefield_entry(state, event, filter, ctx);
+        // CR 614.12: another source's entry replacement reads the entrant as it would exist on
+        // the battlefield; the entrant's own is checked through that projection separately
+        // (`entrant_retains_own_entry_replacement_on_entry_board`).
+        let own_entry = matches!(
+            event,
+            ProposedEvent::TokenEntry { entry_ref, .. } if *entry_ref == source_id
+        );
+        return if own_entry {
+            matches_target_filter_on_battlefield_entry(state, event, filter, ctx)
+        } else {
+            super::filter::matches_target_filter_on_projected_battlefield_entry(
+                state, event, filter, ctx,
+            )
+        };
     }
     // CR 109.2 + CR 110.1: a counter replacement whose `valid_card` describes
     // the object by a card type or subtype without naming a zone — "a creature
