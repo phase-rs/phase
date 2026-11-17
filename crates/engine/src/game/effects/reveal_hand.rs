@@ -5,7 +5,7 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
     reveal_hand_parks_card_choice, Effect, EffectError, EffectKind, ParentTargetMissingReason,
-    ResolvedAbility, TargetFilter, TargetRef, ZoneChoiceCandidateSource,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -226,34 +226,13 @@ pub fn resolve(
     // Filter to only eligible cards for the choice (e.g. "nonland card").
     // CR 107.3a + CR 601.2b: ability-context evaluation for dynamic thresholds.
     let eligible: Vec<_> = if matches!(card_filter, TargetFilter::Any) {
-        hand.clone()
+        hand
     } else {
         let ctx = FilterContext::from_ability(ability);
-        hand.iter()
-            .copied()
+        hand.into_iter()
             .filter(|&id| matches_target_filter(state, id, &card_filter, &ctx))
             .collect()
     };
-
-    // If this RevealHand has a ChooseFromZone sub_ability with Legacy candidate
-    // source (the "you choose one of those cards" anaphor), the post-reveal
-    // choice is handled by ChooseFromZone's ChooseFromZoneChoice prompt, not by
-    // RevealChoice. Publish the eligible cards as the chain's tracked set so
-    // ChooseFromZone reads them, and skip the redundant RevealChoice prompt.
-    // CR 701.20a: the reveal remains public until the effect completes.
-    let has_legacy_choose_from_zone = ability
-        .sub_ability
-        .as_ref()
-        .is_some_and(|sub| matches!(&sub.effect, Effect::ChooseFromZone { candidate_source: ZoneChoiceCandidateSource::Legacy, .. }));
-    if needs_reveal_choice && !choice_optional && is_reveal && has_legacy_choose_from_zone {
-        super::publish_reveal_result(state, eligible.clone());
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::Reveal,
-            source_id: ability.source_id,
-            subject: None,
-        });
-        return Ok(());
-    }
 
     if eligible.is_empty() {
         if !is_reveal {

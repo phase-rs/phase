@@ -4655,14 +4655,6 @@ fn scan_trigger_condition(x: &TriggerCondition, mode: ScanMode) -> Axes {
             acc
         }
         TriggerCondition::EventTime { condition } => scan_trigger_condition(condition, mode),
-        // CR 122.1f: defending player poison status reads the defending player's
-        // poison counter state (projected resource).
-        TriggerCondition::DefendingPlayerIsPoisoned => Axes {
-            event: false,
-            sibling: false,
-            projected: true,
-            history: HistoryReads::NONE,
-        },
     }
 }
 
@@ -4855,14 +4847,6 @@ fn scan_static_condition(x: &StaticCondition, mode: ScanMode) -> Axes {
             ));
             acc
         }
-        // CR 122.1f: defending player poison status reads the defending player's
-        // poison counter state (projected resource).
-        StaticCondition::DefendingPlayerIsPoisoned => Axes {
-            event: false,
-            sibling: false,
-            projected: true,
-            history: HistoryReads::NONE,
-        },
         StaticCondition::SourceAttackingAlone => Axes::NONE,
         StaticCondition::SourceIsAttacking => Axes::NONE,
         StaticCondition::SourceIsBlocking => Axes::NONE,

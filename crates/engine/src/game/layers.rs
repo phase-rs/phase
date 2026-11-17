@@ -2150,7 +2150,6 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         // creature this static applies to), not the source, so this condition is
         // recipient-relative regardless of what its filter reads.
         StaticCondition::DefendingPlayerControls { .. } => true,
-        StaticCondition::DefendingPlayerIsPoisoned => true,
         // CR 303.4m + CR 611.3a: resolve a recipient-anchored monarch subject
         // for each affected object, not once against the source.
         StaticCondition::IsMonarch { player } => {
@@ -2233,8 +2232,6 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         StaticCondition::IsPresent { .. } => true,
         // Per-player board-count gate (defending player controls a [filter]).
         StaticCondition::DefendingPlayerControls { .. } => true,
-        // Defending player poison status — depends on defender's counters.
-        StaticCondition::DefendingPlayerIsPoisoned => true,
         // "you control a/your commander" — membership of a commander on the
         // battlefield, board-population dependent.
         StaticCondition::ControlsCommander { .. } => true,
@@ -2381,9 +2378,6 @@ fn static_condition_characteristic_reads_at(
         // CR 509.1a + CR 109.4: per-player board census over a live filter.
         StaticCondition::DefendingPlayerControls { filter } => CharacteristicKinds::CONTROLLER
             .union(target_filter_characteristic_reads_at(filter, depth)),
-        // CR 122.1f: defending player poison status reads the defending player's
-        // poison counter state.
-        StaticCondition::DefendingPlayerIsPoisoned => CharacteristicKinds::CONTROLLER,
         // CR 903.3 + CR 613.1b: commander designation is fixed at deck
         // construction; only the control scope is layer-writable.
         StaticCondition::ControlsCommander { .. }
@@ -2540,9 +2534,6 @@ fn entered_object_perturbs_static_condition(
         StaticCondition::DefendingPlayerControls { filter } => {
             matches_target_filter(state, entered_id, filter, ctx)
         }
-        // CR 122.1f: defending player poison status is not perturbed by
-        // battlefield entries (only by damage dealing poison counters).
-        StaticCondition::DefendingPlayerIsPoisoned => false,
         // Commander presence — conservatively perturb (a commander entering can
         // flip it; not worth a precise commander membership test here).
         StaticCondition::ControlsCommander { .. } => true,
@@ -3142,20 +3133,6 @@ fn evaluate_condition_inner(
                     None => FilterContext::from_source(state, source_id),
                 };
                 crate::game::filter::player_controls_matching(state, defending, filter, &ctx)
-            })
-        }
-        // CR 122.1f: True when the defending player has one or more poison counters.
-        StaticCondition::DefendingPlayerIsPoisoned => {
-            let attacking = context.recipient.unwrap_or(source_id);
-            let defending = match context.declared_attack {
-                Some(target) => crate::game::combat::defending_player_for_target(state, target),
-                None => crate::game::combat::defending_player_for_attacker(state, attacking),
-            };
-            defending.is_some_and(|defending| {
-                state
-                    .players
-                    .get(defending.0 as usize)
-                    .is_some_and(|p| p.poison_counters > 0)
             })
         }
         // CR 506.5: True when the source creature is the only attacking creature.
@@ -5481,7 +5458,6 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::AdditionalCostPaid
         | StaticCondition::CastingAsVariant { .. }
         | StaticCondition::FirstCombatPhaseOfTurn
-        | StaticCondition::DefendingPlayerIsPoisoned
         | StaticCondition::None => false,
     }
 }
