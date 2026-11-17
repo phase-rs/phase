@@ -895,18 +895,18 @@ function CardPreviewInner({
  *   on the left;
  * - the room down, converted to a width through the frame's ratio (488:680
  *   upright, 680:488 rotated): the screen less padding, and in portrait less
- *   the action strip under the card as well (5.25rem covers the p-4 padding,
- *   the gap-3 and the strip's pill).
+ *   the action strip under the card as well (5.5rem covers the p-4 padding,
+ *   the gap-3 and the strip's 44px pill).
  */
 const MOBILE_PREVIEW_FRAME_CLASS = {
   upright: [
     "aspect-[488/680]",
-    "w-[min(488px,calc(100vw_-_2rem),calc((100dvh_-_5.25rem)*488/680))]",
+    "w-[min(488px,calc(100vw_-_2rem),calc((100dvh_-_5.5rem)*488/680))]",
     "landscape:w-[min(488px,45vw,calc((100dvh_-_3rem)*488/680))]",
   ].join(" "),
   rotated: [
     "aspect-[680/488]",
-    "w-[min(420px,calc(100vw_-_2rem),calc((100dvh_-_5.25rem)*680/488))]",
+    "w-[min(420px,calc(100vw_-_2rem),calc((100dvh_-_5.5rem)*680/488))]",
     "landscape:w-[min(420px,45vw,calc((100dvh_-_3rem)*680/488))]",
   ].join(" "),
 };
@@ -919,9 +919,10 @@ const MOBILE_PREVIEW_ROTATED_IMAGE_CLASS = [
   "-translate-x-1/2 -translate-y-1/2 rotate-90 object-cover",
 ].join(" ");
 
-/** One button in the mobile preview's action strip, without a text color. */
+/** One button in the mobile preview's action strip, without a text color.
+ *  `min-h-11` keeps the touch target at least 44px tall. */
 const MOBILE_ACTION_PILL_CLASS = [
-  "rounded-full border border-white/20 bg-black/70 px-4 py-2",
+  "min-h-11 rounded-full border border-white/20 bg-black/70 px-4 py-2",
   "text-sm font-semibold shadow-lg backdrop-blur active:bg-black/80",
 ].join(" ");
 
