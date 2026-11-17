@@ -198,8 +198,9 @@ use self::sequence::{
     try_parse_repeat_process_for_keywords, try_parse_same_is_true_continuation,
 };
 use self::subject::{
-    try_parse_each_deals_damage_equal_to_power, try_parse_each_source_deals_damage,
-    try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
+    parse_dealt_damage_this_way_subject, try_parse_each_deals_damage_equal_to_power,
+    try_parse_each_source_deals_damage, try_parse_subject_predicate_ast,
+    try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_ir::context::{
@@ -323,7 +324,8 @@ fn clause_delayed_combat_step(clause: &ClauseIr) -> Option<Phase> {
     match condition {
         DelayedTriggerCondition::AtNextPhase { phase }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { phase, .. }
-        | DelayedTriggerCondition::AtBeginningOfAddedPhase { phase, .. } => {
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { phase, .. }
+        | DelayedTriggerCondition::AtBeginningOfGrantedTurn { phase, .. } => {
             Some(*phase).filter(|phase| phase.is_combat())
         }
         DelayedTriggerCondition::WhenLeavesPlay { .. }
@@ -3927,6 +3929,10 @@ fn try_parse_at_next_phase_delayed_trigger(
 ) -> Option<ParsedEffectClause> {
     let (effect_text, condition) = strip_temporal_prefix(text);
     let condition = condition?;
+    // CR 608.2c: a line on its own has no preceding clause to name the turn.
+    if !temporal_antecedent_is_proven(&condition, &[]) {
+        return None;
+    }
     let mut ctx = antecedents.clone_player_antecedents();
     // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
     ctx.spell_anaphor_binding = SpellAnaphorBinding::EventSource;
@@ -4041,6 +4047,20 @@ pub(crate) fn delayed_sweep_is_unbound_anaphor(inner: &AbilityDefinition) -> boo
 /// pushed onto the target object's `replacement_definitions` (by the
 /// `AddTargetReplacement` resolver), SelfRef on a replacement resolves
 /// against the carrying object — which IS the target.
+///
+/// CR 109.2: a subject that names a card type ("a creature dealt damage this
+/// way", Anger of the Gods, Touch of the Void) is only that type, so the carried
+/// `valid_card` is `And[SelfRef, Typed(type)]`. The noun is checked when the
+/// replacement applies (CR 614.1), so a noncreature that was dealt damage this way
+/// (a planeswalker that took redirected damage) goes to the graveyard instead of
+/// being exiled. "a permanent dealt damage this way" (Underworld Fires, CR 110.1),
+/// a declared-target subject and "it" add no type restriction and keep `SelfRef`.
+///
+/// CR 608.2c: the subject is the one place the rider's recipient is named, but
+/// this detector always emits `target: Any`; the clause loop's
+/// [`bind_die_exile_rider_antecedent`] rebinds it from the same subject (the
+/// anaphor "a creature/permanent dealt damage this way" after a mass-damage
+/// clause names the set that clause published, Anger of the Gods).
 fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
     use crate::types::ability::ReplacementDefinition;
     use crate::types::replacements::ReplacementEvent;
@@ -4051,17 +4071,31 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("if "))
         .parse(lower)
         .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that permanent"),
-        tag::<_, _, OracleError<'_>>("that creature or planeswalker"),
-        tag("that creature"),
-        tag("that planeswalker"),
-        tag("that token"),
-        tag("a permanent dealt damage by ~"),
-        tag("a creature dealt damage by ~"),
-        tag("a permanent dealt damage this way"),
-        tag("a creature dealt damage this way"),
-        tag("it"),
+    // The card-type noun the printed subject names, if any (CR 109.2): only the
+    // "a creature dealt damage ..." anaphors carry one. "a permanent dealt damage
+    // ..." (CR 110.1), a declared-target subject (its type is enforced by target
+    // legality, CR 608.2b) and the pronoun "it" add no type restriction.
+    let (rest, subject_noun) = alt((
+        value(
+            None,
+            alt((
+                tag::<_, _, OracleError<'_>>("that permanent"),
+                tag("that creature or planeswalker"),
+                tag("that creature"),
+                tag("that planeswalker"),
+                tag("that token"),
+                tag("a permanent dealt damage by ~"),
+            )),
+        ),
+        value(
+            Some(TypeFilter::Creature),
+            tag("a creature dealt damage by ~"),
+        ),
+        map(parse_dealt_damage_this_way_subject, |noun| match noun {
+            TypeFilter::Permanent => None,
+            noun => Some(noun),
+        }),
+        value(None, tag("it")),
     ))
     .parse(rest)
     .ok()?;
@@ -4111,8 +4145,21 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
             enters_modified_if: None,
         },
     );
+    // CR 614.1: a replacement effect applies continuously as events happen, so the
+    // noun is read from the carrier when it would die, not when the rider installs.
+    // The carrier is the host the resolver attaches this to (`SelfRef`); a subject
+    // that names a card type adds that type as a conjunct (CR 109.2).
+    let valid_card = match subject_noun {
+        None => TargetFilter::SelfRef,
+        Some(noun) => TargetFilter::And {
+            filters: vec![
+                TargetFilter::SelfRef,
+                TargetFilter::Typed(TypedFilter::new(noun)),
+            ],
+        },
+    };
     let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
-        .valid_card(TargetFilter::SelfRef)
+        .valid_card(valid_card)
         .destination_zone(Zone::Graveyard)
         .execute(exile_effect);
     repl.consume_on_apply = true;
@@ -32086,6 +32133,19 @@ fn lift_untargeted_declared_slot_destroy(
     (lifted, None)
 }
 
+/// CR 608.2c: the effect of the nearest preceding clause that is not a
+/// continuation — the damage instruction a separate-sentence rider ("... dealt
+/// damage this way ...") attaches to. The single authority for "which clause does
+/// a rider attach to", shared by the regen rider guard and the die-exile
+/// binding ([`bind_die_exile_rider_antecedent`]).
+fn preceding_damage_effect(clauses: &[ClauseIr]) -> Option<&Effect> {
+    clauses
+        .iter()
+        .rev()
+        .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
+        .map(|clause| &clause.parsed.effect)
+}
+
 /// CR 614.1a + CR 601.2c + CR 608.2c: bind a die-exile rider ("If that creature
 /// would die this turn, exile it instead") to the declared slot its subject
 /// names when that slot is NOT the immediately preceding node's own — the rider
@@ -32094,6 +32154,13 @@ fn lift_untargeted_declared_slot_destroy(
 /// instead of the creature. The subject resolves through the chain-wide
 /// registry ([`resolve_declared_slot_anaphor`]); the rider then targets
 /// `TargetFilter::ParentTargetSlot { index }`.
+///
+/// CR 608.2c: the anaphor "a creature / a permanent dealt damage this way" after
+/// a mass-damage clause (`DamageAll`, which declares no slot) names the set that
+/// clause published, so the rider is bound to `TrackedSet{TrackedSetId(0)}` before
+/// the no-declared-slot early returns below would leave it on `Any` (Anger of the
+/// Gods). A single-target damage clause keeps `Any` (its declared target is the
+/// recipient).
 ///
 /// Unchanged (`Any`) when the preceding clause announces no target, its last
 /// declared slot is the antecedent, or it holds the chain's only declared slot
@@ -32107,6 +32174,22 @@ fn bind_die_exile_rider_antecedent(
     clauses: &[ClauseIr],
     ctx: &ParseContext,
 ) -> AbilityDefinition {
+    let subject = tag::<_, _, OracleError<'_>>("if ")
+        .parse(rider_lower)
+        .map_or(rider_lower, |(rest, _)| rest);
+    if parse_dealt_damage_this_way_subject(subject).is_ok()
+        && matches!(
+            preceding_damage_effect(clauses),
+            Some(Effect::DamageAll { .. })
+        )
+    {
+        if let Effect::AddTargetReplacement { target, .. } = &mut *rider.effect {
+            *target = TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            };
+        }
+        return rider;
+    }
     let Some((_, earlier)) = clauses.split_last() else {
         return rider;
     };
@@ -32122,9 +32205,6 @@ fn bind_die_exile_rider_antecedent(
     if previous_clause_slots.is_empty() {
         return rider;
     }
-    let subject = tag::<_, _, OracleError<'_>>("if ")
-        .parse(rider_lower)
-        .map_or(rider_lower, |(rest, _)| rest);
     match resolve_declared_slot_anaphor(subject, ctx) {
         Some((slot, _)) => {
             if previous_clause_slots.last().and_then(|entry| entry.index) != Some(slot) {
@@ -50294,18 +50374,10 @@ fn parse_effect_chain_ir_body(
         // static binds to via `TrackedSet`. Guarded on a preceding damage clause
         // so the targeted/anaphor regen forms (Hurr Jackal, Lim-Dûl's Cohort)
         // keep their standalone in-chain dispatch.
-        if builder
-            .clauses()
-            .iter()
-            .rev()
-            .find(|clause| !matches!(clause.disposition, ClauseDisposition::Continue { .. }))
-            .is_some_and(|clause| {
-                matches!(
-                    &clause.parsed.effect,
-                    Effect::DealDamage { .. } | Effect::DamageAll { .. }
-                )
-            })
-        {
+        if matches!(
+            preceding_damage_effect(builder.clauses()),
+            Some(Effect::DealDamage { .. } | Effect::DamageAll { .. })
+        ) {
             // CR 608.2c + CR 109.2 + CR 614.1a: Disintegrate / Carbonize print a
             // CONDITIONAL rider gated on "if it's a creature, it" (the damage
             // targets "any target", so the regen prohibition + die-exile only
@@ -52656,6 +52728,15 @@ fn parse_effect_chain_ir_body(
                 None => (text_after_prefix, None),
             },
         };
+        // CR 608.2c: "that turn" names a turn this chain granted; without such
+        // an antecedent the phrase stays unrecognized (unsupported) rather than
+        // binding to a guessed referent.
+        let (text_after_prefix, prefix_delayed) = match prefix_delayed {
+            Some(condition) if !temporal_antecedent_is_proven(&condition, builder.clauses()) => {
+                (text.as_str(), None)
+            }
+            other => (text_after_prefix, other),
+        };
         // CR 107.3i: If this chunk has no local "where X is" but a sibling clause
         // in the same sentence binds X, propagate the sibling binding so "target
         // player loses X life" and "you gain X life" in the same sentence share
@@ -52871,6 +52952,15 @@ fn parse_effect_chain_ir_body(
         }
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
+        // CR 608.2c: "that turn" only anaphorically names a turn this chain
+        // granted; without one the phrase stays unrecognized (unsupported)
+        // rather than binding to a guessed referent.
+        let (text_no_temporal, delayed_condition) = match delayed_condition {
+            Some(condition) if !temporal_antecedent_is_proven(&condition, builder.clauses()) => {
+                (text.as_str(), None)
+            }
+            other => (text_no_temporal, other),
+        };
         if delayed_condition.is_some() {
             // CR 603.7: assembly wraps this clause in `CreateDelayedTrigger`, so
             // it is the body of a delayed triggered ability that resolves later.
@@ -59988,6 +60078,39 @@ fn chain_most_recent_clause_is_cast_grant(clauses: &[ClauseIr]) -> bool {
                 Effect::CastFromZone { .. } | Effect::CastCopyOfCard { .. }
             )
         })
+}
+
+/// CR 603.7a + CR 608.2c: whether the antecedent a temporal anaphor needs is
+/// established by the clauses parsed so far. "That turn's end step" names the
+/// extra turn an earlier clause of the same chain grants (Final Fortune); it
+/// does not name "that player's next turn" in a different chain (Oracle
+/// en-Vec), whose referent is not a granted turn.
+///
+/// WILDCARD-FREE on purpose, like `render_delayed_condition_descriptions`: a new
+/// `DelayedTriggerCondition` must decide here whether it carries an anaphoric
+/// antecedent, so adding one is a compile error rather than a silent `true`.
+fn temporal_antecedent_is_proven(
+    condition: &DelayedTriggerCondition,
+    clauses: &[ClauseIr],
+) -> bool {
+    match condition {
+        DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. } => clauses
+            .iter()
+            .any(|clause| matches!(clause.parsed.effect, Effect::ExtraTurn { .. })),
+        // No anaphoric antecedent to prove: each names its own phase, event or
+        // object (`AtBeginningOfAddedPhase` is bound to its added phase by the
+        // delayed-trigger resolver, not by the chain).
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        | DelayedTriggerCondition::WhenLeavesPlay { .. }
+        | DelayedTriggerCondition::WhenDies { .. }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
+        | DelayedTriggerCondition::WhenEntersBattlefield { .. }
+        | DelayedTriggerCondition::WhenDiesOrExiled { .. }
+        | DelayedTriggerCondition::WheneverEvent { .. }
+        | DelayedTriggerCondition::WhenNextEvent { .. } => true,
+    }
 }
 
 /// CR 603.7: Checks whether an earlier clause in this chain granted a card-casting

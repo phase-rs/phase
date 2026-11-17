@@ -53,9 +53,9 @@ pub struct DecisionFrame {
     /// Engine-authored standing brief: the seat's role, difficulty, and format
     /// guidance. Instructions, never data.
     pub brief: String,
-    /// The rendered position. DATA: card names, Oracle text, log lines and
-    /// player names all reach it, so it is only ever placed in the question's
-    /// `state`, never in its instructions.
+    /// The rendered position. DATA: card names, Oracle text and log lines all
+    /// reach it, so it is only ever placed in the question's `state`, never in
+    /// its instructions.
     pub position: String,
     /// The engine-authored question put about the position.
     pub instruction: String,
@@ -130,7 +130,7 @@ pub fn difficulty_brief(difficulty: AiDifficulty) -> &'static str {
 /// How much game history this difficulty is shown.
 ///
 /// History is summarized per turn cycle ([`crate::render::history`]): the cycle
-/// in progress verbatim, earlier cycles as one line per turn. The two lowest
+/// in progress entry by entry, earlier cycles as one line per turn. The two lowest
 /// difficulties deliberately reason from a near-term window, which is a large
 /// part of what makes them beatable; every budget is bounded, so no difficulty's
 /// prompt grows with the length of the game. For the same reason a message
@@ -178,7 +178,7 @@ const FORGED_MARKER_REPLACEMENT: &str = "[redacted delimiter]";
 ///
 /// Rendered game and draft data is not neutral prose. Oracle text is written in
 /// the imperative ("Sacrifice a creature", "You may search your library"), log
-/// lines carry player names, action labels carry card names and payload
+/// lines carry card names, action labels carry card names and payload
 /// strings, and a pack can carry any card text the format contains. A model
 /// reading that in the same undifferentiated stream as its own instructions has
 /// no structural reason to treat one as description and the other as directive.
