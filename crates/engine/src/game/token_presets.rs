@@ -9,9 +9,10 @@ use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::TokenCharacteristics;
 
 pub use crate::types::token_presets::{
-    known_token_body_by_name, known_token_body_by_name_for_source, known_token_preset_by_id,
-    known_token_presets, parse_overlay, serialize_catalog, PredefinedTokenKind, PresetFidelity,
-    TokenCategory, TokenPreset, TokenPtProvenance, TokenSourceRef,
+    catalog_token_mana_cost, known_token_body_by_name, known_token_body_by_name_for_source,
+    known_token_preset_by_id, known_token_presets, parse_overlay, serialize_catalog,
+    PredefinedTokenKind, PresetFidelity, TokenCategory, TokenPreset, TokenPtProvenance,
+    TokenSourceRef,
 };
 
 /// What `tokens-gen` did with one `known-tokens.overlay.toml` row.
@@ -385,12 +386,25 @@ fn role_normalized_display_name(name: &str) -> &str {
     name.strip_suffix(" Role").unwrap_or(name)
 }
 
+/// CR 111.4 + CR 111.11: The catalog names some named tokens with a trailing
+/// " Token" (`"Gingerbrute Token"`, `"Spirit Sorcerer Token"`) while the parser
+/// hands the engine the bare Oracle descriptor (`"Gingerbrute"`, CR 111.11).
+/// Reconcile the trailing " Token" — on top of the " Role" reconciliation above —
+/// so a bare-descriptor token body matches its suffixed catalog preset body.
+/// Non-suffixed names are unaffected; the accompanying subtype/type comparison
+/// still prevents a suffixed body from matching a non-suffixed preset.
+fn catalog_normalized_display_name(name: &str) -> &str {
+    let without_role = role_normalized_display_name(name);
+    without_role.strip_suffix(" Token").unwrap_or(without_role)
+}
+
 fn token_body_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
     token_body_identity_matches(a, b) && a.power == b.power && a.toughness == b.toughness
 }
 
 fn token_body_identity_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
-    role_normalized_display_name(&a.display_name) == role_normalized_display_name(&b.display_name)
+    catalog_normalized_display_name(&a.display_name)
+        == catalog_normalized_display_name(&b.display_name)
         && sorted_debug(&a.core_types) == sorted_debug(&b.core_types)
         && sorted_strings(&a.subtypes) == sorted_strings(&b.subtypes)
         && sorted_debug(&a.supertypes) == sorted_debug(&b.supertypes)
@@ -1218,9 +1232,10 @@ mod tests {
     }
 
     /// CR 111.4 + CR 707.2a (F1): the parsed `Effect::Token` spec body for
-    /// `create a Gingerbrute token` (name `"Gingerbrute Token"`, 1/1,
+    /// `create a Gingerbrute token` (Oracle name `"Gingerbrute"`, 1/1,
     /// Artifact Creature — Food Golem, colorless, haste) matches the
-    /// Gingerbrute catalog preset body, so creation links a
+    /// Gingerbrute catalog preset body (catalog name `"Gingerbrute Token"`)
+    /// through the `" Token"`-tolerant identity match, so creation links a
     /// `token_image_ref` through the source-gated `find_token_ref_with_mode`
     /// path. The RED integration test exercises this linkage end to end;
     /// this probe pins the body-equality leg without the full runner.
@@ -1232,7 +1247,7 @@ mod tests {
         // fills (registry display name + catalog P/T-colors-keywords), not
         // cloned from the preset — otherwise the assertion is circular.
         let parsed_spec_body = TokenCharacteristics {
-            display_name: "Gingerbrute Token".to_string(),
+            display_name: "Gingerbrute".to_string(),
             power: Some(1),
             toughness: Some(1),
             loyalty: None,

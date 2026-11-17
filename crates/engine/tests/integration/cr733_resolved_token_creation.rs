@@ -415,3 +415,89 @@ fn token_creation_journals_an_exact_resolved_birth() {
         "a token birth is not idempotent: re-applying it must fail closed"
     );
 }
+
+/// CR733 journal-replay family + CR 111.11 + CR 202.3 (F2): a Gingerbrute Spec
+/// birth replays with its `{1}` catalog cost, through the shared
+/// `materialize_token_spec_body` — resolve and replay install the cost through
+/// the same function, so the two cannot drift.
+///
+/// REVERT-PROBE (discriminating, RUN): delete the cost install in
+/// `materialize_token_spec_body` ⇒ the replayed `mana_cost` is the zero-cost
+/// default while live holds `{1}`, and the discriminator below fails.
+#[test]
+fn gingerbrute_spec_birth_replays_its_catalog_mana_cost() {
+    // The upkeep line alone: the ETB line would crown P0 mid-test and confound
+    // the fixture (same isolation as the Ginger integration test).
+    const GINGER_UPKEEP: &str =
+        "At the beginning of each upkeep, if you're the monarch, create a Gingerbrute token.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Untap);
+    scenario
+        .add_creature(P0, "Ginger, Queen of Sweets", 6, 4)
+        .from_oracle_text(GINGER_UPKEEP);
+    let mut runner = scenario.build();
+    runner.state_mut().monarch = Some(P0);
+    let pre_state = runner.state().clone();
+    let journal_start = pre_state.resolved_rules_journal.entries().len();
+
+    runner.advance_to_upkeep();
+    runner.advance_until_stack_empty();
+    let state = runner.state().clone();
+
+    // ── reach guards: the trigger really created the linked Gingerbrute ──
+    // (name + preset link only — the live cost is V8's claim in the Ginger
+    // test, so a reverted cost install must fail below, not here)
+    let token_id = *state
+        .last_created_token_ids
+        .first()
+        .expect("CR 111.1: the upkeep trigger must create the Gingerbrute token");
+    let live = &state.objects[&token_id];
+    assert_eq!(
+        live.name, "Gingerbrute",
+        "reach guard: F1 names the live token exactly"
+    );
+    assert!(
+        live.token_image_ref.is_some(),
+        "reach guard: the live Gingerbrute links its catalog preset, so a replay that drops the ref is observable"
+    );
+
+    let birth = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| entry.command.clone())
+        .find_map(|command| match command {
+            ResolvedRulesCommand::TokenCreation(command)
+                if command.object.object_id == token_id =>
+            {
+                Some(command)
+            }
+            _ => None,
+        })
+        .expect("the Gingerbrute birth is journaled");
+
+    let mut replay = pre_state;
+    engine::game::effects::token::apply_resolved_token_creation(&mut replay, &birth)
+        .expect("the recorded birth must replay against its captured predecessor");
+    let replayed = &replay.objects[&token_id];
+
+    // THE DISCRIMINATOR. Body-only materialization without the cost install
+    // gives the zero-cost default here.
+    assert_eq!(
+        replayed.mana_cost,
+        ManaCost::generic(1),
+        "CR 111.11: replay installs the same {{1}} cost the live creation did"
+    );
+    assert_eq!(
+        replayed.base_mana_cost,
+        ManaCost::generic(1),
+        "CR 202.3: replay installs the same layer base, so the MV survives a layers pass"
+    );
+    assert_eq!(
+        replayed.effective_mana_value(),
+        1,
+        "CR 202.3: the replayed Gingerbrute's mana value is 1"
+    );
+}

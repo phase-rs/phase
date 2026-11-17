@@ -16,6 +16,7 @@ use std::sync::LazyLock;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::types::card::TokenImageRef;
+use crate::types::mana::{parse_mtgjson_mana_cost, ManaCost};
 use crate::types::token_spec::TokenCharacteristics;
 
 /// CR 111.10: Stable identifier for predefined-ability artifact tokens. Each
@@ -364,6 +365,43 @@ fn unique_token_body_by_name(name: &str) -> Option<&'static TokenCharacteristics
         .then_some(first_body)
 }
 
+/// CR 111.11 + CR 202.3: A named token created as a copy of a card carries
+/// that card's mana cost (e.g. Gingerbrute's `{1}`). The committed catalog
+/// embeds the cost only inside the preset's free-form `rules_text` reminder,
+/// machine-shaped as `(This token's mana cost is {COST}.)` at a line end.
+/// Extract the brace-delimited cost through the single `parse_mtgjson_mana_cost`
+/// authority so new cost shapes stay in one place. Returns `None` when no
+/// well-formed reminder is present (predefined tokens carry none — CR 202.3a:
+/// no mana cost means MV 0) or when the declared cost is malformed; callers
+/// keep the zero-cost default then. Total and pure.
+pub fn catalog_token_mana_cost(rules_text: &str) -> Option<ManaCost> {
+    const MARKER: &str = "(This token's mana cost is ";
+    for line in rules_text.lines() {
+        let Some(marker_at) = line.find(MARKER) else {
+            continue;
+        };
+        let rest = &line[marker_at + MARKER.len()..];
+        let Some(close_at) = rest.find(')') else {
+            continue;
+        };
+        let (cost_text, tail) = rest.split_at(close_at);
+        // `tail` starts at the closing paren: the reminder must end the line
+        // as `{COST}.)`, so a parenthetical that continues past `)` is not
+        // the cost declaration.
+        if tail[1..].trim_end() != "." {
+            continue;
+        }
+        let cost_text = cost_text.trim();
+        // Costs are brace-delimited (`{1}`, `{1}{G}`); a braceless middle
+        // (`banana`) is malformed, not a zero cost.
+        if !cost_text.starts_with('{') {
+            continue;
+        }
+        return Some(parse_mtgjson_mana_cost(cost_text));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -584,5 +622,120 @@ scryfall_oracle_id = "11111111-1111-1111-1111-111111111111"
         let body = known_token_body_by_name_for_source("Heartwood", Some("Soul Tether"))
             .expect("Heartwood must keep resolving exactly");
         assert_eq!(body.display_name, "Heartwood");
+    }
+
+    /// CR 111.11 + CR 202.3 (F2): every catalog row whose embedded `rules_text`
+    /// declares `(This token's mana cost is {COST}.)` extracts that exact cost
+    /// through the `parse_mtgjson_mana_cost` authority.
+    #[test]
+    fn catalog_token_mana_cost_hits_all_reminder_rows_with_exact_costs() {
+        use crate::types::mana::ManaCostShard;
+
+        const MARKER: &str = "(This token's mana cost is ";
+        let reminded: Vec<&TokenPreset> = known_token_presets()
+            .iter()
+            .filter(|preset| {
+                preset
+                    .rules_text
+                    .as_deref()
+                    .is_some_and(|text| text.contains(MARKER))
+            })
+            .collect();
+        // Reach-guard: the measured corpus — 27 reminder rows — so a vacuous
+        // empty loop cannot pass.
+        assert_eq!(
+            reminded.len(),
+            27,
+            "the catalog must carry exactly the 27 measured cost-reminder rows"
+        );
+        for preset in &reminded {
+            let text = preset.rules_text.as_deref().unwrap_or("");
+            assert!(
+                catalog_token_mana_cost(text).is_some(),
+                "row `{}` declares a cost reminder but extracts None",
+                preset.id
+            );
+        }
+
+        // Spot exact costs. Printings of one token share the reminder, so all
+        // same-named reminded rows must agree.
+        let cost_of = |display: &str| -> ManaCost {
+            let mut costs = reminded
+                .iter()
+                .filter(|preset| preset.body.display_name == display)
+                .map(|preset| {
+                    catalog_token_mana_cost(preset.rules_text.as_deref().unwrap_or(""))
+                        .unwrap_or_else(|| panic!("reminded row `{}` must extract Some", preset.id))
+                });
+            let first = costs
+                .next()
+                .unwrap_or_else(|| panic!("reach guard: a reminded `{display}` row exists"));
+            assert!(
+                costs.all(|cost| cost == first),
+                "all `{display}` printings must agree on the extracted cost"
+            );
+            first
+        };
+        // CR 202.3: MV derivation control — the {1} reminder is MV 1.
+        assert_eq!(cost_of("Gingerbrute Token"), ManaCost::generic(1));
+        assert_eq!(
+            cost_of("Tarmogoyf"),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            }
+        );
+        assert_eq!(
+            cost_of("Osgood, Operation Double"),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 2,
+            }
+        );
+        // Mid-line reminder: the cost parenthetical follows other rules text
+        // on the same line.
+        assert_eq!(
+            cost_of("Steelburr Champion"),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 2,
+            }
+        );
+    }
+
+    /// CR 202.3a (F2 hostile): rows without a cost reminder — predefined
+    /// tokens and malformed reminders — extract no cost, so callers keep the
+    /// zero-cost default.
+    #[test]
+    fn catalog_token_mana_cost_is_none_without_a_reminder() {
+        const MARKER: &str = "(This token's mana cost is ";
+        for display in ["Treasure", "Food", "Pest", "Heartwood", "Ajani's Pridemate"] {
+            let preset = known_token_presets()
+                .iter()
+                .find(|preset| preset.body.display_name == display)
+                .unwrap_or_else(|| panic!("reach guard: a `{display}` preset exists"));
+            let text = preset.rules_text.as_deref().unwrap_or("");
+            assert!(
+                !text.contains(MARKER),
+                "reach guard: `{display}` carries no reminder, got {text:?}"
+            );
+            assert_eq!(
+                catalog_token_mana_cost(text),
+                None,
+                "`{display}` must extract no cost"
+            );
+        }
+        // Malformed reminders never fabricate a cost.
+        assert_eq!(
+            catalog_token_mana_cost("(This token's mana cost is banana.)"),
+            None,
+            "a braceless middle is malformed, not a zero cost"
+        );
+        assert_eq!(
+            catalog_token_mana_cost("(This token's mana cost is {1}.) and then some"),
+            None,
+            "a reminder that does not end the line is not the cost declaration"
+        );
+        assert_eq!(catalog_token_mana_cost(""), None);
     }
 }

@@ -2341,6 +2341,27 @@ pub(crate) fn materialize_token_spec_body(
         object.keywords = ch.keywords.clone();
         object.base_keywords = ch.keywords.clone();
     }
+    // CR 111.11 + CR 202.3: a named token created as a copy of a card carries
+    // that card's mana cost (Gingerbrute's `{1}`, read from its catalog
+    // reminder). A cost is a characteristic (CR 111.3), not a granted ability,
+    // so this installs independent of the `has_attrs`/inject suppress guards
+    // above. `base_mana_cost` rides along so the layers reset keeps the MV
+    // after `evaluate_layers`. Covers resolve + replay with zero drift: both
+    // call sites pass the recorded `token_image_ref` through this function,
+    // and the copy seam (`materialize_token_copy_body`) is untouched — CR 707.2
+    // copies carry the source's cost through the copiable values.
+    if let Some(cost) = object
+        .token_image_ref
+        .as_ref()
+        .and_then(|image_ref| {
+            crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
+        })
+        .and_then(|preset| preset.rules_text.as_deref())
+        .and_then(crate::game::token_presets::catalog_token_mana_cost)
+    {
+        object.mana_cost = cost.clone();
+        object.base_mana_cost = cost;
+    }
     // CR 400.7 + CR 302.6: Tokens enter the battlefield as new objects
     // and must run the same ETB-state reset as any other permanent
     // (summoning sickness, echo, damage, loyalty-activated flags).
@@ -8162,7 +8183,7 @@ mod tests {
         // Reach-guard: the extras below must be non-empty, or the suppression
         // assertion is vacuous.
         let materialized = materialize_token_ability_payload(
-            "Gingerbrute Token",
+            "Gingerbrute",
             &["Food".to_string(), "Golem".to_string()],
             Some(preset),
         );
@@ -8180,7 +8201,7 @@ mod tests {
             &mut state,
             CardId(0),
             PlayerId(0),
-            "Gingerbrute Token".to_string(),
+            "Gingerbrute".to_string(),
             Zone::Battlefield,
         );
         let with_clause_grant = StaticDefinition::continuous()
@@ -8215,6 +8236,150 @@ mod tests {
             ),
             "the kept ability is the Food sacrifice ability, got {:?}",
             obj.base_abilities[0].effect
+        );
+    }
+
+    /// CR 111.11 + CR 202.3 (F2): the shared materializer installs the catalog
+    /// reminder cost onto the token object AND its layer base, so the layers
+    /// reset preserves the MV. No image ref — or a preset with no reminder —
+    /// leaves both at the zero-cost default.
+    #[test]
+    fn materialize_token_spec_body_installs_catalog_mana_cost() {
+        use crate::types::mana::ManaCost;
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "c770e27a-6846-59be-82f0-b2b61dd95d9f",
+        )
+        .expect("Gingerbrute preset");
+        // Reach-guard: the reminder the install reads is really there — without
+        // it a None extractor and a vacuous install would both pass.
+        assert!(
+            preset
+                .rules_text
+                .as_deref()
+                .is_some_and(|text| text.contains("(This token's mana cost is {1}.)")),
+            "the Gingerbrute preset must carry its {{1}} cost reminder"
+        );
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Gingerbrute".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![CoreType::Artifact, CoreType::Creature],
+                subtypes: vec!["Food".to_string(), "Golem".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![Keyword::Haste],
+            },
+            script_name: "Gingerbrute".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
+            sacrifice_at: None,
+            source_id: ObjectId(3),
+            controller: PlayerId(0),
+            attach_to: TokenHostRequest::NotRequested,
+        };
+        let mut object = GameObject::new(
+            ObjectId(7),
+            CardId(0),
+            PlayerId(0),
+            "Gingerbrute".to_string(),
+            Zone::Battlefield,
+        );
+        materialize_token_spec_body(
+            &mut object,
+            &spec,
+            preset.token_image_ref.clone(),
+            1,
+            42,
+            false,
+        );
+        // THE DISCRIMINATOR. Reverting the F2 install leaves both at the
+        // zero-cost default and both assertions fail.
+        assert_eq!(
+            object.mana_cost,
+            ManaCost::generic(1),
+            "CR 111.11: the Gingerbrute token carries its card's {{1}} cost"
+        );
+        assert_eq!(
+            object.base_mana_cost,
+            ManaCost::generic(1),
+            "CR 202.3: the layer base carries the cost so the MV survives a layers pass"
+        );
+
+        // Hostile: no image ref means no catalog cost to install.
+        let mut unlinked = GameObject::new(
+            ObjectId(8),
+            CardId(0),
+            PlayerId(0),
+            "Gingerbrute".to_string(),
+            Zone::Battlefield,
+        );
+        materialize_token_spec_body(&mut unlinked, &spec, None, 1, 43, false);
+        assert_eq!(
+            unlinked.mana_cost,
+            ManaCost::zero(),
+            "no image ref installs no cost"
+        );
+        assert_eq!(
+            unlinked.base_mana_cost,
+            ManaCost::zero(),
+            "no image ref installs no layer-base cost"
+        );
+
+        // Hostile: a linked preset with no reminder (predefined Treasure)
+        // stays costless (CR 202.3a).
+        let treasure_preset = crate::game::token_presets::known_token_presets()
+            .iter()
+            .find(|preset| preset.body.display_name == "Treasure")
+            .expect("reach guard: a Treasure preset exists");
+        if let Some(text) = treasure_preset.rules_text.as_deref() {
+            assert!(
+                !text.contains("(This token's mana cost is "),
+                "reach guard: Treasure carries no cost reminder, got {text:?}"
+            );
+        }
+        let mut treasure = GameObject::new(
+            ObjectId(9),
+            CardId(0),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        let mut treasure_spec = spec.clone();
+        treasure_spec.characteristics = TokenCharacteristics {
+            display_name: "Treasure".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            core_types: vec![CoreType::Artifact],
+            subtypes: vec!["Treasure".to_string()],
+            supertypes: vec![],
+            colors: vec![],
+            keywords: vec![],
+        };
+        materialize_token_spec_body(
+            &mut treasure,
+            &treasure_spec,
+            treasure_preset.token_image_ref.clone(),
+            1,
+            44,
+            false,
+        );
+        assert_eq!(
+            treasure.mana_cost,
+            ManaCost::zero(),
+            "a reminder-less preset installs no cost"
+        );
+        assert_eq!(
+            treasure.base_mana_cost,
+            ManaCost::zero(),
+            "a reminder-less preset installs no layer-base cost"
         );
     }
 

@@ -2,6 +2,7 @@
 //! Gingerbrute token when you're the monarch (CR 603.4 intervening-if,
 //! CR 111.1 token creation, CR 111.3 token text).
 
+use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{AbilityCost, AbilityKind, Effect, SacrificeCost, TargetFilter};
@@ -52,10 +53,11 @@ fn ginger_creates_gingerbrute_when_you_are_monarch() {
     assert!(token.is_token, "the created object is a token");
     assert_eq!(token.zone, Zone::Battlefield);
     assert_eq!(token.controller, P0);
-    assert!(
-        token.name.contains("Gingerbrute"),
-        "token carries the Gingerbrute name, got {}",
-        token.name
+    // F1: the upkeep-created token is named exactly `Gingerbrute` (CR 111.11)
+    // and keeps its preset link and abilities.
+    assert_eq!(
+        token.name, "Gingerbrute",
+        "token carries exactly the Gingerbrute card name"
     );
     assert_eq!(token.power, Some(1), "CR 111.3: 1/1 from the token text");
     assert_eq!(
@@ -100,6 +102,36 @@ fn ginger_creates_gingerbrute_when_you_are_monarch() {
         2,
         "exactly the unblockable rider and the Food sacrifice ability — \
          a third ability is the #9810 double-grant"
+    );
+    // F2: the token carries the Gingerbrute card's {1} mana cost (CR 111.11).
+    // Reverting the install leaves the GameObject default and this fails.
+    assert_eq!(
+        token.mana_cost,
+        ManaCost::generic(1),
+        "CR 111.3: the Gingerbrute token carries its card's {{1}} cost"
+    );
+    // F2: the MV stays 1 after an explicit layer recomputation (CR 202.3) —
+    // the install rides `base_mana_cost` through the layers reset.
+    evaluate_layers(runner.state_mut());
+    let token = runner
+        .state()
+        .objects
+        .get(&token_id)
+        .expect("the created token exists on the battlefield");
+    assert_eq!(
+        token.mana_cost,
+        ManaCost::generic(1),
+        "CR 202.3: the cost survives layer recomputation"
+    );
+    assert_eq!(
+        token.base_mana_cost,
+        ManaCost::generic(1),
+        "CR 202.3: the layer base carries the cost"
+    );
+    assert_eq!(
+        token.effective_mana_value(),
+        1,
+        "CR 202.3: the Gingerbrute token's mana value is 1"
     );
 }
 
