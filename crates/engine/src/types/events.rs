@@ -984,6 +984,17 @@ pub enum ExertOrigin {
     AbilityCost,
 }
 
+/// CR 603.7: whether a triggered ability that triggered is an ability of its
+/// source or a delayed triggered ability an effect created. Public projection
+/// of the scheduler's private firing identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TriggeredAbilityOrigin {
+    /// A triggered ability its source has (CR 603.1).
+    SourceAbility,
+    /// CR 603.7: a delayed triggered ability.
+    Delayed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -1370,6 +1381,19 @@ pub enum GameEvent {
     },
     StackPushed {
         object_id: ObjectId,
+    },
+    /// CR 603.2 + CR 603.3d: a triggered ability triggered and reached
+    /// placement. `stack_entry: None` = removed during placement (CR 603.3c,
+    /// CR 603.3d). `controller` is the ability's controller (CR 603.3a).
+    /// `causes` is engine bookkeeping for the observer matcher and is never
+    /// sent to a client; it is never empty (an occurrence with no cause record
+    /// is not emitted).
+    AbilityTriggered {
+        stack_entry: Option<ObjectId>,
+        source_id: ObjectId,
+        controller: PlayerId,
+        origin: TriggeredAbilityOrigin,
+        causes: Vec<GameEvent>,
     },
     StackResolved {
         object_id: ObjectId,

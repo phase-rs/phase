@@ -38809,6 +38809,13 @@ impl GameState {
         /// already-ranked value and panic in `above`.
         fn named_incarnations(event: &mut GameEvent, f: &mut impl FnMut(ObjectId, &mut u64)) {
             match event {
+                // CR 603.2: an observed ability's cause events carry the same
+                // pins as the top-level events they copy.
+                GameEvent::AbilityTriggered { causes, .. } => {
+                    for cause in causes {
+                        named_incarnations(cause, f);
+                    }
+                }
                 GameEvent::PermanentTapped {
                     object_id,
                     incarnation: Some(incarnation),
@@ -39219,6 +39226,11 @@ impl GameState {
             f: &mut impl FnMut(ObjectId, &mut u64),
         ) {
             match event {
+                GameEvent::AbilityTriggered { causes, .. } => {
+                    for cause in causes {
+                        event_entered_incarnations(cause, f);
+                    }
+                }
                 GameEvent::ZoneChanged { record, .. }
                 | GameEvent::CreatureExploited { record, .. } => {
                     record_entered_incarnation(record, f);
@@ -39391,6 +39403,11 @@ impl GameState {
             G: FnMut(ObjectId, &mut u64),
         {
             match event {
+                GameEvent::AbilityTriggered { causes, .. } => {
+                    for cause in causes {
+                        event_record_incarnations(cause, incarnations, grant_generations);
+                    }
+                }
                 GameEvent::ZoneChanged { record, .. }
                 | GameEvent::CreatureExploited { record, .. } => {
                     record_incarnations(record, incarnations, grant_generations);
@@ -41096,6 +41113,8 @@ impl GameState {
                 f(event);
             }
             context.trigger_events.iter_mut().for_each(&mut *f);
+            // CR 603.2: the cause record is a second copy of the firing's events.
+            context.causes.iter_mut().for_each(&mut *f);
         }
         if let Some(event) = self.current_trigger_event.as_mut() {
             f(event);
@@ -41141,6 +41160,7 @@ impl GameState {
                     f(event);
                 }
                 context.trigger_events.iter_mut().for_each(&mut *f);
+                context.causes.iter_mut().for_each(&mut *f);
             }
             context_events(&mut resume.current, f);
             for context in resume.accepted_tail.iter_mut() {
