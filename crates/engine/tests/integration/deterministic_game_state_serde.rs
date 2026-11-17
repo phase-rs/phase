@@ -926,7 +926,7 @@ fn expected_manifest() -> BTreeMap<String, OwnerSpec> {
         ),
         (
             "src/game/zone_pipeline.rs",
-            "BatchMemberDeliveryOwner",
+            "MemberDeliveryOwner",
             None,
             "population_devour_snapshot",
             "Option<HashSet>",
