@@ -165,7 +165,7 @@ fn answer_counter_order(
     assert_eq!(
         candidates.len(),
         2,
-        "reach-guard: Solemnity + Constrictor must both apply, got {candidates:?}"
+        "reach-guard: Doubling Season + Constrictor must both apply, got {candidates:?}"
     );
     assert!(
         candidates.iter().any(|c| c.source_id == first)
@@ -621,7 +621,7 @@ fn give_priority(runner: &mut GameRunner, player: PlayerId) {
 }
 
 /// CR 120.3d + CR 616.1 non-combat, single target (V5–V7): Puncture Blast at
-/// a Constrictor-controlled creature under Solemnity pauses on the counter
+/// a Constrictor-controlled creature under Doubling Season pauses on the counter
 /// order and resumes with `DamageDealt` + record — no remaining chain.
 ///
 /// REVERT-FAILING ASSERTION: the record count (1 vs 0 at base).

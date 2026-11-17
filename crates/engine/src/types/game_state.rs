@@ -3338,7 +3338,7 @@ pub enum DamagePostLossStage {
 /// CR 120.3d + CR 702.2b + CR 702.15b + CR 120.1 + CR 510.2 + CR 616.1:
 /// post-counter work a wither/infect-to-creature leg still owes after its
 /// `-1/-1` counter placement paused on co-applicable counter replacements
-/// (Solemnity prevention + Constrictor modification forces a CR 616.1 order).
+/// (Doubling Season + Constrictor modification forces a CR 616.1 order).
 /// Stashed by `apply_damage_after_replacement` on the pause. A non-combat leg
 /// drains through `drain_pending_damage_post_counter` once the counter event
 /// fully settles; a combat leg (`is_combat`) instead rides the combat batch's
