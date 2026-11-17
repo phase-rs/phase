@@ -374,8 +374,10 @@ describe("P2PDraftHost persistence disposal", () => {
       const publicSnapshot = JSON.parse(request.snapshot_json);
       expect(publicSnapshot.booster_pack_pool).toBeUndefined();
       expect(publicSnapshot.poolInput.data.cube_list_text).toBeUndefined();
-      expect(publicSnapshot.matchLaunches[0].launch.deckPayload.booster_pack_pool).toBeUndefined();
-      expect(publicSnapshot.intergameCommands[0].launchPayload.deckPayload.booster_pack_pool).toBeUndefined();
+      // The whole launch deck payload is removed (decks are another seat's private
+      // contents), which also removes the booster pool it carried.
+      expect(publicSnapshot.matchLaunches[0].launch.deckPayload).toBeUndefined();
+      expect(publicSnapshot.intergameCommands[0].launchPayload.deckPayload).toBeUndefined();
       // The nested draft-session legs. `booster_pack_pool` is the REACH-GUARD
       // for `shared_stack`: it proves the nested redactor demonstrably ran on
       // this fixture, so an absent `shared_stack` is a redaction and not a

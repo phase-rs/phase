@@ -1,5 +1,11 @@
 import { DRAFT_KINDS } from "../adapter/draftKinds";
-import { isCommanderBracket, type CommanderBracket } from "../types/bracket";
+import {
+  isCommanderBracket,
+  isComboDeclaration,
+  UNDECLARED_COMBO,
+  type ComboDeclaration,
+  type CommanderBracket,
+} from "../types/bracket";
 import type { FeedSubscription } from "../types/feed";
 import { repairParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { projectSavedDeckSpecialSlots } from "../services/savedDeckProjection";
@@ -178,12 +184,13 @@ export interface DeckFolder {
 }
 
 /**
- * Fire {@link DECKS_CHANGED_EVENT} so mounted views re-read folder state.
- * Contract: every mutator that changes folder membership or star state
- * (`setDeckFolder`, `toggleDeckStar`, `migrateDeckMeta`) MUST call this, and
- * every registry write goes through `saveFolderStore` which calls it — this is
- * what drives `useDeckFolders` to regroup. A new mutator that forgets it will
- * leave the library/switcher showing stale groupings.
+ * Fire {@link DECKS_CHANGED_EVENT} so mounted views re-read library state.
+ * Contract: every mutator that changes the deck inventory (deck data writes
+ * and removals, feed subscriptions and origins) or folder membership or star
+ * state MUST call this, and every registry write goes through
+ * `saveFolderStore` which calls it — this is what drives `useDeckFolders` to
+ * regroup and the shared AI deck catalog to rescan. A new mutator that
+ * forgets it will leave views showing stale decks or groupings.
  */
 function notifyDecksChanged(): void {
   if (typeof window !== "undefined") {
@@ -306,6 +313,7 @@ export function requireSavedDeckUnchanged(txn: SavedDeckTxn, deck: SavedDeckSnap
 export function writeSavedDeckData(txn: SavedDeckTxn, deckName: string, raw: string): SavedDeckSnapshot {
   void txn;
   localStorage.setItem(STORAGE_KEY_PREFIX + deckName, raw);
+  notifyDecksChanged();
   return { name: deckName, raw };
 }
 
@@ -342,6 +350,7 @@ export function adoptSavedDeckRewrite(baseline: SavedDeckSnapshot, rewrite: Save
 export function removeSavedDeckData(txn: SavedDeckTxn, deckName: string): void {
   void txn;
   localStorage.removeItem(STORAGE_KEY_PREFIX + deckName);
+  notifyDecksChanged();
 }
 
 /** Move a saved deck from `oldName` to `newName`: removes `oldName`'s data, carries its metadata
@@ -382,6 +391,15 @@ export function toggleDeckStar(txn: SavedDeckTxn, deckName: string): boolean {
 /** Get metadata for a single deck, or null if not tracked. */
 export function getDeckMeta(deckName: string): DeckMeta | null {
   return loadMetadataStore()[deckName] ?? null;
+}
+
+/**
+ * Bulk read of the deck metadata store: one parse for N lookups. Random-pool
+ * filtering reads through this (via `loadFolderIndex`) instead of calling
+ * `getDeckMeta` once per candidate.
+ */
+export function loadDeckMetaMap(): Record<string, DeckMeta> {
+  return loadMetadataStore();
 }
 
 /** Remove metadata for a deleted deck. */
@@ -652,11 +670,69 @@ export function saveSavedDeckBracket(txn: SavedDeckTxn, deckName: string, bracke
   }
 }
 
+/** Read the two-card-combo declaration sidecar from a saved deck. */
+export function loadSavedDeckComboDeclaration(deckName: string): ComboDeclaration {
+  if (isRandomDeckSelection(deckName)) return UNDECLARED_COMBO;
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + deckName);
+  if (!raw) return UNDECLARED_COMBO;
+  try {
+    const parsed = JSON.parse(raw) as { combo_declaration?: unknown };
+    return isComboDeclaration(parsed.combo_declaration)
+      ? parsed.combo_declaration
+      : UNDECLARED_COMBO;
+  } catch {
+    return UNDECLARED_COMBO;
+  }
+}
+
+/** Write or remove the two-card-combo declaration sidecar on a saved deck. */
+export function saveSavedDeckComboDeclaration(
+  txn: SavedDeckTxn,
+  deckName: string,
+  value: ComboDeclaration,
+): void {
+  void txn;
+  const storageKey = STORAGE_KEY_PREFIX + deckName;
+  const raw = localStorage.getItem(storageKey);
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (value.kind === "undeclared") {
+      if (!("combo_declaration" in parsed)) return;
+      delete parsed.combo_declaration;
+    } else {
+      parsed.combo_declaration = value;
+    }
+    localStorage.setItem(storageKey, JSON.stringify(parsed));
+  } catch {
+    // Corrupt JSON: leave it alone. The deck builder will overwrite on save.
+  }
+}
+
 /** Load the currently active deck from localStorage. */
 export function loadActiveDeck(): ParsedDeck | null {
   const activeName = localStorage.getItem(ACTIVE_DECK_KEY);
   if (!activeName) return null;
   return loadSavedDeck(activeName);
+}
+
+/**
+ * Read the declared bracket for the currently active deck from localStorage.
+ * Returns `null` when no deck is selected or the deck carries no bracket tag.
+ * This is the sole call site for bracket → active-deck bridging so future
+ * bracket storage changes only need to update this function.
+ */
+export function loadActiveDeckBracket(): CommanderBracket | null {
+  const name = localStorage.getItem(ACTIVE_DECK_KEY);
+  if (!name || isRandomDeckSelection(name)) return null;
+  return loadSavedDeckBracket(name);
+}
+
+/** Single bridge from the active saved deck's sidecar to engine-bound deck data. */
+export function loadActiveDeckComboDeclaration(): ComboDeclaration {
+  const name = localStorage.getItem(ACTIVE_DECK_KEY);
+  if (!name || isRandomDeckSelection(name)) return UNDECLARED_COMBO;
+  return loadSavedDeckComboDeclaration(name);
 }
 
 // --- Feed storage helpers ---
@@ -672,6 +748,7 @@ export function loadFeedSubscriptions(): FeedSubscription[] {
 
 export function saveFeedSubscriptions(subs: FeedSubscription[]): void {
   localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify(subs));
+  notifyDecksChanged();
 }
 
 export function loadDeckOrigins(): Record<string, string> {
@@ -685,4 +762,5 @@ export function loadDeckOrigins(): Record<string, string> {
 
 export function saveDeckOrigins(origins: Record<string, string>): void {
   localStorage.setItem(FEED_DECK_ORIGINS_KEY, JSON.stringify(origins));
+  notifyDecksChanged();
 }

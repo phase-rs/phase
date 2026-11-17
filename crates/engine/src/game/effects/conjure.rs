@@ -9,6 +9,7 @@ use crate::types::ability::{
 use crate::types::card::CardFace;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::game_state::RandomDraw;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -378,7 +379,11 @@ fn place_conjured_in_library(
                 // `window` is the final top-N size; `head.len() + 1` is the
                 // slots available after this insert. Delegates to the single
                 // authority so zone-pipeline exhaustiveness arms stay identical.
-                let slot = zones::random_top_slot_index(&mut state.rng, window, head.len() + 1);
+                let slot = zones::random_top_slot_index(
+                    state.rng.draw(RandomDraw::Placement),
+                    window,
+                    head.len() + 1,
+                );
                 head.insert(slot, id);
             }
             head.extend(tail);

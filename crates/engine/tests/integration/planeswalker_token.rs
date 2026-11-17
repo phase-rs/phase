@@ -11,18 +11,25 @@
 //! so the before/after pair stays observable.
 
 use engine::ai_support::legal_actions;
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::engine::EngineError;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::token_presets::known_token_preset_by_id;
-use engine::types::ability::AbilityCost;
+use engine::types::ability::{
+    AbilityCost, ControllerRef, CostCategory, StaticDefinition, TargetFilter, TypeFilter,
+    TypedFilter,
+};
 use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction};
 use engine::types::card::PrintedLoyalty;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::ActionResult;
+use engine::types::game_state::CastPaymentMode;
+use engine::types::game_state::{ActionResult, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaColor;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
 /// FRA Jace planeswalker token (MTGJSON uuid).
@@ -71,6 +78,7 @@ fn enumerated_ability_indices(runner: &GameRunner, source: ObjectId) -> Vec<usiz
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } if *source_id == source => Some(*ability_index),
             _ => None,
         })
@@ -281,6 +289,7 @@ fn jace_token_loyalty_abilities_respect_once_per_turn() {
         .act(GameAction::ActivateAbility {
             source_id: jace,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating [−1] must succeed");
     runner.advance_until_stack_empty();
@@ -292,4 +301,187 @@ fn jace_token_loyalty_abilities_respect_once_per_turn() {
     assert!(runner.state().stack.is_empty());
 
     assert!(enumerated_ability_indices(&runner, jace).is_empty());
+}
+
+/// Hands `holder` priority in `phase` of `active`'s turn with an empty stack.
+fn give_priority(runner: &mut GameRunner, active: PlayerId, holder: PlayerId, phase: Phase) {
+    let state = runner.state_mut();
+    state.active_player = active;
+    state.phase = phase;
+    state.priority_player = holder;
+    state.waiting_for = WaitingFor::Priority { player: holder };
+}
+
+/// Submits `[ability_index]` of `source` and asserts the engine refuses it
+/// through the loyalty gate.
+fn assert_activation_refused(runner: &mut GameRunner, source: ObjectId, ability_index: usize) {
+    let result = runner.act(GameAction::ActivateAbility {
+        source_id: source,
+        ability_index,
+        payment_mode: CastPaymentMode::Auto,
+    });
+    assert!(
+        matches!(result, Err(EngineError::ActionNotAllowed(_))),
+        "activating ability {ability_index} must be refused, got {result:?}"
+    );
+}
+
+/// CR 606.3: a loyalty ability may be activated only "during a main phase of
+/// their turn". On its controller's own turn, the Jace token offers and accepts
+/// neither ability in the upkeep, beginning of combat or end step; in the
+/// postcombat main phase it offers both and `[−1]` resolves its cost.
+#[test]
+fn jace_token_loyalty_abilities_need_own_main_phase() {
+    let mut runner = debug_runner();
+    let (jace, _) = create_preset(
+        &mut runner,
+        JACE_TOKEN_PRESET_ID,
+        vec![(CounterType::Loyalty, 3)],
+    );
+
+    for phase in [Phase::Upkeep, Phase::BeginCombat, Phase::End] {
+        give_priority(&mut runner, P0, P0, phase);
+        assert!(
+            enumerated_ability_indices(&runner, jace).is_empty(),
+            "no loyalty ability may be offered in {phase:?}"
+        );
+        assert_activation_refused(&mut runner, jace, 0);
+        assert_activation_refused(&mut runner, jace, 1);
+        assert_eq!(runner.state().objects[&jace].loyalty, Some(3));
+        assert!(runner.state().stack.is_empty());
+    }
+
+    // Positive reach-guard, run last: the refusals above must not have come
+    // from the once-per-turn cap.
+    give_priority(&mut runner, P0, P0, Phase::PostCombatMain);
+    assert_eq!(
+        runner.state().objects[&jace].loyalty_activations_this_turn,
+        0,
+        "no loyalty activation may have been recorded by the refused attempts"
+    );
+    assert_eq!(enumerated_ability_indices(&runner, jace), vec![0, 1]);
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: jace,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating [−1] in the postcombat main phase must succeed");
+    assert_eq!(runner.state().objects[&jace].loyalty, Some(2));
+}
+
+/// CR 606.3: "during a main phase of their turn". On the opponent's turn the
+/// Jace token's controller holds priority with an empty stack, in a main phase
+/// and in the draw step, and neither ability is offered or accepted.
+#[test]
+fn jace_token_loyalty_abilities_need_own_turn() {
+    let mut runner = debug_runner();
+    let (jace, _) = create_preset(
+        &mut runner,
+        JACE_TOKEN_PRESET_ID,
+        vec![(CounterType::Loyalty, 3)],
+    );
+
+    give_priority(&mut runner, P0, P0, Phase::PreCombatMain);
+    assert_eq!(
+        enumerated_ability_indices(&runner, jace),
+        vec![0, 1],
+        "reach-guard: both abilities are offered in the controller's own main phase"
+    );
+
+    for phase in [Phase::PreCombatMain, Phase::Draw] {
+        give_priority(&mut runner, P1, P0, phase);
+        assert!(
+            enumerated_ability_indices(&runner, jace).is_empty(),
+            "no loyalty ability may be offered on the opponent's turn in {phase:?}"
+        );
+        assert_activation_refused(&mut runner, jace, 0);
+        assert_activation_refused(&mut runner, jace, 1);
+        assert_eq!(runner.state().objects[&jace].loyalty, Some(3));
+        assert!(runner.state().stack.is_empty());
+    }
+}
+
+/// CR 606.3: "the stack is empty". With a first Jace token's `[−1]` on the
+/// stack and priority back with its controller (CR 117.3c), a second Jace
+/// token is neither offered nor accepted in its controller's main phase. The
+/// CR 701.71a token has no legendary supertype, so two can share the
+/// battlefield; the debug creation path makes the second one directly.
+#[test]
+fn jace_token_loyalty_abilities_need_an_empty_stack() {
+    let mut runner = debug_runner();
+    let (first, _) = create_preset(
+        &mut runner,
+        JACE_TOKEN_PRESET_ID,
+        vec![(CounterType::Loyalty, 3)],
+    );
+    let (second, _) = create_preset(
+        &mut runner,
+        JACE_TOKEN_PRESET_ID,
+        vec![(CounterType::Loyalty, 3)],
+    );
+    give_priority(&mut runner, P0, P0, Phase::PreCombatMain);
+    assert_eq!(
+        enumerated_ability_indices(&runner, second),
+        vec![0, 1],
+        "reach-guard: the second token offers both abilities with an empty stack"
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: first,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating the first token's [−1] must succeed");
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P0
+    ));
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+
+    assert!(enumerated_ability_indices(&runner, second).is_empty());
+    assert_activation_refused(&mut runner, second, 0);
+    assert_eq!(runner.state().objects[&second].loyalty, Some(3));
+    assert_eq!(runner.state().stack.len(), 1);
+}
+
+/// CR 606.3 timing lives in the overridable restriction list: a static
+/// permission of the Teferi, Temporal Archmage emblem class ("You may activate
+/// loyalty abilities of planeswalkers you control on any player's turn any time
+/// you could cast an instant.") makes the Jace token's abilities legal actions
+/// for its controller on the opponent's turn.
+#[test]
+fn instant_permission_lets_jace_token_activate_on_opponents_turn() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Permission Source", 1, 1)
+        .with_static_definition(
+            StaticDefinition::new(StaticMode::ActivateAsInstant {
+                cost_category: CostCategory::PaysLoyalty,
+                keyword: None,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+            )),
+        );
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    let (jace, _) = create_preset(
+        &mut runner,
+        JACE_TOKEN_PRESET_ID,
+        vec![(CounterType::Loyalty, 3)],
+    );
+
+    give_priority(&mut runner, P0, P0, Phase::PreCombatMain);
+    assert_eq!(
+        enumerated_ability_indices(&runner, jace),
+        vec![0, 1],
+        "reach-guard: both abilities are offered in the controller's own main phase"
+    );
+
+    give_priority(&mut runner, P1, P0, Phase::PreCombatMain);
+    assert_eq!(enumerated_ability_indices(&runner, jace), vec![0, 1]);
 }

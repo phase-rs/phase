@@ -152,7 +152,7 @@ fn cast_from_window(runner: &mut GameRunner, selection: Option<ObjectId>) {
 /// return how many prompts there were. Each prompt must offer its pick.
 fn order_copies(runner: &mut GameRunner, picks: &[ObjectId]) -> usize {
     let mut asked = 0;
-    while let WaitingFor::SpellCopyOrderChoice {
+    while let WaitingFor::MemberOrderChoice {
         player, choices, ..
     } = &runner.state().waiting_for
     {
@@ -443,7 +443,7 @@ fn the_controller_interleaves_the_copies_across_retarget_choices() {
                 cast_from_window(&mut b.runner, Some(b.sorcery));
                 continue;
             }
-            WaitingFor::SpellCopyOrderChoice { choices, .. } => {
+            WaitingFor::MemberOrderChoice { choices, .. } => {
                 let pick = order_picks.next().expect("one pick per prompt");
                 assert!(choices.contains(&pick));
                 prompts.push("order");

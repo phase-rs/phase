@@ -1,4 +1,5 @@
 use crate::game::effects::{resolve_ability_chain, search_library};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, PlayerFilter, ResolvedAbility, SubAbilityLink,
@@ -66,6 +67,7 @@ pub(crate) fn supports_simultaneous_delivery(ability: &ResolvedAbility) -> bool 
             true
         }
         Effect::ChangeZone {
+            actor: _,
             origin: Some(Zone::Library),
             destination: Zone::Hand,
             target: TargetFilter::ParentTarget,
@@ -79,6 +81,7 @@ pub(crate) fn supports_simultaneous_delivery(ability: &ResolvedAbility) -> bool 
             conditional_enter_with_counters,
             face_down_profile: None,
             enters_modified_if: None,
+            library_shuffle: _,
         } if *reveal
             && enter_with_counters.is_empty()
             && conditional_enter_with_counters.is_empty() =>
@@ -316,12 +319,10 @@ pub(crate) fn submit_selection(
             chosen.len()
         )));
     }
-    for id in chosen {
-        if !cards.contains(id) {
-            return Err(EffectError::InvalidParam(
-                "Selected card not in scoped search results".to_string(),
-            ));
-        }
+    if !search_library::selection_is_distinct_subset(chosen, cards) {
+        return Err(EffectError::InvalidParam(
+            "Selected search cards must be distinct and in the offered pool".to_string(),
+        ));
     }
     let ScopedLibrarySearchPhase::CollectSelections {
         prepared_choices, ..
@@ -348,14 +349,6 @@ pub(crate) fn submit_selection(
                 "selected scoped search card is stale".to_string(),
             ));
         }
-    }
-    let mut distinct = chosen.to_vec();
-    distinct.sort_unstable_by_key(|id| id.0);
-    distinct.dedup();
-    if distinct.len() != chosen.len() {
-        return Err(EffectError::InvalidParam(
-            "Cannot select the same search card more than once".to_string(),
-        ));
     }
     if !search_library::selection_satisfies_constraint(state, chosen, constraint) {
         return Err(EffectError::InvalidParam(
@@ -800,19 +793,30 @@ fn deliver_collected_cards(
             if object.incarnation != frozen.identity.incarnation {
                 return None;
             }
-            let (move_destination, source_id) = match frozen.disposition {
+            let (move_destination, source_id, performed_by) = match frozen.disposition {
                 crate::types::proposed_event::SearchFoundDisposition::Original => {
-                    (destination, pending.ability.source_id)
+                    (destination, pending.ability.source_id, None)
                 }
                 crate::types::proposed_event::SearchFoundDisposition::Modified(disposition) => {
                     if let Some(grant) = disposition.grant {
                         grants.push((frozen.identity, grant));
                     }
-                    (disposition.destination, disposition.source.object_id)
+                    (
+                        disposition.destination,
+                        disposition.source.object_id,
+                        disposition.performer(frozen.searcher),
+                    )
                 }
             };
+            // CR 608.2c: the searcher's exile records the searcher. No
+            // ownership input, as before: `performer` names nobody off Exile,
+            // and an exile never rebinds entry ownership.
             let mut request =
-                ZoneMoveRequest::effect(frozen.identity.object_id, move_destination, source_id);
+                ZoneMoveRequest::effect(frozen.identity.object_id, move_destination, source_id)
+                    .actors(crate::game::zone_pipeline::MoveActors {
+                        performed_by,
+                        ownership_actor: None,
+                    });
             request.mods.enter_tapped = enter_tapped;
             Some(request)
         })
@@ -852,6 +856,7 @@ fn deliver_collected_cards(
                     .iter()
                     .filter_map(|id| state.objects.get(id).map(|object| object.name.clone()))
                     .collect(),
+                occurrences: state.disclosed_occurrences(&card_ids),
                 card_ids,
             });
         }
@@ -949,6 +954,8 @@ mod tests {
             .collect();
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::ParentTarget,
@@ -985,6 +992,128 @@ mod tests {
         (state, search, cards)
     }
 
+    /// Supplemental hostile state staging; no player can act mid-resolution.
+    #[test]
+    fn scoped_submission_rechecks_prepared_identity_and_zone() {
+        for stale_case in 0..4 {
+            let (mut state, search, cards) = three_player_scoped_search(false);
+            let sibling = create_object(
+                &mut state,
+                CardId(90),
+                PlayerId(0),
+                "Live sibling".to_string(),
+                Zone::Library,
+            );
+            start(&mut state, &search, &[PlayerId(0)], None, &mut Vec::new()).unwrap();
+            assert!(
+                matches!(&state.waiting_for, WaitingFor::SearchChoice { player: PlayerId(0), cards: offered, .. }
+                if offered.contains(&cards[0]) && offered.contains(&sibling))
+            );
+            let legal = GameAction::SelectCards {
+                cards: vec![cards[0]],
+            };
+            assert!(!crate::ai_support::structurally_valid_search_selection(
+                &state, &legal
+            ));
+            let mut control = state.clone();
+            apply_as_current(&mut control, legal.clone()).unwrap();
+            assert_eq!(control.objects[&cards[0]].zone, Zone::Hand);
+            assert!(control.pending_scoped_library_search.is_none());
+            assert!(matches!(control.waiting_for, WaitingFor::Priority { .. }));
+            // CR 400.7: numeric membership cannot substitute for prepared identity.
+            match stale_case {
+                0 => state.objects.get_mut(&cards[0]).unwrap().incarnation += 1,
+                1 => {
+                    let pending = state.pending_scoped_library_search.as_ref().unwrap();
+                    let ScopedLibrarySearchPhase::CollectSelections {
+                        prepared_choices, ..
+                    } = &pending.phase
+                    else {
+                        unreachable!()
+                    };
+                    let prepared_identity = *prepared_choices[0]
+                        .candidates
+                        .iter()
+                        .find(|candidate| candidate.object_id == cards[0])
+                        .unwrap();
+                    assert_eq!(
+                        prepared_identity,
+                        ObjectIncarnationRef::from_object(&state.objects[&cards[0]])
+                    );
+                    assert_eq!(state.objects[&cards[0]].zone, Zone::Library);
+                    assert!(state.library_of(PlayerId(0)).contains(&cards[0]));
+                    // CR 400.7: a real zone departure changes incarnation as well
+                    // as zone containers; keep the already-published prompt stale.
+                    crate::game::zones::move_to_zone(
+                        &mut state,
+                        cards[0],
+                        Zone::Graveyard,
+                        &mut Vec::new(),
+                    );
+                    // Finish the staged move's action-scoped sidecars before
+                    // snapshotting rejection: apply clears these before its
+                    // rollback snapshot, without changing active search authority.
+                    state.clear_completed_hidden_search_audiences();
+                    assert_eq!(state.objects[&cards[0]].zone, Zone::Graveyard);
+                    assert!(!state.library_of(PlayerId(0)).contains(&cards[0]));
+                    assert!(state.graveyard_of(PlayerId(0)).contains(&cards[0]));
+                    let current = ObjectIncarnationRef::from_object(&state.objects[&cards[0]]);
+                    assert_eq!(current.object_id, prepared_identity.object_id);
+                    assert_ne!(current.incarnation, prepared_identity.incarnation);
+                    let pending = state.pending_scoped_library_search.as_ref().unwrap();
+                    let ScopedLibrarySearchPhase::CollectSelections {
+                        prepared_choices, ..
+                    } = &pending.phase
+                    else {
+                        unreachable!()
+                    };
+                    assert!(prepared_choices[0].candidates.contains(&prepared_identity));
+                    assert!(
+                        matches!(&state.waiting_for, WaitingFor::SearchChoice { player: PlayerId(0), cards: offered, .. }
+                        if offered.contains(&cards[0]) && offered.contains(&sibling))
+                    );
+                }
+                2 => {
+                    state.objects.remove(&cards[0]);
+                }
+                3 => {
+                    let pending = state.pending_scoped_library_search.as_mut().unwrap();
+                    let ScopedLibrarySearchPhase::CollectSelections {
+                        prepared_choices, ..
+                    } = &mut pending.phase
+                    else {
+                        unreachable!()
+                    };
+                    prepared_choices[0]
+                        .candidates
+                        .retain(|candidate| candidate.object_id != cards[0]);
+                }
+                _ => unreachable!(),
+            }
+            let before = serde_json::to_value(&state).unwrap();
+            let result = apply_as_current(&mut state, legal);
+            assert!(
+                matches!(
+                    &result,
+                    Err(crate::game::engine::EngineError::InvalidAction(_))
+                ),
+                "stale case {stale_case}: expected rejection, got {result:?}"
+            );
+            assert_eq!(serde_json::to_value(&state).unwrap(), before);
+            apply_as_current(
+                &mut state,
+                GameAction::SelectCards {
+                    cards: vec![sibling],
+                },
+            )
+            .unwrap();
+            assert_eq!(state.objects[&sibling].zone, Zone::Hand);
+            assert!(state.pending_scoped_library_search.is_none());
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
+
     #[test]
     fn ordinary_optional_frame_prevents_scoped_protocol_prompt_collision() {
         let (mut state, mut scoped_search, _) = three_player_scoped_search(true);
@@ -1003,6 +1132,7 @@ mod tests {
         ordinary_optional.optional = true;
         ordinary_optional.set_controller_recursive(PlayerId(0));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ordinary_optional),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -1130,6 +1260,8 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -1214,6 +1346,8 @@ mod tests {
             .collect();
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -1424,7 +1558,12 @@ mod tests {
         )
         .unwrap();
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(0),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(matches!(
             state.waiting_for,
@@ -1462,7 +1601,12 @@ mod tests {
             }
         ));
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(0),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(matches!(
             state.waiting_for,
@@ -1529,6 +1673,8 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -1633,6 +1779,8 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::ParentTarget,
@@ -1688,6 +1836,7 @@ mod tests {
                                 destination: Zone::Hand,
                                 source: ObjectIncarnationRef::from_object(&state.objects[&source]),
                                 grant: None,
+                                actor: Default::default(),
                             },
                         ),
                     },
@@ -1740,6 +1889,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Graveyard,
                             target: TargetFilter::Any,
@@ -1778,6 +1929,9 @@ mod tests {
                                 destination: Zone::Exile,
                                 source,
                                 grant: None,
+                                // CR 608.2c: the searcher exiles the card they find.
+                                actor:
+                                    crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                             },
                         ),
                     },
@@ -1812,6 +1966,12 @@ mod tests {
 
         assert_eq!(state.objects[&cards[0]].zone, Zone::Hand);
         assert_eq!(state.objects[&cards[1]].zone, Zone::Exile);
+        // CR 608.2c: the batch delivery records the searching
+        // player (P1) as the exiler of the redirected member; the member that
+        // kept its original disposition records nobody. Synthetic: a
+        // `LibraryPlayer` exile disposition bound onto a mixed scoped search.
+        assert_eq!(state.objects[&cards[1]].exiled_by, Some(PlayerId(1)));
+        assert_eq!(state.objects[&cards[0]].exiled_by, None);
         let moved: Vec<_> = result
             .events
             .iter()
@@ -1834,6 +1994,99 @@ mod tests {
         assert!(state.active_batch_delivery().is_none());
     }
 
+    /// CR 614.6 ("A modified event occurs instead") + CR 608.2c: in a
+    /// shared-library (Dandân) game, the searcher's exile of a found card that
+    /// a replacement redirects to the hand leaves the card with its owner. The
+    /// scoped batch delivery records the searcher as performer and, explicitly,
+    /// no ownership input, so the redirect cannot make the searcher (P1) the
+    /// receiver or owner of the P0-owned card.
+    /// Synthetic: a `LibraryPlayer` exile disposition and a mandatory
+    /// exile-to-hand redirect; no printed card redirects an exile to a hand.
+    ///
+    /// Revert sensitivity: letting the delivery read the performer as the
+    /// ownership input sends the card to P1's hand, owned by P1.
+    #[test]
+    fn redirected_scoped_search_exile_keeps_the_found_cards_owner() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ReplacementDefinition, ReplacementMode,
+        };
+        use crate::types::game_state::FrozenScopedSearchFoundDisposition;
+        use crate::types::identifiers::ObjectIncarnationRef;
+        use crate::types::proposed_event::{BoundSearchFoundDisposition, SearchFoundDisposition};
+        use crate::types::replacements::ReplacementEvent;
+
+        let (mut state, search, cards) = three_player_scoped_search(false);
+        state.format_config = crate::types::format::FormatConfig::dandan();
+        let source = ObjectIncarnationRef::from_object(&state.objects[&search.source_id]);
+        let found = ObjectIncarnationRef::from_object(&state.objects[&cards[0]]);
+        let redirect_source = create_object(
+            &mut state,
+            CardId(98),
+            PlayerId(2),
+            "Exile-to-hand redirect".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&redirect_source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .mode(ReplacementMode::Mandatory)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
+                            origin: None,
+                            destination: Zone::Hand,
+                            target: TargetFilter::Any,
+                            owner_library: false,
+                            enter_transformed: false,
+                            enters_under: None,
+                            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                            enters_attacking: false,
+                            up_to: false,
+                            enter_with_counters: Vec::new(),
+                            conditional_enter_with_counters: Vec::new(),
+                            face_down_profile: None,
+                            enters_modified_if: None,
+                        },
+                    ))
+                    .destination_zone(Zone::Exile),
+            );
+        state.pending_scoped_library_search = Some(PendingScopedLibrarySearch {
+            ability: Box::new(search),
+            phase: ScopedLibrarySearchPhase::CollectSelections {
+                prepared_choices: Vec::new(),
+                next_selection_index: 0,
+                current_player: None,
+                selections: vec![(PlayerId(1), vec![found])],
+                frozen_dispositions: vec![FrozenScopedSearchFoundDisposition {
+                    searcher: PlayerId(1),
+                    identity: found,
+                    disposition: SearchFoundDisposition::Modified(BoundSearchFoundDisposition {
+                        destination: Zone::Exile,
+                        source,
+                        grant: None,
+                        actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
+                    }),
+                }],
+                pending_reveals: Vec::new(),
+            },
+            after_scope: None,
+        });
+
+        deliver_collected_cards(&mut state, &mut Vec::new()).unwrap();
+
+        // Reach-guard: the redirect applied.
+        assert_eq!(state.objects[&cards[0]].zone, Zone::Hand);
+        assert_eq!(state.objects[&cards[0]].owner, PlayerId(0));
+        assert!(state.players[0].hand.contains(&cards[0]));
+        assert!(!state.players[1].hand.contains(&cards[0]));
+    }
+
     #[test]
     fn elimination_advances_the_current_acceptance_cursor() {
         let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
@@ -1846,6 +2099,8 @@ mod tests {
         );
         let delivery = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Hand,
                 target: TargetFilter::ParentTarget,
@@ -1897,7 +2152,12 @@ mod tests {
             }
         ));
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(0),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         assert!(matches!(
             state.waiting_for,

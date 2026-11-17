@@ -95,7 +95,7 @@ fn battlefield_ninjutsu_marker_not_offered_as_activate_ability_without_mana() {
             a,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index: 0,
+                ability_index: 0, ..
             } if *source_id == battlefield_hacker
         )),
         "synthesized NinjutsuFamily marker must not be offered via ActivateAbility"
@@ -109,6 +109,7 @@ fn battlefield_ninjutsu_marker_not_offered_as_activate_ability_without_mana() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: battlefield_hacker,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         result.is_err(),

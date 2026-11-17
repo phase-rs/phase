@@ -357,7 +357,8 @@ fn resolve_choice(
         WaitingFor::MulliganDecision { .. }
         | WaitingFor::OpeningHandBottomCards { .. }
         | WaitingFor::BetweenGamesSideboard { .. }
-        | WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
+        | WaitingFor::BetweenGamesChoosePlayDraw { .. }
+        | WaitingFor::ChooseStartingPlayer { .. } => {
             return Err(BailReason::MulliganOrSideboardEncountered);
         }
         WaitingFor::GameOver { .. } => {
@@ -554,6 +555,7 @@ fn resolve_choice(
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::OptionalCostChoice { .. }
         | WaitingFor::TributeChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. } => {
             // For the actor: pick the "no" option (decline) unless it's the
             // opponent and there's a clearly growth-maximizing yes.
@@ -587,37 +589,15 @@ fn resolve_choice(
             .ok_or_else(|| BailReason::NoLegalAction {
                 waiting_for: format!("{:?}", state.waiting_for),
             })?,
-        // PR-7 Phase 4c (LOW-2): self-preservation via the single-authority
-        // `smart_shortcut_response` — Shorten when the polled player has a meaningful
-        // way to break the loop, else Accept.
-        WaitingFor::RespondToShortcut { player, .. } => GameAction::RespondToShortcut {
-            response: engine::ai_support::smart_shortcut_response(state, *player),
-        },
-        WaitingFor::RespondToPrecastCopyShortcut {
-            player,
-            epoch,
-            breakpoint_ids,
-            ..
-        } => {
-            let response = match engine::ai_support::smart_shortcut_response(state, *player) {
-                engine::analysis::loop_check::ShortcutResponse::Shorten { .. } => {
-                    breakpoint_ids.first().map_or(
-                        engine::types::actions::PrecastCopyShortcutResponse::Accept,
-                        |breakpoint_id| {
-                            engine::types::actions::PrecastCopyShortcutResponse::Shorten {
-                                breakpoint_id: *breakpoint_id,
-                            }
-                        },
-                    )
-                }
-                engine::analysis::loop_check::ShortcutResponse::Accept => {
-                    engine::types::actions::PrecastCopyShortcutResponse::Accept
-                }
-            };
-            GameAction::PrecastCopyShortcut {
-                epoch: *epoch,
-                response,
-            }
+        // CR 732.2b: a rollout takes the conservative answer to a shortcut proposal.
+        WaitingFor::RespondToShortcut { .. } | WaitingFor::RespondToPrecastCopyShortcut { .. } => {
+            actions
+                .iter()
+                .find(|action| crate::search::is_shortcut_accept(action))
+                .cloned()
+                .ok_or_else(|| BailReason::NoLegalAction {
+                    waiting_for: format!("{:?}", state.waiting_for),
+                })?
         }
 
         _ => {
@@ -1008,6 +988,9 @@ pub(crate) mod projection_fixtures {
     const BEGIN_COMBAT_GROWTH_ORACLE: &str =
         "At the beginning of combat on your turn, put a +1/+1 counter on this creature.";
 
+    /// Inert permanents added to each board by [`seed_opponent_begin_combat_horizon`].
+    const BYSTANDERS_PER_BOARD: usize = 25;
+
     /// Seed `scenario` so that a state built from it TRAVERSES `project_to`'s
     /// loop to `ProjectionHorizon::OpponentBeginCombat` for
     /// `(ai_player, target_opponent)`. Returns the growing permanent's id, which
@@ -1058,6 +1041,16 @@ pub(crate) mod projection_fixtures {
             )
             .id();
         scenario.add_creature(ai_player, "Projection Bear", 2, 2);
+        // Inert bystanders on both boards. A traversal clones and re-evaluates the whole
+        // game every step, so its cost grows with the permanents on the battlefield;
+        // this keeps the traversal comfortably above the 15 ms interactive cap on a fast
+        // host, which is the margin T7b's wall-clock arm needs to discriminate. They
+        // have no abilities, so they change neither the horizon's reachability nor which
+        // choices the traversal dispatches.
+        for index in 0..BYSTANDERS_PER_BOARD {
+            scenario.add_creature(ai_player, &format!("AI Bystander {index}"), 1, 1);
+            scenario.add_creature(target_opponent, &format!("Opp Bystander {index}"), 1, 1);
+        }
         scenario.with_library_top(
             ai_player,
             &[
@@ -1247,13 +1240,17 @@ mod tests {
             predicted_winner: Some(PlayerId(1)),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
-                win_kind: engine::analysis::loop_check::WinKind::LethalDamage,
+                rising: vec![],
+                win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
+                win_kind_at: None,
                 mandatory: false,
                 residual_board_delta: engine::analysis::resource::BoardDelta::default(),
                 per_cycle: None,
             },
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
+            counted_take: Default::default(),
+            period: Default::default(),
         };
 
         let (_actor, action, is_policy_choice, _successor) =
@@ -1488,6 +1485,7 @@ mod tests {
             player: PlayerId(0),
             total: 0,
             resume_at_resolution_depth: 0,
+            pending_entry: None,
         });
         assert_eq!(
             classify_payment_continuation(&state),
@@ -1750,5 +1748,57 @@ mod tests {
             ..k1
         };
         assert_ne!(k1, k2);
+    }
+
+    /// R6 (projection leg). A rollout answers a shortcut proposal with the Accept although the
+    /// Shorten is issued: on the Cauldron Familiar board P1 holds Relic of Progenitus, so its
+    /// place-1 Shorten is admitted.
+    #[test]
+    fn a_rollout_accepts_a_shortcut_proposal() {
+        use engine::analysis::decision_template::IterationCount;
+        use engine::analysis::loop_check::ShortcutResponse;
+        use std::io::Read;
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../engine/tests/fixtures/familiar_relic_turn5_2p.json.gz");
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(std::fs::File::open(path).expect("the Familiar dump opens"))
+            .read_to_string(&mut json)
+            .expect("the Familiar dump inflates");
+        let json = engine::types::game_state::record_captured_onsets_json(&json);
+        let document: serde_json::Value =
+            serde_json::from_str(&json).expect("the Familiar dump is JSON");
+        let mut state = serde_json::from_value::<engine::types::game_state::PersistedGameState>(
+            document["gameState"].clone(),
+        )
+        .expect("the Familiar dump decodes")
+        .into_game_state()
+        .expect("the Familiar dump restores");
+        engine::game::engine::apply(
+            &mut state,
+            P0,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(12),
+                template: None,
+            },
+        )
+        .expect("P0 declares the shortcut");
+        let accept = GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        };
+        assert_eq!(
+            legal_actions(&state),
+            vec![
+                accept.clone(),
+                GameAction::RespondToShortcut {
+                    response: ShortcutResponse::Shorten { at_iteration: 1 },
+                },
+            ],
+            "reach-guard: the Shorten is issued"
+        );
+
+        let (seat, action, _, _) =
+            resolve_choice(&state, PlayerId(1), PlayerId(0)).expect("the window has answers");
+        assert_eq!((seat, action), (PlayerId(1), accept));
     }
 }

@@ -44,6 +44,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card_type::CoreType;
+use engine::types::game_state::GameState;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
@@ -75,11 +76,12 @@ fn draw_count_substitute(value: i32) -> AbilityDefinition {
 }
 
 /// A replacement-bearing permanent to seat: its card name, and a shaper that
-/// fills in the `ReplacementDefinition` given the permanent's `ObjectId` (needed
-/// because a `runtime_execute` substitute binds its own source).
+/// fills in the `ReplacementDefinition` given the state and the permanent's
+/// `ObjectId` (needed because a `runtime_execute` substitute binds its own source
+/// and is installed in the state's continuation arena).
 type ReplacementShape = (
     &'static str,
-    Box<dyn Fn(&mut ReplacementDefinition, ObjectId)>,
+    Box<dyn Fn(&mut GameState, &mut ReplacementDefinition, ObjectId)>,
 );
 
 /// Seats P0 with `library` cards, plus a replacement-bearing permanent when
@@ -105,7 +107,7 @@ fn scenario(library: usize, customize: Option<ReplacementShape>) -> GameRunner {
     if let (Some(source), Some((_, shape))) = (source, customize) {
         let mut repl = ReplacementDefinition::new(ReplacementEvent::Draw)
             .draw_scope(DrawReplacementScope::IndividualDraw);
-        shape(&mut repl, source);
+        shape(runner.state_mut(), &mut repl, source);
         runner
             .state_mut()
             .objects
@@ -200,9 +202,11 @@ fn mandatory_prevent_is_predicted_and_not_delivered() {
         3,
         Some((
             "Living Conundrum",
-            Box::new(|repl: &mut ReplacementDefinition, _source| {
-                repl.quantity_modification = Some(QuantityModification::Prevent);
-            }),
+            Box::new(
+                |_state: &mut GameState, repl: &mut ReplacementDefinition, _source| {
+                    repl.quantity_modification = Some(QuantityModification::Prevent);
+                },
+            ),
         )),
     );
     assert_preflight_matches_pipeline("mandatory prevent", runner, false);
@@ -217,9 +221,11 @@ fn mandatory_execute_substitute_is_predicted_and_not_delivered() {
         3,
         Some((
             "Chains of Mephistopheles",
-            Box::new(|repl: &mut ReplacementDefinition, _source| {
-                repl.execute = Some(Box::new(gain_life_substitute()));
-            }),
+            Box::new(
+                |_state: &mut GameState, repl: &mut ReplacementDefinition, _source| {
+                    repl.execute = Some(Box::new(gain_life_substitute()));
+                },
+            ),
         )),
     );
     assert_preflight_matches_pipeline("mandatory execute substitute", runner, false);
@@ -234,14 +240,17 @@ fn mandatory_runtime_execute_substitute_is_predicted_and_not_delivered() {
         3,
         Some((
             "Words of Worship",
-            Box::new(|repl: &mut ReplacementDefinition, source: ObjectId| {
-                repl.runtime_execute = Some(Box::new(ResolvedAbility::new(
-                    gain_life_substitute().effect.as_ref().clone(),
-                    Vec::new(),
-                    source,
-                    P0,
-                )));
-            }),
+            Box::new(
+                |state: &mut GameState, repl: &mut ReplacementDefinition, source: ObjectId| {
+                    repl.runtime_execute =
+                        Some(state.install_replacement_continuation(ResolvedAbility::new(
+                            gain_life_substitute().effect.as_ref().clone(),
+                            Vec::new(),
+                            source,
+                            P0,
+                        )));
+                },
+            ),
         )),
     );
     assert_preflight_matches_pipeline("mandatory runtime_execute substitute", runner, false);
@@ -257,9 +266,11 @@ fn count_modifying_replacement_is_predicted_and_delivered() {
         3,
         Some((
             "Alhammarret's Archive",
-            Box::new(|repl: &mut ReplacementDefinition, _source| {
-                repl.execute = Some(Box::new(draw_count_substitute(2)));
-            }),
+            Box::new(
+                |_state: &mut GameState, repl: &mut ReplacementDefinition, _source| {
+                    repl.execute = Some(Box::new(draw_count_substitute(2)));
+                },
+            ),
         )),
     );
     assert_preflight_matches_pipeline("count-modifying replacement", runner, true);
@@ -275,9 +286,11 @@ fn zero_count_replacement_is_predicted_and_not_delivered() {
         3,
         Some((
             "Zero-Count Draw Rescaler",
-            Box::new(|repl: &mut ReplacementDefinition, _source| {
-                repl.execute = Some(Box::new(draw_count_substitute(0)));
-            }),
+            Box::new(
+                |_state: &mut GameState, repl: &mut ReplacementDefinition, _source| {
+                    repl.execute = Some(Box::new(draw_count_substitute(0)));
+                },
+            ),
         )),
     );
     assert_preflight_matches_pipeline("zero-count replacement", runner, false);

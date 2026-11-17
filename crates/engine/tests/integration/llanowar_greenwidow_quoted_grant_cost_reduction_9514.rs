@@ -79,7 +79,7 @@ fn greenwidow_graveyard_ability_is_reduced_per_basic_land_type() {
     runner.advance_until_stack_empty();
 
     assert!(
-        outcome.state().players[0].mana_pool.mana.is_empty(),
+        outcome.state().players[0].mana_pool.is_empty(),
         "the reduced cost {{4}}{{G}} spends the whole pool"
     );
     assert_eq!(runner.state().objects[&greenwidow].zone, Zone::Battlefield);

@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { canUseLanBridge } from "./lan";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 import {
@@ -18,7 +19,7 @@ const DEFAULT_PORT = 9374;
 export type FlagCode = "us";
 
 export interface ServerPreset {
-  labelKey: string;
+  labelKey: ParseKeys<"multiplayer">;
   url: string;
   flag?: FlagCode;
 }
@@ -32,7 +33,7 @@ export interface ServerPreset {
 export const SERVER_PRESETS: ServerPreset[] = [
   ...(DEFAULT_MULTIPLAYER_SERVER_URL === OFFICIAL_MULTIPLAYER_SERVER_URL
     ? []
-    : [{ labelKey: "serverPicker.selfHosted", url: DEFAULT_MULTIPLAYER_SERVER_URL }]),
+    : [{ labelKey: "serverPicker.selfHosted", url: DEFAULT_MULTIPLAYER_SERVER_URL } satisfies ServerPreset]),
   {
     labelKey: "serverPicker.official",
     url: OFFICIAL_MULTIPLAYER_SERVER_URL,
@@ -119,8 +120,15 @@ export function parseJoinCode(input: string): { code: string; serverAddress?: st
   }
 
   // Split host:port on the last colon so a host:port pair splits correctly.
+  // A bracketed IPv6 literal with no port (e.g. `[::1]`) ends in `]`, and its
+  // last colon is INSIDE the address — splitting there yields a broken host like
+  // `[:`. When the host is a bracketed literal with no trailing `:port`, there
+  // is no port to split off.
   const colonIndex = hostPort.lastIndexOf(":");
-  const hasPort = colonIndex !== -1 && colonIndex < hostPort.length - 1;
+  const hasPort =
+    colonIndex !== -1 &&
+    colonIndex < hostPort.length - 1 &&
+    !hostPort.endsWith("]");
   const host = hasPort ? hostPort.slice(0, colonIndex) : hostPort;
 
   const isLocal = host === "localhost" || host === "127.0.0.1";

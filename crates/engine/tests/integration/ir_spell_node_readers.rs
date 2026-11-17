@@ -42,9 +42,7 @@ fn retained_ability_slots(parsed: &ParsedAbilities) -> Vec<usize> {
                 additional_modifications,
                 ..
             } => from_mods(additional_modifications, out),
-            Effect::AddPendingEntersModifications { modifications } => {
-                from_mods(modifications, out)
-            }
+            Effect::AddPendingEntersModifications { rider } => from_mods(&rider.modifications, out),
             _ => {}
         }
         if let Some(sub) = def.sub_ability.as_deref() {
@@ -175,20 +173,21 @@ fn typed_props(filter: &TargetFilter, out: &mut Vec<FilterProp>) {
     }
 }
 
-/// CR 102.1 + CR 603.7c + CR 608.2c: the `ActivePlayerPunisher` relation pairs
-/// the mass-attack coerce clause with its sibling delayed punisher, then
-/// rebinds the punisher's "that player controls" anaphor from the line-local
-/// `You` default to `ActivePlayer`.
+/// CR 102.1 + CR 608.2c: the coerce clause's subject is the
+/// document antecedent of the delayed punisher's "that player controls", so the
+/// anaphor binds to `ActivePlayer` at parse time; the `ActivePlayerPunisher`
+/// relation then pairs the two items and folds the continuity exemption.
 ///
 /// Siren's Call is the witness because BOTH sides of the relation are ability
 /// items — two printed abilities on one instant — so a single card drives
 /// `item_ability` twice, once per predicate.
 ///
-/// DISCRIMINATING: the rebind is reachable ONLY through the relation, and the
-/// relation is discovered only if `item_ability` returns a definition for both
-/// participating items. Blind the reader on either side and this sees the
-/// line-local `You` — the wrong player, which destroys the caster's own
-/// creatures.
+/// DISCRIMINATING: the exemption fold is reachable ONLY through the relation,
+/// and the relation is discovered only if `item_ability` returns a definition
+/// for both participating items. Blind the reader on either side and the
+/// exemption stays an unfolded sibling. Drop the document antecedent and this
+/// sees the line-local `You` — the wrong player, which destroys the caster's
+/// own creatures.
 #[test]
 fn active_player_punisher_relation_survives_the_item_ability_reader() {
     let parsed = parse_oracle_text(
@@ -204,14 +203,15 @@ fn active_player_punisher_relation_survives_the_item_ability_reader() {
     typed_controllers(&target, &mut controllers);
     assert!(
         !controllers.is_empty(),
-        "reach-guard: the destroyed set must carry at least one typed node to rebind, got {target:?}"
+        "reach-guard: the destroyed set must carry at least one typed node to bind, got {target:?}"
     );
     assert!(
         controllers
             .iter()
             .all(|c| *c == Some(ControllerRef::ActivePlayer)),
-        "the punisher's destroyed set must be rebound to ActivePlayer by the CR 607.2d relation; \
-         a `You` here means the relation was not discovered, got {controllers:?}"
+        "the punisher's destroyed set must be bound to ActivePlayer by the coerce clause's \
+         document antecedent; a `You` here means the antecedent did not reach the delayed \
+         body, got {controllers:?}"
     );
 
     // CR 302.6 + CR 508.1a: the same relation folds the continuous-control
@@ -231,7 +231,7 @@ fn active_player_punisher_relation_survives_the_item_ability_reader() {
 
 /// Reach-guard for the assertion above: `ActivePlayer` must not be something
 /// the punisher line parses to on its own. With no sibling coerce clause there
-/// is no relation to discover, so the anaphor keeps its line-local `You`.
+/// is no document antecedent, so the anaphor keeps its line-local `You`.
 ///
 /// Without this, the test above would still pass against an `item_ability` that
 /// returned `Some` for every item, or against a parser that hardcoded
@@ -250,7 +250,7 @@ fn the_punisher_line_alone_keeps_its_line_local_controller() {
     typed_controllers(&target, &mut controllers);
     assert!(
         !controllers.contains(&Some(ControllerRef::ActivePlayer)),
-        "with no coerce sibling there is no relation, so the anaphor must NOT be \
-         rebound to ActivePlayer, got {controllers:?}"
+        "with no coerce sibling there is no antecedent, so the anaphor must NOT be \
+         bound to ActivePlayer, got {controllers:?}"
     );
 }

@@ -23,7 +23,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::parse_counter_type;
 use engine::types::game_state::{
-    ExileLink, ExileLinkKind, GameState, ManaChoicePrompt, PayCostKind, WaitingFor,
+    CastPaymentMode, ExileLink, ExileLinkKind, GameState, ManaChoicePrompt, PayCostKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -101,6 +101,7 @@ fn tap_for_mana(runner: &mut GameRunner, source: ObjectId) -> Produced {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("reach-guard: the mana ability is activatable");
     match runner.state().waiting_for.clone() {
@@ -281,6 +282,7 @@ fn squandered_reading(state: &GameState, squandered: ObjectId, land: ObjectId) -
         .act(GameAction::ActivateAbility {
             source_id: squandered,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("reach-guard: Squandered Resources is activatable");
     let WaitingFor::PayCost {

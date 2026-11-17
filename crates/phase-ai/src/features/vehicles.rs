@@ -3,9 +3,9 @@
 //!
 //! Parser AST verification — VERIFIED against engine source:
 //! - `Keyword::Crew { power, once_per_turn }` at
-//!   `crates/engine/src/types/keywords.rs:707` — the Vehicle payoff and, in
+//!   `crates/phase-ast/src/types/keywords.rs` — the Vehicle payoff and, in
 //!   `power`, the exact total power CR 702.122a requires to crew it.
-//! - `CardFace.keywords: Vec<Keyword>` at `crates/engine/src/types/card.rs:60`.
+//! - `CardFace.keywords: Vec<Keyword>` at `crates/phase-ast/src/types/card.rs`.
 //! - `CardFace.power: Option<PtValue>` at `card.rs:171`; `PtValue::Fixed(i32)`
 //!   is the only deck-time-knowable form — a `*` power is `PtValue::Variable`
 //!   and is excluded rather than guessed.

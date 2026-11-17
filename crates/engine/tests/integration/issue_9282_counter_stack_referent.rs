@@ -1079,6 +1079,7 @@ fn ward_counters_an_activated_ability_that_targeted_the_warded_creature() {
         .act(GameAction::ActivateAbility {
             source_id: pinger,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate");
     choose_targets_until_settled(&mut runner, warded);
@@ -1216,7 +1217,7 @@ fn each_ward_trigger_counters_a_kicked_spells_cast_trigger() {
     for _ in 0..16 {
         let result = match &runner.state().waiting_for {
             WaitingFor::OptionalCostChoice { .. } => {
-                runner.act(GameAction::DecideOptionalCost { pay: true })
+                runner.act(GameAction::DecideOptionalCost { index: 0 })
             }
             WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
                 runner.act(GameAction::ChooseTarget {
@@ -1270,6 +1271,7 @@ fn ward_counters_a_divided_damage_ability() {
         .act(GameAction::ActivateAbility {
             source_id: mob,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate");
     for _ in 0..8 {

@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
@@ -48,7 +49,7 @@ import type { DraftRunFormat, DraftRunState } from "../services/quickDraftPersis
 
 // ── Format Picker ─────────────────────────────────────────────────────
 
-const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: string; descKey: string }> = [
+const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: ParseKeys<"draft">; descKey: ParseKeys<"draft"> }> = [
   { value: "single", labelKey: "formatPicker.single.label", descKey: "formatPicker.single.description" },
   { value: "bo3", labelKey: "formatPicker.bo3.label", descKey: "formatPicker.bo3.description" },
   { value: "run", labelKey: "formatPicker.run.label", descKey: "formatPicker.run.description" },
@@ -780,6 +781,7 @@ export function DraftPage() {
                 onStartDraft={handleStartDraft}
                 defaultPackCount={setupMode === "sealed" ? SEALED_PACK_COUNT : DRAFT_PACK_COUNT}
                 fixedPackCount={setupMode === "sealed"}
+                showPickEnhancements={setupMode === "quick"}
                 startLabel={
                   setupMode === "sealed"
                     ? t("setSelector.startSealed")
@@ -875,7 +877,7 @@ export function DraftPage() {
               onRemoveBasicLand: (name) => useDraftStore.getState().removeBasicLand(name),
               onAutoSuggestDeck: () => useDraftStore.getState().autoSuggestDeck(),
               onAutoSuggestLands: () => useDraftStore.getState().autoSuggestLands(),
-              onSubmitDeck: () => useDraftStore.getState().submitDeck(),
+              onSubmitDeck: (commanders, companion) => useDraftStore.getState().submitDeck(commanders, companion),
               onCardHover: setHoveredCard,
             }}
           />

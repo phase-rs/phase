@@ -163,7 +163,7 @@ fn peerless_recycling_three_player_chooses_gift_recipient_not_next_player() {
                     "Gift optional cost must carry Gift origin"
                 );
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("promise Gift");
             }
             WaitingFor::ChooseGiftRecipient { candidates, .. } => {
@@ -255,7 +255,7 @@ fn gift_card_three_player_delivery_uses_chosen_recipient_not_next_player() {
             WaitingFor::OptionalCostChoice { origin, .. } => {
                 assert_eq!(*origin, AdditionalCostOrigin::Gift);
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("promise Gift");
             }
             WaitingFor::ChooseGiftRecipient { candidates, .. } => {
@@ -326,7 +326,7 @@ fn gift_recipient_prompt_lists_each_recipient_once() {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("promise Gift");
             }
             WaitingFor::ChooseGiftRecipient { candidates, .. } => {

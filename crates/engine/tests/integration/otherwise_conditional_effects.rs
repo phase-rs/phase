@@ -152,6 +152,7 @@ fn repeat_offender_suspected_gets_counter() {
         .act(GameAction::ActivateAbility {
             source_id: offender,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating Repeat Offender must succeed");
     drain_priority(&mut runner);
@@ -190,6 +191,7 @@ fn repeat_offender_unsuspected_is_suspected_not_countered() {
         .act(GameAction::ActivateAbility {
             source_id: offender,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating Repeat Offender must succeed");
     drain_priority(&mut runner);
@@ -1045,7 +1047,12 @@ fn drive_rent_end_step(
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 saw_payment_prompt = true;
-                if runner.act(GameAction::DecideOptionalCost { pay }).is_err() {
+                if runner
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }

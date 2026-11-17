@@ -1,10 +1,13 @@
+use serde::{Deserialize, Serialize};
+
 use crate::types::ability::{AggregateFunction, ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
-use crate::types::game_state::LinkedExileSnapshot;
+use crate::types::game_state::StackEntry;
+use crate::types::game_state::{LinkedExileSnapshot, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::TurnDirection;
-use crate::types::player::PlayerId;
+use crate::types::player::{Player, PlayerId};
 use crate::types::zones::Zone;
 
 /// Returns true if the player exists in the game and is not eliminated.
@@ -148,6 +151,50 @@ pub fn next_player_in_turn_order(state: &GameState, current: PlayerId) -> Player
     }
 }
 
+/// CR 800.4g + CR 800.4h: an object requires a choice of a player who has left
+/// the game. The controller of the object — read now, live while it is on the
+/// stack and last-known once it has left (`stack::resolving_object_controller`),
+/// never the CR 112.2 default while the spell is on the stack — chooses another
+/// player to make it; a controller who has left is a player a rule requires to
+/// choose, so the next player in turn order after them elects instead
+/// (CR 800.4h). "Another player" is any player other than the one who left —
+/// every player still in the game, in APNAP order, the elector included
+/// (CR 102.1). The second sentence of CR 800.4g does not apply to either
+/// caller: the original choice was the one the object's instructions give its
+/// controller (CR 608.2c + CR 608.2d), made by whoever controlled it when the
+/// choice was to be made — not by an opponent of the controller. A later change
+/// of control (a thief leaving, CR 800.4a) makes another player the object's
+/// controller; it does not turn that controller's own choice into an opponent's
+/// choice, and the new controller is the player its instructions now name
+/// (CR 608.2c).
+pub(crate) struct SubstituteChooserElection {
+    pub elector: PlayerId,
+    pub candidates: Vec<PlayerId>,
+}
+
+/// The election of a substitute chooser for a choice that `object` — the
+/// resolution carrier — requires of a player who has left (see
+/// [`SubstituteChooserElection`]).
+pub(crate) fn substitute_chooser_election(
+    state: &GameState,
+    object: &StackEntry,
+) -> SubstituteChooserElection {
+    let controller = super::stack::resolving_object_controller(state, object);
+    let elector = if is_alive(state, controller) {
+        controller
+    } else {
+        next_player_in_turn_order(state, controller)
+    };
+    let candidates = apnap_order(state)
+        .into_iter()
+        .filter(|&player| is_alive(state, player))
+        .collect();
+    SubstituteChooserElection {
+        elector,
+        candidates,
+    }
+}
+
 /// CR 102.1 + CR 103.1: Single authority for seating-neighbor resolution.
 ///
 /// Resolves the living player seated immediately to `controller`'s left or
@@ -217,6 +264,38 @@ pub fn choosable_opponents(state: &GameState, player: PlayerId) -> Vec<PlayerId>
         .into_iter()
         .filter(|&id| player_exists_for_choice(state, id))
         .collect()
+}
+
+/// CR 102.1 + CR 800.4j: the player whose turn it is; `None` while a turn whose active player has
+/// left the game continues without one. `state.active_player` keeps naming that seat, because
+/// turn order still runs from it.
+pub fn active_player(state: &GameState) -> Option<PlayerId> {
+    is_alive(state, state.active_player).then_some(state.active_player)
+}
+
+/// CR 102.1 + CR 805.4a: the players whose turn it is — every living member of the active
+/// player's side on a shared team turn, else the active player; nobody without one (CR 800.4j).
+pub fn turn_players(state: &GameState) -> Vec<PlayerId> {
+    let Some(active) = active_player(state) else {
+        return Vec::new();
+    };
+    if super::topology::side_takes_shared_turn(state, active) {
+        super::topology::team_members(state, active)
+    } else {
+        vec![active]
+    }
+}
+
+/// CR 805.4 + CR 805.9: whether it is `player`'s turn — on a shared team turn every member of
+/// the active team is an active player, so "your turn" holds for each of them.
+pub fn is_turn_player(state: &GameState, player: PlayerId) -> bool {
+    turn_players(state).contains(&player)
+}
+
+/// CR 102.3 + CR 800.4j: whether it is an opponent's turn for `player`; a turn without an active
+/// player is no player's turn.
+pub fn is_opponents_turn(state: &GameState, player: PlayerId) -> bool {
+    active_player(state).is_some_and(|active| is_opponent(state, player, active))
 }
 
 /// CR 102.2 / CR 102.3: Whether `other` is an opponent of `player`.
@@ -308,6 +387,7 @@ pub fn apnap_order_from(
             | ControllerRef::ScopedPlayer
             | ControllerRef::TargetPlayer
             | ControllerRef::TargetOpponent
+            | ControllerRef::DeclaredPlayer { .. }
             | ControllerRef::ParentTargetController
             | ControllerRef::EventTargetController
             | ControllerRef::ParentTargetOwner
@@ -322,33 +402,22 @@ pub fn apnap_order_from(
         ) => state.active_player,
     };
 
-    if state.format_config.topology().has_shared_team_turns() {
-        return super::topology::apnap_order_from(state, start_player);
-    }
-
-    let start_idx = seat_order
-        .iter()
-        .position(|&id| id == start_player)
-        .unwrap_or(0);
-
-    let mut result = Vec::new();
-    for offset in 0..len {
-        // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
-        let idx = turn_order_index(start_idx, offset, len, state.turn_direction);
-        let candidate = seat_order[idx];
-        // CR 800.4f: A player who has left the game does not pay costs or
-        // make choices on objects' behalf; skip eliminated players.
-        if is_alive(state, candidate) {
-            result.push(candidate);
-        }
-    }
-    result
+    // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction, with
+    // each shared side collapsed to a single choice group and each individual seat
+    // its own group (see `topology::apnap_choice_groups_from`). Flattening that is
+    // the living APNAP order for every side shape — uniform-individual (one group
+    // per seat), uniform-shared, and the mixed Horde game alike — so this is a
+    // single delegation rather than a per-format branch.
+    super::topology::apnap_order_from(state, start_player)
 }
 
 /// CR 603.10a + CR 607.2a: Return the cards linked as "exiled with" `source_id`.
 /// Leaves-the-battlefield triggers prefer the trigger event's zone-change snapshot
 /// because `TrackedBySource` links are pruned immediately on battlefield exit per
-/// CR 400.7. Outside that look-back path, fall back to the live exile-link store.
+/// CR 400.7. Outside that look-back path, fall back to the exile-link store's
+/// links of the incarnation this read is made for. The final linked-exile LKI
+/// fallback is incarnation-bounded the same way (CR 400.7). A record with a
+/// trigger source context reads `linked_exile_pile`.
 pub fn linked_exile_cards_for_source(
     state: &GameState,
     source_id: ObjectId,
@@ -360,49 +429,66 @@ pub fn linked_exile_cards_for_source(
         ..
     }) = state.current_trigger_event.as_ref()
     {
-        if *object_id == source_id && !record.linked_exile_snapshot.is_empty() {
-            return record.linked_exile_snapshot.clone();
+        if *object_id == source_id {
+            let linked = match record.trigger_source_context() {
+                Some(source) => linked_exile_pile(state, source),
+                None => record.linked_exile_snapshot.clone(),
+            };
+            if !linked.is_empty() {
+                return linked;
+            }
         }
     }
 
-    let live: Vec<LinkedExileSnapshot> =
-        crate::game::exile_links::live_links_for_source(state, source_id)
+    // CR 113.7a + CR 400.7: an ability of an older incarnation reads only that
+    // incarnation's cards, never the pile of the object that replaced it.
+    let reader = crate::game::exile_links::linked_exile_incarnation(state, source_id);
+    let linked: Vec<LinkedExileSnapshot> =
+        crate::game::exile_links::links_for_reader(state, source_id, reader)
             .filter_map(|link| {
-                state.objects.get(&link.exiled_id).and_then(|obj| {
-                    (obj.zone == Zone::Exile).then(|| LinkedExileSnapshot {
-                        exiled_id: link.exiled_id,
-                        owner: obj.owner,
-                        // CR 202.3d + CR 709.4b: the exiled card is off the stack, so
-                        // a split card records its combined mana value.
-                        mana_value: obj.effective_mana_value(),
-                    })
-                })
+                crate::game::exile_links::exiled_card_snapshot(state, link.exiled_id)
             })
             .collect();
-    if !live.is_empty() {
-        return live;
+    if !linked.is_empty() {
+        return linked;
     }
 
-    // CR 607.2b + CR 603.10e: The live links are gone (the source left the
-    // battlefield — e.g. sacrificed as its own ability's cost). Fall back to the
-    // persisted linked-exile LKI, filtered to cards STILL in exile so stale
-    // entries (cards that later left exile) contribute nothing.
-    state
+    // CR 607.2a + CR 607.2b + CR 113.7a: The reader has no links (the source left
+    // the battlefield, e.g. sacrificed as its own ability's cost, or the reader is
+    // a departed incarnation whose tracked links were pruned or never made). Fall
+    // back to the linked-exile LKI, again only to the reader's piles.
+    crate::game::exile_links::lki_snapshots_for_reader(state, source_id, reader)
+        .cloned()
+        .collect()
+}
+
+/// CR 607.2a + CR 400.7: The cards linked to a trigger bound to `source`: its
+/// latched snapshot plus the linked-exile LKI recorded for that incarnation
+/// (its departure pile and what it exiled after departing).
+pub fn linked_exile_pile(
+    state: &GameState,
+    source: &TriggerSourceContext,
+) -> Vec<LinkedExileSnapshot> {
+    let bound = source.identity.reference;
+    let mut pile = source.linked_exile_snapshot.clone();
+    // `departed`, not `admits`: an entry whose successor is this incarnation
+    // belongs to an earlier departure, a different object.
+    let later = state
         .linked_exile_lki
-        .get(&source_id)
-        .map(|snapshots| {
-            snapshots
-                .iter()
-                .filter(|snap| {
-                    state
-                        .objects
-                        .get(&snap.exiled_id)
-                        .is_some_and(|obj| obj.zone == Zone::Exile)
-                })
-                .cloned()
-                .collect()
-        })
-        .unwrap_or_default()
+        .get(&bound.object_id)
+        .into_iter()
+        .flatten()
+        .filter(|lki| lki.departed == bound.incarnation)
+        .flat_map(|lki| &lki.snapshot);
+    for snap in later {
+        if !pile
+            .iter()
+            .any(|p| p.exiled_id == snap.exiled_id && p.incarnation == snap.incarnation)
+        {
+            pile.push(snap.clone());
+        }
+    }
+    pile
 }
 
 /// CR 406.6 + CR 607.1: Returns true if `player` owns at least one card currently
@@ -428,9 +514,10 @@ pub fn teammates(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
 /// each DISTINCT team's shared `team_life_total` exactly once (dedup by team).
 /// Min/Max = extremum over team totals; Sum = Σ team totals (no double-count).
 /// Empty population → 0. Off-team every player is its own singleton team, so
-/// this matches a per-individual fold: the dedup key falls back to `pid.0`,
-/// which is distinct per player even when two players share a `team_index`
-/// (e.g. a 1v1 where players 0 and 1 are both `team_index == 0`).
+/// this matches a per-individual fold: the dedup key is a per-seat variant,
+/// distinct per player even when two players share a `team_index` (e.g. a 1v1
+/// where players 0 and 1 are both `team_index == 0`) — and distinct from any
+/// shared-side key, so a Horde seat never collapses into the survivor pool.
 /// CR 810.9d is the confirming example: a per-team extremum (Repay in Kind)
 /// reads each team's total once, not each member.
 pub(crate) fn aggregate_over_teams<I>(
@@ -443,7 +530,7 @@ where
 {
     let mut seen = std::collections::BTreeSet::new();
     let team_totals = players.into_iter().filter_map(|pid| {
-        let key = super::topology::shared_resource_dedup_key(state, pid);
+        let key = super::topology::shared_life_dedup_key(state, pid);
         seen.insert(key).then(|| team_life_total(state, pid))
     });
     match aggregate {
@@ -464,7 +551,7 @@ where
 /// source of truth (CR 810.9: life loss/gain still happens to "each player
 /// individually") — this is a pure derived sum, not a separate stored pool.
 pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
-    super::topology::shared_resource_members(state, player)
+    super::topology::shared_life_members(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.life)
@@ -474,13 +561,123 @@ pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
 /// CR 810.10 + CR 810.10a: A player's team's shared poison-counter total.
 /// Mirrors `team_life_total` — a pure derived sum over `Player::poison_counters`
 /// for the player and their (living) teammates. Non-team formats degenerate
-/// to the player's own count.
+/// to the player's own count, as does Archenemy Commander for every seat:
+/// CR 904.13c keeps poison individual even though life is shared.
 pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
-    super::topology::shared_resource_members(state, player)
+    super::topology::shared_poison_members(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.poison_counters)
         .sum()
+}
+
+/// CR 704.5c / CR 704.6b + CR 810.8d / CR 904.13c: whose poison counters a
+/// poison loss is measured on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PoisonLossScope {
+    /// CR 704.5c / CR 904.13c: the player's own counters.
+    Player,
+    /// CR 704.6b + CR 810.10: the team's shared counters.
+    Team,
+}
+
+/// CR 704.6b / CR 810.8d: fifteen shared poison counters.
+pub const TEAM_POISON_LOSS_THRESHOLD: u32 = 15;
+
+/// The poison count that decides a player's poison loss and the threshold it
+/// is checked against, as returned by [`poison_loss_measure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoisonLossMeasure {
+    pub scope: PoisonLossScope,
+    pub count: u32,
+    pub threshold: u32,
+}
+
+impl PoisonLossMeasure {
+    /// CR 704.5c / CR 704.6b: "… or more poison counters" — the count reaching
+    /// the threshold is a loss.
+    pub fn is_lethal(self) -> bool {
+        self.count >= self.threshold
+    }
+}
+
+/// The poison count that decides `player`'s poison loss and the threshold it
+/// is checked against: the team's shared total against fifteen where poison
+/// is shared (`topology::has_shared_poison`), else the player's own counters
+/// against the format's individual threshold. `None` when no poison-loss rule
+/// applies to `player` (individual branch with `poison_counter_threshold:
+/// None`). The single authority: `LossPool::poison` and the HUD's
+/// `DerivedViews.poison_loss` read it.
+pub fn poison_loss_measure(state: &GameState, player: &Player) -> Option<PoisonLossMeasure> {
+    if super::topology::has_shared_poison(state, player.id) {
+        // CR 704.6b + CR 810.8d / CR 810.10: the team's shared total.
+        Some(PoisonLossMeasure {
+            scope: PoisonLossScope::Team,
+            count: team_poison_total(state, player.id),
+            threshold: TEAM_POISON_LOSS_THRESHOLD,
+        })
+    } else {
+        // CR 704.5c / CR 904.13c: the player's own counters against the
+        // format's individual threshold.
+        state
+            .format_config
+            .poison_counter_threshold
+            .map(|threshold| PoisonLossMeasure {
+                scope: PoisonLossScope::Player,
+                count: player.poison_counters,
+                threshold: u32::from(threshold),
+            })
+    }
+}
+
+/// CR 704.5a + CR 704.5c + CR 704.6a + CR 704.6b: the seats whose life or poison one state-based
+/// loss is checked against together, and how far that total still is from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LossPool {
+    /// CR 810.4 / CR 904.13b + CR 810.10: the living seats sharing the total; the player alone where
+    /// nothing is shared.
+    pub(crate) members: Vec<PlayerId>,
+    /// How far the total is from the threshold; 0 or less once reached.
+    pub(crate) to_threshold: i64,
+}
+
+impl LossPool {
+    /// CR 704.5a / CR 704.6a: 0 or less life loses. `None` for a seat out of the game or with no
+    /// life total.
+    pub(crate) fn life(state: &GameState, player: PlayerId) -> Option<LossPool> {
+        if !is_alive(state, player) || super::horde::player_has_no_life_total(state, player) {
+            return None;
+        }
+        Some(LossPool {
+            members: super::topology::shared_life_members(state, player),
+            to_threshold: i64::from(team_life_total(state, player)),
+        })
+    }
+
+    /// CR 704.5c / CR 704.6b: the poison-loss rule [`poison_loss_measure`] applies. `None` for a
+    /// seat out of the game or one no poison-loss rule applies to.
+    pub(crate) fn poison(state: &GameState, player: PlayerId) -> Option<LossPool> {
+        if !is_alive(state, player) {
+            return None;
+        }
+        let measure = poison_loss_measure(state, state.players.iter().find(|p| p.id == player)?)?;
+        Some(LossPool {
+            members: super::topology::shared_poison_members(state, player),
+            to_threshold: i64::from(measure.threshold) - i64::from(measure.count),
+        })
+    }
+
+    pub(crate) fn reached(&self) -> bool {
+        self.to_threshold <= 0
+    }
+
+    /// CR 810.9 / CR 810.10: what `axis` moves the pool's total by, summed over its members.
+    pub(crate) fn moved_by(&self, axis: &std::collections::BTreeMap<PlayerId, i64>) -> i64 {
+        self.members
+            .iter()
+            .map(|member| axis.get(member).copied().unwrap_or(0))
+            .sum()
+    }
 }
 
 #[cfg(test)]
@@ -519,7 +716,11 @@ mod tests {
         );
     }
     use super::*;
+    use crate::game::zones::{create_object, move_to_zone};
+    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::format::FormatConfig;
+    use crate::types::game_state::{CastingVariant, LinkedExileLki, StackEntry, StackEntryKind};
+    use crate::types::identifiers::CardId;
 
     fn make_state(player_count: u8, config: FormatConfig) -> GameState {
         GameState::new(config, player_count, 0)
@@ -574,6 +775,102 @@ mod tests {
             apnap_order(&state),
             vec![PlayerId(0), PlayerId(3), PlayerId(2), PlayerId(1)],
             "CR 101.4: APNAP follows the reversed turn order",
+        );
+    }
+
+    /// CR 800.4g + CR 800.4h: a living controller elects the substitute
+    /// chooser; a departed controller's election passes to the next player in
+    /// turn order after them, in the current turn direction. The candidates are
+    /// every player still in the game in APNAP order, the elector included.
+    /// The controller is the object's (CR 113.8: an ability's, fixed at
+    /// activation; CR 613.1b: a spell's live controller on the stack, not its
+    /// CR 112.2 default).
+    ///
+    /// REVERT-FAILING: the stolen-spell case names P0 when the election reads
+    /// the entry's default controller.
+    #[test]
+    fn substitute_chooser_election_names_the_controller_or_the_next_player() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        state.active_player = PlayerId(0);
+        // An activated ability of P1's (no object row): its controller is P1.
+        let ability_id = ObjectId(900);
+        assert!(!state.objects.contains_key(&ability_id));
+        let ability = StackEntry {
+            id: ability_id,
+            source_id: ability_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ability_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    ability_id,
+                    PlayerId(1),
+                )),
+            },
+        };
+
+        // A spell P0 cast, controlled on the stack by P2 (CR 613.1b).
+        let stolen = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stolen Spell".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&stolen).unwrap().controller = PlayerId(2);
+        let spell = StackEntry {
+            id: stolen,
+            source_id: stolen,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        };
+        assert_eq!(
+            substitute_chooser_election(&state, &spell).elector,
+            PlayerId(2),
+            "the spell's controller now elects, not its caster"
+        );
+
+        let living = substitute_chooser_election(&state, &ability);
+        assert_eq!(living.elector, PlayerId(1), "a living controller elects");
+        assert_eq!(
+            living.candidates,
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)],
+            "every player in the game, in APNAP order"
+        );
+
+        eliminate(&mut state, PlayerId(1));
+        let departed = substitute_chooser_election(&state, &ability);
+        assert_eq!(
+            departed.elector,
+            PlayerId(2),
+            "CR 800.4h: the next player in turn order after the departed controller"
+        );
+        assert_eq!(
+            departed.candidates,
+            vec![PlayerId(0), PlayerId(2), PlayerId(3)],
+            "CR 102.1: a departed player is not a candidate"
+        );
+
+        state.turn_direction = TurnDirection::Reversed;
+        let reversed = substitute_chooser_election(&state, &ability);
+        assert_eq!(
+            reversed.elector,
+            PlayerId(0),
+            "CR 800.4h: the next player in the reversed turn order"
+        );
+        assert_eq!(
+            reversed.candidates,
+            vec![PlayerId(0), PlayerId(3), PlayerId(2)],
+            "APNAP follows the reversed turn order"
         );
     }
 
@@ -1008,6 +1305,105 @@ mod tests {
         assert_eq!(team_poison_total(&state, PlayerId(2)), 9);
     }
 
+    fn pool(members: &[u8], to_threshold: i64) -> Option<LossPool> {
+        Some(LossPool {
+            members: members.iter().map(|&n| PlayerId(n)).collect(),
+            to_threshold,
+        })
+    }
+
+    /// CR 704.5a + CR 704.5c: one-member pools read the player's own life and ten poison.
+    #[test]
+    fn loss_pool_of_an_unshared_seat_is_the_seat() {
+        let mut state = make_state(2, FormatConfig::standard());
+        state.players[1].life = 7;
+        state.players[1].poison_counters = 3;
+        assert_eq!(LossPool::life(&state, PlayerId(1)), pool(&[1], 7));
+        assert_eq!(LossPool::poison(&state, PlayerId(1)), pool(&[1], 7));
+
+        eliminate(&mut state, PlayerId(1));
+        assert_eq!(LossPool::life(&state, PlayerId(1)), None);
+        assert_eq!(LossPool::poison(&state, PlayerId(1)), None);
+    }
+
+    /// CR 704.6a + CR 704.6b: a Two-Headed Giant team is one pool, at team life and fifteen
+    /// shared poison.
+    #[test]
+    fn loss_pool_of_a_two_headed_giant_team_is_the_team() {
+        let mut state = make_state(4, FormatConfig::two_headed_giant());
+        state.players[2].life = 4;
+        state.players[3].life = 9;
+        state.players[2].poison_counters = 6;
+        state.players[3].poison_counters = 2;
+        for seat in [2, 3] {
+            assert_eq!(LossPool::life(&state, PlayerId(seat)), pool(&[2, 3], 13));
+            assert_eq!(LossPool::poison(&state, PlayerId(seat)), pool(&[2, 3], 7));
+        }
+
+        eliminate(&mut state, PlayerId(3));
+        assert_eq!(LossPool::life(&state, PlayerId(3)), None);
+        assert_eq!(LossPool::poison(&state, PlayerId(3)), None);
+    }
+
+    /// CR 904.13b + CR 904.13c: Archenemy Commander heroes pool life but not poison.
+    #[test]
+    fn loss_pool_of_an_archenemy_commander_hero_shares_life_only() {
+        let mut state = make_state(4, FormatConfig::archenemy_commander());
+        state.players[1].poison_counters = 6;
+        assert_eq!(LossPool::life(&state, PlayerId(1)), pool(&[1, 2, 3], 60));
+        assert_eq!(LossPool::poison(&state, PlayerId(1)), pool(&[1], 4));
+        assert_eq!(LossPool::life(&state, PlayerId(0)), pool(&[0], 60));
+        assert_eq!(LossPool::poison(&state, PlayerId(0)), pool(&[0], 10));
+    }
+
+    #[test]
+    fn loss_pool_of_horde_seats() {
+        let state = GameState::new(
+            FormatConfig::horde(
+                crate::types::format::ChallengeDeck::CybermanHorde.default_ruleset(),
+            ),
+            3,
+            42,
+        );
+        assert_eq!(LossPool::life(&state, PlayerId(0)), None);
+        assert_eq!(LossPool::poison(&state, PlayerId(0)), pool(&[0], 10));
+        let survivors = LossPool::life(&state, PlayerId(1)).unwrap();
+        assert_eq!(survivors.members, [PlayerId(1), PlayerId(2)]);
+        assert_eq!(
+            survivors.to_threshold,
+            i64::from(team_life_total(&state, PlayerId(1)))
+        );
+        assert_eq!(LossPool::poison(&state, PlayerId(1)), pool(&[1, 2], 15));
+    }
+
+    /// CR 704.5a + CR 704.5c + CR 704.6b: a pool is reached at 0 life, ten poison, and fifteen
+    /// shared poison, and not one short of each.
+    #[test]
+    fn loss_pool_reached_at_each_threshold() {
+        let mut state = make_state(2, FormatConfig::standard());
+        for (life, poison, reached) in [(0, 10, true), (1, 9, false)] {
+            state.players[1].life = life;
+            state.players[1].poison_counters = poison;
+            assert_eq!(
+                LossPool::life(&state, PlayerId(1)).unwrap().reached(),
+                reached
+            );
+            assert_eq!(
+                LossPool::poison(&state, PlayerId(1)).unwrap().reached(),
+                reached
+            );
+        }
+        let mut team = make_state(4, FormatConfig::two_headed_giant());
+        for (held, reached) in [(15, true), (14, false)] {
+            team.players[2].poison_counters = held - 5;
+            team.players[3].poison_counters = 5;
+            assert_eq!(
+                LossPool::poison(&team, PlayerId(2)).unwrap().reached(),
+                reached
+            );
+        }
+    }
+
     // --- aggregate_over_teams ---
 
     /// CR 810.9a + CR 810.9d: aggregating life over a population folds each
@@ -1036,10 +1432,10 @@ mod tests {
         );
     }
 
-    /// The dedup key falls back to `pid.0` off-team so two players that share a
+    /// The dedup key is a per-seat variant off-team so two players that share a
     /// `team_index` in a NON-team format are NOT collapsed. In Commander,
     /// players 0 and 1 both have `team_index == 0` (0/2 and 1/2); a bare
-    /// `team_index` key would drop one and break Sum. With the `pid.0` guard,
+    /// `team_index` key would drop one and break Sum. With the per-seat guard,
     /// Sum over [11, 7] is 18 (both counted as singleton teams).
     #[test]
     fn aggregate_over_teams_non_team_format_keeps_players_distinct() {
@@ -1070,5 +1466,351 @@ mod tests {
             aggregate_over_teams(&state, empty, AggregateFunction::Sum),
             0
         );
+    }
+
+    /// CR 904.13b + CR 810.9d: in Archenemy Commander the archenemy's
+    /// dedup key must stay distinct from the heroes' shared key even when
+    /// the archenemy sits in seat 1 — a bare `TeamId(player.0)` key
+    /// collides with the heroes' shared `TeamId(1)` and drops one side
+    /// from the fold (a Repay-in-Kind Min over archenemy-at-10 plus
+    /// heroes-sharing-60 would read 60 instead of 10).
+    #[test]
+    fn aggregate_over_teams_archenemy_commander_seat_one_keeps_sides_distinct() {
+        let mut config = FormatConfig::archenemy_commander();
+        config.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(config, 4, 0);
+        state.players[1].life = 10;
+        state.players[0].life = 20;
+        state.players[2].life = 20;
+        state.players[3].life = 20;
+        let all = vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Min),
+            10,
+            "seat-1 archenemy's 10 must survive the fold, not collapse into the heroes' 60"
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Max),
+            60
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all, AggregateFunction::Sum),
+            70,
+            "both sides' totals must be counted exactly once"
+        );
+    }
+
+    /// Default Archenemy keeps per-seat keys: every seat reads its own
+    /// life, so a seat-1 archenemy at 40 beside 20-life heroes folds as
+    /// four distinct totals. Pins the non-Commander side of the seat-1
+    /// key fix.
+    #[test]
+    fn aggregate_over_teams_default_archenemy_seat_one_stays_per_seat() {
+        let mut config = FormatConfig::archenemy();
+        config.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(config, 4, 0);
+        state.players[1].life = 40;
+        state.players[0].life = 20;
+        state.players[2].life = 20;
+        state.players[3].life = 20;
+        let all = vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Min),
+            20
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all, AggregateFunction::Sum),
+            100
+        );
+    }
+
+    // --- linked-exile LKI incarnation bounds (CR 400.7 + CR 113.7a) ---
+
+    /// The incarnation the source had when it left the battlefield.
+    const DEPARTED: u64 = 4;
+
+    fn departure(departed: u64, card: ObjectId) -> LinkedExileLki {
+        LinkedExileLki {
+            departed,
+            successor: departed + 1,
+            snapshot: vec![LinkedExileSnapshot {
+                exiled_id: card,
+                owner: PlayerId(1),
+                mana_value: 0,
+                // `departed_pile` makes the card directly in exile.
+                incarnation: 0,
+            }],
+        }
+    }
+
+    /// Source `S` with no live links, a card in exile, and one departure entry
+    /// `{DEPARTED, DEPARTED + 1, [card]}`. `live` is S's current incarnation;
+    /// `None` removes S from the game.
+    fn departed_pile(live: Option<u64>) -> (GameState, ObjectId, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".into(),
+            Zone::Graveyard,
+        );
+        let card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Exiled Card".into(),
+            Zone::Exile,
+        );
+        match live {
+            Some(incarnation) => {
+                state.objects.get_mut(&source).unwrap().incarnation = incarnation;
+            }
+            None => {
+                state.objects.remove(&source);
+            }
+        }
+        state
+            .linked_exile_lki
+            .insert(source, vec![departure(DEPARTED, card)]);
+        (state, source, card)
+    }
+
+    /// An activated ability of `source`, put on the stack while `source` had
+    /// incarnation `stamp`, is resolving.
+    fn resolving_ability_of(state: &mut GameState, source: ObjectId, stamp: u64) {
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.source_incarnation = Some(stamp);
+        state.resolving_stack_entry = Some(StackEntry {
+            id: ObjectId(900),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+        });
+    }
+
+    fn linked_ids(state: &GameState, source: ObjectId) -> Vec<ObjectId> {
+        linked_exile_cards_for_source(state, source)
+            .iter()
+            .map(|snapshot| snapshot.exiled_id)
+            .collect()
+    }
+
+    /// CR 607.2a + CR 400.7: the pile is the snapshot plus the bound
+    /// incarnation's later exiles, deduplicated, never an earlier departure's.
+    #[test]
+    fn linked_exile_pile_reads_only_the_bound_incarnation() {
+        let (mut state, source, card) = departed_pile(Some(DEPARTED + 1));
+        let other = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Other".into(),
+            Zone::Exile,
+        );
+        let later = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Later".into(),
+            Zone::Exile,
+        );
+        let snap = |id| LinkedExileSnapshot {
+            exiled_id: id,
+            owner: PlayerId(1),
+            mana_value: 0,
+            incarnation: 0,
+        };
+        let entries = state.linked_exile_lki.get_mut(&source).unwrap();
+        entries.push(LinkedExileLki {
+            departed: DEPARTED,
+            successor: DEPARTED,
+            snapshot: vec![snap(later)],
+        });
+        entries.push(LinkedExileLki {
+            departed: DEPARTED - 1,
+            successor: DEPARTED,
+            snapshot: vec![snap(other)],
+        });
+        let mut context = state.objects[&source]
+            .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Graveyard)
+            .trigger_source_context
+            .expect("context");
+        context.identity.reference.incarnation = DEPARTED;
+        context.linked_exile_snapshot = vec![snap(card)];
+        let ids: Vec<ObjectId> = linked_exile_pile(&state, &context)
+            .iter()
+            .map(|s| s.exiled_id)
+            .collect();
+        assert_eq!(ids, vec![card, later]);
+    }
+
+    /// CR 603.10a + CR 607.2a: a leaves record carrying a trigger source context
+    /// also reads what the bound incarnation exiled after departing.
+    #[test]
+    fn record_branch_reads_the_bound_incarnations_later_exiles() {
+        let (mut state, source, card) = departed_pile(Some(DEPARTED + 1));
+        let later = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Later".into(),
+            Zone::Exile,
+        );
+        let snap = |id| LinkedExileSnapshot {
+            exiled_id: id,
+            owner: PlayerId(1),
+            mana_value: 0,
+            incarnation: 0,
+        };
+        state
+            .linked_exile_lki
+            .get_mut(&source)
+            .unwrap()
+            .push(LinkedExileLki {
+                departed: DEPARTED,
+                successor: DEPARTED,
+                snapshot: vec![snap(later)],
+            });
+        let mut record = state.objects[&source].snapshot_for_zone_change(
+            source,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        record.linked_exile_snapshot = vec![snap(card)];
+        record.sync_trigger_source_context();
+        record
+            .trigger_source_context
+            .as_mut()
+            .unwrap()
+            .identity
+            .reference
+            .incarnation = DEPARTED;
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record),
+        });
+        assert_eq!(linked_ids(&state, source), vec![card, later]);
+    }
+
+    /// CR 113.7a + CR 400.7: a departure entry admits exactly the object that
+    /// left and the object it became.
+    #[test]
+    fn linked_exile_lki_admits_only_its_departure_incarnations() {
+        let lki = LinkedExileLki {
+            departed: 4,
+            successor: 5,
+            snapshot: Vec::new(),
+        };
+        assert!(lki.admits(4));
+        assert!(lki.admits(5));
+        assert!(!lki.admits(3));
+        assert!(!lki.admits(6));
+    }
+
+    /// CR 400.7: the object the source became still reads the pile; a later
+    /// object under the same id does not.
+    #[test]
+    fn linked_exile_lki_is_not_read_by_a_later_incarnation() {
+        let (state, source, card) = departed_pile(Some(DEPARTED + 1));
+        assert_eq!(linked_ids(&state, source), vec![card]);
+
+        let (state, source, _) = departed_pile(Some(DEPARTED + 2));
+        assert!(linked_ids(&state, source).is_empty());
+    }
+
+    /// CR 113.7a + CR 607.2a: an ability of the departed object, resolving after
+    /// its source came back, reads the departed object's pile; an ability of the
+    /// returned object, or of another source, does not.
+    #[test]
+    fn linked_exile_lki_is_read_by_a_resolving_ability_of_the_departed_object() {
+        let (mut state, source, card) = departed_pile(Some(DEPARTED + 2));
+        resolving_ability_of(&mut state, source, DEPARTED);
+        assert_eq!(linked_ids(&state, source), vec![card]);
+
+        resolving_ability_of(&mut state, source, DEPARTED + 2);
+        assert!(linked_ids(&state, source).is_empty());
+
+        let other = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Other Source".into(),
+            Zone::Battlefield,
+        );
+        resolving_ability_of(&mut state, other, DEPARTED);
+        assert!(
+            linked_ids(&state, source).is_empty(),
+            "another source's ability reads for the live object"
+        );
+    }
+
+    /// A source that no longer exists (a token) left once, so its only
+    /// departure entry is read.
+    #[test]
+    fn linked_exile_lki_is_read_when_the_source_no_longer_exists() {
+        let (state, source, card) = departed_pile(None);
+        assert_eq!(linked_ids(&state, source), vec![card]);
+    }
+
+    /// CR 113.7a + CR 400.7: two departures of one id in one step keep two
+    /// entries, and each is read only for its own incarnations.
+    #[test]
+    fn linked_exile_lki_keeps_each_departure_for_its_own_incarnation() {
+        let (mut state, source, first) = departed_pile(Some(DEPARTED + 4));
+        let second = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Second Exiled Card".into(),
+            Zone::Exile,
+        );
+        state
+            .linked_exile_lki
+            .get_mut(&source)
+            .unwrap()
+            .push(departure(DEPARTED + 2, second));
+
+        resolving_ability_of(&mut state, source, DEPARTED);
+        assert_eq!(linked_ids(&state, source), vec![first]);
+        resolving_ability_of(&mut state, source, DEPARTED + 2);
+        assert_eq!(linked_ids(&state, source), vec![second]);
+    }
+
+    /// CR 607.2a + CR 400.7: a pile member that leaves exile is not read, and it
+    /// is still not read once it is exiled again, because the card in exile is
+    /// a new object. Checked for a source that no longer exists and for the
+    /// object the source became.
+    #[test]
+    fn linked_exile_lki_drops_a_member_that_left_exile_and_was_exiled_again() {
+        for live in [None, Some(DEPARTED + 1)] {
+            let (mut state, source, card) = departed_pile(live);
+            assert_eq!(
+                linked_ids(&state, source),
+                vec![card],
+                "positive control: the member is read while it stays in exile"
+            );
+            let mut events = Vec::new();
+            move_to_zone(&mut state, card, Zone::Graveyard, &mut events);
+            assert!(linked_ids(&state, source).is_empty(), "it left exile");
+            move_to_zone(&mut state, card, Zone::Exile, &mut events);
+            assert!(
+                linked_ids(&state, source).is_empty(),
+                "CR 400.7: the card exiled again is a new object, not the member"
+            );
+        }
     }
 }

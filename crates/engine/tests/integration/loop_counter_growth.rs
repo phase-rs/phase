@@ -1,45 +1,29 @@
-//! PR-7 — live preserved-`Generic` counter-growth loop detection (Path C).
+//! PR-7 — live preserved-`Generic` counter-growth loop detection.
 //!
-//! Companion to `loop_shortcut.rs`'s B5 revocable-∞ tests. Covers the live
-//! `interactive_loop_bridge` Path-C arm for a self-refilling OPTIONAL cascade that
-//! grows a `Generic` charge counter each cycle (CR 122.1) — the axis
-//! `loop_states_cover_modulo_counter_growth` was built for. Because the growing charge
-//! is a PRESERVED counter, the constant-depth `loop_states_equal_modulo_resources`
-//! disjunct FAILS on this fixture, so the Path-C mark can only land via the new
-//! counter-growth disjunct: reverting that disjunct makes `drive_until_marked` time out
-//! (the revert-failing assertion).
+//! Covers an OPTIONAL loop that grows a `Generic` charge counter each cycle
+//! (CR 122.1) — the axis `loop_states_cover_modulo_counter_growth` was built for. Because the
+//! growing charge is a PRESERVED counter, the constant-depth
+//! `loop_states_equal_modulo_resources` disjunct FAILS on this fixture.
 //!
-//! The live proliferate loop (Pentad Prism cast + Kilo/Freed/Relic) is NOT sampled by
-//! construction — a `ProliferateChoice` beat every cycle hits the sampler's ring-CLEAR
-//! arm (see `loop_shortcut.rs` docs). That acceptance path is covered OFFLINE by
-//! `drive_offline_pentad_prism` in `corpus_tests.rs`. This file uses the sampler-visible
-//! shape: a self-refilling trigger cascade whose per-cycle charge-put resolves with no
-//! prompt.
+//! The live proliferate loop (Pentad Prism cast + Kilo/Freed/Relic) is covered OFFLINE by
+//! `drive_offline_pentad_prism` in `corpus_tests.rs`. This file loops Worldgorger Dragon and
+//! Animate Dead beside Black Market, which gains a charge counter at each Dragon death.
 
-use engine::analysis::resource::{CounterClass, ResourceAxis};
-use engine::game::derived_views::{CounterMagnitude, CounterRowView, ObjectCounterDisplay};
+use engine::game::derived_views::{CounterRowView, DisplayMagnitude, ObjectCounterDisplay};
 use engine::game::scenario::{GameRunner, GameScenario};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::AbilityKind;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, LoopDetectionMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::ManaColor;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 
 const P0: PlayerId = PlayerId(0);
-
-/// A SINGLE self-refilling trigger that both grows a `Generic` charge counter and
-/// re-gains life in ONE resolution. The trailing "You gain 1 life." re-triggers the
-/// same ability (like `SELF_LIFE_ENGINE`), so the stack stays NON-SHRINKING across the
-/// resolution — the shape the live loop-detect sampler records. A separate leaf
-/// charge-put trigger would shrink the stack on resolution and hit the sampler's
-/// ring-CLEAR arm, so the counter-put must ride the self-refilling resolution itself.
-const CHARGE_LIFE_ENGINE: &str =
-    "Whenever you gain life, put a charge counter on this creature. You gain 1 life.";
-const KICKOFF: &str = "You gain 1 life.";
 
 fn charge_of(runner: &GameRunner, id: ObjectId) -> u32 {
     runner
@@ -51,41 +35,41 @@ fn charge_of(runner: &GameRunner, id: ObjectId) -> u32 {
         .unwrap_or(0)
 }
 
-/// 2-player OPTIONAL beneficial cascade controlled by P0 that grows a `Generic` charge
-/// counter each cycle. One creature carries `CHARGE_LIFE_ENGINE` (a single self-refilling
-/// trigger that puts a charge counter AND re-gains life in one resolution — the
-/// sampler-visible non-shrinking shape). P1 holds a castable Bolt off an untapped Mountain
-/// (a meaningful priority action) so the loop is OPTIONAL (`mandatory == false`) ⇒ Path C,
-/// not the Path-B draw. Nobody loses life ⇒ Path A finds no faller. Returns runner +
-/// (kickoff sorcery id, engine creature id — the charge-counter bearer).
-fn setup_2p_optional_charge_growth(mode: LoopDetectionMode) -> (GameRunner, ObjectId, ObjectId) {
+/// Worldgorger Dragon in P0's graveyard and Animate Dead in P0's hand with {B}{B} floating; P1
+/// controls Black Market, which gains a charge counter at each Dragon death, and holds Lightning
+/// Bolt off a Mountain, so the loop is optional. Returns the runner, Animate Dead, the Dragon and
+/// Black Market.
+fn setup_2p_optional_charge_growth(
+    mode: LoopDetectionMode,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let db = crate::support::shared_card_db().expect("the committed card fixture loads");
     let mut scenario = GameScenario::new_n_player(2, 7);
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.with_life(P0, 20);
-    scenario.with_life(PlayerId(1), 20);
-    let engine_creature = scenario
-        .add_creature_from_oracle(P0, "Test Charge Life Engine", 2, 2, CHARGE_LIFE_ENGINE)
-        .id();
-    scenario.add_basic_land(PlayerId(1), ManaColor::Red);
-    scenario.add_bolt_to_hand(PlayerId(1));
-    let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
-        .id();
+    let dragon = scenario.add_real_card(P0, "Worldgorger Dragon", Zone::Graveyard, db);
+    let animate = scenario.add_real_card(P0, "Animate Dead", Zone::Hand, db);
+    let market = scenario.add_real_card(PlayerId(1), "Black Market", Zone::Battlefield, db);
+    scenario.add_real_card(PlayerId(1), "Mountain", Zone::Battlefield, db);
+    scenario.add_real_card(PlayerId(1), "Lightning Bolt", Zone::Hand, db);
+    scenario.with_mana_pool(
+        P0,
+        (0..2)
+            .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+            .collect(),
+    );
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
-    (runner, kickoff, engine_creature)
+    (runner, animate, dragon, market)
 }
 
 /// Beats driven before this fixture is taken to be non-marking. The floor is the beat at
-/// which the Interactive sibling marks; the same fixture is driven to this same cap there
-/// and asserted to mark, so that test passing is what holds this bound. Beyond one full
+/// which the Interactive sibling is offered the loop; the same fixture is driven to this same
+/// cap there and asserted to reach the offer, so that test passing is what holds this bound. Beyond one full
 /// loop period the cascade repeats, so extra beats observe nothing new.
 const MARK_SEARCH_BEATS: usize = 200;
 
 /// Drive `PassPriority`/`OrderTriggers` beats, collecting every emitted event, until
-/// `controller`'s revocable-∞ capability is marked (Path C is a SILENT mark — it never
-/// changes `waiting_for`, so callers poll `unbounded_resources` directly). Returns the
-/// accumulated events and whether the mark landed.
+/// `controller` holds an unbounded mark or another prompt opens. Returns the accumulated
+/// events and whether the mark landed.
 fn drive_until_marked_collecting(
     runner: &mut GameRunner,
     controller: PlayerId,
@@ -112,81 +96,70 @@ fn drive_until_marked_collecting(
     (events, marked(runner.state()))
 }
 
-/// PR-7 #6 (live Path-C, revert-failing): an OPTIONAL self-refilling cascade that grows a
-/// `Generic` charge counter each cycle is marked as a revocable-∞ capability naming the
-/// charge counter axis — and NEVER produces a `GameOver` (CR 104.4b: an optional loop is
-/// not a draw; Path C is a silent mark).
-///
-/// REVERT-FAILING assertion (`marked`): the growing charge is a PRESERVED counter, so the
-/// constant-depth `loop_states_equal_modulo_resources` Path-C disjunct FAILS on this
-/// fixture (contrast `b5_optional_beneficial_marks_revocable_unbounded`, whose pure-life
-/// loop marks via that equality disjunct). The mark can land ONLY via the new
-/// `loop_states_cover_modulo_counter_growth` disjunct; reverting it makes the recurrence
-/// gate fail and `drive_until_marked_collecting` returns `false`.
+/// CR 732.5 + CR 732.2a: P1's Bolt is an out outside the charge-growth loop, so P0 is offered a
+/// draw without end instead of being marked, and every player accepting it draws the game
+/// (CR 732.4).
 #[test]
-fn live_optional_charge_growth_marks_counter_advantage_no_gameover() {
-    let (mut runner, kickoff, rider) =
+fn an_out_only_charge_growth_loop_is_offered_not_marked() {
+    use engine::analysis::decision_template::IterationCount;
+    use engine::analysis::loop_check::ShortcutResponse;
+
+    let (mut runner, animate, dragon, rider) =
         setup_2p_optional_charge_growth(LoopDetectionMode::Interactive);
-    let _ = runner.cast(kickoff).resolve();
+    let _ = runner.cast(animate).target_object(dragon).resolve();
 
     let (events, marked) = drive_until_marked_collecting(&mut runner, P0, MARK_SEARCH_BEATS);
+    assert!(!marked, "an out-only loop is never marked");
     assert!(
-        marked,
-        "the optional charge-growth cascade must reach the Path-C revocable-∞ mark \
-         (only reachable via loop_states_cover_modulo_counter_growth — the growing charge \
-         breaks the constant-depth equality disjunct)"
+        runner.state().unbounded_resources.is_empty(),
+        "{:?}",
+        runner.state().unbounded_resources
     );
+    match &runner.state().waiting_for {
+        WaitingFor::LoopShortcut {
+            proposer,
+            predicted_winner,
+            schema,
+            ..
+        } => {
+            assert_eq!(*proposer, P0);
+            assert_eq!(*predicted_winner, None);
+            assert_eq!(schema.iteration_count, IterationCount::WithoutEnd);
+        }
+        other => panic!("no offer: {other:?}"),
+    }
+    assert!(
+        charge_of(&runner, rider) >= 1,
+        "reach: the charge counter grew, charge {}",
+        charge_of(&runner, rider)
+    );
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, GameEvent::GameOver { .. })));
 
-    // Non-vacuity reach-guard: the charge counter genuinely grew (≥2 ⇒ the CHARGE_RIDER
-    // trigger parsed AND the loop ran multiple cycles), so the mark is not a degenerate
-    // empty capability.
-    let charge = charge_of(&runner, rider);
-    assert!(
-        charge >= 2,
-        "reach-guard: the rider must have accrued ≥2 charge counters (loop actually ran); got {charge}"
-    );
-
-    // The marked capability names the charge counter axis (CounterClass::Other = a Generic
-    // charge counter). This axis appears ONLY because the counter-growth disjunct fired.
-    let axes = runner
-        .state()
-        .unbounded_resources
-        .get(&P0)
-        .cloned()
-        .unwrap_or_default();
-    assert!(
-        axes.iter()
-            .any(|a| matches!(a, ResourceAxis::Counter(CounterClass::Other, _))),
-        "P0's revocable-∞ capability must include the Generic charge counter axis; got {axes:?}"
-    );
-
-    // Revocability bound: Path C is a silent mark — the game continues at live priority,
-    // never a GameOver (neither waiting_for nor an emitted event).
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
-        "an optional beneficial loop must fall through to live priority, not GameOver; got {:?}",
-        runner.state().waiting_for
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, GameEvent::GameOver { .. })),
-        "no GameOver event may be emitted for a revocable optional beneficial loop"
-    );
-    assert!(
-        runner.state().players.iter().all(|p| !p.is_eliminated),
-        "a no-loss beneficial loop eliminates no player"
+    runner
+        .act(GameAction::DeclareShortcut {
+            count: IterationCount::WithoutEnd,
+            template: None,
+        })
+        .expect("declare");
+    runner
+        .act(GameAction::RespondToShortcut {
+            response: ShortcutResponse::Accept,
+        })
+        .expect("accept");
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: None }
     );
 }
 
-/// PR-7 #7 (#4603 OFF gate): under `LoopDetectionMode::Off` the SAME charge-growth
-/// fixture never marks a revocable capability — the detector is fully dormant (the
-/// sampler never records under Off), restoring exact pre-feature behavior. Paired with
-/// #6 (Interactive marks), this proves the user-controllable toggle gates the feature.
+/// Under `LoopDetectionMode::Off` the charge-growth fixture is neither marked nor offered and never ends, because the play trace records nothing under Off.
 #[test]
 fn live_charge_growth_off_never_marks() {
-    let (mut runner, kickoff, rider) = setup_2p_optional_charge_growth(LoopDetectionMode::Off);
-    let _ = runner.cast(kickoff).resolve();
+    let (mut runner, animate, dragon, rider) =
+        setup_2p_optional_charge_growth(LoopDetectionMode::Off);
+    let _ = runner.cast(animate).target_object(dragon).resolve();
 
     // Drive a bounded number of beats; Off must never mark, and (being a beneficial
     // no-loss loop) must never reach a GameOver.
@@ -216,16 +189,8 @@ fn live_charge_growth_off_never_marks() {
     );
 }
 
-/// A FREE, voluntarily-repeatable activation that creates a token AND grows a `+1/+1` counter.
-///
-/// BOTH CLAUSES ARE LOAD-BEARING, and the token one is not decoration. `apply_action`'s
-/// `ActivateAbility` arm bootstraps `last_loop_action_sequence` ONLY when the activated ability
-/// `creates_token` (or when a period for the same controller is already open); any other
-/// activation CLEARS it. Mana activations arm it through the separate
-/// `record_mana_loop_action_step` path. So a counter-only activation can never open a period, and
-/// the CR 732.2a offer — which requires a non-empty sequence — is unreachable without a carrier.
-/// The `+1/+1` growth therefore rides a token-creating activation, which is also a realistic
-/// shape: a token engine whose creature grows as it works.
+/// A FREE, voluntarily-repeatable activation that creates a token AND grows a `+1/+1` counter: a
+/// token engine whose creature grows as it works.
 const PLUS1_TOKEN_ENGINE: &str =
     "{0}: Create a 1/1 colorless Servo artifact creature token. Put a +1/+1 counter on this creature.";
 
@@ -268,27 +233,8 @@ fn drive_plus1_token_engine_to_declared_offer() -> (GameRunner, ObjectId) {
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
 
-    // THE DRIVING SHAPE — two constraints, both MEASURED by building the fixture that violates
-    // them and watching it fail, not inferred from the code:
-    //
-    // 1. It must be an ACTIVATION, not a trigger cascade. `try_offer_object_growth_shortcut`
-    //    requires a non-empty `last_loop_action_sequence` whose every step is
-    //    `is_voluntarily_repeatable()` (CR 601.2a / CR 602.2 / CR 605.3a — casting, activating, and
-    //    mana abilities are each a voluntary choice at priority; the helper's own annotation names
-    //    all three). A trigger cascade drives itself and records no
-    //    action sequence, so it reaches only the Path-C silent mark — which registers no backing
-    //    set at all. The cascade version of this fixture grew its counters and then sat at
-    //    `Priority` with no offer.
-    // 2. The activation must CREATE A TOKEN. `apply_action`'s `ActivateAbility` arm opens a period
-    //    only for a token-creating ability (or continues one already open for this controller);
-    //    every other activation CLEARS the sequence. A `{0}: Put a +1/+1 counter on this creature.`
-    //    version therefore also sat at `Priority` — each activation wiped the very sequence the
-    //    offer needs. Mana activations arm it by a different path entirely
-    //    (`record_mana_loop_action_step`).
-    //
-    // So the reachable production shape for a `+1/+1` ∞ display registration is a counter growth
-    // riding a token-creating or mana-producing carrier. That is a real constraint on the class,
-    // worth stating: it is why no such fixture existed to reuse.
+    // THE DRIVING SHAPE: an ACTIVATION, a voluntary choice at priority (CR 602.2), whose repeat
+    // the play trace names as a period.
     let ability_index = runner
         .state()
         .objects
@@ -311,6 +257,7 @@ fn drive_plus1_token_engine_to_declared_offer() -> (GameRunner, ObjectId) {
         match runner.act(GameAction::ActivateAbility {
             source_id: rider,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         }) {
             Ok(_) => activations += 1,
             Err(e) => {
@@ -344,7 +291,7 @@ fn drive_plus1_token_engine_to_declared_offer() -> (GameRunner, ObjectId) {
     // target set below means "the registration missed the class" and not "no loop happened".
     //
     // THRESHOLD IS ONE, deliberately, and not the `>= 2` the charge cascades above use. Those
-    // fixtures need the BOARD to iterate because they are witnessing a Path-C mark that only
+    // fixtures need the BOARD to iterate because they are witnessing a Path-C offer that only
     // recurrence can produce. This one witnesses an OFFER, and the offer fires as soon as a single
     // period is recorded and the clone-drive confirms it recurs — the real board never iterates
     // twice. Measured: with `>= 2` this guard failed at `got 1 counters after 1 activation(s)`
@@ -471,7 +418,7 @@ fn plus_one_counter_growth_registers_its_infinity_display_target() {
             pills: vec![CounterRowView {
                 counter: CounterType::Plus1Plus1,
                 count: live,
-                magnitude: CounterMagnitude::Unbounded,
+                magnitude: DisplayMagnitude::Unbounded,
             }],
             loyalty: None,
         }),
@@ -588,7 +535,7 @@ fn plus_one_counter_growth_registers_a_target_the_bearer_does_not_yet_carry() {
             pills: vec![CounterRowView {
                 counter: CounterType::Plus1Plus1,
                 count: 0,
-                magnitude: CounterMagnitude::Unbounded,
+                magnitude: DisplayMagnitude::Unbounded,
             }],
             loyalty: None,
         }),
@@ -736,12 +683,12 @@ fn two_seats_collapse_the_shared_pair_and_keep_the_distinct_one() {
                 CounterRowView {
                     counter: CounterType::Plus1Plus1,
                     count: 3,
-                    magnitude: CounterMagnitude::Unbounded,
+                    magnitude: DisplayMagnitude::Unbounded,
                 },
                 CounterRowView {
                     counter: charge.clone(),
                     count: 7,
-                    magnitude: CounterMagnitude::Unbounded,
+                    magnitude: DisplayMagnitude::Unbounded,
                 },
             ],
             loyalty: None,
@@ -808,7 +755,7 @@ fn unbounded_counter_row_dies_with_its_bearer_but_the_store_does_not() {
             pills: vec![CounterRowView {
                 counter: CounterType::Plus1Plus1,
                 count: live,
-                magnitude: CounterMagnitude::Unbounded,
+                magnitude: DisplayMagnitude::Unbounded,
             }],
             loyalty: None,
         }),
@@ -851,4 +798,25 @@ fn unbounded_counter_row_dies_with_its_bearer_but_the_store_does_not() {
          projection merely declined to invent rows. Got {:?}",
         runner.state().objects[&rider].counters
     );
+}
+
+/// CR 732.2a: beside P1's Lightning Bolt the charge-growth loop is offered, and P0's accepted
+/// `Fixed(3)` performs three repetitions, each sacrificing Worldgorger Dragon once, so Black
+/// Market ("Whenever a creature dies, put a charge counter on this enchantment.") gains exactly
+/// three charge counters.
+#[test]
+fn a_counted_take_of_a_charge_growth_loop_beside_an_out_performs_its_count() {
+    let (mut runner, animate, dragon, rider) =
+        setup_2p_optional_charge_growth(LoopDetectionMode::Interactive);
+    let _ = runner.cast(animate).target_object(dragon).resolve();
+    drive_until_marked_collecting(&mut runner, P0, MARK_SEARCH_BEATS);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::LoopShortcut { .. }),
+        "{:?}",
+        runner.state().waiting_for
+    );
+    assert!(charge_of(&runner, rider) >= 1, "reach: the charge grew");
+    let (taken, _) = crate::mandatory_loop_draws::accepted_take(runner.state(), 3, "charge growth");
+    let taken = GameRunner::from_state(taken);
+    assert_eq!(charge_of(&taken, rider), charge_of(&runner, rider) + 3);
 }

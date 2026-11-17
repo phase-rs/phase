@@ -27,18 +27,6 @@
 //! mechanism is measured and pinned by
 //! [`r1b_the_published_point_set_is_exactly_what_the_retained_window_announces`].
 //!
-//! ⚠ **THE PREVIOUS PARAGRAPH SAID THE OPPOSITE, AND IT WAS A MEASUREMENT OF A BLIND SPOT, NOT
-//! OF THE BOARD.** The CR 732.2a ring sampler used to fire only at `Priority { player ==
-//! active_player }` after a non-shrinking resolution, so on this board the retained frames
-//! alternated strictly between the `404` and `402` stack entries; `certified_period_touch`'s
-//! `announced` set is "entries in a frame's stack that were absent from the previous frame's",
-//! which made the `403` and `401` entries structurally invisible to conjunct (6) and to
-//! `bounded_cycle_pin_slots_for_window`. Torch and Reed resolve ACROSS a forced pre-priority
-//! window, and that window is exactly what the old site could not see. The second sampling site
-//! records a frame at the beat such a window is **ANSWERED**, so those two entries are now
-//! announced like the other two — a widening of what the offer can publish, not a change to
-//! what the board does.
-//!
 //! CONSEQUENCE, also measured and pinned
 //! ([`r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_announced`]): an
 //! accepted `Fixed(n)` declaration carrying the full published pin set now **commits exactly
@@ -46,17 +34,60 @@
 //! are DISTINGUISHABLE. The former zero-commit was the fail-closed abort on Reed's unpinned
 //! "may"; with Reed published there is nothing left to abort on.
 
-use engine::analysis::decision_template::{DecisionKind, DecisionPointKind, IterationCount};
-use engine::analysis::resource::ResourceVector;
+use engine::analysis::decision_template::{
+    DecisionKind, DecisionPoint, DecisionPointKind, IterationCount,
+};
+use engine::analysis::resource::{AnnouncedLead, ChargeBound, PeriodicDelta, ResourceVector};
 use engine::game::engine::apply;
-use engine::types::ability::{ReplacementMode, TargetRef};
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, PersistedGameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
-use engine::types::replacements::ReplacementEvent;
 
 use crate::loop_shortcut_drain_boards::rederive_live_offer_bound;
+
+/// CR 732.2a: the count the offer's published declaration (the observation) is stamped with —
+/// the count it drives, which is not `iteration_count` once the offer publishes a suggestion.
+pub(crate) fn published_declaration_count(state: &GameState) -> u32 {
+    use engine::analysis::decision_template::ReplayMode;
+    match &state.waiting_for {
+        WaitingFor::LoopShortcut {
+            declaration: Some(declaration),
+            ..
+        } => match declaration.replay {
+            ReplayMode::Scheduled {
+                count: IterationCount::Fixed(n),
+            } => n,
+            ref other => {
+                panic!("a published declaration is stamped with a Fixed count, got {other:?}")
+            }
+        },
+        other => panic!("expected an offer publishing a declaration, got {other:?}"),
+    }
+}
+
+/// CR 732.2a: the offer's suggested count — `iteration_count`'s `Fixed` value, which is what a
+/// declarer who overrides nothing names and what `template: None` resolves to. The count the
+/// published declaration itself drives is [`published_declaration_count`].
+///
+/// NAMED ONCE, because the ceiling and the suggestion are two different numbers on this class. The
+/// ceiling (`deliverable_capacity`) is the widest count SOME legal declaration may specify —
+/// CR 732.2a's existential — and on a board whose charged slot can be re-aimed after the first
+/// crossing that is strictly larger. Every row below whose claim is "this declaration commits its
+/// whole count" is about the suggestion; the rows about what the declare handler REFUSES are about
+/// the ceiling, and they say so by reading `deliverable_capacity` directly.
+pub(crate) fn published_suggestion(
+    schema: &engine::analysis::decision_template::ShortcutDecisionSchema,
+) -> u32 {
+    match schema.iteration_count {
+        IterationCount::Fixed(n) => n,
+        IterationCount::WithoutEnd => panic!(
+            "a bounded offer publishes a `Fixed` suggestion; this one measured {:?}",
+            schema.repetition_bound
+        ),
+    }
+}
 
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
@@ -83,7 +114,8 @@ fn gunzip(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Load the tracked F4 dump's `["gameState"]` through the REAL production restore chokepoint
@@ -239,7 +271,7 @@ fn resolve_by_name(state: &GameState, name: &str) -> ObjectId {
 /// CONSTANT seat, so the cycle is board-stable and the detector can certify it); at either
 /// CR 603.5 "may" prompt TAKE (declining Sue's token breaks the chain to Reed).
 ///
-/// The aimed seat is a PARAMETER, not a constant, so a row can prove the journal FOLLOWS the
+/// The aimed seat is a PARAMETER, not a constant, so a row can prove the declaration FOLLOWS the
 /// announcement instead of coinciding with one hard-coded seat. MEASURED: constant P1,
 /// constant P2 and constant P3 all certify and reach the offer; it is the VARIATION between
 /// iterations, not the seat, that blocks certification.
@@ -424,13 +456,42 @@ fn f4_pin_template(
     }
 }
 
-/// Restore the `Priority` window the reconcile bridge consumed when it raised the offer, so
-/// the mint can be re-run on the offer beat's OWN board. Every caller proves the
-/// reconstruction faithful by requiring the same outcome the production path produced.
-fn replay_at_priority(state: &GameState, proposer: PlayerId) -> GameState {
-    let mut replay = state.clone();
-    replay.waiting_for = WaitingFor::Priority { player: proposer };
-    replay
+/// [`f4_pin_template`]'s shape with the `Targets` pin carrying the `TargetSchedule::Piecewise`
+/// the allocation ingress mints for `allocation` — segment starts at the prefix sums its amounts
+/// imply, which is what `decode_sequenced_targets` builds. Lets a row hand the DECLARE HANDLER the
+/// same multi-segment declaration it hands the human ingress, so the two entries are compared on
+/// one declaration rather than on two the test built differently.
+fn f4_allocation_template(
+    schema: &engine::analysis::decision_template::ShortcutDecisionSchema,
+    owner: PlayerId,
+    count: u32,
+    allocation: &[(PlayerId, u32)],
+) -> engine::analysis::decision_template::DecisionTemplate {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
+    };
+    let mut template = f4_pin_template(schema, owner, count);
+    let mut start = 0u32;
+    let segments: Vec<(u32, Ranking)> = allocation
+        .iter()
+        .map(|(seat, amount)| {
+            let at = start;
+            start += amount;
+            (at, Ranking::one(AnnouncementSubject::Seat(*seat)))
+        })
+        .collect();
+    assert_eq!(
+        start, count,
+        "an allocation partitions the DECLARED count; this shape does not"
+    );
+    for pin in &mut template.decisions {
+        if let PinnedDecision::Targets { targets, .. } = pin {
+            *targets = vec![TargetPin::Scheduled(TargetSchedule::Piecewise(
+                segments.clone(),
+            ))];
+        }
+    }
+    template
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -575,7 +636,7 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 /// §6 R1 — the CR 732.2a bounded offer FIRES on the REAL 4-player F4 dump, driven through
-/// `apply()`, and its `max_iterations` equals the bound re-derived by this row from the
+/// `apply()`, and its MEASURED threshold equals the bound re-derived by this row from the
 /// offer-beat board.
 ///
 /// **STATUS: §6 R1's other half is now MEASURED TRUE, in two sibling rows.** R1 as planned also
@@ -590,7 +651,7 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 ///   commits **exactly `n`**, run at `n = 1` and `n = 3` so the two outcomes are
 ///   distinguishable — not zero;
 /// * the row that measured zero was `r2_an_accepted_declaration_commits_zero_cycles_…`, and it
-///   NO LONGER EXISTS. This branch RENAMED it to `r2a_…` once the answer-beat sampler announced
+///   NO LONGER EXISTS. This branch RENAMED it to `r2a_…` once the recorded period announced
 ///   the frame Reed's entry sits on, which removed the unannounced `may` the zero-commit was
 ///   fail-closing on. Any surviving cross-reference to `r2` resolves to nothing.
 ///
@@ -656,7 +717,9 @@ fn r1_the_bounded_offer_fires_on_the_real_f4_dump() {
 
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes the per-period signature its bound was divided by");
     let life_loss_p1 = -per_cycle.delta.life.get(&P1).copied().unwrap_or(0);
     let library_drain_p0 = -per_cycle.delta.library_delta.get(&P0).copied().unwrap_or(0);
@@ -700,20 +763,33 @@ fn r1_the_bounded_offer_fires_on_the_real_f4_dump() {
     // ── the expectation, re-derived independently of `elimination_bounds` ──
     // `drive_f4_to_offer` aims every re-aimable choice at P1, so P1 is the seat the window
     // observed this slot announce.
+    // THE DECLARATION'S OWN COUNT, not the capacity: this mirror re-derives the FIRST crossing
+    // under the aim the drive announced, which is exactly the count the offer's own published
+    // declaration drives. The capacity answers CR 732.2a's existential instead — the widest count SOME legal
+    // declaration may specify — and on this board a declaration that re-aims the charged slot
+    // after that crossing reaches further, which is asserted below rather than conflated here.
     let expected = rederive_live_offer_bound(&state, P1);
     assert_eq!(
-        schema.max_iterations, expected,
-        "CR 732.2a + CR 704.5a: `max_iterations` is the MIN over every living seat's \
-         elimination headroom, divided by the per-period consumption the certificate itself \
-         published PLUS the `victim_slot` magnitude charged to every seat the slot reaches, \
-         LESS what the window saw that slot aim at each seat. Re-derived here as {expected}; \
-         the offer published {}",
-        schema.max_iterations
+        published_declaration_count(&state),
+        expected,
+        "CR 732.2a + CR 704.5a: the count the published declaration is stamped with is the MIN \
+         over every living seat's elimination headroom, divided by the per-period consumption \
+         the certificate itself published PLUS the `victim_slot` magnitude charged to every seat \
+         the slot reaches, LESS what the window saw that slot aim at each seat. Re-derived here \
+         as {expected}"
     );
     assert!(
-        schema.max_iterations < MAX_SHORTCUT_CYCLES_MIRROR,
-        "the bound must be NARROWED, else this row is satisfied by the unnarrowed default \
-         every pre-bounded offer carries"
+        schema.is_bounded() && schema.deliverable_capacity < MAX_SHORTCUT_CYCLES_MIRROR,
+        "the threshold must be MEASURED and its capacity NARROWED, else this row is satisfied \
+         by the un-narrowed default every pre-bounded offer carries"
+    );
+    assert!(
+        schema.deliverable_capacity >= published_declaration_count(&state),
+        "CR 732.2a: the ceiling is the widest count SOME legal declaration may specify, so it is \
+         never below the count the offer's own declaration drives; got capacity {} vs declared \
+         count {}",
+        schema.deliverable_capacity,
+        published_declaration_count(&state)
     );
 }
 
@@ -730,8 +806,8 @@ fn r1_the_bounded_offer_fires_on_the_real_f4_dump() {
 ///
 /// # Discrimination
 ///
-/// REVERT-PROBE (the commit itself): restore `record_trigger_target_answer`'s player arm to
-/// `Some(TargetPin::Player(*pl))` ⇒ the journal holds the CHOICE-class spelling ⇒
+/// REVERT-PROBE (the commit itself): restore `announced_target_pins`'s player arm to
+/// `Some(TargetPin::Player(*pl))` ⇒ the observed aim carries the CHOICE-class spelling ⇒
 /// `build_bounded_declaration` copies it through ⇒ the pin-value assertion FAILS while
 /// `is_some()` stays green. That asymmetry is the row.
 ///
@@ -772,10 +848,10 @@ fn r2a_split_the_bounded_offer_still_publishes_a_ranked_seat_pin_and_refuses_a_h
     let schema = schema.clone();
 
     assert_eq!(
-        schema.max_iterations,
+        published_declaration_count(&state),
         rederive_live_offer_bound(&state, P1),
-        "the CR 704.5a-derived bound at beat {beat} agrees with an independent re-derivation \
-         from the offer's own published certificate and the seat this drive aimed at. It \
+        "the CR 704.5a-derived count the published declaration is stamped with at beat {beat} \
+         agrees with an independent re-derivation from the offer's own published certificate and the seat this drive aimed at. It \
          tracks the charge model rather than a literal; it does NOT compare against a \
          pre-split value, so it is an agreement check and not a spelling-invariance one"
     );
@@ -814,7 +890,7 @@ fn r2a_split_the_bounded_offer_still_publishes_a_ranked_seat_pin_and_refuses_a_h
     // ── PAIRED POSITIVE: the pin is LEGAL against the offer's own schema, before the hostile
     //    change lands ──
     assert!(
-        validate_pins(&schema, &declaration, schema.max_iterations, &state).is_ok(),
+        validate_pins(&schema, &declaration, schema.deliverable_capacity, &state).is_ok(),
         "paired positive: the ranked pin validates at the FULL declared range on the \
          un-hexproofed board — otherwise the refusal below is explained by a seat pin that \
          never validates at all"
@@ -887,7 +963,7 @@ fn r2a_split_the_bounded_offer_still_publishes_a_ranked_seat_pin_and_refuses_a_h
     );
 
     assert!(
-        validate_pins(&schema, &declaration, schema.max_iterations, &hostile).is_err(),
+        validate_pins(&schema, &declaration, schema.deliverable_capacity, &hostile).is_err(),
         "CR 601.2c + CR 702.11c: a TARGET-class seat that has become untargetable is an \
          ILLEGAL pin value, so the declaration is REFUSED rather than driven at a wrong seat. \
          Under the pre-split `TargetPin::Player` this returns Ok — existence alone — which is \
@@ -902,61 +978,24 @@ fn r2a_split_the_bounded_offer_still_publishes_a_ranked_seat_pin_and_refuses_a_h
 /// ever sit on the stack across a `TriggerTargetSelection` / `OptionalEffectChoice` window …
 /// so `403` and `401` are never announced … therefore `bounded_cycle_pin_slots_for_window`
 /// publishes exactly ONE point — Sue's `MayChoice`"* — IS FALSIFIED BY THIS ROW'S OWN BODY, and
-/// is replaced rather than softened. Measured on this tree now:
+/// is replaced rather than softened: all THREE points are published, and R1's planned
+/// expectation is MET rather than corrected.
 ///
-/// * ALL FOUR cycle sources are retained on some sample's stack — the `framed_sources` census
-///   below asserts `{Thing, Sue, Torch, Reed}` exactly, and states `Torch`/`Reed` as its own
-///   conjunct because they are the load-bearing half;
-/// * `403` and `401` do still resolve ACROSS a forced pre-priority window, but the answer-beat
-///   sampling site in `apply_action` records a frame at the beat that window is ANSWERED — so
-///   `certified_period_touch`'s `announced` set, still exactly "entries in a frame's stack
-///   absent from the previous frame's", now contains them;
-/// * therefore `bounded_cycle_pin_slots_for_window` publishes all THREE points, and R1's
-///   planned expectation is MET rather than corrected.
-///
-/// The row asserts the MEASUREMENT, with the sources named, and the frame census as its own
-/// reach-guard. **If a future change NARROWS the announced set again this row FAILS LOUDLY** —
+/// The row asserts the MEASUREMENT, with the sources named. **If a future change NARROWS the
+/// announced set again this row FAILS LOUDLY** —
 /// which is what it is for: that shrink is exactly the regression
 /// [`r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_announced`],
 /// written on the strength of Reed being published, would otherwise silently lose.
 #[test]
 fn r1b_the_published_point_set_is_exactly_what_the_retained_window_announces() {
     let mut state = load_f4();
-    let (torch, sue, reed, thing) = (
+    let (torch, sue, reed) = (
         resolve_by_name(&state, TORCH),
         resolve_by_name(&state, SUE),
         resolve_by_name(&state, REED),
-        resolve_by_name(&state, THING),
     );
     drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
     let (_proposer, _certificate, schema) = offer_parts(&state);
-
-    // ── reach-guard: the ring really is populated, and its frames really do alternate over
-    //    exactly {THING, SUE} — this is the fact that EXPLAINS the point set ──
-    assert!(
-        state.loop_detect_ring.len() >= 2,
-        "reach-guard: a window needs at least two retained samples; ring = {}",
-        state.loop_detect_ring.len()
-    );
-    let framed_sources: std::collections::BTreeSet<ObjectId> = state
-        .loop_detect_ring
-        .iter()
-        .flat_map(|f| f.live.stack.iter().map(|e| e.source_id))
-        .collect();
-    assert_eq!(
-        framed_sources,
-        [thing, sue, torch, reed].into_iter().collect(),
-        "MEASURED: every one of the four cycle sources is retained on some sample's stack. \
-         {TORCH:?} ({torch:?}) and {REED:?} ({reed:?}) resolve ACROSS a forced pre-priority \
-         window, and the second sampling site in `apply_action` records a frame at the beat \
-         that window is ANSWERED — so they are announced exactly like {THING:?} ({thing:?}) \
-         and {SUE:?} ({sue:?}). This is the reach-guard for the point-set assertion below"
-    );
-    assert!(
-        framed_sources.contains(&torch) && framed_sources.contains(&reed),
-        "stated as its own conjunct because it is the load-bearing half: the two sources whose \
-         choices used to go unpublished are exactly the two the answer-beat sampler adds"
-    );
 
     let published: Vec<(ObjectId, &'static str)> = schema
         .points
@@ -978,9 +1017,7 @@ fn r1b_the_published_point_set_is_exactly_what_the_retained_window_announces() {
         published,
         vec![(sue, "MayChoice"), (reed, "MayChoice"), (torch, "Targets")],
         "MEASURED: the window mint publishes all THREE per-iteration choices this cycle \
-         opens — Sue's and Reed's CR 603.5 `may` gates and Torch's CR 608.2b `Targets` slot. \
-         The set is exactly the announced set from the census above; if it SHRINKS again the \
-         answer-beat sampling site regressed"
+         opens — Sue's and Reed's CR 603.5 `may` gates and Torch's CR 608.2b `Targets` slot"
     );
 }
 
@@ -989,8 +1026,8 @@ fn r1b_the_published_point_set_is_exactly_what_the_retained_window_announces() {
 /// A `Fixed(n)` declaration carrying the FULL published pin set is ACCEPTED at declare
 /// (`predictability_gate` + `validate_pins` both pass — the published set is covered), every
 /// living opponent Accepts (CR 732.2c), and the drive then commits **exactly `n`** repetitions
-/// of the published per-cycle delta: cycle 0 answers Sue's `OptionalEffectChoice` from the pin
-/// (U4's `inject_pinned_answer` arm, on the real dump), then Reed's from ITS pin, and the cycle
+/// of the published per-cycle delta: cycle 0 answers Sue's `OptionalEffectChoice` from the pin,
+/// then Reed's from ITS pin, and the cycle
 /// closes at the published period boundary.
 ///
 /// ⚠ **THIS ROW USED TO ASSERT THE OPPOSITE** (`r2_..._commits_zero_cycles_because_reeds_may_
@@ -1024,7 +1061,9 @@ fn r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_ann
         // has nothing to do with the property under test.
         let per_cycle = certificate
             .per_cycle
-            .clone()
+            .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+            .cloned()
             .expect("a bounded offer publishes its per-period signature");
         let schema = schema.clone();
 
@@ -1127,61 +1166,11 @@ fn r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_ann
 }
 
 /// **R3-a** — the CR 732.2a EPISODE BOUNDARY, driven on the real dump: a completed drive
-/// hands back at the priority point with the detection window CLEARED (`loop_detect_ring`
-/// empty, `loop_answer_journal == None`), and this same `apply()` does NOT re-offer.
-///
-/// The seam is the drive-end block in `game::engine` — `*state = committed;`, then the ring
-/// clear and journal clear, then the priority handback. That is **site 2** of the eight
-/// ring-clear sites [`c1_every_ring_clear_site_also_clears_the_loop_answer_journal`]
-/// enumerates, and that census covers site 2 STRUCTURALLY only (its own doc says so). This
-/// row drives it.
-///
-/// # Why the f4 board, and why it is not substitutable
-///
-/// Four shipped fixtures reach this seam. MEASURED, this dump is the only one whose journal
-/// is non-empty there (`answers=3`; the three `loop_shortcut.rs` fixtures arrive at
-/// `answers=0`). The `loop_answer_journal` half of the claim is therefore unpinnable
-/// anywhere else — which is what makes this row REAL-DUMP rather than convenient. The TERMINAL
-/// entry to the same seam is covered where its fixtures already live, on
-/// `bounded_fixed_drive_commits_the_terminal_cycle_that_eliminates_one_seat` in `loop_shortcut.rs`.
-///
-/// # Discrimination — REVERT-PROBE, RUN, not adopted from a code read
-///
-/// Delete the seam's `state.loop_detect_ring.clear();` + `state.loop_answer_journal = None;`
-/// ⇒ MEASURED `ring=12, answers=3, wf=LoopShortcut` against this drive's `0, 0, Priority`:
-/// all three assertions below flip together and the engine re-offers within the same
-/// `apply()`.
-///
-/// The ANTI-PROBE, also run: deleting `apply_action`'s PRE-ACTION clear instead leaves the
-/// final state MEASURED-unchanged at `0, 0, Priority`. This row keys on the drive-end seam
-/// and not on the upstream clear, and must not be attributed to it.
-///
-/// ⚠ **Do NOT assert that the ring/journal are non-empty immediately before the seam.**
-/// MEASURED: they read `0/0` at the post-declare beat, because `apply_action`'s pre-action
-/// clear fires on `DeclareShortcut`. The `12/3` the seam itself receives is internal and
-/// unobservable from a test. The paired positive below is taken at the OFFER beat, which is
-/// observable.
-///
-/// ⚠ **Do NOT add a revert-probe on the `WaitingFor::Priority` re-seat** that follows the
-/// clear: MEASURED VACUOUS on all four fixtures reaching this seam — they are already at
-/// `Priority` on entry. The seam's own comment block carries that as labelled
-/// interpretation, deliberately not as a pinned claim.
+/// hands back at the priority point, and this same `apply()` does NOT re-offer.
 #[test]
-fn r3a_the_accepted_drive_ends_at_the_priority_point_with_the_window_cleared() {
+fn r3a_the_accepted_drive_ends_at_the_priority_point() {
     let mut state = load_f4();
     drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
-
-    // ── PAIRED POSITIVE (i): the window is LIVE at the offer beat, same board, same run.
-    //    MEASURED at `2160f6e2c`: ring=9, answers=3. Without it every zero below is
-    //    satisfiable by a board that never sampled or never answered a `may`. ──
-    let ring_at_offer = state.loop_detect_ring.len();
-    let answers_at_offer = state.loop_answers_recorded();
-    assert!(
-        ring_at_offer > 0 && answers_at_offer > 0,
-        "paired positive: at the CR 732.2a offer beat this board must carry BOTH a populated \
-         detection ring and a populated CR 603.5 answer journal, else the cleared-window \
-         assertions after the drive are vacuous. ring={ring_at_offer} answers={answers_at_offer}"
-    );
 
     let (proposer, _certificate, schema) = offer_parts(&state);
     let schema = schema.clone();
@@ -1195,9 +1184,7 @@ fn r3a_the_accepted_drive_ends_at_the_priority_point_with_the_window_cleared() {
         },
     )
     .expect("the declaration is dispatched");
-    // Reach-guard, not the claim: a REFUSED declaration hands priority straight back, and
-    // then the cleared window below would be the pre-action clear's work rather than the
-    // drive-end seam's.
+    // Reach-guard, not the claim: a REFUSED declaration hands priority straight back.
     assert!(
         matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
         "reach-guard: the declaration carrying the full published pin set must be accepted \
@@ -1212,36 +1199,13 @@ fn r3a_the_accepted_drive_ends_at_the_priority_point_with_the_window_cleared() {
          (CR 732.2c) — else the drive never ran and no seam was reached"
     );
 
-    // ── THE CLAIM: the drive ended at the CR 732.2a ending point with the window discarded ──
-    assert!(
-        state.loop_detect_ring.is_empty(),
-        "CR 732.2a: the accepted drive ends at the ending point with the detection window \
-         DISCARDED, so the next episode re-detects from scratch. ring still carries {} \
-         sample(s) (it carried {ring_at_offer} at the offer beat)",
-        state.loop_detect_ring.len()
-    );
-    assert_eq!(
-        state.loop_answers_recorded(),
-        0,
-        "CR 603.5: the recorded `may` answers describe the window that just ended, and the \
-         drive-end seam drops them with the ring (it carried {answers_at_offer} at the offer \
-         beat)"
-    );
+    // ── THE CLAIM: the drive ended at the CR 732.2a ending point ──
     assert!(
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "CR 732.2a: the ending point of the taken sequence is a place where a player has \
-         priority — and a `LoopShortcut` here would be the re-offer the seam's ring clear \
-         exists to prevent. got {:?}",
+         priority — and a `LoopShortcut` here would be a re-offer of the interrupted loop. \
+         got {:?}",
         state.waiting_for
-    );
-
-    // ── PAIRED POSITIVE (ii): the sampler is still ON at handback, so an empty ring is a
-    //    CLEARED ring and not a disabled detector. ──
-    assert!(
-        state.loop_detection.samples(),
-        "paired positive: the detector must still be sampling after the handback ({:?}), \
-         else `ring.is_empty()` above says nothing about the seam",
-        state.loop_detection
     );
 }
 
@@ -1373,852 +1337,6 @@ fn r3b_driven_a_loop_choice_carrier_survives_a_whole_accepted_f4_drive() {
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────────────────
-// R23 conjunct (5-reach) — the beat guard's reachability on the real dump
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
-/// §6 R23, the (5-reach) arm — **U4's CR 603.3c beat guard never fires on the acceptance
-/// fixture, and the fire population it guards against is measurably NON-EMPTY on the same
-/// drive.**
-///
-/// The guard is `if work.pending_trigger.is_some() { return Err(RecastAbort) }` at the head of
-/// `inject_pinned_answer`'s `OptionalEffectChoice` arm: a live CR 603.3c construction cursor
-/// means the prompt in hand may be the ANNOUNCEMENT-time optional-modal question rather than
-/// the resolution-time "may" the pin answers, and `slot_source_prompted` matches only the
-/// SOURCE OBJECT, which both questions share.
-///
-/// ⚠ DISCLOSED INSTRUMENT LIMIT: the guard reads the drive's private `work` board, which no
-/// test can observe. This row asserts the same property on the OUTER drive — every
-/// `OptionalEffectChoice` beat this dump reaches carries `pending_trigger == None` — which is
-/// the beat structure the drive replays. **Its non-vacuity is the paired positive**: the same
-/// drive DOES visit beats carrying a live cursor (`pending_trigger == Some(TORCH)`), so the
-/// instrument demonstrably can report one.
-///
-/// **If the `is_none()` assertion ever fires, the remedy is NOT to weaken it**: it is to scope
-/// the guard to the prompt's own `source_id` (§5 U2's alternative placement), which changes
-/// what the guard MEANS and is an escalation, not a local edit.
-#[test]
-fn r23_5_reach_no_may_beat_of_the_f4_drive_carries_a_construction_cursor() {
-    let mut state = load_f4();
-    let mut may_beats = 0usize;
-    let mut cursor_beats = 0usize;
-    for beat in 0..400u32 {
-        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
-            break;
-        }
-        if let WaitingFor::OptionalEffectChoice { source_id, .. } = &state.waiting_for {
-            may_beats += 1;
-            assert!(
-                state.pending_trigger.is_none(),
-                "R23 (5-reach): a CR 603.5 `may` beat carrying a LIVE CR 603.3c construction \
-                 cursor is exactly the configuration U4's beat guard fail-closes on, and it \
-                 must not occur on the acceptance fixture. beat {beat}, prompt source \
-                 {source_id:?}, cursor source {:?}. REMEDY IS AN ESCALATION (scope the guard \
-                 to the prompt's own source_id), NEVER a weakening of this assertion",
-                state.pending_trigger.as_ref().map(|t| t.source_id)
-            );
-        }
-        if state.pending_trigger.is_some() {
-            cursor_beats += 1;
-        }
-        if f4_drive_one_beat(&mut state).is_err() {
-            break;
-        }
-    }
-    // ── the paired positive: both populations are non-empty, so neither half is vacuous ──
-    assert!(
-        may_beats > 0,
-        "reach-guard: the drive must actually REACH CR 603.5 `may` beats, else the assertion \
-         above quantifies over nothing"
-    );
-    assert!(
-        cursor_beats > 0,
-        "reach-guard: the same drive must visit beats that DO carry a live construction \
-         cursor (this dump ships `pending_trigger` on Torch), else `is_none()` is satisfied by \
-         an instrument that can never report `Some`"
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────
-// R9 — the environmental discharge, on the production path
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
-/// §6 R9 — **the environmental-discharge row round 2's def-scan design could not fail** — with
-/// its keying RE-DERIVED from measurement.
-///
-/// # What the row asserts
-///
-/// CR ANCHORS, CORRECTED: this row cited **CR 614.1a** for the choice. `614.1a` is
-/// "effects that use the word *instead*" — a sub-rule, and not the one that makes an
-/// optional replacement a choice. **CR 614.1** is the DEFINITION (replacement effects watch
-/// for an event and replace it) and **CR 732.2a** is the LOAD-BEARING half: a shortcut
-/// "can't include conditional actions, where the outcome of a game event determines the next
-/// action a player takes". CR 616.1 stays where it belongs — the two-or-more ORDERING branch.
-///
-/// On the offer-beat board, ONE CR 614.1 replacement definition that the resolver's OWN
-/// derivation draws turns the OFFER into `UnspecifiedChoiceWindow`; six definitions the
-/// resolver's derivation does NOT draw leave the offer standing. That contrast IS the claim:
-/// the obligation is **event-derived**, read off what the resolution proposes through
-/// `find_applicable_replacements`, and is NOT a scan over `def.event` NAMES. A name scan
-/// cannot distinguish the seven definitions below — they differ only in their `event` name.
-///
-/// # MEASURED PLAN CORRECTION — the plan's ChangeZone/token keying does not fire
-///
-/// §6 R9 keys this row on *"a def carrying `event: ReplacementEvent::ChangeZone` … because
-/// Sue's `ProposedEvent::CreateToken` draws it via the `ChangeZone` registry key"*. Measured on
-/// this board, that def leaves the offer standing — and the reason is already on record in this
-/// lane: U1-fin measured that `Effect::Token` never sets `CreateToken.copy`, and
-/// `apply_create_token_after_replacement_with_created_ids` gates the whole `TokenEntry` route
-/// on `if let Some(copy) = copy`, so **an `Effect::Token` resolution derives no token-entry
-/// event at all** (the same fact that re-keyed R19a). Sue's trigger IS an `Effect::Token`
-/// (`Wall` 0/4), so the plan's board cannot reach its own stated mechanism.
-///
-/// The row is therefore re-keyed onto the announced entry whose derivation the resolver DOES
-/// produce: **The Thing's mandatory `PutCounter P1P1 ×2`, deriving `ProposedEvent::AddCounter`**
-/// — same class, same seam, same conjunct, on the same real board. The falsified keys are not
-/// dropped: they ship as arm (b), where their NON-firing is the discriminator.
-///
-/// # Arms
-///
-/// * **(pos)** the UNMODIFIED offer-beat board OFFERS through the metered seam — asserted
-///   FIRST, so every refusal below is attributable to the definition and not to the replay.
-/// * **(a)** one OPTIONAL `AddCounter` definition ⇒ `UnspecifiedChoiceWindow` (CR 732.2a +
-///   CR 614.1: an optional replacement is a genuine resolution-time choice, and a described
-///   sequence may not contain one ⇒ the period is not choice-free).
-/// * **(a′)** the SAME definition, MANDATORY ⇒ still OFFERS. CR 616.1: a lone quantity
-///   modification commutes with nothing, so there is no ordering choice to make. This is what
-///   keeps (a) keyed to OPTIONALITY rather than to "a definition exists".
-/// * **(b)** six definitions whose events this board's resolutions never propose
-///   (`ChangeZone`, `Moved`, `CreateToken`, `Draw`, `DamageDone`, `RemoveCounter`), each
-///   OPTIONAL ⇒ all still OFFER. A `def.event`-name scan would have to refuse these too.
-///
-/// # Reach-guard
-///
-/// The live candidate authority is asked directly for the `ProposedEvent::AddCounter` The
-/// Thing's resolution proposes, and must return a non-empty set — otherwise (a)'s refusal
-/// could belong to some other conjunct.
-///
-/// # REVERT-PROBES — RUN, and the FIRST FOUR MEASURED **NOT** TO FLIP, which is the finding
-///
-/// The refusal is carried by **two independent authorities**, and each one alone is sufficient:
-///
-/// | probe (one production edit) | (a) |
-/// |---|---|
-/// | delete `resolution_events_are_discharged`'s `!causes.is_empty()` conjunct | still REFUSES |
-/// | disable `probe_resolution`'s `waiting_for`-discriminant arm | still REFUSES |
-/// | … + its `events.is_empty()` arm | still REFUSES |
-/// | … + its `event_is_accounted` arm (all three prompt arms) | still REFUSES |
-/// | **all three prompt arms AND the discharge conjunct** | **OFFERS ⇒ (a) FAILS** |
-///
-/// Measured at the seam with a throwaway instrument (run, read, deleted): on the unprobed tree
-/// The Thing's entry classifies `MayPrompt` — the resolver's OWN probe detects the pending
-/// optional replacement — and a MANDATORY entry publishes no `may`, so
-/// `pinned_may_choice_relief` returns `None` and conjunct (6) refuses there. Disable that
-/// detection and the entry classifies `FreeUnlessReplacements([AddCounter])`, whereupon the
-/// CR 732.2a + CR 614.1 discharge conjunct refuses instead. Defence in depth is the property; a row that
-/// flipped on either single edit would have been asserting over only one of the two.
-///
-/// ⚠ §6 R9's stated probe (*"swap `proposed_event_prompt_cause` back to a def-scan over
-/// `def.event` names"*) is not runnable — that scan and its class map were DELETED at U1 — and
-/// its predicted single-edit flip is refuted by the table above. Arm (b) covers what that probe
-/// was for: it exhibits six definitions a name scan could not distinguish from (a)'s.
-#[test]
-fn r9_the_offer_refuses_on_a_derived_replacement_obligation_not_on_a_definition_name() {
-    use engine::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
-    use engine::types::ability::{QuantityModification, ReplacementDefinition};
-    use engine::types::counter::CounterType;
-    use engine::types::proposed_event::{CounterPlacement, ProposedEvent};
-
-    let mut state = load_f4();
-    let thing = resolve_by_name(&state, THING);
-    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
-    let (proposer, _certificate, _schema) = offer_parts(&state);
-
-    // ── (pos) the matched positive, asserted first ──
-    let healthy = replay_at_priority(&state, proposer);
-    let (healthy_out, healthy_meter) =
-        try_offer_bounded_cycle_shortcut_metered(&healthy, false, ProbeCap::Shipped);
-    assert!(
-        healthy_out.is_ok(),
-        "matched positive: the UNMODIFIED offer-beat board must still OFFER through the \
-         metered seam, else every negative below is asserted over a board that refuses \
-         anyway. got {healthy_out:?}, meter {healthy_meter:?}"
-    );
-
-    // One definition, installed on an EXISTING P0-controlled permanent (never a new object),
-    // so board membership — and therefore every certification premise — is untouched.
-    // CR ANCHOR CORRECTED with the two above it: this said "CR 614.1a scopes a definition to
-    // its controller's events". It does not — `614.1a` is the "effects that use the word
-    // *instead*" sub-rule and says nothing about controllers. CR 614.1 is the definition a
-    // replacement definition answers to: it watches for the event its own text names.
-    let with_def = |event: ReplacementEvent, optional: bool| -> GameState {
-        let mut hostile = healthy.clone();
-        let mut def = ReplacementDefinition::new(event.clone());
-        if optional {
-            def.mode = ReplacementMode::Optional { decline: None };
-        }
-        if matches!(event, ReplacementEvent::Draw) {
-            // CR 121.2: a Draw definition must declare its stage or the pipeline debug-asserts.
-            def.draw_scope = Some(engine::types::ability::DrawReplacementScope::IndividualDraw);
-        }
-        def.quantity_modification = Some(QuantityModification::Plus { value: 1 });
-        hostile
-            .objects
-            .get_mut(&thing)
-            .expect("The Thing is on the battlefield")
-            .replacement_definitions
-            .push(def);
-        hostile
-    };
-    let outcome = |board: &GameState| {
-        try_offer_bounded_cycle_shortcut_metered(board, false, ProbeCap::Shipped)
-    };
-
-    // ── reach-guard: the LIVE candidate authority draws the optional AddCounter definition
-    //    for the very event The Thing's announced resolution proposes ──
-    let optional_counter_board = with_def(ReplacementEvent::AddCounter, true);
-    let proposed = ProposedEvent::AddCounter {
-        placement: CounterPlacement::Object {
-            actor: proposer,
-            object_id: thing,
-            counter_type: CounterType::Plus1Plus1,
-        },
-        count: 2,
-        applied: Default::default(),
-    };
-    let candidates = engine::game::replacement::find_applicable_replacements(
-        &optional_counter_board,
-        &proposed,
-        engine::game::replacement::replacement_registry(),
-    );
-    assert!(
-        !candidates.is_empty(),
-        "reach-guard: the live candidate authority must draw the definition for the \
-         `ProposedEvent::AddCounter` The Thing's `PutCounter P1P1 x2` proposes — a refusal \
-         over an EMPTY candidate set would belong to some other conjunct entirely"
-    );
-
-    // ── (a) the optional definition refuses ──
-    let (a_out, a_meter) = outcome(&optional_counter_board);
-    assert!(
-        matches!(
-            a_out,
-            Err(engine::game::engine::BoundedOfferRefusal::UnspecifiedChoiceWindow)
-        ),
-        "(a) CR 732.2a + CR 614.1: an OPTIONAL replacement candidate applicable to an \
-         ANNOUNCED entry's DERIVED event is a real resolution-time choice, so the period is \
-         not choice-free and the offer must be refused. got {a_out:?}, meter {a_meter:?}"
-    );
-
-    // ── (a′) the same definition, mandatory, still offers ──
-    let (a2_out, a2_meter) = outcome(&with_def(ReplacementEvent::AddCounter, false));
-    assert!(
-        a2_out.is_ok(),
-        "(a′) CR 616.1: a LONE mandatory quantity modification commutes with nothing, so it \
-         opens no ordering choice and the offer stands. Without this arm (a) would be keyed \
-         to `a definition exists` rather than to OPTIONALITY. got {a2_out:?}, meter {a2_meter:?}"
-    );
-
-    // ── (b) the def-NAME discriminator, RE-DERIVED: the one optional definition whose event
-    //    this board's announced resolutions still never propose ──
-    let b_event = ReplacementEvent::RemoveCounter;
-    let (b_out, b_meter) = outcome(&with_def(b_event.clone(), true));
-    assert!(
-        b_out.is_ok(),
-        "(b) {b_event:?}: this board's announced resolutions never PROPOSE this event, so an \
-         event-derived obligation must ignore the definition entirely and the offer must \
-         stand. A scan over `def.event` NAMES would refuse here exactly as it refuses in (a), \
-         which is what makes this arm the discriminator. got {b_out:?}, meter {b_meter:?}"
-    );
-
-    // ── (b′) the five events the WIDENED announced set really does propose ──
-    // Once Torch's damage and Reed's draw are announced, `ChangeZone`/`Moved`/`CreateToken`/
-    // `Draw`/`DamageDone` are genuinely derivable from this period's resolutions, so an
-    // OPTIONAL definition on any of them is a real CR 616.1 choice and must refuse. This arm
-    // is the paired positive control for (b): without it, (b) shrinking to one event could be
-    // read as the obligation going blind rather than as the proposal set widening.
-    for event in [
-        ReplacementEvent::ChangeZone,
-        ReplacementEvent::Moved,
-        ReplacementEvent::CreateToken,
-        ReplacementEvent::Draw,
-        ReplacementEvent::DamageDone,
-    ] {
-        let (c_out, c_meter) = outcome(&with_def(event.clone(), true));
-        assert!(
-            matches!(
-                c_out,
-                Err(engine::game::engine::BoundedOfferRefusal::UnspecifiedChoiceWindow)
-            ),
-            "(b′) {event:?}: the widened announced set PROPOSES this event, so an OPTIONAL \
-             replacement applicable to it is a genuine resolution-time choice and the offer \
-             must refuse. got {c_out:?}, meter {c_meter:?}"
-        );
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────
-// R16 — the probe budget does not starve the F4 acceptance fixture
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
-/// §6 R16 (i) + the exact-demand pin, on the newly tracked F4 fixture.
-///
-/// The shipped `PROBE_BUDGET` was re-derived at U3 from dina's offering beat (demand 13). F4
-/// was UNTRACKED then, so the acceptance fixture this whole lane exists for had never been
-/// measured against the budget at all. Measured here, at F4's own offering beat, through the
-/// metered seam:
-///
-/// * the demand is EXACT — `Lowered(d)` offers and every `Lowered(n < d)` refuses, over the
-///   seam's closed cap domain. That is a sweep, not a single reading, so the number cannot be
-///   an artifact of one call;
-/// * `denied == false` at the shipped cap — the budget is not binding on this fixture;
-/// * the certification basis at that beat is recorded (`ResourceSignatureOnly`, basis B),
-///   because the meter is the only surface on which the basis is observable.
-///
-/// # (iii-b) THE ORDERING PIN, re-keyed onto an instrument that exists
-///
-/// §6 R16 (iii-b) asks for *"the honest count is 1"* at a beat carrying a non-exempt `optional`
-/// entry, with the revert *"move `try_charge_one` above the `optional` gate ⇒ the entry burns a
-/// charge in its primary pass as well as its residual pass ⇒ the count rises 1 → 2"*. The
-/// count-per-entry is not a `MintMeter` field, but the property is: the meter carries BOTH
-/// `spent` and `conjunct6_asks`, so **`spent == conjunct6_asks`** says exactly "every ask
-/// charged once", which is the invariant the ordering protects. Under the stated revert an
-/// `optional` ask charges twice and `spent > asks`.
-///
-/// Its reach-guard is the population the plan asks for: at least one entry the door is asked
-/// about must be CR 603.5 `optional` — asserted on the retained window, since Sue's announced
-/// entries are the optional ones (the current stack's single entry is The Thing's mandatory
-/// `PutCounter`).
-///
-/// # (iii-a) — DISCLOSED, the plan's instrument does not exist on this tree
-///
-/// §6 R16 (iii-a) pins the *"CURRENT-FRAME charge subcount"* at 1. `MintMeter` has no
-/// current-frame subcount, and adding one is a production change with no other consumer. What
-/// this row establishes instead, and states as a derivation rather than a reading: the offering
-/// beat's `current.stack` holds exactly ONE entry (asserted) and every ask charges exactly once
-/// (asserted above) ⇒ the current frame contributes exactly one charge. The unqualified TOTAL
-/// is (ii-a)'s figure and is measured directly by the sweep below.
-#[test]
-fn r16_the_f4_offering_beats_probe_demand_is_exactly_measured() {
-    use engine::game::engine::{try_offer_bounded_cycle_shortcut_metered, ProbeCap};
-
-    let mut state = load_f4();
-    drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
-    let (proposer, _certificate, _schema) = offer_parts(&state);
-    let replay = replay_at_priority(&state, proposer);
-
-    let (shipped_out, shipped) =
-        try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Shipped);
-    assert!(
-        shipped_out.is_ok(),
-        "reach-guard: the replay must reproduce the production OFFER, else every figure below \
-         is measured on a different board. got {shipped_out:?}"
-    );
-    assert!(
-        !shipped.denied,
-        "R16 (i): the shipped budget must not STARVE the acceptance fixture — a denied budget \
-         at the one beat this corpus offers on is the defect U3's re-derivation fixed for \
-         dina, measured here for F4. meter {shipped:?}"
-    );
-    assert_eq!(
-        shipped.certification,
-        Some(engine::analysis::resource::PeriodCertification::ResourceSignatureOnly),
-        "the F4 offering beat certifies through BASIS B; the meter is the only surface on \
-         which that is observable (both bases publish `frames_per_period`)"
-    );
-
-    // ── (iii-b) the ordering pin: every ask charges EXACTLY ONE ──
-    let optional_in_window = state
-        .loop_detect_ring
-        .iter()
-        .map(|f| optional_entries(&f.live))
-        .sum::<usize>();
-    assert!(
-        optional_in_window > 0,
-        "(iii-b) reach-guard: the door must be asked about at least one CR 603.5 `optional` \
-         entry, else the ordering property below is asserted over a population that never \
-         reaches the `optional` gate at all — the exact defect §6 R16's ROUND-10 (MED-2) \
-         re-keying was about"
-    );
-    assert!(
-        shipped.conjunct6_asks > 0,
-        "(iii-b) reach-guard: conjunct (6) must actually ASK, else `spent == asks` is `0 == 0`"
-    );
-    assert_eq!(
-        shipped.spent, shipped.conjunct6_asks,
-        "(iii-b) CR 603.5: `try_charge_one` sits BELOW the `optional` gate, so an entry pays \
-         for its residual pass and never additionally for a primary pass it exits early. \
-         Hoisting the charge above that gate makes every optional ask charge TWICE and \
-         `spent` exceed `asks`. meter {shipped:?}"
-    );
-    assert_eq!(
-        state.stack.len(),
-        1,
-        "(iii-a) the derivation's premise: the offering beat's current frame holds exactly ONE \
-         entry, so with `spent == asks` the current frame contributes exactly one charge. \
-         (`MintMeter` has no current-frame subcount — see this row's doc.)"
-    );
-
-    // ── the exact-demand sweep over the seam's closed cap domain ──
-    let demand = shipped.spent;
-    assert!(
-        demand > 0,
-        "reach-guard: a zero-demand beat would make every `Lowered(n)` below identical to \
-         `Lowered(0)` and the sweep vacuous"
-    );
-    let (at_demand, _) =
-        try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Lowered(demand));
-    assert!(
-        at_demand.is_ok(),
-        "the measured demand {demand} must be SUFFICIENT — `Lowered(demand)` still offers"
-    );
-    for n in 0..demand {
-        let (out, meter) =
-            try_offer_bounded_cycle_shortcut_metered(&replay, false, ProbeCap::Lowered(n));
-        assert!(
-            matches!(
-                out,
-                Err(engine::game::engine::BoundedOfferRefusal::UnspecifiedChoiceWindow)
-            ) && meter.denied,
-            "every cap BELOW the measured demand must exhaust and refuse FAIL-CLOSED, so the \
-             demand figure is a boundary and not one lucky reading. cap {n} gave {out:?}, \
-             meter {meter:?}"
-        );
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────
-// R27 (a1) — the F4 arm of the split-sample row
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
-/// §6 R27 (a1), the F4 arm the plan sites at U5 (*"on BOTH real dumps"*; U0 landed the dellian
-/// arm only, because this fixture was untracked until now).
-///
-/// CR 104.4b: the loop-detection COMPARAND is `normalize_for_loop`d, which zeroes the object
-/// allocator so two structurally identical boards compare equal. CR 732.2a: the EVALUATION
-/// board must keep the live allocator cursor, or every downstream consumer is reading a board
-/// the game was never in. `LoopDetectSample` splits the two, and this row asserts the split on
-/// the real F4 dump, on the allocator axis, at a sample the PRODUCTION sampler wrote.
-#[test]
-fn r27_a1_the_f4_dumps_recorded_sample_keeps_a_live_half_normalization_would_have_erased() {
-    let mut state = load_f4();
-    assert!(
-        state.loop_detect_ring.is_empty(),
-        "reach-guard: the restored dump starts with an EMPTY ring, so the sample asserted on \
-         below is one THIS drive's production sampler wrote"
-    );
-    let mut witness = None;
-    for _ in 0..400u32 {
-        let before = state.next_object_id;
-        let ring_before = state.loop_detect_ring.len();
-        if f4_drive_one_beat(&mut state).is_err() {
-            break;
-        }
-        if state.loop_detect_ring.len() > ring_before {
-            witness = Some((before, state.next_object_id));
-            break;
-        }
-    }
-    let (before_beat, after_beat) =
-        witness.expect("the production sampler must grow the ring within the drive's cap");
-    let sample = state
-        .loop_detect_ring
-        .back()
-        .expect("the ring just grew, so it has a newest sample");
-
-    assert!(
-        before_beat > 0,
-        "reach-guard: the allocator cursor must be non-zero before the sampled beat, else the \
-         inequality below is `0 != 0`"
-    );
-    assert_eq!(
-        sample.normalized.next_object_id, 0,
-        "CR 104.4b: the COMPARAND half is normalized — `normalize_for_loop` zeroes the object \
-         allocator so two structurally identical boards compare equal"
-    );
-    assert!(
-        sample.live.next_object_id >= before_beat && sample.live.next_object_id <= after_beat,
-        "CR 732.2a: the EVALUATION half carries the LIVE allocator cursor, inside the beat's \
-         own bracket [{before_beat}, {after_beat}]; got {}",
-        sample.live.next_object_id
-    );
-    assert_ne!(
-        sample.live, sample.normalized,
-        "the two halves must be genuinely different boards — an equal pair would make the \
-         split a distinction without a difference"
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────
-// C1 — the CR 603.5 "may"-answer journal
-//
-// TIER, stated so no row here is read as covering more than it does: C1 ships the journal
-// (record + read) and nothing that CONSUMES it. `build_bounded_declaration` and the offer's
-// published `declaration` arrive with C2, so every row below asserts at the JOURNAL, never
-// at a minted-or-refused declaration.
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
-/// The CR 603.5 "may" SLOT the journal keys on. The source half is built the way
-/// `game::engine::object_decision_source` builds it (CR 400.7: `ThisObject` bound to the
-/// object's CURRENT incarnation, `trigger_description` held `None`) and is reconstructed
-/// here rather than called because the engine's helper is `pub(crate)`; every row that uses
-/// it asserts the reconstruction is faithful by requiring the production write site to have
-/// stored something under it. The SUB-INDEX half is not reconstructed at all — it comes from
-/// the engine's own `DecisionSlot::may`, the same constructor the publisher and the
-/// `DecideOptionalEffect` writer use, so this key cannot drift from theirs.
-fn may_source_key(
-    state: &GameState,
-    source_id: ObjectId,
-) -> engine::analysis::decision_template::DecisionSlot {
-    engine::analysis::decision_template::DecisionSlot::may(
-        engine::types::game_state::YieldTarget::ThisObject {
-            source_id,
-            incarnation: Some(state.objects[&source_id].incarnation),
-            trigger_description: None,
-        },
-    )
-}
-
-/// How the drive answers CR 603.5 "may" prompts. Typed rather than a pair of `bool`s: the
-/// three rows below need three genuinely different drive shapes, and each is named.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MayPolicy {
-    /// Take every prompt and drive on to the bounded offer — the shipped F4 policy.
-    TakeAll,
-    /// Take every prompt, and STOP at the first prompt that repeats a (source, seat) pair.
-    TakeUntilRepeat,
-    /// Take every prompt, then DECLINE the first prompt that repeats a (source, seat) pair,
-    /// and stop there.
-    DeclineOnRepeat,
-}
-
-/// One answered "may" prompt, as the drive saw it.
-struct MayBeat {
-    key: engine::analysis::decision_template::DecisionSlot,
-    seat: PlayerId,
-    take: bool,
-    /// The journal entry for this (source, seat) pair BEFORE this beat was answered — the
-    /// evidence that a "repeat" beat really is a repeat.
-    before: Option<engine::analysis::decision_template::LoopAnswer>,
-}
-
-/// Drive the F4 dump under `policy`, answering "may" prompts directly (so the row controls
-/// the answer) and delegating every other beat to [`f4_drive_one_beat`].
-///
-/// The repeat-stopping policies stop AT the beat that lands, deliberately: a later
-/// deliberate action or non-forced window would clear the ring, and the journal follows it.
-fn drive_f4_may_beats(state: &mut GameState, cap: u32, policy: MayPolicy) -> Vec<MayBeat> {
-    let mut beats: Vec<MayBeat> = Vec::new();
-    for _ in 0..cap {
-        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
-            return beats;
-        }
-        let prompt = match &state.waiting_for {
-            WaitingFor::OptionalEffectChoice {
-                player, source_id, ..
-            } => Some((*player, *source_id)),
-            _ => None,
-        };
-        let Some((seat, source_id)) = prompt else {
-            if f4_drive_one_beat(state).is_err() {
-                return beats;
-            }
-            continue;
-        };
-        let key = may_source_key(state, source_id);
-        let repeat = beats.iter().any(|b| b.key == key && b.seat == seat);
-        let take = !(repeat && policy == MayPolicy::DeclineOnRepeat);
-        let before = state.loop_answer(&key, seat);
-        if apply(
-            state,
-            seat,
-            GameAction::DecideOptionalEffect { accept: take },
-        )
-        .is_err()
-        {
-            return beats;
-        }
-        beats.push(MayBeat {
-            key,
-            seat,
-            take,
-            before,
-        });
-        if repeat && policy != MayPolicy::TakeAll {
-            return beats;
-        }
-    }
-    beats
-}
-
-/// **Row 1′.** CR 603.5 + CR 732.2a: at the real F4 bounded offer, every published
-/// `MayChoice` point's source has a journal entry UNDER THE PROPOSER'S OWN KEY.
-///
-/// `proposer` is bound from the minted `WaitingFor::LoopShortcut`, never hard-coded: the
-/// publisher filters the published may slot on `gate.prompt_player == proposer`, so
-/// `(source, proposer)` is precisely the key that is supposed to exist, and a hard-coded
-/// seat would read `None` and red this row for the wrong reason.
-///
-/// # Discrimination
-///
-/// Delete the `record_loop_answer` call from the `DecideOptionalEffect` reducer arm ⇒ the
-/// journal stays empty ⇒ `loop_answers_recorded() > 0` fails and every lookup returns
-/// `None`. Weaken the gate the other way (record under a fixed seat) ⇒ the per-point
-/// lookups fail for any board whose prompt seat is not the proposer.
-///
-/// # Reach-guards
-///
-/// * the restored dump starts with an EMPTY journal, so every entry is one this drive wrote;
-/// * the drive really answered at least one "may" prompt;
-/// * the offer really published at least one `MayChoice` point — without this the `for` loop
-///   below is empty and the row would pass on a board it never tested.
-#[test]
-fn c1_row1_the_may_journal_is_populated_at_the_f4_offer_under_the_proposers_own_key() {
-    use engine::analysis::decision_template::{LoopAnswer, LoopAnswerValue, MayChoiceOption};
-
-    let mut state = load_f4();
-    assert_eq!(
-        state.loop_answers_recorded(),
-        0,
-        "reach-guard: the restored dump starts with an EMPTY journal"
-    );
-
-    let beats = drive_f4_may_beats(&mut state, 400, MayPolicy::TakeAll);
-    assert!(
-        !beats.is_empty(),
-        "reach-guard: the drive must have answered at least one CR 603.5 `may` prompt, else \
-         there is no write for this row to observe"
-    );
-
-    let (proposer, _certificate, schema) = offer_parts(&state);
-    // The WHOLE published slot, sub-index included — the journal is keyed on it, so
-    // projecting it down to `slot.source` here would test a coarser identity than the one
-    // production writes and reads.
-    let may_slots: Vec<_> = schema
-        .points
-        .iter()
-        .filter(|p| matches!(p.kind, DecisionPointKind::MayChoice))
-        .map(|p| p.slot.clone())
-        .collect();
-    assert!(
-        !may_slots.is_empty(),
-        "reach-guard: the offer must publish at least one MayChoice point (r1b measures \
-         three points on this board), else the per-point assertions below are vacuous"
-    );
-    assert!(
-        state.loop_answers_recorded() > 0,
-        "CR 603.5: the offer beat must carry the answers the drive gave"
-    );
-    for slot in &may_slots {
-        assert_eq!(
-            state.loop_answer(slot, proposer),
-            Some(LoopAnswer::Uniform(LoopAnswerValue::May(
-                MayChoiceOption::Take
-            ))),
-            "every published may point's slot must be journalled under the PROPOSER's own \
-             key; slot {slot:?}, proposer {proposer:?}, journal holds {} entries",
-            state.loop_answers_recorded()
-        );
-    }
-}
-
-/// **Row T1 — WIRE / JOURNAL TIER.** CR 608.2b + CR 601.2c (reached via CR 603.3d) +
-/// CR 732.2a: at the real F4 bounded offer, the published `Targets` point's SLOT carries the
-/// announcement the proposer actually made, under the proposer's own key.
-///
-/// Every beat crosses the public `apply()` boundary; the slot is bound from `schema.points`
-/// and the pinned seat from the drive policy's own aim, so a re-dump that renumbers objects
-/// flows through without edit.
-///
-/// # Discrimination
-///
-/// Delete the `record_trigger_target_answer(..)` call from `apply_action`'s
-/// `(TriggerTargetSelection, ChooseTarget)` arm ⇒ the `Targets` slot is never journalled and
-/// the value assertion reads `None`. The helper and its `SelectTargets` caller survive, so
-/// the mutation COMPILES and reds on the assert. The `SelectTargets` arm is covered at a
-/// DIFFERENT TIER by `loop_shortcut.rs`'s
-/// `c2a_row_t1b_both_trigger_target_selection_arms_route_through_the_single_writer`, which is
-/// a SOURCE CENSUS: it asserts that both reducer arms are WIRED to the single writer, and
-/// structurally cannot observe an announced seat (no fixture in this repo reaches the
-/// `SelectTargets` arm — that row's own doc records the per-dump measurement and the backlog
-/// item). The two deletions are ASYMMETRIC, and the asymmetry is the usable part: deleting the
-/// `SelectTargets` call reds ONLY the census, while deleting the `ChooseTarget` call reds BOTH —
-/// so a red census names the arm, and this row disambiguates which one moved. The census cannot
-/// be blind to either arm: it asserts `unwired.is_empty()` across both.
-///
-/// # Sibling (T1-sib), asserted in this same body
-///
-/// After that mutation the two `MayChoice` points still read `Uniform(May(Take))`, so the
-/// deletion is TARGET-SPECIFIC and cannot be confused with a journal that stopped working.
-///
-/// # Reach-guards, all asserted BEFORE the claim
-///
-/// * the restored dump starts with an EMPTY journal, so every entry is one this drive wrote;
-/// * the drive really reaches the CR 732.2a offer beat (searched, never hardcoded);
-/// * the offer really publishes a `Targets` point — without this the loop below is empty;
-/// * the drive's aimed seat is NOT the proposer's own seat, so a writer that journalled the
-///   proposer instead of the announcement could not pass.
-///
-/// # What this row does NOT claim
-///
-/// It is a WRITER row. C2a ships no declaration consumer, so nothing here asserts that a
-/// declaration is built from these entries.
-#[test]
-fn c2a_row_t1_the_announced_target_is_journalled_at_the_f4_offers_published_slot() {
-    use engine::analysis::decision_template::{
-        AnnouncementSubject, LoopAnswer, LoopAnswerValue, MayChoiceOption, Ranking, TargetPin,
-        TargetSchedule,
-    };
-
-    let mut state = load_f4();
-    assert_eq!(
-        state.loop_answers_recorded(),
-        0,
-        "reach-guard: the restored dump starts with an EMPTY journal"
-    );
-
-    let beat = drive_f4_to_offer(&mut state, 400)
-        .expect("reach-guard: the F4 drive must reach the CR 732.2a bounded offer");
-    let (proposer, _certificate, schema) = offer_parts(&state);
-
-    let target_slots: Vec<_> = schema
-        .points
-        .iter()
-        .filter(|p| matches!(p.kind, DecisionPointKind::Targets { .. }))
-        .map(|p| p.slot.clone())
-        .collect();
-    assert!(
-        !target_slots.is_empty(),
-        "reach-guard: the offer must publish at least one CR 601.2c Targets point at beat \
-         {beat}, else the per-point assertion below is vacuous"
-    );
-    // `P1` is the seat `f4_drive_one_beat` aims Torch's "target opponent" at. It must not be
-    // the proposer, or a writer that journalled the PROMPT'S OWN SEAT rather than the
-    // ANNOUNCED target would satisfy this row.
-    assert_ne!(
-        P1, proposer,
-        "reach-guard: the drive's aimed seat must differ from the proposer's own seat"
-    );
-
-    for slot in &target_slots {
-        assert_eq!(
-            state.loop_answer(slot, proposer),
-            Some(LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![
-                TargetPin::Scheduled(TargetSchedule::Constant(Ranking::one(
-                    AnnouncementSubject::Seat(P1)
-                )))
-            ]))),
-            "CR 608.2b: the published Targets slot must hold the announcement the drive made \
-             (a constant CR 115.2 player target, in the CR 601.2c TARGET-class spelling), \
-             under the PROPOSER's own key; slot \
-             {slot:?}, proposer {proposer:?}, journal holds {} entries",
-            state.loop_answers_recorded()
-        );
-    }
-
-    // ── T1-sib: the CR 603.5 axis is untouched by the target axis's write ──
-    let may_slots: Vec<_> = schema
-        .points
-        .iter()
-        .filter(|p| matches!(p.kind, DecisionPointKind::MayChoice))
-        .map(|p| p.slot.clone())
-        .collect();
-    assert!(
-        !may_slots.is_empty(),
-        "reach-guard: this board publishes MayChoice points too, else the sibling assertion \
-         below is vacuous"
-    );
-    for slot in &may_slots {
-        assert_eq!(
-            state.loop_answer(slot, proposer),
-            Some(LoopAnswer::Uniform(LoopAnswerValue::May(
-                MayChoiceOption::Take
-            ))),
-            "T1-sib: deleting the target write must leave C1's CR 603.5 axis green — the two \
-             axes share one journal but not one entry"
-        );
-    }
-}
-
-/// **Row T1-P — WIRE / PROVENANCE.** The journalled pin FOLLOWS THE ANNOUNCEMENT, not a
-/// constant: driving the SAME dump with the SAME policy but a different aimed seat produces a
-/// different journal value at the same published slot.
-///
-/// # Why this row exists at all — the vacuity it closes
-///
-/// [`c2a_row_t1_the_announced_target_is_journalled_at_the_f4_offers_published_slot`] drives
-/// the shipped policy, which aims at P1. A writer that IGNORED the announcement and stored
-/// the constant seat P1 would satisfy it exactly. Only a second seat discriminates that, and it
-/// must be a REAL drive: the seat is announced through production `apply()` at Torch's
-/// CR 601.2c choice, never injected.
-///
-/// # Discrimination
-///
-/// In `record_trigger_target_answer`, replace the mapped `targets` with
-/// `vec![TargetPin::Scheduled(TargetSchedule::Constant(Ranking::one(AnnouncementSubject::Seat(PlayerId(1)))))]`
-/// ⇒ this row reds on the value while T1 stays GREEN. That asymmetry is the point: T1 alone
-/// cannot see this mutation. The mutant is spelled in the CURRENT producer spelling on purpose:
-/// the discrimination is seat-vs-seat and survives any re-spelling, but a recipe naming a
-/// spelling the producer no longer emits is a recipe that no longer compiles.
-///
-/// # Reach-guards
-///
-/// The P2 drive must reach the offer (MEASURED: constant P1, P2 and P3 all certify — it is
-/// the variation between iterations, not the seat, that blocks certification), the offer must
-/// publish a `Targets` point, and the aimed seat must differ from T1's.
-#[test]
-fn c2a_row_t1p_the_journalled_pin_follows_the_announced_seat_not_a_constant() {
-    use engine::analysis::decision_template::{
-        AnnouncementSubject, LoopAnswer, LoopAnswerValue, Ranking, TargetPin, TargetSchedule,
-    };
-
-    const AIMED: PlayerId = PlayerId(2);
-    assert_ne!(
-        AIMED, P1,
-        "reach-guard: this row's aimed seat must differ from the shipped policy's, else it \
-         re-runs T1 and discriminates nothing"
-    );
-
-    let mut state = load_f4();
-    assert_eq!(
-        state.loop_answers_recorded(),
-        0,
-        "reach-guard: the restored dump starts with an EMPTY journal"
-    );
-    let beat = drive_f4_to_offer_at(&mut state, 400, AIMED).expect(
-        "reach-guard: a CONSTANT non-P1 target still certifies — it is the VARIATION between \
-         iterations, not the seat, that blocks the CR 732.2a offer",
-    );
-    let (proposer, _certificate, schema) = offer_parts(&state);
-    assert_ne!(
-        AIMED, proposer,
-        "reach-guard: the aimed seat must not be the proposer's own"
-    );
-
-    let target_slots: Vec<_> = schema
-        .points
-        .iter()
-        .filter(|p| matches!(p.kind, DecisionPointKind::Targets { .. }))
-        .map(|p| p.slot.clone())
-        .collect();
-    assert!(
-        !target_slots.is_empty(),
-        "reach-guard: the offer at beat {beat} must publish a CR 601.2c Targets point"
-    );
-    for slot in &target_slots {
-        assert_eq!(
-            state.loop_answer(slot, proposer),
-            Some(LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![
-                TargetPin::Scheduled(TargetSchedule::Constant(Ranking::one(
-                    AnnouncementSubject::Seat(AIMED)
-                )))
-            ]))),
-            "PROVENANCE: the journal must hold the seat this drive ANNOUNCED ({AIMED:?}), not \
-             the seat the shipped policy happens to aim at; slot {slot:?}"
-        );
-    }
-}
-
 /// The declaration the live offer PUBLISHES. A separate accessor rather than a fourth element
 /// on [`offer_parts`], so the ~20 existing callers of that helper are untouched.
 fn offer_declaration(
@@ -2236,24 +1354,22 @@ fn offer_declaration(
 /// ⚠ **THIS IS A CONFORMANCE ORACLE, NEVER A PROVENANCE ONE.** [`f4_pin_template`] is a pure
 /// function of `(schema, owner, count)` — it hard-codes `MayChoiceOption::Take` and the seat P1
 /// (as `Scheduled(Constant(Ranking::one(AnnouncementSubject::Seat(P1))))`, the CR 601.2c
-/// TARGET-class spelling the publisher emits) and never reads the journal — so a consumer that
-/// ignored the journal entirely and emitted those same constants passes this row. That is exactly what
-/// [`d1p_the_published_pin_follows_the_journal_not_a_constant`] and its P3 sibling are for.
+/// TARGET-class spelling the publisher emits) and never reads the board — so a consumer that
+/// ignored the announcement entirely and emitted those same constants passes this row. That is exactly what
+/// [`d1p_the_published_pin_follows_the_announcement_not_a_constant`] and its P3 sibling are for.
 ///
 /// # The count trap, measured
 ///
-/// The reference must be built with `count = schema.max_iterations`, NOT the `1` every other
+/// The reference must be built with `count = schema.deliverable_capacity`, NOT the `1` every other
 /// declare row in this file passes: `build_bounded_declaration` sets
-/// `replay: Scheduled { count: schema.iteration_count }`, and `certified_bounded_cycle_offer`
-/// builds the schema with `IterationCount::Fixed(max_iterations)`. Measured on all three boards:
+/// `replay: Scheduled { count: schema.iteration_count }`, and `bounded_offer_tail`
+/// builds the schema with a suggestion narrowed to that capacity. Measured on all three boards:
 /// `REAL == f4_pin_template(count = 1)` is FALSE and `REAL == f4_pin_template(count = max)` is
 /// TRUE.
 ///
 /// # Reach-guards, asserted BEFORE the claim
 ///
-/// The journal holds at least one answer per published point (else `declaration.is_some()`
-/// could only ever be the empty-schema path), the point count is the board's known one, and the
-/// bound is the one re-derived from the board's own published certificate — which is also the
+/// The point count is the board's known one, and the bound is the one re-derived from the board's own published certificate — which is also the
 /// reference's count.
 ///
 /// REVERT-PROBE: make `build_bounded_declaration`'s `(Targets, Targets)` arm `return None` ⇒
@@ -2272,35 +1388,27 @@ fn d1_the_bounded_offer_publishes_a_conformant_declaration_on_every_tracked_dump
         let (proposer, _certificate, schema) = offer_parts(&state);
         let schema = schema.clone();
 
-        assert!(
-            state.loop_answers_recorded() >= schema.points.len(),
-            "[{label}] REACH-GUARD: every published point must have an answer in the journal, \
-             else a `Some` declaration below could not be about this schema at all. recorded={} \
-             points={}",
-            state.loop_answers_recorded(),
-            schema.points.len()
-        );
         assert_eq!(
             schema.points.len(),
             expected_points,
             "[{label}] REACH-GUARD: the published point count at beat {beat}"
         );
         assert_eq!(
-            schema.max_iterations,
+            published_declaration_count(&state),
             rederive_live_offer_bound(&state, P1),
-            "[{label}] REACH-GUARD: the CR 704.5a-derived bound — and the count the reference \
-             below must be built with — re-derived from this offer's own published certificate \
-             and the seat the drive aimed at"
+            "[{label}] REACH-GUARD: the CR 704.5a-derived count the published declaration is \
+             stamped with, and so the count the reference below must be built with, re-derived \
+             from this offer's own published certificate and the seat the drive aimed at"
         );
 
         let declaration = offer_declaration(&state)
             .unwrap_or_else(|| panic!("[{label}] the offer publishes a declaration"));
         assert_eq!(
             declaration,
-            f4_pin_template(&schema, proposer, schema.max_iterations),
+            f4_pin_template(&schema, proposer, published_declaration_count(&state)),
             "[{label}] CR 732.2a: the published declaration must CONFORM to the shape this \
              suite's accepted declarations take — one pin per published point, owner == \
-             proposer, `replay.count` == the offer's own suggestion"
+             proposer, `replay.count` == the count it drives"
         );
 
         assert!(
@@ -2313,42 +1421,37 @@ fn d1_the_bounded_offer_publishes_a_conformant_declaration_on_every_tracked_dump
             "[{label}] and its pin VALUES are legal at iteration 1"
         );
         assert!(
-            validate_pins(&schema, &declaration, schema.max_iterations, &state).is_ok(),
+            validate_pins(&schema, &declaration, schema.deliverable_capacity, &state).is_ok(),
             "[{label}] and at the full declared range — the count the AI's candidate carries"
         );
     }
 }
 
-/// **Row D1-P — WIRE / PROVENANCE.** The declaration's pinned target FOLLOWS THE JOURNAL, not a
-/// constant: driving the SAME dump with the SAME policy but a different aimed seat publishes a
-/// different pin at the same published slot.
-///
-/// This is the CONSUMER-tier sibling of
-/// [`c2a_row_t1p_the_journalled_pin_follows_the_announced_seat_not_a_constant`] (the WRITER-tier
-/// row) and reuses its two helpers, so the drive is production `apply()` and the seat is
-/// ANNOUNCED at Torch's CR 601.2c choice, never injected.
+/// **Row D1-P — WIRE / PROVENANCE.** The declaration's pinned target FOLLOWS THE ANNOUNCEMENT,
+/// not a constant: driving the SAME dump with the SAME policy but a different aimed seat
+/// publishes a different pin at the same published slot. The drive is production `apply()` and
+/// the seat is ANNOUNCED at Torch's CR 601.2c choice, never injected.
 ///
 /// # The asymmetry IS the row
 ///
-/// On the shipped P1 board, replacing the journalled targets with the constant seat P1
+/// On the shipped P1 board, replacing the announced targets with the constant seat P1
 /// (`vec![TargetPin::Scheduled(TargetSchedule::Constant(Ranking::one(AnnouncementSubject::Seat(PlayerId(1)))))]`)
 /// is GREEN — that mutant is indistinguishable there. At a second seat it is RED. Only a second
-/// seat discriminates a journal-blind consumer.
+/// seat discriminates an announcement-blind consumer.
 ///
 /// # Reach-guards, asserted BEFORE the claim
 ///
 /// The offer fires at the aimed seat, the point set is the known one, the aimed seat is not the
-/// proposer's own (or a writer that stored the PROMPT's seat would satisfy the row), and the
-/// `Targets` point's journal entry already reads the aimed seat before the consumer is called.
+/// proposer's own (or a writer that stored the PROMPT's seat would satisfy the row).
 ///
 /// REVERT-PROBE: in `build_bounded_declaration`'s `(Targets, Targets)` arm, replace the
-/// journalled `targets` with the same constant-P1 vector named above ⇒ this row flips on the pin
+/// observed `targets` with the same constant-P1 vector named above ⇒ this row flips on the pin
 /// VALUE while D1 stays green.
 ///
-/// *What wrong implementation would still pass this row?* One that reads the journal but ignores
-/// `point.slot` — there is one `Targets` point here, so the slot axis is D1-P-may's and D3's.
+/// *What wrong implementation would still pass this row?* One that reads the announcement but
+/// ignores `point.slot` — there is one `Targets` point here, so the slot axis is D3's.
 #[test]
-fn d1p_the_published_pin_follows_the_journal_not_a_constant() {
+fn d1p_the_published_pin_follows_the_announcement_not_a_constant() {
     d1p_provenance_at_seat(PlayerId(2));
 }
 
@@ -2361,12 +1464,9 @@ fn d1p_sib_the_published_pin_provenance_is_not_specific_to_one_second_seat() {
 
 fn d1p_provenance_at_seat(aimed: PlayerId) {
     use engine::analysis::decision_template::{
-        validate_pins, AnnouncementSubject, LoopAnswer, LoopAnswerValue, PinnedDecision, Ranking,
-        TargetPin, TargetSchedule,
+        validate_pins, AnnouncementSubject, PinnedDecision, Ranking, TargetPin, TargetSchedule,
     };
-    // CR 601.2c: the one spelling this row expects at BOTH tiers — the journal's own write and
-    // the declaration the publisher derives from it. Built once so the two `assert_eq!`s below
-    // cannot drift apart; it is still a fully-determined VALUE, not a pattern.
+    // CR 601.2c: the one spelling this row expects in the published declaration.
     let announced_seat = TargetPin::Scheduled(TargetSchedule::Constant(Ranking::one(
         AnnouncementSubject::Seat(aimed),
     )));
@@ -2399,16 +1499,6 @@ fn d1p_provenance_at_seat(aimed: PlayerId) {
         .find(|p| matches!(p.kind, DecisionPointKind::Targets { .. }))
         .map(|p| p.slot.clone())
         .expect("reach-guard: the offer publishes a CR 601.2c Targets point");
-    // The WRITER's own output, asserted BEFORE the consumer runs: without this the row could not
-    // tell "the consumer ignored the journal" from "the journal never held the aimed seat".
-    assert_eq!(
-        state.loop_answer(&target_slot, proposer),
-        Some(LoopAnswer::Uniform(LoopAnswerValue::Targets(vec![
-            announced_seat.clone()
-        ]))),
-        "reach-guard: the journal holds the ANNOUNCED seat {aimed:?} at the published slot"
-    );
-
     let declaration = offer_declaration(&state).expect("the offer publishes a declaration");
     let pinned = declaration
         .decisions
@@ -2426,306 +1516,9 @@ fn d1p_provenance_at_seat(aimed: PlayerId) {
     );
     assert!(
         validate_pins(&schema, &declaration, 1, &state).is_ok(),
-        "and the journal-derived pin is LEGAL against the offer's own schema — otherwise a \
+        "and the announced pin is LEGAL against the offer's own schema — otherwise a \
          provenance-correct consumer could still be publishing an unusable declaration"
     );
-}
-
-/// **Row 2b — JOURNAL TIER.** CR 603.5: ONE seat answering ONE source two different ways
-/// inside one detection window latches [`LoopAnswer::Conflicted`].
-///
-/// ⚠ TIER LIMIT, stated rather than implied: C1 ships no declaration consumer, so this row
-/// asserts the LATCH, not a refused declaration. The declaration-tier half — that a
-/// `Conflicted` entry makes `build_bounded_declaration` return `None` on this same board —
-/// belongs to C2 and is NOT covered here.
-///
-/// The same-seat constraint is asserted in the body, not assumed: under the pair key two
-/// DIFFERENT seats answering one source land in two entries and the `Entry::Occupied` arm is
-/// never entered at all, which would make this row vacuous.
-///
-/// # Discrimination
-///
-/// Delete `record_loop_answer`'s `Entry::Occupied` conflict arm (let a second write be
-/// ignored, or overwrite) ⇒ the entry stays `Uniform { take: Take }` ⇒ the final assertion
-/// flips. MEASURED, not predicted — see this row's companion probe in the implementation
-/// report.
-///
-/// # Paired positive / reach-guard
-///
-/// `before` on the conflicting beat must already be `Uniform { Take }`: that proves the beat
-/// really was a REPEAT of an already-journalled pair, so a drive that never repeated cannot
-/// satisfy this row.
-#[test]
-fn c1_row2b_one_seat_answering_one_source_two_ways_latches_conflicted() {
-    use engine::analysis::decision_template::{LoopAnswer, LoopAnswerValue, MayChoiceOption};
-
-    let mut state = load_f4();
-    let beats = drive_f4_may_beats(&mut state, 400, MayPolicy::DeclineOnRepeat);
-    let last = beats
-        .last()
-        .expect("the drive must have answered at least one `may` prompt");
-    assert!(
-        !last.take,
-        "reach-guard: the drive must have REACHED a repeated (source, seat) prompt and \
-         declined it; it answered {} prompts and the last was a Take",
-        beats.len()
-    );
-
-    let first = beats
-        .iter()
-        .find(|b| b.key == last.key && b.seat == last.seat && b.take)
-        .expect("the repeat's own first answer must be in the drive's record");
-    assert_eq!(
-        first.seat, last.seat,
-        "SAME-SEAT CONSTRAINT: both answers must come from one seat. Two seats occupy two \
-         keys, never enter the conflict arm, and would make this row vacuous"
-    );
-    assert_eq!(
-        last.before,
-        Some(LoopAnswer::Uniform(LoopAnswerValue::May(
-            MayChoiceOption::Take
-        ))),
-        "paired positive: the FIRST answer was journalled as Uniform(May(Take)) before the \
-         differing one landed"
-    );
-    assert_eq!(
-        state.loop_answer(&last.key, last.seat),
-        Some(LoopAnswer::Conflicted),
-        "CR 603.5: a second, DIFFERENT answer from the same seat for the same source latches \
-         Conflicted (an engine-capability refusal, not a CR 732.2a mandate)"
-    );
-}
-
-/// **Row 2b sibling — idempotence.** The latch fires on DISAGREEMENT, not on repetition: the
-/// same seat answering the same source the same way twice stays `Uniform`.
-///
-/// Without this sibling, a `record_loop_answer` that latched `Conflicted` on EVERY repeat
-/// would pass row 2b and destroy every real board — the F4 drive answers each may source
-/// once per iteration.
-///
-/// Discrimination: replace the conflict arm's `if *o.get() != answer` with an unconditional
-/// `o.insert(LoopAnswer::Conflicted)` ⇒ this row reds while row 2b stays green.
-#[test]
-fn c1_row2b_sibling_an_identical_second_answer_stays_uniform() {
-    use engine::analysis::decision_template::{LoopAnswer, LoopAnswerValue, MayChoiceOption};
-
-    let mut state = load_f4();
-    let beats = drive_f4_may_beats(&mut state, 400, MayPolicy::TakeUntilRepeat);
-    let last = beats
-        .last()
-        .expect("the drive must have answered at least one `may` prompt");
-    assert_eq!(
-        last.before,
-        Some(LoopAnswer::Uniform(LoopAnswerValue::May(
-            MayChoiceOption::Take
-        ))),
-        "reach-guard: the last beat must be a REPEAT of an already-journalled pair, else this \
-         row asserts idempotence over a single write"
-    );
-    assert_eq!(
-        state.loop_answer(&last.key, last.seat),
-        Some(LoopAnswer::Uniform(LoopAnswerValue::May(
-            MayChoiceOption::Take
-        ))),
-        "an identical second answer must not latch Conflicted"
-    );
-}
-
-/// **Row 7b″.** The journal is invalidated with `loop_detect_ring`, ON THE SAME RECEIVER.
-///
-/// Three of the eight ring-clear sites act on a `clone`/`self` rather than on `state`, so a
-/// journal clear applied to the wrong receiver would leave a stored sample carrying the live
-/// window's answers. Sites 6 and 7 are only observable downstream, through
-/// `LoopDetectSample`'s `pub normalized` / `pub live` halves on the ring — this row asserts
-/// there, simultaneously with the LIVE state being non-empty, so no single-receiver bug
-/// satisfies both halves.
-///
-/// Site 5 (`apply_action`'s pre-action clear, a `state` receiver) is driven directly.
-/// Sites 1–4 and 8 are covered structurally instead, by
-/// [`c1_every_ring_clear_site_also_clears_the_loop_answer_journal`] — stated here so the coverage of
-/// this row is not read as more than it is.
-///
-/// # Discrimination
-///
-/// Delete `clone.loop_answer_journal = None;` from `normalize_for_loop` or from
-/// `loop_detect_live_sample` ⇒ the corresponding per-sample assertion flips. Delete it from
-/// `apply_action`'s clear block ⇒ the final assertion flips.
-#[test]
-fn c1_row7b_the_may_journal_follows_the_ring_on_the_same_receiver() {
-    let mut state = load_f4();
-    drive_f4_may_beats(&mut state, 400, MayPolicy::TakeAll);
-    let (proposer, _certificate, _schema) = offer_parts(&state);
-
-    assert!(
-        state.loop_answers_recorded() > 0,
-        "paired positive: the LIVE state must carry answers at the offer beat, else every \
-         zero below is satisfied by a journal that was never written"
-    );
-    assert!(
-        !state.loop_detect_ring.is_empty(),
-        "reach-guard: there must be stored samples to inspect"
-    );
-    for (i, sample) in state.loop_detect_ring.iter().enumerate() {
-        assert_eq!(
-            sample.normalized.loop_answers_recorded(),
-            0,
-            "site 6 (`normalize_for_loop`, CLONE receiver): stored sample {i}'s normalized \
-             half must not carry the live window's answers"
-        );
-        assert_eq!(
-            sample.live.loop_answers_recorded(),
-            0,
-            "site 7 (`loop_detect_live_sample`, CLONE receiver): stored sample {i}'s live \
-             half must not carry the live window's answers"
-        );
-    }
-
-    apply(&mut state, proposer, GameAction::DeclineShortcut)
-        .expect("declining the offer is always legal for the proposer");
-    assert!(
-        state.loop_detect_ring.is_empty(),
-        "reach-guard: site 5's ring clear must actually have fired on this action, else the \
-         journal zero below is not evidence about that clear"
-    );
-    assert_eq!(
-        state.loop_answers_recorded(),
-        0,
-        "site 5 (`apply_action`, STATE receiver): the journal follows the ring"
-    );
-}
-
-/// **Row 7c.** The journal never crosses save/load as stale data.
-///
-/// `last_loop_action_sequence` fell into exactly this trap once; `#[serde(skip, default)]`
-/// is the bar, and this row asserts BOTH halves of it — the field is absent from the encoded
-/// payload, and a decode of a populated board restores an empty journal.
-///
-/// Discrimination: drop `skip` from the field's serde attribute ⇒ the key appears in the
-/// encoded value ⇒ the first assertion flips (and NEITHER `LoopAnswer` NOR `LoopAnswerValue`
-/// derives `Serialize`, so that edit does not even compile — which is the point of the note
-/// on the field; the compile-time bar had to be re-checked when the value type grew a second
-/// axis, and this row is the runtime half of it).
-#[test]
-fn c1_row7c_the_may_journal_does_not_cross_save_load() {
-    let mut state = load_f4();
-    drive_f4_may_beats(&mut state, 400, MayPolicy::TakeAll);
-    assert!(
-        state.loop_answers_recorded() > 0,
-        "reach-guard: the board being serialized must have a POPULATED journal, else the \
-         empty restore below proves nothing"
-    );
-
-    let encoded = serde_json::to_value(&state).expect("a live GameState serializes");
-    assert!(
-        encoded.get("loop_answer_journal").is_none(),
-        "`#[serde(skip)]`: the journal must be absent from the encoded payload entirely"
-    );
-    let restored = serde_json::from_value::<PersistedGameState>(encoded)
-        .expect("the encoded board decodes through the production decoder")
-        .into_game_state()
-        .expect("persisted test snapshot satisfies the checked restore contract");
-    assert_eq!(
-        restored.loop_answers_recorded(),
-        0,
-        "a restored board must start its own window with no inherited answers"
-    );
-}
-
-/// **Row 7b″, structural half.** EVERY production `loop_detect_ring.clear()` is paired with
-/// a `loop_answer_journal = None` on the same receiver, at all nine sites.
-///
-/// The driven row above reaches sites 5, 6 and 7 on the F4 board; sites 1–4 and 8 need
-/// materialize / until-lethal / pipeline / unobserved-life-move boards that this fixture does
-/// not produce. A source-level census covers the whole set at the only tier that can, and
-/// fails loudly if a TENTH clear site is added without the journal, which is the actual
-/// regression this guards.
-///
-/// THE WALK IS THE WHOLE CRATE, not a named pair of files. A hard-coded
-/// `["game/engine.rs", "types/game_state.rs"]` cannot see a tenth site in any THIRD file: such
-/// a site is neither paired nor reported, so `paired == 9` still passes while the regression is
-/// live. MEASURED on this tree: the recursive walk finds exactly the 9 sites the named pair did
-/// (5 in `game/engine.rs`, 4 in `types/game_state.rs`), so THE COUNT ASSERTION IS BLIND TO THE
-/// WIDENING — the planted-third-file probe below is the only thing that measures it.
-///
-/// Discrimination, BOTH DIRECTIONS, RUN:
-/// * delete any one `loop_answer_journal = None;` that follows a ring clear ⇒ the pairing count
-///   drops and this row reds naming the file and line;
-/// * add an unpaired `state.loop_detect_ring.clear();` to a THIRD file under
-///   `crates/engine/src` ⇒ `unpaired` names that file and this row reds. Under the named-pair
-///   walk the identical plant left the row GREEN.
-#[test]
-fn c1_every_ring_clear_site_also_clears_the_loop_answer_journal() {
-    use std::path::Path;
-
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut unpaired: Vec<String> = Vec::new();
-    let mut paired = 0usize;
-    // The walker is the sibling census's, not a second copy: one home for "every `.rs` file
-    // under a root", already shared by the census rows in this binary.
-    for path in super::loop_shortcut_offer_writer_census::rs_files(&src) {
-        let rel = path
-            .strip_prefix(&src)
-            .expect("walked path is under src")
-            .to_string_lossy()
-            .replace('\\', "/");
-        let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
-        let lines: Vec<&str> = text.lines().collect();
-        // Both halves read the CODE of a line, never its comment: prose neither clears the ring
-        // nor clears the journal. Whole-line-only exclusion is not enough here and the failure is
-        // two-sided — a comment naming the clear would be counted as a site, and a comment naming
-        // `loop_answer_journal = None` inside a window would mark a genuinely UNPAIRED site as
-        // paired, which is the direction that hides the regression. Shared rule, one home:
-        // `src/source_census.rs`, the same file the crate's own unit-test censuses use.
-        use super::source_census::code;
-        for (i, line) in lines.iter().enumerate() {
-            if !code(line).contains("loop_detect_ring.clear()") {
-                continue;
-            }
-            // The journal assignment sits within the same block, immediately after the ring
-            // clear (a comment line may separate them).
-            let window = lines[i + 1..(i + 5).min(lines.len())]
-                .iter()
-                .map(|l| code(l))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if window.contains("loop_answer_journal = None") {
-                paired += 1;
-            } else {
-                unpaired.push(format!("{rel}:{}", i + 1));
-            }
-        }
-    }
-    assert!(
-        unpaired.is_empty(),
-        "every ring-clear site must also clear the CR 603.5 + CR 608.2b loop-answer journal; \
-         unpaired: \
-         {unpaired:?}"
-    );
-    assert_eq!(
-        paired, 9,
-        "the ring has NINE production clear sites across the whole of `crates/engine/src` \
-         (5 in game/engine.rs, 4 in types/game_state.rs, the fourth being the CR 104.4b \
-         not-loop-comparable sampler gate; MEASURED by this recursive walk). A \
-         different count means a site was added or removed and this census must be re-derived, \
-         not re-numbered"
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────
-// helpers used by more than one row
-// ─────────────────────────────────────────────────────────────────────────────────────────
-
-/// Count the stack entries whose triggered ability is CR 603.5 `optional`. Used as a reach
-/// guard where a row's claim is about the optional gate.
-fn optional_entries(state: &GameState) -> usize {
-    state
-        .stack
-        .iter()
-        .filter(|e| match &e.kind {
-            StackEntryKind::TriggeredAbility { ability, .. } => ability.optional,
-            _ => false,
-        })
-        .count()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────
@@ -2750,7 +1543,7 @@ fn optional_entries(state: &GameState) -> usize {
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
 /// **Row D6 — WIRE / POSITIVE.** At the real F4 bounded offer the AI candidate generator now
-/// emits `DeclareShortcut { Fixed(max_iterations), Some(declaration) }` beside the decline, and
+/// emits `DeclareShortcut { Fixed(capacity), Some(declaration) }` beside the decline, and
 /// the `template` it carries IS THE OFFER'S OWN published declaration — not one the AI built.
 ///
 /// ⚠ **THIS ROW'S PREVIOUS CLAIM WAS THE OPPOSITE, AND IT IS SUPERSEDED, NOT BROKEN.** As
@@ -2792,11 +1585,11 @@ fn d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration() {
     };
 
     assert!(
-        schema.is_bounded() && schema.max_iterations < MAX_SHORTCUT_CYCLES_MIRROR,
+        schema.is_bounded() && schema.deliverable_capacity < MAX_SHORTCUT_CYCLES_MIRROR,
         "reach-guard: the generator's `Fixed` candidate is gated on `is_bounded()`, so an \
-         unbounded offer would decide this row for the wrong reason. bounded={} max_it={}",
+         unbounded offer would decide this row for the wrong reason. bounded={} capacity={}",
         schema.is_bounded(),
-        schema.max_iterations
+        schema.deliverable_capacity
     );
     assert!(
         !schema.points.is_empty(),
@@ -2812,21 +1605,30 @@ fn d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration() {
         "reach-guard: the offer PUBLISHES a declaration — that is the generator's new input",
     );
 
+    // CR 732.2a: the candidate declares the offer's suggestion, the witness over the observation.
+    let suggested = schema
+        .suggestion(Some(&declaration))
+        .cloned()
+        .expect("the offer suggests a declaration");
+
     // ── the seam: `phase-ai/src/search.rs` `WaitingFor::LoopShortcut { .. } =>` calls this ──
     let actions = engine::ai_support::legal_actions(&state);
     assert_eq!(
         actions,
         vec![
             GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(schema.max_iterations),
-                template: Some(declaration.clone()),
+                // THE SUGGESTION, not the capacity. The candidate has to be an action the declare
+                // handler accepts AND the consumption seam's drivability gate then admits, and
+                // the gate re-derives the cascade under the declaration this candidate carries —
+                // the offer's own. A candidate at the capacity would open the CR 732.2b window and
+                // then commit zero cycles, i.e. the engine refusing its own candidate.
+                count: IterationCount::Fixed(published_suggestion(&schema)),
+                template: Some(suggested.clone()),
             },
             GameAction::DeclineShortcut,
         ],
-        "CR 732.2a: exactly two candidates. No `UntilLethal` declaration (gated on \
-         `!schema.is_bounded()`, and this offer narrowed its bound to {}), and the `Fixed` \
-         declaration carries the ENGINE'S OWN pin set for the {} published point(s)",
-        schema.max_iterations,
+        "CR 732.2a: exactly two candidates, and the `Fixed` declaration carries the ENGINE'S OWN \
+         pin set for the {} published point(s) at the count that declaration drives",
         schema.points.len()
     );
 
@@ -2838,7 +1640,7 @@ fn d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration() {
             GameAction::DeclareShortcut {
                 count: IterationCount::Fixed(n),
                 template: Some(t),
-            } if *n == schema.max_iterations && *t == declaration
+            } if *n == published_suggestion(&schema) && *t == suggested
         )),
         "the candidate's template is the offer's own declaration, VALUE-EQUAL — a fabricated \
          template of the same shape would fail here and pass an `is_some()` check"
@@ -2849,8 +1651,8 @@ fn d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration() {
     );
 }
 
-/// §5 U6 (ii) — the generator's OWN candidate now opens the CR 732.2b window, and the four
-/// one-axis declare drives that say why.
+/// §5 U6 (ii) — the generator's OWN candidate now opens the CR 732.2b window, and the two
+/// declare drives that say why.
 ///
 /// ⚠ **THIS ROW'S PREVIOUS CLAIM WAS THAT THE CAPABILITY WAS ABSENT, AND IT IS SUPERSEDED, NOT
 /// BROKEN.** As `u6_no_declaration_the_generator_can_emit_opens_the_window_while_the_accepted_
@@ -2861,77 +1663,54 @@ fn d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration() {
 /// RE-DERIVED from the generator rather than hand-named: the declare candidate opens the window
 /// and the decline hands priority back.
 ///
-/// **The four one-axis drives below still measure the engine-side guards the generator's gate
-/// depends on, but one of them has FLIPPED, deliberately.** `Fixed(max) + None` used to be a
+/// **The two drives below still measure the engine-side guards the generator's gate
+/// depends on, but one of them has FLIPPED, deliberately.** `Fixed(declared) + None` used to be a
 /// live fail-closed guard, on the stated grounds that resolving a `template: None` declaration
 /// against the offer's own published declaration was a declare-handler change deferred out of
 /// that commit's partition. Item-4 C2 IS that change: `handle_declare_shortcut` now resolves a
 /// `None` template against `offer.declaration` before the `template.owner` firewall, so on this
 /// board — which publishes a declaration — that arm is ACCEPTED and the `None if
-/// …loop_period_controller() != Some(proposer)` arm is bypassed rather than reached. The arm is
+/// … offer.period.is_empty()` arm is bypassed rather than reached. The arm is
 /// kept, flipped, because it is the one row here that measures the manual ingress agreeing with
 /// the AI ingress on one and the same offer. Its fail-closed sibling did not disappear — it
 /// moved to the offer shape that still reaches it, which is
 /// [`a_template_free_declaration_is_admitted_only_by_the_proposers_own_period`] (offer with
 /// `declaration: None`).
 ///
-/// Four declarations are driven through `apply()` on the SAME real offer board, differing one
-/// axis at a time:
+/// Two declarations are driven through `apply()` on the SAME real offer board, differing in
+/// their template:
 ///
 /// | declaration | measured |
 /// |---|---|
-/// | `UntilLethal` + `None` — **the shape the generator emitted before the bounded gate** | REFUSED ⇒ `Priority` |
-/// | `UntilLethal` + a conformant template | REFUSED ⇒ `Priority` (so the refusal is keyed on the COUNT, not on the pins) |
-/// | `Fixed(max)` + `None` | **ACCEPTED** ⇒ item-4 C2 resolves the `None` against the declaration this offer published, so the browser payload reaches the same window the AI's does |
-/// | `Fixed(max)` + a conformant template | **ACCEPTED** ⇒ the CR 732.2b APNAP window opens |
-///
-/// The last row is the ANTI-VACUITY control: without it, "everything reaches `Priority`" would
-/// be satisfied by a board that refuses every declaration for some unrelated reason. With it,
-/// the two `UntilLethal` refusals are proved to be refusals of *those* declarations.
+/// | `Fixed(declared)` + `None` | **ACCEPTED** ⇒ item-4 C2 resolves the `None` against the declaration this offer published, so the browser payload reaches the same window the AI's does |
+/// | `Fixed(declared)` + a conformant template | **ACCEPTED** ⇒ the CR 732.2b APNAP window opens |
 ///
 /// ⚠ This row deliberately does NOT assert what the accepted declaration then accomplishes —
 /// that is [`r2a_an_accepted_declaration_commits_exactly_n_cycles_because_reeds_may_is_announced`]'s
 /// job, and it now measures an exact `n`-repetition commit (it measured a zero commit while
 /// Reed's `may` was unpublished). Splitting the two keeps this row a DECLARE-time matrix.
-///
-/// The `UntilLethal` rows are what justifies the generator's `!schema.is_bounded()` gate
-/// ([`d6_the_ai_declare_candidate_carries_the_offers_own_published_declaration`]): the engine refuses that count
-/// against a narrowed bound on a real board, so emitting it was offering the search layer an
-/// action that is accepted-then-discarded. These rows keep measuring the ENGINE guard directly,
-/// which is the fact the generator gate depends on and must not be allowed to rot.
-///
-/// REVERT-PROBES, both RUN, and the measured result CORRECTS the obvious prediction — the
-/// count-free declaration is refused by TWO INDEPENDENT guards, so disabling either alone
-/// leaves it refused:
-///
-/// * disable `IterationCount::UntilLethal if offer.schema.is_bounded()` in
-///   `handle_declare_shortcut` ⇒ the *`UntilLethal` + conformant template* arm flips
-///   (`Priority` → `RespondToShortcut`), while the AI's own `template: None` candidate stays
-///   refused by the `None if last_loop_action_sequence.is_empty()` arm;
-/// * disable BOTH ⇒ the AI-candidate loop itself flips — `UntilLethal` + `None` builds a
-///   proposal and opens APNAP for `PlayerId(1)`.
-///
-/// The row asserts both arms for exactly that reason: a single-guard probe would report the
-/// AI's candidate as still-refused and hide the change.
 #[test]
 fn u6_the_generators_own_candidate_opens_the_window_and_the_accepted_shape_is_measured() {
     let mut state = load_f4();
     drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
     let (proposer, _certificate, schema) = offer_parts(&state);
     let schema = schema.clone();
-    let max = schema.max_iterations;
+    // CR 732.2a: the count these arms declare is the one the offer's published declaration is
+    // stamped with — the count it may legally specify, since `truncate_to_declared_seats` cuts it
+    // at the repetition its own aim departs on. The published capacity is what
+    // SOME legal declaration may specify, which is a different declaration, and none of this
+    // row's three claims is about which count is legal.
+    let declared = published_declaration_count(&state);
+    assert!(
+        declared >= 1 && declared <= schema.deliverable_capacity,
+        "reach-guard: the declared count lies inside the published window, so no arm below is \
+         refused by the capacity cap; declared={declared} capacity={}",
+        schema.deliverable_capacity
+    );
 
     assert!(
-        state.last_loop_action_sequence.is_empty(),
-        "the measured precondition that makes the `Fixed` + `None` arm below ATTRIBUTABLE: with \
-         no recorded period at all, the `None if …loop_period_controller() != Some(proposer)` \
-         arm would refuse this declaration on the pre-C2 engine, so that arm's acceptance is \
-         attributable to item-4 C2's `or_else` and to nothing else on this board. len={}",
-        state.last_loop_action_sequence.len()
-    );
-    assert!(
         offer_declaration(&state).is_some(),
-        "and the other half of that attribution: the `or_else` can only accept because THIS \
+        "the `or_else` can only accept because THIS \
          offer published a declaration to fall back to. An offer publishing `None` still \
          fail-closes — `a_template_free_declaration_is_admitted_only_by_the_proposers_own_period`"
     );
@@ -2990,17 +1769,7 @@ fn u6_the_generators_own_candidate_opens_the_window_and_the_accepted_shape_is_me
     };
 
     assert_eq!(
-        outcome(
-            IterationCount::UntilLethal,
-            Some(f4_pin_template(&schema, proposer, 1))
-        ),
-        "Priority",
-        "CR 732.2a: the refusal of the AI's candidate is keyed on the COUNT — `UntilLethal` \
-         against a narrowed bound — not on its missing pins. Carrying the very template the \
-         positive control below has accepted changes nothing"
-    );
-    assert_eq!(
-        outcome(IterationCount::Fixed(max), None),
+        outcome(IterationCount::Fixed(declared), None),
         "RespondToShortcut",
         "item-4 C2, and this arm FLIPPED with it: `Fixed` + `template: None` is the browser's \
          own payload, and `handle_declare_shortcut` now resolves that `None` against the \
@@ -3012,12 +1781,12 @@ fn u6_the_generators_own_candidate_opens_the_window_and_the_accepted_shape_is_me
     // ── ANTI-VACUITY CONTROL: this board DOES accept a declaration ──
     assert_eq!(
         outcome(
-            IterationCount::Fixed(max),
-            Some(f4_pin_template(&schema, proposer, max))
+            IterationCount::Fixed(declared),
+            Some(f4_pin_template(&schema, proposer, declared))
         ),
         "RespondToShortcut",
         "the accepted shape is `Fixed(n)` + a template pinning every published point, owner == \
-         proposer. Without this arm the three refusals above would be vacuous"
+         proposer"
     );
 }
 
@@ -3092,13 +1861,12 @@ fn u6_the_declare_owner_firewall_holds_on_the_real_f4_offer() {
 // B5f — the DECLARED term is load-bearing on a real board, in both directions
 // ─────────────────────────────────────────────────────────────────────────────────────────
 
-/// §4 B5f — **the REACH term `seat_life_charges` puts in the divisor can suppress an offer that
-/// is otherwise legal, and the suppression is measured ONE LIFE POINT WIDE on the user's own
-/// board.**
+/// §4 B5f — **the REACH term `seat_life_charges` puts in the DIVISOR binds it, and the binding is
+/// measured ONE LIFE POINT WIDE on the user's own board.**
 ///
 /// CR 704.5a (a seat at 0 or less life has lost) + CR 732.2a (a shortcut describes a sequence
 /// that "may be legally taken", so every legal declaration must fit the bound, not only the one
-/// the window watched). Once the answer-beat sampling site announces Torch's CR 608.2b
+/// the window watched). Once the recorded period announces Torch's CR 608.2b
 /// `Targets` entry, `victim_slot` is non-empty and EVERY seat that slot can be re-aimed onto is
 /// charged its magnitude — including seats carrying no observed loss of their own, which is
 /// where the term is load-bearing and nothing else narrows.
@@ -3114,19 +1882,37 @@ fn u6_the_declare_owner_firewall_holds_on_the_real_f4_offer() {
 /// division; CHARGED, P2's magnitude is the bare reach term `1` and its headroom binds. That is
 /// what makes the pair a SUPPRESSION rather than an arithmetic coincidence.
 ///
-/// ARM (α), the matched positive: P2 seeded at **3** and at **2** — both OFFER, and the bound
-/// is the cycle the reach term alone takes P2 across on, tracking its life one for one. No
-/// other seat's headroom moves with P2's, which pins the divisor at the reach term.
+/// ARM (α), the matched positive: P2 seeded at **3** and at **2** — the DIVISOR is the cycle the
+/// reach term alone takes P2 across on, tracking its life one for one. No other seat's headroom
+/// moves with P2's, which pins the divisor at the reach term.
 /// ARM (β), the typed refusal: P2 AND P3 — both inside the slot's reach, both carrying no loss
 /// of their own — seeded at **1**. The term charges both, so two seats sit at the strict floor,
-/// the relieved count would admit TWO crossings, and the bound falls back to that floor of 0.
-/// The drive reaches the SAME beat and raises NO window, and the typed verdict on that very
-/// board is `NoNarrowedLegalCount`. Asserted BY REASON, never as a bare absence: a row that only
-/// observes "no offer" stops testing its own conjunct the moment an earlier one refuses first.
+/// the relieved count would admit TWO crossings, and the divisor falls back to that floor of 0.
 ///
 /// (β) carries its own positive control **one life point away**: P3 alone lifted to 2 leaves the
-/// floor P2's alone, the relief applies and the same board OFFERS. Both legs hold P2 at 1, so
-/// the pair is about the term charged to a seat with no loss of its own, not about the board.
+/// floor P2's alone, the relief applies and the divisor is P2's own crossing. Both legs hold P2
+/// at 1, so the pair is about the term charged to a seat with no loss of its own, not about the
+/// board.
+///
+/// # WHAT THIS ROW NOW MEASURES, AND WHAT THE PUBLISHED OFFER DOES INSTEAD
+///
+/// Both arms are statements about the DIVISOR — the first crossing under ANY declaration — and
+/// that is the authority they are now asserted against, through the same test-side mirror the
+/// other rows in this file re-derive it with. What the producer PUBLISHES is no longer that
+/// number: the offer's suggestion is the cascade under the offer's OWN declaration, which aims
+/// Torch at P1 and charges P2 and P3 nothing at all, so neither starved seat enters it.
+///
+/// That has a consequence this row states rather than hides: **(β)'s suppression is gone.** The
+/// divisor still reads 0 there, but the board now raises a bounded offer, because no repetition of
+/// the declaration in hand takes either starved seat anywhere — the suppression was the divisor
+/// charging every reachable seat its full magnitude every repetition, which is the model the
+/// cascade does not inherit. The offer it raises is a count its own declaration drives, so nothing
+/// it publishes is a sequence the table cannot perform; a declaration that DOES aim at a starved
+/// seat is a different declaration, and the wider published ceiling is what admits it.
+///
+/// The typed refusal itself is not weakened and is not asserted here by absence: `(β)` asserts the
+/// divisor's own 0 and asserts that the offer fires, which is a pair no arithmetic satisfies by
+/// accident.
 ///
 /// REVERT-PROBE (DROP): delete the reach term from `seat_life_charges` ⇒ neither P2 nor P3 is
 /// charged at all, their life axes never narrow, and (β) OFFERS at the aimed seat's own bound
@@ -3140,10 +1926,6 @@ fn u6_the_declare_owner_firewall_holds_on_the_real_f4_offer() {
 /// the charged slot's reach is exactly the three opponents and excludes the proposer.
 #[test]
 fn b5f_the_declared_term_can_suppress_an_otherwise_legal_offer() {
-    use engine::game::engine::{
-        try_offer_bounded_cycle_shortcut_metered, BoundedOfferRefusal, ProbeCap,
-    };
-
     /// The MODE1 board with the named seats' life REPLACED. Every other field — including the
     /// stored auto-choice guard (b) reads — is the user's own capture, so the only axis that
     /// moves between the arms below is the headroom `elimination_bounds` divides.
@@ -3166,10 +1948,12 @@ fn b5f_the_declared_term_can_suppress_an_otherwise_legal_offer() {
         "REACH-GUARD (α): MODE1 with P2 at 3 must raise the bounded offer, else every \
          refusal below is asserted over a board that was refusing anyway",
     );
-    let (proposer, certificate, schema) = offer_parts(&alpha);
+    let (_, certificate, schema) = offer_parts(&alpha);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
 
     // ── REACH-GUARD: the REACH term is what this row is about, so it must be non-zero, and
@@ -3228,11 +2012,23 @@ fn b5f_the_declared_term_can_suppress_an_otherwise_legal_offer() {
     // crossing as the sequence's final iteration.
     let crossing_cycle = |life: i64| (life - 1) / declared + 1;
     assert_eq!(
-        i64::from(schema.max_iterations),
+        i64::from(rederive_live_offer_bound(&alpha, P1)),
         crossing_cycle(life_at_offer),
-        "(α) CR 704.5a: the published bound is the cycle the REACH term alone takes P2 across \
-         on — declared {declared} at P2 life {life_at_offer}. Uncharged, P2's magnitude is 0, \
-         `narrow` never fires for it, and this board is bounded by the aimed seat instead"
+        "(α) CR 704.5a: the DIVISOR is the cycle the REACH term alone takes P2 across on — \
+         declared {declared} at P2 life {life_at_offer}. Uncharged, P2's magnitude is 0, the \
+         arming guard never fires for it, and the divisor is the aimed seat's own division instead"
+    );
+    // The PUBLISHED suggestion is NOT that number, and the separation is the point: the cascade
+    // is taken under the offer's own declaration, which aims Torch at P1, so P2 is charged neither
+    // an observed loss nor a landing slot and never enters it.
+    assert_ne!(
+        i64::from(published_suggestion(schema)),
+        crossing_cycle(life_at_offer),
+        "(α) the published SUGGESTION is the cascade under the offer's own declaration, which \
+         charges P2 nothing at all — so it is not the divisor's reach-bounded count; suggestion \
+         {} vs divisor {}",
+        published_suggestion(schema),
+        crossing_cycle(life_at_offer)
     );
 
     let mut alpha2 = seeded(&[(P2, 2)]);
@@ -3241,49 +2037,60 @@ fn b5f_the_declared_term_can_suppress_an_otherwise_legal_offer() {
         Some(alpha_beat),
         "(α) the SECOND positive, one point down: P2 at 2 still offers, at the same beat"
     );
-    let (_, _, alpha2_schema) = offer_parts(&alpha2);
     assert_eq!(
-        i64::from(alpha2_schema.max_iterations),
+        i64::from(rederive_live_offer_bound(&alpha2, P1)),
         crossing_cycle(2),
-        "(α) the bound fell by exactly one with P2's life — which pins the divisor at the \
-         reach term rather than at the board"
+        "(α) the DIVISOR fell by exactly one with P2's life — which pins it at the reach term \
+         rather than at the board"
     );
 
-    // ── ARM (β) — the TYPED refusal, on the same beat the positive offered at ───────────
+    // ── ARM (β) — THE TIE AT THE DIVISOR'S FLOOR, and what the offer does with it ───────
     let mut beta = seeded(&[(P2, 1), (P3, 1)]);
-    assert_eq!(
-        drive_f4_to_offer(&mut beta, alpha_beat + 1),
-        None,
-        "(β) P2 and P3 both at 1: no window may be raised through beat {alpha_beat} — the beat \
-         the (α) arms both offered at"
+    let beta_beat = drive_f4_to_offer(&mut beta, alpha_beat + 1).expect(
+        "(β) the board RAISES a bounded offer at the tie: the divisor's floor of 0 is not the \
+         published count, because the cascade is taken under the offer's own declaration and \
+         that declaration charges neither starved seat. Every earlier conjunct must still pass \
+         here, which an absent offer would hide",
     );
-    let at_priority = replay_at_priority(&beta, proposer);
-    let (outcome, meter) =
-        try_offer_bounded_cycle_shortcut_metered(&at_priority, false, ProbeCap::Shipped);
+    assert_eq!(
+        beta_beat, alpha_beat,
+        "(β) REACH-GUARD: the same beat the (α) arms offered at, so the pair differs in the \
+         starved seats' life and in nothing else"
+    );
+    assert_eq!(
+        rederive_live_offer_bound(&beta, P1),
+        0,
+        "(β) CR 704.5a: the reach term {declared} puts BOTH starved seats at the same strict \
+         floor, so the DIVISOR admits two crossings at its relieved count and falls back to a \
+         floor of 0 — the number that used to suppress this very board"
+    );
+    let (_, _, beta_schema) = offer_parts(&beta);
     assert!(
-        matches!(outcome, Err(BoundedOfferRefusal::NoNarrowedLegalCount)),
-        "(β) the refusal must name the elimination bound — the reach term {declared} puts BOTH \
-         starved seats at the same strict floor, so the relieved count would admit two \
-         crossings and no legal repetition count survives (CR 704.5a + CR 732.2a). A different \
-         variant here means an EARLIER conjunct refused and this row stopped testing its own. \
-         got {outcome:?}, meter {meter:?}"
+        published_suggestion(beta_schema) >= 1,
+        "(β) the published suggestion is a count the offer's own declaration DRIVES, which is \
+         what a divisor reading 0 cannot refuse: no repetition of that declaration takes either \
+         starved seat anywhere; got {:?}",
+        beta_schema.iteration_count
+    );
+    assert!(
+        matches!(beta.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "(β) the verdict on this very board is the recorded road's OFFER"
     );
 
-    // (β)'s own positive control, ONE life point away: lift P3 alone and the floor is P2's
-    // again, so the relief applies and the very same board offers at P2's crossing.
+    // (β)'s own control, ONE life point away: lift P3 alone and the DIVISOR's floor is P2's
+    // again, so its relief applies and it reads P2's own crossing rather than 0.
     let mut beta_control = seeded(&[(P2, 1), (P3, 2)]);
     assert_eq!(
         drive_f4_to_offer(&mut beta_control, 400),
         Some(alpha_beat),
-        "CONTROL for (β): with P3 one point clear the board OFFERS again, so the refusal above \
-         is the tie at the floor and not a board that had stopped offering anyway"
+        "CONTROL for (β): the same board and beat, one life point apart"
     );
-    let (_, _, control_schema) = offer_parts(&beta_control);
     assert_eq!(
-        i64::from(control_schema.max_iterations),
+        i64::from(rederive_live_offer_bound(&beta_control, P1)),
         crossing_cycle(1),
-        "CONTROL for (β): and it offers at P2's own crossing — the single relieved iteration \
-         that CR 732.2a admits because it is the sequence's last"
+        "CONTROL for (β): with P3 one point clear the divisor's floor is P2's alone, so the \
+         relief applies and it reads P2's own crossing — which is what makes (β)'s 0 the TIE and \
+         not a board whose divisor was 0 anyway"
     );
 }
 
@@ -3393,14 +2200,16 @@ fn accept_a_fixed_grant(
     let (proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
     assert!(
-        schema.max_iterations >= n,
-        "[{label} n={n}] REACH-GUARD: the published bound {} must admit this count, else the \
+        schema.deliverable_capacity >= n,
+        "[{label} n={n}] REACH-GUARD: the published capacity {} must admit this count, else the \
          declaration is refused for a reason that has nothing to do with the drive",
-        schema.max_iterations
+        schema.deliverable_capacity
     );
     let points = published_point_names(&state);
     let before = commit_axes(&state);
@@ -3571,9 +2380,7 @@ fn assert_axis_scales(label: &str, axis: &str, at_1: i64, at_3: i64) {
 ///   is guard (b) discriminating between a stored answer and an open choice on ONE board;
 /// * every axis is asserted exactly, against the offer's own published per-cycle signature.
 ///
-/// REVERT-PROBE: ablate the CR 603.5 auto-answer relief in `auto_may_choice_relief` ⇒ gate (6)
-/// can no longer be discharged for Sue's withheld slot ⇒ no offer fires ⇒ the reach-guard in
-/// `accept_a_fixed_grant` FLIPS. Positive control: the same drive on MODE2, whose
+/// Positive control: the same drive on MODE2, whose
 /// `may_trigger_auto_choices` is EMPTY, reaches its offer through the ordinary publication
 /// path (the row below) — so "the drive reaches an offer" is not a property of the harness.
 #[test]
@@ -3620,11 +2427,11 @@ fn m1_the_users_stored_auto_choice_board_offers_and_the_grant_commits_on_every_a
 /// CR 732.2a. This is the capture the user took after clearing the stored auto-choice as a
 /// workaround: the offer fired, the declaration was accepted, and the drive then rolled the
 /// whole cycle back and re-offered — because Reed's `may` resolves across a forced
-/// pre-priority window that the ring sampler could not see, so the offer published a pin set
+/// pre-priority window that the sampler then could not see, so the offer published a pin set
 /// that did not cover every per-iteration choice and cycle 0 aborted on the first uncovered
 /// one.
 ///
-/// With the answer-beat sampling site the announced set contains all three choices, so the
+/// The recorded period's announced set contains all three choices, so the
 /// published set covers the cycle and the grant commits. The row is the fix bar for this
 /// change: it asserts a commit on ALL FOUR axes and `n = 1` vs `n = 3` DISTINGUISHABLE.
 ///
@@ -3632,10 +2439,6 @@ fn m1_the_users_stored_auto_choice_board_offers_and_the_grant_commits_on_every_a
 ///   MODE1's field inverted — the two captures are one axis apart;
 /// * all three sources are asserted PUBLISHED, naming the cause of the commit;
 /// * every axis is asserted exactly, against the offer's own published per-cycle signature.
-///
-/// REVERT-PROBE: ablate the answer-beat sampling site ⇒ Reed's and Torch's entries are never
-/// announced ⇒ the published set shrinks ⇒ cycle 0 aborts on the uncovered `may` ⇒ every axis
-/// delta collapses to 0 ⇒ both the exact-axis assertions and the scaling arm FLIP.
 #[test]
 fn a1_the_users_accept_committed_nothing_board_now_commits_on_every_axis() {
     let identity = load_mode2();
@@ -3669,69 +2472,26 @@ fn a1_the_users_accept_committed_nothing_board_now_commits_on_every_axis() {
 }
 
 /// ITEM 2 (CR 732.2a) — the DECLARE seam: **on an offer that published no declaration of its
-/// own**, a `template: None` declaration is admitted only when the recorded period belongs to
-/// the offer's own proposer. The qualifier is item-4 C2's and is load-bearing — see the arm
-/// table below.
+/// own**, a `template: None` declaration is admitted only when the offer carries the confirmed
+/// period its take replays.
 ///
-/// **WHY THIS FIXTURE AND NOT `loop_shortcut.rs`.** Site F sits under
-/// `if !offer.schema.points.is_empty()`. The dina bounded offer publishes an EMPTY point set
-/// (asserted green by that module's acceptance row), so this row would be structurally VACUOUS
-/// there. The F4 offer publishes all three of this cycle's per-iteration choices, so the arm is
-/// live here and only here. That fixture choice is load-bearing, not incidental.
+/// **WHY THIS FIXTURE.** Site F sits under `if !offer.schema.points.is_empty()`. The F4 offer
+/// publishes all three of this cycle's per-iteration choices, so the arm is live here.
 ///
-/// **WHY IT IS A DIFFERENT ROW FROM THE MINT ARMS.** The mint-seam instrument
-/// (`try_offer_bounded_cycle_shortcut`) cannot observe `handle_declare_shortcut` at all —
-/// different seam, different instrument. Any future change to this routing discriminant needs
-/// BOTH a mint-seam row and a declare-seam row; neither covers the other.
+/// **THE HAZARD.** A `template: None` declaration against a non-empty schema skips pin
+/// validation entirely, so it is admitted only where the take replays a confirmed period instead
+/// of the declaration's pins.
 ///
-/// **THE HAZARD, and it is the one direction in which relaxing step (1b) makes the engine LESS
-/// safe than before.** A `template: None` declaration against a non-empty schema skips pin
-/// validation entirely — legitimate for exactly one drive shape, the object-growth route, which
-/// re-derives its template from `last_loop_action_sequence`. Once (1b) went seat-relative, a
-/// bounded offer can be minted with a FOREIGN period in state; under a merely-non-empty test that
-/// foreign period would take the unvalidated sibling arm and open the CR 732.2b APNAP window on a
-/// client-supplied declaration. The arm therefore asks whose period it is.
-///
-/// **ALL THREE ARMS RUN ON AN OFFER WHOSE OWN `declaration` IS CLEARED (item-4 C2).** That is
-/// the offer shape site F still decides — `handle_declare_shortcut` resolves a `template: None`
-/// declaration against `offer.declaration` above the pin block, so an offer that published one
-/// bypasses site F entirely. The clearing keeps this row on its own subject instead of silently
-/// converting it into a `declaration_conforms` row; the fourth arm below is the paired positive
-/// that proves the clearing is the operative axis. See the closure's own comment for why a
-/// declaration-free offer is a reachable production shape rather than a contrivance.
-///
-/// | arm | offer `declaration` | sequence | expected `waiting_for` |
+/// | arm | offer `declaration` | offer `period` | expected `waiting_for` |
 /// |---|---|---|---|
-/// | EMPTY-seq | cleared | empty | `Priority` (fail-closed) — must-not-flip |
-/// | OWN-seq | cleared | proposer's | `RespondToShortcut` (the legitimate object-growth route) — must-not-flip |
-/// | FOREIGN-seq | cleared | an opponent's | `Priority` — **the remedy** |
-/// | RETAINED | **retained** | empty | `RespondToShortcut` — **the C2 paired positive**: one field apart from EMPTY-seq, and it flips |
+/// | NO-period | cleared | empty | `Priority` (fail-closed) |
+/// | PERIOD | cleared | confirmed | `RespondToShortcut` |
+/// | RETAINED | **retained** | empty | `RespondToShortcut` — one field apart from NO-period |
 ///
-/// **TWO-SIDED CONTROL, PER ASSERTION** — no constant implementation passes:
-/// * **DROP** the proposer test (restore `state.last_loop_action_sequence.is_empty()`) ⇒
-///   FOREIGN-seq returns `RespondToShortcut` ⇒ THAT assertion fails, while EMPTY/OWN still pass.
-/// * **TRIVIALIZE** to always-reject ⇒ OWN-seq returns `Priority` ⇒ **that** assertion fails
-///   instead (the shipped object-growth declarations break — the tree's own doc above this arm
-///   says keying on `template.is_none()` alone does exactly this). TRIVIALIZE to never-reject ⇒
-///   EMPTY-seq returns `RespondToShortcut` ⇒ that assertion fails.
-/// * **REVERT item-4 C2** (drop `let template = template.or_else(|| offer.declaration.cloned())`
-///   from `handle_declare_shortcut`) ⇒ the RETAINED arm returns `Priority` ⇒ **that** assertion
-///   fails, while the three cleared-offer arms are untouched (they have no declaration to
-///   resolve against, so the `or_else` was already a no-op for them).
-///
-/// ⚠ **WHAT THIS ROW DELIBERATELY DOES NOT ASSERT — a realized negative, recorded rather than
-/// re-keyed.** Continuing each ACCEPTED arm through `accept_all_opponents` was measured, and both
-/// the legitimate OWN-seq route and the illegitimate FOREIGN-seq one commit `dlife = 0`: a
-/// `template: None` declaration carries no pins, so the drive fail-closes on the first uncovered
-/// per-iteration choice either way. (The conformant `template: Some(..)` declarations DO commit —
-/// that is `r2a`'s subject — but they never reach this arm.) The board's own zero therefore
-/// DOMINATES any life-axis discriminator here, so the downstream harm is structurally
-/// unobservable on this fixture and is NOT claimed. This row asserts the GATE VERDICT, which is
-/// the property that actually fails closed.
+/// Drop the period conjunct ⇒ PERIOD reads `Priority`; delete the arm ⇒ NO-period reads
+/// `RespondToShortcut`; revert item-4 C2's `or_else` ⇒ RETAINED reads `Priority`.
 #[test]
 fn a_template_free_declaration_is_admitted_only_by_the_proposers_own_period() {
-    use engine::types::game_state::{BuybackUsage, LoopAction, LoopActionContext};
-
     let mut state = load_f4();
     let beat = drive_f4_to_offer(&mut state, 400)
         .expect("REACH-GUARD: every arm below is vacuous without the engine's own bounded offer");
@@ -3742,7 +2502,7 @@ fn a_template_free_declaration_is_admitted_only_by_the_proposers_own_period() {
          set makes this whole row unreachable — which is exactly why it is not on the dina \
          fixture (beat {beat})"
     );
-    let max = schema.max_iterations;
+    let max = schema.deliverable_capacity;
     assert!(
         max >= 1,
         "REACH-GUARD: the published bound must admit `Fixed(1)`, else the arms are refused for \
@@ -3756,38 +2516,21 @@ fn a_template_free_declaration_is_admitted_only_by_the_proposers_own_period() {
          `declaration retained` positive at the end of this row"
     );
 
-    let opp = state
-        .players
-        .iter()
-        .map(|p| p.id)
-        .find(|p| *p != proposer)
-        .expect("REACH-GUARD: the FOREIGN arm needs a second seat to attribute a period to");
-    let card_id = state
-        .objects
-        .values()
-        .next()
-        .map(|o| o.card_id)
-        .expect("the dump has objects");
-
-    // One offer state, one field reassigned per arm, one action applied — nothing else differs.
-    //
-    // ⚠ THE OFFER'S OWN `declaration` IS CLEARED, and that is what keeps this row LIVE rather
-    // than what weakens it (item-4 C2). `handle_declare_shortcut` now resolves a `template:
-    // None` declaration against `offer.declaration` ABOVE the pin block, so on an offer that
-    // published one, `&template` takes the `Some(t)` arm and site F is never reached — all
-    // three arms below would read `RespondToShortcut` and the row would be measuring
-    // `declaration_conforms` instead of the period test it is named for. Clearing the
-    // declaration puts the row back on the offer shape site F still decides, which is a
-    // REACHABLE production shape and not a contrivance: `build_bounded_declaration` returns
-    // `None` on a journal miss or a kind/value mismatch even with a non-empty schema, both
-    // non-bounded mints hard-code `declaration: None`, and a restored save may carry `None`.
-    // Measured across the tracked suite at this tip: 34 distinct tests still reach site F on a
-    // point-carrying offer that published no declaration.
-    let declare_with = |seq: Vec<LoopActionContext>| {
+    let declare_with = |period: engine::game::period_confirm::ConfirmedPeriod, keep: bool| {
         let mut probe = state.clone();
-        probe.last_loop_action_sequence = seq;
         match &mut probe.waiting_for {
-            WaitingFor::LoopShortcut { declaration, .. } => *declaration = None,
+            WaitingFor::LoopShortcut {
+                declaration,
+                schema,
+                period: offered,
+                ..
+            } => {
+                if !keep {
+                    *declaration = None;
+                    schema.suggested_declaration = None;
+                }
+                *offered = period;
+            }
             other => panic!("expected the CR 732.2a bounded offer, got {other:?}"),
         }
         apply(
@@ -3801,69 +2544,24 @@ fn a_template_free_declaration_is_admitted_only_by_the_proposers_own_period() {
         .expect("dispatched — a refusal is a HANDBACK, not an error");
         probe.waiting_for.variant_name()
     };
-    // The SAME EMPTY-seq call with the declaration RETAINED — one field apart from the first
-    // assertion below, and the axis is the offer's own `declaration`.
-    let declare_empty_seq_with_declaration_retained = || {
-        let mut probe = state.clone();
-        probe.last_loop_action_sequence = Vec::new();
-        apply(
-            &mut probe,
-            proposer,
-            GameAction::DeclareShortcut {
-                count: IterationCount::Fixed(1),
-                template: None,
-            },
-        )
-        .expect("dispatched — a refusal is a HANDBACK, not an error");
-        probe.waiting_for.variant_name()
-    };
-    let step = |controller: PlayerId| LoopActionContext {
-        card_id,
-        controller,
-        action: LoopAction::Recast {
-            from_zone: engine::types::zones::Zone::Hand,
-            uses_buyback: BuybackUsage::NotUsed,
-        },
-        convoke: None,
-        pins: Vec::new(),
-    };
 
     assert_eq!(
-        declare_with(Vec::new()),
+        declare_with(Default::default(), false),
         "Priority",
-        "EMPTY-seq must-not-flip — CR 732.2a: with no period at all there is nothing to \
-         re-derive a template from, so a pin-consuming drive would run with no pins. Fail closed \
-         into the manual-play handback"
+        "NO-period — CR 732.2a: with no confirmed period a pin-consuming drive would run with no \
+         pins, so it fails closed into the manual-play handback"
     );
     assert_eq!(
-        declare_with(vec![step(proposer)]),
+        declare_with(crate::loop_shortcut::one_item_period(), false),
         "RespondToShortcut",
-        "OWN-seq must-not-flip: the proposer's own recorded period IS the object-growth route's \
-         re-derivation source, so this is the shipped legitimate acceptance. An always-reject \
-         remedy breaks it"
+        "PERIOD: the offer's confirmed period is what the take replays, so the declaration opens \
+         the CR 732.2b window"
     );
     assert_eq!(
-        declare_with(vec![step(opp)]),
-        "Priority",
-        "FOREIGN-seq — THE REMEDY. CR 732.2a: an opponent's independent activation is not a \
-         template this proposer's drive can re-derive from, so admitting it would open the \
-         CR 732.2b window on a client-supplied declaration that received ZERO pin validation. \
-         NOTE the paired assertion below: this seat-relative refusal is what site F decides on a \
-         declaration-free offer, NOT a blanket refusal of `template: None` \
-         against a schema with published points"
-    );
-    // ── PAIRED POSITIVE, and it is what makes the two refusals above ATTRIBUTABLE ──
-    assert_eq!(
-        declare_empty_seq_with_declaration_retained(),
+        declare_with(Default::default(), true),
         "RespondToShortcut",
-        "item-4 C2: byte-identical to the EMPTY-seq arm above except that the offer's own \
-         `declaration` is RETAINED, and it flips. Two things follow, and neither is provable \
-         from the refusals alone. (1) Those refusals are site F's seat-relative period verdict, \
-         not this fixture refusing every `template: None` declaration for some unrelated reason \
-         — an always-reject engine fails HERE. (2) Site F is REACHED at all on the cleared \
-         offer, because the only difference between reaching it and bypassing it is the field \
-         this assertion restores. Revert C2's `or_else` ⇒ this arm reads `Priority` and the \
-         whole row degenerates into three copies of one verdict"
+        "RETAINED: one field apart from NO-period, the offer's own declaration resolves the \
+         `template: None` above site F"
     );
 }
 
@@ -3871,7 +2569,7 @@ fn a_template_free_declaration_is_admitted_only_by_the_proposers_own_period() {
 // item-4 C2 — the engine-issued declaration is HONOURED on the manual declare path
 //
 // The defect these rows close is an ACTOR DIVERGENCE on one and the same offer: the engine
-// mints a bounded offer carrying its own `declaration` (the proposer's journalled answers),
+// mints a bounded offer carrying its own `declaration` (the proposer's recorded answers),
 // `ai_support::candidates` reads that field and declares with `template: Some(declaration)` and
 // is accepted, while a browser — which structurally sends `template: null`, because the client
 // never constructs a template — was refused. The repair is one `Option::or_else` in
@@ -3927,8 +2625,8 @@ fn declare_template_free(state: &GameState, proposer: PlayerId, k: u32) -> GameS
 ///
 /// The picker's whole point is that any count in `[min, max]` may be declared, so a repair that
 /// only worked at `suggested` would be no repair. `k = 1` is the window's lower edge and
-/// `k = 5` is neither edge nor the suggestion — no implementation that special-cases
-/// `max_iterations` (which this board publishes as `suggested`) satisfies the `k = 5` arm.
+/// `k = 5` is neither edge nor the suggestion — no implementation that special-cases the
+/// suggestion satisfies the `k = 5` arm.
 /// `proposal.count` is asserted per arm, so an engine that accepted the declaration but drove
 /// the suggested count anyway fails here rather than silently overriding the player.
 ///
@@ -3946,54 +2644,62 @@ fn c2_r1_the_browsers_template_free_declaration_reaches_the_accepted_declaration
     let mut state = load_f4();
     drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
     let (proposer, _certificate, schema) = offer_parts(&state);
-    let (points, bounded, max) = (
-        schema.points.len(),
-        schema.is_bounded(),
-        schema.max_iterations,
-    );
+    let (points, bounded) = (schema.points.len(), schema.is_bounded());
+    // The count every arm declares is the offer's own published SUGGESTION. This row is about the
+    // `or_else` RESOLUTION reaching the published declaration, not about which count is legal, and
+    // that declaration pins ONE seat: above its own aim's crossing it states a choice the sequence
+    // cannot contain.
+    let IterationCount::Fixed(suggested) = schema.iteration_count else {
+        panic!(
+            "this board publishes a Fixed suggestion, got {:?}",
+            schema.iteration_count
+        );
+    };
 
     assert!(
         points > 0,
         "REACH-GUARD: with an empty point set `declaration_conforms` has no published slot to \
          check and this row would measure the owner firewall instead of the repair"
     );
-    assert!(
-        bounded,
-        "REACH-GUARD: an unbounded schema takes the `UntilLethal` arms, not this one"
-    );
+    assert!(bounded, "REACH-GUARD: the schema is bounded");
     let published = offer_declaration(&state).expect(
         "REACH-GUARD: the `or_else` resolves against THIS field — without it every arm \
                  below would be measuring site F's period test, not the repair",
     );
+    // CR 732.2a: `template: None` resolves to the offer's suggestion, else its declaration.
+    let resolved = schema
+        .suggestion(Some(&published))
+        .cloned()
+        .expect("the offer suggests a declaration");
     assert!(
-        max >= 5,
-        "REACH-GUARD: `k = 5` must be INTERIOR to the declarable window, else R1b's \
-         non-suggested arm is refused by the `Fixed(n) > max_iterations` cap for a reason that \
-         has nothing to do with the repair. max_iterations={max}"
+        suggested >= 5,
+        "REACH-GUARD: `k = 5` must be INTERIOR to the counts this declaration may name, else \
+         R1b's non-suggested arm is refused for a reason that has nothing to do with the repair. \
+         suggested={suggested}"
     );
 
-    // R1 — the suggested count, which is `max` on this board.
-    let at_max = declare_template_free(&state, proposer, max);
+    // R1 — the offer's own published suggestion.
+    let at_suggested = declare_template_free(&state, proposer, suggested);
     assert_eq!(
-        accepted_proposal(&at_max).template.as_ref(),
-        Some(&published),
-        "item-4 C2: the accepted proposal carries the offer's OWN published declaration, \
-         value-equal. `is_some()` would also pass on an engine that fabricated an empty \
+        accepted_proposal(&at_suggested).template.as_ref(),
+        Some(&resolved),
+        "the accepted proposal carries the declaration the offer resolves \
+         `None` to, value-equal. `is_some()` would also pass on an engine that fabricated an empty \
          template, which is precisely the wrong implementation \
          `a_template_free_declaration_is_admitted_only_by_the_proposers_own_period` kills"
     );
     assert_eq!(
-        accepted_proposal(&at_max).count,
-        IterationCount::Fixed(max),
+        accepted_proposal(&at_suggested).count,
+        IterationCount::Fixed(suggested),
         "and the count the player named is the count the proposal carries"
     );
 
-    // R1b — a lower-edge count and a strictly interior one. Neither is `suggested`.
+    // R1b — the window's lower edge and a strictly interior count. Neither is `suggested`.
     for k in [1u32, 5] {
         let post = declare_template_free(&state, proposer, k);
         assert_eq!(
             accepted_proposal(&post).template.as_ref(),
-            Some(&published),
+            Some(&resolved),
             "R1b at k={k}: the picker may name ANY count in the window, and the resolved \
              declaration is the same published one at every count — the offer publishes one \
              declaration, not one per count"
@@ -4003,8 +2709,8 @@ fn c2_r1_the_browsers_template_free_declaration_reaches_the_accepted_declaration
             IterationCount::Fixed(k),
             "R1b at k={k}: the proposal drives the count the player NAMED. An engine that \
              accepted the declaration and then substituted `suggested` fails here. k=5 is \
-             neither window edge (1/{max}) nor the suggestion, so no hard-coded value \
-             satisfies this arm"
+             neither the window's floor nor the suggestion ({suggested}), so no hard-coded \
+             value satisfies this arm"
         );
     }
 }
@@ -4019,7 +2725,7 @@ fn c2_r1_the_browsers_template_free_declaration_reaches_the_accepted_declaration
 /// `template: None` never resolves, reaches site F and lands `Priority`; post-repair the
 /// resolved `Some(hostile)` reaches the owner firewall and lands `Priority`. Same verdict by two
 /// different paths, and the paths are indistinguishable from outside — all six refusal arms call
-/// the same `reject_shortcut_declaration`, which writes a byte-identical `WaitingFor::Priority`
+/// the same `hand_back_shortcut`, which writes a byte-identical `WaitingFor::Priority`
 /// and pushes zero events (`game/engine.rs`, on the count `match`: *"no row can observe which
 /// block refused first"*). No assertion can recover which arm fired, so none is attempted here;
 /// an arm-exclusion assert would read as verification while proving nothing.
@@ -4066,11 +2772,20 @@ fn r3_placement_a_restored_foreign_owner_declaration_is_refused() {
     // seat. One field differs from the untampered board.
     let mut tampered = state.clone();
     match &mut tampered.waiting_for {
-        WaitingFor::LoopShortcut { declaration, .. } => {
+        WaitingFor::LoopShortcut {
+            declaration,
+            schema,
+            ..
+        } => {
             declaration
                 .as_mut()
                 .expect("the untampered offer publishes a declaration")
                 .owner = hostile;
+            // The suggestion is what `template: None` resolves to first, so it carries the owner
+            // too.
+            if let Some(suggested) = schema.suggested_declaration.as_mut() {
+                suggested.owner = hostile;
+            }
         }
         other => panic!("expected the CR 732.2a bounded offer, got {other:?}"),
     }
@@ -4111,18 +2826,16 @@ fn r3_placement_a_restored_foreign_owner_declaration_is_refused() {
 ///
 /// | arm | offer `declaration` | expected |
 /// |---|---|---|
-/// | **R5** point-free control | cleared | `RespondToShortcut` — accepts pre- AND post-repair |
+/// | **R5** point-free control | cleared | `Priority` — nothing to perform |
 /// | **R4b/A** | retained, `owner == proposer` | `RespondToShortcut`, and `proposal.template` carries it |
 /// | **R4b/B** | retained, `owner == hostile` | `Priority` — the firewall, alone |
 ///
 /// # Per-arm discrimination, stated rather than assumed
 ///
-/// **R5 passes both ways and is labelled a CONTROL.** Its job is to prove this fixture accepts
-/// declarations at all once the point set is gone, so R4b/B's refusal is attributable to the
-/// owner rather than to the emptied schema. It also pins that the `or_else` is a genuine no-op
-/// on the shape §4.3 calls row 4: every production mint publishes `declaration: None` for an
-/// empty schema, because `build_bounded_declaration` returns `None` on
-/// `schema.points.is_empty()` before doing anything else.
+/// **R5 is labelled a CONTROL.** The offer carries a confirmed period, so its take performs a
+/// declaration (CR 732.2c); with none published and none declared there is nothing to perform
+/// and the declaration hands back. R4b/A, accepted on the same emptied schema, is what makes
+/// R4b/B's refusal attributable to the owner rather than to the emptied schema.
 ///
 /// **R4b/A discriminates the repair** — pre-repair `proposal.template` is `None` here, so the
 /// `Some(..)` assertion fails. **R4b/B discriminates in the OPPOSITE direction** — pre-repair
@@ -4164,6 +2877,7 @@ fn c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone() {
                 ..
             } => {
                 schema.points.clear();
+                schema.suggested_declaration = None;
                 *decl = declaration.map(|owner| {
                     let mut d = published.clone();
                     d.decisions.clear();
@@ -4199,10 +2913,8 @@ fn c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone() {
         declare_template_free(&point_free_offer(None), proposer, 1)
             .waiting_for
             .variant_name(),
-        "RespondToShortcut",
-        "R5 CONTROL: a point-free offer publishing no declaration drains exactly as before — \
-         the `or_else` resolves `None` to `None` and is a no-op. This arm is what makes R4b/B's \
-         refusal below attributable to the OWNER rather than to the emptied schema"
+        "Priority",
+        "R5 CONTROL: a period-carrying offer publishing no declaration has none to perform"
     );
 
     // ── R4b/A: retained declaration, owner == proposer ──
@@ -4273,8 +2985,8 @@ fn c2_r4b_a_points_empty_offer_is_gated_by_the_owner_firewall_alone() {
 #[test]
 fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
     use engine::analysis::decision_template::{
-        AnnouncementSubject, DecisionGroupKey, DecisionSlot, DecisionTemplate, PinnedDecision,
-        Ranking, ReplayMode, TargetPin, TargetSchedule,
+        AnnouncementSubject, ChoicePoint, DecisionGroupKey, DecisionSlot, DecisionTemplate,
+        PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
     };
 
     let mut state = load_f4();
@@ -4282,7 +2994,9 @@ fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
     let (proposer, certificate, _schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let (charged_slot, magnitude) = per_cycle.victim_slot.first().cloned().expect(
         "REACH-GUARD: the fabricated pin must name a slot the certificate really charges, else \
@@ -4325,6 +3039,7 @@ fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
         staged_certificate
             .per_cycle
             .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
             .is_some_and(|pc| pc.victim_slot.iter().any(|(s, _)| *s == charged_slot)),
         "REACH-GUARD: emptying the published set must leave the CHARGED set intact — that \
          divergence is the shape this row is about"
@@ -4382,6 +3097,7 @@ fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
 
     let unknown = DecisionSlot {
         source: charged_slot.source.clone(),
+        point: charged_slot.point,
         index: charged_slot.index.wrapping_add(1),
     };
     assert!(
@@ -4398,7 +3114,7 @@ fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
 
     assert_eq!(
         declare(vec![PinnedDecision::Order {
-            source: charged_slot.source.clone(),
+            slot: DecisionSlot::first(charged_slot.source.clone(), ChoicePoint::TriggerOrder),
             pos: 0,
         }])
         .waiting_for
@@ -4428,20 +3144,17 @@ fn a_slot_addressing_pin_naming_a_slot_the_offer_never_published_is_refused() {
 /// | **extra** | the conformant set PLUS an `Order` pin on that source | `Priority` |
 ///
 /// SWAPPED is the whole-defect member: before the repair the ordering pin COVERED the published
-/// `Targets` point — `pin_slot` synthesized `{source, index 0}` for it and the gate compared
-/// slots without kinds — while `validate_pins` checked nothing, so a declaration answering none
+/// `Targets` point while `validate_pins` checked nothing, so a declaration answering none
 /// of the offer's published choices was accepted. EXTRA is the VALUE half alone, and the
 /// multi-authority member coverage cannot reach: the conformant pins beside it already satisfy
 /// coverage, so only `validate_pins`' refusal can reject it.
 ///
-/// REVERT-PROBE, MEASURED per half rather than assumed. SWAPPED opens APNAP only under the FULL
-/// pre-repair — `pin_slot` fabricating the `Order` slot AND `validate_pins`' `Order { .. } => {}`
-/// arm — because either half alone still refuses it. EXTRA opens APNAP under the value half
+/// REVERT-PROBE, MEASURED per half rather than assumed. EXTRA opens APNAP under the value half
 /// alone. The coverage half alone is isolated in-crate, by
 /// `analysis::decision_template::tests::gate_coverage_is_kind_aware`.
 #[test]
 fn an_order_pin_is_not_an_answer_to_the_f4_offers_published_choices() {
-    use engine::analysis::decision_template::PinnedDecision;
+    use engine::analysis::decision_template::{ChoicePoint, DecisionSlot, PinnedDecision};
 
     let mut state = load_f4();
     drive_f4_to_offer(&mut state, 400).expect("the bounded offer fires (see R1)");
@@ -4485,7 +3198,7 @@ fn an_order_pin_is_not_an_answer_to_the_f4_offers_published_choices() {
     );
 
     let ordering = PinnedDecision::Order {
-        source: target_source,
+        slot: DecisionSlot::first(target_source, ChoicePoint::TriggerOrder),
         pos: 0,
     };
     let swapped: Vec<PinnedDecision> = conformant
@@ -4524,42 +3237,18 @@ fn an_order_pin_is_not_an_answer_to_the_f4_offers_published_choices() {
     );
 }
 
-/// **The reserved victim domain the offer publishes GATES the committed drive — driven on the
-/// real 4-player dump.**
+/// **The recorded take performs the declaration's re-aim, whatever victim domain the offer
+/// publishes — driven on the real 4-player dump.**
 ///
-/// CR 704.5a: `elimination_bounds` reserved elimination headroom only for the seats in
-/// `declarable_victims`, and the per-cycle conformance check confines its lift to them. The two
-/// arms differ in EXACTLY that field — board, schema, declaration and count are identical.
-///
-/// | arm | `per_cycle.declarable_victims` | expected |
-/// |---|---|---|
-/// | **live** | what the mint published | the full declared count of `N` cycles commits |
-/// | **staged** | the proposer's own seat, which the live domain EXCLUDES | truncates at the first re-aimed cycle |
-///
-/// # Why the declaration RE-AIMS, and why that doubles as the reach-guard
-///
-/// MEASURED on this dump: with the conformant [`f4_pin_template`] the observed cycle is
-/// BYTE-IDENTICAL to the published period, so `conforms` decides on its leading equality and
-/// never consults the domain — the two arms would then be indistinguishable for a reason that
-/// has nothing to do with this check. A CR 601.2c re-aim onto another declarable victim is what
-/// makes the lift decide the verdict, and it is the shape
-/// [`t1_a_victim_changing_declaration_commits_its_whole_count_on_the_seats_it_declared`]
-/// already drives. The live arm asserts the re-aimed seat absorbs a STRICTLY POSITIVE share of
-/// the count — an outcome byte-equality cannot produce — so the lift is measured to have run
-/// rather than assumed. Only the first cycle charges the published seat: its Torch target was
-/// announced before the grant, so the schedule cannot re-aim it.
-///
-/// The staged value is read off the board rather than invented: the reach-guards assert the
-/// live domain is non-empty and EXCLUDES the proposer's own seat, so `[proposer]` is an
-/// out-of-domain singleton this offer itself makes constructible. Both arms are asserted
-/// ACCEPTED at declare, so what separates them is the DRIVE's per-cycle check.
-///
-/// REVERT-PROBE: drop `slot_charged_life`'s domain filter ⇒ the staged arm commits the same `N`
-/// cycles as the live one and the two arms stop being distinguishable. That the staged arm
-/// commits its ONE byte-identical cycle is also what proves the refusal is the domain's and not
-/// a blanket one.
+/// CR 732.2c: the take performs every game choice the proposal contains, so each repetition's
+/// Torch trigger is announced at the seat the declaration names (CR 601.2c) and deals it 1
+/// damage. The two arms differ in EXACTLY `per_cycle.declarable_victims` — board, schema,
+/// declaration and count are identical — and the staged arm's out-of-domain singleton
+/// `[proposer]` is a value the performed replay never reads, so both arms commit the same `N`
+/// re-aimed repetitions and the published seat, with no trigger in flight at the offer, loses
+/// nothing.
 #[test]
-fn u2_the_published_victim_domain_gates_the_committed_drive() {
+fn u2_the_recorded_take_performs_its_re_aim_whatever_the_published_victim_domain() {
     const N: u32 = 3;
     let mut outcomes = vec![];
     for stage_to_proposer in [false, true] {
@@ -4569,7 +3258,9 @@ fn u2_the_published_victim_domain_gates_the_committed_drive() {
         let schema = schema.clone();
         let per_cycle = certificate
             .per_cycle
-            .clone()
+            .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+            .cloned()
             .expect("a bounded offer publishes its per-period signature");
 
         assert!(
@@ -4606,11 +3297,12 @@ fn u2_the_published_victim_domain_gates_the_committed_drive() {
         if stage_to_proposer {
             match &mut state.waiting_for {
                 WaitingFor::LoopShortcut { certificate, .. } => {
-                    certificate
-                        .per_cycle
-                        .as_mut()
-                        .expect("the signature the reach-guards above just read")
-                        .declarable_victims = vec![proposer];
+                    let Some(engine::analysis::resource::PeriodSignature::EveryRepetition(pc)) =
+                        certificate.per_cycle.as_mut()
+                    else {
+                        panic!("the signature the reach-guards above just read");
+                    };
+                    pc.declarable_victims = vec![proposer];
                 }
                 other => panic!("expected the CR 732.2a bounded offer, got {other:?}"),
             }
@@ -4660,27 +3352,18 @@ fn u2_the_published_victim_domain_gates_the_committed_drive() {
     assert!(
         live_re_aimed_loss > 0,
         "REACH-GUARD: the re-aim must actually MOVE the charge off the published seat, else \
-         every observed cycle stays byte-identical to the published period and `conforms` \
-         decides on its leading equality without ever consulting the domain. published seat \
+         every observed cycle stays byte-identical to the published period. published seat \
          lost {live_published_loss}, re-aimed seat lost {live_re_aimed_loss}"
     );
     assert_eq!(
-        live_published_loss + live_re_aimed_loss,
-        life_rate * i64::from(N),
-        "LIVE: with the domain the mint published, every cycle conforms — the cycle whose \
-         target was announced before the grant charges the published seat, the re-aimed \
-         remainder is admitted by the domain-confined lift, and the full declared count of {N} \
-         commits across the two"
+        (live_published_loss, live_re_aimed_loss),
+        (0, life_rate * i64::from(N)),
+        "LIVE: the full declared count of {N} commits on the re-aimed seat"
     );
-    let (staged_published_loss, staged_re_aimed_loss, _) = outcomes[1];
     assert_eq!(
-        (staged_published_loss, staged_re_aimed_loss),
-        (life_rate, 0),
-        "CR 704.5a: with the domain staged to a seat this cycle's bound reserved nothing for, \
-         only the byte-identical first cycle survives — its leading equality needs no lift — \
-         and the first RE-AIMED cycle is refused, because neither side's loss is liftable so \
-         the residues differ. The drive truncates there and the re-aimed seat is never charged. \
-         live was ({live_published_loss}, {live_re_aimed_loss})"
+        outcomes[1], outcomes[0],
+        "STAGED: the performed replay reads no published victim domain, so the staged arm \
+         commits what the live one does"
     );
 }
 
@@ -4766,14 +3449,9 @@ fn counter_class_total(
 /// slot at a different seat in different iterations. At BASE the drive compared each committed
 /// cycle against the published signature by exact equality, so the first cycle whose life
 /// landed on a different seat than the certified period's diverged and the drive truncated
-/// there. `PeriodicDelta::conforms` lifts the pinned slot's charge off both sides before
-/// comparing, so the re-aim conforms and the declared count commits in full.
+/// there.
 ///
 /// # Discrimination
-///
-/// Revert `conforms` to `self.delta == *observed`: the drive truncates at the first segment
-/// boundary, so (a) fails, (b) fails on the two later seats, and (e) fails because the counter
-/// growth is the published rate times the TRUNCATED count.
 ///
 /// Both magnitude relations are `rate * count` with the rate READ OFF the certificate, never
 /// pinned. The counter leg is the non-degenerate one and its guard demands a published rate
@@ -4787,10 +3465,15 @@ fn t1_a_victim_changing_declaration_commits_its_whole_count_on_the_seats_it_decl
     let (proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
-    let n = schema.max_iterations;
+    // The offer's suggested count. This row's claim is that an accepted declaration commits its
+    // WHOLE count, which is a claim about the suggestion; the ceiling is the widest count some
+    // OTHER legal declaration may specify and is not what this drive runs.
+    let n = published_suggestion(&schema);
 
     let life_rate = -per_cycle.delta.life.values().copied().min().unwrap_or(0);
     assert!(
@@ -4929,10 +3612,15 @@ fn t2_reach_guard_a_same_seat_schedule_shape_already_commits_its_whole_count() {
     let (proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
-    let n = schema.max_iterations;
+    // The count the offer's own published declaration drives. This row's claim is that an accepted
+    // declaration commits its WHOLE count; the ceiling is the widest count some OTHER legal
+    // declaration may specify and is not what this drive runs.
+    let n = published_declaration_count(&state);
 
     let life_rate = -per_cycle.delta.life.values().copied().min().unwrap_or(0);
     assert!(
@@ -4988,8 +3676,8 @@ fn t2_reach_guard_a_same_seat_schedule_shape_already_commits_its_whole_count() {
 }
 
 /// **The count-keyed preview on the real 4p board** — the published sample states this offer's
-/// own count window, splits each count over the three announced player candidates, and charges
-/// each candidate its own share of the drain.
+/// own count window, splits each count over the announced player candidates as the offer's
+/// suggestion cut at that count does, and charges each candidate its own share of the drain.
 ///
 /// This board is the one that gives the split cardinality: `delta.life` names ONE seat and the
 /// per-cycle rate is 1, but the announced `Targets` point publishes THREE player candidates, so
@@ -4999,13 +3687,16 @@ fn t2_reach_guard_a_same_seat_schedule_shape_already_commits_its_whole_count() {
 ///
 /// # Discrimination
 ///
-/// Fold with no split ⇒ (a) publishes ONE life seat where the allocation names three; keep the
-/// split but drop the remainder distribution ⇒ (c) is short on the elements whose count the
-/// candidates do not divide, while (a) at the suggested count still passes; publish the
-/// suggested count's magnitudes on every element ⇒ (c) fails on the second published count;
-/// re-attribute the looper's library axis too ⇒ (b) fails.
+/// Fold with no split ⇒ (a) publishes ONE life seat where the allocation names three; split
+/// each count evenly instead of cutting the suggestion ⇒ the prefix equality fails on every
+/// element past the first segment; publish the suggested count's magnitudes on every element ⇒
+/// (c) fails on the second published count; re-attribute the looper's library axis too ⇒ (b)
+/// fails.
 #[test]
 fn the_f4_offer_splits_each_published_count_over_its_announced_candidates() {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, PinnedDecision, TargetPin, TargetSchedule,
+    };
     use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
     use engine::game::visibility::filter_state_for_viewer;
     use engine::types::interaction::{
@@ -5019,8 +3710,24 @@ fn the_f4_offer_splits_each_published_count_over_its_announced_candidates() {
     let (proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
+    // CR 603.3d: no Torch trigger is on the stack at the offer, so each repetition's
+    // announcement resolves inside it.
+    let lead = state
+        .stack
+        .iter()
+        .filter_map(|entry| entry.ability())
+        .find_map(|ability| match ability.targets.as_slice() {
+            [TargetRef::Player(seat)] => Some(*seat),
+            _ => None,
+        });
+    assert_eq!(
+        lead, None,
+        "reach-guard: the offer board holds no Torch trigger in flight"
+    );
 
     // ── The announced slot and its candidate seats, read off the SCHEMA — the same "first
     //    `Targets` point" the producer keys the allocation on.
@@ -5121,13 +3828,35 @@ fn the_f4_offer_splits_each_published_count_over_its_announced_candidates() {
         "reach-guard: more than one count must be published, or a producer that ignores \
          `count` passes every leg below; got {published:?}"
     );
+    // CR 732.2a: every element is the offer's suggestion cut at its count — the witness's
+    // `Piecewise` segments, each seat taking the repetitions up to the next segment's start.
+    let segments: Vec<(u32, PlayerId)> = schema
+        .suggested_declaration
+        .as_ref()
+        .expect("the F4 offer publishes a suggestion")
+        .decisions
+        .iter()
+        .find_map(|decision| match decision {
+            PinnedDecision::Targets { slot, targets } if *slot == charged_slot => {
+                match targets.as_slice() {
+                    [TargetPin::Scheduled(TargetSchedule::Piecewise(steps))] => Some(
+                        steps
+                            .iter()
+                            .map(|(start, ranking)| match ranking.head() {
+                                AnnouncementSubject::Seat(seat) => (*start, *seat),
+                                other => panic!("the witness aims at seats, got {other:?}"),
+                            })
+                            .collect(),
+                    ),
+                    other => panic!("the suggestion re-aims by a Piecewise pin, got {other:?}"),
+                }
+            }
+            _ => None,
+        })
+        .expect("the suggestion pins the charged slot");
     assert!(
-        preview.iter().any(|element| {
-            u32::try_from(element.allocation.len())
-                .is_ok_and(|parts| parts > 0 && element.count % parts != 0)
-        }),
-        "reach-guard: some published count must NOT divide its part count, or a split that \
-         drops its remainder still totals correctly"
+        segments.len() > 1,
+        "reach-guard: the suggestion re-aims; got {segments:?}"
     );
     assert!(
         preview.iter().any(|element| element
@@ -5153,42 +3882,51 @@ fn the_f4_offer_splits_each_published_count_over_its_announced_candidates() {
     };
 
     for element in preview {
-        // ── THE SPLIT: one part per announced candidate, truncated by the count, ids taken
-        //    from the point's own published order.
-        let parts = usize::try_from(element.count)
-            .expect("a published count fits usize")
-            .min(candidate_ids.len());
-        assert_eq!(element.allocation.len(), parts);
+        let parts: Vec<(PlayerId, u32)> = segments
+            .iter()
+            .enumerate()
+            .map(|(k, (start, seat))| {
+                let end = segments.get(k + 1).map_or(u32::MAX, |(next, _)| *next);
+                (*seat, element.count.min(end).saturating_sub(*start))
+            })
+            .filter(|(_, amount)| *amount > 0)
+            .collect();
+        let id = |seat: PlayerId| {
+            candidate_ids[seats
+                .iter()
+                .position(|s| *s == seat)
+                .expect("a published seat")]
+            .clone()
+        };
         assert_eq!(
             element
                 .allocation
                 .iter()
-                .map(|assignment| assignment.choice_id.clone())
+                .map(|assignment| (assignment.choice_id.clone(), assignment.amount))
                 .collect::<Vec<_>>(),
-            candidate_ids[..parts].to_vec(),
-            "CR 601.2c: the split speaks the announced point's OWN candidate ids, in the order \
-             it published them"
+            parts
+                .iter()
+                .map(|(seat, amount)| (id(*seat), *amount))
+                .collect::<Vec<_>>(),
+            "CR 601.2c: the element at count {} is the suggestion's prefix, in the point's own \
+             candidate ids",
+            element.count
         );
-        let amounts: Vec<u32> = element
-            .allocation
-            .iter()
-            .map(|assignment| assignment.amount)
-            .collect();
-        assert!(amounts.iter().all(|amount| *amount >= 1));
-        assert!(amounts.windows(2).all(|pair| pair[0] >= pair[1]));
-        assert_eq!(amounts.iter().sum::<u32>(), element.count);
 
-        // ── (a) THE ENTRIES FOLLOW THE SPLIT: each allocated candidate at its own share.
+        // ── (a) THE ENTRIES FOLLOW THE SPLIT: each seat's resolving announcements at the rate.
         let mut expected: Vec<(Option<u8>, i32)> = seats
             .iter()
-            .zip(element.allocation.iter())
-            .map(|(seat, assignment)| {
+            .map(|seat| {
+                let share = parts
+                    .iter()
+                    .find(|(s, _)| s == seat)
+                    .map_or(0, |(_, amount)| i64::from(*amount));
                 (
                     Some(seat.0),
-                    i32::try_from(-rate * i64::from(assignment.amount))
-                        .expect("a previewed magnitude fits i32"),
+                    i32::try_from(-rate * share).expect("a previewed magnitude fits i32"),
                 )
             })
+            .filter(|(_, amount)| *amount != 0)
             .collect();
         expected.sort_unstable();
         assert_eq!(
@@ -5211,13 +3949,14 @@ fn the_f4_offer_splits_each_published_count_over_its_announced_candidates() {
         );
 
         // ── (b) PAIRED CONTROL: the looper's own library axis is seat-keyed too and is NOT
-        //    victim-attributed, so it keeps its seat and its unscaled product.
+        //    victim-attributed, so it keeps its seat and its unscaled product. CR 121.1: the
+        //    period mills nothing, so every card it takes from the library is drawn.
         for (seat, magnitude) in &per_cycle.delta.library_delta {
             assert!(
                 element.entries.iter().any(|entry| {
-                    entry.family == InteractionShortcutPreviewFamily::Mill
+                    entry.family == InteractionShortcutPreviewFamily::Cards
                         && entry.player == Some(seat.0)
-                        && i64::from(entry.amount) == magnitude * i64::from(element.count)
+                        && i64::from(entry.amount) == -magnitude * i64::from(element.count)
                 }),
                 "an axis the announced slot does not charge keeps the seat `payload_seat` gave \
                  it and the raw count product: {:?}",
@@ -5242,9 +3981,7 @@ fn the_f4_offer_splits_each_published_count_over_its_announced_candidates() {
 ///
 /// (i) drop the token term from `period` ⇒ the rate guard and (a) red; (ii) point the
 /// conformance site back at the raw snapshot pair while leaving the mint fed ⇒ zero cycles
-/// commit, so (b) reds while (a) still passes — that coupling is the assertion; (iii) revert
-/// `ring_delta_signature`'s `per_period` binding ⇒ this board certifies on the
-/// resource-signature basis, the published rate returns to zero and the guard reds.
+/// commit, so (b) reds while (a) still passes — that coupling is the assertion.
 #[test]
 fn t3_the_published_token_rate_is_delivered_by_the_accepted_drive() {
     use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
@@ -5259,7 +3996,9 @@ fn t3_the_published_token_rate_is_delivered_by_the_accepted_drive() {
     let (proposer, certificate, schema) = offer_parts(&state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
 
@@ -5332,7 +4071,10 @@ fn t3_the_published_token_rate_is_delivered_by_the_accepted_drive() {
 
     // ── (b) THE DELIVERED SIDE: the same count, driven, on the untouched board.
     let count = preview.count;
-    let template = f4_pin_template(&schema, proposer, count);
+    let template = schema
+        .suggestion(offer_declaration(&state).as_ref())
+        .cloned()
+        .expect("the offer suggests a declaration at its suggested count");
     let (_, _, _, tokens_before) = commit_axes(&state);
     let life_before = life_by_seat(&state);
 
@@ -5370,25 +4112,18 @@ fn t3_the_published_token_rate_is_delivered_by_the_accepted_drive() {
         "the accepted drive must commit the very count the preview stated: life \
          {life_before:?} -> {life_after:?} at rate {life_rate}"
     );
-    // The terminal cycle is PARTIAL by design: the drained seat crosses CR 704.5a mid-beat,
-    // CR 800.4a takes it out of the game at the SBA check, and that is a CR 732.2a ending
-    // point — the rest of that cycle's beat is live on the stack for manual play. The life
-    // axis it crossed on delivers every cycle; the token axis, fed by that residue, delivers
-    // one fewer.
-    let departed = state.players.iter().filter(|p| p.is_eliminated).count() as i64;
+    // CR 800.4a: P1 and P2 leave on non-final repetitions, which complete, and the proposer
+    // survives the count, so every committed cycle mints its token.
+    let departed = state.players.iter().filter(|p| p.is_eliminated).count();
     assert_eq!(
-        (departed, state.stack.is_empty()),
-        (1, false),
-        "REACH-GUARD: exactly one seat left the game and the cycle it left on still has its \
-         remainder on the stack — which is what makes the token product below one cycle short \
-         rather than simply wrong"
+        departed, 2,
+        "REACH-GUARD: the suggestion takes P1 and P2 out of the game"
     );
     assert_eq!(
         (tokens_after - tokens_before) as i64,
-        token_rate * (committed - departed),
+        token_rate * committed,
         "the board must mint the published per-cycle token rate {token_rate} on each of the \
-         {committed} committed cycles but the terminal one: {tokens_before} -> {tokens_after} \
-         battlefield tokens"
+         {committed} committed cycles: {tokens_before} -> {tokens_after} battlefield tokens"
     );
 }
 
@@ -5401,15 +4136,14 @@ fn t3_the_published_token_rate_is_delivered_by_the_accepted_drive() {
 /// break (a bounded offer publishes nothing to the unbounded-resource channel), and (c) is the
 /// reducer property that containment argument quantifies over.
 ///
-/// `GameState::loop_period_controller` — the predicate guarding the only mark route this
-/// phase's new axis could reach — is `pub(crate)` and unnameable here, so (b) asserts its
-/// INPUT: `last_loop_action_sequence` is EMPTY, which makes that function's leading
-/// `first()?` return `None` outright.
+/// The take routes on the offer's confirmed period, so (b) asserts the bounded offer carries one
+/// with a published per-period signature: its accepted cycles perform the period rather than
+/// reach the mark route.
 ///
 /// # Discrimination
 ///
-/// (a) reds if the token term is dropped from `ResourceVector::period`. (b) reds if the
-/// accept-side route stops testing the controller predicate.
+/// (a) reds if the token term is dropped from `ResourceVector::period`. (b) reds if the bounded
+/// offer carries a confirmed period.
 #[test]
 fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_closed() {
     use engine::analysis::resource::ResourceAxis;
@@ -5420,10 +4154,15 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
     let unbounded = certificate.unbounded.clone();
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
-    let n = schema.max_iterations;
+    // The count the offer's own published declaration drives. This row's claim is that an accepted
+    // declaration commits its WHOLE count; the ceiling is the widest count some OTHER legal
+    // declaration may specify and is not what this drive runs.
+    let n = published_declaration_count(&state);
 
     // ── (a) the enumerated consumer moves.
     assert!(
@@ -5439,7 +4178,7 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
         "the refused action needs a LIVE battlefield source, else the refusal could be about \
          the source rather than about the wait"
     );
-    let sequence_at_offer = state.last_loop_action_sequence.clone();
+    let trace_at_offer = engine::game::play_trace_view(&state).map(|view| view.entries);
     let mut firewall = state.clone();
     let refusal = apply(
         &mut firewall,
@@ -5447,6 +4186,7 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
         GameAction::ActivateAbility {
             source_id: torch,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     );
     assert!(
@@ -5458,9 +4198,9 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
          got {refusal:?}"
     );
     assert_eq!(
-        firewall.last_loop_action_sequence, sequence_at_offer,
-        "the refused action must not mint a loop-action step — that sequence is the input to \
-         the very predicate guarding the mark route (b) asserts closed"
+        engine::game::play_trace_view(&firewall).map(|view| view.entries),
+        trace_at_offer,
+        "the refused action must not enter the window's trace"
     );
     assert!(
         matches!(firewall.waiting_for, WaitingFor::LoopShortcut { .. }),
@@ -5468,11 +4208,15 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
         firewall.waiting_for
     );
 
-    // ── (b) the guard's input is unset at the offer beat, with its own positive control.
+    // ── (b) the bounded offer's take performs its period, with its own positive control.
     assert!(
-        sequence_at_offer.is_empty(),
-        "no seat owns a driving period at the offer beat, so the object-growth mark route is \
-         not live for anyone. sequence={sequence_at_offer:?}"
+        matches!(
+            &state.waiting_for,
+            WaitingFor::LoopShortcut { period, certificate, .. }
+                if !period.is_empty() && certificate.per_cycle.is_some()
+        ),
+        "CR 732.2c: the bounded offer carries a confirmed period and its per-period signature, \
+         so its take performs the period and the mark route is not live"
     );
     assert!(
         state.unbounded_resources.is_empty(),
@@ -5480,7 +4224,11 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
         state.unbounded_resources
     );
     let mut marked = state.clone();
-    marked.mark_unbounded_loop(proposer, &[ResourceAxis::TokensCreated]);
+    marked.mark_unbounded_loop(
+        proposer,
+        &[ResourceAxis::TokensCreated],
+        &[ResourceAxis::TokensCreated],
+    );
     assert!(
         !marked.unbounded_resources.is_empty(),
         "POSITIVE CONTROL: the same reader returns non-empty on a hand-marked state, so the \
@@ -5532,10 +4280,9 @@ fn t8_the_token_axis_reaches_the_certificate_while_the_unbounded_channel_stays_c
          about a drive that actually ran: life {life_before:?} -> {life_after:?}"
     );
     assert!(
-        state.last_loop_action_sequence.is_empty() && state.unbounded_resources.is_empty(),
-        "after the bounded drive the object-growth route is STILL not live and nothing was \
-         published to the unbounded-resource channel. sequence={:?} marks={:?}",
-        state.last_loop_action_sequence,
+        state.unbounded_resources.is_empty(),
+        "after the bounded drive nothing was published to the unbounded-resource channel. \
+         marks={:?}",
         state.unbounded_resources
     );
 }
@@ -5571,20 +4318,30 @@ struct F4Allocation {
     published_preview: Vec<engine::types::interaction::InteractionShortcutPreview>,
     /// The offer beat's published candidates, for the same reason.
     offer_candidates: Vec<engine::types::interaction::InteractionChoice>,
-    /// The CR 601.2c announcement journal's answer at the `Targets` slot — the seat the
-    /// drive's LEADING cycle resolves, before anything the allocation governs.
+    /// The published declaration's pin at the `Targets` slot — the aim the offer
+    /// published there, which the drive's first cycle resolves only where that trigger already sits
+    /// on the offer's stack.
     preannounced: PlayerId,
-    /// The published `InteractionShortcutCountSpec::Fixed` ceiling.
-    max_count: u32,
+    /// CR 732.2a: the count the offer's published declaration is stamped with — the count it
+    /// drives, which is what every allocation row below declares.
+    ///
+    /// NOT the window's `max`. That is the widest count SOME legal declaration may specify, and on
+    /// this class it is strictly larger: a declaration re-aiming the charged slot after the first
+    /// crossing reaches further. Which authored allocations actually drive the wider ceiling is a
+    /// question about which allocations are legal, which is not this file's subject — these rows
+    /// are about what a declaration COMPOSES and REALIZES at a count it certainly drives.
+    drivable_count: u32,
     /// Magnitude of the published per-cycle life charge at `preannounced`.
     rate: i64,
 }
 
 /// Drive the real dump to its bounded offer, bind the interaction authority, and read the
 /// allocation surface off the published offer.
+///
+/// A test function composing real-board drives pays at most three of them, at most two of them accepts.
 fn f4_allocation_offer(state: &mut GameState) -> F4Allocation {
     use engine::analysis::decision_template::{
-        AnnouncementSubject, LoopAnswer, LoopAnswerValue, TargetPin, TargetSchedule,
+        AnnouncementSubject, PinnedDecision, TargetPin, TargetSchedule,
     };
     use engine::game::interaction::{bind_interaction_authority, derive_viewer_interaction};
     use engine::game::visibility::filter_state_for_viewer;
@@ -5597,7 +4354,9 @@ fn f4_allocation_offer(state: &mut GameState) -> F4Allocation {
     let (proposer, certificate, schema) = offer_parts(state);
     let per_cycle = certificate
         .per_cycle
-        .clone()
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
         .expect("a bounded offer publishes its per-period signature");
     let schema = schema.clone();
 
@@ -5617,18 +4376,22 @@ fn f4_allocation_offer(state: &mut GameState) -> F4Allocation {
         })
         .collect();
 
-    // The pre-announced seat is read from the CR 601.2c announcement journal — the authority
-    // `c2a_row_t1` reads and `c2a_row_t1p` proves follows the announcement. Identifying it as
+    // The pre-announced seat is read from the published declaration's pin at that slot — the
+    // seat the CR 601.2c announcement named (`d1p_provenance_at_seat`). Identifying it as
     // "the seat that lost one extra cycle" would make every sum leg below unfalsifiable.
-    let preannounced = match state.loop_answer(&schema.points[target_group].slot, proposer) {
-        Some(LoopAnswer::Uniform(LoopAnswerValue::Targets(pins))) => match pins.as_slice() {
-            [TargetPin::Scheduled(TargetSchedule::Constant(ranking))] => match ranking.head() {
-                AnnouncementSubject::Seat(seat) => *seat,
-                other => panic!("the journalled announcement is a seat, got {other:?}"),
-            },
-            other => panic!("the journal holds one scheduled constant pin, got {other:?}"),
+    let target_slot = &schema.points[target_group].slot;
+    let declaration = offer_declaration(state).expect("the offer publishes a declaration");
+    let preannounced = match declaration.decisions.iter().find_map(|pin| match pin {
+        PinnedDecision::Targets { slot, targets } if slot == target_slot => {
+            Some(targets.as_slice())
+        }
+        _ => None,
+    }) {
+        Some([TargetPin::Scheduled(TargetSchedule::Constant(ranking))]) => match ranking.head() {
+            AnnouncementSubject::Seat(seat) => *seat,
+            other => panic!("the announced pin is a seat, got {other:?}"),
         },
-        other => panic!("the CR 601.2c journal must hold this slot's announcement, got {other:?}"),
+        other => panic!("the declaration pins one scheduled constant seat, got {other:?}"),
     };
     let rate = -per_cycle
         .delta
@@ -5685,10 +4448,15 @@ fn f4_allocation_offer(state: &mut GameState) -> F4Allocation {
         "reach-guard: candidate ids are positionally aligned with the published legal victims, \
          which is how every allocation below names a seat without spelling an id"
     );
-    let max_count = match count {
-        InteractionShortcutCountSpec::Fixed { max, .. } => *max,
+    let drivable_count = published_declaration_count(state);
+    match count {
+        InteractionShortcutCountSpec::Fixed { max, .. } => assert!(
+            drivable_count <= *max && drivable_count >= 1,
+            "reach-guard: the published declaration's count must lie inside the published window; \
+             got {drivable_count} vs max {max}"
+        ),
         other => panic!("this board publishes a Fixed count window, got {other:?}"),
-    };
+    }
 
     let answerable: Vec<_> = points
         .iter()
@@ -5721,7 +4489,7 @@ fn f4_allocation_offer(state: &mut GameState) -> F4Allocation {
         published_preview: preview.clone(),
         offer_candidates: offer_candidates.clone(),
         preannounced,
-        max_count,
+        drivable_count,
         rate,
     }
 }
@@ -5787,16 +4555,27 @@ fn f4_drive_allocation(
     count: u32,
     allocation: &[(PlayerId, u32)],
 ) -> Vec<i64> {
+    f4_declare_allocation(state, offer, count, allocation);
+    f4_accept_window(state)
+}
+
+/// Submit `allocation` through the ingress and dispatch the declaration it mints, returning that
+/// action.
+fn f4_declare_allocation(
+    state: &mut GameState,
+    offer: &F4Allocation,
+    count: u32,
+    allocation: &[(PlayerId, u32)],
+) -> GameAction {
     use engine::game::interaction::resolve_interaction_response;
 
-    let before: Vec<i64> = state.players.iter().map(|p| p.life as i64).collect();
     let action = resolve_interaction_response(
         state,
         offer.proposer,
         &f4_allocation_submission(offer, count, allocation),
     )
     .expect("the allocation ingress accepts a conformant sequenced pin");
-    apply(state, offer.proposer, action).expect("the minted declaration is dispatched");
+    apply(state, offer.proposer, action.clone()).expect("the minted declaration is dispatched");
     // THE DISCRIMINATOR between "declare refused it" and "the drive aborted": a refused
     // declaration hands priority straight back and never opens the APNAP window.
     assert!(
@@ -5804,6 +4583,13 @@ fn f4_drive_allocation(
         "the accepted declaration must open the CR 732.2b APNAP window, got {:?}",
         state.waiting_for
     );
+    action
+}
+
+/// Every living opponent accepts the open CR 732.2c window; returns the per-seat life LOSSES
+/// positionally by `state.players`.
+fn f4_accept_window(state: &mut GameState) -> Vec<i64> {
+    let before: Vec<i64> = state.players.iter().map(|p| p.life as i64).collect();
     assert!(
         accept_all_opponents(state) > 0,
         "the CR 732.2c window must actually take responses"
@@ -5814,6 +4600,61 @@ fn f4_drive_allocation(
         .enumerate()
         .map(|(seat, p)| before[seat] - p.life as i64)
         .collect()
+}
+
+/// A saved board decoded through the production decoder.
+fn f4_restored(saved: serde_json::Value) -> GameState {
+    serde_json::from_value::<PersistedGameState>(saved)
+        .expect("the saved board decodes through the production decoder")
+        .into_game_state()
+        .expect("the saved board satisfies the checked restore contract")
+}
+
+/// The published legal victims other than the pre-announced seat, in published order.
+fn f4_other_victims(offer: &F4Allocation) -> Vec<PlayerId> {
+    let others: Vec<PlayerId> = offer
+        .legal_seats
+        .iter()
+        .copied()
+        .filter(|seat| *seat != offer.preannounced)
+        .collect();
+    assert!(
+        others.len() > 1,
+        "reach-guard: a re-aiming shape needs TWO non-pre-announced legal victims; got {:?}",
+        offer.legal_seats
+    );
+    others
+}
+
+fn f4_life(state: &GameState, seat: PlayerId) -> i64 {
+    state
+        .players
+        .iter()
+        .find(|p| p.id == seat)
+        .map(|p| i64::from(p.life))
+        .unwrap_or_else(|| panic!("{seat:?} is not seated on this board"))
+}
+
+fn f4_eliminated(state: &GameState, seat: PlayerId) -> bool {
+    state
+        .players
+        .iter()
+        .find(|p| p.id == seat)
+        .map(|p| p.is_eliminated)
+        .unwrap_or_else(|| panic!("{seat:?} is not seated on this board"))
+}
+
+/// The F4 dump with `seat`'s life mapped through `life` before any beat is driven.
+fn f4_with_life(seat: PlayerId, life: impl FnOnce(i64) -> i64) -> GameState {
+    let mut state = load_f4();
+    let player = state
+        .players
+        .iter_mut()
+        .find(|p| p.id == seat)
+        .unwrap_or_else(|| panic!("{seat:?} is not seated on this board"));
+    player.life = i32::try_from(life(i64::from(player.life)))
+        .expect("a life total fits the board's own type");
+    state
 }
 
 /// The seat each `state.players` position holds, so a loss vector can be read by seat.
@@ -5838,9 +4679,10 @@ fn f4_pending_announcement(state: &GameState) -> Vec<TargetRef> {
     }
 }
 
-/// **Row (1)** — an allocation of the published `Fixed` ceiling across all three legal victims
+/// **Row (1)** — an allocation of the published `Fixed` SUGGESTION across all three legal victims
 /// decodes to `TargetSchedule::Piecewise` at the prefix sums its amounts imply, and commits its
-/// whole declared count.
+/// whole declared count. The SUGGESTION, never the window's `max` — the distinction and its
+/// direction on this class are stated on [`F4Allocation`]'s `drivable_count`.
 ///
 /// # Discrimination
 ///
@@ -5850,10 +4692,8 @@ fn f4_pending_announcement(state: &GameState) -> Vec<TargetRef> {
 ///
 /// # Shape
 ///
-/// The near-equal split, whose every segment start lands inside the window a drive of `n`
-/// cycles actually realizes: the FIRST cycle resolves the target announced before the drive
-/// begins, so template indices `0..=n-2` govern the rest. Row (1c) pins that window as its own
-/// class property rather than smuggling it into this row's wording.
+/// The near-equal split. No target is announced before the drive begins, so template indices
+/// `0..n` govern its `n` cycles; row (1c) pins that window as its own class property.
 ///
 /// # Paired positives
 ///
@@ -5869,10 +4709,24 @@ fn f4_pending_announcement(state: &GameState) -> Vec<TargetRef> {
 /// no member in this row; [`p4_row_1b_an_authored_non_canonical_distribution_is_accepted`]'s
 /// third arm is where a real one lives.
 #[test]
-fn p4_row_1_an_allocation_of_the_published_ceiling_commits_its_whole_count() {
+fn an_allocation_of_the_published_suggestion_commits_its_whole_count() {
     let mut state = load_f4();
     let offer = f4_allocation_offer(&mut state);
-    let count = offer.max_count;
+    let count = offer.drivable_count;
+    let (_, _, schema) = offer_parts(&state);
+    assert!(
+        state.players.iter().any(|p| p.id == P3 && !p.is_eliminated),
+        "reach-guard: P3 is in the game at the offer"
+    );
+    assert_eq!(
+        (schema.repetition_bound, &schema.iteration_count),
+        (
+            engine::analysis::decision_template::RepetitionBound::Measured,
+            &IterationCount::Fixed(88)
+        ),
+        "CR 121.4: P3 is still in the game at P0's library crossing at 89, so that crossing \
+         ends the walk, not P2's departure at 77"
+    );
 
     assert!(
         offer.rate > 0,
@@ -5928,9 +4782,9 @@ fn p4_row_1_an_allocation_of_the_published_ceiling_commits_its_whole_count() {
         .collect();
     assert!(
         realized.windows(2).any(|pair| pair[0] != pair[1]),
-        "ANTI-VACUITY: an EQUAL declared split still realizes a NON-uniform loss map, because \
-         the leading cycle shifts every segment boundary one cycle late. A uniform-split bug \
-         would satisfy the sum leg above; it cannot satisfy this one. realized={realized:?}"
+        "ANTI-VACUITY: the near-equal split's remainder realizes a NON-uniform loss map. A \
+         uniform-split bug would satisfy the sum leg above; it cannot satisfy this one. \
+         realized={realized:?}"
     );
 }
 
@@ -5941,24 +4795,23 @@ fn p4_row_1_an_allocation_of_the_published_ceiling_commits_its_whole_count() {
 /// the canonical member. Restrict the ingress to the published allocation ⇒ all three arms fail
 /// while row (1) still passes.
 ///
-/// # One rule governs both sum legs, and the arms sit on opposite sides of it
+/// # One rule governs every sum leg
 ///
-/// Total realized loss is always `rate * count`; the pre-announced seat takes the leading cycle
-/// ON TOP OF whatever the allocation gives it. So the declared seats sum to `rate * (count - 1)`
-/// exactly when the allocation OMITS that seat, and to `rate * count` when it INCLUDES it.
-/// Asserting one figure in both arms would be false in one of them.
+/// No Torch trigger is in flight at the offer, so every repetition resolves an announcement the
+/// allocation made: the declared seats sum to `rate * count` whether or not the allocation names
+/// the pre-announced seat, and a seat it omits loses nothing.
 #[test]
 fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
     let count_probe = {
         let mut state = load_f4();
-        f4_allocation_offer(&mut state).max_count
+        f4_allocation_offer(&mut state).drivable_count
     };
 
     // ── (a) UNEQUAL PARTS over all three victims ──
     {
         let mut state = f4_at_offer();
         let offer = f4_allocation_offer(&mut state);
-        let count = offer.max_count;
+        let count = offer.drivable_count;
         assert!(
             offer.rate > 0,
             "ANTI-VACUITY: the published rate is positive"
@@ -5990,7 +4843,7 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
     {
         let mut state = f4_at_offer();
         let offer = f4_allocation_offer(&mut state);
-        let count = offer.max_count;
+        let count = offer.drivable_count;
         let declared: Vec<PlayerId> = offer
             .legal_seats
             .iter()
@@ -6014,33 +4867,25 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
         );
         assert_eq!(
             f4_loss(&state, &losses, offer.preannounced),
-            offer.rate,
-            "(b) CR 601.2c: the pre-announced seat still takes the LEADING cycle — the one \
-             resolving a target announced before the drive begins — and nothing else. Reading \
-             that seat from the announcement journal rather than from 'the one that lost rate' \
-             is what lets a drive that charged the leading cycle elsewhere red this row. \
-             losses={losses:?}"
+            0,
+            "(b) CR 601.2c: with no target announced before the drive begins, the omitted \
+             pre-announced seat loses nothing. losses={losses:?}"
         );
         assert_eq!(
             allocation
                 .iter()
                 .map(|(seat, _)| f4_loss(&state, &losses, *seat))
                 .sum::<i64>(),
-            offer.rate * i64::from(count - 1),
-            "(b) with the leading cycle discounted, the declared seats take the REMAINING \
-             repetitions. losses={losses:?}"
+            offer.rate * i64::from(count),
+            "(b) the declared seats take every repetition. losses={losses:?}"
         );
     }
 
     // ── (c) A PROPER SUBSET omitting a legal victim that is NOT the pre-announced seat ──
-    //
-    // This is the arm that gives the omitted-victim clause a member the leading-cycle
-    // exception does not excuse. Without it the conjunct ranges over the empty set across the
-    // whole matrix: row (1) declares every victim, and arm (b)'s only omission is excused.
     {
         let mut state = f4_at_offer();
         let offer = f4_allocation_offer(&mut state);
-        let count = offer.max_count;
+        let count = offer.drivable_count;
         let omitted = *offer
             .legal_seats
             .iter()
@@ -6055,13 +4900,11 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
             .collect();
         assert!(
             offer.legal_seats.contains(&omitted) && omitted != offer.preannounced,
-            "the omitted seat is a PUBLISHED legal victim and is NOT the pre-announced seat, so \
-             its zero below cannot be explained by either exception"
+            "the omitted seat is a PUBLISHED legal victim and is NOT the pre-announced seat"
         );
         assert!(
             declared.contains(&offer.preannounced),
-            "reach-guard: this arm keeps the pre-announced seat in the allocation, which is \
-             what puts its sum leg on the other side of the rule from arm (b)"
+            "reach-guard: this arm keeps the pre-announced seat in the allocation"
         );
         let half = count / 2;
         let allocation = [(declared[0], half), (declared[1], count - half)];
@@ -6078,8 +4921,7 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
                 .map(|(seat, _)| f4_loss(&state, &losses, *seat))
                 .sum::<i64>(),
             offer.rate * i64::from(count),
-            "(c) the pre-announced seat is IN this allocation, so the declared seats take the \
-             whole charge including the leading cycle. losses={losses:?}"
+            "(c) the declared seats take the whole charge. losses={losses:?}"
         );
     }
 
@@ -6088,22 +4930,22 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
     let mut control = f4_at_offer();
     let control_offer = f4_allocation_offer(&mut control);
     assert_eq!(
-        control_offer.max_count, count_probe,
+        control_offer.drivable_count, count_probe,
         "reach-guard: the loaded board is the same one every arm above used"
     );
-    let third = control_offer.max_count / 3;
+    let third = control_offer.drivable_count / 3;
     let control_allocation = [
         (control_offer.legal_seats[0], third),
         (control_offer.legal_seats[1], third),
         (
             control_offer.legal_seats[2],
-            control_offer.max_count - 2 * third,
+            control_offer.drivable_count - 2 * third,
         ),
     ];
     let control_losses = f4_drive_allocation(
         &mut control,
         &control_offer,
-        control_offer.max_count,
+        control_offer.drivable_count,
         &control_allocation,
     );
     let omitted = *control_offer
@@ -6122,29 +4964,20 @@ fn p4_row_1b_an_authored_non_canonical_distribution_is_accepted() {
 
 /// **Row (1c)** — THE REALIZED INDEX WINDOW, the class property the ingress now exposes.
 ///
-/// A drive of `n` cycles commits `rate * n` in total. Its FIRST cycle resolves the target
-/// announced before the drive begins, so template indices `0..=n-2` govern the remaining
-/// `n-1` cycles; index `n-1`'s announcement lands on the trigger left on the stack at the
-/// CR 732.2a handback and resolves in manual play.
-///
-/// # What the pair isolates, exactly
-///
-/// A three-seat allocation whose LAST segment is 2 long (start `n-2`) gives its trailing seat
-/// ONE realized cycle; 1 long (start `n-1`) gives it NONE. Same arity, same trailing seat,
-/// last start one index apart — so the 1 -> 0 step isolates the index window FROM ARITY. It
-/// does NOT isolate it from segment length, and no pair over LAST segments can: at fixed `n` a
-/// last segment's start is `n - length`, so the two move together. The middle-segment rows are
-/// what separate those — row (1b) arm (a)'s middle seat realizes its full declared 4, not 3.
-/// The two-segment form reproduces the step independently.
+/// A drive of `n` cycles commits `rate * n` in total. No target is announced before the drive
+/// begins, so template indices `0..n` govern its `n` cycles: a trailing segment of length 2
+/// (start `n-2`) realizes 2 cycles and one of length 1 (start `n-1`) realizes 1, and no
+/// announcement is left on the stack at the CR 732.2a handback. The two-segment form
+/// reproduces the step independently.
 ///
 /// This is not a revert row for the ingress: it pins a shipped drive property. It reds if the
-/// ingress starts refusing trailing segments, or if the drive's leading-cycle offset moves.
+/// ingress starts refusing trailing segments, or if the drive's index offset moves.
 #[test]
-fn p4_row_1c_a_segment_starting_at_the_last_index_realizes_nothing_but_stays_announced() {
+fn p4_row_1c_a_segment_starting_at_the_last_index_realizes_its_whole_length() {
     let drive = |allocation_of: &dyn Fn(&F4Allocation) -> Vec<(PlayerId, u32)>| {
         let mut state = f4_at_offer();
         let offer = f4_allocation_offer(&mut state);
-        let count = offer.max_count;
+        let count = offer.drivable_count;
         let allocation = allocation_of(&offer);
         let trailing = allocation
             .last()
@@ -6170,19 +5003,19 @@ fn p4_row_1c_a_segment_starting_at_the_last_index_realizes_nothing_but_stays_ann
     // length rather than from a halving, so the axis this pair moves stays 2 against 1 at
     // every published count instead of only at one parity of it.
     let (rate, count, last_len2, total_len2, _, _, losses_len2) = drive(&|o: &F4Allocation| {
-        let head = (o.max_count - 2) / 2;
+        let head = (o.drivable_count - 2) / 2;
         vec![
             (o.legal_seats[0], head),
-            (o.legal_seats[1], o.max_count - 2 - head),
+            (o.legal_seats[1], o.drivable_count - 2 - head),
             (o.legal_seats[2], 2),
         ]
     });
     let (_, _, last_len1, total_len1, trailing_len1, pending_len1, losses_len1) =
         drive(&|o: &F4Allocation| {
-            let head = (o.max_count - 1) / 2;
+            let head = (o.drivable_count - 1) / 2;
             vec![
                 (o.legal_seats[0], head),
-                (o.legal_seats[1], o.max_count - 1 - head),
+                (o.legal_seats[1], o.drivable_count - 1 - head),
                 (o.legal_seats[2], 1),
             ]
         });
@@ -6190,9 +5023,9 @@ fn p4_row_1c_a_segment_starting_at_the_last_index_realizes_nothing_but_stays_ann
     assert!(rate > 0, "ANTI-VACUITY: the published rate is positive");
     assert_eq!(
         (last_len2, last_len1),
-        (rate, 0),
-        "the trailing seat realizes ONE cycle when its segment starts at index n-2 and NONE \
-         when it starts at n-1. losses were {losses_len2:?} then {losses_len1:?}"
+        (2 * rate, rate),
+        "the trailing seat realizes its whole segment, from index n-2 and from index n-1. \
+         losses were {losses_len2:?} then {losses_len1:?}"
     );
     assert_eq!(
         (total_len2, total_len1),
@@ -6202,36 +5035,42 @@ fn p4_row_1c_a_segment_starting_at_the_last_index_realizes_nothing_but_stays_ann
     );
     assert_eq!(
         pending_len1,
-        vec![TargetRef::Player(trailing_len1)],
-        "the trailing seat loses nothing INSIDE the drive while its announcement is LIVE: it \
-         is the announced target of the trigger left on the stack at the CR 732.2a handback"
+        Vec::<TargetRef>::new(),
+        "index n-1's announcement resolved inside the drive, so the entry left on the stack at \
+         the CR 732.2a handback announces no target"
     );
 
-    // Arity 2 reproduces the step independently, and its pending readout takes a DIFFERENT
-    // seat — so the readout above follows index n-1's segment rather than being a constant.
-    // Its long head deliberately skips the seat the pre-drive announcement already aims at:
+    // Arity 2 reproduces the step independently. Its long head skips the pre-announced seat:
     // the published count is that seat's own CR 704.5a crossing, so declaring nearly all of it
-    // onto that seat again ends the drive at the removal instead of at the handback this pair
-    // reads.
-    let (_, _, two_len2, _, _, _, losses_two_len2) =
-        drive(&|o: &F4Allocation| vec![(o.legal_seats[2], o.max_count - 2), (o.legal_seats[1], 2)]);
+    // onto that seat ends the drive at the removal instead of at the handback this pair reads.
+    let (_, _, two_len2, _, _, _, losses_two_len2) = drive(&|o: &F4Allocation| {
+        vec![
+            (o.legal_seats[2], o.drivable_count - 2),
+            (o.legal_seats[1], 2),
+        ]
+    });
     let (_, _, two_len1, _, two_trailing, two_pending, losses_two_len1) =
-        drive(&|o: &F4Allocation| vec![(o.legal_seats[2], o.max_count - 1), (o.legal_seats[1], 1)]);
+        drive(&|o: &F4Allocation| {
+            vec![
+                (o.legal_seats[2], o.drivable_count - 1),
+                (o.legal_seats[1], 1),
+            ]
+        });
     assert_eq!(
         (two_len2, two_len1),
-        (rate, 0),
-        "the two-segment form reproduces the same 1 -> 0 step at the same two starts. \
+        (2 * rate, rate),
+        "the two-segment form reproduces the same 2 -> 1 step at the same two starts. \
          losses were {losses_two_len2:?} then {losses_two_len1:?}"
     );
     assert_eq!(
         two_pending,
-        vec![TargetRef::Player(two_trailing)],
-        "the pending announcement follows index n-1's segment"
+        Vec::<TargetRef>::new(),
+        "no announcement is left on the stack at the handback"
     );
     assert_ne!(
         two_trailing, trailing_len1,
-        "CONTROL: the two shapes' trailing seats DIFFER, so the pending readout asserted twice \
-         above is not a constant this board would print either way"
+        "CONTROL: the two shapes' trailing seats DIFFER, so each step above is read off a \
+         different seat"
     );
 }
 
@@ -6307,7 +5146,7 @@ fn p4_row_2_a_later_segment_that_went_illegal_refuses_the_whole_declaration() {
 
     let mut state = load_f4();
     let offer = f4_allocation_offer(&mut state);
-    let count = offer.max_count;
+    let count = offer.drivable_count;
     let third = count / 3;
     let allocation = [
         (offer.legal_seats[0], third),
@@ -6432,14 +5271,14 @@ fn e1_a_narrowed_offer_publishes_its_bound_beside_an_untouched_infinity_channel(
         drive_f4_to_offer(&mut state, 400)
             .unwrap_or_else(|| panic!("[{label}] reach-guard: the bounded offer must FIRE"));
         let (proposer, _certificate, schema) = offer_parts(&state);
-        let bound = schema.max_iterations;
+        let bound = schema.deliverable_capacity;
         let bounded = schema.is_bounded();
         let schema = schema.clone();
         assert!(
             bounded && bound > 1,
             "[{label}] reach-guard: this offer's producer must have NARROWED the bound below the \
              engine cap, and to more than one repetition — an unnarrowed offer takes the other \
-             arm and a ceiling of 1 could not discriminate. max_iterations={bound} cap={}",
+             arm and a ceiling of 1 could not discriminate. capacity={bound} cap={}",
             MAX_SHORTCUT_CYCLES_MIRROR
         );
 
@@ -6459,7 +5298,11 @@ fn e1_a_narrowed_offer_publishes_its_bound_beside_an_untouched_infinity_channel(
             views.unbounded_resources
         );
         let mut marked = state.clone();
-        marked.mark_unbounded_loop(proposer, &[ResourceAxis::TokensCreated]);
+        marked.mark_unbounded_loop(
+            proposer,
+            &[ResourceAxis::TokensCreated],
+            &[ResourceAxis::TokensCreated],
+        );
         let marked_views = derive_views(&marked, None);
         assert_eq!(
             marked_views
@@ -6595,7 +5438,18 @@ fn e5_an_unnarrowed_offer_and_every_respond_window_state_no_ceiling() {
         drive_f4_to_offer(&mut state, 400)
             .unwrap_or_else(|| panic!("[{label}] reach-guard: the bounded offer must FIRE"));
         let (proposer, _certificate, schema) = offer_parts(&state);
-        let declared = schema.max_iterations;
+        // The CEILING this row's channel assertions are about, and — separately — the COUNT its
+        // declarations are made at. Different numbers: the ceiling is what SOME legal declaration
+        // may specify, while a declaration pinning ONE seat may specify only the count its own aim
+        // survives. Both are read from THIS board, so the three boards below land at three counts
+        // of their own rather than at one.
+        let ceiling = schema.deliverable_capacity;
+        let declared = published_declaration_count(&state);
+        assert!(
+            declared >= 1 && declared <= ceiling,
+            "[{label}] reach-guard: the declared count lies inside the published window, so the \
+             window below opens for its own reason; declared={declared} ceiling={ceiling}"
+        );
         let schema = schema.clone();
 
         // ── E5a: the same board with its bound un-narrowed to the engine cap.
@@ -6607,7 +5461,11 @@ fn e5_an_unnarrowed_offer_and_every_respond_window_state_no_ceiling() {
         else {
             panic!("[{label}] the driven beat is the CR 732.2a offer");
         };
-        hostile_schema.max_iterations = MAX_SHORTCUT_CYCLES_MIRROR;
+        // Un-narrowing is the ABSENCE, not a budget-valued count: `is_bounded()` reads the
+        // measured field, and the capacity is what the picker publishes.
+        hostile_schema.repetition_bound =
+            engine::analysis::decision_template::RepetitionBound::Unmeasured;
+        hostile_schema.deliverable_capacity = MAX_SHORTCUT_CYCLES_MIRROR;
         assert!(
             !hostile_schema.is_bounded(),
             "[{label}] reach-guard: the mutated board really is UNNARROWED, so the absence below \
@@ -6659,7 +5517,7 @@ fn e5_an_unnarrowed_offer_and_every_respond_window_state_no_ceiling() {
         // ── E6: the same refusal on a NARROWED offer, with its matched positive one beat back.
         assert_eq!(
             derive_views(&state, None).bounded_loop_max_repetitions,
-            Some(declared),
+            Some(ceiling),
             "[{label}] matched positive: the narrowed offer DOES state its ceiling one beat \
              before the declaration below"
         );
@@ -6698,7 +5556,7 @@ fn e5_an_unnarrowed_offer_and_every_respond_window_state_no_ceiling() {
 ///
 /// # Discrimination
 ///
-/// Publish `max_iterations + 1` from the new arm ⇒ the equality reds. The hostile leg is the
+/// Publish the capacity `+ 1` from the new arm ⇒ the equality reds. The hostile leg is the
 /// unnarrowed board, where the picker still publishes a ceiling at the cap while this channel
 /// states nothing — so no disagreement is representable there.
 #[test]
@@ -6746,7 +5604,7 @@ fn e7_the_published_bound_is_the_count_pickers_own_ceiling() {
         drive_f4_to_offer(&mut state, 400)
             .unwrap_or_else(|| panic!("[{label}] reach-guard: the bounded offer must FIRE"));
         let (proposer, _certificate, schema) = offer_parts(&state);
-        let bound = schema.max_iterations;
+        let bound = schema.deliverable_capacity;
         assert!(
             schema.is_bounded() && bound > 1,
             "[{label}] reach-guard: a narrowed window with a ceiling above 1 — a ceiling of 1 \
@@ -6770,7 +5628,9 @@ fn e7_the_published_bound_is_the_count_pickers_own_ceiling() {
         else {
             panic!("[{label}] the driven beat is the CR 732.2a offer");
         };
-        hostile_schema.max_iterations = MAX_SHORTCUT_CYCLES_MIRROR;
+        hostile_schema.repetition_bound =
+            engine::analysis::decision_template::RepetitionBound::Unmeasured;
+        hostile_schema.deliverable_capacity = MAX_SHORTCUT_CYCLES_MIRROR;
         assert_eq!(
             published_ceiling(&unnarrowed, proposer, label),
             MAX_SHORTCUT_CYCLES_MIRROR,
@@ -7050,7 +5910,7 @@ fn the_responder_reads_the_declared_partition_and_its_per_seat_magnitudes() {
     };
 
     const COUNT: u32 = 6;
-    const SEGMENTS: [u32; 3] = [1, 2, 3];
+    const SEGMENTS: [u32; 3] = [2, 1, 3];
 
     let mut state = load_f4();
     let offer = f4_allocation_offer(&mut state);
@@ -7176,10 +6036,17 @@ fn the_responder_reads_the_declared_partition_and_its_per_seat_magnitudes() {
             .collect::<Vec<_>>(),
         "and every segment names its own seat through this beat's published candidates"
     );
+    // CR 603.3d: no Torch trigger is in flight at the offer, so each repetition's announcement
+    // resolves inside it and each seat takes exactly its own segment.
     let expected: Vec<(u8, i32)> = allocation
         .iter()
         .map(|(seat, segment)| (seat.0, -(offer.rate * i64::from(*segment)) as i32))
         .collect();
+    assert_eq!(
+        expected,
+        vec![(1, -2), (2, -1), (3, -3)],
+        "derived from the cards"
+    );
     assert_eq!(
         f4_life_entries(element),
         expected,
@@ -7295,7 +6162,7 @@ fn the_responders_element_agrees_with_the_producers_other_two_call_sites() {
     };
 
     const COUNT: u32 = 6;
-    const SEGMENTS: [u32; 3] = [1, 2, 3];
+    const SEGMENTS: [u32; 3] = [2, 1, 3];
 
     // ── MAIN LEG: the proposer's own preview of this declaration, through `preview_interaction`,
     //    the responder's published element for the same declaration.
@@ -7333,11 +6200,13 @@ fn the_responders_element_agrees_with_the_producers_other_two_call_sites() {
         .collect();
     assert_eq!(
         magnitudes,
-        SEGMENTS
-            .iter()
-            .map(|segment| -(offer.rate * i64::from(*segment)) as i32)
-            .collect::<Vec<_>>(),
-        "reach-guard: the compared element states three DISTINCT per-seat magnitudes"
+        vec![
+            -2 * offer.rate as i32,
+            -(offer.rate as i32),
+            -3 * offer.rate as i32
+        ],
+        "reach-guard: the compared element states three DISTINCT per-seat magnitudes: with no \
+         Torch trigger in flight each seat takes its own segment"
     );
     assert_ne!(
         submission.interaction_id,
@@ -7491,127 +6360,79 @@ fn reply_interaction_id(
         .clone()
 }
 
-/// **THE ANSWERED OPTIONAL DECISIONS REACH THE RESPONDER, AND WHICH WAY EACH ONE WENT.**
+/// **THE RECORDED OPTIONAL DECISIONS REACH THE RESPONDER, AND WHICH WAY EACH ONE WENT.**
 ///
 /// CR 732.2c makes every choice in the proposal actually taken on acceptance, so the answers are
-/// the rule's own object rather than decoration. Each published statement point carries exactly
-/// two candidate ids, read in order as its own decision's SUBJECT and that decision's ANSWER.
-///
-/// # HOSTILE, and it is what makes the row discriminating rather than decorative
-///
-/// The declaration is authored with the two answers going DIFFERENT ways. A producer that keyed
-/// an answer on anything but its own pin's slot pairs the wrong answer to the wrong source, and
-/// one that states "taken" for every optional decision passes the uniform case and fails this.
+/// the rule's own object rather than decoration. The recorded period took both optional
+/// decisions, so the offer pins them read-only and each published statement point carries its own
+/// decision's SUBJECT then that decision's ANSWER.
 ///
 /// # Discrimination
 ///
-/// Drop one answered decision ⇒ the point count fails. Publish both answers from the first
-/// point ⇒ the difference assertion fails. The uniform sibling below keeps the difference from
-/// being a shape the producer always emits.
+/// Drop one decision ⇒ the point count fails. Publish both from the first point ⇒ the subject
+/// difference fails. Leave them answerable ⇒ the reach-guard fails.
 #[test]
 fn both_answered_optional_decisions_reach_the_responder_with_their_own_answers() {
     use engine::types::interaction::InteractionShortcutPointKind;
 
     const COUNT: u32 = 6;
 
-    let answered = |answers: &[usize]| {
-        let mut state = load_f4();
-        let offer = f4_allocation_offer(&mut state);
-        assert_eq!(
-            offer.answerable.len(),
-            2,
-            "reach-guard: the tracked offer publishes TWO optional decisions, which is what \
-             makes a differing pair constructible at all"
-        );
-        assert!(
-            offer
-                .answerable
-                .iter()
-                .all(|point| point.kind == InteractionShortcutPointKind::MayChoice),
-            "reach-guard: both answerable points are optional decisions"
-        );
-        let allocation: Vec<(PlayerId, u32)> = offer
-            .legal_seats
-            .iter()
-            .copied()
-            .zip([1u32, 2, 3])
-            .collect();
-        let submission = f4_submission_with_answers(&offer, COUNT, &allocation, answers);
-        let responder = f4_open_respond_window(&mut state, &offer, &submission);
-        let reply = f4_reply_at(&state, responder);
-        let published: Vec<_> = reply
-            .points
-            .iter()
-            .filter(|point| point.kind == InteractionShortcutPointKind::MayChoice)
-            .cloned()
-            .collect();
-        assert_eq!(
-            published.len(),
-            2,
-            "both answered optional decisions reach the responder"
-        );
-        let stated: Vec<(String, String)> = published
-            .iter()
-            .map(|point| {
-                let [subject, answer] = point.candidate_ids.as_slice() else {
-                    panic!(
-                        "a published optional-decision statement point carries EXACTLY two \
-                         candidate ids — subject then answer — got {}",
-                        point.candidate_ids.len()
-                    );
-                };
-                (
-                    f4_candidate_object(&reply.candidates, subject)
-                        .expect("the subject candidate names its decision's own source object"),
-                    f4_candidate_value(&reply.candidates, answer)
-                        .expect("the answer candidate states which way the decision went"),
-                )
-            })
-            .collect();
-        (stated, reply.declared)
-    };
-
-    // ── HOSTILE: take one, decline the other.
-    let (differing, differing_declared) = answered(&[0, 1]);
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    assert!(
+        offer.answerable.is_empty(),
+        "reach-guard: the recorded period already answered both optional decisions"
+    );
+    let allocation: Vec<(PlayerId, u32)> = offer
+        .legal_seats
+        .iter()
+        .copied()
+        .zip([1u32, 2, 3])
+        .collect();
+    let submission = f4_submission_with_answers(&offer, COUNT, &allocation, &[]);
+    let responder = f4_open_respond_window(&mut state, &offer, &submission);
+    let reply = f4_reply_at(&state, responder);
+    let stated: Vec<(String, String, bool)> = reply
+        .points
+        .iter()
+        .filter(|point| point.kind == InteractionShortcutPointKind::MayChoice)
+        .map(|point| {
+            let [subject, answer] = point.candidate_ids.as_slice() else {
+                panic!(
+                    "a published optional-decision statement point carries EXACTLY two \
+                     candidate ids — subject then answer — got {}",
+                    point.candidate_ids.len()
+                );
+            };
+            (
+                f4_candidate_object(&reply.candidates, subject)
+                    .expect("the subject candidate names its decision's own source object"),
+                f4_candidate_value(&reply.candidates, answer)
+                    .expect("the answer candidate states which way the decision went"),
+                point.read_only,
+            )
+        })
+        .collect();
+    assert_eq!(
+        stated.len(),
+        2,
+        "both recorded optional decisions reach the responder"
+    );
     assert_ne!(
-        differing[0].0, differing[1].0,
-        "reach-guard: the two statement points name DIFFERENT source objects, so pairing an \
-         answer to the wrong one is visible"
+        stated[0].0, stated[1].0,
+        "each statement point names its OWN decision's source object"
     );
     assert_eq!(
-        differing
+        stated
             .iter()
-            .map(|(_, answer)| answer.as_str())
+            .map(|(_, answer, read_only)| (answer.as_str(), *read_only))
             .collect::<Vec<_>>(),
-        vec!["take", "decline"],
-        "CR 732.2c: each published answer is its OWN decision's — a producer that stated \
-         'taken' for every optional decision passes the uniform sibling below and fails here"
+        vec![("take", true), ("take", true)],
+        "CR 732.2c: each published answer is the one its decision took in the recorded period"
     );
     assert!(
-        differing_declared.is_some(),
+        reply.declared.is_some(),
         "and publishing the answered decisions does not cost the declaration its partition"
-    );
-
-    // ── SIBLING: the same board declared with BOTH answers taken, so the difference above is a
-    //    branch rather than a shape the producer always emits.
-    let (uniform, _) = answered(&[0, 0]);
-    assert_eq!(
-        uniform
-            .iter()
-            .map(|(_, answer)| answer.as_str())
-            .collect::<Vec<_>>(),
-        vec!["take", "take"]
-    );
-    assert_eq!(
-        uniform
-            .iter()
-            .map(|(subject, _)| subject)
-            .collect::<Vec<_>>(),
-        differing
-            .iter()
-            .map(|(subject, _)| subject)
-            .collect::<Vec<_>>(),
-        "and both boards name the same two decisions, so only the ANSWERS differ between them"
     );
 }
 
@@ -7632,18 +6453,10 @@ fn both_answered_optional_decisions_reach_the_responder_with_their_own_answers()
 ///   away from the canonical split" is satisfied by re-sending it.
 /// * `"repeated part"` — pairwise-distinct parts, which is what makes the per-seat magnitudes
 ///   distinguishable.
-/// * `"final segment length"` — a final part of at least 2. With positive parts totalling the
-///   count that is exactly "every segment START inside the window a drive of that count
-///   realizes"; a segment starting at the last index realizes nothing, which
-///   [`p4_row_1c_a_segment_starting_at_the_last_index_realizes_nothing_but_stays_announced`]
-///   drives.
-/// * `"leading-cycle seat"` — the final segment's seat is NOT the one the leading cycle
-///   resolves, which repays exactly the cycle that segment loses.
 fn authored_split_is_admissible(
     canonical: &[(PlayerId, u32)],
     authored: &[(PlayerId, u32)],
     count: u32,
-    leading: PlayerId,
 ) -> Result<(), &'static str> {
     use std::collections::{BTreeSet, HashSet};
 
@@ -7666,15 +6479,6 @@ fn authored_split_is_admissible(
     if parts.iter().collect::<HashSet<_>>().len() != parts.len() {
         return Err("repeated part");
     }
-    let Some((final_seat, final_part)) = authored.last() else {
-        return Err("dropped seat");
-    };
-    if *final_part < 2 {
-        return Err("final segment length");
-    }
-    if *final_seat == leading {
-        return Err("leading-cycle seat");
-    }
     Ok(())
 }
 
@@ -7685,7 +6489,7 @@ fn authored_split_is_admissible(
 /// [`e1_a_narrowed_offer_publishes_its_bound_beside_an_untouched_infinity_channel`] and
 /// [`e7_the_published_bound_is_the_count_pickers_own_ceiling`], the token product by
 /// [`t3_the_published_token_rate_is_delivered_by_the_accepted_drive`], the full commit across
-/// an authored allocation by [`p4_row_1_an_allocation_of_the_published_ceiling_commits_its_whole_count`],
+/// an authored allocation by [`p4_row_1_an_allocation_of_the_published_suggestion_commits_its_whole_count`],
 /// the one-producer identity by [`the_responders_element_agrees_with_the_producers_other_two_call_sites`].
 /// What none of them holds is that those surfaces are the SAME object, so this is ONE test with
 /// ONE `load_f4()` and every leg reading what the previous leg produced.
@@ -7717,15 +6521,18 @@ fn the_published_offer_the_authored_edit_and_the_committed_drive_are_one_chain()
     let mut state = load_f4();
     let offer = f4_allocation_offer(&mut state);
 
-    // ── (a) THE BADGE. The open window's ceiling is the engine-published bound, and that bound
-    //    is the count picker's own — ONE value, which every leg below then runs on.
-    let (bound, per_cycle) = {
+    // ── (a) THE BADGE. The open window's ceiling is the engine-published bound; the count the
+    //    legs below run on is the picker's suggestion, which that ceiling contains.
+    let (bound, suggested, per_cycle) = {
         let (_, certificate, schema) = offer_parts(&state);
         (
-            schema.max_iterations,
+            schema.deliverable_capacity,
+            published_suggestion(schema),
             certificate
                 .per_cycle
-                .clone()
+                .as_ref()
+                .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+                .cloned()
                 .expect("a bounded offer publishes its per-period signature"),
         )
     };
@@ -7734,12 +6541,14 @@ fn the_published_offer_the_authored_edit_and_the_committed_drive_are_one_chain()
         Some(bound),
         "CR 732.2a: the open window's ceiling is the schema's own bound {bound}"
     );
+    // CR 121.1 + CR 704.5b: the badge's ceiling and the picker's suggestion are both P0's
+    // library at the offer, since the draw past it finds no card and no repetition completes.
+    // Every leg below runs on the suggestion, whose element spreads over every published victim.
     assert_eq!(
-        bound, offer.max_count,
-        "CR 732.2a: the badge's bound and the count picker's published ceiling are ONE engine \
-         value, which is what makes every leg below run on the same count"
+        suggested, bound,
+        "CR 732.2a: the suggestion is the ceiling on this board"
     );
-    let count = offer.max_count;
+    let count = suggested;
 
     // ── (b) THE RATES, asserted BEFORE anything multiplies by them, so no product below can
     //    meet its clause as `0 == 0 * n`.
@@ -7795,8 +6604,9 @@ fn the_published_offer_the_authored_edit_and_the_committed_drive_are_one_chain()
         .iter()
         .enumerate()
         .map(|(index, (seat, part))| {
-            let shifted =
-                i64::from(*part) + 2 * i64::try_from(index).expect("an index fits an i64") - spread;
+            // Offsets of three per step keep the parts pairwise distinct.
+            let shifted = i64::from(*part)
+                + 3 * (2 * i64::try_from(index).expect("an index fits an i64") - spread);
             (*seat, u32::try_from(shifted).unwrap_or(0))
         })
         .collect();
@@ -7825,42 +6635,10 @@ fn the_published_offer_the_authored_edit_and_the_committed_drive_are_one_chain()
          here. canonical={canonical_prefix:?} authored={authored_prefix:?}"
     );
     assert_eq!(
-        authored_split_is_admissible(&canonical, &authored, count, offer.preannounced),
+        authored_split_is_admissible(&canonical, &authored, count),
         Ok(()),
         "the derived split must be admissible; a re-dump this derivation cannot serve reds \
          HERE. canonical={canonical:?} authored={authored:?} count={count}"
-    );
-
-    // Both refusals are REAL members the ingress accepts and commits, and each falsifies a
-    // named conjunct of (g). The admitted split above, run through the IDENTICAL predicate in
-    // this same invocation, is their positive control.
-    let mut trailing_one = authored.clone();
-    let last = trailing_one.len() - 1;
-    let moved = trailing_one[last].1 - 1;
-    trailing_one[last].1 = 1;
-    trailing_one[0].1 += moved;
-    assert_eq!(
-        authored_split_is_admissible(&canonical, &trailing_one, count, offer.preannounced),
-        Err("final segment length"),
-        "a split whose FINAL PART is 1 starts its last segment past the window a drive of \
-         {count} realizes, so its trailing seat realizes nothing. split={trailing_one:?}"
-    );
-    let mut swapped_seats: Vec<PlayerId> = authored.iter().map(|(seat, _)| *seat).collect();
-    let leading_index = swapped_seats
-        .iter()
-        .position(|seat| *seat == offer.preannounced)
-        .expect("the leading cycle's seat is one of the published legal victims");
-    swapped_seats.swap(leading_index, last);
-    let leading_last: Vec<(PlayerId, u32)> = swapped_seats
-        .into_iter()
-        .zip(authored.iter().map(|(_, part)| *part))
-        .collect();
-    assert_eq!(
-        authored_split_is_admissible(&canonical, &leading_last, count, offer.preannounced),
-        Err("leading-cycle seat"),
-        "a split whose FINAL SEGMENT is the leading cycle's seat has that cycle repay exactly \
-         the cycle the segment loses, so it realizes the declared split scaled. \
-         split={leading_last:?}"
     );
 
     // ── (e) THE ROUND-TRIP: what the proposer is shown back for the split just authored.
@@ -7892,23 +6670,28 @@ fn the_published_offer_the_authored_edit_and_the_committed_drive_are_one_chain()
         "CR 732.2a: the returned element states the allocation the player AUTHORED, not the \
          canonical one it was derived from. canonical={canonical:?}"
     );
+    // CR 603.3d: no Torch trigger is in flight at the offer, so each seat takes its own part.
+    let realized_split: Vec<i64> = authored
+        .iter()
+        .map(|(_, part)| offer.rate * i64::from(*part))
+        .collect();
     assert_eq!(
         f4_life_entries(&returned),
         authored
             .iter()
-            .map(|(seat, part)| (seat.0, -(offer.rate * i64::from(*part)) as i32))
+            .zip(&realized_split)
+            .map(|((seat, _), loss)| (seat.0, -*loss as i32))
             .collect::<Vec<_>>(),
         "CR 732.2a: the per-victim lines are the RETURNED element's own entries — the \
-         predictable result of the described sequence, the published rate {} times EACH seat's \
-         own segment",
+         predictable result of the described sequence at the published rate {}",
         offer.rate
     );
 
     // ── (f) SUBMISSION AND THE RESPOND BEAT.
     assert!(
-        !offer.other_pins.is_empty(),
-        "reach-guard: the split travels ALONGSIDE a pin for every other non-read-only point, \
-         else that clause is vacuous on this board"
+        offer.other_pins.is_empty(),
+        "the recorded period answered every other point, so the split is the submission's only \
+         pin"
     );
     let (life_before, _, _, tokens_before) = commit_axes(&state);
     let responder = f4_open_respond_window(&mut state, &offer, &submission);
@@ -7984,15 +6767,9 @@ fn the_published_offer_the_authored_edit_and_the_committed_drive_are_one_chain()
         .iter()
         .map(|(seat, _)| f4_loss(&state, &losses, *seat))
         .collect();
-    let declared_scaled: Vec<i64> = authored
-        .iter()
-        .map(|(_, part)| offer.rate * i64::from(*part))
-        .collect();
-    assert_ne!(
-        realized, declared_scaled,
-        "CR 601.2c: the leading cycle resolves a target announced BEFORE the drive begins, so \
-         every segment boundary lands one cycle late while the total stays exact — the realized \
-         map is not the declared split scaled. realized={realized:?}"
+    assert_eq!(
+        realized, realized_split,
+        "CR 601.2c: the drive delivers the per-seat lines the returned element stated"
     );
 
     // ── (h) THE TOKENS, at the very count this row committed.
@@ -8002,4 +6779,1929 @@ fn the_published_offer_the_authored_edit_and_the_committed_drive_are_one_chain()
         "CR 732.2a: the board mints the published per-cycle token rate {token_rate} on each of \
          the {count} committed cycles: {tokens_before} -> {tokens_after} battlefield tokens"
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════
+// The per-segment aim refusal, driven on the real 4p dump through both production entries.
+// ═════════════════════════════════════════════════════════════════════════════════════════
+
+/// A published legal victim that is NOT the pre-announced seat.
+fn f4_other_victim(offer: &F4Allocation) -> PlayerId {
+    *offer
+        .legal_seats
+        .iter()
+        .find(|seat| **seat != offer.preannounced)
+        .expect("reach-guard: a retarget segment needs a second published legal victim")
+}
+
+/// That seat's published headroom: its own life divided by its own published per-cycle charge.
+fn f4_headroom(state: &GameState, per_cycle: &PeriodicDelta, seat: PlayerId) -> u32 {
+    let life = state
+        .players
+        .iter()
+        .find(|p| p.id == seat)
+        .map(|p| p.life)
+        .expect("a published legal victim is seated");
+    let charge = per_cycle
+        .seat_life_charge
+        .iter()
+        .find(|(charged, _)| *charged == seat)
+        .map(|(_, magnitude)| *magnitude)
+        .expect("a published legal victim carries a published per-cycle charge");
+    assert!(
+        life > 0 && charge > 0,
+        "reach-guard: a seat with no life or no charge has no headroom to size a segment from; \
+         seat={seat:?} life={life} charge={charge}"
+    );
+    (life as u32) / (charge as u32)
+}
+
+/// Both verdicts for one allocation at one count, in the two currencies the two production
+/// entries refuse in: the human ingress `Err`s and mints no action (it borrows the board
+/// immutably, so it cannot move `waiting_for` for any submission, accepted or refused), while the
+/// declare handler returns `Ok` and hands priority back — so the ABSENCE of the CR 732.2b window
+/// is that entry's discriminator.
+fn f4_both_entries_admit(
+    state: &GameState,
+    offer: &F4Allocation,
+    schema: &engine::analysis::decision_template::ShortcutDecisionSchema,
+    count: u32,
+    allocation: &[(PlayerId, u32)],
+) -> (bool, bool) {
+    use engine::game::interaction::resolve_interaction_response;
+    let ingress = resolve_interaction_response(
+        state,
+        offer.proposer,
+        &f4_allocation_submission(offer, count, allocation),
+    );
+    let mut probe = state.clone();
+    apply(
+        &mut probe,
+        offer.proposer,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(count),
+            template: Some(f4_allocation_template(
+                schema,
+                offer.proposer,
+                count,
+                allocation,
+            )),
+        },
+    )
+    .expect("a refused declaration is a HANDBACK, never an error");
+    (
+        ingress.is_ok(),
+        matches!(probe.waiting_for, WaitingFor::RespondToShortcut { .. }),
+    )
+}
+
+/// CR 704.5a: every aimable seat's AIM-INDEPENDENT life charge at this offer — the per-repetition
+/// `net` a TEMPLATE-FREE declaration produces, which is the component no declaration's aim can
+/// move.
+///
+/// Zero at [`ChargeBound::Attributable`] is what makes a count's partition across seats mean what
+/// a partition is supposed to mean: a seat charged whether or not it is aimed crosses on a
+/// repetition that depends on the ORDER of the segments and not only on their sizes, and every row
+/// that reads a refusal as being about the aim would then be reading something else.
+///
+/// The same read at [`ChargeBound::Ceiling`] is the live control in the same invocation, so a zero
+/// is a measurement rather than a dead instrument; the two-seat floor and the caller's own bounded
+/// offer are what keep a board demoted out of this shape from passing vacuously.
+pub(crate) fn assert_no_aim_independent_charge(
+    state: &GameState,
+    per_cycle: &PeriodicDelta,
+    points: &[DecisionPoint],
+    seats: &[PlayerId],
+) {
+    assert!(
+        seats.len() > 1,
+        "reach-guard: this read needs at least two published aimable seats, or a partition across \
+         seats is not a thing this board can express; got {seats:?}"
+    );
+    for &seat in seats {
+        let charge = |bound| {
+            per_cycle
+                .declared_seat_life_charges(
+                    seat,
+                    None,
+                    None,
+                    points,
+                    state,
+                    bound,
+                    AnnouncedLead::None,
+                )
+                .next()
+                .expect("the per-repetition charges are unbounded")
+        };
+        let attributable = charge(ChargeBound::Attributable);
+        let ceiling = charge(ChargeBound::Ceiling);
+        assert_eq!(
+            attributable.net, 0,
+            "CR 704.5a: {seat:?} carries an aim-independent per-repetition charge, so its crossing \
+             depends on where the other segments aim; got {attributable:?}"
+        );
+        assert!(
+            ceiling.net > 0,
+            "LIVE CONTROL: the same read at the ceiling bound must be nonzero on {seat:?}, or the \
+             zero above is an instrument that cannot answer; got {ceiling:?}"
+        );
+    }
+}
+
+/// **One count, three allocations, and only the overrunning two are refused.** CR 732.2a +
+/// CR 102.1: a declaration is refused when a segment aims a published victim at a repetition
+/// STRICTLY AFTER the one this declaration's own aims take that seat out on. The SAME count,
+/// partitioned inside every published seat's own headroom, is admitted — so the refusal is
+/// attributable to the allocation and not to the count, which no single half can show.
+///
+/// Both production entries in one invocation, each in its own refusal currency (see
+/// [`f4_both_entries_admit`]).
+///
+/// # Shape, derived from the published offer
+///
+/// The count is the pre-announced victim's own published headroom plus the other published
+/// victim's. The ADMITTED partition gives each seat exactly its own headroom with the
+/// pre-announced victim in the LATER segment; the first REFUSED one moves a single repetition
+/// from the first segment into the second, so the later segment outlives its seat by one; the
+/// second aims the whole count at the pre-announced victim from the first repetition.
+///
+/// # Reach guards, in the same invocation
+///
+/// A strictly positive per-cycle magnitude; two published legal victims; the published suggestion
+/// IS the pre-announced seat's own headroom, which is what makes "inside every seat's headroom"
+/// the same partition the offer itself suggests; all three allocations carry the same count, at or
+/// below the published capacity, so neither the capacity nor the budget arm separates them; and no
+/// aimable seat carries an aim-independent charge ([`assert_no_aim_independent_charge`]).
+///
+/// # The two failing legs
+///
+/// Delete `declaration_conforms`' aim conjunct ⇒ both refused halves are admitted. Restore
+/// `ChargeBound::Ceiling` at that conjunct ⇒ the admitted half is refused, because the ceiling
+/// charges the pre-announced victim its reserved magnitude at every repetition this declaration
+/// aims elsewhere.
+#[test]
+fn one_count_three_allocations_and_only_the_overrunning_ones_are_refused() {
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let (_proposer, certificate, schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
+        .expect("a bounded offer publishes its per-period signature");
+    let schema = schema.clone();
+    let capacity = schema.deliverable_capacity;
+    let suggestion = offer.drivable_count;
+    let other = f4_other_victim(&offer);
+    let preannounced = f4_headroom(&state, &per_cycle, offer.preannounced);
+    let remainder = f4_headroom(&state, &per_cycle, other);
+    let count = preannounced + remainder;
+
+    assert!(
+        offer.rate > 0,
+        "reach-guard: a zero per-cycle charge crosses nobody and every verdict below is vacuous"
+    );
+    assert!(
+        offer.legal_seats.len() > 1,
+        "reach-guard: a two-segment allocation needs a second published legal victim; got {:?}",
+        offer.legal_seats
+    );
+    assert_eq!(
+        preannounced, suggestion,
+        "reach-guard: the published suggestion is the pre-announced victim's OWN headroom on this \
+         board, which is what makes the admitted partition below the one the offer itself \
+         suggests; headroom={preannounced} suggestion={suggestion}"
+    );
+    assert!(
+        count <= capacity,
+        "reach-guard: the declared count sits inside the published window, so the capacity arm is \
+         not what refuses either half; count={count} capacity={capacity}"
+    );
+    assert_no_aim_independent_charge(&state, &per_cycle, &schema.points, &offer.legal_seats);
+
+    let inside = [(other, remainder), (offer.preannounced, preannounced)];
+    let overruns_late = [
+        (other, remainder - 1),
+        (offer.preannounced, preannounced + 1),
+    ];
+    let overruns_whole = [(offer.preannounced, count)];
+    for allocation in [
+        inside.as_slice(),
+        overruns_late.as_slice(),
+        overruns_whole.as_slice(),
+    ] {
+        assert_eq!(
+            allocation.iter().map(|(_, n)| n).sum::<u32>(),
+            count,
+            "the three allocations carry the SAME count; only their partitions differ"
+        );
+    }
+
+    assert_eq!(
+        f4_both_entries_admit(&state, &offer, &schema, count, &inside),
+        (true, true),
+        "CR 732.2a: every segment ends at or before its own seat's crossing under the aims this \
+         declaration itself makes, so both production entries admit it — and that acceptance is \
+         what makes the refusals below attributable to the PARTITION rather than to an ingress \
+         that started refusing everything. count={count} allocation={inside:?}"
+    );
+    assert_eq!(
+        f4_both_entries_admit(&state, &offer, &schema, count, &overruns_late),
+        (false, false),
+        "CR 732.2a + CR 102.1: the later segment aims a seat this declaration's own aims have \
+         already taken out of the game, so the choice cannot be made and the DECLARATION is \
+         refused — at the ingress with no action minted, and at the handler with priority handed \
+         back and no CR 732.2b window. count={count} allocation={overruns_late:?}"
+    );
+    assert_eq!(
+        f4_both_entries_admit(&state, &offer, &schema, count, &overruns_whole),
+        (false, false),
+        "CR 732.2a: one segment aimed past its own seat's crossing is refused by the same \
+         conjunct, whether the overrun is a whole count or a single repetition. \
+         count={count} allocation={overruns_whole:?}"
+    );
+}
+
+/// **A later segment aiming the pre-announced victim inside its own headroom is admitted.**
+/// CR 732.2a: the repetitions a declaration spends aiming ELSEWHERE are repetitions that seat is
+/// not charged for, so its own crossing moves out by exactly them. This is the shape the shipped
+/// rule refused, and the refusal was the finding that reopened this phase.
+///
+/// # The pair, at ONE count
+///
+/// One repetition aimed at the other published victim and then the pre-announced victim for its
+/// whole headroom — admitted. The same count aimed at the pre-announced victim from the FIRST
+/// repetition — refused, because nothing moved its crossing and the last repetition aims a seat
+/// the earlier ones removed. The two differ in one repetition's aim, which is what keeps this row
+/// from being satisfied by a conjunct that stopped refusing anything at all.
+///
+/// # Failing legs
+///
+/// Restore `ChargeBound::Ceiling` at `declaration_conforms`' aim conjunct ⇒ the admitted half
+/// flips, because the ceiling charges the pre-announced victim its reserved magnitude at the
+/// repetition this declaration aims elsewhere. Delete the conjunct ⇒ the refused half flips.
+#[test]
+fn a_later_segment_aiming_the_preannounced_victim_within_its_headroom_is_admitted() {
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let (_proposer, certificate, schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
+        .expect("a bounded offer publishes its per-period signature");
+    let schema = schema.clone();
+    let capacity = schema.deliverable_capacity;
+    let other = f4_other_victim(&offer);
+    let preannounced = f4_headroom(&state, &per_cycle, offer.preannounced);
+    let count = preannounced + 1;
+
+    assert!(
+        offer.legal_seats.len() > 1,
+        "reach-guard: the deferred half needs a second published legal victim to spend its first \
+         repetition on; got {:?}",
+        offer.legal_seats
+    );
+    assert!(
+        count <= capacity,
+        "reach-guard: the declared count sits inside the published window, so the capacity arm is \
+         not what refuses the immediate half; count={count} capacity={capacity}"
+    );
+
+    let deferred = [(other, 1), (offer.preannounced, preannounced)];
+    let immediate = [(offer.preannounced, count)];
+    assert_eq!(
+        f4_both_entries_admit(&state, &offer, &schema, count, &deferred),
+        (true, true),
+        "CR 732.2a: the repetition aimed elsewhere is one the pre-announced victim is not charged \
+         for, so its own segment ends exactly on its crossing and both entries admit the \
+         declaration. count={count} allocation={deferred:?}"
+    );
+    assert_eq!(
+        f4_both_entries_admit(&state, &offer, &schema, count, &immediate),
+        (false, false),
+        "CR 732.2a + CR 102.1: the SAME count aimed at that seat from the first repetition \
+         outlives it by one, so the declaration is refused — which is what shows the acceptance \
+         above is about where the aims fall and not about the count. count={count} \
+         allocation={immediate:?}"
+    );
+}
+
+/// **The reported departure is the one this declaration's own aims produce.** CR 732.2a +
+/// CR 102.1: for a declaration BOTH readings of the charge model refuse, the departure
+/// `AimViolation::AimsAtDepartedSeat` carries is the repetitions this declaration aims ELSEWHERE
+/// before that seat's own segment plus that seat's own published headroom. The published ceiling
+/// reports the same departure on this board: the seat's observed loss is wholly the charged
+/// slot's, so the ceiling relieves it for the repetitions aimed elsewhere (CR 119.3).
+///
+/// # Both sides derived, neither spelled
+///
+/// The attributable side is the violation's own `departure`. The ceiling side is that same seat's
+/// first crossing under the SAME declaration and the SAME published observation, read through the
+/// same public producer at [`ChargeBound::Ceiling`] over the board's own life total. The relation
+/// asserted is the derived one; no count, seat or repetition is written down.
+#[test]
+fn the_reported_departure_counts_the_repetitions_aimed_elsewhere_first() {
+    use engine::analysis::decision_template::{
+        aims_survive_the_crossings, AimContext, AimViolation,
+    };
+
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let (_proposer, certificate, schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
+        .expect("a bounded offer publishes its per-period signature");
+    let schema = schema.clone();
+    let other = f4_other_victim(&offer);
+    let preannounced = f4_headroom(&state, &per_cycle, offer.preannounced);
+    let elsewhere = f4_headroom(&state, &per_cycle, other) - 1;
+    let count = elsewhere + preannounced + 1;
+    assert!(
+        count <= schema.deliverable_capacity,
+        "reach-guard: the declaration under test sits inside the published window, so the refusal \
+         it carries is the aim conjunct's; count={count} capacity={}",
+        schema.deliverable_capacity
+    );
+
+    let allocation = [(other, elsewhere), (offer.preannounced, preannounced + 1)];
+    let template = f4_allocation_template(&schema, offer.proposer, count, &allocation);
+    let published = offer_declaration(&state);
+    assert!(
+        published.is_some(),
+        "reach-guard: the ceiling's over-charge is taken against the declaration this offer \
+         PUBLISHED, so a `None` there would make the two readings coincide"
+    );
+
+    let violation = aims_survive_the_crossings(
+        &schema.points,
+        &template,
+        count,
+        AimContext {
+            proposer: offer.proposer,
+            per_cycle: certificate.per_cycle.as_ref(),
+            published: published.as_ref(),
+        },
+        &state,
+    )
+    .expect_err("CR 732.2a: this declaration outlives the seat its later segment aims");
+    let AimViolation::AimsAtDepartedSeat {
+        repetition,
+        seat,
+        departure,
+    } = violation;
+
+    assert_eq!(
+        seat, offer.preannounced,
+        "the seat the later segment aims is the offer's own pre-announced victim"
+    );
+    assert_eq!(
+        repetition, count,
+        "the violation is reported at the one repetition that outlives the departure, which on \
+         this allocation is its last; got {repetition} of {count}"
+    );
+    assert_eq!(
+        departure,
+        elsewhere + preannounced,
+        "CR 732.2a: the departure this declaration's own aims produce counts the repetitions it \
+         spends elsewhere FIRST — {elsewhere} of them — and then that seat's own headroom \
+         {preannounced}; got {departure}"
+    );
+
+    // The ceiling comparand: the same seat, the same declaration, the same published observation,
+    // read at the direction the publisher and the drivability gate ask for.
+    let life = state
+        .players
+        .iter()
+        .find(|player| player.id == offer.preannounced)
+        .map(|player| i64::from(player.life))
+        .expect("the pre-announced victim is seated");
+    let ceiling = PeriodicDelta::first_life_crossing(
+        per_cycle.declared_seat_life_charges(
+            offer.preannounced,
+            Some(&template),
+            published.as_ref(),
+            &schema.points,
+            &state,
+            ChargeBound::Ceiling,
+            AnnouncedLead::None,
+        ),
+        life,
+        count,
+    )
+    .expect(
+        "CONTROL: the ceiling reading must cross this seat inside the declared count too, or the \
+         two readings are not being compared on one refusal",
+    );
+    assert_eq!(
+        ceiling, departure,
+        "CR 119.3: the seat's observed loss is wholly the charged slot's, so the ceiling relieves \
+         it for the repetitions aimed elsewhere and crosses where the declaration's own aims do"
+    );
+}
+
+/// A re-aiming shape: two segments whose FIRST aims a
+/// non-pre-announced legal victim, each sized to its own seat's published headroom, so every
+/// segment ends on its own seat's crossing and the aim conjunct admits it.
+fn f4_re_aiming_segments(state: &GameState, offer: &F4Allocation) -> [(PlayerId, u32); 2] {
+    let (_proposer, certificate, _schema) = offer_parts(state);
+    let per_cycle = certificate
+        .per_cycle
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .expect("a bounded offer publishes its per-period signature");
+    let others = f4_other_victims(offer);
+    [
+        (others[0], f4_headroom(state, per_cycle, others[0])),
+        (others[1], f4_headroom(state, per_cycle, others[1])),
+    ]
+}
+
+/// **The drive performs the crossing its own accepted declaration causes.** CR 732.2a +
+/// CR 704.5a: an accept of the re-aiming shape delivers its whole count; with no Torch trigger in
+/// flight at the offer each segment's seat takes its whole headroom, so the first segment's seat
+/// crosses inside the count and the later one on its last repetition, and both leave the game.
+///
+/// # Admitted member
+///
+/// The same respond window saved without the published declaration, as a save written before
+/// that field existed is: its count exceeds the ceiling's, so the take is refused whole and
+/// priority returns to the proposer.
+#[test]
+fn an_admitted_re_aiming_accept_delivers_its_whole_count_and_the_crossing_it_declares() {
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let capacity = offer_parts(&state).2.deliverable_capacity;
+    let suggestion = offer.drivable_count;
+    let segments = f4_re_aiming_segments(&state, &offer);
+    let [(first, first_headroom), (later, later_headroom)] = segments;
+    let count = first_headroom + later_headroom;
+    assert!(
+        count > suggestion && count <= capacity,
+        "reach-guard: the declared count is strictly ABOVE the published suggestion and inside \
+         the published window, so neither the capacity arm nor the budget arm shortens it. \
+         count={count} suggestion={suggestion} capacity={capacity}"
+    );
+    assert!(
+        offer.rate > 0,
+        "reach-guard: a zero per-cycle charge makes every life delta below read 0"
+    );
+    f4_declare_allocation(&mut state, &offer, count, &segments);
+    assert_eq!(
+        accepted_proposal(&state).count,
+        IterationCount::Fixed(count),
+        "the declaration is accepted at the declared count"
+    );
+    let window = state.clone();
+    let losses = f4_accept_window(&mut state);
+    assert_eq!(
+        losses.iter().sum::<i64>() / offer.rate,
+        i64::from(count),
+        "CR 732.2a: the accepted count is delivered whole. losses={losses:?}"
+    );
+    assert!(
+        f4_eliminated(&state, first),
+        "CR 704.5a: the first segment's seat crosses inside the count and leaves the game"
+    );
+    assert!(
+        f4_eliminated(&state, later)
+            && f4_loss(&state, &losses, later) == i64::from(later_headroom) * offer.rate,
+        "CR 704.5a: the later segment's seat takes its whole headroom and leaves. \
+         losses={losses:?}"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if !f4_eliminated(&state, player)),
+        "CR 800.4a: priority is handed back to a living seat; got {:?}",
+        state.waiting_for
+    );
+
+    // ── ADMITTED MEMBER: the same window saved without the published declaration.
+    let mut saved = serde_json::to_value(&window).expect("a live GameState serializes");
+    assert!(
+        saved["waiting_for"]["data"]["proposal"]
+            .as_object_mut()
+            .and_then(|proposal| proposal.remove("published_declaration"))
+            .is_some(),
+        "reach-guard: the saved window carries the published declaration this leg removes"
+    );
+    let mut legacy = f4_restored(saved);
+    assert!(
+        accepted_proposal(&legacy).published_declaration.is_none()
+            && accepted_proposal(&legacy).template.is_some(),
+        "reach-guard: the save decodes to a pinned proposal with no published declaration"
+    );
+    let legacy_losses = f4_accept_window(&mut legacy);
+    assert_eq!(
+        legacy_losses,
+        vec![0; legacy_losses.len()],
+        "CR 732.2a: with no published declaration the ceiling charges the slot to every opponent, \
+         so the declared count exceeds it and the take is refused whole"
+    );
+    assert!(
+        legacy.players.iter().all(|player| !player.is_eliminated)
+            && matches!(legacy.waiting_for, WaitingFor::Priority { player } if player == offer.proposer),
+        "CR 732.2a: priority returns to the proposer; got {:?}",
+        legacy.waiting_for
+    );
+}
+
+/// **The near-equal split commits its whole count.** CR 732.2a: an allocation
+/// spreading the published capacity near-equally over the three legal victims is delivered whole.
+#[test]
+fn the_near_equal_split_at_the_capacity_commits_its_whole_count() {
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let capacity = offer_parts(&state).2.deliverable_capacity;
+    let others = f4_other_victims(&offer);
+    let third = capacity / 3;
+    let spread = [
+        (offer.preannounced, third),
+        (others[0], third),
+        (others[1], capacity - 2 * third),
+    ];
+    let losses = f4_drive_allocation(&mut state, &offer, capacity, &spread);
+    assert_eq!(
+        losses.iter().sum::<i64>() / offer.rate,
+        i64::from(capacity),
+        "CR 732.2a: the near-equal split commits its whole count at the capacity. \
+         losses={losses:?}"
+    );
+}
+
+/// **An offer whose stack holds no charged announcement delivers the re-aiming count whole.**
+/// CR 603.3d + CR 732.2a: with no charged trigger announced before the shortcut, the drive's first
+/// repetition resolves the declaration's own first segment, so that segment's seat crosses inside
+/// the count and leaves the game.
+#[test]
+fn an_offer_holding_no_charged_announcement_delivers_the_re_aiming_count_whole() {
+    // How many of the offer's charged slots the offer's published lead snapshot names.
+    let charged_on_stack = |board: &GameState| -> (usize, usize) {
+        let (_, certificate, schema) = offer_parts(board);
+        let charged = &certificate
+            .per_cycle
+            .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+            .expect("a bounded offer publishes its per-period signature")
+            .victim_slot;
+        let on_stack = charged
+            .iter()
+            .filter(|(slot, _)| schema.leading_aims.iter().any(|(lead, _)| lead == slot))
+            .count();
+        (charged.len(), on_stack)
+    };
+
+    let mut state = f4_at_offer();
+    let offer = f4_allocation_offer(&mut state);
+    let (charged, on_stack) = charged_on_stack(&state);
+    assert!(
+        charged > 0 && on_stack == 0,
+        "reach-guard: the offer's stack holds no charged announcement; charged={charged} \
+         on_stack={on_stack}"
+    );
+    let capacity = offer_parts(&state).2.deliverable_capacity;
+    let segments = f4_re_aiming_segments(&state, &offer);
+    let [(first, _), _] = segments;
+    let count = segments.iter().map(|(_, n)| n).sum::<u32>();
+    assert!(
+        count <= capacity && offer.rate > 0,
+        "reach-guard: a charging count inside the published window; count={count} \
+         capacity={capacity} rate={}",
+        offer.rate
+    );
+
+    f4_declare_allocation(&mut state, &offer, count, &segments);
+    let losses = f4_accept_window(&mut state);
+    assert_eq!(
+        f4_loss(&state, &losses, offer.preannounced),
+        0,
+        "reach-guard: no repetition resolves the pre-announced seat. losses={losses:?}"
+    );
+    assert_eq!(
+        losses.iter().sum::<i64>() / offer.rate,
+        i64::from(count),
+        "CR 732.2a: the accepted count is delivered whole. losses={losses:?}"
+    );
+    assert!(
+        f4_eliminated(&state, first),
+        "CR 704.5a: the first segment's seat crosses inside the count and leaves the game"
+    );
+}
+
+/// **An accept at the capacity delivers an opponent's crossing and empties the proposer's
+/// library.** CR 732.2a + CR 704.5b: the accept delivers its whole count; an opponent the
+/// declaration aims at leaves along the way, another survives, and the proposer is handed priority
+/// back alive with an empty library. The proposer's elimination is a draw after the handback, which
+/// this test's beat policy chooses to take: Mister Fantastic's optional draw (CR 603.5). The
+/// declaration does not cause it.
+#[test]
+fn an_accept_at_the_capacity_delivers_an_opponent_crossing_and_empties_the_proposers_library() {
+    let announced = P1;
+
+    // Derived from the F4 dump: the drive's aimed seat's life raised by the cycle ceiling every
+    // published capacity is capped at, so no count inside the capacity takes that seat.
+    let mut state = f4_with_life(announced, |life| {
+        life + i64::from(MAX_SHORTCUT_CYCLES_MIRROR)
+    });
+    let offer = f4_allocation_offer(&mut state);
+    let (proposer, certificate, schema) = offer_parts(&state);
+    let capacity = schema.deliverable_capacity;
+    let victim = f4_other_victim(&offer);
+    let headroom = f4_headroom(
+        &state,
+        certificate
+            .per_cycle
+            .as_ref()
+            .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+            .expect("a bounded offer publishes its per-period signature"),
+        victim,
+    );
+    assert_eq!(
+        offer.preannounced, announced,
+        "reach-guard: the raised seat is the pre-announced one on the derived board"
+    );
+    assert!(
+        f4_life(&state, announced) > i64::from(capacity) * offer.rate,
+        "reach-guard: the raised seat's life exceeds everything the capacity can charge it"
+    );
+    assert!(
+        headroom < capacity,
+        "reach-guard: the aimed opponent's crossing lies inside the capacity; headroom={headroom} \
+         capacity={capacity}"
+    );
+    let allocation = [(victim, headroom), (announced, capacity - headroom)];
+    let seats = |board: &GameState| {
+        board
+            .players
+            .iter()
+            .map(|p| (p.id, p.life, p.library.len(), p.is_eliminated))
+            .collect::<Vec<_>>()
+    };
+    let before = seats(&state);
+
+    let losses = f4_drive_allocation(&mut state, &offer, capacity, &allocation);
+    assert_eq!(
+        losses.iter().sum::<i64>() / offer.rate,
+        i64::from(capacity),
+        "CR 732.2a: the accepted count is delivered whole. losses={losses:?}"
+    );
+    let opponents: Vec<(PlayerId, bool)> = state
+        .players
+        .iter()
+        .filter(|p| p.id != proposer)
+        .map(|p| (p.id, p.is_eliminated))
+        .collect();
+    assert!(
+        f4_eliminated(&state, victim) && opponents.iter().any(|(_, gone)| !gone),
+        "CR 104.2a: an opponent leaves and another survives, so the game outlives the opponents' \
+         crossings; opponents={opponents:?}"
+    );
+
+    // CR 704.5b: the count empties the proposer's library; the beat policy takes the optional draw
+    // on the priority passes after the handback, which run with detection off so no offer
+    // interrupts them.
+    let handback = seats(&state);
+    state.loop_detection = engine::types::game_state::LoopDetectionMode::Off;
+    let mut beats = 0u32;
+    while !f4_eliminated(&state, proposer) {
+        assert!(
+            beats < 64,
+            "the proposer's draw from the emptied library resolves within the passes after the \
+             handback. capacity={capacity} allocation={allocation:?} before={before:?} \
+             handback={handback:?} now={:?} waiting={}",
+            seats(&state),
+            serde_json::to_value(&state.waiting_for).expect("a WaitingFor serializes")["type"]
+        );
+        f4_drive_one_beat_at(&mut state, announced)
+            .unwrap_or_else(|error| panic!("{error}; handback={handback:?}"));
+        beats += 1;
+    }
+    let end = seats(&state);
+    assert!(
+        end.iter()
+            .map(|seat| (seat.0, seat.1))
+            .eq(handback.iter().map(|seat| (seat.0, seat.1)))
+            && state
+                .players
+                .iter()
+                .any(|p| p.id == proposer && p.library.is_empty())
+            && f4_eliminated(&state, victim)
+            && state
+                .players
+                .iter()
+                .any(|p| p.id != proposer && !p.is_eliminated),
+        "CR 704.5b + CR 104.2a: the proposer leaves on their own draw from the library the count \
+         emptied, before any life total moves again, and the game outlives it. \
+         handback={handback:?} end={end:?}"
+    );
+}
+
+/// **A departure coinciding with the pre-announced seat's crossing under a charge at every
+/// repetition is the declaration's own.** CR 732.2a + CR 704.5a: on a board where the first
+/// segment's seat crosses at the repetition a charge at every repetition would take the
+/// pre-announced seat, the whole count commits and only the seats the segments aim at leave.
+#[test]
+fn a_departure_coinciding_with_the_announced_seats_ceiling_crossing_commits_the_whole_count() {
+    let mut unaltered = f4_at_offer();
+    let unaltered_offer = f4_allocation_offer(&mut unaltered);
+    let announced = unaltered_offer.preannounced;
+    let victim = f4_other_victim(&unaltered_offer);
+
+    // Derived from the F4 dump: the first non-announced legal victim's life set to the
+    // pre-announced seat's life at the unaltered offer.
+    let mut state = f4_with_life(victim, |_| f4_life(&unaltered, announced));
+    let offer = f4_allocation_offer(&mut state);
+    let (_proposer, certificate, schema) = offer_parts(&state);
+    let capacity = schema.deliverable_capacity;
+    let per_cycle = certificate
+        .per_cycle
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
+        .expect("a bounded offer publishes its per-period signature");
+    let points = schema.points.clone();
+    let charged: Vec<_> = per_cycle
+        .victim_slot
+        .iter()
+        .map(|(slot, _)| slot.clone())
+        .collect();
+    let segments = f4_re_aiming_segments(&state, &offer);
+    let [(first, first_headroom), (later, later_headroom)] = segments;
+    let count = first_headroom + later_headroom;
+    assert_eq!(
+        (offer.preannounced, first),
+        (announced, victim),
+        "reach-guard: the derived board announces the same seat and aims the lowered one first"
+    );
+    assert!(
+        count <= capacity,
+        "reach-guard: inside the published window; count={count} capacity={capacity}"
+    );
+
+    // The coincidence this board is built for, and the unit rate it is counted at.
+    let crossing = first_headroom;
+    assert_eq!(
+        offer.rate, 1,
+        "the coincidence below is counted in whole repetitions at a unit rate"
+    );
+    assert_eq!(
+        f4_life(&state, announced),
+        i64::from(crossing),
+        "a charge at every repetition takes the pre-announced seat at the repetition the first \
+         segment's seat crosses"
+    );
+
+    f4_declare_allocation(&mut state, &offer, count, &segments);
+    let proposal = accepted_proposal(&state).clone();
+    // CR 603.3d: no Torch trigger is on the stack at the offer, so no charged slot leads.
+    assert!(
+        !charged.is_empty()
+            && !state.stack.iter().any(|entry| entry
+                .ability()
+                .is_some_and(|ability| !ability.targets.is_empty())),
+        "reach-guard: the offer charges a slot and no announcement is in flight"
+    );
+    let announced_crossing = |bound| {
+        PeriodicDelta::first_life_crossing(
+            per_cycle.declared_seat_life_charges(
+                announced,
+                proposal.template.as_ref(),
+                proposal.published_declaration.as_ref(),
+                &points,
+                &state,
+                bound,
+                AnnouncedLead::None,
+            ),
+            f4_life(&state, announced),
+            count,
+        )
+    };
+    assert_eq!(
+        (
+            announced_crossing(ChargeBound::Ceiling),
+            announced_crossing(ChargeBound::Attributable)
+        ),
+        (None, None),
+        "CR 119.3: the seat's observed loss is wholly the charged slot's, so neither direction \
+         charges it for the repetitions the declaration aims elsewhere, and its own aims never \
+         take it"
+    );
+
+    let losses = f4_accept_window(&mut state);
+    assert_eq!(
+        losses.iter().sum::<i64>() / offer.rate,
+        i64::from(count),
+        "CR 732.2a: the whole count commits. losses={losses:?}"
+    );
+    assert_eq!(
+        [announced, first, later].map(|seat| f4_eliminated(&state, seat)),
+        [false, true, true],
+        "CR 704.5a: each segment's seat takes its whole headroom and leaves; the announced seat, \
+         which no segment aims at, stays"
+    );
+}
+
+/// What an accepted drive leaves behind: the four commit axes, every seat's elimination, and the
+/// kind of state it hands back.
+fn f4_drive_outcome(board: &GameState) -> impl PartialEq + std::fmt::Debug {
+    (
+        commit_axes(board),
+        board
+            .players
+            .iter()
+            .map(|p| p.is_eliminated)
+            .collect::<Vec<_>>(),
+        std::mem::discriminant(&board.waiting_for),
+    )
+}
+
+/// **A game saved at the offer drives to the unsaved outcome.** CR 732.2a: the
+/// restored offer mints the same proposal from the same declaration, and its accept reaches the
+/// outcome of the game that was not saved.
+#[test]
+fn a_save_at_the_offer_drives_to_the_unsaved_outcome() {
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let segments = f4_re_aiming_segments(&state, &offer);
+    let count = segments.iter().map(|(_, n)| n).sum::<u32>();
+
+    let mut from_offer =
+        f4_restored(serde_json::to_value(&state).expect("a live GameState serializes"));
+    let declaration = f4_declare_allocation(&mut state, &offer, count, &segments);
+    apply(&mut from_offer, offer.proposer, declaration)
+        .expect("the minted declaration is dispatched on the restored offer");
+    let proposal = accepted_proposal(&state).clone();
+    assert!(
+        proposal.template.is_some() && proposal.published_declaration.is_some(),
+        "reach-guard: the proposal pins choices and carries the published declaration"
+    );
+    assert_eq!(
+        accepted_proposal(&from_offer),
+        &proposal,
+        "a save at the offer declares the same proposal"
+    );
+
+    f4_accept_window(&mut state);
+    f4_accept_window(&mut from_offer);
+    assert!(
+        state.players.iter().any(|p| p.is_eliminated),
+        "reach-guard: the unsaved drive delivers a crossing, so the outcomes compared are a \
+         departing drive's"
+    );
+    assert_eq!(
+        f4_drive_outcome(&from_offer),
+        f4_drive_outcome(&state),
+        "the save at the offer drives to the unsaved outcome"
+    );
+}
+
+/// **A game saved at the respond window drives to the unsaved outcome.**
+/// CR 732.2a: the restored window carries the same proposal, a publishing proposal serializes as
+/// an unpublished one plus exactly the published declaration's key, and its accept reaches the
+/// outcome of the game that was not saved.
+#[test]
+fn a_save_at_the_respond_window_drives_to_the_unsaved_outcome() {
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let segments = f4_re_aiming_segments(&state, &offer);
+    let count = segments.iter().map(|(_, n)| n).sum::<u32>();
+
+    f4_declare_allocation(&mut state, &offer, count, &segments);
+    let mut from_window =
+        f4_restored(serde_json::to_value(&state).expect("a live GameState serializes"));
+    let proposal = accepted_proposal(&state).clone();
+    assert!(
+        proposal.template.is_some() && proposal.published_declaration.is_some(),
+        "reach-guard: the saved proposal pins choices and carries the published declaration"
+    );
+    assert_eq!(
+        accepted_proposal(&from_window),
+        &proposal,
+        "a save at the window restores the same proposal"
+    );
+    let unpublished = engine::analysis::loop_check::ShortcutProposal {
+        published_declaration: None,
+        ..proposal.clone()
+    };
+    let bare = serde_json::to_string(&unpublished).expect("a proposal serializes");
+    let key = format!(
+        ",\"published_declaration\":{}",
+        serde_json::to_string(&proposal.published_declaration).expect("a declaration serializes")
+    );
+    assert_eq!(
+        serde_json::to_string(&proposal).expect("a proposal serializes"),
+        format!(
+            "{}{key}}}",
+            bare.strip_suffix('}')
+                .expect("a proposal serializes to an object")
+        ),
+        "an unpublished proposal serializes without the key, and a publishing one differs from \
+         it in exactly that key"
+    );
+
+    f4_accept_window(&mut state);
+    f4_accept_window(&mut from_window);
+    assert!(
+        state.players.iter().any(|p| p.is_eliminated),
+        "reach-guard: the unsaved drive delivers a crossing, so the outcomes compared are a \
+         departing drive's"
+    );
+    assert_eq!(
+        f4_drive_outcome(&from_window),
+        f4_drive_outcome(&state),
+        "the save at the window drives to the unsaved outcome"
+    );
+}
+
+/// **The drive's template and the published declaration are carried apart.** CR 732.2a: a
+/// declaration that re-aims the charged slot leaves the proposal carrying both, naming different
+/// seats at that slot, and the charge authority reads the first segment's crossing only against
+/// the published one. A declaration that overrides nothing carries one declaration in both roles,
+/// and a carried declaration tampered to name the seat the drive takes refuses the crossing cycle.
+#[test]
+fn the_drive_template_and_the_published_declaration_are_carried_apart() {
+    use engine::analysis::decision_template::{
+        resolve, AnnouncementSubject, ConcreteDecision, ConcreteTarget, DecisionTemplate,
+        PinnedDecision, Ranking, TargetPin, TargetSchedule,
+    };
+
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let (_proposer, certificate, schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
+        .expect("a bounded offer publishes its per-period signature");
+    let points = schema.points.clone();
+    let charged: Vec<_> = per_cycle
+        .victim_slot
+        .iter()
+        .map(|(slot, _)| slot.clone())
+        .collect();
+    assert!(
+        !charged.is_empty(),
+        "reach-guard: the offer charges a slot, so the seats below are named at a slot that exists"
+    );
+    let segments = f4_re_aiming_segments(&state, &offer);
+    let [(first, first_headroom), _] = segments;
+    let count = segments.iter().map(|(_, n)| n).sum::<u32>();
+    let at_offer = state.clone();
+
+    f4_declare_allocation(&mut state, &offer, count, &segments);
+    let proposal = accepted_proposal(&state).clone();
+    let template = proposal
+        .template
+        .as_ref()
+        .expect("the re-aimed declaration is the drive's template");
+    let published = proposal
+        .published_declaration
+        .as_ref()
+        .expect("the offer's declaration rides beside it");
+    let aimed = |declaration: &DecisionTemplate| -> Vec<PlayerId> {
+        resolve(declaration, 0, &state)
+            .expect("the declaration resolves at its first index")
+            .into_iter()
+            .filter_map(|decision| match decision {
+                ConcreteDecision::Targets { slot, targets } if charged.contains(&slot) => {
+                    Some(targets)
+                }
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|target| match target {
+                ConcreteTarget::Player(seat) => Some(seat),
+                ConcreteTarget::Object(_) => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        (aimed(template), aimed(published)),
+        (vec![first], vec![offer.preannounced]),
+        "the two roles name different seats at the charged slot"
+    );
+    // CR 603.3d + CR 601.2c: the in-flight trigger latched the pre-announced seat.
+    let lead: Vec<ConcreteDecision> = charged
+        .iter()
+        .map(|slot| ConcreteDecision::Targets {
+            slot: slot.clone(),
+            targets: vec![ConcreteTarget::Player(offer.preannounced)],
+        })
+        .collect();
+    let first_crossing = |observed: &DecisionTemplate| {
+        PeriodicDelta::first_life_crossing(
+            per_cycle.declared_seat_life_charges(
+                first,
+                Some(template),
+                Some(observed),
+                &points,
+                &state,
+                ChargeBound::Attributable,
+                AnnouncedLead::LeadingRepetition(&lead),
+            ),
+            f4_life(&state, first),
+            count,
+        )
+    };
+    assert_eq!(
+        first_crossing(published),
+        Some(1 + first_headroom),
+        "read against the published declaration, the first segment's seat crosses where the \
+         drive takes it"
+    );
+    assert_ne!(
+        first_crossing(template),
+        first_crossing(published),
+        "read against the drive's own template in both roles, it does not"
+    );
+
+    // ── NO OVERRIDE: the suggestion drives and the published declaration rides beside it.
+    let plain = declare_template_free(&at_offer, offer.proposer, offer.drivable_count);
+    let plain = accepted_proposal(&plain);
+    let published = offer_declaration(&at_offer);
+    let resolved = offer_parts(&at_offer)
+        .2
+        .suggestion(published.as_ref())
+        .cloned();
+    assert!(
+        plain.published_declaration.is_some()
+            && plain.published_declaration == published
+            && plain.template == resolved,
+        "a declaration that overrides nothing drives the offer's suggestion and carries the \
+         published declaration beside it"
+    );
+
+    // ── TAMPERED: the carried declaration rewritten to name the seat the drive takes first.
+    let mut tampered = state.clone();
+    let WaitingFor::RespondToShortcut {
+        proposal: carried, ..
+    } = &mut tampered.waiting_for
+    else {
+        unreachable!("the declaration opened the respond window");
+    };
+    let carried = carried
+        .published_declaration
+        .as_mut()
+        .expect("the window carries the published declaration");
+    for pin in &mut carried.decisions {
+        if let PinnedDecision::Targets { targets, .. } = pin {
+            *targets = vec![TargetPin::Scheduled(TargetSchedule::Constant(
+                Ranking::one(AnnouncementSubject::Seat(first)),
+            ))];
+        }
+    }
+    assert_eq!(
+        aimed(carried),
+        vec![first],
+        "reach-guard: the tampered declaration names that seat at the charged slot"
+    );
+    let tampered_losses = f4_accept_window(&mut tampered);
+    assert!(
+        tampered_losses.iter().sum::<i64>() / offer.rate < i64::from(count)
+            && !f4_eliminated(&tampered, first),
+        "a carried declaration that hides the crossing refuses the crossing cycle rather than \
+         delivering it. losses={tampered_losses:?}"
+    );
+}
+
+/// **One authority, structural half.** The aim conjunct lives INSIDE `declaration_conforms` and
+/// at no call site: `aims_survive_the_crossings` is named only in the authority's own file, once
+/// to define it and once for the authority's own call. A caller that invoked it directly would be
+/// a second place deciding whether a declaration is legal, which is the divergence
+/// `declaration_conforms` exists to make unrepresentable.
+///
+/// The walk is the WHOLE crate source, not a named file: a direct call in a THIRD file is exactly
+/// what a named-pair walk cannot see. Line comments are stripped by the shared census helper, so
+/// a mention in a doc cannot satisfy this.
+///
+/// LIVE CONTROL, in the same invocation and over the same walk: `declaration_conforms(` — whose
+/// production sites are spread across three files — must be found in MORE THAN ONE of them. A
+/// walk that reached only the authority's own file would satisfy the claim above by not looking.
+#[test]
+fn the_aim_conjunct_is_named_only_inside_the_declaration_authority() {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use super::source_census::code;
+
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut aim: BTreeMap<String, usize> = BTreeMap::new();
+    let mut control: BTreeMap<String, usize> = BTreeMap::new();
+    for (root, prefix) in [
+        (manifest.join("src"), "engine/src"),
+        (
+            manifest.join("..").join("phase-ai").join("src"),
+            "phase-ai/src",
+        ),
+    ] {
+        for path in super::loop_shortcut_offer_writer_census::rs_files(&root) {
+            let rel = path
+                .strip_prefix(&root)
+                .expect("walked path is under its root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let rel = format!("{prefix}/{rel}");
+            let text =
+                std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+            for line in text.lines() {
+                let line = code(line);
+                if line.contains("aims_survive_the_crossings(") {
+                    *aim.entry(rel.clone()).or_default() += 1;
+                }
+                if line.contains("declaration_conforms(") {
+                    *control.entry(rel.clone()).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    assert!(
+        control.len() > 1,
+        "LIVE CONTROL: the shared authority is called from more than one file, so a walk \
+         reporting one file for the conjunct below is a measurement rather than a walk that \
+         stopped early; got {control:?}"
+    );
+    assert_eq!(
+        aim.into_iter().collect::<Vec<_>>(),
+        vec![("engine/src/analysis/decision_template.rs".to_string(), 2)],
+        "CR 732.2a: the aim conjunct is the authority's, not a call site's — one definition and \
+         the authority's own call, both in `engine/src/analysis/decision_template.rs`. A hit in \
+         any other file of either crate is a second place deciding whether a declaration is legal"
+    );
+}
+
+/// **The over-ceiling refusal stays observable, and the row names which conjunct each half is
+/// about.** CR 732.2a: a count one above the published capacity opens NO accept-or-shorten window,
+/// while the at-capacity count — declared with an allocation the aim conjunct admits — does, in
+/// the same invocation. The refusal hands priority back rather than erroring, so the window's
+/// ABSENCE is the only discriminator; some waiting state is always present and is not one.
+///
+/// The at-capacity half is also this phase's over-breadth control: the published capacity is what
+/// SOME legal declaration may specify, and this shows at least one still can after the aim
+/// conjunct lands. Without it, a conjunct that refused every declaration at the ceiling would
+/// satisfy the over-capacity half and look correct.
+///
+/// Hostile sibling: a count above the engine's own repetition budget is refused by the BUDGET
+/// arm, which is a different conjunct and is labelled as one.
+#[test]
+fn a_count_above_the_published_capacity_opens_no_window_while_the_capacity_itself_does() {
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    let (_proposer, _certificate, schema) = offer_parts(&state);
+    let schema = schema.clone();
+    let capacity = schema.deliverable_capacity;
+    assert!(
+        capacity < MAX_SHORTCUT_CYCLES_MIRROR,
+        "reach-guard: the capacity must sit strictly below the engine's own budget, else the \
+         over-capacity half would be measuring the BUDGET arm; capacity={capacity}"
+    );
+
+    // The near-equal split the offer's own preview publishes: each segment ends on or before its
+    // own seat's crossing, so the aim conjunct admits it at the ceiling.
+    let third = capacity / 3;
+    let others: Vec<PlayerId> = offer
+        .legal_seats
+        .iter()
+        .copied()
+        .filter(|seat| *seat != offer.preannounced)
+        .collect();
+    assert!(
+        others.len() > 1,
+        "reach-guard: the published split needs three announced seats; got {:?}",
+        offer.legal_seats
+    );
+    let split = [
+        (offer.preannounced, third),
+        (others[0], third),
+        (others[1], capacity - 2 * third),
+    ];
+
+    let window_opens = |count: u32, allocation: &[(PlayerId, u32)]| -> bool {
+        let mut probe = state.clone();
+        apply(
+            &mut probe,
+            offer.proposer,
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(count),
+                template: Some(f4_allocation_template(
+                    &schema,
+                    offer.proposer,
+                    count,
+                    allocation,
+                )),
+            },
+        )
+        .expect("a refused declaration is a HANDBACK, never an error");
+        matches!(probe.waiting_for, WaitingFor::RespondToShortcut { .. })
+    };
+
+    assert!(
+        window_opens(capacity, &split),
+        "CR 732.2a: the published ceiling is what SOME legal declaration may specify, and this \
+         one does — the paired positive that makes the absence below a discriminator rather than \
+         a board refusing everything. capacity={capacity} allocation={split:?}"
+    );
+
+    let over = [
+        (offer.preannounced, third),
+        (others[0], third),
+        (others[1], capacity + 1 - 2 * third),
+    ];
+    assert!(
+        !window_opens(capacity + 1, &over),
+        "CR 732.2a: the PER-OFFER CAPACITY arm refuses a count one above the ceiling this offer \
+         published — an in-proposal CR 704 crossing would decide what happens next — so no \
+         CR 732.2b window opens. capacity={capacity}"
+    );
+
+    // ── Hostile sibling: the OTHER conjunct. A count above the engine's own repetition budget is
+    //    refused by the budget arm, which wears no CR number because the budget is ours.
+    let over_budget = MAX_SHORTCUT_CYCLES_MIRROR + 1;
+    let budget_split = [
+        (offer.preannounced, third),
+        (others[0], third),
+        (others[1], over_budget - 2 * third),
+    ];
+    assert!(
+        !window_opens(over_budget, &budget_split),
+        "IMPLEMENTATION BUDGET BOUND: a count above the engine's own repetition budget is refused \
+         by the budget arm, not by the per-offer capacity arm"
+    );
+}
+
+/// Park the real F4 dump at an open CR 732.2b window over a TWO-SEGMENT declaration whose
+/// accepted count contains a predicted CR 704 crossing, returning that count and the repetition
+/// the crossing lands on. Built from the offer's own published numbers, never a transcribed pair.
+/// Each responder holds Relic of Progenitus ("{T}: Target player exiles a card from their
+/// graveyard."), so it has a game choice at every place it may name (CR 732.2b).
+pub(crate) fn f4_cascade_spanning_window() -> (GameState, u32, u32) {
+    use engine::game::interaction::resolve_interaction_response;
+
+    let mut state = load_f4();
+    let offer = f4_allocation_offer(&mut state);
+    crate::loop_shortcut::arm_responders(&mut state);
+    let (_proposer, certificate, _schema) = offer_parts(&state);
+    let per_cycle = certificate
+        .per_cycle
+        .as_ref()
+        .and_then(engine::analysis::resource::PeriodSignature::every_repetition)
+        .cloned()
+        .expect("a bounded offer publishes its per-period signature");
+    let crossing = offer.drivable_count;
+    let other = f4_other_victim(&offer);
+    let count = crossing + f4_headroom(&state, &per_cycle, other);
+    assert!(
+        crossing < count,
+        "reach-guard: the accepted count must CONTAIN the crossing, else it spans no cascade; \
+         crossing={crossing} count={count}"
+    );
+    // No Torch trigger is in flight at the offer, so the first seat's crossing is its own
+    // segment's last repetition.
+    let segments = [(offer.preannounced, crossing), (other, count - crossing)];
+    let action = resolve_interaction_response(
+        &state,
+        offer.proposer,
+        &f4_allocation_submission(&offer, count, &segments),
+    )
+    .expect("CR 732.2a: each segment ends on its own seat's crossing, so the ingress admits it");
+    apply(&mut state, offer.proposer, action).expect("the minted declaration is dispatched");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::RespondToShortcut { .. }),
+        "reach-guard: the CR 732.2b window must open, got {:?}",
+        state.waiting_for
+    );
+    (state, count, crossing)
+}
+
+/// CR 104.2a + CR 704.5b: no count wins on the F4 board (killing all three opponents takes 117
+/// repetitions and P0's library holds 88 cards), so the offer suggests the most repetitions its
+/// proposer survives: 88, aimed P1 → P2 → P3 at each crossing. Taking it eliminates P1 and P2,
+/// leaves P3 at 29 and P0 alive with an empty library.
+#[test]
+fn the_f4_offer_suggests_the_most_repetitions_its_proposer_survives() {
+    use engine::analysis::decision_template::{
+        AnnouncementSubject, PinnedDecision, Ranking, ReplayMode, TargetPin, TargetSchedule,
+    };
+
+    let mut state = f4_at_offer();
+    let (_, _, schema) = offer_parts(&state);
+    let schema = schema.clone();
+    let WaitingFor::LoopShortcut { declaration, .. } = &state.waiting_for else {
+        unreachable!();
+    };
+    let own = declaration
+        .clone()
+        .expect("the offer publishes its observation");
+    assert_eq!(
+        schema.deliverable_capacity, 88,
+        "reach-guard: the capacity counts the witness"
+    );
+    assert_eq!(
+        own.replay,
+        ReplayMode::Scheduled {
+            count: IterationCount::Fixed(37)
+        },
+        "reach-guard: the observation's own count is P1's crossing"
+    );
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(88));
+    let suggestion = schema
+        .suggested_declaration
+        .clone()
+        .expect("the offer publishes the witness as its suggestion");
+    assert_eq!(
+        suggestion.replay,
+        ReplayMode::Scheduled {
+            count: IterationCount::Fixed(88)
+        }
+    );
+    let seat = |s: PlayerId| Ranking::one(AnnouncementSubject::Seat(s));
+    assert!(suggestion.decisions.iter().any(|decision| matches!(
+        decision,
+        PinnedDecision::Targets { targets, .. }
+            if *targets == vec![TargetPin::Scheduled(TargetSchedule::Piecewise(vec![
+                (0, seat(P1)),
+                (37, seat(P2)),
+                (77, seat(P3)),
+            ]))]
+    )));
+    let ai = engine::ai_support::legal_actions(&state);
+    assert!(ai.contains(&GameAction::DeclareShortcut {
+        count: IterationCount::Fixed(88),
+        template: Some(suggestion),
+    }));
+
+    f4_accept_suggested(&mut state);
+    let out: Vec<bool> = state.players.iter().map(|p| p.is_eliminated).collect();
+    let lives: Vec<i32> = state.players.iter().map(|p| p.life).collect();
+    assert_eq!(out, vec![false, true, true, false]);
+    assert_eq!(lives[3], 29);
+    assert_eq!(state.library_of(P0).len(), 0);
+    assert!(!matches!(state.waiting_for, WaitingFor::GameOver { .. }));
+}
+
+/// CR 603.3d + CR 601.2c + CR 104.2a: with P3 gone, Human Torch's trigger has two legal targets,
+/// and once P1 leaves at 37 P2 is the only one, so the trigger takes it unasked. The recorded period
+/// still performs: 37 + 40 = 77 repetitions kill both opponents within P0's 88 cards.
+#[test]
+fn a_period_whose_target_set_shrinks_to_one_performs_past_the_shrink() {
+    let mut state = load_f4();
+    apply(&mut state, P3, GameAction::Concede { player_id: P3 }).expect("CR 104.3a: a concession");
+    drive_f4_to_offer(&mut state, 400).expect("reach-guard: the three-seat board still offers");
+    let (_, _, schema) = offer_parts(&state);
+    assert_eq!(
+        (
+            state.players.iter().map(|p| p.life).collect::<Vec<_>>()[..3].to_vec(),
+            state.library_of(P0).len()
+        ),
+        (vec![40, 37, 40], 88),
+        "reach-guard: the offer frame"
+    );
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(77));
+    assert_eq!(
+        schema.repetition_bound,
+        engine::analysis::decision_template::RepetitionBound::Measured,
+        "CR 104.2a: P2 leaving at 77 leaves P0 alone, so P0's library crossing at 89 never comes"
+    );
+    assert!(
+        schema.suggested_declaration.is_none(),
+        "the published declaration already reaches the count, so no suggestion is published"
+    );
+
+    let (proposer, _, _) = offer_parts(&state);
+    let mut state = declare_template_free(&state, proposer, 77);
+    assert!(
+        accept_all_opponents(&mut state) > 0,
+        "the respond window opens"
+    );
+    assert!(
+        matches!(
+            &state.waiting_for,
+            WaitingFor::GameOver { winner: Some(P0) }
+        ),
+        "{:?}",
+        state.waiting_for
+    );
+}
+
+/// AcceptSuggested with an empty `Targets` pin through the interaction ingress, then every
+/// opponent accepts.
+fn f4_accept_suggested(state: &mut GameState) {
+    use engine::game::interaction::resolve_interaction_response;
+    use engine::types::interaction::{
+        InteractionResponse, InteractionShortcutDecision, InteractionShortcutPin,
+        InteractionSubmission,
+    };
+
+    let offer = f4_allocation_offer(state);
+    let mut pins = offer.other_pins.clone();
+    pins.push(InteractionShortcutPin {
+        group: offer.target_group,
+        choice_ids: Vec::new(),
+        amounts: Vec::new(),
+    });
+    let action = resolve_interaction_response(
+        state,
+        offer.proposer,
+        &InteractionSubmission {
+            interaction_id: offer.interaction_id.clone(),
+            response: InteractionResponse::Shortcut {
+                decision: InteractionShortcutDecision::AcceptSuggested,
+                pins,
+            },
+        },
+    )
+    .expect("AcceptSuggested with an empty pin is admitted");
+    apply(state, offer.proposer, action).expect("the declaration is dispatched");
+    assert!(accept_all_opponents(state) > 0, "the respond window opens");
+}
+
+/// The F4 dump standing at its offer with P0's library holding `cards` there. The unmodified
+/// drive reaches the offer holding 88 and draws from the top, so the cut comes off the bottom.
+pub(crate) fn f4_library_at_offer(cards: usize) -> GameState {
+    let mut state = f4_library_cut(cards);
+    drive_f4_to_offer(&mut state, 400).expect("reach-guard: the cut board still offers");
+    assert_eq!(
+        state.library_of(P0).len(),
+        cards,
+        "reach-guard: library at the offer"
+    );
+    state
+}
+
+/// The undriven F4 dump with P0's library cut so that `cards` remain at the offer beat.
+fn f4_library_cut(cards: usize) -> GameState {
+    use engine::types::zones::Zone;
+    let mut state = load_f4();
+    let library = state.library_of(P0);
+    let cut: Vec<ObjectId> = library
+        .iter()
+        .skip(library.len() + cards - 88)
+        .copied()
+        .collect();
+    for id in cut {
+        engine::game::zones::move_to_zone(&mut state, id, Zone::Exile, &mut Vec::new());
+    }
+    state
+}
+
+/// CR 704.5b + CR 732.2a: with no card left at the offer beat, the proposer survives no
+/// repetition, so no shortcut is offered and the loop is played by hand until P0's next draw.
+#[test]
+fn a_proposer_who_survives_no_repetition_is_offered_no_shortcut() {
+    let mut state = f4_library_cut(0);
+    for _ in 0..400 {
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }),
+            "no offer is minted"
+        );
+        assert!(
+            !engine::ai_support::legal_actions(&state)
+                .iter()
+                .any(|action| matches!(action, GameAction::DeclareShortcut { .. })),
+            "the AI has no bounded declare candidate"
+        );
+        if f4_eliminated(&state, P0) || f4_drive_one_beat(&mut state).is_err() {
+            break;
+        }
+    }
+    assert!(
+        f4_eliminated(&state, P0),
+        "reach-guard: the hand-played loop reaches P0's draw from an empty library"
+    );
+}
+
+/// CR 121.1 + CR 704.5b: the paired control — one card left at the offer beat is one repetition
+/// offered, and taking it leaves P0 in the game.
+#[test]
+fn a_proposer_with_one_card_left_is_offered_one_repetition() {
+    let mut state = f4_library_at_offer(1);
+    let (_, _, schema) = offer_parts(&state);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(1));
+    let declares: Vec<GameAction> = engine::ai_support::legal_actions(&state)
+        .into_iter()
+        .filter(|action| matches!(action, GameAction::DeclareShortcut { .. }))
+        .collect();
+    let [declare @ GameAction::DeclareShortcut { count, .. }] = declares.as_slice() else {
+        panic!("the AI has one bounded declare candidate, got {declares:?}");
+    };
+    assert_eq!(*count, IterationCount::Fixed(1));
+    apply(&mut state, P0, declare.clone()).expect("the AI's candidate is dispatched");
+    assert!(
+        accept_all_opponents(&mut state) > 0,
+        "the respond window opens"
+    );
+    assert!(!f4_eliminated(&state, P0));
+    assert_eq!(state.library_of(P0).len(), 0);
+}
+
+/// CR 121.1 + CR 704.5b: with two cards left both replayed cycles come round, so the offer
+/// publishes its own declaration at 2, and taking the suggestion leaves P0 in the game.
+#[test]
+fn a_proposer_with_two_cards_left_is_offered_two_repetitions_on_the_published_declaration() {
+    let mut state = f4_library_at_offer(2);
+    let (_, _, schema) = offer_parts(&state);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(2));
+    assert_eq!(published_declaration_count(&state), 2);
+    f4_accept_suggested(&mut state);
+    assert!(!f4_eliminated(&state, P0));
+    assert_eq!(state.library_of(P0).len(), 0);
+}
+
+/// The F4 dump standing at its offer with P1 at 100 life there (37 on the unmodified drive).
+fn f4_p1_at_100_at_offer() -> GameState {
+    let mut state = f4_with_life(P1, |life| life + 63);
+    drive_f4_to_offer(&mut state, 400).expect("reach-guard: the edited board still offers");
+    assert_eq!(
+        f4_life(&state, P1),
+        100,
+        "reach-guard: P1's life at the offer"
+    );
+    state
+}
+
+/// CR 704.5b: Human Torch's controller draws once per repetition, so with 30 cards left the
+/// offer suggests 30, and taking it leaves P0 in the game with an empty library.
+#[test]
+fn a_library_shorter_than_the_cascade_bounds_the_suggestion_at_its_last_card() {
+    let mut state = f4_library_at_offer(30);
+    let (_, _, schema) = offer_parts(&state);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(30));
+    f4_accept_suggested(&mut state);
+    assert!(!f4_eliminated(&state, P0));
+    assert_eq!(state.library_of(P0).len(), 0);
+}
+
+/// CR 704.5b: with P1 at 100, P0's 88 cards run out before any opponent leaves, so the offer
+/// suggests 88 and taking it leaves P0 in the game.
+#[test]
+fn a_life_total_the_library_cannot_reach_bounds_the_suggestion_at_the_last_card() {
+    let mut state = f4_p1_at_100_at_offer();
+    let (_, _, schema) = offer_parts(&state);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(88));
+    f4_accept_suggested(&mut state);
+    assert!(!f4_eliminated(&state, P0));
+    assert_eq!(state.library_of(P0).len(), 0);
+}
+
+/// CR 704.5b: the AI's bounded declare candidate is the count its proposer survives.
+#[test]
+fn the_ai_declare_candidate_stops_at_the_proposers_last_card() {
+    let mut state = f4_library_at_offer(30);
+    let declares: Vec<GameAction> = engine::ai_support::legal_actions(&state)
+        .into_iter()
+        .filter(|action| matches!(action, GameAction::DeclareShortcut { .. }))
+        .collect();
+    let [declare @ GameAction::DeclareShortcut { count, .. }] = declares.as_slice() else {
+        panic!("the AI has one bounded declare candidate, got {declares:?}");
+    };
+    assert_eq!(*count, IterationCount::Fixed(30));
+    apply(&mut state, P0, declare.clone()).expect("the AI's candidate is dispatched");
+    assert!(
+        accept_all_opponents(&mut state) > 0,
+        "the respond window opens"
+    );
+    assert!(!f4_eliminated(&state, P0));
+}
+
+/// CR 704.5b: where no suggestion is published, the count the offer publishes is its own
+/// declaration's stamp, and that stamp is the last repetition the proposer survives.
+#[test]
+fn a_fallback_offer_publishes_its_own_declaration_at_the_count_the_proposer_survives() {
+    for (label, state, survived) in [
+        ("library 30", f4_library_at_offer(30), 30),
+        ("P1 at 100", f4_p1_at_100_at_offer(), 88),
+    ] {
+        let (_, _, schema) = offer_parts(&state);
+        assert!(
+            schema.suggested_declaration.is_none(),
+            "[{label}] reach-guard: the offer falls back to its own declaration"
+        );
+        assert_eq!(published_declaration_count(&state), survived, "[{label}]");
+        assert_eq!(
+            schema.iteration_count,
+            IterationCount::Fixed(survived),
+            "[{label}]"
+        );
+    }
+}
+
+/// CR 732.2b: a template-free declaration resolves to the offer's suggestion (its own declaration
+/// where it publishes none), and a responder reads a statement of it at the proposal's count — a
+/// schedule step that count never reaches is no part of it. Each seat's stated life line is what
+/// accepting the declaration does to it, at counts below a later step's start and exactly on one,
+/// and after an earlier responder shortened the suggestion below a later start.
+///
+/// # Discrimination
+///
+/// State the uncut schedule ⇒ below a later start (declared or shortened to) the responder reads
+/// no statement and the `expect` fails; at a start it reads a zero-length final segment, the last
+/// unresolved announcement is charged to the wrong seat, and the line equality fails by one
+/// repetition.
+#[test]
+fn a_template_free_declarations_responder_statement_is_what_the_take_does() {
+    use engine::analysis::decision_template::{PinnedDecision, TargetPin, TargetSchedule};
+    use engine::analysis::loop_check::ShortcutResponse;
+    use engine::game::interaction::bind_interaction_authority;
+    use engine::types::interaction::InteractionSessionId;
+
+    let weird = {
+        let mut state = crate::loop_shortcut_drain_boards::weird_drain_board();
+        crate::loop_shortcut_drain_boards::drive_to_live_declarable_offer(&mut state);
+        state
+    };
+    for (label, mut offer, suggests, counts, shortened_to) in [
+        ("F4", f4_at_offer(), true, &[37u32, 76, 87][..], Some(50)),
+        ("weird drain", weird, false, &[5, 30][..], None),
+    ] {
+        bind_interaction_authority(&mut offer, InteractionSessionId(label.into()))
+            .expect("valid interaction authority binding");
+        let WaitingFor::LoopShortcut {
+            proposer, schema, ..
+        } = &offer.waiting_for
+        else {
+            panic!("[{label}] the board stands at its CR 732.2a offer");
+        };
+        let (proposer, suggested) = (*proposer, published_suggestion(schema));
+        assert_eq!(
+            schema.suggested_declaration.is_some(),
+            suggests,
+            "[{label}] a suggestion is published only past the declaration's own count"
+        );
+        if let Some(suggestion) = schema.suggested_declaration.as_ref() {
+            let starts: Vec<u32> = suggestion
+                .decisions
+                .iter()
+                .find_map(|decision| match decision {
+                    PinnedDecision::Targets { targets, .. } => match targets.as_slice() {
+                        [TargetPin::Scheduled(TargetSchedule::Piecewise(steps))] => {
+                            Some(steps.iter().map(|(start, _)| *start).collect())
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("[{label}] the offer suggests a re-aiming schedule"));
+            assert!(
+                counts.iter().any(|k| starts.iter().any(|start| start > k))
+                    && counts.iter().any(|k| starts.contains(k))
+                    && shortened_to.is_some_and(|to| starts.iter().any(|start| *start > to)),
+                "[{label}] reach-guard: some count lies below a later step's start, some count is \
+                 exactly a start, and the shortened count lies below one; starts={starts:?} \
+                 counts={counts:?} shortened_to={shortened_to:?}"
+            );
+        }
+
+        let declared = counts
+            .iter()
+            .map(|&k| (k, declare_template_free(&offer, proposer, k)));
+        let shortened = shortened_to.map(|shortened_to| {
+            let mut state = declare_template_free(&offer, proposer, suggested);
+            let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for else {
+                panic!("[{label}] the suggestion opens the CR 732.2b window");
+            };
+            apply(
+                &mut state,
+                player,
+                GameAction::RespondToShortcut {
+                    response: ShortcutResponse::Shorten {
+                        at_iteration: shortened_to,
+                    },
+                },
+            )
+            .expect("CR 732.2b: a place inside the proposed sequence is a legal shortening");
+            (shortened_to, state)
+        });
+        for (k, mut state) in declared.chain(shortened) {
+            let WaitingFor::RespondToShortcut {
+                player: responder, ..
+            } = state.waiting_for
+            else {
+                panic!("[{label}] k={k}: the CR 732.2b window is open");
+            };
+            let element = f4_reply_at(&state, responder).declared.unwrap_or_else(|| {
+                panic!("[{label}] k={k}: the responder is stated the declaration")
+            });
+            assert_eq!(
+                element.count, k,
+                "[{label}] the statement is at the proposal's count"
+            );
+            let mut stated = f4_life_entries(&element);
+            stated.sort_unstable();
+
+            let before = life_by_seat(&state);
+            assert!(
+                accept_all_opponents(&mut state) > 0,
+                "[{label}] k={k}: every remaining opponent accepts"
+            );
+            let after = life_by_seat(&state);
+            let mut driven: Vec<(u8, i32)> = before
+                .iter()
+                .map(|(seat, life)| {
+                    let delta = life_of(&after, *seat) - life;
+                    (seat.0, i32::try_from(delta).expect("a life delta fits i32"))
+                })
+                .filter(|(_, delta)| *delta != 0)
+                .collect();
+            driven.sort_unstable();
+            assert!(
+                !driven.is_empty(),
+                "[{label}] k={k}: anti-vacuity: the take moves a life total"
+            );
+            assert_eq!(
+                stated, driven,
+                "[{label}] k={k}: CR 732.2a: the responder's per-seat lines are what the take does"
+            );
+        }
+    }
+}
+
+/// The verdict on each `Repeat` span the trace names at `state`'s offer frame, its offer set aside
+/// so the frame is the priority frame it was minted at.
+fn f4_offer_frame_repeat_verdicts(
+    state: &GameState,
+) -> Vec<Result<Vec<String>, engine::game::period_confirm::OfferRefusal>> {
+    let (proposer, _, _) = offer_parts(state);
+    let mut frame = state.clone();
+    frame.waiting_for = WaitingFor::Priority { player: proposer };
+    engine::game::period_confirm::confirm_for_tests(&frame)
+        .into_iter()
+        .filter(|(span, _)| span.cause == engine::game::NamingCause::Repeat)
+        .map(|(_, verdict)| verdict)
+        .collect()
+}
+
+/// The fodder-cover refusals among `verdicts`.
+fn fodder_refusals(
+    verdicts: &[Result<Vec<String>, engine::game::period_confirm::OfferRefusal>],
+) -> Vec<[Vec<engine::analysis::resource::FodderCoverRefusal>; 2]> {
+    use engine::analysis::resource::ObjectGrowthVerdict;
+    use engine::game::period_confirm::OfferRefusal;
+    verdicts
+        .iter()
+        .filter_map(|verdict| match verdict {
+            Err(OfferRefusal::Cover(ObjectGrowthVerdict::FodderGrowth(pairs))) => {
+                Some(pairs.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 121.1 + CR 603.2c + CR 702.3b + CR 732.2a: at the turn-5 draw-step offer frame the
+/// period's draw is put back (Human Torch's Power-up gate reads only this turn's entries), Mister
+/// Fantastic's batched records name moves already made, the Wall tokens' defender is read by no
+/// surface, and Human Torch's trigger on the stack reads Heroes, not Walls, so the fodder cover
+/// refuses no `Repeat` span.
+#[test]
+fn the_turn_five_draw_span_clears_the_fodder_cover() {
+    use engine::types::phase::Phase;
+    let state = f4_at_offer();
+    assert_eq!(
+        (state.turn_number, state.phase),
+        (5, Phase::Draw),
+        "reach: the offer stands in turn 5's draw step"
+    );
+    let verdicts = f4_offer_frame_repeat_verdicts(&state);
+    assert!(fodder_refusals(&verdicts).is_empty(), "{verdicts:?}");
+    assert!(
+        verdicts.iter().any(Result::is_ok),
+        "reach: a Repeat span confirms: {verdicts:?}"
+    );
+}
+
+/// Tolarian Kraken's Oracle text, verbatim from card data.
+const KRAKEN: &str =
+    "Whenever you draw a card, you may pay {1}. When you do, you may tap or untap target creature.";
+
+/// The F4 dump with Tolarian Kraken (4/6 Creature — Kraken) on P0's battlefield, built from its
+/// Oracle text.
+fn f4_with_kraken() -> (GameState, ObjectId) {
+    use engine::types::ability::PtValue;
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType};
+    use engine::types::identifiers::CardId;
+    use engine::types::zones::Zone;
+    let name = "Tolarian Kraken";
+    let parsed = engine::parser::parse_oracle_text(
+        KRAKEN,
+        name,
+        &[],
+        &["Creature".to_string()],
+        &["Kraken".to_string()],
+    );
+    let face = CardFace {
+        name: name.to_string(),
+        power: Some(PtValue::Fixed(4)),
+        toughness: Some(PtValue::Fixed(6)),
+        card_type: CardType {
+            supertypes: Vec::new(),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Kraken".to_string()],
+        },
+        oracle_text: Some(KRAKEN.to_string()),
+        triggers: parsed.triggers,
+        ..Default::default()
+    };
+    let mut state = load_f4();
+    let card_id = CardId(state.next_object_id);
+    let kraken = engine::game::zones::create_object(
+        &mut state,
+        card_id,
+        P0,
+        name.to_string(),
+        Zone::Battlefield,
+    );
+    engine::game::printed_cards::apply_card_face_to_object(
+        state.objects.get_mut(&kraken).expect("just created"),
+        &face,
+    );
+    engine::game::trigger_index::reindex_object_triggers(&mut state, kraken);
+    (state, kraken)
+}
+
+/// One beat of the F4 drive on the Kraken board: Kraken's "may pay {1}" is answered `accept`, its
+/// reflexive trigger taps Kraken, and a trigger batch is put on the stack in the order listed.
+/// Returns whether the beat answered Kraken's "may".
+fn kraken_beat(state: &mut GameState, kraken: ObjectId, accept: bool) -> bool {
+    let action = match &state.waiting_for {
+        WaitingFor::OptionalEffectChoice { source_id, .. } if *source_id == kraken => {
+            GameAction::DecideOptionalEffect { accept }
+        }
+        WaitingFor::TriggerTargetSelection {
+            source_id: Some(source_id),
+            ..
+        } if *source_id == kraken => GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(kraken)),
+        },
+        WaitingFor::ChooseOneOfBranch { source_id, .. } if *source_id == kraken => {
+            GameAction::ChooseBranch { index: 0 }
+        }
+        WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+            order: (0..triggers.len()).collect(),
+        },
+        _ => {
+            f4_drive_one_beat(state).expect("the F4 policy answers this beat");
+            return false;
+        }
+    };
+    let asked = matches!(action, GameAction::DecideOptionalEffect { .. });
+    let who = state.waiting_for.acting_player().expect("an acting player");
+    let actor = engine::game::turn_control::authorized_submitter_for_player(state, who);
+    apply(state, actor, action).expect("the Kraken beat is legal");
+    asked
+}
+
+/// The Kraken board driven to its offer, Kraken's "may" answered `accept`.
+fn kraken_at_offer(accept: bool) -> GameState {
+    let (mut state, kraken) = f4_with_kraken();
+    let mut asked = 0;
+    for _ in 0..400 {
+        if matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }) {
+            break;
+        }
+        asked += usize::from(kraken_beat(&mut state, kraken, accept));
+    }
+    assert!(asked > 0, "reach-guard: Kraken's trigger asked its \"may\"");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::LoopShortcut { .. }),
+        "reach-guard: the Kraken board offers"
+    );
+    state
+}
+
+/// CR 118.3 + CR 603.12 + CR 603.3b + CR 732.2a: paying Kraken's {1} each time it can be paid, P0
+/// stacks Kraken's trigger above Human Torch's, which takes its sole legal target once two
+/// opponents are gone; accepting an unpayable {1} does nothing and its "when you do" trigger never
+/// fires, so the offer counts the 87 cards left, not the repetition where Torch was not asked.
+#[test]
+fn a_kraken_paid_while_it_can_be_is_offered_the_library_it_draws_through() {
+    let mut state = kraken_at_offer(true);
+    assert_eq!(
+        state.library_of(P0).len(),
+        87,
+        "reach-guard: the offer frame"
+    );
+    let (_, _, schema) = offer_parts(&state);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(87));
+    f4_accept_suggested(&mut state);
+    assert_eq!(state.library_of(P0).len(), 0);
+    assert!(!f4_eliminated(&state, P0));
+}
+
+/// CR 603.5 + CR 732.2a: declining Kraken's "may" leaves the 88-card period's count.
+#[test]
+fn a_kraken_declined_is_offered_the_library_it_draws_through() {
+    let state = kraken_at_offer(false);
+    assert_eq!(
+        state.library_of(P0).len(),
+        88,
+        "reach-guard: the offer frame"
+    );
+    let (_, _, schema) = offer_parts(&state);
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(88));
 }

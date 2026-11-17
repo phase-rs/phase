@@ -28,7 +28,11 @@ pub fn resolve(
             // context-ref filters resolve via state slots, not controller.
             super::resolve_player_for_context_ref(state, ability, target),
         ),
-        _ => (1, ability.controller),
+        _ => (1, Some(ability.controller)),
+    };
+    // CR 608.2b: a declared player whose target was illegal does not surveil.
+    let Some(surveil_player) = surveil_player else {
+        return Ok(());
     };
 
     let player = state

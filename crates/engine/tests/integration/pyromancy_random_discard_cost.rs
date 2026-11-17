@@ -29,6 +29,8 @@ fn optional_graveyard_exile_replacement() -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::SelfRef,
@@ -132,6 +134,7 @@ fn pyromancy_snapshot_survives_a_discard_zone_replacement_pause() {
         .act(GameAction::ActivateAbility {
             source_id: pyromancy,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Pyromancy");
     runner

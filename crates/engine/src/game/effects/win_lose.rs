@@ -1,5 +1,5 @@
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, LossReason};
 use crate::types::game_state::GameState;
 
 use super::resolve_player_for_context_ref;
@@ -42,7 +42,10 @@ pub fn resolve_lose(
         // prior bespoke helper: it handles Controller, SelfRef-equivalent,
         // TriggeringPlayer (via event-context lookup), and the
         // `TargetFilter::Player` case by reading `ability.targets`.
-        Some(filter) => vec![resolve_player_for_context_ref(state, ability, filter)],
+        // CR 608.2b: a declared player whose target was illegal is not affected.
+        Some(filter) => resolve_player_for_context_ref(state, ability, filter)
+            .into_iter()
+            .collect(),
         None if ability.targets.is_empty() => {
             // No directed subject and no targets: controller loses
             // (e.g., "you lose the game").
@@ -77,7 +80,7 @@ pub fn resolve_lose(
             continue;
         }
         // CR 104.3e: A player who loses the game leaves the game.
-        eliminate_player(state, pid, events);
+        eliminate_player(state, pid, LossReason::EffectStatedLoss, events);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -88,7 +91,7 @@ pub fn resolve_lose(
     Ok(())
 }
 
-/// CR 104.2b + CR 104.3e: Resolve "win the game" — the winner's opponents lose.
+/// CR 104.2b + CR 104.1: Resolve "win the game" — the winner's opponents lose.
 ///
 /// Winner resolution (in priority order):
 /// 1. If `Effect::WinTheGame.target` names a context-ref subject, that
@@ -100,7 +103,7 @@ pub fn resolve_lose(
 ///    game" reading).
 ///
 /// After resolving the winner, all opponents of the winner are eliminated
-/// (CR 104.3e), unless the winner is under `CantWinTheGame` (CR 104.2b).
+/// (CR 104.1), unless the winner is under `CantWinTheGame` (CR 104.2b).
 pub fn resolve_win(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -116,9 +119,11 @@ pub fn resolve_win(
     // TriggeringPlayer, and `TargetFilter::Player` (consulting
     // `ability.targets`) in one call; absence of a filter falls back to the
     // controller (standard "you win the game" reading).
-    let winner = match target_filter {
+    let Some(winner) = (match target_filter {
         Some(filter) => resolve_player_for_context_ref(state, ability, filter),
-        None => ability.controller,
+        None => Some(ability.controller),
+    }) else {
+        return Ok(());
     };
 
     // CR 104.2b: CantWinTheGame blocks effect-based wins. If the winner is
@@ -136,14 +141,14 @@ pub fn resolve_win(
         return Ok(());
     }
 
-    // CR 104.2b + CR 104.3e: A player wins the game — all opponents lose.
+    // CR 104.2b + CR 104.1: A player wins the game — all opponents lose.
     let opponents: Vec<_> = players::opponents(state, winner)
         .into_iter()
         .filter(|&pid| players::is_alive(state, pid))
         .collect();
 
     for pid in opponents {
-        eliminate_player(state, pid, events);
+        eliminate_player(state, pid, LossReason::OpponentWon, events);
     }
 
     events.push(GameEvent::EffectResolved {

@@ -81,6 +81,7 @@ use super::mana_abilities::{
 };
 use super::mana_sources::{has_tap_component, mana_options_from_production};
 use super::replacement::{hypothetical_produced_mana_types, produced_mana_may_be_replaced};
+use super::restrictions::ability_usage_key;
 use super::triggers::{
     build_triggered_ability_from_context, check_trigger_condition_with_source,
     filter_binding_diverges, gate_binding_diverges, quantity_expr_binding_diverges,
@@ -513,8 +514,16 @@ fn resolution_entry_state<'a>(
         return (Cow::Borrowed(state), HypotheticalLedger::Live);
     };
     let mut scratch = state.clone();
-    if let HypotheticalEntry::Activation = entry {
-        let recorded = record_ability_activation(&mut scratch, root.source_id, ability_index, None);
+    // CR 602.5c: the activation tally is keyed per acquisition. A root built from
+    // its definition carries no announcement capture, so the gate's evaluator
+    // re-derives this same key; a slot that no longer resolves has no key and
+    // reads a count of 0 either way, so nothing is recorded for it.
+    let activation_key = match entry {
+        HypotheticalEntry::Activation => ability_usage_key(&scratch, root.source_id, ability_index),
+        HypotheticalEntry::Trigger => None,
+    };
+    if let Some(key) = activation_key {
+        let recorded = record_ability_activation(&mut scratch, key, None);
         // A replay-invariant mismatch cannot arise on a fresh copy of a valid
         // state. Should one ever appear, fail closed to the both-ways reading
         // rather than evaluate against a ledger the projection did not write.
@@ -1869,6 +1878,7 @@ mod tests {
             Effect::ChooseOneOf {
                 chooser: crate::types::ability::PlayerFilter::Controller,
                 branches: vec![branch_with_red_cost],
+                kind: crate::types::ability::ChooseOneOfKind::Ordinary,
             },
         );
         let mut state = main_phase_state();
@@ -2111,9 +2121,12 @@ mod tests {
             "no activation yet: the projected activation is the first"
         );
 
-        state.activated_abilities_this_turn.insert((land, 0), 1);
+        // CR 602.5c: the activation tally is keyed per acquisition.
+        let key = crate::game::restrictions::ability_usage_key(&state, land, 0)
+            .expect("reach-guard: the land's ability resolves to a usage key");
+        state.activated_abilities_this_turn.insert(key.clone(), 1);
         assert_eq!(
-            state.activated_abilities_this_turn.get(&(land, 0)).copied(),
+            state.activated_abilities_this_turn.get(&key).copied(),
             Some(1),
             "reach-guard: the ledger reads the stamped count"
         );
@@ -2419,7 +2432,7 @@ mod tests {
             runner.activate(seeker, 0).target_object(seeker).resolve();
         }
         for player in &mut runner.state_mut().players {
-            player.mana_pool.mana.clear();
+            player.mana_pool.clear();
         }
         let state = runner.state_mut();
         state.priority_player = P0;
@@ -2495,6 +2508,7 @@ mod tests {
             .act(crate::types::actions::GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("reach-guard: the mana ability is activatable");
         let prompt = match runner.state().waiting_for.clone() {

@@ -6,10 +6,11 @@ use crate::game::combat::AttackTarget;
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef,
-    Effect, EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ReplacementMode, ResolvedAbility, TapStateChange, TargetFilter,
-    TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChooseOneOfKind, Comparator,
+    ControllerRef, Effect, EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr,
+    QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility, TapStateChange,
+    TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -66,6 +67,8 @@ fn hand_to_battlefield_choice_ability(
 ) -> ResolvedAbility {
     ResolvedAbility::new(
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin: Some(Zone::Hand),
             destination: Zone::Battlefield,
             target: TargetFilter::Any,
@@ -864,7 +867,7 @@ fn issue_1243_end_step_may_pay_trigger_accept_pays_and_resolves_reflexive() {
         "paying {{1}} must place one +1/+1 counter on the lone Shrine"
     );
     assert_eq!(
-        state.players[0].mana_pool.mana.len(),
+        state.players[0].mana_pool.total(),
         0,
         "the {{1}} must actually be paid on accept"
     );
@@ -2019,9 +2022,10 @@ fn card_name_choice_validates_against_all_card_names() {
     let mut state = GameState::new_two_player(42);
     state.all_card_names = vec!["Lightning Bolt".to_string(), "Counterspell".to_string()].into();
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -2038,9 +2042,10 @@ fn card_name_choice_validates_against_all_card_names() {
 
     // Reset state for invalid test
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -2061,9 +2066,10 @@ fn card_name_choice_is_case_insensitive() {
     let mut state = GameState::new_two_player(42);
     state.all_card_names = vec!["Lightning Bolt".to_string()].into();
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: PlayerId(0),
-        choice_type: crate::types::ability::ChoiceType::CardName,
+        choice_type: crate::types::ability::ChoiceType::card_name(),
         options: Vec::new(),
         source: None,
         persist_player: None,
@@ -2112,6 +2118,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
     ability.sub_ability = Some(Box::new(draw));
 
     state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
+        parked_poll: None,
         ability: Box::new(ability),
         trigger_event: None,
         trigger_events: Vec::new(),
@@ -2166,6 +2173,7 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
     ability.sub_ability = Some(Box::new(draw_that_many(source_id, PlayerId(1))));
 
     state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
+        parked_poll: None,
         ability: Box::new(ability),
         trigger_event: None,
         trigger_events: Vec::new(),
@@ -2227,6 +2235,8 @@ fn unless_payment_decline_preserves_nested_effect_zone_choice_continuation() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2305,6 +2315,8 @@ fn static_prison_unless_pay_sacrifice_returns_exiled_permanent() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 
     apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2375,6 +2387,8 @@ fn unless_pay_success_runs_if_a_player_does_sub_ability() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2464,6 +2478,8 @@ fn unless_pay_success_sub_ability_fires_triggers_from_events() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2569,6 +2585,8 @@ fn unless_pay_resolution_choice_defers_branch_triggers() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
@@ -2650,6 +2668,8 @@ fn unless_pay_decline_runs_primary_not_if_a_player_does_sub() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2694,6 +2714,8 @@ fn unless_pay_success_with_no_sub_ability_is_inert() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2754,6 +2776,8 @@ fn unless_pay_success_clears_stale_cost_payment_failed_flag() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 
     let starting_life = state.players[0].life;
@@ -2795,6 +2819,8 @@ fn unless_energy_payment_deducts_energy_and_skips_effect() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
@@ -2857,6 +2883,8 @@ fn unless_discard_payment_filters_eligible_hand_cards() {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
+        repeat: None,
     };
 
     let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
@@ -2970,6 +2998,7 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         Zone::Battlefield,
     );
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![obj_id],
         count: 1,
@@ -2987,10 +3016,12 @@ fn effect_zone_choice_handler_resolves_sacrifice_and_continuation() {
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -3048,6 +3079,7 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
     }
 
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![chosen_land, unchosen_land],
         count: 2,
@@ -3065,10 +3097,12 @@ fn effect_zone_choice_handler_resolves_untap_selection() {
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -3101,6 +3135,7 @@ fn effect_zone_choice_up_to_respects_min_count() {
         Zone::Battlefield,
     );
     state.waiting_for = WaitingFor::EffectZoneChoice {
+        performed_by: None,
         player: PlayerId(0),
         cards: vec![obj_id],
         count: 1,
@@ -3118,10 +3153,12 @@ fn effect_zone_choice_up_to_respects_min_count() {
         track_exiled_by_source: false,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         face_down_profile: None,
+        with_entry_effect: None,
         enter_with_counters: vec![],
         conditional_enter_with_counters: vec![],
         count_param: 0,
         library_position: None,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         mass_library_order: None,
         is_cost_payment: false,
         enters_modified_if: None,
@@ -3142,6 +3179,7 @@ fn choose_one_of_enters_branch_choice_state() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![draw_ability(1), draw_ability(2)],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3191,6 +3229,7 @@ fn choose_one_of_branch_resolves_selected_branch_with_original_controller() {
         continuation: None,
         replacement_applied: Default::default(),
         remaining_players: vec![],
+        trigger_context: None,
     };
 
     apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
@@ -3224,6 +3263,7 @@ fn choose_one_of_each_opponent_prompts_apnap_and_branch_targets_faced_player() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![branch_target_player_loses_life.clone(), draw_ability(1)],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3317,6 +3357,7 @@ fn choose_one_of_scoped_player_sacrifice_prompts_faced_opponent() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![sacrifice_branch, draw_ability(1)],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3372,6 +3413,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -3381,6 +3423,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![sacrifice_branch, token_branch],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3499,6 +3542,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     let effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: crate::types::ability::ChoiceType::BasicLandType,
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -3549,6 +3593,7 @@ fn choose_option_with_exact_source_stores_chosen_attribute() {
 
     // Set up an exact-object prompt (simulating a persist=true Choose).
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: PlayerId(0),
         choice_type: ChoiceType::color(),
@@ -3623,7 +3668,8 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     let resolve = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
-    assert!(state.battlefield.contains(&siege_id));
+    // CR 614.12a: the anchor word is chosen before the Siege enters.
+    assert!(!state.battlefield.contains(&siege_id));
     match resolve.waiting_for {
         WaitingFor::NamedChoice {
             free_entry: None,
@@ -3636,7 +3682,7 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
             assert_eq!(source.prompt.identity.reference.object_id, siege_id);
             assert_eq!(
                 source.binding,
-                crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+                crate::types::game_state::NamedChoiceSourceBinding::PendingEntry
             );
             assert_eq!(options, &vec!["Temur".to_string(), "Sultai".to_string()]);
         }
@@ -3651,6 +3697,7 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
     )
     .unwrap();
 
+    assert!(state.battlefield.contains(&siege_id));
     assert_eq!(state.objects[&siege_id].chosen_label(), Some("Temur"));
 }
 
@@ -3661,6 +3708,7 @@ fn restricted_color_choice_rejects_excluded_color() {
 
     let mut state = GameState::new_two_player(42);
     state.waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: PlayerId(0),
         choice_type: ChoiceType::color_excluding(vec![ManaColor::White]),
@@ -4571,6 +4619,8 @@ fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
         let reflexive = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: None,
                 destination: Zone::Exile,
                 target: TargetFilter::ParentTarget,
@@ -4766,6 +4816,8 @@ fn reflexive_when_you_do_fires_after_become_copy_replacement() {
             ..crate::types::ability::AbilityDefinition::new(
                 crate::types::ability::AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: None,
                     destination: Zone::Exile,
                     target: TargetFilter::ParentTarget,

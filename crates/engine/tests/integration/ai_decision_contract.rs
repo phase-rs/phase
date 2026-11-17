@@ -4,8 +4,8 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
-    AdditionalCostRepeatability, Effect, EffectKind, QuantityExpr, ResolvedAbility, TargetFilter,
-    TargetRef, TypeFilter, TypedFilter,
+    AdditionalCostRepeatability, ControllerRef, Effect, EffectKind, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -332,7 +332,10 @@ fn decision_contract_validates_a_target_before_a_dynamically_empty_optional_tail
     pending_cast.target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];
     let mut trailing_ability = ResolvedAbility::new(
         Effect::TargetOnly {
-            target: TargetFilter::SpecificPlayer { id: PlayerId(0) },
+            target: TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::SpecificPlayer { id: PlayerId(0) }),
+            ),
         },
         Vec::new(),
         pending_cast.ability.source_id,
@@ -431,6 +434,7 @@ fn decision_contract_keeps_reducer_completable_final_activation_targets() {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activation must reach its final target prompt");
@@ -556,7 +560,7 @@ fn decision_contract_filters_optional_cost_that_leaves_no_legal_targets() {
         matches!(
             apply_as_current(
                 &mut state.clone(),
-                GameAction::DecideOptionalCost { pay: false },
+                GameAction::DecideOptionalCost { index: 1 },
             ),
             Err(EngineError::ActionNotAllowed(message))
                 if message == "No legal targets available"
@@ -569,7 +573,7 @@ fn decision_contract_filters_optional_cost_that_leaves_no_legal_targets() {
         contract.candidates.iter().any(|candidate| {
             matches!(
                 candidate.action,
-                GameAction::DecideOptionalCost { pay: true }
+                GameAction::DecideOptionalCost { index: 0 }
             )
         }),
         "the target-enabling kicker payment must be issued"
@@ -578,7 +582,7 @@ fn decision_contract_filters_optional_cost_that_leaves_no_legal_targets() {
         !contract.candidates.iter().any(|candidate| {
             matches!(
                 candidate.action,
-                GameAction::DecideOptionalCost { pay: false }
+                GameAction::DecideOptionalCost { index: 1 }
             )
         }),
         "the targetless declining choice must not be issued"

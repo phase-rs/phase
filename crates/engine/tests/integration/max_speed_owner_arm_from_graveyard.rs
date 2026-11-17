@@ -93,6 +93,7 @@ fn activated_from_graveyard(
     let _ = runner.act(GameAction::ActivateAbility {
         source_id: surveyor,
         ability_index: index,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     runner.state().objects[&surveyor].zone == Zone::Exile
 }

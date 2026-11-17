@@ -1,7 +1,8 @@
+import type { ParseKeys } from "i18next";
 import type { DraftPoolGroupKind } from "../../adapter/draft-adapter";
 
 /** Translation keys for the engine-defined limited-pool group categories. */
-export const POOL_GROUP_LABEL_KEYS: Record<DraftPoolGroupKind, string> = {
+export const POOL_GROUP_LABEL_KEYS = {
   white: "pool.groups.white",
   blue: "pool.groups.blue",
   black: "pool.groups.black",
@@ -29,4 +30,4 @@ export const POOL_GROUP_LABEL_KEYS: Record<DraftPoolGroupKind, string> = {
   mana_value4: "pool.groups.manaValue4",
   mana_value5: "pool.groups.manaValue5",
   mana_value6_plus: "pool.groups.manaValue6Plus",
-};
+} as const satisfies Record<DraftPoolGroupKind, ParseKeys<"draft">>;

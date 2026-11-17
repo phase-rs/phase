@@ -1,3 +1,4 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
 use crate::game::quantity::resolve_quantity_with_targets;
@@ -32,7 +33,9 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("ExileFaceDownPile".to_string())),
     };
 
-    let player = super::resolve_player_for_context_ref(state, ability, &player_filter);
+    let Some(player) = super::resolve_player_for_context_ref(state, ability, &player_filter) else {
+        return Ok(());
+    };
     let source_object = resolve_pile_object(state, ability, &object);
     let seat = state
         .players
@@ -111,7 +114,7 @@ pub(crate) fn complete_exile_face_down_pile_delivery(
     if fully_exiled {
         // CR 701.24a: The face-down pile, not the library, is shuffled. The
         // resulting vector is its exact top-to-bottom return order.
-        members.shuffle(&mut state.rng);
+        members.shuffle(state.rng.draw(RandomDraw::Placement));
         for id in &members {
             state
                 .objects
@@ -302,6 +305,8 @@ mod tests {
                     .execute(AbilityDefinition::new(
                         AbilityKind::Spell,
                         Effect::ChangeZone {
+                            actor: crate::types::ability::LibraryInstructionActor::Controller,
+                            library_shuffle: Default::default(),
                             origin: None,
                             destination: Zone::Exile,
                             target: TargetFilter::Any,

@@ -9,6 +9,14 @@
 //! [`directory`] shares that same no-I/O constraint: it is the server-directory
 //! contract both shells (and, later, the client's TypeScript mirror) apply.
 
+mod protocol_versions {
+    include!(concat!(env!("OUT_DIR"), "/protocol_versions.rs"));
+}
+
+#[cfg(test)]
+#[path = "../build.rs"]
+mod protocol_registry;
+
 pub mod broker;
 pub mod directory;
 pub mod env;
@@ -16,13 +24,15 @@ pub mod inbound_guard;
 pub mod lobby;
 pub mod protocol;
 pub mod reservation_auth;
+pub mod snapshot_codec;
 pub mod tournament;
 pub mod validation;
 
 pub use broker::{
     check_build_commit, lobby_frame_for_viewer, lobby_frame_json_for_viewer, lobby_row_visible_to,
-    row_delivery, Broker, BuildCommitCheck, ClientHelloInfo, ConnState, Outbound, ReapOutcome,
-    RowDelivery, RowDelta, MAX_LOBBY_ENTRIES,
+    row_delivery, Broker, BuildCommitCheck, ClientHelloInfo, ConnState, Handled, Outbound,
+    PersistedChange, ReapOutcome, RowDelivery, RowDelta, MAX_LOBBY_ENTRIES,
+    MAX_SNAPSHOT_ENCODED_BYTES, SNAPSHOT_STORAGE_KEY,
 };
 pub use directory::{
     compare_announcement_to_info, info_url, normalize_announced_url, score, validate_announcement,

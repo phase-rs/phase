@@ -220,6 +220,7 @@ export function loadScryfallData(): Promise<ScryfallDataMap | null> {
       const foldedNameIndex = buildFoldedNameIndex(data);
       scryfallDataResolved = data;
       scryfallFoldedNameIndex = foldedNameIndex;
+      notifyOwnerArtReadiness();
       return data;
     })()
       .catch(() => null);
@@ -241,6 +242,7 @@ export function loadPrintingsData(): Promise<PrintingsDataMap | null> {
       const data: unknown = await response.json();
       if (!isPrintingsDataMap(data)) return null;
       printingsDataResolved = data;
+      notifyOwnerArtReadiness();
       return data;
     })()
       .catch(() => null);
@@ -377,6 +379,7 @@ export function loadLocaleArt(lang: string): Promise<Map<string, LocalizedArtEnt
   desiredArtLang = lang;
   if (lang === "en") {
     localeArtResolved = null;
+    notifyOwnerArtReadiness();
     return Promise.resolve(new Map<string, LocalizedArtEntry>());
   }
   let promise = localeArtPromises.get(lang);
@@ -394,7 +397,10 @@ export function loadLocaleArt(lang: string): Promise<Map<string, LocalizedArtEnt
     localeArtPromises.set(lang, promise);
   }
   return promise.then((map) => {
-    if (desiredArtLang === lang) localeArtResolved = { lang, map };
+    if (desiredArtLang === lang) {
+      localeArtResolved = { lang, map };
+      notifyOwnerArtReadiness();
+    }
     return map;
   });
 }
@@ -407,10 +413,12 @@ export function hasAlternatePrintingsSync(oracleId: string): boolean {
   return nonList.length > 1;
 }
 
+function printingsForOracle(data: PrintingsDataMap | null, oracleId: string): PrintingEntry[] {
+  return (data?.[oracleId] ?? []).filter((printing) => printing.set !== "plst");
+}
+
 export async function getCardPrintings(oracleId: string): Promise<PrintingEntry[]> {
-  const data = await loadPrintingsData();
-  const printings = data?.[oracleId] ?? [];
-  return printings.filter((p) => p.set !== "plst");
+  return printingsForOracle(await loadPrintingsData(), oracleId);
 }
 
 export async function getCardPrintingsByName(cardName: string): Promise<PrintingEntry[]> {
@@ -619,8 +627,11 @@ export function deriveImageUrl(url: string, size: ImageSize): string {
  * cache-buster and means nothing for a different Scryfall object. Omitting it
  * costs only the ability to notice a re-scan of that art.
  */
-function localizeImageUrl(url: string): string {
-  if (!localeArtResolved) return url;
+function localizeImageUrl(
+  url: string,
+  localeMap: Map<string, LocalizedArtEntry> | null = localeArtResolved?.map ?? null,
+): string {
+  if (!localeMap) return url;
   const parsed = splitSizedImageUrl(url);
   if (!parsed) return url;
   // segments: [host, size, face, id[0], id[1], "<id>.jpg?<timestamp>"]
@@ -628,7 +639,7 @@ function localizeImageUrl(url: string): string {
   // A UUID contains no `.`, so the first dot always ends the id.
   const dot = filename.indexOf(".");
   if (dot < 0) return url;
-  const localized = localeArtResolved.map.get(filename.slice(0, dot));
+  const localized = localeMap.get(filename.slice(0, dot));
   if (!localized) return url;
   const faceIndex = parsed.segments[2] === "back" ? 1 : 0;
   const face = localized.faces[faceIndex] ?? localized.faces[0];
@@ -654,6 +665,7 @@ function localizeImageUrl(url: string): string {
 function localFaceImageUrl(
   face: ScryfallImageFace | undefined,
   size: ImageSize,
+  localeMap: Map<string, LocalizedArtEntry> | null = localeArtResolved?.map ?? null,
 ): string | undefined {
   if (!face) return undefined;
   // Localization is applied here, at the single funnel every stored-URL path
@@ -662,13 +674,13 @@ function localFaceImageUrl(
   // commute — `deriveImageUrl` rewrites segment 1, `localizeImageUrl` rewrites
   // segments 3-5 — so the order below is immaterial.
   if (size === "art_crop") {
-    return face.art_crop ? localizeImageUrl(face.art_crop) : undefined;
+    return face.art_crop ? localizeImageUrl(face.art_crop, localeMap) : undefined;
   }
   if (size === "small") {
     const url = face.small ?? (face.normal ? deriveImageUrl(face.normal, "small") : undefined);
-    return url ? localizeImageUrl(url) : undefined;
+    return url ? localizeImageUrl(url, localeMap) : undefined;
   }
-  return face.normal ? localizeImageUrl(face.normal) : undefined;
+  return face.normal ? localizeImageUrl(face.normal, localeMap) : undefined;
 }
 
 export interface CardImageAsset {
@@ -873,12 +885,16 @@ function buildFoldedNameIndex(data: ScryfallDataMap): Map<string, string> {
   return index;
 }
 
-function resolveNameLookupKey(name: string): string {
+function resolveNameLookupKey(
+  name: string,
+  data: ScryfallDataMap | null = scryfallDataResolved,
+  foldedIndex: Map<string, string> | null = scryfallFoldedNameIndex,
+): string {
   const normalized = normalizeCardName(name).toLowerCase();
-  if (!scryfallDataResolved) return normalized;
-  if (scryfallDataResolved[normalized]) return normalized;
+  if (!data) return normalized;
+  if (data[normalized]) return normalized;
   const folded = foldDiacritics(normalized);
-  const foldedHit = scryfallFoldedNameIndex?.get(folded);
+  const foldedHit = foldedIndex?.get(folded);
   if (foldedHit) return foldedHit;
   // A combined multi-face name ("Front // Back", a hand-typed glued
   // "Front//Back", or a single-slash "Front/Back") is not itself an export key —
@@ -893,17 +909,20 @@ function resolveNameLookupKey(name: string): string {
   if (normalized.includes(separator)) {
     const frontFace = normalized.split(separator)[0].trim();
     if (frontFace && frontFace !== normalized) {
-      if (scryfallDataResolved[frontFace]) return frontFace;
-      const frontFolded = scryfallFoldedNameIndex?.get(foldDiacritics(frontFace));
+      if (data[frontFace]) return frontFace;
+      const frontFolded = foldedIndex?.get(foldDiacritics(frontFace));
       if (frontFolded) return frontFolded;
     }
   }
   return normalized;
 }
 
-function lookupEntryByName(name: string): ScryfallDataEntry | undefined {
-  if (!scryfallDataResolved) return undefined;
-  return scryfallDataResolved[resolveNameLookupKey(name)];
+function lookupEntryByName(
+  name: string,
+  data: ScryfallDataMap | null = scryfallDataResolved,
+  foldedIndex: Map<string, string> | null = scryfallFoldedNameIndex,
+): ScryfallDataEntry | undefined {
+  return data?.[resolveNameLookupKey(name, data, foldedIndex)];
 }
 
 export async function fetchCardData(cardName: string): Promise<ScryfallCard> {
@@ -1396,4 +1415,310 @@ export function getCardImageSmall(card: ScryfallCard): string {
   return card.image_uris?.small
     ?? card.card_faces?.[0]?.image_uris?.small
     ?? "";
+}
+
+export interface OwnerArtLookup {
+  cardName: string;
+  oracleId?: string;
+  faceName?: string;
+  faceIndex: number;
+  language?: string;
+  offline: boolean;
+}
+
+export interface OwnerArtAuthority {
+  key: string;
+  oracleId: string | null;
+  faceIndex: number;
+  printings: PrintingEntry[] | null;
+  isRotated: boolean;
+  isFlip: boolean;
+}
+
+export interface OwnerArtCatalogReader {
+  read(input: OwnerArtLookup): OwnerArtAuthority;
+  prepare(input: OwnerArtLookup): Promise<void>;
+  prepareLocale(language: string, offline: boolean): Promise<void>;
+  imageUrl(printing: PrintingEntry, faceIndex: number, size: ImageSize, language: string): string | null;
+  subscribe(listener: () => void | Promise<void>): () => void;
+  release(): void;
+}
+
+const ownerArtListeners = new Set<() => void | Promise<void>>();
+
+function notifyOwnerArtReadiness(): void {
+  if (scryfallDataResolved) {
+    ownerMain.snapshot = null;
+    ownerIndexedMain = null;
+    ownerFoldedIndex = null;
+  }
+  if (printingsDataResolved) ownerPrintings.snapshot = null;
+  if (localeArtResolved) {
+    const resource = ownerLocales.get(localeArtResolved.lang);
+    if (resource) resource.snapshot = null;
+    ownerLocales.delete(localeArtResolved.lang);
+  }
+  for (const listener of ownerArtListeners) {
+    try {
+      void Promise.resolve(listener()).catch(() => {});
+    } catch {
+      // Observers cannot change canonical loader success or block later observers.
+    }
+  }
+}
+
+type OwnerAcquisitionOutcome = "ready" | "cache-only" | "unavailable" | "discarded";
+
+interface OwnerResource<T> {
+  snapshot: T | null;
+  pending: Promise<OwnerAcquisitionOutcome> | null;
+  consumers: Map<object, () => boolean>;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+}
+
+const OWNER_ART_IDLE_GRACE_MS = 2000;
+
+function emptyOwnerResource<T>(): OwnerResource<T> {
+  return { snapshot: null, pending: null, consumers: new Map(), idleTimer: null };
+}
+
+const ownerMain = emptyOwnerResource<ScryfallDataMap>();
+const ownerPrintings = emptyOwnerResource<PrintingsDataMap>();
+const ownerLocales = new Map<string, OwnerResource<Map<string, LocalizedArtEntry>>>();
+const ownerSnapshotIds = new WeakMap<object, number>();
+let nextOwnerSnapshotId = 0;
+let ownerIndexedMain: ScryfallDataMap | null = null;
+let ownerFoldedIndex: Map<string, string> | null = null;
+
+function ownerSnapshotId(snapshot: object | null): number {
+  if (!snapshot) return 0;
+  let id = ownerSnapshotIds.get(snapshot);
+  if (id === undefined) {
+    id = ++nextOwnerSnapshotId;
+    ownerSnapshotIds.set(snapshot, id);
+  }
+  return id;
+}
+
+function hasOnlineOwnerConsumer<T>(resource: OwnerResource<T>): boolean {
+  for (const canFetch of resource.consumers.values()) {
+    if (canFetch()) return true;
+  }
+  return false;
+}
+
+function retainOwnerResource<T>(
+  resource: OwnerResource<T>,
+  consumer: object,
+  canFetch: () => boolean,
+  onIdle: () => void,
+): () => void {
+  if (resource.idleTimer !== null) {
+    clearTimeout(resource.idleTimer);
+    resource.idleTimer = null;
+  }
+  resource.consumers.set(consumer, canFetch);
+  return () => {
+    if (!resource.consumers.delete(consumer) || resource.consumers.size > 0) return;
+    resource.idleTimer = setTimeout(() => {
+      resource.idleTimer = null;
+      if (resource.consumers.size > 0) return;
+      resource.snapshot = null;
+      onIdle();
+    }, OWNER_ART_IDLE_GRACE_MS);
+  };
+}
+
+async function prepareOwnerResource<T>(
+  resource: OwnerResource<T>,
+  url: string,
+  offline: boolean,
+  resident: () => T | null,
+  parse: (value: unknown) => T | null,
+): Promise<void> {
+  if (resident()) {
+    resource.snapshot = null;
+    return;
+  }
+  if (resource.snapshot || resource.consumers.size === 0) return;
+  if (resource.pending) {
+    const outcome = await resource.pending;
+    if (
+      (outcome === "cache-only" && !offline && hasOnlineOwnerConsumer(resource)
+        || outcome === "discarded" && resource.consumers.size > 0)
+      && !resource.snapshot && !resident()
+    ) {
+      await prepareOwnerResource(resource, url, offline, resident, parse);
+    }
+    return;
+  }
+  const pending = (async (): Promise<OwnerAcquisitionOutcome> => {
+    let snapshot: T | null = null;
+    let networkAttempted = false;
+    try {
+      const cached = await globalThis.caches?.match(url);
+      if (resource.consumers.size === 0) return "discarded";
+      if (cached?.ok) snapshot = parse(await cached.json());
+    } catch {
+      // CacheStorage may be unavailable or denied. Reads never create a bucket.
+    }
+    if (!snapshot && !offline && hasOnlineOwnerConsumer(resource) && !resident()) {
+      networkAttempted = true;
+      try {
+        const privateUrl = new URL(url, globalThis.location?.href ?? "http://localhost/");
+        privateUrl.searchParams.set("phase-owner-art", "1");
+        const response = await fetch(privateUrl.href, { cache: "no-store" });
+        if (resource.consumers.size === 0) return "discarded";
+        if (response.ok) snapshot = parse(await response.json());
+      } catch {
+        // A failed online attempt is retryable only on a new meaningful attempt.
+      }
+    }
+    if (resident()) {
+      resource.snapshot = null;
+      return "ready";
+    }
+    if (resource.consumers.size === 0) return "discarded";
+    if (!snapshot) return networkAttempted ? "unavailable" : "cache-only";
+    resource.snapshot = snapshot;
+    notifyOwnerArtReadiness();
+    return "ready";
+  })();
+  resource.pending = pending;
+  try {
+    await pending;
+  } finally {
+    if (resource.pending === pending) resource.pending = null;
+  }
+}
+
+/**
+ * Owner admission reads resident canonical snapshots or isolated private snapshots.
+ * It never starts/joins canonical loaders, writes their caches, or revalidates
+ * persistent metadata. Cold online resources use a query-separated no-store URL;
+ * offline resources use CacheStorage.match only. One private resource is shared
+ * across mounts; canonical readiness supersedes and releases private duplicates.
+ * Each reader retains its prepared resources until release(); its current locale
+ * replaces the previous locale lease. Last-consumer release keeps settled data
+ * for 2000 ms to cover rapid remounts/toggles, then drops snapshots, name indexes
+ * and unused locale entries. In-flight completions with no consumers are discarded.
+ * Online callers joining a cache-only miss coalesce one online acquisition;
+ * failed online attempts do not automatically retry. Network permission is checked
+ * against live consumers immediately before fetch, including caller connectivity.
+ */
+export function createOwnerArtCatalogReader(canFetchNetwork: () => boolean = () => true): OwnerArtCatalogReader {
+  const consumer = {};
+  const leases = new Map<object, () => void>();
+  let offline = true;
+  let localeLease: object | null = null;
+  const retain = <T>(resource: OwnerResource<T>, onIdle: () => void) => {
+    if (!leases.has(resource)) {
+      leases.set(resource, retainOwnerResource(resource, consumer, () => !offline && canFetchNetwork(), onIdle));
+    }
+  };
+  const mainSnapshot = () => {
+    if (scryfallDataResolved) {
+      ownerMain.snapshot = null;
+      ownerIndexedMain = null;
+      ownerFoldedIndex = null;
+      return scryfallDataResolved;
+    }
+    return ownerMain.snapshot;
+  };
+  const catalogSnapshot = () => {
+    if (printingsDataResolved) ownerPrintings.snapshot = null;
+    return printingsDataResolved ?? ownerPrintings.snapshot;
+  };
+  const localeSnapshot = (language: string) => {
+    if (language === "en") return null;
+    if (localeArtResolved?.lang === language) {
+      const resource = ownerLocales.get(language);
+      if (resource) resource.snapshot = null;
+      ownerLocales.delete(language);
+      return localeArtResolved.map;
+    }
+    return ownerLocales.get(language)?.snapshot ?? null;
+  };
+  return {
+    read(input) {
+      const main = mainSnapshot();
+      const catalog = catalogSnapshot();
+      let index = scryfallFoldedNameIndex;
+      if (!input.oracleId && main && main !== scryfallDataResolved) {
+        if (ownerIndexedMain !== main) {
+          ownerIndexedMain = main;
+          ownerFoldedIndex = buildFoldedNameIndex(main);
+        }
+        index = ownerFoldedIndex;
+      }
+      const oracleId = input.oracleId
+        ? input.oracleId.toLowerCase()
+        : lookupEntryByName(input.cardName, main, index)?.oracle_id.toLowerCase() ?? null;
+      const entry = oracleId ? main?.[oracleId] : undefined;
+      const namedFace = input.faceName ? entry?.face_names.indexOf(input.faceName.toLowerCase()) : undefined;
+      const faceIndex = namedFace !== undefined && namedFace >= 0 ? namedFace : input.faceIndex;
+      return {
+        key: JSON.stringify([oracleId, faceIndex, ownerSnapshotId(main), ownerSnapshotId(catalog),
+          ownerSnapshotId(localeSnapshot(input.language ?? "en"))]),
+        oracleId,
+        faceIndex,
+        printings: oracleId && catalog ? printingsForOracle(catalog, oracleId) : null,
+        isRotated: entry ? isSidewaysFace(entry, faceIndex) : false,
+        isFlip: isFlipLayout(entry?.layout),
+      };
+    },
+    async prepare(input) {
+      offline = input.offline;
+      retain(ownerMain, () => {
+        ownerIndexedMain = null;
+        ownerFoldedIndex = null;
+      });
+      retain(ownerPrintings, () => {});
+      await Promise.all([
+        prepareOwnerResource(ownerMain, __SCRYFALL_DATA_URL__, input.offline,
+          () => scryfallDataResolved, (value) => isScryfallDataMap(value) ? value : null),
+        prepareOwnerResource(ownerPrintings, __SCRYFALL_PRINTINGS_URL__, input.offline,
+          () => printingsDataResolved, (value) => isPrintingsDataMap(value) ? value : null),
+      ]);
+    },
+    async prepareLocale(language, effectiveOffline) {
+      offline = effectiveOffline;
+      let resource = language === "en" || localeArtResolved?.lang === language
+        ? undefined : ownerLocales.get(language);
+      if (!resource && language !== "en" && localeArtResolved?.lang !== language) {
+        resource = emptyOwnerResource<Map<string, LocalizedArtEntry>>();
+        ownerLocales.set(language, resource);
+      }
+      if (localeLease && localeLease !== resource) {
+        leases.get(localeLease)?.();
+        leases.delete(localeLease);
+        localeLease = null;
+      }
+      if (!resource) return;
+      const currentResource = resource;
+      localeLease = resource;
+      retain(resource, () => {
+        if (ownerLocales.get(language) === currentResource) ownerLocales.delete(language);
+      });
+      await prepareOwnerResource(resource,
+        __SCRYFALL_IMAGES_LOCALE_URL_TEMPLATE__.replace("{lng}", language), effectiveOffline,
+        () => localeArtResolved?.lang === language ? localeArtResolved.map : null,
+        (value) => value && typeof value === "object" && !Array.isArray(value) ? parseLocalizedArtMap(value) : null);
+    },
+    imageUrl(printing, faceIndex, size, language) {
+      const face = printing.faces[faceIndex] ?? printing.faces[0];
+      const url = localFaceImageUrl(face, size, localeSnapshot(language));
+      return url && !isPlaceholderImageUrl(url) ? url : null;
+    },
+    subscribe(listener) {
+      ownerArtListeners.add(listener);
+      return () => ownerArtListeners.delete(listener);
+    },
+    release() {
+      offline = true;
+      for (const release of leases.values()) release();
+      leases.clear();
+      localeLease = null;
+    },
+  };
 }

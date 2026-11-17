@@ -25,6 +25,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -119,9 +120,13 @@ fn fire_next_chapter(runner: &mut GameRunner) {
 }
 
 /// Declare `attackers` at P0's declare-attackers step and resolve the attack
-/// triggers.
+/// triggers. The step is reached by passing priority from the main phase:
+/// `advance_to_combat` would first re-run the precombat main phase's turn-based
+/// actions in place, putting a second lore counter on the Saga (CR 714.3c).
 fn attack(runner: &mut GameRunner, attackers: &[ObjectId]) {
-    runner.advance_to_combat();
+    drive_until(runner, |r| {
+        matches!(r.state().waiting_for, WaitingFor::DeclareAttackers { .. })
+    });
     let attacks: Vec<_> = attackers
         .iter()
         .map(|&id| (id, AttackTarget::Player(P1)))
@@ -1493,6 +1498,7 @@ fn pyromancer_decree_board(theft: bool, bounce: bool, pending: bool) -> (i32, i3
             .act(GameAction::ActivateAbility {
                 source_id: pyromancer,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("P1 activates Prodigal Pyromancer");
         runner
@@ -1632,6 +1638,7 @@ fn chandras_outrage_hits_the_live_controller_of_a_source_with_a_pending_ability(
         .act(GameAction::ActivateAbility {
             source_id: pyromancer,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("P1 activates Prodigal Pyromancer");
     runner

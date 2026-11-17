@@ -28,6 +28,7 @@ import {
 } from "three";
 
 import { CAMERA_UP, dieDescriptor } from "./dieGeometry.ts";
+import { useFrameFailure } from "./useFrameFailure.ts";
 
 interface Dice3DProps {
   sides: number;
@@ -120,6 +121,7 @@ export function Dice3D({
   const settledRef = useRef(false);
   const onSettleRef = useRef(onSettle);
   onSettleRef.current = onSettle;
+  const failFrame = useFrameFailure();
 
   useEffect(() => {
     const container = containerRef.current;
@@ -309,10 +311,21 @@ export function Dice3D({
       }
 
       renderer.render(scene, camera);
-      rafId = requestAnimationFrame(tick);
+      rafId = requestAnimationFrame(guardedTick);
     };
 
-    rafId = requestAnimationFrame(tick);
+    // A frame that throws (e.g. a lost WebGL context) stops the loop and
+    // hands the error to the overlay's boundary, which shows the static result.
+    const guardedTick = (now: number) => {
+      try {
+        tick(now);
+      } catch (error) {
+        cancelAnimationFrame(rafId);
+        failFrame(error);
+      }
+    };
+
+    rafId = requestAnimationFrame(guardedTick);
 
     return () => {
       disposed = true;
@@ -326,7 +339,7 @@ export function Dice3D({
         container.removeChild(renderer.domElement);
       }
     };
-  }, [sides, result, speedMultiplier, size]);
+  }, [sides, result, speedMultiplier, size, failFrame]);
 
   return (
     <div

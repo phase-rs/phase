@@ -82,6 +82,7 @@ fn activate_and_sacrifice(
         .act(GameAction::ActivateAbility {
             source_id: squandered,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("reach-guard: Squandered Resources must be activatable");
 
@@ -682,6 +683,7 @@ fn sacrificed_millikin_offers_the_colorless_its_non_mana_ability_could_produce()
         .act(GameAction::ActivateAbility {
             source_id: squandered,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Squandered Resources is activatable with a Forest to sacrifice");
     let WaitingFor::PayCost { choices, .. } = &runner.state().waiting_for else {
@@ -720,6 +722,7 @@ fn contamination_rewrites_only_the_tapped_for_mana_production() {
         .act(GameAction::ActivateAbility {
             source_id: control_forest,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("control: tapping the Forest for mana");
     assert_eq!(
@@ -757,6 +760,7 @@ fn sacrificed_forest_under_contamination_adds_black() {
         .act(GameAction::ActivateAbility {
             source_id: control_forest,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("control: tapping a Forest for mana");
     assert_eq!(pool(&runner, P0), vec![ManaType::Black]);
@@ -942,6 +946,7 @@ fn sacrificed_reflecting_pool_follows_an_anchored_chain() {
         .act(GameAction::ActivateAbility {
             source_id: orchard,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("control: tapping the Orchard");
     assert_eq!(
@@ -1185,6 +1190,7 @@ fn tap_for_mana(runner: &mut GameRunner, land: ObjectId) -> Vec<ManaType> {
         .act(GameAction::ActivateAbility {
             source_id: land,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("tapping the land for mana");
     let produced = pool(runner, P0);
@@ -1849,6 +1855,7 @@ fn reflecting_pool_options(runner: &mut GameRunner, reflecting_pool: ObjectId) -
         .act(GameAction::ActivateAbility {
             source_id: reflecting_pool,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("tapping Reflecting Pool");
     match runner.state().waiting_for.clone() {

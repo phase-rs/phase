@@ -145,7 +145,11 @@ fn drive(runner: &mut GameRunner, source: ObjectId, first: GameAction, answers: 
         elections: Vec::new(),
     };
     match runner.act(first) {
-        Ok(result) => events.extend(result.events),
+        Ok(result) => {
+            events.extend(result.events);
+            // CR 733.1: a refused cast can settle by cancellation.
+            out.refused = runner.state().cancelled_casts.contains(&source);
+        }
         Err(_) => out.refused = true,
     }
     while !out.refused {
@@ -162,11 +166,15 @@ fn drive(runner: &mut GameRunner, source: ObjectId, first: GameAction, answers: 
             WaitingFor::OptionalCostChoice { .. } => {
                 out.optional_offers += 1;
                 GameAction::DecideOptionalCost {
-                    pay: answers.pay_optional,
+                    index: if answers.pay_optional { 0 } else { 1 },
                 }
             }
             WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost {
-                pay: answers.defiler_pay.unwrap_or(answers.pay_optional),
+                index: if answers.defiler_pay.unwrap_or(answers.pay_optional) {
+                    0
+                } else {
+                    1
+                },
             },
             WaitingFor::AlternativeCastChoice { .. } => GameAction::ChooseAlternativeCast {
                 choice: answers.alt.unwrap_or(AlternativeCastDecision::Alternative),
@@ -204,7 +212,11 @@ fn drive(runner: &mut GameRunner, source: ObjectId, first: GameAction, answers: 
         };
         out.prompts.push(runner.waiting_for_kind());
         match runner.act(action) {
-            Ok(result) => events.extend(result.events),
+            Ok(result) => {
+                events.extend(result.events);
+                // CR 733.1: a refused cast can settle by cancellation.
+                out.refused = runner.state().cancelled_casts.contains(&source);
+            }
             Err(_) => out.refused = true,
         }
     }
@@ -1519,6 +1531,7 @@ fn activation_and_prompted_declarations_keep_event_counts() {
             GameAction::ActivateAbility {
                 source_id: engine_card,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             &answers,
         );

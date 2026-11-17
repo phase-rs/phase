@@ -1,14 +1,26 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { renderHook, waitFor } from "@testing-library/react";
 
 import type { DeckCompatibilityResult } from "../deckCompatibility";
 import type { ParsedDeck } from "../deckParser";
 import { evaluateDeckCompatibility } from "../deckCompatibility";
-import { buildLegalAiDeckCatalog, filterByBracket, type AiDeckCandidate } from "../aiDeckCatalog";
+import {
+  buildLegalAiDeckCatalog,
+  candidateDeclarations,
+  candidateSeatDeck,
+  submitCandidateSeatDeck,
+  catalogRequestKey,
+  filterByBracket,
+  useAiDeckCatalog,
+  useSettledAiCatalog,
+  type AiDeckCandidate,
+  type UseAiDeckCatalogResult,
+} from "../aiDeckCatalog";
 import { buildDeckCatalog } from "../deckCatalog";
 import { getCachedFeed, getDeckFeedOrigin, listSubscriptions } from "../feedService";
-import { getSharedAdapter } from "../../adapter/wasm-adapter";
+import { estimateDeckBracket, type BracketEstimateOutcome } from "../bracketEstimate";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
-import { FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
+import { DECKS_CHANGED_EVENT, FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { BUNDLED_CEDH_DECKS } from "../../data/cedhDecks";
 import { CEDH_BRACKET } from "../cedhLock";
 import type { BracketEstimate } from "../../types/bracket";
@@ -17,15 +29,19 @@ vi.mock("../deckCompatibility", () => ({
   evaluateDeckCompatibility: vi.fn(),
 }));
 
-vi.mock("../../adapter/wasm-adapter", () => ({
-  getSharedAdapter: vi.fn(),
+vi.mock("../bracketEstimate", () => ({
+  estimateDeckBracket: vi.fn(),
 }));
 
-/** Stub the shared adapter so `resolveBracket` returns the given estimate. */
+/** Stub the bracket service so `resolveBracket` receives the given estimate. */
 function stubBracketEstimate(estimate: BracketEstimate | null): void {
-  vi.mocked(getSharedAdapter).mockReturnValue({
-    estimateBracket: vi.fn(async () => estimate),
-  } as unknown as ReturnType<typeof getSharedAdapter>);
+  vi.mocked(estimateDeckBracket).mockResolvedValue(
+    estimate ? { kind: "estimate", estimate } : { kind: "no-commander" },
+  );
+}
+
+function stubBracketOutcome(outcome: BracketEstimateOutcome): void {
+  vi.mocked(estimateDeckBracket).mockResolvedValue(outcome);
 }
 
 vi.mock("../feedService", () => ({
@@ -112,6 +128,26 @@ describe("buildLegalAiDeckCatalog", () => {
     ]);
   });
 
+  it("returns the complete raw universe as allCandidates alongside the legal candidates", async () => {
+    saveDeck("Legal Deck", deck("Legal Card"));
+    saveDeck("Illegal Deck", deck("Illegal Starter"));
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Standard",
+      selectedMatchType: "Bo1",
+    });
+
+    // Draws, counts, and display use the legal universe only.
+    expect(catalog.candidates.map((candidate) => candidate.id)).toEqual(["saved:Legal Deck"]);
+    // Group toggles clear overrides against the raw universe: the illegal
+    // saved deck and the Commander-only bundled decks are unlisted for
+    // Standard, but an override on one must not survive a folder toggle.
+    const rawIds = catalog.allCandidates.map((candidate) => candidate.id);
+    expect(rawIds).toContain("saved:Legal Deck");
+    expect(rawIds).toContain("saved:Illegal Deck");
+    expect(rawIds).toContain("precon:BundledCedh_HeliodBallista_Demo");
+  });
+
   it("includes legal saved Pauper Commander user decks", async () => {
     saveDeck("PDH Legal", deck("Command Tower", "Murmuring Mystic"));
 
@@ -124,6 +160,39 @@ describe("buildLegalAiDeckCatalog", () => {
     expect(evaluateDeckCompatibility).toHaveBeenCalledWith(
       expect.objectContaining({ commander: ["Murmuring Mystic"] }),
       { selectedFormat: "PauperCommander", selectedMatchType: "Bo1", summaryOnly: true },
+    );
+  });
+
+  it("validates Horde survivor candidates against the picked challenge with no format tag", async () => {
+    saveDeck("EDH Deck", deck("EDH Card", "EDH Commander"));
+    saveDeck("Constructed Deck", deck("Constructed Card"));
+    // The engine answers the picked challenge's survivor verdict per
+    // candidate (here scripted: only the EDH-shaped deck fits Sauron).
+    vi.mocked(evaluateDeckCompatibility).mockImplementation(async (parsed) =>
+      compatibility(parsed.main[0]?.name === "EDH Card")
+    );
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedMatchType: "Bo1",
+      selectedChallengeDeck: "SauronHorde",
+    });
+
+    // The request contract: no format tag (unrestricted pool), challenge set.
+    expect(evaluateDeckCompatibility).toHaveBeenCalledWith(
+      expect.anything(),
+      {
+        selectedFormat: undefined,
+        selectedMatchType: "Bo1",
+        selectedChallengeDeck: "SauronHorde",
+        summaryOnly: true,
+      },
+    );
+    // Only the survivor-compatible candidate survives.
+    expect(catalog.candidates.map((candidate) => candidate.id)).toContain("saved:EDH Deck");
+    expect(catalog.candidates.map((candidate) => candidate.id)).not.toContain("saved:Constructed Deck");
+    // Scans for different challenges must not share a request key.
+    expect(catalogRequestKey(null, "Bo1", "SauronHorde")).not.toBe(
+      catalogRequestKey(null, "Bo1", "CybermanHorde"),
     );
   });
 
@@ -242,6 +311,7 @@ describe("buildLegalAiDeckCatalog", () => {
 
     const candidate = catalog.candidates.find((c) => c.id === "saved:Tagged Commander");
     expect(candidate?.bracket).toBe(4);
+    expect(candidate?.declaredBracket).toBe(4);
   });
 
   it("falls back to the engine bracket estimate for untagged Commander decks", async () => {
@@ -259,6 +329,21 @@ describe("buildLegalAiDeckCatalog", () => {
 
     const candidate = catalog.candidates.find((c) => c.id === "saved:Estimated Commander");
     expect(candidate?.bracket).toBe(4); // "optimized" → 4
+    // The estimate only filters the pool; the seat stays undeclared.
+    expect(candidate?.declaredBracket).toBeNull();
+  });
+
+  it("leaves an untagged deck null when card data is unavailable", async () => {
+    saveDeck("Unavailable Commander", deck("Sol Ring", "Atraxa, Praetors' Voice"));
+    stubBracketOutcome({ kind: "card-data-unavailable", reason: "database load failed" });
+
+    const catalog = await buildLegalAiDeckCatalog({
+      selectedFormat: "Commander",
+      selectedMatchType: "Bo1",
+    });
+
+    const candidate = catalog.candidates.find((c) => c.id === "saved:Unavailable Commander");
+    expect(candidate?.bracket).toBeNull();
   });
 
   it("prefers an explicit bracket tag over the engine estimate", async () => {
@@ -424,6 +509,281 @@ describe("bundled cEDH decks", () => {
 });
 
 // ---------------------------------------------------------------------------
+// useAiDeckCatalog — library-inventory rescan while mounted
+// ---------------------------------------------------------------------------
+
+describe("useAiDeckCatalog", () => {
+  it("rescans the catalog when the deck inventory changes while mounted", async () => {
+    saveDeck("First", deck("First Card"));
+    const { result, unmount } = renderHook(() =>
+      useAiDeckCatalog({ selectedFormat: "Standard", selectedMatchType: "Bo1" }),
+    );
+    try {
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.candidates.map((candidate) => candidate.id)).toEqual(["saved:First"]);
+
+      // Import a second deck while the setup screen stays mounted: the
+      // inventory event schedules a (debounced) rescan that picks it up, so
+      // mounted previews never hide decks game start can draw.
+      saveDeck("Second", deck("Second Card"));
+      window.dispatchEvent(new Event(DECKS_CHANGED_EVENT));
+      await waitFor(
+        () =>
+          expect(result.current.candidates.map((candidate) => candidate.id)).toEqual([
+            "saved:First",
+            "saved:Second",
+          ]),
+        { timeout: 5000 },
+      );
+      expect(result.current.allCandidates.map((candidate) => candidate.id)).toContain("saved:Second");
+    } finally {
+      unmount();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useSettledAiCatalog — request-keyed retained snapshot
+// ---------------------------------------------------------------------------
+
+function savedSettleCandidate(
+  id: string,
+  bracket: AiDeckCandidate["bracket"],
+  source: AiDeckCandidate["source"] = { type: "saved" },
+): AiDeckCandidate {
+  return {
+    id,
+    name: id,
+    source,
+    deck: { main: [], sideboard: [] },
+    coveragePct: null,
+    archetype: null,
+    bracket,
+    declaredBracket: bracket,
+    comboDeclaration: { kind: "undeclared" },
+  };
+}
+
+function settleHookResult(
+  candidates: AiDeckCandidate[],
+  requestKey: string | null,
+  overrides?: Partial<UseAiDeckCatalogResult>,
+): UseAiDeckCatalogResult {
+  return {
+    candidates,
+    allCandidates: candidates,
+    loading: false,
+    error: null,
+    requestKey,
+    ...overrides,
+  };
+}
+
+describe("useSettledAiCatalog", () => {
+  const keyA = catalogRequestKey("Standard", "Bo1");
+  const keyB = catalogRequestKey("Commander", "Bo1");
+  const deckA = () => savedSettleCandidate("saved:A", 2);
+  const deckB = () => savedSettleCandidate("saved:B", 3);
+
+  function renderSettled(initialKey: string) {
+    return renderHook(
+      ({ catalog, key }: { catalog: UseAiDeckCatalogResult; key: string }) =>
+        useSettledAiCatalog(catalog, key),
+      { initialProps: { catalog: settleHookResult([], null, { loading: true }), key: initialKey } },
+    );
+  }
+
+  it("withholds the previous production after the request changes, even when the new request fails", () => {
+    const { result, rerender, unmount } = renderSettled(keyA);
+    try {
+      expect(result.current).toBeUndefined();
+      // A settles under the Standard request.
+      rerender({ catalog: settleHookResult([deckA()], keyA), key: keyA });
+      expect(result.current?.candidates.map((candidate) => candidate.id)).toEqual(["saved:A"]);
+
+      // Format changes: the hook still returns the old non-loading result
+      // before its scan effect starts loading — it must not surface A as
+      // the Commander legal universe.
+      rerender({ catalog: settleHookResult([deckA()], keyA), key: keyB });
+      expect(result.current).toBeUndefined();
+
+      // The new request runs pending, then rejects: still nothing for
+      // Commander — the error must not preserve A indefinitely either.
+      rerender({ catalog: settleHookResult([deckA()], keyA, { loading: true }), key: keyB });
+      expect(result.current).toBeUndefined();
+      rerender({ catalog: settleHookResult([], keyB, { error: "scan failed" }), key: keyB });
+      expect(result.current).toBeUndefined();
+
+      // The fresh Commander production surfaces once it lands.
+      rerender({ catalog: settleHookResult([deckB()], keyB), key: keyB });
+      expect(result.current?.candidates.map((candidate) => candidate.id)).toEqual(["saved:B"]);
+    } finally {
+      unmount();
+    }
+  });
+
+  it("retains the settled production across a same-request rescan and ignores identity-only refreshes", () => {
+    const { result, rerender, unmount } = renderSettled(keyA);
+    try {
+      rerender({ catalog: settleHookResult([deckA()], keyA), key: keyA });
+      const first = result.current;
+      expect(first?.candidates.map((candidate) => candidate.id)).toEqual(["saved:A"]);
+
+      // A same-request rescan keeps the previous production visible while
+      // loading instead of flashing back to no snapshot.
+      rerender({ catalog: settleHookResult([deckA()], keyA, { loading: true }), key: keyA });
+      expect(result.current).toBe(first);
+
+      // Same content under fresh identities (a caller rebuilding its result
+      // object every render) keeps the snapshot instead of looping.
+      const identical = savedSettleCandidate("saved:A", 2);
+      rerender({ catalog: settleHookResult([identical], keyA), key: keyA });
+      expect(result.current).toBe(first);
+
+      // A genuinely changed refresh is adopted.
+      rerender({ catalog: settleHookResult([deckA(), deckB()], keyA), key: keyA });
+      expect(result.current?.candidates.map((candidate) => candidate.id)).toEqual([
+        "saved:A",
+        "saved:B",
+      ]);
+      expect(result.current).not.toBe(first);
+    } finally {
+      unmount();
+    }
+  });
+
+  it("adopts a provenance-only refresh with unchanged ids and brackets", () => {
+    const { result, rerender, unmount } = renderSettled(keyA);
+    try {
+      // Saved feed mirror A settles feed-owned …
+      rerender({
+        catalog: settleHookResult(
+          [savedSettleCandidate("saved:A", 2, { type: "saved", feedId: "feed-a" })],
+          keyA,
+        ),
+        key: keyA,
+      });
+      const first = result.current;
+      expect(first?.candidates[0].source).toEqual({ type: "saved", feedId: "feed-a" });
+
+      // … then A is adopted without renaming: same id and bracket, but the
+      // origin is gone, which regroups it from its feed into its folder.
+      // The settle bailout must not swallow that semantic update.
+      rerender({
+        catalog: settleHookResult([savedSettleCandidate("saved:A", 2)], keyA),
+        key: keyA,
+      });
+      expect(result.current).not.toBe(first);
+      expect(result.current?.candidates[0].source).toEqual({ type: "saved" });
+    } finally {
+      unmount();
+    }
+  });
+});
+
+// Combo declarations — catalog to seat
+// ---------------------------------------------------------------------------
+
+const EARLY_COMBO = { kind: "intended", window: "early_game" } as const;
+
+function saveCommanderDeck(name: string, sidecar: Record<string, unknown> = {}): void {
+  localStorage.setItem(
+    STORAGE_KEY_PREFIX + name,
+    JSON.stringify({ ...deck(`${name} Card`, `${name} Commander`), format: "Commander", ...sidecar }),
+  );
+}
+
+describe("combo declarations", () => {
+  function stubFloorFromDeclaration(): void {
+    vi.mocked(estimateDeckBracket).mockImplementation(async ({ deck: request }) => ({
+      kind: "estimate",
+      estimate: {
+        tier: request.combo_declaration.kind === "intended" ? "optimized" : "core",
+      } as BracketEstimate,
+    }));
+  }
+
+  it("estimates each saved deck with its own answer and carries it on the candidate", async () => {
+    stubFloorFromDeclaration();
+    saveCommanderDeck("Early", { combo_declaration: EARLY_COMBO });
+    saveCommanderDeck("Plain");
+
+    const { candidates } = await buildLegalAiDeckCatalog({ selectedFormat: "Commander" });
+
+    const byName = new Map(candidates.map((candidate) => [candidate.name, candidate]));
+    expect(byName.get("Early")).toMatchObject({
+      bracket: 4,
+      declaredBracket: null,
+      comboDeclaration: EARLY_COMBO,
+    });
+    expect(byName.get("Plain")).toMatchObject({
+      bracket: 2,
+      declaredBracket: null,
+      comboDeclaration: { kind: "undeclared" },
+    });
+  });
+
+  it("lets a manual tag win without losing the answer the seat still sends", async () => {
+    vi.mocked(estimateDeckBracket).mockClear();
+    stubFloorFromDeclaration();
+    saveCommanderDeck("Tagged", { bracket: 2, combo_declaration: EARLY_COMBO });
+
+    const { candidates } = await buildLegalAiDeckCatalog({ selectedFormat: "Commander" });
+
+    const tagged = candidates.find((candidate) => candidate.name === "Tagged");
+    expect(tagged).toMatchObject({ bracket: 2, comboDeclaration: EARLY_COMBO });
+    expect(estimateDeckBracket).not.toHaveBeenCalled();
+  });
+
+  it("gives a seat the candidate's declarations, never its filter bracket", () => {
+    const candidate = {
+      ...makeCandidate("Estimated", 4),
+      declaredBracket: null,
+      comboDeclaration: EARLY_COMBO,
+    };
+
+    const submitted = { main_deck: ["Forest"], sideboard: [], commander: [] };
+    expect(candidateSeatDeck(candidate, submitted)).toMatchObject({
+      main_deck: ["Forest"],
+      bracket_tier: null,
+      combo_declaration: EARLY_COMBO,
+    });
+    expect(candidateSeatDeck({ ...candidate, declaredBracket: 5 }, submitted).bracket_tier).toBe("cedh");
+    expect(candidateDeclarations(candidate)).toEqual({
+      bracket_tier: null,
+      combo_declaration: EARLY_COMBO,
+    });
+  });
+
+  it("submits a candidate's own deck with that candidate's declarations, not a neighbour's", async () => {
+    const early = { ...makeCandidate("Early", null), comboDeclaration: EARLY_COMBO };
+    const undeclared = makeCandidate("Plain", null);
+
+    const [first, second] = await Promise.all([
+      submitCandidateSeatDeck(early),
+      submitCandidateSeatDeck(undeclared),
+    ]);
+
+    expect(first.combo_declaration).toEqual(EARLY_COMBO);
+    expect(second.combo_declaration).toEqual({ kind: "undeclared" });
+  });
+
+  it("refreshes a settled catalog when only a candidate's answer changed", async () => {
+    const before = savedSettleCandidate("saved:Tagged", 3);
+    const after = { ...before, comboDeclaration: EARLY_COMBO };
+    const { result, rerender } = renderHook(
+      ({ catalog }) => useSettledAiCatalog(catalog, "Commander::"),
+      { initialProps: { catalog: settleHookResult([before], "Commander::") } },
+    );
+    await waitFor(() => expect(result.current?.candidates).toEqual([before]));
+
+    rerender({ catalog: settleHookResult([after], "Commander::") });
+
+    await waitFor(() => expect(result.current?.candidates[0]?.comboDeclaration).toEqual(EARLY_COMBO));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // filterByBracket — pure bracket filter
 // ---------------------------------------------------------------------------
 
@@ -436,6 +796,8 @@ function makeCandidate(id: string, bracket: AiDeckCandidate["bracket"]): AiDeckC
     coveragePct: null,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
+    comboDeclaration: { kind: "undeclared" },
   };
 }
 

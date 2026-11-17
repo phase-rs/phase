@@ -60,7 +60,7 @@ export function isValidP2PTerminalResult(value: unknown): value is P2PTerminalRe
     && (typeof result.display?.winner === "number" || result.display?.winner === null);
 }
 
-function sameTerminalResult(left: P2PTerminalResult, right: P2PTerminalResult): boolean {
+export function sameP2PTerminalResult(left: P2PTerminalResult, right: P2PTerminalResult): boolean {
   return left.key === right.key
     && left.lease.sessionKey === right.lease.sessionKey
     && left.lease.hostIncarnation === right.lease.hostIncarnation
@@ -81,7 +81,7 @@ export async function commitP2PTerminalResult(result: P2PTerminalResult): Promis
   try {
     const key = recordKey(result.key);
     const existing = await get<P2PTerminalResult>(key, getTerminalStore());
-    if (existing) return sameTerminalResult(existing, result);
+    if (existing) return sameP2PTerminalResult(existing, result);
     await set(key, result, getTerminalStore());
     return true;
   } catch {

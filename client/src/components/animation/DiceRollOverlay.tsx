@@ -1,17 +1,43 @@
-import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Component, Suspense, type ComponentProps, useCallback, useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { getPlayerId } from "../../hooks/usePlayerId";
+import { reportBoundaryError } from "../../services/telemetryEvents";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
 import type { DiceRollPayload } from "../../stores/uiStore";
+import type { Coin3D as Coin3DImpl } from "./dice3d/Coin3D.tsx";
+import type { Dice3D as Dice3DImpl } from "./dice3d/Dice3D.tsx";
+import { loadCoin3DModule, loadDice3DModule } from "./dice3d/loaders";
+import { safeLazy, warnOnce } from "./dice3d/safeLazy";
 
 // Code-split the WebGL renderer: `three` only loads when a die is actually
-// rolled, keeping it out of the main bundle.
-const Dice3D = lazy(() => import("./dice3d/Dice3D.tsx").then((m) => ({ default: m.Dice3D })));
-const Coin3D = lazy(() => import("./dice3d/Coin3D.tsx").then((m) => ({ default: m.Coin3D })));
+// rolled, keeping it out of the main bundle. The roll is cosmetic, so a chunk
+// that is missing after a deploy degrades to the static face (`safeLazy`)
+// instead of throwing into the app-level ErrorBoundary and unmounting the game.
+const Dice3D = safeLazy(
+  "Dice3D",
+  loadDice3DModule,
+  (m) => m.Dice3D,
+  function StaticDice3D({ result, onSettle }: Dice3DFallbackProps) {
+    return <SettledPlaceholder label={String(result)} onSettle={onSettle} />;
+  },
+);
+const Coin3D = safeLazy(
+  "Coin3D",
+  loadCoin3DModule,
+  (m) => m.Coin3D,
+  function StaticCoin3D({ face, labels, onSettle }: Coin3DFallbackProps) {
+    return <SettledPlaceholder label={labels?.[face] ?? face} onSettle={onSettle} />;
+  },
+);
+
+// Prop types come from the real components (type-only imports are erased, so
+// `three` stays out of the main bundle).
+type Dice3DFallbackProps = ComponentProps<typeof Dice3DImpl>;
+type Coin3DFallbackProps = ComponentProps<typeof Coin3DImpl>;
 
 const DIE_SIZE = 132;
 
@@ -79,8 +105,10 @@ export function DiceRollOverlay() {
   // fallback while the chunk downloads. Skipped where we'd never animate.
   useEffect(() => {
     if (shouldReduceMotion || !hasWebGL()) return;
-    void import("./dice3d/Dice3D.tsx");
-    void import("./dice3d/Coin3D.tsx");
+    // Best-effort warm-up: a failed prefetch must not become an unhandled
+    // rejection; the render path degrades on its own.
+    void loadDice3DModule().catch(() => {});
+    void loadCoin3DModule().catch(() => {});
   }, [shouldReduceMotion]);
 
   // CR 103.1 contest holds for input, so its hint reads "tap to continue"; an
@@ -114,11 +142,15 @@ export function DiceRollOverlay() {
           />
           {/* Keyed by payload identity so each roll the FIFO advances to gets a
               fresh component instance (resets settle state, re-runs the 3D mount). */}
-          <DiceRollContent
+          <DiceRollBoundary
             key={diceRollKey(diceRoll)}
-            payload={diceRoll}
-            animate={!shouldReduceMotion && hasWebGL()}
-          />
+            fallback={<DiceRollContent payload={diceRoll} animate={false} />}
+          >
+            <DiceRollContent
+              payload={diceRoll}
+              animate={!shouldReduceMotion && hasWebGL()}
+            />
+          </DiceRollBoundary>
           <motion.span
             className="pointer-events-none absolute bottom-8 text-xs font-medium uppercase tracking-[0.2em] text-slate-400/70"
             initial={{ opacity: 0 }}
@@ -131,6 +163,34 @@ export function DiceRollOverlay() {
       )}
     </AnimatePresence>
   );
+}
+
+/**
+ * Keeps a failure inside the cosmetic dice/coin render local rather than letting
+ * it reach the app-level ErrorBoundary, which would unmount the whole game
+ * route. The animation is dropped but the engine's result is not: `fallback`
+ * re-renders the same payload statically (roll-winner caption, coin outcome).
+ * The error is still reported to telemetry like any other caught render error,
+ * so a real WebGL crash does not go unseen.
+ */
+class DiceRollBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error): void {
+    reportBoundaryError(error);
+    warnOnce("DiceRollBoundary", "dice roll render failed; showing the static result.", error);
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
 }
 
 /** Stable identity for a payload so the FIFO advancing from one roll to the next
@@ -216,14 +276,16 @@ function DiceRollContent({ payload, animate }: { payload: DiceRollPayload; anima
 }
 
 /**
- * Starting-player contest (CR 103.1): the d20 roll-off, rendered one round at a
- * time. Round 0 rolls every seat; on a tie the tied-max group rerolls in the
- * next round (the others drop out), until one seat is the unique high roller —
- * the engine's authoritative `winner`. Rendering round-by-round (rather than
+ * Starting-player contest (CR 103.1): the d20 roll-off that decides who chooses
+ * the starting player, rendered one round at a time. Round 0 rolls every seat;
+ * on a tie the tied-max group rerolls in the next round (the others drop out),
+ * until one seat is the unique high roller — the engine's authoritative
+ * `winner`. Rendering round-by-round (rather than
  * collapsing to last-roll-per-player) keeps the winner the visible high roller
  * of the round shown; the prior collapse could surface an eliminated seat's
  * higher earlier die as if it beat the winner's lower reroll. `rounds` and
- * `winner` come straight from the engine event — never recomputed here.
+ * `winner` come straight from the engine event — never recomputed here; the
+ * caption names the roll winner, not the starting player.
  */
 function ContestDice({
   payload,
@@ -268,12 +330,8 @@ function ContestDice({
   const caption =
     winner != null
       ? winnerIsYou
-        ? t("diceRoll.youPlayFirst")
-        : t("diceRoll.playerPlaysFirst", { name: getOpponentDisplayName(winner) })
-      : null;
-  const yourTurnCaption =
-    payload.viewerTurnNumber && payload.viewerTurnNumber > 1
-      ? t("diceRoll.youTakeTurn", { turn: payload.viewerTurnNumber })
+        ? t("diceRoll.youWonRoll")
+        : t("diceRoll.playerWonRoll", { name: getOpponentDisplayName(winner) })
       : null;
 
   return (
@@ -357,47 +415,6 @@ function ContestDice({
           )}
         </AnimatePresence>
       </div>
-      {revealed && payload.turnOrder && payload.turnOrder.length > 0 && (
-        <motion.div
-          className="flex flex-col items-center gap-2"
-          initial={{ opacity: 0, y: 8 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.25, duration: 0.35 }}
-        >
-          <span className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
-            {t("diceRoll.turnOrder")}
-          </span>
-          <div className="flex flex-wrap justify-center gap-2">
-            {payload.turnOrder.map((slot) => {
-              return (
-                <span
-                  key={slot.slot_index}
-                  className="rounded-full border px-3 py-1 text-sm font-bold"
-                  style={{
-                    color: slot.is_viewer ? `rgb(${GOLD})` : "#cbd5e1",
-                    borderColor:
-                      slot.is_viewer || slot.is_starting_player
-                        ? `rgba(${GOLD},0.62)`
-                        : "rgba(148,163,184,0.32)",
-                    backgroundColor:
-                      slot.is_viewer || slot.is_starting_player
-                        ? `rgba(${GOLD},0.12)`
-                        : "rgba(15,23,42,0.7)",
-                  }}
-                >
-                  {t("diceRoll.turnOrderItem", {
-                    turn: slot.turn_number,
-                    name: playerLabel(slot.player),
-                  })}
-                </span>
-              );
-            })}
-          </div>
-          {yourTurnCaption && (
-            <span className="text-lg font-extrabold text-amber-300">{yourTurnCaption}</span>
-          )}
-        </motion.div>
-      )}
     </div>
   );
 }
@@ -582,4 +599,13 @@ function DiePlaceholder({ label }: { label: string }) {
       {label}
     </div>
   );
+}
+
+/** The static stand-in used as a `safeLazy` fallback: shows the result and
+ *  reports settled on mount, since there is no 3D animation to wait for. */
+function SettledPlaceholder({ label, onSettle }: { label: string; onSettle?: () => void }) {
+  useEffect(() => {
+    onSettle?.();
+  }, [onSettle]);
+  return <DiePlaceholder label={label} />;
 }

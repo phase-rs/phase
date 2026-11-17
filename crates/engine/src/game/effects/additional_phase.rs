@@ -61,6 +61,11 @@ fn added_to_turn_in_progress(
             .current_trigger_event
             .as_ref()
             .and_then(|event| extract_player_from_event(event, state)),
+        // CR 608.2b + CR 608.2c: "that player" names the declared player, which
+        // gets nothing once it is illegal or was never announced.
+        ExtraPhaseRecipient::TargetedPlayer(filter) if filter.names_one_player() => {
+            super::resolve_player_for_context_ref(state, ability, filter)
+        }
         ExtraPhaseRecipient::TargetedPlayer(_) => {
             // CR 115.1 + CR 608.2b: the embedded recipient filter assigned
             // this instruction its own player slot at announcement and the
@@ -74,7 +79,8 @@ fn added_to_turn_in_progress(
             })
         }
     };
-    player == Some(state.active_player)
+    // CR 500.10a + CR 805.4: on a shared team turn the turn is each member's.
+    player.is_some_and(|p| crate::game::players::is_turn_player(state, p))
 }
 
 /// CR 500.8: Add extra phases to the current turn via a LIFO stack.
@@ -286,6 +292,7 @@ mod tests {
         count: QuantityExpr,
     ) -> ResolvedAbility {
         ResolvedAbility {
+            coin_branches: None,
             declares_chosen_group: None,
             reads_chosen_group: None,
             declares_return_result: None,
@@ -306,12 +313,15 @@ mod tests {
             source_id: ObjectId(1),
             cast_occurrence: None,
             source_incarnation: None,
+            announced_source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
+            delayed_origin: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
             target_pins: Vec::new(),
             legacy_selected_target_incarnations: Vec::new(),
+            chosen_target_slots: Default::default(),
             illegal_target_slots: Vec::new(),
             unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
@@ -358,12 +368,16 @@ mod tests {
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             target_reads: Default::default(),
+            entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
+            instruction_join: crate::types::ability::InstructionJoin::Own,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            announced_usage_key: None,
+            control_change_instruction: None,
         }
     }
 

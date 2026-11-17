@@ -16,7 +16,7 @@
  * WASM adapter, deckCompatibility, useBracketEstimate) are mocked so the
  * test only exercises the warning-chip render condition.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -69,9 +69,14 @@ vi.mock("../../services/aiDeckCatalog", async () => {
     await vi.importActual<typeof import("../../services/aiDeckCatalog")>(
       "../../services/aiDeckCatalog",
     );
+  // Stable identity like the real hook's state result: GameSetupPage derives
+  // its settled catalog from this in an effect, and a fresh literal every
+  // render would churn that effect. The factory runs once per file, so this
+  // single object is shared across renders.
+  const stubCatalogResult = { candidates: [], allCandidates: [], loading: false, error: null };
   return {
     ...actual,
-    useAiDeckCatalog: () => ({ candidates: [], loading: false, error: null }),
+    useAiDeckCatalog: () => stubCatalogResult,
   };
 });
 
@@ -151,6 +156,7 @@ beforeEach(() => {
       lastFormat: null,
       lastPlayerCount: 2,
       lastMatchType: "Bo1",
+      lastLoopDetection: { type: "Off" },
     });
   });
 });
@@ -194,6 +200,13 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
     renderGameSetupPage("/game-setup?format=Planechase");
 
     expect(await screen.findByText("Planechase")).toBeInTheDocument();
+    expect(screen.getByText(/AI matches are not supported/i)).toBeInTheDocument();
+  });
+
+  it("accepts Planechase Commander on the setup page and explains the AI limitation", async () => {
+    renderGameSetupPage("/game-setup?format=PlanechaseCommander");
+
+    expect(await screen.findByText("Planechase Commander")).toBeInTheDocument();
     expect(screen.getByText(/AI matches are not supported/i)).toBeInTheDocument();
   });
 
@@ -303,6 +316,47 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
     });
   });
 
+  describe("combo detector preference", () => {
+    async function comboDetectorSegments() {
+      const label = (await screen.findByText("Combo Detector (experimental)")).closest("label");
+      if (!label) throw new Error("the combo detector segments sit inside a label");
+      return {
+        off: within(label).getByText("Off", { selector: "button" }),
+        interactive: within(label).getByText("Interactive", { selector: "button" }),
+      };
+    }
+
+    it("seeds from the remembered choice and carries it into the game URL", async () => {
+      act(() => {
+        usePreferencesStore.setState({
+          lastFormat: "Momir",
+          lastPlayerCount: 2,
+          lastLoopDetection: { type: "Interactive" },
+        });
+      });
+      renderGameSetupPage();
+
+      const { off, interactive } = await comboDetectorSegments();
+      expect(interactive).toHaveClass("bg-indigo-600");
+      expect(off).not.toHaveClass("bg-indigo-600");
+
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole("button", { name: /^Start Match/ }));
+      expect((await screen.findByTestId("game-route")).textContent ?? "").toContain("loop=interactive");
+    });
+
+    it("persists each toggle, the last one written winning", async () => {
+      renderGameSetupPage();
+      const user = userEvent.setup();
+
+      await user.click((await comboDetectorSegments()).interactive);
+      expect(usePreferencesStore.getState().lastLoopDetection).toEqual({ type: "Interactive" });
+
+      await user.click((await comboDetectorSegments()).off);
+      expect(usePreferencesStore.getState().lastLoopDetection).toEqual({ type: "Off" });
+    });
+  });
+
   describe("host-supplied pile", () => {
     async function start(): Promise<string> {
       const user = userEvent.setup();
@@ -378,6 +432,65 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
       await waitFor(() => expect(deckSupplyForFormat).toHaveBeenCalledWith("Standard"));
       await act(async () => {});
       expect(screen.queryByRole("combobox", { name: "Pile" })).toBeNull();
+    });
+  });
+
+  describe("horde co-horde seat floor", () => {
+    async function start(): Promise<string> {
+      const user = userEvent.setup();
+      const startButton = await screen.findByRole("button", { name: /^Start Match/ });
+      await waitFor(() => expect(startButton).toBeEnabled());
+      await user.click(startButton);
+      return (await screen.findByTestId("game-route")).textContent ?? "";
+    }
+
+    function playerSlider(): HTMLInputElement {
+      return screen.getByRole("slider", { name: /players/i }) as HTMLInputElement;
+    }
+
+    beforeEach(() => {
+      seedDeck("Survivor");
+      setActiveDeck("Survivor");
+      act(() => {
+        usePreferencesStore.setState({ hordeChallengeDeck: "CybermanHorde" });
+      });
+    });
+
+    it("selecting Two Towers bumps the count to 3 and Start carries players=3", async () => {
+      renderGameSetupPage("/game-setup?format=Horde");
+      const twoTowers = await screen.findByRole("radio", { name: /LOTR: The Two Towers Horde/ });
+      expect(playerSlider().value).toBe("2");
+
+      await userEvent.setup().click(twoTowers);
+      await waitFor(() => expect(playerSlider().value).toBe("3"));
+      expect(playerSlider().min).toBe("3");
+
+      const search = await start();
+      expect(search).toContain("players=3");
+      expect(search).toContain("hordeDeck=LotrTwoTowersHorde");
+    });
+
+    it("entering Horde with a stored Two Towers pick starts at 3, not the stale 2", async () => {
+      act(() => {
+        usePreferencesStore.setState({ hordeChallengeDeck: "LotrTwoTowersHorde" });
+      });
+      renderGameSetupPage("/game-setup?format=Horde");
+      await screen.findByRole("radio", { name: /LOTR: The Two Towers Horde/ });
+      expect(playerSlider().value).toBe("3");
+    });
+
+    it("restoring a Horde session with a stored Two Towers pick bumps the stale count", async () => {
+      act(() => {
+        usePreferencesStore.setState({
+          lastFormat: "Horde",
+          lastPlayerCount: 2,
+          lastMatchType: "Bo1",
+          hordeChallengeDeck: "LotrTwoTowersHorde",
+        });
+      });
+      renderGameSetupPage();
+      await screen.findByRole("radio", { name: /LOTR: The Two Towers Horde/ });
+      expect(playerSlider().value).toBe("3");
     });
   });
 });

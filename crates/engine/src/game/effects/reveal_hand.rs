@@ -1,37 +1,22 @@
+use crate::types::game_state::RandomDraw;
 use rand::seq::SliceRandom;
 
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ParentTargetMissingReason, ResolvedAbility, TargetFilter,
-    TargetRef,
+    reveal_hand_parks_card_choice, Effect, EffectError, EffectKind, ObjectSelectionCardinality,
+    ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetRef,
 };
+use std::collections::HashSet;
+
+use crate::game::engine::EngineError;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::resolved_commands::{
     ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
 };
-
-/// CR 608.2d + CR 701.20a: whether a hand reveal with this card filter and
-/// optionality parks a post-reveal card choice (`WaitingFor::RevealChoice`).
-pub(crate) fn reveal_hand_parks_card_choice(
-    card_filter: &TargetFilter,
-    choice_optional: bool,
-) -> bool {
-    choice_optional || !matches!(card_filter, TargetFilter::None)
-}
-
-/// CR 608.2d + CR 701.20a: "this effect parks a post-reveal card choice" over a
-/// whole `Effect` — read by the fan-out referent predicate, the trigger-lowering
-/// chosen-object boundary and the parser's per-player reveal-choice rule; the
-/// resolver's needs-choice test reads `reveal_hand_parks_card_choice` directly.
-pub(crate) fn effect_parks_reveal_card_choice(effect: &Effect) -> bool {
-    matches!(
-        effect,
-        Effect::RevealHand { card_filter, choice_optional, .. }
-            if reveal_hand_parks_card_choice(card_filter, *choice_optional)
-    )
-}
 
 /// CR 701.20a / CR 701.20e: RevealHand — reveal or privately look at a target
 /// player's hand, then optionally let the caster choose a card.
@@ -46,42 +31,61 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (card_filter, count, random, choice_optional, is_reveal, target) = match &ability.effect {
-        Effect::RevealHand {
-            card_filter,
-            count,
-            selection,
-            choice_optional,
-            reveal,
-            target,
-            ..
-        } => (
-            card_filter.clone(),
-            count.clone(),
-            selection.is_random(),
-            *choice_optional,
-            *reveal,
-            target.clone(),
-        ),
-        _ => (
-            TargetFilter::Any,
-            None,
-            false,
-            false,
-            true,
-            TargetFilter::Any,
-        ),
-    };
+    let (card_filter, count, random, choice_optional, is_reveal, target, cardinality) =
+        match &ability.effect {
+            Effect::RevealHand {
+                card_filter,
+                count,
+                selection,
+                choice_optional,
+                reveal,
+                target,
+                cardinality,
+            } => (
+                card_filter.clone(),
+                count.clone(),
+                selection.is_random(),
+                *choice_optional,
+                *reveal,
+                target.clone(),
+                *cardinality,
+            ),
+            _ => (
+                TargetFilter::Any,
+                None,
+                false,
+                false,
+                true,
+                TargetFilter::Any,
+                ObjectSelectionCardinality::SINGLE,
+            ),
+        };
 
     // Find the target player from resolved targets. Targeted RevealHand
     // (Thoughtseize, Duress) builds a real `TargetRef::Player` slot — keep that
     // fast path unchanged (zero regression).
-    let target_player = ability
-        .targets
-        .iter()
-        .find_map(|t| match t {
-            TargetRef::Player(pid) => Some(*pid),
-            _ => None,
+    let declared_player = if target.names_one_player()
+        || super::declared_player_slot_is_empty(state, ability, &target)
+    {
+        match super::resolve_player_for_context_ref(state, ability, &target) {
+            Some(player) => Some(player),
+            None => {
+                if reveal_hand_parks_card_choice(&card_filter, choice_optional) {
+                    state.last_parent_target_missing_reason =
+                        Some(ParentTargetMissingReason::RevealHandChoice);
+                }
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    let target_player = declared_player
+        .or_else(|| {
+            ability.targets.iter().find_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                _ => None,
+            })
         })
         // CR 608.2c + CR 109.4 + CR 108.3: a possessive-shift subject ("target
         // spell's/creature's controller|owner reveals their hand" — Denied!,
@@ -129,9 +133,46 @@ pub fn resolve(
         .map(|p| p.hand.iter().copied().collect())
         .unwrap_or_default();
 
+    // CR 107.1c + CR 701.20a: "reveal any number of [filter] cards in your
+    // hand" — the revealing player chooses which matching cards (zero or more)
+    // to reveal, so the selection IS the reveal: nothing is revealed before the
+    // choice, and the chosen cards become the tracked set ("for each card
+    // revealed this way"). Revealing is the hand owner's action, so the hand
+    // owner chooses.
+    if cardinality == ObjectSelectionCardinality::AnyNumber {
+        // CR 400.2: hand size is public, eligibility is not — so the prompt
+        // exists for every non-empty hand, even when no card matches (the
+        // empty selection is then the only legal answer). Only an empty hand
+        // skips it.
+        let hand_is_empty = full_hand.is_empty();
+        let eligible = matching_hand_cards(state, ability, full_hand, &card_filter);
+        if hand_is_empty {
+            // CR 107.1c: zero is the only possible choice; publish the empty
+            // revealed set so a "for each card revealed this way" reader sees
+            // this resolution's population rather than a stale one.
+            super::publish_tracked_set(state, Vec::new());
+        } else {
+            state.waiting_for = WaitingFor::RevealChoice {
+                player: target_player,
+                cards: eligible,
+                filter: card_filter,
+                optional: false,
+                decline_runs_continuation: false,
+                cardinality,
+                pending_mana_ability: None,
+            };
+        }
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::Reveal,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
+
     let mut hand = full_hand;
     if random {
-        hand.shuffle(&mut state.rng);
+        hand.shuffle(state.rng.draw(RandomDraw::Outcome));
     }
     // CR 701.20a: If a count is specified, reveal only that many cards.
     if let Some(count_expr) = &count {
@@ -169,6 +210,8 @@ pub fn resolve(
                 filter: card_filter,
                 optional: true,
                 decline_runs_continuation: false,
+                cardinality,
+                pending_mana_ability: None,
             };
         }
         events.push(GameEvent::EffectResolved {
@@ -205,6 +248,7 @@ pub fn resolve(
             .collect();
         events.push(GameEvent::CardsRevealed {
             player: target_player,
+            occurrences: state.disclosed_occurrences(&hand),
             card_ids: hand.clone(),
             card_names,
         });
@@ -229,14 +273,7 @@ pub fn resolve(
 
     // Filter to only eligible cards for the choice (e.g. "nonland card").
     // CR 107.3a + CR 601.2b: ability-context evaluation for dynamic thresholds.
-    let eligible: Vec<_> = if matches!(card_filter, TargetFilter::Any) {
-        hand
-    } else {
-        let ctx = FilterContext::from_ability(ability);
-        hand.into_iter()
-            .filter(|&id| matches_target_filter(state, id, &card_filter, &ctx))
-            .collect()
-    };
+    let eligible = matching_hand_cards(state, ability, hand, &card_filter);
 
     if eligible.is_empty() {
         if !is_reveal {
@@ -259,6 +296,8 @@ pub fn resolve(
                 filter: card_filter,
                 optional: true,
                 decline_runs_continuation: false,
+                cardinality,
+                pending_mana_ability: None,
             };
         }
         events.push(GameEvent::EffectResolved {
@@ -269,12 +308,15 @@ pub fn resolve(
         return Ok(());
     }
 
+    let cardinality = achievable_cardinality(cardinality, eligible.len());
     state.waiting_for = WaitingFor::RevealChoice {
         player: chooser,
         cards: eligible,
         filter: card_filter,
         optional: choice_optional,
         decline_runs_continuation: false,
+        cardinality,
+        pending_mana_ability: None,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -284,6 +326,103 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 608.2d + CR 701.20a: validate a submitted `WaitingFor::RevealChoice`
+/// selection against the prompt it answers — the published cardinality and the
+/// published eligible `cards`. Every producer builds `cards` by evaluating the
+/// card filter from the resolving ability's viewpoint, so that list is the
+/// single authority for eligibility. The player can't choose an option that's
+/// illegal or impossible, and each card can be selected at most once, so a
+/// repeated id is rejected before anything is revealed.
+pub(crate) fn validate_reveal_selection(
+    cards: &[ObjectId],
+    cardinality: ObjectSelectionCardinality,
+    chosen: &[ObjectId],
+) -> Result<(), EngineError> {
+    if !cardinality.admits(chosen.len()) {
+        return Err(EngineError::InvalidAction(format!(
+            "Selection of {} card(s) does not satisfy {cardinality:?}",
+            chosen.len()
+        )));
+    }
+    let mut seen = HashSet::with_capacity(chosen.len());
+    for &chosen_id in chosen {
+        if !seen.insert(chosen_id) {
+            return Err(EngineError::InvalidAction(
+                "The same card was selected more than once".to_string(),
+            ));
+        }
+        if !cards.contains(&chosen_id) {
+            return Err(EngineError::InvalidAction(
+                "Selected card is not an eligible card of this reveal".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// CR 701.20a + CR 701.20b: reveal the cards a player selected from their hand
+/// — shown to all players without leaving the hand — and announce them.
+/// An empty selection reveals nothing and announces nothing.
+pub(crate) fn reveal_selected_hand_cards(
+    state: &mut GameState,
+    player: PlayerId,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) {
+    if chosen.is_empty() {
+        return;
+    }
+    state
+        .resolve_and_apply_information(
+            chosen,
+            ResolvedInformationAudience::Public,
+            ResolvedInformationLifetime::UntilZoneChange,
+            ResolvedInformationEdit::Reveal,
+        )
+        .expect("published hand-reveal occurrences must be live and distinct");
+    let card_names: Vec<String> = chosen
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))
+        .collect();
+    events.push(GameEvent::CardsRevealed {
+        player,
+        occurrences: state.disclosed_occurrences(chosen),
+        card_ids: chosen.to_vec(),
+        card_names,
+    });
+}
+
+/// CR 107.3a + CR 601.2b: the hand cards a reveal's card choice may select,
+/// evaluated in the resolving ability's context (dynamic thresholds).
+fn matching_hand_cards(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    hand: Vec<ObjectId>,
+    card_filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    if matches!(card_filter, TargetFilter::Any) {
+        return hand;
+    }
+    let ctx = FilterContext::from_ability(ability);
+    hand.into_iter()
+        .filter(|&id| matches_target_filter(state, id, card_filter, &ctx))
+        .collect()
+}
+
+/// CR 609.3: an exact selection asking for more cards than are eligible takes
+/// all that are eligible, so the published prompt is always satisfiable.
+fn achievable_cardinality(
+    cardinality: ObjectSelectionCardinality,
+    available: usize,
+) -> ObjectSelectionCardinality {
+    match cardinality {
+        ObjectSelectionCardinality::Exactly { count } => ObjectSelectionCardinality::Exactly {
+            count: count.min(u32::try_from(available).unwrap_or(u32::MAX)),
+        },
+        ObjectSelectionCardinality::AnyNumber => ObjectSelectionCardinality::AnyNumber,
+    }
 }
 
 #[cfg(test)]
@@ -335,6 +474,7 @@ mod tests {
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                     reveal: true,
+                    cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
                 },
                 vec![],
                 source,
@@ -402,6 +542,7 @@ mod tests {
                     selection: crate::types::ability::CardSelectionMode::Chosen,
                     choice_optional: false,
                     reveal: false,
+                    cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
                 },
                 vec![],
                 source,
@@ -603,6 +744,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             vec![TargetRef::Player(target_player)],
             ObjectId(100),
@@ -648,6 +790,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: false,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             // Source object slot only — no explicit player target.
             vec![TargetRef::Object(ObjectId(100))],
@@ -708,6 +851,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: false,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             // …but the explicit player target is the controller itself.
             vec![TargetRef::Player(PlayerId(0))],
@@ -738,6 +882,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             vec![TargetRef::Object(ObjectId(100))],
             ObjectId(100),
@@ -868,6 +1013,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Random,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -948,6 +1094,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: true,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -993,6 +1140,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: false,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -1047,6 +1195,7 @@ mod tests {
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: false,
+                cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(100),
@@ -1084,6 +1233,8 @@ mod tests {
             filter: TargetFilter::Any,
             optional: true,
             decline_runs_continuation: false,
+            cardinality: ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
         };
         let mut continuation = ResolvedAbility::new(
             Effect::GainLife {
@@ -1106,6 +1257,8 @@ mod tests {
                 filter: TargetFilter::Any,
                 optional: true,
                 decline_runs_continuation: false,
+                cardinality: ObjectSelectionCardinality::SINGLE,
+                pending_mana_ability: None,
             },
             GameAction::SelectCards { cards: vec![] },
             &mut events,

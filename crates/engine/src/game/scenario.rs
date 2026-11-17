@@ -308,7 +308,7 @@ impl GameScenario {
     /// Replace a player's mana pool for deterministic payment tests.
     ///
     /// CR 118.3a: routes each unit through `add_mana_to_pool` so every seeded
-    /// unit receives a distinct `ManaPipId` (a direct `mana_pool.mana = mana`
+    /// unit receives a distinct `ManaPipId` (a pool built directly from `mana`
     /// would leave all units at the `ManaPipId(0)` sentinel, so pins would
     /// collide). All callers seed a fresh pool exactly once per player, so
     /// appending is equivalent to replacing.
@@ -580,6 +580,27 @@ impl GameScenario {
         );
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Land);
+        obj.base_card_types = obj.card_types.clone();
+
+        CardBuilder {
+            state: &mut self.state,
+            id,
+        }
+    }
+
+    /// Add an artifact card to a player's graveyard (CR 404), without
+    /// introducing a creature or spell type that the printed card lacks.
+    pub fn add_artifact_to_graveyard(&mut self, player: PlayerId, name: &str) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Graveyard,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
         obj.base_card_types = obj.card_types.clone();
 
         CardBuilder {
@@ -917,6 +938,39 @@ impl GameScenario {
         obj.card_types.core_types.push(CoreType::Artifact);
         obj.base_card_types = obj.card_types.clone();
         // CR 301.1: artifacts have no power/toughness unless they are also creatures.
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// Add an enchantment card to hand with abilities parsed from Oracle text.
+    ///
+    /// Mirrors `add_artifact_to_hand_from_oracle` for enchantments (CR 303.1).
+    /// Subtypes (e.g. Aura, CR 303.4) are the caller's concern — chain
+    /// `.with_subtypes(..)` on the returned builder.
+    pub fn add_enchantment_to_hand_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+        // CR 208.3: a noncreature object not on the battlefield has power or
+        // toughness only if it has a power and toughness printed on it.
 
         let mut builder = CardBuilder {
             state: &mut self.state,
@@ -1746,6 +1800,14 @@ impl GameRunner {
     /// Bounded loop: a turn has 12 phases/steps (CR 500.1), so a generous cap
     /// guards against an unexpectedly stuck transition rather than spinning.
     pub fn advance_to_phase(&mut self, phase: Phase) {
+        let _ = self.advance_to_phase_collecting_events(phase);
+    }
+
+    /// Advance the same production turn structure as [`Self::advance_to_phase`]
+    /// while retaining events emitted by automatic phase actions and public
+    /// priority passes. This is useful when a test's claim depends on those
+    /// events; it deliberately shares the single advancement loop.
+    pub fn advance_to_phase_collecting_events(&mut self, phase: Phase) -> Vec<GameEvent> {
         let mut events = Vec::new();
         let mut waiting = crate::game::turns::auto_advance(&mut self.state, &mut events);
         for _ in 0..32 {
@@ -1758,10 +1820,15 @@ impl GameRunner {
             let r1 = apply_as_current(&mut self.state, GameAction::PassPriority);
             let r2 = apply_as_current(&mut self.state, GameAction::PassPriority);
             match (r1, r2) {
-                (Ok(_), Ok(result)) => waiting = result.waiting_for,
+                (Ok(first), Ok(result)) => {
+                    events.extend(first.events);
+                    events.extend(result.events);
+                    waiting = result.waiting_for;
+                }
                 _ => break,
             }
         }
+        events
     }
 
     /// Advance to the declare-attackers step (CR 508). The engine surfaces
@@ -1889,6 +1956,44 @@ impl GameRunner {
             hand_baseline,
             life_before,
         }
+    }
+
+    /// Whether a player must pass priority now to move from the first combat
+    /// damage step to the second (CR 510.4): the CR 510.3 window between the two
+    /// steps is open with an empty stack, so one more pass round starts the
+    /// regular step. The window definition is
+    /// `combat_damage::between_combat_damage_steps`; the extra conjunct only
+    /// requires that someone currently holds priority.
+    pub fn between_combat_damage_steps(&self) -> bool {
+        super::combat_damage::between_combat_damage_steps(&self.state)
+            && matches!(self.state.waiting_for, WaitingFor::Priority { .. })
+    }
+
+    /// Pass the CR 510.3 window between the two combat damage steps until the
+    /// regular step begins, returning the events of the passes.
+    ///
+    /// One `PassPriority` per iteration with [`Self::between_combat_damage_steps`]
+    /// re-checked each time, so any seat count works (CR 117.4). A non-empty stack
+    /// leaves the predicate false and the window untouched. Panics if the window
+    /// does not close within a generous bound or a pass is rejected, rather than
+    /// hanging the test.
+    pub fn pass_combat_damage_window(&mut self) -> Vec<GameEvent> {
+        const MAX_PASSES: usize = 16;
+        let mut events = Vec::new();
+        let mut passes = 0;
+        while self.between_combat_damage_steps() {
+            assert!(
+                passes < MAX_PASSES,
+                "the window between the combat damage steps must close within {MAX_PASSES} passes"
+            );
+            events.extend(
+                self.act(GameAction::PassPriority)
+                    .expect("passing the window between the combat damage steps should succeed")
+                    .events,
+            );
+            passes += 1;
+        }
+        events
     }
 
     /// Pass priority until the top of the stack resolves.
@@ -2066,11 +2171,13 @@ impl GameRunner {
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
             WaitingFor::ExploreChoice { .. } => "ExploreChoice",
             WaitingFor::ReturnAsAuraTarget { .. } => "ReturnAsAuraTarget",
+            WaitingFor::ChooseTokenHost { .. } => "ChooseTokenHost",
             WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
+            WaitingFor::DigBottomOrder { .. } => "DigBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -2085,16 +2192,18 @@ impl GameRunner {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
-            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
+            WaitingFor::MemberOrderChoice { .. } => "MemberOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+            WaitingFor::HeroEventChoice { .. } => "HeroEventChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
             WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
             WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
             WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
             WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
+            WaitingFor::ChooseStartingPlayer { .. } => "ChooseStartingPlayer",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
             WaitingFor::OpponentGuess { .. } => "OpponentGuess",
             WaitingFor::SpellbookDraft { .. } => "SpellbookDraft",
@@ -2181,12 +2290,14 @@ impl GameRunner {
             WaitingFor::TributeChoice { .. } => "TributeChoice",
             WaitingFor::UnlessPayment { .. } => "UnlessPayment",
             WaitingFor::UnlessPaymentChooseCost { .. } => "UnlessPaymentChooseCost",
+            WaitingFor::SecretAgendaChoice { .. } => "SecretAgendaChoice",
             WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
             WaitingFor::ChooseRoomDoor { .. } => "ChooseRoomDoor",
             WaitingFor::PayCost { .. } => "PayCost",
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
+            WaitingFor::ManaAbilityManaPayment { .. } => "ManaAbilityManaPayment",
             WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
             WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
             WaitingFor::CastOffer {
@@ -2242,6 +2353,7 @@ impl GameRunner {
             WaitingFor::ChooseFromZoneOpponentChooser { .. } => "ChooseFromZoneOpponentChooser",
             WaitingFor::ChooseAnnouncingOpponent { .. } => "ChooseAnnouncingOpponent",
             WaitingFor::ClashCardPlacement { .. } => "ClashCardPlacement",
+            WaitingFor::PhysicalContest { .. } => "PhysicalContest",
             WaitingFor::VoteChoice { .. } => "VoteChoice",
             WaitingFor::CategoryChoice { .. } => "CategoryChoice",
             WaitingFor::EachPlayerCopyChosenSelection { .. } => "EachPlayerCopyChosenSelection",
@@ -2350,6 +2462,7 @@ pub struct SpellCast<'a> {
     effect_zone_cards: Vec<ObjectId>,
     copy_target: Option<ObjectId>,
     spellbook_pick: Option<String>,
+    payment_mode: CastPaymentMode,
 }
 
 impl<'a> SpellCast<'a> {
@@ -2379,7 +2492,16 @@ impl<'a> SpellCast<'a> {
             effect_zone_cards: Vec::new(),
             copy_target: None,
             spellbook_pick: None,
+            payment_mode: CastPaymentMode::Auto,
         }
+    }
+
+    /// CR 601.2g-h: announce the cast with `mode` — `Auto` pays from the pool at
+    /// announcement; `Manual` surfaces the interactive mana-payment window, which
+    /// the driver finalizes. Default `Auto`.
+    pub fn payment_mode(mut self, mode: CastPaymentMode) -> Self {
+        self.payment_mode = mode;
+        self
     }
 
     /// Submit the first legal candidates at any `SearchChoice` during
@@ -2611,6 +2733,7 @@ impl<'a> SpellCast<'a> {
             effect_zone_cards,
             copy_target,
             spellbook_pick,
+            payment_mode,
         } = self;
 
         // CR 119.3: snapshot life totals before the cast so `life_delta` reads a
@@ -2631,7 +2754,7 @@ impl<'a> SpellCast<'a> {
                 card_id,
                 targets: vec![],
 
-                payment_mode: CastPaymentMode::Auto,
+                payment_mode,
             },
             &mut events,
         )?;
@@ -2769,14 +2892,26 @@ impl<'a> SpellCast<'a> {
                     });
                     act_collect(runner, GameAction::ChooseX { value }, &mut events)?;
                 }
-                // CR 601.2f: optional additional costs are chosen during
+                // CR 601.2b: optional additional costs are chosen during
                 // announcement, before the spell is committed to the stack.
                 WaitingFor::OptionalCostChoice { .. } => {
-                    let pay = matches!(optional, OptionalPolicy::Accept);
-                    act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                    let index = match optional {
+                        OptionalPolicy::Accept => 0,
+                        OptionalPolicy::Decline => 1,
+                        OptionalPolicy::Stop => {
+                            panic!("OptionalPolicy::Stop is only valid after spell commitment")
+                        }
+                    };
+                    act_collect(
+                        runner,
+                        GameAction::DecideOptionalCost { index },
+                        &mut events,
+                    )?;
                 }
-                // CR 702.174a: after promising Gift with ≥2 opponents, pick a recipient.
-                // Sole-opponent games auto-latch and never raise this prompt.
+                // Cast-time opponent choice (Gift recipient, CR 702.174a, or
+                // effect-cost player, CR 601.2h) — the driver picks the first
+                // candidate; tests that must observe the pick drive it manually.
+                // A sole candidate auto-binds and never raises this prompt.
                 WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                     let opponent = candidates.first().copied().unwrap_or_else(|| {
                         panic!("ChooseGiftRecipient raised with empty candidates")
@@ -3008,6 +3143,11 @@ impl<'a> CastCommit<'a> {
         &self.runner.state
     }
 
+    /// Engine events emitted while committing this cast to the stack.
+    pub fn events(&self) -> &[GameEvent] {
+        &self.events
+    }
+
     /// Submit an action while this cast remains committed on the stack.
     ///
     /// This keeps response tests on the same `apply()` pipeline as the live
@@ -3051,6 +3191,12 @@ impl<'a> CastCommit<'a> {
     /// Decline optional ("you may") effects/costs during resolution.
     pub fn decline_optional(mut self) -> Self {
         self.optional = OptionalPolicy::Decline;
+        self
+    }
+
+    /// Leave optional resolution choices unanswered (CR 608.2d).
+    pub fn stop_at_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Stop;
         self
     }
 
@@ -3197,6 +3343,7 @@ fn waiting_for_variant_name(waiting: &WaitingFor) -> &'static str {
         WaitingFor::NamedChoice { .. } => "NamedChoice",
         WaitingFor::TributeChoice { .. } => "TributeChoice",
         WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+        WaitingFor::HeroEventChoice { .. } => "HeroEventChoice",
         WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
         WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
         WaitingFor::CopyRetarget { .. } => "CopyRetarget",
@@ -3381,6 +3528,12 @@ impl<'a> AbilityActivation<'a> {
         self
     }
 
+    /// Leave optional resolution choices unanswered (CR 608.2d).
+    pub fn stop_at_optional(mut self) -> Self {
+        self.optional = OptionalPolicy::Stop;
+        self
+    }
+
     /// Choose a named/string option at a `NamedChoice` prompt during
     /// resolution. Mirrors [`SpellCast::choose_option`]; the shared
     /// [`drive_resolution`] honours [`ResolutionPolicy::named_choice`].
@@ -3399,6 +3552,13 @@ impl<'a> AbilityActivation<'a> {
     /// Drive the full activation pipeline to its conclusion and return the
     /// outcome. See [`SpellCast::resolve`] for the shared contract.
     pub fn resolve(self) -> Outcome {
+        self.try_resolve()
+            .expect("ability resolution must be accepted by the engine")
+    }
+
+    /// Drive the full activation pipeline and return engine rejection instead of
+    /// panicking when the reducer rejects a step.
+    pub fn try_resolve(self) -> Result<Outcome, EngineError> {
         let AbilityActivation {
             runner,
             source,
@@ -3430,6 +3590,7 @@ impl<'a> AbilityActivation<'a> {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
             &mut events,
         )
@@ -3556,16 +3717,14 @@ impl<'a> AbilityActivation<'a> {
             copy_target: None,
             spellbook_pick,
         };
-        events.extend(
-            drive_resolution(runner, &policy).expect("ability resolution must be accepted"),
-        );
+        events.extend(drive_resolution(runner, &policy)?);
 
-        Outcome {
+        Ok(Outcome {
             state: runner.state.clone(),
             events,
             hand_baseline,
             life_before,
-        }
+        })
     }
 }
 
@@ -3591,7 +3750,7 @@ pub enum SearchPolicy {
 }
 
 /// What the resolution driver does at an optional "you may" decision
-/// (`OptionalEffectChoice` per CR 608.2d, `OptionalCostChoice` per CR 601.2f).
+/// (CR 608.2d); casting also uses Accept/Decline for additional costs (CR 601.2b).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OptionalPolicy {
     /// Accept the optional effect / pay the optional cost.
@@ -3599,6 +3758,8 @@ pub enum OptionalPolicy {
     /// Decline — the safe default, since many "you may" prompts default to no.
     #[default]
     Decline,
+    /// Leave the resolution choice (CR 608.2d) unanswered for the caller.
+    Stop,
 }
 
 /// Declared intent reused across resolution prompts. Built once per
@@ -3677,7 +3838,8 @@ fn drive_resolution(
                 act_collect(runner, GameAction::SelectCards { cards: keep }, &mut events)?;
             }
             WaitingFor::RippleBottomOrder { cards, .. }
-            | WaitingFor::RevealUntilBottomOrder { cards, .. } => {
+            | WaitingFor::RevealUntilBottomOrder { cards, .. }
+            | WaitingFor::DigBottomOrder { cards, .. } => {
                 let cards = cards.clone();
                 act_collect(runner, GameAction::SelectCards { cards }, &mut events)?;
             }
@@ -3823,7 +3985,11 @@ fn drive_resolution(
             },
             // CR 608.2d: accept or decline an optional ("you may") effect.
             WaitingFor::OptionalEffectChoice { .. } => {
-                let accept = matches!(policy.optional, OptionalPolicy::Accept);
+                let accept = match policy.optional {
+                    OptionalPolicy::Accept => true,
+                    OptionalPolicy::Decline => false,
+                    OptionalPolicy::Stop => break,
+                };
                 act_collect(
                     runner,
                     GameAction::DecideOptionalEffect { accept },
@@ -3831,18 +3997,33 @@ fn drive_resolution(
                 )?;
             }
             WaitingFor::TributeChoice { .. } => {
-                let accept = matches!(policy.optional, OptionalPolicy::Accept);
+                let accept = match policy.optional {
+                    OptionalPolicy::Accept => true,
+                    OptionalPolicy::Decline => false,
+                    OptionalPolicy::Stop => break,
+                };
                 act_collect(
                     runner,
                     GameAction::DecideOptionalEffect { accept },
                     &mut events,
                 )?;
             }
-            // CR 601.2f: pay or decline an optional cost during resolution.
+            // CR 608.2d: leave resolution-time choices to the declared policy.
             WaitingFor::OptionalCostChoice { .. } => {
-                let pay = matches!(policy.optional, OptionalPolicy::Accept);
-                act_collect(runner, GameAction::DecideOptionalCost { pay }, &mut events)?;
+                let index = match policy.optional {
+                    OptionalPolicy::Accept => 0,
+                    OptionalPolicy::Decline => 1,
+                    OptionalPolicy::Stop => break,
+                };
+                act_collect(
+                    runner,
+                    GameAction::DecideOptionalCost { index },
+                    &mut events,
+                )?;
             }
+            // Cast-time opponent choice (Gift recipient, CR 702.174a, or effect-cost
+            // player, CR 601.2h) — the driver picks the first candidate; tests that
+            // must observe the pick drive it manually.
             WaitingFor::ChooseGiftRecipient { candidates, .. } => {
                 let opponent = candidates
                     .first()
@@ -3974,6 +4155,12 @@ fn drive_resolution(
                 }
                 match runner.act(GameAction::PassPriority) {
                     Ok(result) => events.extend(result.events),
+                    // An unrepresentable life change is an engine limit, not an
+                    // unhandled prompt: the driver must report it rather than
+                    // silently stop with a partially resolved effect.
+                    Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => {
+                        return Err(error);
+                    }
                     Err(_) => {
                         break;
                     }
@@ -4537,7 +4724,8 @@ mod tests {
     use super::*;
     use crate::game::combat::AttackTarget;
     use crate::types::ability::{
-        AbilityCondition, ControllerRef, FilterProp, TargetChoiceTiming, TypedFilter,
+        AbilityCondition, AbilityCost, AdditionalCostRepeatability, ControllerRef, FilterProp,
+        TargetChoiceTiming, TypedFilter,
     };
     use crate::types::replacements::ReplacementEvent;
 
@@ -4554,17 +4742,91 @@ mod tests {
         assert_eq!(state.players[1].life, 20);
     }
 
-    /// Cast a free (no-mana-cost) sorcery (already in the active player's hand)
-    /// and commit it to the stack, returning the `WaitingFor` the engine halts
-    /// in (the first resolution prompt). Helper for the "any player may"
-    /// group-bargain tests that must drive the per-player APNAP prompt loop by
-    /// hand.
-    fn cast_free_sorcery_to_prompt(
-        runner: &mut GameRunner,
-        spell: ObjectId,
-        preferred_target: Option<TargetRef>,
-    ) -> WaitingFor {
-        let card_id = runner.state.objects[&spell].card_id;
+    #[test]
+    fn optional_activation_stop_preserves_prompt_until_public_response() {
+        // Synthetic harness fixture: optional draw, with a free activation.
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Reward"]);
+        let source = scenario
+            .add_creature(P0, "Optional activation fixture", 1, 1)
+            .with_ability_definition(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+                .optional(),
+            )
+            .id();
+        let mut runner = scenario.build();
+        let outcome = runner.activate(source, 0).stop_at_optional().resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
+        outcome.assert_hand_drawn(P0, 0);
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        assert_eq!(runner.state().players[0].hand.len(), 1);
+        assert!(runner.state().stack.is_empty());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+    }
+
+    #[test]
+    fn flash_explicit_optional_policies_preserve_accept_and_decline() {
+        for accept in [true, false] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let flash = scenario.add_spell_to_hand_from_oracle(P0, "Flash", true,
+                "You may put a creature card from your hand onto the battlefield. If you do, sacrifice it unless you pay its mana cost reduced by {2}.").id();
+            let first = scenario.add_creature_to_hand(P0, "First", 1, 1).id();
+            let second = scenario.add_creature_to_hand(P0, "Second", 2, 2).id();
+            let mut runner = scenario.build();
+            let committed = runner.cast(flash).commit();
+            let outcome = if accept {
+                committed.accept_optional()
+            } else {
+                committed.decline_optional()
+            }
+            .resolve();
+            outcome.assert_zone(&[first, second], Zone::Hand);
+            if accept {
+                assert!(matches!(
+                    outcome.final_waiting_for(),
+                    WaitingFor::EffectZoneChoice { player: P0, .. }
+                ));
+            } else {
+                assert!(matches!(
+                    outcome.final_waiting_for(),
+                    WaitingFor::Priority { .. }
+                ));
+                assert!(outcome.state().stack.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn optional_driver_stop_preserves_tribute_and_cost_prompts() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Cost fixture", false)
+            .with_additional_cost(AdditionalCost::Optional {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::zero(),
+                },
+                repeatability: AdditionalCostRepeatability::Once,
+            })
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
         runner
             .act(GameAction::CastSpell {
                 object_id: spell,
@@ -4572,40 +4834,64 @@ mod tests {
                 targets: vec![],
                 payment_mode: CastPaymentMode::Auto,
             })
-            .expect("CastSpell must be accepted");
-        // CR 601.2a–c: answer any cast-time target slot (the "target player"
-        // reward of Browbeat-class cards), then commit and begin resolving.
-        for _ in 0..16 {
-            match runner.state.waiting_for.clone() {
-                WaitingFor::TargetSelection { target_slots, .. } => {
-                    let slot = &target_slots[0];
-                    let target = preferred_target
-                        .as_ref()
-                        .and_then(|preferred| {
-                            slot.legal_targets
-                                .iter()
-                                .find(|candidate| *candidate == preferred)
-                                .cloned()
-                        })
-                        .unwrap_or_else(|| slot.legal_targets[0].clone());
-                    runner
-                        .act(GameAction::ChooseTarget {
-                            target: Some(target),
-                        })
-                        .expect("cast-time target must be accepted");
-                }
-                WaitingFor::Priority { .. } => {
-                    if runner.state.stack.is_empty() {
-                        break;
-                    }
-                    if runner.act(GameAction::PassPriority).is_err() {
-                        break;
-                    }
-                }
-                _ => break,
-            }
+            .unwrap();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { player: P0, .. }
+        ));
+        let cost_prompt = runner.state().waiting_for.clone();
+        for prompt in [
+            cost_prompt,
+            WaitingFor::TributeChoice {
+                player: P1,
+                source_id: spell,
+                count: 2,
+            },
+        ] {
+            runner.state_mut().waiting_for = prompt.clone();
+            let events = drive_resolution(
+                &mut runner,
+                &ResolutionPolicy {
+                    optional: OptionalPolicy::Stop,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(runner.state().waiting_for, prompt);
+            assert!(events.is_empty());
         }
-        runner.state.waiting_for.clone()
+    }
+
+    #[test]
+    #[should_panic(expected = "OptionalPolicy::Stop is only valid after spell commitment")]
+    fn optional_stop_cannot_silently_decline_casting_cost() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Cost fixture", false)
+            .with_additional_cost(AdditionalCost::Optional {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::zero(),
+                },
+                repeatability: AdditionalCostRepeatability::Once,
+            })
+            .id();
+        let mut runner = scenario.build();
+        // Positive control: the same fixture commits under a legal policy.
+        let mut control = GameRunner::from_state(runner.state().clone());
+        assert_eq!(
+            control
+                .cast(spell)
+                .decline_optional()
+                .commit()
+                .state()
+                .stack
+                .len(),
+            1
+        );
+        let mut cast = runner.cast(spell);
+        cast.optional = OptionalPolicy::Stop;
+        cast.commit();
     }
 
     #[test]
@@ -4634,9 +4920,16 @@ mod tests {
             })
             .id();
         let mut runner = scenario.build();
-        let first = cast_free_sorcery_to_prompt(&mut runner, flash, None);
+        let committed = runner.cast(flash).commit();
+        assert_eq!(committed.state().stack.len(), 1);
+        let first = committed
+            .stop_at_optional()
+            .resolve()
+            .final_waiting_for()
+            .clone();
+        assert_eq!(runner.state().objects[&chosen].zone, Zone::Hand);
         assert!(
-            matches!(first, WaitingFor::OptionalEffectChoice { .. }),
+            matches!(first, WaitingFor::OptionalEffectChoice { player: P0, .. }),
             "{first:?}"
         );
         runner
@@ -4718,7 +5011,13 @@ mod tests {
                 .id();
             let mut runner = scenario.build();
             assert!(matches!(
-                cast_free_sorcery_to_prompt(&mut runner, flash, None),
+                runner
+                    .cast(flash)
+                    .commit()
+                    .stop_at_optional()
+                    .resolve()
+                    .final_waiting_for()
+                    .clone(),
                 WaitingFor::OptionalEffectChoice { .. }
             ));
             runner
@@ -4793,7 +5092,15 @@ mod tests {
             })
             .id();
         let mut runner = scenario.build();
-        cast_free_sorcery_to_prompt(&mut runner, flash, None);
+        assert!(matches!(
+            runner
+                .cast(flash)
+                .commit()
+                .stop_at_optional()
+                .resolve()
+                .final_waiting_for(),
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
         runner
             .act(GameAction::DecideOptionalEffect { accept: true })
             .unwrap();
@@ -4816,7 +5123,7 @@ mod tests {
             .expect("pay reduced cost");
         assert_eq!(runner.state().objects[&creature].zone, Zone::Battlefield);
         assert_eq!(runner.state().objects[&decoy].zone, Zone::Hand);
-        assert!(runner.state().players[0].mana_pool.mana.is_empty());
+        assert!(runner.state().players[0].mana_pool.is_empty());
     }
 
     #[test]
@@ -4852,7 +5159,13 @@ mod tests {
         }
         let mut runner = scenario.build();
         assert!(matches!(
-            cast_free_sorcery_to_prompt(&mut runner, flash, None),
+            runner
+                .cast(flash)
+                .commit()
+                .stop_at_optional()
+                .resolve()
+                .final_waiting_for()
+                .clone(),
             WaitingFor::OptionalEffectChoice { .. }
         ));
         runner
@@ -4918,7 +5231,15 @@ mod tests {
                 .with_replacement_definition(replacement);
         }
         let mut runner = scenario.build();
-        cast_free_sorcery_to_prompt(&mut runner, flash, None);
+        assert!(matches!(
+            runner
+                .cast(flash)
+                .commit()
+                .stop_at_optional()
+                .resolve()
+                .final_waiting_for(),
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
         runner
             .act(GameAction::DecideOptionalEffect { accept: true })
             .unwrap();
@@ -5014,7 +5335,15 @@ mod tests {
             .with_replacement_definition(devour)
             .id();
         let mut runner = scenario.build();
-        cast_free_sorcery_to_prompt(&mut runner, flash, None);
+        assert!(matches!(
+            runner
+                .cast(flash)
+                .commit()
+                .stop_at_optional()
+                .resolve()
+                .final_waiting_for(),
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
         runner
             .act(GameAction::DecideOptionalEffect { accept: true })
             .unwrap();
@@ -5266,7 +5595,13 @@ mod tests {
         let creature = scenario.add_creature_to_hand(P0, "Creature", 3, 3).id();
         let mut runner = scenario.build();
         assert!(matches!(
-            cast_free_sorcery_to_prompt(&mut runner, flash, None),
+            runner
+                .cast(flash)
+                .commit()
+                .stop_at_optional()
+                .resolve()
+                .final_waiting_for()
+                .clone(),
             WaitingFor::OptionalEffectChoice { .. }
         ));
         runner
@@ -5307,7 +5642,7 @@ mod tests {
         scenario.with_library_top(P0, &["Reward Card"]);
         let mut runner = scenario.build();
 
-        let wf = cast_free_sorcery_to_prompt(&mut runner, spell, None);
+        let wf = runner.cast(spell).resolve().final_waiting_for().clone();
 
         // CR 101.4: the controller (active player P0) is offered FIRST, and the
         // other player remains queued.
@@ -5394,12 +5729,12 @@ mod tests {
         );
     }
 
-    /// CR 608.2d + CR 701.21a: choosing to perform an impossible optional
-    /// sacrifice is not "a player does". If the current promptee controls no
-    /// legal permanent, the APNAP offer must continue to the next player rather
-    /// than treating the empty selection as an accepted sacrifice.
+    /// CR 608.2d + CR 701.21a: a player who controls no land can't sacrifice one,
+    /// so they can't choose "any player may sacrifice a land of their choice" and
+    /// aren't offered it. The offer goes to the player who can, and no reward
+    /// is drawn before anyone sacrifices.
     #[test]
-    fn any_player_may_impossible_sacrifice_accept_continues_offer() {
+    fn any_player_may_sacrifice_is_not_offered_to_a_player_without_a_land() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let _p1_land = scenario.add_basic_land(P1, ManaColor::White);
@@ -5415,17 +5750,6 @@ mod tests {
         scenario.with_library_top(P0, &["Reward Card"]);
         let mut runner = scenario.build();
 
-        let wf = cast_free_sorcery_to_prompt(&mut runner, spell, None);
-        match wf {
-            WaitingFor::OpponentMayChoice {
-                player, remaining, ..
-            } => {
-                assert_eq!(player, P0, "controller is still offered first");
-                assert_eq!(remaining, vec![P1], "opponent remains queued");
-            }
-            other => panic!("expected first OpponentMayChoice, got {other:?}"),
-        }
-
         let hand_before = runner
             .state
             .players
@@ -5434,18 +5758,18 @@ mod tests {
             .unwrap()
             .hand
             .len();
-        runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("empty sacrifice accept should advance to next player");
-
-        match &runner.state.waiting_for {
-            WaitingFor::OpponentMayChoice { player, .. } => {
+        let wf = runner.cast(spell).resolve().final_waiting_for().clone();
+        match wf {
+            WaitingFor::OpponentMayChoice {
+                player, remaining, ..
+            } => {
                 assert_eq!(
-                    *player, P1,
-                    "empty accept must not end the offer or fire the if-a-player-does rider"
+                    player, P1,
+                    "CR 608.2d: the controller controls no land, so the first offer is the opponent's"
                 );
+                assert!(remaining.is_empty(), "no other seat is queued");
             }
-            other => panic!("expected opponent offer after impossible accept, got {other:?}"),
+            other => panic!("expected the opponent's OpponentMayChoice, got {other:?}"),
         }
         let hand_after = runner
             .state
@@ -5456,8 +5780,9 @@ mod tests {
             .hand
             .len();
         assert_eq!(
-            hand_after, hand_before,
-            "no card should be drawn because no sacrifice happened"
+            hand_after,
+            hand_before - 1,
+            "only the cast spell left the hand; no card is drawn because no sacrifice happened"
         );
     }
 
@@ -5488,6 +5813,8 @@ mod tests {
 
     fn move_zone_effect(origin: Option<Zone>, destination: Zone, target: TargetFilter) -> Effect {
         Effect::ChangeZone {
+            actor: crate::types::ability::LibraryInstructionActor::Controller,
+            library_shuffle: Default::default(),
             origin,
             destination,
             target,
@@ -5504,11 +5831,11 @@ mod tests {
         }
     }
 
-    /// CR 101.4 + CR 608.2d: an impossible exact-three acceptance is skipped
-    /// without recording acceptance, and the APNAP offer advances to the next
-    /// player whose selection is feasible.
+    /// CR 101.4 + CR 608.2d: a player without three cards in their graveyard
+    /// can't make the exact selection, so they can't choose the option and are
+    /// never offered it; the player who can is the first and only seat offered.
     #[test]
-    fn carrion_wurm_impossible_first_accept_advances_to_feasible_player() {
+    fn carrion_wurm_is_offered_only_to_the_player_who_can_exile_three() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let wurm = scenario
@@ -5526,24 +5853,22 @@ mod tests {
         let mut runner = scenario.build();
 
         attack_until_optional_prompt(&mut runner, wurm);
-        runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("infeasible first acceptance advances");
-        assert!(matches!(
-            &runner.state().waiting_for,
-            WaitingFor::OpponentMayChoice { player: P1, .. }
-        ));
-        assert!(!runner.state().player_actions_this_way.contains(&(
-            P0,
-            crate::types::events::PlayerActionKind::AcceptedOptionalEffect
-        )));
-        assert!(p0_cards
-            .iter()
-            .all(|card| runner.state().objects[card].zone == Zone::Graveyard));
+        match &runner.state().waiting_for {
+            WaitingFor::OpponentMayChoice {
+                player, remaining, ..
+            } => {
+                assert_eq!(
+                    *player, P1,
+                    "CR 608.2d: the controller can't exile three, so the first offer is P1's"
+                );
+                assert!(remaining.is_empty(), "no other seat is queued");
+            }
+            other => panic!("expected P1's OpponentMayChoice, got {other:?}"),
+        }
 
         runner
             .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("feasible second acceptance opens exact choice");
+            .expect("the feasible acceptance opens the exact choice");
         match &runner.state().waiting_for {
             WaitingFor::EffectZoneChoice {
                 player,
@@ -5577,6 +5902,13 @@ mod tests {
             .iter()
             .all(|card| runner.state().objects[card].zone == Zone::Exile));
         assert!(runner.state().objects[&wurm].assigns_no_combat_damage);
+        assert!(p0_cards
+            .iter()
+            .all(|card| runner.state().objects[card].zone == Zone::Graveyard));
+        assert!(!runner.state().player_actions_this_way.contains(&(
+            P0,
+            crate::types::events::PlayerActionKind::AcceptedOptionalEffect
+        )));
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::Priority { .. }
@@ -5618,11 +5950,11 @@ mod tests {
         ));
     }
 
-    /// CR 608.2d: when every player lacks three eligible cards, exhausting the
-    /// APNAP offers with impossible acceptances is equivalent to no player
-    /// performing the instruction.
+    /// CR 608.2d: when every player lacks three eligible cards, no player can
+    /// choose the option, so no one is offered it and no player performs the
+    /// instruction: the rider stays closed.
     #[test]
-    fn carrion_wurm_all_infeasible_acceptances_leave_rider_false() {
+    fn carrion_wurm_with_no_player_able_to_exile_three_offers_no_one() {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let wurm = scenario
@@ -5632,23 +5964,32 @@ mod tests {
         scenario.add_spell_to_graveyard(P1, "P1 Only Card", true);
         let mut runner = scenario.build();
 
-        attack_until_optional_prompt(&mut runner, wurm);
-        runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("controller cannot make exact selection");
+        runner.advance_to_combat();
         assert!(matches!(
             runner.state().waiting_for,
-            WaitingFor::OpponentMayChoice { player: P1, .. }
+            WaitingFor::DeclareAttackers { .. }
         ));
         runner
-            .act(GameAction::DecideOptionalEffect { accept: true })
-            .expect("last player also cannot make the exact selection");
+            .declare_attackers(&[(wurm, AttackTarget::Player(P1))])
+            .expect("declare Carrion attacker");
+        assert!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == wurm),
+            "the Wurm's attack trigger is on the stack"
+        );
+        // An `OpponentMayChoice` would stop the drive here: nothing answers it.
+        runner.advance_until_stack_empty();
 
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "CR 608.2d: no player can exile three, so no one is offered; got {:?}",
+            runner.state().waiting_for
+        );
+        assert!(runner.state().stack.is_empty());
         assert!(!runner.state().objects[&wurm].assigns_no_combat_damage);
-        assert!(matches!(
-            runner.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ));
         assert!(runner.state().active_ability_continuation().is_none());
     }
 
@@ -5895,7 +6236,12 @@ mod tests {
         scenario.with_library_top(P1, &["A", "B", "C", "D"]);
         let mut runner = scenario.build();
 
-        let wf = cast_free_sorcery_to_prompt(&mut runner, spell, Some(TargetRef::Player(P1)));
+        let wf = runner
+            .cast(spell)
+            .target_player(P1)
+            .resolve()
+            .final_waiting_for()
+            .clone();
 
         // Controller (P0) offered first.
         match wf {

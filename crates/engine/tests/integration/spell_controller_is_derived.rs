@@ -1535,7 +1535,12 @@ fn cr800_4a_thief_leaving_reverts_the_stolen_spell_and_leaves_it_on_the_stack() 
     assert_eq!(state.stack.len(), 1);
 
     let mut events = Vec::new();
-    eliminate_player(&mut state, thief, &mut events);
+    eliminate_player(
+        &mut state,
+        thief,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     // Leg 2 (REVERT-FAILING): the spell reverts to its by-default caster and
     // stays on the stack.
@@ -1580,7 +1585,12 @@ fn cr800_4a_caster_leaving_removes_the_stolen_spell() {
     assert_eq!(stack_object_controller(&state, &entry), thief);
 
     let mut events = Vec::new();
-    eliminate_player(&mut state, caster, &mut events);
+    eliminate_player(
+        &mut state,
+        caster,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(
         !state.stack.iter().any(|e| e.id == spell),
@@ -1619,7 +1629,12 @@ fn cr800_4a_thief_leaving_reverts_a_stolen_permanent_to_its_by_default_controlle
     assert_eq!(state.objects[&permanent].controller, thief);
 
     let mut events = Vec::new();
-    eliminate_player(&mut state, thief, &mut events);
+    eliminate_player(
+        &mut state,
+        thief,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
     assert_eq!(
         state.objects[&permanent].zone,
         Zone::Battlefield,
@@ -1672,7 +1687,12 @@ fn cr800_4a_caster_leaving_leaves_a_stolen_spell_under_its_surviving_thief() {
     assert_eq!(stack_object_controller(state, &entry), thief);
 
     let mut events = Vec::new();
-    eliminate_player(state, caster, &mut events);
+    eliminate_player(
+        state,
+        caster,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(
         state.stack.iter().any(|e| e.id == spell),
@@ -1717,7 +1737,12 @@ fn cr800_4a_a_leavers_spell_on_a_survivors_card_is_exiled() {
     assert_eq!(stack_object_controller(state, &entry), caster);
 
     let mut events = Vec::new();
-    eliminate_player(state, caster, &mut events);
+    eliminate_player(
+        state,
+        caster,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(
         !state.stack.iter().any(|e| e.id == spell),
@@ -1757,7 +1782,12 @@ fn cr800_4a_simultaneous_leavers_journal_their_own_stack_removals() {
     assert_eq!(state.stack.len(), 2);
 
     let mut events = Vec::new();
-    engine::game::elimination::eliminate_players_simultaneously(&mut state, &[P0, P1], &mut events);
+    engine::game::elimination::eliminate_players_simultaneously(
+        &mut state,
+        &[P0, P1],
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(
         state.stack.is_empty(),
@@ -1861,9 +1891,9 @@ fn cr603_10d_lose_control_trigger_is_controlled_by_the_player_who_lost_control()
 /// control changed (`source_id != object_id`). Its controller comes from a
 /// wholly separate authority — `DelayedTrigger.controller`, bound once at
 /// installation and read directly by `triggers::delayed_trigger_to_context`
-/// — never from `collect_matching_triggers_inner`'s CR 603.10d override
-/// above (which is gated on `trig_def.mode == ChangesController && *object_id
-/// == obj_id`, false here by construction). This row pins that the class
+/// — never from `collect_matching_triggers_inner`'s `ControlChangeSide`
+/// override above (which is gated on `ChangesController { side }` with
+/// `*object_id == obj_id`, false here by construction). This row pins that the class
 /// still resolves for the correct player (P0, the temp holder who created
 /// the delayed trigger) after U3, confirming the two authorities do not
 /// collide — the "must NOT be re-keyed" half of V8b.
@@ -1931,7 +1961,9 @@ fn cr603_10d_delayed_specific_object_shape_still_attributes_to_its_own_source() 
         runner.state().objects.get(&source).unwrap(),
     ));
     let mut trig = engine::types::ability::TriggerDefinition::new(
-        engine::types::triggers::TriggerMode::ChangesController,
+        engine::types::triggers::TriggerMode::ChangesController {
+            side: engine::types::triggers::ControlChangeSide::Loses,
+        },
     );
     trig.valid_card = Some(TargetFilter::SpecificObject { id: sword });
     trig.execute = None;
@@ -2064,6 +2096,7 @@ fn announcement_window_display_uses_the_stack_entry_controller() {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 },
             );

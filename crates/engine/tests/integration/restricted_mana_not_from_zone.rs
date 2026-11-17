@@ -45,7 +45,7 @@ fn cannot_cast_from_hand_restriction() -> ManaRestriction {
 fn spell_cast_from(zone: Zone) -> SpellMeta {
     SpellMeta {
         types: vec!["Artifact".to_string()],
-        cast_from_zone: Some(zone),
+        cast_origin: Some(engine::types::zones::CastProvenance::Zone(zone)),
         ..SpellMeta::default()
     }
 }
@@ -252,7 +252,7 @@ fn karolina_restriction_drives_the_production_cast_payment_pipeline() {
         ] {
             assert_eq!(pool.count_color(color), 1);
         }
-        assert!(pool.mana.iter().all(|unit| {
+        assert!(pool.units().all(|unit| {
             unit.restrictions == vec![ManaRestriction::CannotCastSpellFromZone(Zone::Hand)]
         }));
         (game, spell)

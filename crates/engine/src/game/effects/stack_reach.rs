@@ -6,16 +6,18 @@ use std::borrow::Cow;
 use crate::game::ability_utils::{
     apply_instead_swap, flatten_specified_targets_in_chain, validate_targets_in_chain,
 };
-use crate::game::functioning_abilities::active_replacements;
-use crate::game::replacement::{find_applicable_replacements, replacement_registry};
+use crate::game::functioning_abilities::{active_replacements, replacement_functions_in_zone};
+use crate::game::replacement::{
+    find_applicable_replacements, live_floating_replacements, replacement_registry,
+};
 use crate::game::{stack, targeting};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Effect, EffectOutcomeSignal, EffectScope, ObjectScope,
-    ResolvedAbility, TapStateChange, TargetFilter, TargetRef,
+    AbilityCondition, Effect, EffectOutcomeSignal, EffectScope, FilterProp, ObjectScope,
+    ReplacementDefinition, ResolvedAbility, TapStateChange, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
-use crate::types::mana::ManaCost;
+use crate::types::player::PlayerId;
 use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
@@ -56,6 +58,8 @@ pub fn stack_entry_node_reach<'a>(state: &GameState, entry: &'a StackEntry) -> V
     let Some(root) = entry.ability() else {
         return Vec::new();
     };
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_stack_entry_reach();
     let resolves_first: Vec<ObjectId> = state
         .stack
         .iter()
@@ -96,7 +100,7 @@ pub fn stack_entry_node_reach<'a>(state: &GameState, entry: &'a StackEntry) -> V
 /// controller), a required target that has not been chosen
 /// (`stack::has_missing_required_stack_targets`), or a CR 608.2b declared
 /// target that is no longer legal.
-fn resolution_board(
+pub(crate) fn resolution_board(
     state: &GameState,
     entry: &StackEntry,
     root: &ResolvedAbility,
@@ -252,23 +256,23 @@ impl Walk<'_> {
             node,
             acted_on: own,
         });
-        let children = [
-            (node.sub_ability.as_deref(), prepared.sub_ability.as_deref()),
-            (
-                node.else_ability.as_deref(),
-                prepared.else_ability.as_deref(),
-            ),
-        ];
-        for (index, (child, prepared_child)) in children.into_iter().enumerate() {
-            debug_assert_eq!(
-                child.is_some(),
+        for (edge, child) in node.child_links() {
+            let prepared_child = prepared
+                .child_links()
+                .find_map(|(prepared_edge, child)| (prepared_edge == edge).then_some(child));
+            debug_assert!(
                 prepared_child.is_some(),
-                "the resolution rewrites keep the chain's shape"
+                "resolution rewrites keep the chain's shape"
             );
-            let (Some(child), Some(prepared_child)) = (child, prepared_child) else {
+            let Some(prepared_child) = prepared_child else {
                 continue;
             };
-            if index == 0 && instead.is_some() {
+            let sequential = match edge {
+                crate::types::game_state::ChainStep::SubAbility => true,
+                crate::types::game_state::ChainStep::ElseAbility
+                | crate::types::game_state::ChainStep::CoinFlipBranch { .. } => false,
+            };
+            if sequential && instead.is_some() {
                 // What runs in this node's place when the swap happened. The
                 // nodes below it are not answered.
                 reaches.push(NodeReach {
@@ -278,10 +282,9 @@ impl Walk<'_> {
                 push_unanswered_below(child, reaches);
                 continue;
             }
-            // An `else_ability` runs when this node's condition is false or its
-            // "you may" is declined, and neither is answered.
+            // Neither an ordinary else nor an unselected coin outcome is answered.
             let handed = board
-                .filter(|_| index == 0)
+                .filter(|_| sequential)
                 .zip(written.clone())
                 .zip(handed_child(&performed, prepared_child));
             let Some(((child_board, written), child_bound)) = handed else {
@@ -325,20 +328,6 @@ impl Walk<'_> {
     fn runs(&self, board: &GameState, ability: &ResolvedAbility, before: &Before) -> Runs {
         if let Some(condition) = &ability.condition {
             if self.condition_holds(board, condition, ability, before) != Some(true) {
-                return Runs::No;
-            }
-        }
-        // The chain resolver treats an unless cost of {0} as paid, so a counter
-        // with one counters nothing and the rest of the entry does not run.
-        // Where no player would be asked, it counters; that answer is nothing
-        // here too.
-        if let Some(unless_pay) = &ability.unless_pay {
-            if matches!(ability.effect, Effect::Counter { .. })
-                && matches!(
-                    super::resolved_unless_cost(board, ability, &unless_pay.cost),
-                    AbilityCost::Mana { cost } if cost == ManaCost::zero()
-                )
-            {
                 return Runs::No;
             }
         }
@@ -410,10 +399,7 @@ impl Walk<'_> {
 
 /// `node`'s subtree below it, every node answering nothing.
 fn push_unanswered_below<'a>(node: &'a ResolvedAbility, reaches: &mut Vec<NodeReach<'a>>) {
-    for child in [node.sub_ability.as_deref(), node.else_ability.as_deref()]
-        .into_iter()
-        .flatten()
-    {
+    for (_, child) in node.child_links() {
         reaches.push(NodeReach {
             node: child,
             acted_on: Vec::new(),
@@ -499,25 +485,19 @@ fn instruction_writes(
         }),
         // CR 701.25a: surveil moves cards from its player's library to their
         // graveyard, where no replacement effect may apply to that move.
+        // CR 400.2 + CR 401.2: which cards those are is hidden, so the move is
+        // judged on public facts alone.
         Effect::Surveil { target, .. } => {
-            let player = super::resolve_player_for_context_ref(board, ability, target);
-            let moves: Vec<ProposedEvent> = board
-                .players
-                .iter()
-                .filter(|candidate| candidate.id == player)
-                .flat_map(|candidate| board.library_of(candidate.id).iter())
-                .map(|id| {
-                    ProposedEvent::zone_change(
-                        *id,
-                        Zone::Library,
-                        Zone::Graveyard,
-                        Some(ability.source_id),
-                    )
-                })
+            // CR 608.2b: a declared player whose target was illegal is not affected.
+            let Some(player) = super::resolve_player_for_context_ref(board, ability, target) else {
+                return Some(Written::default());
+            };
+            let moves: Vec<ProposedEvent> = (!board.library_of(player).is_empty())
+                .then(|| hidden_library_move(Zone::Graveyard))
+                .into_iter()
                 .collect();
-            let replaced = moves.iter().any(|event| {
-                !find_applicable_replacements(board, event, replacement_registry()).is_empty()
-            }) || replacement_may_come_to_apply(board, &moves, before);
+            let replaced = hidden_library_move_may_be_replaced(board, player, Zone::Graveyard)
+                || replacement_may_come_to_apply(board, &moves, before);
             (!replaced).then(|| Written {
                 moved_from: vec![Zone::Library],
                 ..Written::changed()
@@ -587,10 +567,35 @@ fn replacement_may_come_to_apply(
         return false;
     }
     let registry = replacement_registry();
-    let replaces = |kind: &ReplacementEvent, host: ObjectId, event: &ProposedEvent| {
+    let replaces_kind = |kind: &ReplacementEvent, host: ObjectId, event: &ProposedEvent| {
         registry
             .get(kind)
             .is_some_and(|handler| (handler.matcher)(event, host, board))
+    };
+    let replaces = |definition: &ReplacementDefinition, host: ObjectId, event: &ProposedEvent| {
+        if !replaces_kind(&definition.event, host, event) {
+            return false;
+        }
+        // Destination zone gate (CR 614.6)
+        if let (Some(dest), ProposedEvent::ZoneChange { to, .. }) =
+            (definition.destination_zone, event)
+        {
+            if *to != dest {
+                return false;
+            }
+        }
+        // Ownership gate on known objects (CR 108.3: card ownership is immutable)
+        if let Some(object_id) = event.affected_object_id() {
+            if let Some(object) = board.objects.get(&object_id) {
+                if let Some(valid_card) = &definition.valid_card {
+                    if !evaluate_ownership_filter(valid_card, host, object.owner, board, definition)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     };
     events.iter().any(|event| {
         // `instruction_writes` records only regeneration shields, each of
@@ -598,12 +603,11 @@ fn replacement_may_come_to_apply(
         written.replacements.iter().any(|kind| {
             event
                 .affected_object_id()
-                .is_some_and(|host| replaces(kind, host, event))
+                .is_some_and(|host| replaces_kind(kind, host, event))
         }) || active_replacements(board)
-            .any(|(_, object, definition)| replaces(&definition.event, object.id, event))
-            || board.pending_damage_replacements.iter().any(|definition| {
-                !definition.is_consumed && replaces(&definition.event, ObjectId(0), event)
-            })
+            .any(|(_, object, definition)| replaces(definition, object.id, event))
+            || live_floating_replacements(board)
+                .any(|(host, definition)| replaces(definition, host, event))
     })
 }
 
@@ -675,7 +679,7 @@ fn names_resolution_product(effect: &Effect) -> bool {
             super::filter_references_tracked_set(filter)
                 || crate::game::filter::filter_contains_last_created(filter)
                 || crate::game::filter::filter_contains_last_zone_changed(filter)
-                || crate::game::filter::filter_contains(filter, &|inner| {
+                || crate::types::ability::filter_contains(filter, &|inner| {
                     matches!(inner, TargetFilter::LastRevealed)
                 })
         })
@@ -690,9 +694,177 @@ fn replacement_may_apply(
     bound: &ResolvedAbility,
     acted_on: &[TargetRef],
 ) -> bool {
-    proposed_events(board, bound, acted_on)
-        .iter()
-        .any(|event| !find_applicable_replacements(board, event, replacement_registry()).is_empty())
+    let hidden_move_replaced =
+        non_mill_library_edge_destination(&bound.effect).is_some_and(|destination| {
+            acted_on.iter().any(|target| {
+                matches!(target, TargetRef::Player(player)
+                    if hidden_library_move_may_be_replaced(board, *player, destination))
+            })
+        });
+    hidden_move_replaced
+        || proposed_events(board, bound, acted_on).iter().any(|event| {
+            !find_applicable_replacements(board, event, replacement_registry()).is_empty()
+        })
+}
+
+/// CR 701.17a: where a `Mill` node moves cards off its player's library edge
+/// without milling them (a bottom-edge move, Cellar Door; Grenzo, Dungeon
+/// Warden; or a top-edge move to a zone other than the graveyard), the zone
+/// they go to.
+fn non_mill_library_edge_destination(effect: &Effect) -> Option<Zone> {
+    match effect {
+        Effect::Mill {
+            destination,
+            position,
+            ..
+        } if !super::mill::is_mill_move(*destination, position) => Some(*destination),
+        _ => None,
+    }
+}
+
+/// A move of an unnamed card from a library to `destination`. `ObjectId(0)`
+/// names no object: it stands for a card in a hidden zone, which no answer may
+/// tell apart (see `hidden_library_move_may_be_replaced`).
+fn hidden_library_move(destination: Zone) -> ProposedEvent {
+    ProposedEvent::zone_change(ObjectId(0), Zone::Library, destination, None)
+}
+
+/// CR 400.2 + CR 401.2 + CR 614.1: whether a replacement effect may apply to
+/// moving a card from `player`'s library to `destination`, where the library
+/// is a face-down pile in a hidden zone and so which card moves is not public.
+/// The answer reads only public facts (the library's size, the game's format,
+/// and the replacement effects of objects in public zones), so neither the
+/// order nor the membership of the pile can change it.
+///
+/// The moved card's characteristics are unknown, so any replacement that could
+/// apply to some card may apply. A definition is set aside only on facts that
+/// need no knowledge of that card: its event kind, its destination zone, and
+/// a `valid_card` that names its own host, which sits in a public zone and so
+/// is not the hidden card. The definitions read are those the live candidate
+/// scan reads: those of objects in public zones, and the floating ones a
+/// resolved spell or ability left standing (CR 611.2a; Magus of the Will's "If
+/// a card would be put into your graveyard from anywhere this turn, exile that
+/// card instead"). The replacements of objects in hidden zones are not
+/// public. The resolver currently does not admit the hidden card's own
+/// from-anywhere redirect when it declares no active zones. It does admit
+/// the card's own entry replacement (CR 614.12), so a move onto the
+/// battlefield is always answered as possibly replaced.
+fn hidden_library_move_may_be_replaced(
+    board: &GameState,
+    player: PlayerId,
+    destination: Zone,
+) -> bool {
+    if board.library_of(player).is_empty() {
+        return false;
+    }
+    match destination {
+        // CR 614.12: the moved card's own entry replacements apply as it
+        // enters, and those are hidden.
+        Zone::Battlefield => return true,
+        // CR 903.9b: a commander put into a hand or library may be put into
+        // the command zone instead; whether one is in the pile is not read.
+        Zone::Hand | Zone::Library if board.format_config.command_zone => return true,
+        _ => {}
+    }
+    let event = hidden_library_move(destination);
+    let registry = replacement_registry();
+    let may_apply = |host: ObjectId, definition: &ReplacementDefinition| {
+        definition
+            .destination_zone
+            .is_none_or(|zone| zone == destination)
+            && !matches!(definition.valid_card, Some(TargetFilter::SelfRef))
+            && registry
+                .get(&definition.event)
+                .is_some_and(|handler| (handler.matcher)(&event, host, board))
+            && replacement_valid_card_admits_library_owner(definition, host, player, board)
+    };
+    active_replacements(board).any(|(_, host, definition)| {
+        host.zone.is_public()
+            && replacement_functions_in_zone(host, definition)
+            && may_apply(host.id, definition)
+    }) || live_floating_replacements(board).any(|(host, definition)| may_apply(host, definition))
+}
+
+/// Evaluates the ownership component of a replacement's `valid_card` filter
+/// against the known owner of a hidden library card (the library's owner).
+/// Evaluates the ownership component of a replacement's `valid_card` filter
+/// against the known owner of a hidden library card (the library's owner).
+/// CR 400.3 + CR 109.5: cards go to their owner's graveyard, so a replacement
+/// for "your graveyard" (Owned { You }) only applies to cards owned by the
+/// replacement's controller.
+fn replacement_valid_card_admits_library_owner(
+    definition: &ReplacementDefinition,
+    host: ObjectId,
+    library_owner: PlayerId,
+    board: &GameState,
+) -> bool {
+    let Some(valid_card) = &definition.valid_card else {
+        return true; // No filter = admits all
+    };
+
+    // Extract ownership filter from valid_card and evaluate it
+    evaluate_ownership_filter(valid_card, host, library_owner, board, definition)
+}
+
+fn evaluate_ownership_filter(
+    filter: &TargetFilter,
+    host: ObjectId,
+    card_owner: PlayerId,
+    board: &GameState,
+    definition: &ReplacementDefinition,
+) -> bool {
+    let source_controller = board
+        .objects
+        .get(&host)
+        .map(|obj| obj.controller)
+        .or(definition.source_controller);
+    let source_ctx = crate::game::filter::SourceContext::for_controller(host, source_controller);
+    evaluate_ownership_filter_inner(filter, &source_ctx, card_owner, board)
+}
+
+fn evaluate_ownership_filter_inner(
+    filter: &TargetFilter,
+    source_ctx: &crate::game::filter::SourceContext<'_>,
+    card_owner: PlayerId,
+    board: &GameState,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(TypedFilter { properties, .. }) => {
+            // Check if any Owned property admits the card owner.
+            // If there are no Owned properties, there is no ownership constraint.
+            let mut has_owned = false;
+            for prop in properties {
+                if let FilterProp::Owned { controller } = prop {
+                    has_owned = true;
+                    if crate::game::filter::owned_axis_admits(
+                        board, source_ctx, controller, card_owner,
+                    ) {
+                        return true;
+                    }
+                }
+                // Non-ownership properties don't constrain ownership
+            }
+            // If no Owned properties, no ownership constraint = admits all
+            !has_owned
+        }
+        TargetFilter::And { filters } => {
+            // All sub-filters must admit
+            filters
+                .iter()
+                .all(|f| evaluate_ownership_filter_inner(f, source_ctx, card_owner, board))
+        }
+        TargetFilter::Or { filters } => {
+            // At least one sub-filter must admit
+            filters
+                .iter()
+                .any(|f| evaluate_ownership_filter_inner(f, source_ctx, card_owner, board))
+        }
+        TargetFilter::Not { filter } => {
+            !evaluate_ownership_filter_inner(filter, source_ctx, card_owner, board)
+        }
+        TargetFilter::SelfRef => false, // Already excluded by caller
+        _ => true, // Other filters don't constrain ownership for hidden library cards
+    }
 }
 
 /// The events `bound`'s resolver proposes to the replacement pipeline for what
@@ -777,7 +949,13 @@ fn proposed_events(
             })
             .chain(moves(&[Zone::Graveyard]))
             .collect(),
-        Effect::ChangeZone { destination, .. } => moves(&[*destination]),
+        // CR 608.2c: a scalar move and the selected-object library move are
+        // classified by the one authority the AI's removal readers share.
+        Effect::ChangeZone { .. } | Effect::ChangeZoneAll { .. } => {
+            super::bound_object_move_destination(&bound.effect)
+                .map(|destination| moves(&[destination]))
+                .unwrap_or_default()
+        }
         Effect::Bounce { destination, .. } => moves(&[destination.unwrap_or(Zone::Hand)]),
         Effect::Counter { .. } => moves(&[Zone::Graveyard, Zone::Exile, Zone::Hand, Zone::Library]),
         Effect::DiscardCard { .. } => objects
@@ -800,7 +978,16 @@ fn proposed_events(
                 applied: Default::default(),
             })
             .collect(),
-        Effect::Mill { destination, .. } => players
+        // CR 701.17a: only a top-edge move into a graveyard is a mill, so only it
+        // proposes `Mill`. Any other edge (Cellar Door; Grenzo, Dungeon Warden)
+        // is an ordinary library→zone move of a hidden card, which
+        // `replacement_may_apply` judges through
+        // `hidden_library_move_may_be_replaced` rather than by naming a card.
+        Effect::Mill {
+            destination,
+            position,
+            ..
+        } if super::mill::is_mill_move(*destination, position) => players
             .map(|player_id| ProposedEvent::Mill {
                 player_id,
                 count: 1,
@@ -913,7 +1100,7 @@ fn node_acted_on(
         {
             Vec::new()
         }
-        // CR 610.3b: an object whose "until" event already happened does not
+        // CR 610.3a / CR 610.3b: an object whose "until" event already happened does not
         // move.
         Effect::ChangeZone { .. }
             if bound
@@ -926,8 +1113,18 @@ fn node_acted_on(
             let filter = targeting::resolve_tracked_set_sentinel(state, target.clone());
             let ids = super::resolved_effect_object_ids(state, bound, &filter);
             objects(crate::game::merge::expand_returned_merge_components(
-                state, ids, &filter,
+                state, bound, ids, &filter,
             ))
+        }
+        // CR 608.2b + CR 608.2c: "the owner of target permanent shuffles it into
+        // their library" (Chaos Warp) moves the declared selection its resolver
+        // binds; an illegal or stale target is not part of it.
+        Effect::ChangeZoneAll { .. } => {
+            super::change_zone::selected_owner_move_objects(state, bound)
+                .ok()
+                .flatten()
+                .map(objects)
+                .unwrap_or_default()
         }
         Effect::SetTapState {
             scope: EffectScope::Single,
@@ -953,12 +1150,16 @@ fn node_acted_on(
                 )))
                 .collect()
         }
-        Effect::LoseLife { target, .. } => vec![TargetRef::Player(
-            super::life::resolve_life_loss_target(state, bound, target.as_ref()),
-        )],
-        Effect::Mill { target, .. } => vec![TargetRef::Player(
-            super::resolve_player_for_context_ref(state, bound, target),
-        )],
+        Effect::LoseLife { target, .. } => {
+            super::life::resolve_life_loss_target(state, bound, target.as_ref())
+                .into_iter()
+                .map(TargetRef::Player)
+                .collect()
+        }
+        Effect::Mill { target, .. } => super::resolve_player_for_context_ref(state, bound, target)
+            .into_iter()
+            .map(TargetRef::Player)
+            .collect(),
         // These resolvers bind inline rather than through a function shared
         // here: a node that declared targets is answered with them, and one
         // that would inherit its parent's is answered with nothing.

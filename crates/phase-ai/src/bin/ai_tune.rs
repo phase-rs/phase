@@ -10,7 +10,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::process::Command;
 
-use phase_ai::auto_play::run_ai_actions;
+use phase_ai::auto_play::run_ai_actions_headless;
 use phase_ai::config::{
     create_config, AiConfig, AiDifficulty, AiProfile, Platform, PolicyPenalties,
     ACTIVE_POLICY_PENALTY_FIELDS,
@@ -733,7 +733,12 @@ fn build_matchup_payload(db: &CardDatabase, spec: &MatchupSpec) -> Result<DeckPa
         },
         ..Default::default()
     };
-    Ok(resolve_deck_list(db, &deck_list))
+    // Duel decks carry no commander, so the estimator returns None on this path regardless of the table.
+    Ok(resolve_deck_list(
+        db,
+        &engine::database::ComboTable::default(),
+        &deck_list,
+    ))
 }
 
 /// Run a single game with separate AI configs for each player.
@@ -772,7 +777,7 @@ fn run_game(
         }
 
         let results = match std::panic::catch_unwind(AssertUnwindSafe(|| {
-            run_ai_actions(
+            run_ai_actions_headless(
                 &mut state,
                 &ai_players,
                 &ai_configs,

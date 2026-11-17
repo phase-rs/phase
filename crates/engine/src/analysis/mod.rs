@@ -16,7 +16,7 @@
 //!   loop from a *mandatory-draw* (CR 104.4b) loop.
 //!
 //! The strict comparison treats differing life/damage/counters as different
-//! states (correct for a mandatory loop → draw). The detector needs the inverse:
+//! states. The detector needs the inverse:
 //! "same board, resources may differ" → a beneficial loop that should be
 //! shortcut (CR 732.2a) rather than drawn (CR 104.4b / CR 732.4).
 //!
@@ -26,17 +26,14 @@
 //!   stream, which a single `GameState` snapshot cannot supply.
 //! - [`loop_check`] — Engine A: [`detect_loop`] turns a same-board-plus-net-progress
 //!   measurement into a [`LoopCertificate`] (the unbounded axes + a [`WinKind`]),
-//!   the offline classification the corpus harness asserts against. Still
-//!   **zero gameplay change** — never called from the reducer.
-//! - [`ability_graph`] — Engine B: [`candidate_cycles`] is the static, offline
-//!   candidate generator. From a list of `CardFace` ASTs it builds an
-//!   ability/resource graph, finds SCCs, and emits over-approximate
-//!   [`CandidateCycle`]s for Engine A to confirm. Like the rest of this module it
-//!   is **purely additive** — it never drives the reducer and never touches a
-//!   `GameState`.
+//!   the offline classification the corpus harness asserts against.
+//! - [`ability_graph`] — Engine B: [`candidate_cycles`] emits over-approximate
+//!   `CandidateCycle`s; `game::play_trace` carries their members' plays and the
+//!   recorded-period confirmer decides.
 
 pub mod ability_graph;
 pub mod decision_template;
+pub mod deck_signals;
 pub mod loop_check;
 pub mod resource;
 #[cfg(any(test, feature = "test-support"))]
@@ -51,7 +48,11 @@ pub mod corpus;
 #[cfg(test)]
 mod corpus_tests;
 
-pub use ability_graph::{candidate_cycles, AbilityGraph, CandidateCycle};
+pub use ability_graph::{
+    candidate_cycles, candidate_pairs, AbilityGraph, CandidateCycle, PairCandidate,
+};
+#[cfg(feature = "combo-verify")]
+pub use ability_graph::{pair_audit_report, PairAuditReport, COMBO_AUDIT_BLIND_SPOT};
 #[cfg(any(test, feature = "combo-verify"))]
 pub use corpus::{
     corpus_len, drive_row, row, ComboRow, DeferralBucket, ResourceFamily, RowReport, RowStatus,

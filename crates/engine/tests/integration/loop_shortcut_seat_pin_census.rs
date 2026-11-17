@@ -21,8 +21,8 @@
 //! 1. **The `TargetPin::Player` occurrences the walk finds are pinned per file, by identity
 //!    and multiplicity.** The instrument counts constructions and match arms alike, so what
 //!    separates them is the disposition each site carries below. The two producers are
-//!    named individually — `game::engine::record_trigger_target_answer` (the engine's own
-//!    CR 601.2c announcement journal) and
+//!    named individually — `game::engine::announced_target_pins` (the engine's own
+//!    CR 601.2c announcement) and
 //!    `game::interaction::materialize_loop_shortcut_response` (the human ingress of the same
 //!    point kind). Naming them individually is the point: a census asserting only a TOTAL
 //!    production count would stay green with EITHER producer reverted, since a revert removes
@@ -179,7 +179,7 @@ fn production_sites(needle: &str) -> Vec<Site> {
 ///
 /// # Discrimination — TWO independent revert-probes, one per producer
 ///
-/// * restore `game::engine::record_trigger_target_answer`'s `TargetRef::Player(pl)` arm to
+/// * restore `game::engine::announced_target_pins`'s `TargetRef::Player` arm to
 ///   `Some(TargetPin::Player(*pl))` ⇒ `engine/src/game/engine.rs` gains an unclassified
 ///   `TargetPin::Player` construction ⇒ the pinned site list below FAILS with its file:line;
 /// * restore `game::interaction::materialize_loop_shortcut_response`'s
@@ -210,7 +210,7 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
     // production scope changes the compared value, and multiplicity is counted per OCCURRENCE,
     // not per line, so a construction co-located with an existing one on the same line still
     // moves the compared value. That includes a further `engine.rs` hit from reverting
-    // `record_trigger_target_answer`, and a further `interaction.rs` hit from reverting
+    // `announced_target_pins`, and a further `interaction.rs` hit from reverting
     // `materialize_loop_shortcut_response`. The walk visits three roots only
     // (`engine/src`, `server-core/src`, `phase-ai/src`), so a construction added in a crate
     // outside them — `engine-wasm`, `seat-reducer` and `phase-server` all depend on the engine —
@@ -245,8 +245,10 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
         files,
         vec![
             "engine/src/analysis/decision_template.rs",
+            "engine/src/analysis/decision_template.rs",
             "engine/src/game/engine.rs",
             "engine/src/game/engine.rs",
+            "engine/src/game/interaction.rs",
             "engine/src/game/interaction.rs",
             "engine/src/game/visibility.rs",
             "engine/src/types/actions.rs",
@@ -259,12 +261,17 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
             (CR 115.10a existence-only). This IS the class's authority; do not narrow it, \
             `a_shrouded_player_pin_is_still_published_by_the_offer_builder` is the shipped \
             guard against exactly that.\n\
-         2. `game/engine.rs` — `shortcut_drive_period`'s period arm; the migrated pin lands on \
+         1b. `analysis/decision_template.rs` — `DecisionTemplate::resolution_change_points`' \
+            read arm, which lists no change point for a pinned seat (`resolve_target` hands it \
+            no iteration index) and mints no pin.\n\
+         2. `game/engine.rs` — `schedule_bound`'s match arm; the migrated pin lands on \
             the `Scheduled(Constant(_))` arm of the SAME match, which also returns 1.\n\
          3. `game/engine.rs` — `apply_action`'s CR 701.34a proliferate arm feeding \
             `record_loop_pin`. A proliferate choice is NOT a target, so this construction is \
             correct and is this census's positive control.\n\
-         4. `game/interaction.rs` — `declared_targets_statement`'s read arm, which maps a \
+         4. `game/interaction.rs` — `suggested_allocation`'s refusing read arm: a suggestion \
+            pin that is not a `Piecewise` schedule states no allocation, and mints no pin.\n\
+         4b. `game/interaction.rs` — `declared_targets_statement`'s read arm, which maps a \
             pinned seat onto the announcement vocabulary and mints no pin.\n\
          5. `game/visibility.rs` — `pins_name_hidden_source`'s redaction arm (`false`: seat \
             identity is public in this engine), kept for wire-sourced pins.\n\
@@ -297,7 +304,7 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
     );
     assert!(
         engine_texts[0].starts_with("| TargetPin::Player(_) =>"),
-        "site 2 must remain `shortcut_drive_period`'s MATCH arm — a match arm reads a pin, it \
+        "site 2 must remain `schedule_bound`'s match arm — a match arm reads a pin, it \
          cannot produce one. got {:?}",
         engine_texts[0]
     );
@@ -328,19 +335,25 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
         .collect();
     assert_eq!(
         interaction_texts.len(),
-        1,
-        "the file-level list above pins a single `interaction.rs` site; if that changes the \
-         text pin below is measuring the wrong thing. got {interaction_texts:?}"
+        2,
+        "the file-level list above pins two `interaction.rs` sites; if that changes the text \
+         pins below are measuring the wrong things. got {interaction_texts:?}"
     );
     assert!(
+        interaction_texts[0].starts_with("[TargetPin::ByIdentity(_) | TargetPin::Player(_)]")
+            && interaction_texts[0].ends_with("=> return None,"),
+        "site 4 must remain `suggested_allocation`'s refusing MATCH arm. got {:?}",
         interaction_texts[0]
+    );
+    assert!(
+        interaction_texts[1]
             .strip_prefix("TargetPin::Player(")
             .and_then(|bound| bound.split_once(") =>"))
             .is_some_and(|(bound, _)| !bound.contains(['(', ')'])),
-        "site 4 must remain the decode's MATCH arm: the choice spelling, a binding carrying no \
+        "site 4b must remain the decode's MATCH arm: the choice spelling, a binding carrying no \
          parenthesis, then `) =>` immediately after it. A construction substituted for this arm \
          holds the file count and is caught only here. got {:?}",
-        interaction_texts[0]
+        interaction_texts[1]
     );
 
     // CONJUNCT 3, keyed to the SAME instrument: both TARGET-class producers construct the
@@ -356,20 +369,29 @@ fn no_target_class_producer_constructs_a_choice_class_player_pin() {
         ranked_files,
         vec![
             ("engine/src/analysis/decision_template.rs", 1),
+            ("engine/src/analysis/resource.rs", 2),
             ("engine/src/game/engine.rs", 1),
-            ("engine/src/game/interaction.rs", 3),
+            ("engine/src/game/interaction.rs", 4),
+            ("engine/src/game/period_confirm.rs", 1),
             ("engine/src/game/visibility.rs", 1),
             ("engine/src/types/actions.rs", 1),
         ],
         "the TARGET-class spelling must be CONSTRUCTED by BOTH producers — `game/engine.rs` \
-         (`record_trigger_target_answer`) and `game/interaction.rs` \
+         (`announced_target_pins`, which pins an announced seat) and `game/interaction.rs` \
          (`materialize_loop_shortcut_response`) — beside its READ sites: \
          `evaluate_schedule`'s CR 601.2c resolver arm in `analysis/decision_template.rs` and \
          the wildcard-free redaction arm in `game/visibility.rs`, and `GameAction`'s object-id \
          collection arm in `types/actions.rs`. `game/interaction.rs`'s occurrences are the \
-         human ingress's mint in `shortcut_announcement_subject`, and \
+         human ingress's mint in `shortcut_announcement_subject`, \
          `declared_targets_statement`'s declared-subject mint beside its subject-to-candidate \
-         read arm. A MISSING producer is the revert this row exists to catch; an EXTRA file is \
+         read arm, and `suggested_allocation`'s segment-seat read arm. \
+         `analysis/resource.rs`'s occurrences are `piecewise_witness`'s per-segment mint and its \
+         measured-zero park pin, TARGET-class PRODUCERS: the witness is published as the offer's \
+         suggested declaration and driven, and every `TargetSchedule` variant is typed over \
+         `Ranking`, so no choice-class spelling is expressible there. `game/period_confirm.rs`'s \
+         occurrence is `measure_seat_takes`'s declared-seat pin, a TARGET-class PRODUCER: the \
+         declaration it builds is replayed from the offer frame. \
+         A MISSING producer is the revert this row exists to catch; an EXTRA file is \
          a new producer that must be classified rather than absorbed. got {ranked:?}"
     );
     assert!(

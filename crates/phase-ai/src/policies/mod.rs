@@ -88,3 +88,4 @@ pub mod tests;
 pub use registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyRegistry, PolicyVerdict, TacticalPolicy,
 };
+pub(crate) use self_cost_value::payment_surplus_seeds;

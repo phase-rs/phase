@@ -143,6 +143,7 @@ fn samwise_gamgee_sacrifice_excludes_just_sacrificed_foods_from_own_target() {
         .act(GameAction::ActivateAbility {
             source_id: samwise,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("announce Samwise Gamgee's sacrifice ability");
 
@@ -264,6 +265,7 @@ fn discard_two_cost_excludes_both_discarded_cards() {
         .act(GameAction::ActivateAbility {
             source_id: relic,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("announce Test Relic's discard ability");
 

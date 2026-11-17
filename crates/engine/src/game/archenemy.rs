@@ -26,12 +26,15 @@
 //! would receive priority (CR 603.2 / CR 603.3). The two actions collect their
 //! triggers via DIFFERENT mechanisms, and this asymmetry is deliberate:
 //!
-//! - [`set_in_motion`] does NOT self-collect. Every real path to it runs through
-//!   `finish_enter_phase` during a `pass_priority_once_with_pipeline`, which is
-//!   immediately followed by `run_post_action_pipeline`'s normal post-action
-//!   event scan; that scan collects the `SchemeSetInMotion` trigger exactly once
-//!   (it may place it directly on the stack rather than deferring — rules-
-//!   equivalent under CR 603.2 / CR 603.3).
+//! - [`set_in_motion`] does NOT self-collect. Its only caller, `finish_enter_phase`, runs as
+//!   the archenemy's precombat main phase begins (CR 904.9). The precombat-main arm of
+//!   `turns::auto_advance_once` then holds the triggers of every event after that phase's
+//!   entry event (`turns::hold_turn_based_action_triggers`), which claims the
+//!   `SchemeSetInMotion` occurrence for ordinary collection (CR 603.2c), so the post-action
+//!   scan does not collect it again. It goes on the stack with the phase's other first-main
+//!   triggers in one batch (CR 703.4e + CR 117.3a + CR 603.3b). Its "as you set this scheme in motion"
+//!   choices are made by that arm right after the hold, before the lore counters (CR 703.4f), through
+//!   [`resolve_pending_as_set_in_motion_choices`].
 //! - [`abandon`] DOES self-collect (single authority), because an abandon effect
 //!   turns a face-up ongoing scheme face down and removes it from the command
 //!   zone. It collects the `SchemeAbandoned` trigger while the scheme is still
@@ -45,10 +48,12 @@
 //! The two-scheme-deck Supervillain Rumble option (CR 904.12) is deferred: this
 //! module models the single-archenemy game (CR 904.2a).
 
+use crate::types::ability::ChosenAttribute;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::triggers::TriggerMode;
 
 /// CR 314: True when the object is a scheme card.
 pub fn is_scheme_object(state: &GameState, id: ObjectId) -> bool {
@@ -93,13 +98,11 @@ pub fn active_schemes(state: &GameState) -> Vec<ObjectId> {
 /// CR 603.2 / CR 603.3: the `SchemeSetInMotion` event triggers the scheme's
 /// "When you set this scheme in motion" ability (`SetInMotion`). The turn-based
 /// action itself doesn't use the stack (CR 904.9). This function does NOT
-/// self-collect the trigger: every real path that sets a scheme in motion runs
-/// through `finish_enter_phase` during a `pass_priority_once_with_pipeline`,
-/// which is immediately followed by `run_post_action_pipeline`'s normal
-/// post-action event scan — that scan collects the `SchemeSetInMotion` trigger
-/// exactly once. (The scan may place the trigger directly on the stack via
-/// `process_triggers` rather than deferring it; this is rules-equivalent under
-/// CR 603.2 / CR 603.3.) Self-collecting here in addition would double-collect.
+/// self-collect the trigger: its only caller, `finish_enter_phase`, is followed by
+/// the precombat-main arm of `turns::auto_advance_once`, which holds and claims
+/// the triggers of the events after the phase's entry event and places them with
+/// the phase's other first-main triggers (CR 703.4e + CR 117.3a + CR 603.3b).
+/// Self-collecting here in addition would double-collect.
 pub fn set_in_motion(state: &mut GameState, events: &mut Vec<GameEvent>) {
     let Some(archenemy) = crate::game::topology::archenemy(state).or(state.archenemy) else {
         return;
@@ -119,10 +122,10 @@ pub fn set_in_motion(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.command_zone.push_back(scheme_id);
 
     // CR 904.9 / CR 701.32b: announce that the scheme was set in motion. The
-    // SetInMotion trigger is collected by the normal post-action event scan in
-    // `run_post_action_pipeline` (CR 603.2 / CR 603.3), which always follows the
-    // `finish_enter_phase` that called this function — so this function must not
-    // self-collect it here (that would double-collect).
+    // precombat-main arm holds the SetInMotion trigger (see the doc above), so this
+    // function must not self-collect it. The scheme's "as" choices are made by the
+    // precombat-main arm of `turns::auto_advance_once`, which returns their prompt
+    // (a prompt raised here would not survive the pass pipeline's `sync_waiting_for`).
     let event = GameEvent::SchemeSetInMotion {
         player_id: archenemy,
         scheme_id,
@@ -130,20 +133,108 @@ pub fn set_in_motion(state: &mut GameState, events: &mut Vec<GameEvent>) {
     events.push(event);
 }
 
+/// CR 904.9 + CR 603.1: resolve "as you set this scheme in motion" choices
+/// (Bow to My Command) for the `SchemeSetInMotion` events in this scan batch.
+/// Called by the precombat-main arm of `turns::auto_advance_once` right after the scheme
+/// action's triggers are held and before the lore counters (CR 703.4f); a prompt it raises
+/// pauses the phase, which resumes at the answer's priority boundary (`GameState::step_entry_resume`).
+/// It reads the raw events, so the precombat-main arm's claim on the occurrence does not
+/// hide it. The scheme's "when" triggers are already held by that arm; no printed scheme
+/// has both an "as" and a "when" set-in-motion ability. The choice never touches the stack.
+///
+/// Stops at the first pause or pre-existing prompt: a second prompt would clobber the first.
+/// One set-in-motion per phase entry; the earlier prompt is preserved.
+///
+/// Depth 0 is sound here: `set_in_motion` runs only from
+/// `finish_enter_phase`, and phase boundaries never occur mid-resolution, so
+/// no outer resolution's ledgers can be clobbered by the fresh prelude.
+pub(crate) fn resolve_pending_as_set_in_motion_choices(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+) {
+    let schemes: Vec<ObjectId> = events[event_start..]
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::SchemeSetInMotion { scheme_id, .. } => Some(*scheme_id),
+            _ => None,
+        })
+        .collect();
+    for scheme_id in schemes {
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        // CR 607.2d: the "as" choice is linked to THIS set-in-motion action.
+        // Object anchors accumulate across resolutions, and `chosen_player`
+        // reads the first entry — so a recycled scheme (abandoned, then set
+        // in motion again) would otherwise keep its stale choice shadowing
+        // the fresh one. Drop prior chosen players before resolving; other
+        // attribute kinds belong to other choices and are left untouched.
+        // (Bow's `Choose { Opponent }` is the only "as" shape today; a future
+        // shape persisting another kind must extend this clearing.)
+        if let Some(obj) = state.objects.get_mut(&scheme_id) {
+            obj.chosen_attributes
+                .retain(|attr| !matches!(attr, ChosenAttribute::Player(_)));
+        }
+        resolve_scheme_as_choices(state, scheme_id, events);
+    }
+}
+
+/// Resolve one scheme's `AsSetInMotion` choices inline. Reads
+/// `trigger_definitions` directly (not the trigger-suppression-aware active
+/// scan): an "as" choice is not a triggered ability, so triggered-ability
+/// suppressors must not stop it. A fizzled choice must not un-set the scheme.
+fn resolve_scheme_as_choices(
+    state: &mut GameState,
+    scheme_id: ObjectId,
+    events: &mut Vec<GameEvent>,
+) {
+    let defs: Vec<_> = state
+        .objects
+        .get(&scheme_id)
+        .map(|obj| {
+            obj.trigger_definitions
+                .iter_all()
+                .filter(|entry| matches!(entry.definition().mode, TriggerMode::AsSetInMotion))
+                .map(|entry| entry.definition().clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    for def in defs {
+        let Some(obj) = state.objects.get(&scheme_id) else {
+            break;
+        };
+        let source_context = crate::game::triggers::trigger_source_context_for_latch(state, obj);
+        let ability = crate::game::triggers::build_triggered_ability_from_context(
+            state,
+            &def,
+            &source_context,
+            None,
+        );
+        let _ = crate::game::effects::resolve_ability_chain(state, &ability, events, 0);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+    }
+}
+
 /// CR 904.10 / CR 314.6: True if any scheme's triggered ability is on the stack
 /// or waiting to be put on the stack (i.e. deferred but not yet on the stack).
 /// While any such ability exists, the abandon state-based action does nothing.
-pub fn scheme_trigger_on_stack_or_pending(state: &GameState) -> bool {
+pub fn scheme_trigger_on_stack_or_pending(
+    state: &GameState,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+) -> bool {
     // CR 904.10: "on the stack" — any stack entry sourced from a scheme.
     let on_stack = state
         .stack
         .iter()
         .any(|entry| is_scheme_object(state, entry.source_id));
-    // CR 904.10: "waiting to be put on the stack" — any deferred trigger whose
-    // pending source is a scheme.
-    let pending = state
-        .deferred_triggers
+    // CR 904.10: "waiting to be put on the stack" — any trigger in the caller's
+    // waiting batch or the deferred queue whose pending source is a scheme.
+    let pending = waiting
         .iter()
+        .chain(state.deferred_triggers.iter())
         .any(|d| is_scheme_object(state, d.pending.source_id));
     on_stack || pending
 }
@@ -221,6 +312,7 @@ pub fn check_scheme_abandon_sba(
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
 ) {
     if crate::game::topology::archenemy(state)
         .or(state.archenemy)
@@ -230,7 +322,7 @@ pub fn check_scheme_abandon_sba(
     }
     // CR 904.10: do nothing while any scheme's triggered ability is on the stack
     // or waiting to be put on the stack.
-    if scheme_trigger_on_stack_or_pending(state) {
+    if scheme_trigger_on_stack_or_pending(state, waiting) {
         return;
     }
     // CR 904.10 / CR 904.11: turn every face-up non-ongoing scheme face down

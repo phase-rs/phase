@@ -52,6 +52,12 @@ fn resolve_sacrifice_scope(
             })
             .map(|pid| vec![pid])
             .unwrap_or_default(),
+        // CR 608.2c + CR 608.2b: the declared player, no one once that target is illegal.
+        Some(ControllerRef::DeclaredPlayer { group }) => {
+            crate::game::targeting::resolve_live_declared_player(state, ability, group)
+                .into_iter()
+                .collect()
+        }
         Some(ControllerRef::ParentTargetController) => {
             crate::game::targeting::resolve_effect_player_ref(
                 state,
@@ -142,6 +148,45 @@ fn trigger_event_scoped_player(state: &GameState, ability: &ResolvedAbility) -> 
     })
 }
 
+/// CR 701.21a + CR 609.3: Whether `ability` is barred from causing `player` to
+/// sacrifice `object_id`. The Master, Multiplied class muzzles the controller's
+/// own triggered abilities for specific permanents; the Sigarda, Host of Herons /
+/// Tajuru Preserver class stops an opponent's spell or ability from making the
+/// protected player sacrifice ANY permanent, regardless of which one.
+fn sacrifice_cause_muzzled(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    object_id: ObjectId,
+    player: PlayerId,
+) -> bool {
+    crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+        state, ability, object_id, player,
+    ) || crate::game::static_abilities::forced_action_muzzled(
+        state,
+        ability.controller,
+        player,
+        crate::types::ability::CostCategory::SacrificesPermanent,
+    )
+}
+
+/// CR 701.21a + CR 609.3: Whether `player` choosing `object_id` for `ability`'s
+/// sacrifice would actually sacrifice it. Reads every refusal between the
+/// resolver and `sacrifice_permanent`, so an offered option is one that can be
+/// taken (Sigarda's ruling: "you can't take that option").
+pub(crate) fn can_sacrifice_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    object_id: ObjectId,
+    player: PlayerId,
+) -> bool {
+    !sacrifice_cause_muzzled(state, ability, object_id, player)
+        && !crate::game::static_abilities::object_has_static_other(
+            state,
+            object_id,
+            "CantBeSacrificed",
+        )
+}
+
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
 pub fn resolve(
     state: &mut GameState,
@@ -190,6 +235,16 @@ pub fn resolve(
     let resolved_filter =
         crate::game::targeting::resolve_tracked_set_sentinel(state, raw_filter.clone());
     let filter = &resolved_filter;
+    // CR 608.2b: an unavailable announcement names no permanent. Complete
+    // here so neither event/host fallback nor untargeted selection can refill it.
+    if matches!(filter, TargetFilter::ParentTarget) && ability.has_authoritative_empty_binding() {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(completed_result(0));
+    }
     // CR 400.7: A self-referential sacrifice ("sacrifice this creature") does
     // nothing if the source has left and re-entered the battlefield (blink/
     // flicker) since this ability fired — the re-entered permanent is a new
@@ -460,22 +515,7 @@ pub fn resolve(
                         obj.controller == chooser
                             && !obj.is_emblem
                             && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                            && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
-                                state,
-                                ability,
-                                *id,
-                                chooser,
-                            )
-                            // CR 701.21a + CR 609.3: Sigarda, Host of Herons /
-                            // Tajuru Preserver class — an opponent's spell or
-                            // ability can't force the protected player to
-                            // sacrifice ANY permanent, regardless of which one.
-                            && !crate::game::static_abilities::forced_action_muzzled(
-                                state,
-                                ability.controller,
-                                chooser,
-                                crate::types::ability::CostCategory::SacrificesPermanent,
-                            )
+                            && !sacrifice_cause_muzzled(state, ability, *id, chooser)
                     })
             })
             .collect();
@@ -540,6 +580,7 @@ pub fn resolve(
         // size for safety; the branch above handles the mandatory-all case.
         let choice_count = count.min(eligible.len());
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: chooser,
             cards: eligible,
             count: choice_count,
@@ -558,10 +599,12 @@ pub fn resolve(
             face_down_in_exile: crate::types::ability::ExileConcealment::Public,
             // CR 708.2a: sacrifice selection is not a face-down entry.
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: None,
+            library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             is_cost_payment: false,
             enters_modified_if: None,
@@ -642,21 +685,7 @@ pub fn resolve(
 
         let player_id = obj.controller;
 
-        if crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
-            state, ability, obj_id, player_id,
-        ) {
-            continue;
-        }
-
-        // CR 701.21a + CR 609.3: Sigarda, Host of Herons / Tajuru Preserver
-        // class — an opponent's spell or ability can't force the protected
-        // player to sacrifice ANY permanent, regardless of which one.
-        if crate::game::static_abilities::forced_action_muzzled(
-            state,
-            ability.controller,
-            player_id,
-            crate::types::ability::CostCategory::SacrificesPermanent,
-        ) {
+        if sacrifice_cause_muzzled(state, ability, obj_id, player_id) {
             continue;
         }
 
@@ -2128,6 +2157,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -2202,6 +2233,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -2264,8 +2297,10 @@ mod tests {
             counters: std::collections::HashMap::new(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
             produceable_mana_types: Vec::new(),
+            intensity: 0,
         }
     }
 

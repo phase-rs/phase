@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Resolution state v14 preserves copied entry BeforeCounters and ChoiceSettled stages; older readers must reject saves instead of dropping pending counters or repeating the acquired choice"
+}

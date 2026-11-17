@@ -5,6 +5,7 @@ use crate::types::actions::MulliganChoice;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::format::{DealOrder, FreeRevealMulligan, GameFormat, ZoneScope};
+use crate::types::game_state::RandomDraw;
 use crate::types::game_state::{
     GameState, MulliganBottomEntry, MulliganDecisionEntry, MulliganDecisionPhase,
     MulliganDeclaration, MulliganDeclarationKind, OpeningHandBottomReason, PendingBeginGameAbility,
@@ -89,12 +90,17 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
     // Shuffle every player's library.
     let GameState { players, rng, .. } = &mut *state;
     for player in players.iter_mut() {
-        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng.draw(RandomDraw::Placement));
     }
 
+    // Draw the opening hand for each player in seat order. The Horde seat is
+    // skipped: it has no hand and plays off the top of its library, so an
+    // opening hand would strand threats it can never cast and shorten the
+    // library it must deck out to lose.
     let deals: Vec<(PlayerId, usize)> = state
         .seat_order
         .iter()
+        .filter(|&&player| !crate::game::horde::player_skips_opening_hand(state, player))
         .map(|&player| (player, STARTING_HAND_SIZE))
         .collect();
     deal_hands(state, &deals, events);
@@ -114,6 +120,12 @@ fn normal_mulligan_decision(state: &GameState) -> WaitingFor {
     let pending = state
         .seat_order
         .iter()
+        .filter(|&&player| super::players::is_alive(state, player))
+        // A seat with no opening hand has nothing to keep or mulligan; leaving
+        // the Horde in `pending` would stall the game waiting on a decision it
+        // can never meaningfully make (and its "Keep" would bottom cards from a
+        // hand it never drew).
+        .filter(|&&player| !crate::game::horde::player_skips_opening_hand(state, player))
         .map(|&player| MulliganDecisionEntry {
             free_reveals_taken: 0,
             player,
@@ -448,6 +460,7 @@ fn reveal_hand(state: &GameState, player: PlayerId, events: &mut Vec<GameEvent>)
         .collect();
     events.push(GameEvent::CardsRevealed {
         player,
+        occurrences: Vec::new(),
         card_ids: Vec::new(),
         card_names,
     });
@@ -1014,7 +1027,7 @@ fn shuffle_library_of(state: &mut GameState, player: PlayerId) {
         .iter_mut()
         .find(|p| p.id == holder)
         .expect("player exists");
-    crate::util::im_ext::shuffle_vector(&mut player_data.library, rng);
+    crate::util::im_ext::shuffle_vector(&mut player_data.library, rng.draw(RandomDraw::Placement));
 }
 
 /// The living seats in `seat_order`, starting at the active player, so every
@@ -1094,8 +1107,9 @@ fn draw_one(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>
     };
     // CR 103.5: pregame draw — route through the pipeline under the
     // `PregameProcedure` exempt cause.
-    let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(top_card, Zone::Hand)
-        .performed_by(player);
+    let req = crate::game::zone_pipeline::ZoneMoveRequest::pregame(top_card, Zone::Hand).actors(
+        crate::game::zone_pipeline::MoveActors::performer_and_owner(player),
+    );
     crate::game::zone_pipeline::move_object(state, req, events);
     true
 }
@@ -1115,6 +1129,26 @@ mod tests {
     use crate::types::format::FormatConfig;
     use crate::types::game_state::PlayerDeckPool;
     use crate::types::identifiers::CardId;
+
+    #[test]
+    fn archenemy_commander_duel_grants_free_first_mulligan() {
+        // Commander-style duel grant: a two-seat Archenemy Commander game
+        // is fought with Commander decks, so the free first mulligan
+        // reaches it even though CR 103.5c's seat rule does not.
+        let state = GameState::new(FormatConfig::archenemy_commander(), 2, 42);
+        assert!(free_first_mulligan(&state));
+        assert!(state.format_config.format.grants_free_first_mulligan());
+    }
+
+    #[test]
+    fn two_hg_commander_grants_free_first_mulligan_via_multiplayer_seats() {
+        // CR 103.5c: four seats always grant the free first mulligan, even
+        // though the format answers `false` to the duel-only override (it
+        // never seats a duel — CR 810.1 fixes four seats).
+        let state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        assert!(free_first_mulligan(&state));
+        assert!(!state.format_config.format.grants_free_first_mulligan());
+    }
 
     /// Test helper: decide for `player`, advancing `state.waiting_for` in place.
     /// Mirrors the engine dispatch contract: callers must update `state.waiting_for`
@@ -1303,7 +1337,7 @@ mod tests {
         assert!(
             matches!(
                 events.first(),
-                Some(GameEvent::CardsRevealed { player, card_ids, card_names })
+                Some(GameEvent::CardsRevealed { player, card_ids, card_names, .. })
                     if *player == PlayerId(0) && card_ids.is_empty() && *card_names == old_names
             ),
             "the reveal comes first, by name only: {events:?}"
@@ -1707,6 +1741,8 @@ mod tests {
         let mut begin_game = AbilityDefinition::new(
             AbilityKind::BeginGame,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination: Zone::Battlefield,
                 target: TargetFilter::SelfRef,
                 origin: Some(Zone::Hand),
@@ -1719,7 +1755,8 @@ mod tests {
                 enter_with_counters: vec![],
                 conditional_enter_with_counters: vec![],
                 face_down_profile: None,
-             enters_modified_if: None },
+             enters_modified_if: None
+            },
         )
         .description("If this card is in your opening hand, you may begin the game with it on the battlefield.".to_string());
         begin_game.optional = true;

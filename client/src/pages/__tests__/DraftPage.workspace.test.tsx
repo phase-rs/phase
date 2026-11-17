@@ -39,6 +39,7 @@ const wasm = vi.hoisted(() => ({
   start_sealed_draft: vi.fn(),
   start_quick_cube_draft: vi.fn(),
   load_card_database: vi.fn(() => 0),
+  set_draft_pick_enhancements: vi.fn(),
   submit_pick: vi.fn(),
   auto_pick: vi.fn(),
   submit_deck: vi.fn(),
@@ -130,9 +131,17 @@ vi.mock("../../components/card/HoverCardPreview", () => ({
     return null;
   },
 }));
-vi.mock("../../components/draft/BotDifficultySelector", () => ({ BotDifficultySelector: () => null }));
+vi.mock("../../components/draft/BotDifficultySelector", () => ({
+  BotDifficultySelector: (props: { showPickEnhancements?: boolean }) => (
+    <div data-testid="bot-difficulty" data-pick-enhancements={String(props.showPickEnhancements ?? false)} />
+  ),
+}));
 vi.mock("../../components/draft/CubeSetupPanel", () => ({ CubeSetupPanel: () => null }));
-vi.mock("../../components/draft/SetSelector", () => ({ SetSelector: () => null }));
+vi.mock("../../components/draft/SetSelector", () => ({
+  SetSelector: (props: { showPickEnhancements?: boolean }) => (
+    <div data-testid="set-selector" data-pick-enhancements={String(props.showPickEnhancements ?? false)} />
+  ),
+}));
 vi.mock("../../components/draft/LimitedDeckBuilder", () => ({
   LimitedDeckBuilder: (props: { local?: LocalDeckBuilderController }) => {
     captured.local = props.local ?? null;
@@ -224,6 +233,23 @@ describe("DraftPage local deckbuilding wiring", () => {
     useDraftStore.getState().reset();
     vi.unstubAllGlobals();
     localStorage.clear();
+  });
+
+  it("offers the pick-enhancement checkbox only where a bot pick can use it", async () => {
+    useDraftStore.setState({ phase: "setup", view: null, adapter: null });
+    render(<MemoryRouter><DraftPage /></MemoryRouter>);
+    const offered = (testId: string) =>
+      screen.getByTestId(testId).getAttribute("data-pick-enhancements");
+
+    // Quick draft: bots pick from MRD/DST/5DN boosters, which the guide prices.
+    fireEvent.click(await screen.findByRole("button", { name: "Quick Draft" }));
+    expect(offered("set-selector")).toBe("true");
+
+    // Sealed never reaches a bot pick; cube cards carry no guided set code.
+    fireEvent.click(screen.getByRole("button", { name: "Sealed" }));
+    expect(offered("set-selector")).toBe("false");
+    fireEvent.click(screen.getByRole("button", { name: "Cube Draft" }));
+    expect(offered("bot-difficulty")).toBe("false");
   });
 
   it("hands the deckbuilder a workspace-wired local controller after drafting", async () => {

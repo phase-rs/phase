@@ -370,6 +370,9 @@ mod tests {
     /// from what `build_draft_pick_prompt` is actually handed.
     fn view_with(pack: Vec<DraftCardInstance>, pool: Vec<DraftCardInstance>) -> DraftPlayerView {
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::Set {
                 layout: SetLayout::UniformByRound {
                     codes: vec!["MRD".to_string(), "MRD".to_string(), "MRD".to_string()],
@@ -688,6 +691,9 @@ mod tests {
         let procedure = kind.procedure();
         let pod_size = procedure.pod_size;
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             set_code: source.set_code(),
             source,
             kind,
@@ -854,6 +860,9 @@ mod tests {
         let procedure = kind.procedure();
         let source = set_source();
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             set_code: source.set_code(),
             source,
             kind,

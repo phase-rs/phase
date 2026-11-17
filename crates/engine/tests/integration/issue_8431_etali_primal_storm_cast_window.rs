@@ -11,10 +11,13 @@
 //! production sees it.
 
 use engine::game::combat::AttackTarget;
+use engine::game::players::linked_exile_cards_for_source;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
-use engine::types::game_state::{CastOfferKind, WaitingFor};
+use engine::types::game_state::{
+    CastOfferKind, CastPaymentMode, ExileLink, ExileLinkKind, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -605,4 +608,168 @@ fn etali_window_opens_for_lone_exile_when_a_library_is_empty() {
         }
         other => panic!("expected the window with the lone exile, got {other:?}"),
     }
+}
+
+const GHOSTLY_FLICKER: &str = "Exile two target artifacts, creatures, and/or lands you control, \
+     then return those cards to the battlefield under your control.";
+
+/// What Etali's attack trigger offered, and what was exiled with Etali at that
+/// moment.
+struct EtaliWindow {
+    candidates: Vec<ObjectId>,
+    exiled_with_etali: Vec<ObjectId>,
+    exiled: [ObjectId; 2],
+    prior: ObjectId,
+}
+
+/// Etali attacks with Old X already exiled with it. With `blink`, Ghostly
+/// Flicker returns Etali while the attack trigger waits. Passes priority until
+/// the trigger's free-cast window opens.
+fn etali_window_with_a_prior_exile(blink: bool) -> EtaliWindow {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let etali = scenario
+        .add_creature_from_oracle(P0, "Etali, Primal Storm", 6, 6, ETALI_ORACLE)
+        .id();
+    let land = scenario.add_land_from_oracle(P0, "Blank Land", "").id();
+    scenario.add_card_to_library_top(P0, "P0 Filler");
+    scenario.add_card_to_library_top(P1, "P1 Filler");
+    let p0_spell = scenario
+        .add_spell_to_library_top(P0, "P0 Bolt", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .from_oracle_text("Draw a card.")
+        .id();
+    let p1_spell = scenario
+        .add_spell_to_library_top(P1, "P1 Divination", false)
+        .with_mana_cost(ManaCost::generic(2))
+        .from_oracle_text("Draw a card.")
+        .id();
+    let prior = scenario
+        .add_spell_to_exile(P0, "Old X", true)
+        .with_mana_cost(ManaCost::generic(1))
+        .from_oracle_text("Draw a card.")
+        .id();
+    let flicker = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ghostly Flicker", true, GHOSTLY_FLICKER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    // CR 607.2a: an earlier exile by Etali, outside this trigger's instruction.
+    runner.state_mut().exile_links.push(ExileLink {
+        exiled_id: prior,
+        source_id: etali,
+        kind: ExileLinkKind::TrackedBySource,
+    });
+    let incarnation_before = runner.state().objects[&etali].incarnation;
+
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(etali, AttackTarget::Player(P1))])
+        .expect("P0 attacks with Etali");
+    assert_eq!(runner.state().stack.len(), 1, "the attack trigger waits");
+
+    if blink {
+        let card_id = runner.state().objects[&flicker].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: flicker,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("cast Ghostly Flicker");
+        for target in [etali, land] {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+                .expect("target Etali and the land");
+        }
+        runner.act(GameAction::PassPriority).expect("p0 pass");
+        runner.act(GameAction::PassPriority).expect("p1 pass");
+        assert_eq!(
+            zone_of(&runner, flicker),
+            Zone::Graveyard,
+            "Flicker resolved"
+        );
+        assert_eq!(zone_of(&runner, etali), Zone::Battlefield);
+        assert_ne!(
+            runner.state().objects[&etali].incarnation,
+            incarnation_before,
+            "reach-guard: Etali is a new object before its trigger resolves"
+        );
+        assert_eq!(
+            runner.state().stack.len(),
+            1,
+            "the attack trigger still waits"
+        );
+    }
+
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    for card in [p0_spell, p1_spell, prior] {
+        assert_eq!(zone_of(&runner, card), Zone::Exile, "reach-guard: in exile");
+    }
+    let candidates = match runner.state().waiting_for.clone() {
+        WaitingFor::CastOffer {
+            kind: CastOfferKind::FreeCastWindow { candidates, .. },
+            ..
+        } => candidates,
+        other => panic!("expected Etali's free-cast window, got {other:?}"),
+    };
+    EtaliWindow {
+        candidates,
+        exiled_with_etali: linked_exile_cards_for_source(runner.state(), etali)
+            .iter()
+            .map(|snapshot| snapshot.exiled_id)
+            .collect(),
+        exiled: [p0_spell, p1_spell],
+        prior,
+    }
+}
+
+/// Asserts the window offers exactly the two cards the trigger exiled, and
+/// that each of them is exiled with Etali once.
+fn assert_window_offers_exactly_those_cards(window: &EtaliWindow) {
+    let EtaliWindow {
+        candidates,
+        exiled_with_etali,
+        exiled,
+        prior,
+    } = window;
+    assert_eq!(
+        candidates.len(),
+        2,
+        "exactly the two cards this trigger exiled are offered; got {candidates:?}"
+    );
+    for card in exiled {
+        assert!(
+            candidates.contains(card),
+            "{card:?} must be a candidate; got {candidates:?}"
+        );
+        assert_eq!(
+            exiled_with_etali.iter().filter(|id| *id == card).count(),
+            1,
+            "{card:?} is exiled with Etali exactly once; got {exiled_with_etali:?}"
+        );
+    }
+    assert!(
+        !candidates.contains(prior),
+        "a card Etali exiled earlier is not one of \"those cards\"; got {candidates:?}"
+    );
+}
+
+/// CR 113.7a + CR 607.2a: Etali's attack trigger exists independently of
+/// Etali, so after Ghostly Flicker returns Etali it still exiles the top card
+/// of each library and offers "those cards": exactly the two it exiled.
+#[test]
+fn etali_trigger_after_a_blink_offers_exactly_the_cards_it_exiled() {
+    assert_window_offers_exactly_those_cards(&etali_window_with_a_prior_exile(true));
+}
+
+/// Paired control for the blink: without it, the same board offers the same
+/// two cards.
+#[test]
+fn etali_trigger_without_a_blink_offers_exactly_the_cards_it_exiled() {
+    assert_window_offers_exactly_those_cards(&etali_window_with_a_prior_exile(false));
 }

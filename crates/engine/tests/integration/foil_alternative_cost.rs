@@ -124,7 +124,7 @@ fn cast_with_alternative(b: &mut Board, picks: &[ObjectId]) -> Result<Vec<Vec<Ob
             WaitingFor::AlternativeCastChoice { .. } => GameAction::ChooseAlternativeCast {
                 choice: AlternativeCastDecision::Alternative,
             },
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(b.opponent_spell)),
             },
@@ -241,11 +241,14 @@ fn foil_with_affordable_mana_offers_both_costs() {
     // The cast surfaces the optional-cost choice between the two-discard
     // alternative cost and the printed mana cost (CR 118.9b).
     let WaitingFor::OptionalCostChoice {
-        cost: AdditionalCost::Choice(alternative, printed),
+        cost: AdditionalCost::Choice(costs),
         ..
     } = &waiting
     else {
         panic!("expected the alternative/printed cost choice, got {waiting:?}");
+    };
+    let [alternative, printed] = costs.as_slice() else {
+        panic!("expected exactly the alternative and printed costs, got {costs:?}");
     };
     assert!(matches!(
         alternative,
@@ -281,6 +284,7 @@ fn activated_two_discard_leg_cost_pays_both_legs_or_is_not_offered() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation with enough cards is offered")
         .waiting_for;
@@ -310,7 +314,8 @@ fn activated_two_discard_leg_cost_pays_both_legs_or_is_not_offered() {
     assert!(runner
         .act(GameAction::ActivateAbility {
             source_id: source,
-            ability_index: 0
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto
         })
         .is_err());
 }

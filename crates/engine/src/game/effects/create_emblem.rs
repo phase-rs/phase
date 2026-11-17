@@ -117,6 +117,7 @@ pub fn resolve(
         .map(|src| EmblemSource {
             name: src.name.clone(),
             printed_ref: src.printed_ref.clone(),
+            printing: src.printing.clone(),
         });
 
     // CR 607.1d + CR 607.5 + CR 400.7: latch the creating object's exact
@@ -150,6 +151,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::types::ability::{
         BounceSelection, CharacteristicSetRef, ContinuousModification, ControllerRef,
         StaticDefinition, TargetFilter, TypedFilter,
@@ -197,8 +199,12 @@ mod tests {
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+            cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+            mana_spend_permission: None,
+            enters_modifications: Default::default(),
         })
         .affected(TargetFilter::Typed(TypedFilter::new(
             crate::types::ability::TypeFilter::Land,
@@ -361,6 +367,8 @@ mod tests {
 
         let ability = ResolvedAbility::new(
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Command),
                 destination: Zone::Exile,
                 target: TargetFilter::Any,
@@ -659,10 +667,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: source_id },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: crate::game::game_object::DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
             )

@@ -1570,6 +1570,8 @@ fn redirect_own_hand_move_to(destination: Zone) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 destination,
                 origin: None,
                 target: TargetFilter::SelfRef,
@@ -2021,6 +2023,7 @@ fn nested_post_effect_repause_and_reload_preserve_outer_result() {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: engine::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::Labeled {
                     options: vec!["first".to_string(), "second".to_string()],
                 },
@@ -2288,7 +2291,7 @@ fn owner_not_controller_governs_target_and_return_result() {
         WaitingFor::OptionalCostChoice { .. }
     ) {
         runner
-            .act(GameAction::DecideOptionalCost { pay: false })
+            .act(GameAction::DecideOptionalCost { index: 1 })
             .expect("declining kicker reaches target announcement");
     }
     let WaitingFor::TargetSelection {

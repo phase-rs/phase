@@ -3,6 +3,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::game_state::RandomDraw;
 
 /// CR 701.24a: Shuffle — randomize the cards in a library.
 pub fn resolve(
@@ -15,8 +16,8 @@ pub fn resolve(
     // context-ref filters (Controller, etc.) MUST NOT consult `ability.targets`
     // because chained sub-abilities inherit the parent's Player targets — a
     // `Shuffle { target: Controller }` chained off a Player-targeting parent
-    // would otherwise shuffle the wrong library. `Owner` ("its owner's library")
-    // resolves against `source_id`, not targets, so it is handled separately.
+    // would otherwise shuffle the wrong library. The shared player-reference
+    // authority resolves Owner from the source rather than inherited targets.
     let shuffle_target = match &ability.effect {
         Effect::Shuffle { target } => target.clone(),
         _ => TargetFilter::Controller,
@@ -41,7 +42,7 @@ pub fn resolve(
             ..
         } = state;
         let pile = tracked_object_sets.get_mut(&id).map(|set| {
-            set.shuffle(rng);
+            set.shuffle(rng.draw(RandomDraw::Placement));
             set.clone()
         });
         if let Some(pile) = pile {
@@ -56,24 +57,27 @@ pub fn resolve(
     }
 
     let target_player = match &shuffle_target {
-        // CR 400.3: "its owner's library" resolves to the owner of source_id.
-        TargetFilter::Owner => state
-            .objects
-            .get(&ability.source_id)
-            .map(|obj| obj.owner)
-            .unwrap_or(ability.controller),
         // CR 608.2b: a slot that was an illegal target names no player, so no library is shuffled.
         TargetFilter::ParentTargetSlot { index } => {
             match crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
             {
                 Some(TargetRef::Player(player)) => player,
                 Some(TargetRef::Object(_)) => {
-                    super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+                    let Some(player) =
+                        super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+                    else {
+                        return Ok(());
+                    };
+                    player
                 }
                 None => return Ok(()),
             }
         }
-        _ => super::resolve_player_for_context_ref(state, ability, &shuffle_target),
+        // CR 608.2b: a declared player whose target was illegal names no library.
+        _ => match super::resolve_player_for_context_ref(state, ability, &shuffle_target) {
+            Some(player) => player,
+            None => return Ok(()),
+        },
     };
 
     // CR 701.24a: the target player must exist before any shuffle logic runs.
@@ -89,9 +93,17 @@ pub fn resolve(
 
     // CR 701.24: "Can't shuffle" suppresses library shuffling. Per CR 701.24d,
     // if a player would shuffle their library and can't, they don't shuffle.
+    // CR 800.4a + CR 609.3: a player who has left the game no longer has a
+    // library; the instruction does only as much as possible, so it shuffles
+    // nothing. Without this liveness check an owner who conceded in response
+    // still admits a ShuffledLibrary action (which can trigger Cosi's Trickster).
     // The effect itself still resolves (EffectResolved fires below).
-    let suppressed =
-        crate::game::static_abilities::player_has_static_other(state, target_player, "CantShuffle");
+    let suppressed = !crate::game::players::is_alive(state, target_player)
+        || crate::game::static_abilities::player_has_static_other(
+            state,
+            target_player,
+            "CantShuffle",
+        );
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::Shuffle,
@@ -443,7 +455,7 @@ mod tests {
         );
         assert_eq!(
             resolved_player,
-            PlayerId(1),
+            Some(PlayerId(1)),
             "Visions's shuffle must resolve to the targeted opponent, not the caster (filter was {shuffle_filter:?})"
         );
 

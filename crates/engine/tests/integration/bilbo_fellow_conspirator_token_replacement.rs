@@ -64,6 +64,7 @@ fn artifact_token_spec(subtype: &str, controller: PlayerId) -> TokenSpec {
         enter_with_counters: Vec::new(),
         tapped: false,
         enters_attacking: false,
+        attack_request: engine::types::proposed_event::TokenAttackRequest::Unspecified,
         sacrifice_at: None,
         source_id: engine::types::identifiers::ObjectId(0),
         controller,
@@ -78,6 +79,7 @@ fn create_token_batch(runner: &mut GameRunner, owner: PlayerId, subtype: &str, c
         copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count,
+        appended: Vec::new(),
         applied: HashSet::new(),
     };
     let mut events: Vec<GameEvent> = Vec::new();

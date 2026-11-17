@@ -4,20 +4,22 @@
 Family (D) of the parser combinator gate (scripts/check-parser-combinators.sh).
 A flat `alt` whose `tag("...")` arms share a long common *prefix AND suffix* is
 a cross product that should be factored into per-axis `alt`/`opt` calls — see
-crates/engine/src/parser/oracle_nom/PATTERNS.md section 8b.
+crates/phase-parser/src/parser/oracle_nom/PATTERNS.md section 8b.
 
 This is a multi-line structural check (the bash gate's line-regex families can't
 see across an `alt` block), so it lives here and is invoked per changed file.
 
-Usage:
-    git diff --unified=0 <base> -- <file> | \
+Usage (from check-parser-combinators.sh, after `added_lines_load`):
+    added_lines_for <file> | \
         python3 scripts/lib/detect-cross-product-alts.py <file>
 
-Reads the unified=0 diff on stdin (to recover the set of added post-image line
-numbers) and the post-image <file> from disk. Prints one report block per
-flagged cross product that *intersects an added line* — pre-existing blocks are
-frozen in amber, matching the rest of the gate. A block is exempt if any of its
-lines (or the line directly above the `alt((`) carries `allow-noncombinator`.
+Reads the file's genuinely-added records on stdin, as `<line>\\t<content>` from
+scripts/lib/added-lines.sh `added_lines_for` (to recover the set of added
+post-image line numbers), and the post-image <file> from disk. Prints one report
+block per flagged cross product that *intersects an added line* — pre-existing
+blocks are frozen in amber, matching the rest of the gate, and lines moved within
+the parser gate's view are not added. A block is exempt if any of its lines (or
+the line directly above the `alt((`) carries `allow-noncombinator`.
 
 Exit code is always 0; the caller decides pass/fail from whether output is empty.
 """
@@ -40,19 +42,15 @@ MIN_SUFFIX = 5
 
 TAG_RE = re.compile(r'\btag(?:_no_case)?\s*(?:::<[^>]*>)?\s*\(\s*"((?:[^"\\]|\\.)*)"\s*\)')
 ALT_OPEN_RE = re.compile(r'\balt\s*\(\s*\(')
-HUNK_RE = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@')
 
 
-def added_lines_from_diff(diff_text):
-    """Post-image line numbers added in a unified=0 diff."""
-    added = set()
-    for line in diff_text.splitlines():
-        m = HUNK_RE.match(line)
-        if m:
-            start = int(m.group(1))
-            count = int(m.group(2)) if m.group(2) is not None else 1
-            added.update(range(start, start + count))
-    return added
+def added_line_numbers(records):
+    """Post-image line numbers of `added_lines_for` records (`<line>\\t<content>`).
+
+    Records are split on "\\n" only, git's line model: a form feed or other
+    `str.splitlines()` separator inside content stays inside its record.
+    """
+    return {int(r.split("\t", 1)[0]) for r in records.split("\n") if r}
 
 
 def common_prefix(strings):
@@ -171,10 +169,10 @@ def flagged_blocks(lines, added, path):
 
 def main():
     if len(sys.argv) != 2:
-        sys.stderr.write("usage: detect-cross-product-alts.py <file> (diff on stdin)\n")
+        sys.stderr.write("usage: detect-cross-product-alts.py <file> (added-line records on stdin)\n")
         return 0
     path = sys.argv[1]
-    added = added_lines_from_diff(sys.stdin.read())
+    added = added_line_numbers(sys.stdin.read())
     if not added:
         return 0
     try:

@@ -102,6 +102,7 @@ impl TacticalPolicy for FetchLandPatiencePolicy {
         let GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } = &ctx.candidate.action
         else {
             return na();
@@ -314,6 +315,8 @@ mod tests {
         ability.sub_ability = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Library),
                 destination: Zone::Battlefield,
                 target: TargetFilter::Typed(TypedFilter::land()),
@@ -363,6 +366,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(ai), TacticalClass::Ability),
         };

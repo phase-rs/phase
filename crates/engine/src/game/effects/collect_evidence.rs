@@ -12,11 +12,36 @@ use std::collections::HashSet;
 use super::super::engine::EngineError;
 use super::super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
-fn graveyard_cards(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+/// CR 701.59a: the cards in `player`'s graveyard that can be exiled as
+/// evidence. CR 601.2a: a spell is moved to the stack before its costs are
+/// paid, so it is never its own evidence. Once announced it is excluded by
+/// `casting::is_spell_being_cast`, the announcement authority; before that,
+/// while the castability gate prices its cast, the gate names it as
+/// `spell_being_priced`. CR 602.2a: an activated ability's source stays where
+/// it is, so it can be evidence for its own cost (the gate passes `None`).
+///
+/// The single authority for the payability gate, the optional-conjunction
+/// gate ([`can_collect_evidence_without`]), the joint object-leg model and the
+/// `CollectEvidenceChoice` prompt.
+pub(crate) fn evidence_candidates(
+    state: &GameState,
+    player: PlayerId,
+    spell_being_priced: Option<ObjectId>,
+) -> Vec<ObjectId> {
     state
         .players
         .get(player.0 as usize)
-        .map(|p| state.graveyard_of(p.id).iter().copied().collect())
+        .map(|p| {
+            state
+                .graveyard_of(p.id)
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    Some(id) != spell_being_priced
+                        && !super::super::casting::is_spell_being_cast(state, id)
+                })
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -30,11 +55,40 @@ fn total_mana_value(state: &GameState, cards: &[ObjectId]) -> u32 {
         .sum()
 }
 
-// CR 701.59b: Can't collect evidence if graveyard total mana value < N.
-pub(crate) fn can_collect_evidence(state: &GameState, player: PlayerId, amount: u32) -> bool {
-    total_mana_value(state, &graveyard_cards(state, player)) >= amount
+/// CR 701.59b: Can't collect evidence if the total mana value of the cards
+/// that can be exiled as evidence ([`evidence_candidates`]) is less than N.
+pub(crate) fn can_collect_evidence(
+    state: &GameState,
+    player: PlayerId,
+    spell_being_priced: Option<ObjectId>,
+    amount: u32,
+) -> bool {
+    total_mana_value(
+        state,
+        &evidence_candidates(state, player, spell_being_priced),
+    ) >= amount
 }
 
+/// CR 701.59b + CR 118.3 + CR 608.2d: whether collect evidence `amount` can
+/// be paid in full from the evidence pool left once `departed` — objects an
+/// earlier part of the same optional action moves away — are gone. "You may
+/// exile it and collect evidence 4" can't count the exiled card toward its
+/// own evidence (Lamplight Phoenix).
+pub(crate) fn can_collect_evidence_without(
+    state: &GameState,
+    player: PlayerId,
+    departed: &[ObjectId],
+    amount: u32,
+) -> bool {
+    let pool: Vec<ObjectId> = evidence_candidates(state, player, None)
+        .into_iter()
+        .filter(|id| !departed.contains(id))
+        .collect();
+    total_mana_value(state, &pool) >= amount
+}
+
+/// The prompt runs while a cost is being paid, after any spell paying it was
+/// announced, so `is_spell_being_cast` alone keeps that spell out.
 fn waiting_state(
     state: &GameState,
     player: PlayerId,
@@ -44,7 +98,7 @@ fn waiting_state(
     WaitingFor::CollectEvidenceChoice {
         player,
         minimum_mana_value: amount,
-        cards: graveyard_cards(state, player),
+        cards: evidence_candidates(state, player, None),
         resume: Box::new(resume),
     }
 }
@@ -78,7 +132,7 @@ pub(crate) fn begin_cost_payment(
     pending_cast: PendingCast,
     source: crate::types::game_state::SpellCostSource,
 ) -> Result<WaitingFor, EngineError> {
-    if !can_collect_evidence(state, player, amount) {
+    if !can_collect_evidence(state, player, None, amount) {
         return Err(EngineError::ActionNotAllowed(format!(
             "Not enough total mana value in graveyard to collect evidence {}",
             amount
@@ -111,27 +165,18 @@ pub(crate) fn resolve(
         }
     };
 
-    if can_collect_evidence(state, ability.controller, amount) {
-        let pending_ability = ability
-            .sub_ability
-            .as_ref()
-            .map(|sub| sub.as_ref().clone())
-            .unwrap_or_else(|| {
-                ResolvedAbility::new(
-                    Effect::TargetOnly {
-                        target: crate::types::ability::TargetFilter::Any,
-                    },
-                    vec![],
-                    ability.source_id,
-                    ability.controller,
-                )
-            });
+    if can_collect_evidence(state, ability.controller, None, amount) {
+        // CR 701.59a + CR 603.12 + CR 608.2c: the evidence prompt is a
+        // resolution choice, so the chain walker parks this effect's tail and
+        // the engine drains that continuation once the choice is made. That
+        // drain is what lets a "when you do" reflexive trigger only after the
+        // evidence is actually exiled, so the resume carries no tail of its own.
         state.waiting_for = waiting_state(
             state,
             ability.controller,
             amount,
-            CollectEvidenceResume::Effect {
-                pending_ability: Box::new(pending_ability),
+            CollectEvidenceResume::Resolution {
+                source_id: ability.source_id,
             },
         );
     }
@@ -170,11 +215,7 @@ pub(crate) fn handle_choice(
         }
     }
 
-    let still_legal: Vec<ObjectId> = state
-        .players
-        .get(player.0 as usize)
-        .map(|p| state.graveyard_of(p.id).iter().copied().collect())
-        .unwrap_or_default();
+    let still_legal = evidence_candidates(state, player, None);
     for id in chosen {
         if !still_legal.contains(id) {
             return Err(EngineError::InvalidAction(
@@ -198,6 +239,7 @@ fn cost_source_id(resume: &CollectEvidenceResume) -> ObjectId {
     match resume {
         CollectEvidenceResume::Casting { pending_cast, .. } => pending_cast.object_id,
         CollectEvidenceResume::Effect { pending_ability } => pending_ability.source_id,
+        CollectEvidenceResume::Resolution { source_id } => *source_id,
         CollectEvidenceResume::ManaAbility {
             pending_mana_ability,
         } => pending_mana_ability.source_id,
@@ -314,6 +356,17 @@ fn complete_cost_payment(
                 events,
             )
         }
+        // CR 608.2c + CR 117.2e: the rest of the resolving ability is parked on
+        // the resolution stack behind this prompt. Hand back to that
+        // continuation (the engine drains it before anyone gets priority)
+        // instead of entering a fresh chain, which would reset the
+        // resolution-local tracked sets, chosen values and action facts the
+        // parked tail reads.
+        CollectEvidenceResume::Resolution { .. } => {
+            state.waiting_for = WaitingFor::Priority { player };
+            Ok(state.waiting_for.clone())
+        }
+        // A legacy prompt carries its own tail; finish it as it was created.
         CollectEvidenceResume::Effect { pending_ability } => {
             state.waiting_for = WaitingFor::Priority { player };
             super::resolve_ability_chain(state, &pending_ability, events, 0)
@@ -357,7 +410,6 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter, TypedFilter};
-    use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
 
     fn add_graveyard_card(
@@ -556,75 +608,6 @@ mod tests {
         assert!(matches!(err, EngineError::InvalidAction(_)));
     }
 
-    #[test]
-    fn collect_evidence_effect_resumes_sub_ability() {
-        let mut state = GameState::new_two_player(42);
-        let first = add_graveyard_card(&mut state, PlayerId(0), 1, "One", 2);
-        let second = add_graveyard_card(&mut state, PlayerId(0), 2, "Two", 2);
-        let land = create_object(
-            &mut state,
-            CardId(3),
-            PlayerId(0),
-            "Forest".to_string(),
-            Zone::Library,
-        );
-        state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
-        let mut ability = ResolvedAbility::new(
-            Effect::CollectEvidence { amount: 4 },
-            vec![],
-            ObjectId(100),
-            PlayerId(0),
-        );
-        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
-            Effect::SearchLibrary {
-                filter: TargetFilter::Typed(TypedFilter::land()),
-                count: QuantityExpr::Fixed { value: 1 },
-                reveal: true,
-                target_player: None,
-                selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
-                split: None,
-                source_zones: vec![crate::types::zones::Zone::Library],
-            },
-            vec![],
-            ObjectId(100),
-            PlayerId(0),
-        )));
-
-        let mut events = Vec::new();
-        resolve(&mut state, &ability, &mut events).unwrap();
-
-        let (minimum_mana_value, cards, resume) = match state.waiting_for.clone() {
-            WaitingFor::CollectEvidenceChoice {
-                minimum_mana_value,
-                cards,
-                resume,
-                ..
-            } => (minimum_mana_value, cards, resume),
-            other => panic!("Expected CollectEvidenceChoice, got {:?}", other),
-        };
-
-        let mut resume_events = Vec::new();
-        let next = handle_choice(
-            &mut state,
-            PlayerId(0),
-            minimum_mana_value,
-            &cards,
-            &resume,
-            &[first, second],
-            &mut resume_events,
-        )
-        .unwrap();
-
-        assert!(matches!(next, WaitingFor::SearchChoice { .. }));
-        assert!(resume_events.iter().any(|event| matches!(
-            event,
-            GameEvent::PlayerPerformedAction {
-                action: PlayerActionKind::CollectEvidence,
-                ..
-            }
-        )));
-    }
-
     fn mana_pending(source_id: ObjectId) -> PendingManaAbility {
         PendingManaAbility {
             player: PlayerId(0),
@@ -632,18 +615,24 @@ mod tests {
             ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
+            announced_usage_key: None,
             color_override: None,
             resume: crate::types::game_state::ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            pinned_pool_units: Vec::new(),
             chosen_counter_counts: Vec::new(),
             chosen_x: None,
             collected_evidence: Vec::new(),
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         }
     }

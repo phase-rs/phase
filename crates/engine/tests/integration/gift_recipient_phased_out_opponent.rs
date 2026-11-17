@@ -10,7 +10,7 @@
 //! asserts is a branch that changes silently.
 //!
 //! The production entry chain is the `DecideOptionalCost` beat, NOT `handle_cast_spell`:
-//! `GameAction::DecideOptionalCost { pay: true }` → `engine_casting::handle_optional_cost_
+//! `GameAction::DecideOptionalCost { index: 0 }` → `engine_casting::handle_optional_cost_
 //! choice` → `casting_costs::handle_decide_additional_cost` → `continue_after_gift_promised`
 //! (which is private and is never called directly here). `handle_cast_spell` opens the cast
 //! that publishes the `OptionalCostChoice`, one action earlier.
@@ -71,7 +71,12 @@ fn gift_board(
         );
     }
     if let Some(seat) = eliminate {
-        engine::game::elimination::eliminate_player(runner.state_mut(), seat, &mut events);
+        engine::game::elimination::eliminate_player(
+            runner.state_mut(),
+            seat,
+            engine::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(
             runner.state().players[seat.0 as usize].is_eliminated,
             "{seat:?} must read as eliminated"
@@ -127,7 +132,7 @@ fn promise_the_gift(
                     "the UN-routed opponent relation is still non-empty on this board, so \
                      an empty CHOOSABLE list is the routing's doing and not the board's"
                 );
-                return runner.act(GameAction::DecideOptionalCost { pay: true });
+                return runner.act(GameAction::DecideOptionalCost { index: 0 });
             }
             other => panic!("unexpected beat before the gift promise: {other:?}"),
         }

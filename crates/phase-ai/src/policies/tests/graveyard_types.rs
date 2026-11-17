@@ -95,6 +95,7 @@ fn self_mill_effect() -> Effect {
         count: QuantityExpr::Fixed { value: 1 },
         target: TargetFilter::Controller,
         destination: Zone::Graveyard,
+        position: engine::types::ability::LibraryPosition::Top,
     }
 }
 
@@ -198,6 +199,7 @@ fn activate_candidate(source_id: ObjectId, ability_index: usize) -> CandidateAct
         action: GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         },
         metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
     }

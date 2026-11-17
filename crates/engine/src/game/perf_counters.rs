@@ -1,4 +1,6 @@
 use std::cell::Cell;
+#[cfg(feature = "test-support")]
+use std::cell::RefCell;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerfCounterSnapshot {
@@ -76,6 +78,27 @@ pub struct HomogeneousTargetWalkCacheCounters {
     pub advances: u64,
 }
 
+/// Test-only counters for the targeted-cast offer witness
+/// (`ai_support::payment_continuation::witness_targeted_cast_offer`, consulted
+/// by the legal-action filter). Kept out of [`PerfCounterSnapshot`] for the
+/// same reason as the counter sets below: that struct's serialized field set
+/// powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TargetedOfferWitnessCounters {
+    /// Witness runs started by the offer filter.
+    pub calls: u64,
+    /// Runs that certified a completion.
+    pub completed: u64,
+    /// Reducer applications spent across all runs.
+    pub reducer_attempts: u64,
+    /// Phase-owned legality clones made inside the runs.
+    pub phase_owned_state_clones: u64,
+    /// Auto-payment wrapper calls made inside the runs (also counted in
+    /// [PerfCounterSnapshot::auto_payment_borrowed_wrapper_calls]).
+    pub auto_payment_wrapper_calls: u64,
+}
+
 /// Test-only counters for the prior-target-binding seams (cross-slot
 /// object-relative target binding, e.g. Puca's Mischief / Spawnbroker /
 /// Daring Thief). Kept out of [`PerfCounterSnapshot`] for the same reason the
@@ -86,6 +109,41 @@ pub struct HomogeneousTargetWalkCacheCounters {
 pub struct PriorTargetBindingCounters {
     pub static_union_enumerations: u64,
     pub selection_bindings: u64,
+}
+
+/// Test-only counter for the CR 704.5a life-crossing read in `analysis::resource::PeriodicDelta`:
+/// how many repetitions' life charges were computed, by the one closure every reader of those
+/// charges goes through. It pins that an offer's work does not grow with a life total. Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that struct's
+/// serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeclaredLifeChargeCounters {
+    pub reads: u64,
+}
+
+/// Test-only counter for the combinations the AI candidate enumerator's
+/// combination helpers (`ai_support::candidates::{combinations_generic,
+/// combinations_usize}` and the bounded object enumerator) materialize, before
+/// any selection constraint or dedup sees them. Kept out of [`PerfCounterSnapshot`]
+/// for the same reason as the counter sets above.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SelectionCombinationCounters {
+    pub materialized: u64,
+}
+
+/// Test-only counters for work a bounded reader, such as the untap priority
+/// hold, must never reach: the game copies the ability-mana affordability probe
+/// (`casting::can_pay_ability_mana_cost_after_auto_tap_excluding`) takes to run
+/// an auto-payment, and the battlefield objects the "tap untapped creatures"
+/// cost check (`cost_payability::has_enough_tap_creatures`) visits. Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BoundedReaderCounters {
+    pub state_clones: u64,
+    pub tap_creature_cost_visits: u64,
 }
 
 /// Test-only counters for the CR 601.2f + CR 602.2b activation cost-determination
@@ -136,6 +194,41 @@ pub struct ExileReturnLatchCounters {
     pub trigger_origin_lookups: u64,
 }
 
+/// Test-only work counters for the CR 603.10a co-departure arm of trigger
+/// collection (`triggers::CoDepartureObserverIndex`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that
+/// struct's serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CoDepartureObserverCounters {
+    /// Per-pass index builds (one per pass that sees a co-departure group).
+    pub index_builds: u64,
+    /// (departure, co-departed observer) pairs whose observer source context
+    /// was resolved because the observer left with a trigger.
+    pub observer_resolutions: u64,
+}
+
+/// Test-only work counters for the CR 603.10 departure-window arm of trigger
+/// collection (`triggers::ActionDepartures`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DepartureWindowCounters {
+    /// (earlier event, departed observer) pairs admitted past the departure
+    /// row and event-key gates, so the observer's latched context was matched.
+    pub context_resolutions: u64,
+    /// CR 608.2c + CR 603.10: (event, departed observer) pairs skipped because
+    /// the event belongs to the observer's own departing instruction and does
+    /// not look back in time, so the observer no longer existed after it.
+    pub in_instruction_cuts: u64,
+    /// Battlefield departures with no instruction lead: emitted outside any
+    /// instruction scope, or read by the departure-window arm without one.
+    /// The departure-window arm does not observe them (fail-closed). Counts
+    /// observations, not departures: one departure is counted once at emission
+    /// and again by every collection pass that reads it unstamped.
+    pub unstamped_departures: u64,
+}
+
 /// Test-only counters for the stack's bulk token executor
 /// (`stack::resolve_bulk_token_run`) and the post-action pipeline it elides.
 /// Kept out of [`PerfCounterSnapshot`] for the same reason as the counter sets
@@ -147,6 +240,41 @@ pub struct StackBulkCounters {
     pub bulk_entries: u64,
     /// Entries into `engine_priority::run_post_action_pipeline_from_with_policy`.
     pub post_action_pipeline_passes: u64,
+}
+
+/// Test-only count of full `TriggerIndex` rebuilds, whatever the caller. Kept
+/// out of [`PerfCounterSnapshot`], whose fields `phase-ai`'s
+/// `PerfCounters::from_snapshot` maps one-for-one into the AI performance
+/// baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TriggerIndexCounters {
+    /// Calls to `TriggerIndex::rebuild_from_battlefield`.
+    pub full_rebuilds: u64,
+}
+
+/// Test-only counters for the CR 613.8a-c Layer 2 control selector
+/// (`layers::apply_control_effects_in_dependency_order`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that
+/// struct's serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControlDependencyCounters {
+    /// Effect pairs the cheap rejection could not rule out, each of which
+    /// cloned the state to preview the provider.
+    pub previews: u64,
+}
+
+/// Test-only count of `stack_reach::stack_entry_node_reach` calls for an entry with
+/// an ability: the calls that reach `resolution_board`, which copies the board
+/// unless it refuses the entry first. Kept out of [`PerfCounterSnapshot`] for the
+/// same reason as the counter sets above: that struct's serialized field set
+/// powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StackReachCounters {
+    /// Calls to `stack_entry_node_reach` past its no-ability return.
+    pub entry_reaches: u64,
 }
 
 /// Test-only counters for the CR 508.1d attack-declaration solver
@@ -190,6 +318,203 @@ pub struct AttackDeclarationSolverCounters {
     /// "`!Defender` is the FIRST conjunct" revert-failing: move the guard below
     /// the two arms and every vanilla creature registers, once per pairing.
     pub defender_permission_lookups: u64,
+}
+
+/// Test-only counters for the work a replay take does on the turn's growing history: history
+/// records deep-copied, map-backed history entries a state copy does not share, state copies,
+/// keyed journal reads and the records they examine, the replay drive's whole-state
+/// snapshots, and the mana-pool entries and units walked. Kept out of [`PerfCounterSnapshot`]
+/// for the same reason as the counter sets above.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TakeCostCounters {
+    pub history_entries_copied: u64,
+    pub history_map_entries_unshared: u64,
+    pub state_copies: u64,
+    pub journal_keyed_reads: u64,
+    pub journal_records_examined: u64,
+    pub drive_snapshots: u64,
+    pub pool_entries_walked: u64,
+}
+
+#[cfg(feature = "test-support")]
+impl TakeCostCounters {
+    /// The counts accrued since `earlier`, a snapshot taken on the same thread.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            history_entries_copied: self.history_entries_copied - earlier.history_entries_copied,
+            history_map_entries_unshared: self.history_map_entries_unshared
+                - earlier.history_map_entries_unshared,
+            state_copies: self.state_copies - earlier.state_copies,
+            journal_keyed_reads: self.journal_keyed_reads - earlier.journal_keyed_reads,
+            journal_records_examined: self.journal_records_examined
+                - earlier.journal_records_examined,
+            drive_snapshots: self.drive_snapshots - earlier.drive_snapshots,
+            pool_entries_walked: self.pool_entries_walked - earlier.pool_entries_walked,
+        }
+    }
+}
+
+/// Test-only counters for the play trace's work: action boundaries entered (outermost, nested,
+/// inside a probe), entries recorded, the trace's node-map and node-key work, whole-state copies
+/// its own code makes, the windows and legality reads its naming makes, and the spans the
+/// producer asks the confirmer and the replays it drives for them.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlayTraceCounters {
+    pub boundary_entries: u64,
+    pub nested_applies: u64,
+    pub probe_entries: u64,
+    pub actions_recorded: u64,
+    pub resolutions_recorded: u64,
+    pub resolution_hooks_in_probe: u64,
+    pub node_map_reads: u64,
+    pub node_map_writes: u64,
+    pub node_key_compares: u64,
+    pub trace_state_copies: u64,
+    pub windows: u64,
+    pub legality_reads: u64,
+    pub legality_read_copies: u64,
+    pub confirm_asks: u64,
+    pub confirm_drives: u64,
+    /// Replays `mandatory_period_holds` ran.
+    pub mandatory_replays: u64,
+    /// Entries appended to carried spans.
+    pub carry_appends: u64,
+    /// Old-window nodes looked up in the carrying index at a step's end.
+    pub step_end_lookups: u64,
+    /// Engine B runs that rebuilt a seat's carrying index.
+    pub engine_b_rebuilds: u64,
+    /// Objects visited by the face-set scans that fingerprint a seat's printed faces.
+    pub face_set_scans: u64,
+}
+
+#[cfg(feature = "test-support")]
+impl PlayTraceCounters {
+    /// The counts accrued since `earlier`, a snapshot taken on the same thread.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            boundary_entries: self.boundary_entries - earlier.boundary_entries,
+            nested_applies: self.nested_applies - earlier.nested_applies,
+            probe_entries: self.probe_entries - earlier.probe_entries,
+            actions_recorded: self.actions_recorded - earlier.actions_recorded,
+            resolutions_recorded: self.resolutions_recorded - earlier.resolutions_recorded,
+            resolution_hooks_in_probe: self.resolution_hooks_in_probe
+                - earlier.resolution_hooks_in_probe,
+            node_map_reads: self.node_map_reads - earlier.node_map_reads,
+            node_map_writes: self.node_map_writes - earlier.node_map_writes,
+            node_key_compares: self.node_key_compares - earlier.node_key_compares,
+            trace_state_copies: self.trace_state_copies - earlier.trace_state_copies,
+            windows: self.windows - earlier.windows,
+            legality_reads: self.legality_reads - earlier.legality_reads,
+            legality_read_copies: self.legality_read_copies - earlier.legality_read_copies,
+            confirm_asks: self.confirm_asks - earlier.confirm_asks,
+            confirm_drives: self.confirm_drives - earlier.confirm_drives,
+            mandatory_replays: self.mandatory_replays - earlier.mandatory_replays,
+            carry_appends: self.carry_appends - earlier.carry_appends,
+            step_end_lookups: self.step_end_lookups - earlier.step_end_lookups,
+            engine_b_rebuilds: self.engine_b_rebuilds - earlier.engine_b_rebuilds,
+            face_set_scans: self.face_set_scans - earlier.face_set_scans,
+        }
+    }
+}
+
+/// Test-only counters for the CR 733.1 cast-undo record
+/// (`engine_casting::record_spell_cast_undo`): the changed-member values it
+/// builds and what they serialize. Kept out of [`PerfCounterSnapshot`], whose
+/// serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CastUndoRecordCounters {
+    /// CR 733.1: changed-member cast-undo values built by `record_spell_cast_undo` (two per recorded step).
+    pub values: u64,
+    /// Game objects serialized into those values.
+    pub objects: u64,
+    /// Deck-pool entries serialized into those values.
+    pub deck_pool_entries: u64,
+    /// Recorded steps also computed over the complete states and compared (`CastUndoReferenceCheck`).
+    pub reference_checks: u64,
+    /// Of those, steps that folded a cast-start boundary rather than the prior reversal.
+    pub cast_start_reference_checks: u64,
+}
+
+#[cfg(feature = "test-support")]
+impl CastUndoRecordCounters {
+    /// The counts accrued since `earlier`, a snapshot taken on the same thread.
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            values: self.values - earlier.values,
+            objects: self.objects - earlier.objects,
+            deck_pool_entries: self.deck_pool_entries - earlier.deck_pool_entries,
+            reference_checks: self.reference_checks - earlier.reference_checks,
+            cast_start_reference_checks: self.cast_start_reference_checks
+                - earlier.cast_start_reference_checks,
+        }
+    }
+}
+
+/// One replay take: the count it was driven at, the cycles it delivered, the whole take's counts,
+/// and each delivered cycle's counts in order.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TakeCostRecord {
+    pub count: u32,
+    pub delivered: u32,
+    pub whole_take: TakeCostCounters,
+    pub cycles: Vec<TakeCostCounters>,
+}
+
+/// Entries of a map-backed history field that a state copy does not share with its original.
+#[cfg(feature = "test-support")]
+pub(crate) trait Unshared {
+    fn unshared(&self, copy: &Self) -> u64;
+}
+
+// An `im` copy shares every entry while it is `ptr_eq` to its original, and none after a write.
+#[cfg(feature = "test-support")]
+impl<K, V, S> Unshared for im::HashMap<K, V, S>
+where
+    K: std::hash::Hash + Eq + Clone,
+    V: Clone,
+    S: std::hash::BuildHasher,
+{
+    fn unshared(&self, copy: &Self) -> u64 {
+        if self.ptr_eq(copy) {
+            0
+        } else {
+            self.len() as u64
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl<K, V> Unshared for im::OrdMap<K, V>
+where
+    K: Ord + Clone,
+    V: Clone,
+{
+    fn unshared(&self, copy: &Self) -> u64 {
+        if self.ptr_eq(copy) {
+            0
+        } else {
+            self.len() as u64
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl<T, S> Unshared for im::HashSet<T, S>
+where
+    T: std::hash::Hash + Eq + Clone,
+    S: std::hash::BuildHasher,
+{
+    fn unshared(&self, copy: &Self) -> u64 {
+        if self.ptr_eq(copy) {
+            0
+        } else {
+            self.len() as u64
+        }
+    }
 }
 
 thread_local! {
@@ -259,10 +584,35 @@ thread_local! {
         })
     };
     #[cfg(feature = "test-support")]
+    static TARGETED_OFFER_WITNESS_COUNTERS: Cell<TargetedOfferWitnessCounters> = const {
+        Cell::new(TargetedOfferWitnessCounters {
+            calls: 0,
+            completed: 0,
+            reducer_attempts: 0,
+            phase_owned_state_clones: 0,
+            auto_payment_wrapper_calls: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
     static PRIOR_TARGET_BINDING_COUNTERS: Cell<PriorTargetBindingCounters> = const {
         Cell::new(PriorTargetBindingCounters {
             static_union_enumerations: 0,
             selection_bindings: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static DECLARED_LIFE_CHARGE_COUNTERS: Cell<DeclaredLifeChargeCounters> = const {
+        Cell::new(DeclaredLifeChargeCounters { reads: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static SELECTION_COMBINATION_COUNTERS: Cell<SelectionCombinationCounters> = const {
+        Cell::new(SelectionCombinationCounters { materialized: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static BOUNDED_READER_COUNTERS: Cell<BoundedReaderCounters> = const {
+        Cell::new(BoundedReaderCounters {
+            state_clones: 0,
+            tap_creature_cost_visits: 0,
         })
     };
     #[cfg(feature = "test-support")]
@@ -293,9 +643,63 @@ thread_local! {
         })
     };
     #[cfg(feature = "test-support")]
+    static TAKE_COST_COUNTERS: Cell<TakeCostCounters> = const {
+        Cell::new(TakeCostCounters {
+            history_entries_copied: 0,
+            history_map_entries_unshared: 0,
+            state_copies: 0,
+            journal_keyed_reads: 0,
+            journal_records_examined: 0,
+            drive_snapshots: 0,
+            pool_entries_walked: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static TAKE_COST_RECORDS: RefCell<Vec<TakeCostRecord>> = const { RefCell::new(Vec::new()) };
+    #[cfg(feature = "test-support")]
+    static PLAY_TRACE_COUNTERS: Cell<PlayTraceCounters> = const {
+        Cell::new(PlayTraceCounters {
+            boundary_entries: 0,
+            nested_applies: 0,
+            probe_entries: 0,
+            actions_recorded: 0,
+            resolutions_recorded: 0,
+            resolution_hooks_in_probe: 0,
+            node_map_reads: 0,
+            node_map_writes: 0,
+            node_key_compares: 0,
+            trace_state_copies: 0,
+            windows: 0,
+            legality_reads: 0,
+            legality_read_copies: 0,
+            confirm_asks: 0,
+            confirm_drives: 0,
+            mandatory_replays: 0,
+            carry_appends: 0,
+            step_end_lookups: 0,
+            engine_b_rebuilds: 0,
+            face_set_scans: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
     static EXILE_RETURN_LATCH_COUNTERS: Cell<ExileReturnLatchCounters> = const {
         Cell::new(ExileReturnLatchCounters {
             trigger_origin_lookups: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static CO_DEPARTURE_OBSERVER_COUNTERS: Cell<CoDepartureObserverCounters> = const {
+        Cell::new(CoDepartureObserverCounters {
+            index_builds: 0,
+            observer_resolutions: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static DEPARTURE_WINDOW_COUNTERS: Cell<DepartureWindowCounters> = const {
+        Cell::new(DepartureWindowCounters {
+            context_resolutions: 0,
+            in_instruction_cuts: 0,
+            unstamped_departures: 0,
         })
     };
     #[cfg(feature = "test-support")]
@@ -303,6 +707,28 @@ thread_local! {
         Cell::new(StackBulkCounters {
             bulk_entries: 0,
             post_action_pipeline_passes: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
+    static TRIGGER_INDEX_COUNTERS: Cell<TriggerIndexCounters> = const {
+        Cell::new(TriggerIndexCounters { full_rebuilds: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static STACK_REACH_COUNTERS: Cell<StackReachCounters> = const {
+        Cell::new(StackReachCounters { entry_reaches: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static CONTROL_DEPENDENCY_COUNTERS: Cell<ControlDependencyCounters> = const {
+        Cell::new(ControlDependencyCounters { previews: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static CAST_UNDO_RECORD_COUNTERS: Cell<CastUndoRecordCounters> = const {
+        Cell::new(CastUndoRecordCounters {
+            values: 0,
+            objects: 0,
+            deck_pool_entries: 0,
+            reference_checks: 0,
+            cast_start_reference_checks: 0,
         })
     };
     static LEGALITY_CLONE_PHASE: Cell<Option<LegalityClonePhase>> = const { Cell::new(None) };
@@ -315,6 +741,9 @@ pub(crate) enum LegalityClonePhase {
     RawValidation,
     GroupedManaReadiness,
     PostApplyCore,
+    /// Inside a targeted-cast offer witness run (counted by
+    /// [`TargetedOfferWitnessCounters`], not by [`PerfCounterSnapshot`]).
+    TargetedOfferWitness,
 }
 
 pub(crate) struct LegalityClonePhaseGuard {
@@ -387,6 +816,48 @@ pub fn record_prior_target_binding_selection() {
     });
 }
 
+/// CR 704.5a: recorded once per repetition's life charge that `analysis::resource::PeriodicDelta`
+/// computes, in the closure every reader of those charges calls.
+#[cfg(feature = "test-support")]
+pub fn record_declared_life_charge_read() {
+    DECLARED_LIFE_CHARGE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.reads += 1;
+        cell.set(counters);
+    });
+}
+
+/// Recorded with every batch of combinations the AI candidate enumerator builds.
+#[cfg(feature = "test-support")]
+pub fn record_selection_combinations(count: usize) {
+    SELECTION_COMBINATION_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.materialized += count as u64;
+        cell.set(counters);
+    });
+}
+
+/// Recorded once per game copy the ability-mana affordability probe takes.
+#[cfg(feature = "test-support")]
+pub fn record_ability_mana_auto_tap_probe_clone() {
+    BOUNDED_READER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.state_clones += 1;
+        cell.set(counters);
+    });
+}
+
+/// Recorded once per battlefield object the "tap untapped creatures" cost check
+/// visits.
+#[cfg(feature = "test-support")]
+pub fn record_tap_creature_cost_visit() {
+    BOUNDED_READER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.tap_creature_cost_visits += 1;
+        cell.set(counters);
+    });
+}
+
 fn record_phase_owned_state_clone_for(
     snapshot: &mut PerfCounterSnapshot,
     phase: Option<LegalityClonePhase>,
@@ -400,6 +871,14 @@ fn record_phase_owned_state_clone_for(
         }
         Some(LegalityClonePhase::PostApplyCore) => {
             snapshot.post_apply_auto_payment_core_state_clones += 1;
+        }
+        Some(LegalityClonePhase::TargetedOfferWitness) => {
+            #[cfg(feature = "test-support")]
+            TARGETED_OFFER_WITNESS_COUNTERS.with(|cell| {
+                let mut counters = cell.get();
+                counters.phase_owned_state_clones += 1;
+                cell.set(counters);
+            });
         }
         None => {}
     }
@@ -438,6 +917,14 @@ pub(crate) fn record_auto_payment_borrowed_wrapper() {
                 | LegalityClonePhase::PostApplyCore,
             )
             | None => {}
+            Some(LegalityClonePhase::TargetedOfferWitness) => {
+                #[cfg(feature = "test-support")]
+                TARGETED_OFFER_WITNESS_COUNTERS.with(|cell| {
+                    let mut counters = cell.get();
+                    counters.auto_payment_wrapper_calls += 1;
+                    cell.set(counters);
+                });
+            }
         }
     });
     record_phase_owned_state_clone();
@@ -480,9 +967,9 @@ pub fn record_static_full_scan() {
     with_mut(|s| s.static_full_scans += 1);
 }
 
-/// Counts full `game_active_statics` scans for `CastWithKeyword` spell grants.
-/// The O(1) `static_kind_present(CastWithKeyword)` gate should keep this at zero
-/// during candidate generation when no functioning spell-keyword grant exists.
+/// Counts full `game_active_statics` scans for `CastWithKeyword` and `CastWithFlash` spell grants.
+/// The O(1) `static_kind_present` gates should keep this at zero during candidate
+/// generation when no functioning spell grant exists.
 pub fn record_spell_keyword_grant_scan() {
     with_mut(|s| s.spell_keyword_grant_scans += 1);
 }
@@ -497,10 +984,9 @@ pub fn record_combat_shadow_block_scan() {
 }
 
 /// Counts every per-provider `matches_target_filter` evaluation done while
-/// populating the per-controller provider cache in
-/// `expand_granted_activated_abilities`. Memoizing the matching-provider set by
-/// recipient controller collapses the O(recipients×objects) filter sweep to
-/// O(controllers×objects).
+/// populating the per-controller provider cache in the referenced-grant
+/// expanders. Memoizing the matching-provider set by recipient controller
+/// collapses the O(recipients×objects) filter sweep to O(controllers×objects).
 pub fn record_granted_ability_provider_scan() {
     with_mut(|s| s.granted_ability_provider_scans += 1);
 }
@@ -635,6 +1121,48 @@ pub fn homogeneous_target_walk_cache_snapshot() -> HomogeneousTargetWalkCacheCou
 #[cfg(feature = "test-support")]
 pub fn prior_target_binding_snapshot() -> PriorTargetBindingCounters {
     PRIOR_TARGET_BINDING_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn declared_life_charge_snapshot() -> DeclaredLifeChargeCounters {
+    DECLARED_LIFE_CHARGE_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn selection_combination_snapshot() -> SelectionCombinationCounters {
+    SELECTION_COMBINATION_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn bounded_reader_snapshot() -> BoundedReaderCounters {
+    BOUNDED_READER_COUNTERS.with(Cell::get)
+}
+
+/// One targeted-cast offer witness run: its spend, and whether it certified.
+#[cfg(feature = "test-support")]
+pub fn record_targeted_offer_witness(witness: &crate::ai_support::TargetedCastWitness) {
+    TARGETED_OFFER_WITNESS_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.calls += 1;
+        match witness.verdict {
+            crate::ai_support::TargetedCastVerdict::Completed => counters.completed += 1,
+            crate::ai_support::TargetedCastVerdict::NotFound
+            | crate::ai_support::TargetedCastVerdict::Indeterminate => {}
+        }
+        counters.reducer_attempts += witness.reducer_attempts as u64;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn targeted_offer_witness_snapshot() -> TargetedOfferWitnessCounters {
+    TARGETED_OFFER_WITNESS_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn reset_targeted_offer_witness_counters() {
+    TARGETED_OFFER_WITNESS_COUNTERS
+        .with(|counters| counters.set(TargetedOfferWitnessCounters::default()));
 }
 
 /// CR 508.1d: one solver target-table build.
@@ -778,10 +1306,210 @@ pub fn exile_return_latch_snapshot() -> ExileReturnLatchCounters {
     EXILE_RETURN_LATCH_COUNTERS.with(Cell::get)
 }
 
+/// CR 603.10a: one co-departure observer index build.
+#[cfg(feature = "test-support")]
+pub fn record_co_departure_index_build() {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.index_builds += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 603.10a: one co-departed observer whose source context was resolved.
+#[cfg(feature = "test-support")]
+pub fn record_co_departure_observer_resolution() {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.observer_resolutions += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn co_departure_observer_snapshot() -> CoDepartureObserverCounters {
+    CO_DEPARTURE_OBSERVER_COUNTERS.with(Cell::get)
+}
+
+/// CR 603.10: one departed observer matched against an earlier event of its
+/// resolution's departure window.
+#[cfg(feature = "test-support")]
+pub fn record_departure_window_context_resolution() {
+    DEPARTURE_WINDOW_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.context_resolutions += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 608.2c + CR 603.10: one event of a departed observer's own instruction
+/// cut from its departure window.
+#[cfg(feature = "test-support")]
+pub fn record_departure_window_in_instruction_cut() {
+    DEPARTURE_WINDOW_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.in_instruction_cuts += 1;
+        cell.set(counters);
+    });
+}
+
+/// One battlefield departure without an instruction lead.
+#[cfg(feature = "test-support")]
+pub fn record_unstamped_departure() {
+    DEPARTURE_WINDOW_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.unstamped_departures += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn departure_window_snapshot() -> DepartureWindowCounters {
+    DEPARTURE_WINDOW_COUNTERS.with(Cell::get)
+}
+
 #[cfg(feature = "test-support")]
 pub fn reset_prior_target_binding_counters() {
     PRIOR_TARGET_BINDING_COUNTERS
         .with(|counters| counters.set(PriorTargetBindingCounters::default()));
+}
+
+#[cfg(feature = "test-support")]
+pub fn reset_declared_life_charge_counters() {
+    DECLARED_LIFE_CHARGE_COUNTERS
+        .with(|counters| counters.set(DeclaredLifeChargeCounters::default()));
+}
+
+#[cfg(feature = "test-support")]
+fn with_take_cost(f: impl FnOnce(&mut TakeCostCounters)) {
+    TAKE_COST_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        f(&mut counters);
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_history_entry_copied() {
+    with_take_cost(|c| c.history_entries_copied += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_history_map_entries_unshared(entries: u64) {
+    with_take_cost(|c| c.history_map_entries_unshared += entries);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_state_copy() {
+    with_take_cost(|c| c.state_copies += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_journal_keyed_read() {
+    with_take_cost(|c| c.journal_keyed_reads += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_journal_record_examined() {
+    with_take_cost(|c| c.journal_records_examined += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_drive_snapshot() {
+    with_take_cost(|c| c.drive_snapshots += 1);
+}
+
+/// Runs a debug-build check without charging its work to the take-cost counters.
+#[cfg(debug_assertions)]
+pub(crate) fn outside_take_cost(check: impl FnOnce()) {
+    #[cfg(feature = "test-support")]
+    let counted = TAKE_COST_COUNTERS.with(Cell::get);
+    check();
+    #[cfg(feature = "test-support")]
+    TAKE_COST_COUNTERS.with(|cell| cell.set(counted));
+}
+
+#[cfg(feature = "test-support")]
+pub fn record_pool_entries_walked(entries: u64) {
+    with_take_cost(|c| c.pool_entries_walked += entries);
+}
+
+#[cfg(feature = "test-support")]
+pub fn take_cost_snapshot() -> TakeCostCounters {
+    TAKE_COST_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn record_play_trace(f: impl FnOnce(&mut PlayTraceCounters)) {
+    PLAY_TRACE_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        f(&mut counters);
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn play_trace_counters() -> PlayTraceCounters {
+    PLAY_TRACE_COUNTERS.with(Cell::get)
+}
+
+/// Every take recorded on this thread since the last [`reset`], in order.
+#[cfg(feature = "test-support")]
+pub fn take_cost_records() -> Vec<TakeCostRecord> {
+    TAKE_COST_RECORDS.with(|records| records.borrow().clone())
+}
+
+#[cfg(feature = "test-support")]
+pub fn reset_take_cost() {
+    TAKE_COST_COUNTERS.with(|counters| counters.set(TakeCostCounters::default()));
+    TAKE_COST_RECORDS.with(|records| records.borrow_mut().clear());
+}
+
+/// Builds one take's [`TakeCostRecord`] as the replay drive performs it.
+#[cfg(feature = "test-support")]
+pub(crate) struct TakeCostRecorder {
+    count: u32,
+    // A take begun inside a simulation probe is a scratch take, not a real one.
+    in_probe: bool,
+    take_start: TakeCostCounters,
+    cycle_start: TakeCostCounters,
+    cycles: Vec<TakeCostCounters>,
+}
+
+#[cfg(feature = "test-support")]
+impl TakeCostRecorder {
+    pub(crate) fn begin(count: u32) -> Self {
+        let now = take_cost_snapshot();
+        Self {
+            count,
+            in_probe: crate::game::engine::in_simulation_probe(),
+            take_start: now,
+            cycle_start: now,
+            cycles: Vec::new(),
+        }
+    }
+
+    pub(crate) fn begin_cycle(&mut self) {
+        self.cycle_start = take_cost_snapshot();
+    }
+
+    pub(crate) fn end_cycle(&mut self) {
+        self.cycles
+            .push(take_cost_snapshot().since(self.cycle_start));
+    }
+
+    pub(crate) fn finish(self, delivered: u32) {
+        if self.in_probe {
+            return;
+        }
+        let record = TakeCostRecord {
+            count: self.count,
+            delivered,
+            whole_take: take_cost_snapshot().since(self.take_start),
+            cycles: self.cycles,
+        };
+        TAKE_COST_RECORDS.with(|records| records.borrow_mut().push(record));
+    }
 }
 
 pub fn reset() {
@@ -792,6 +1520,13 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     reset_prior_target_binding_counters();
     #[cfg(feature = "test-support")]
+    reset_declared_life_charge_counters();
+    #[cfg(feature = "test-support")]
+    SELECTION_COMBINATION_COUNTERS
+        .with(|counters| counters.set(SelectionCombinationCounters::default()));
+    #[cfg(feature = "test-support")]
+    BOUNDED_READER_COUNTERS.with(|counters| counters.set(BoundedReaderCounters::default()));
+    #[cfg(feature = "test-support")]
     ATTACK_DECLARATION_SOLVER_COUNTERS
         .with(|counters| counters.set(AttackDeclarationSolverCounters::default()));
     #[cfg(feature = "test-support")]
@@ -800,9 +1535,26 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     COMPLETION_WALK_WORK.with(|counters| counters.set(CompletionWalkWork::default()));
     #[cfg(feature = "test-support")]
+    reset_take_cost();
+    #[cfg(feature = "test-support")]
+    PLAY_TRACE_COUNTERS.with(|counters| counters.set(PlayTraceCounters::default()));
+    #[cfg(feature = "test-support")]
     EXILE_RETURN_LATCH_COUNTERS.with(|counters| counters.set(ExileReturnLatchCounters::default()));
     #[cfg(feature = "test-support")]
+    CO_DEPARTURE_OBSERVER_COUNTERS
+        .with(|counters| counters.set(CoDepartureObserverCounters::default()));
+    #[cfg(feature = "test-support")]
+    DEPARTURE_WINDOW_COUNTERS.with(|counters| counters.set(DepartureWindowCounters::default()));
+    #[cfg(feature = "test-support")]
     STACK_BULK_COUNTERS.with(|counters| counters.set(StackBulkCounters::default()));
+    #[cfg(feature = "test-support")]
+    TRIGGER_INDEX_COUNTERS.with(|counters| counters.set(TriggerIndexCounters::default()));
+    #[cfg(feature = "test-support")]
+    STACK_REACH_COUNTERS.with(|counters| counters.set(StackReachCounters::default()));
+    #[cfg(feature = "test-support")]
+    CONTROL_DEPENDENCY_COUNTERS.with(|counters| counters.set(ControlDependencyCounters::default()));
+    #[cfg(feature = "test-support")]
+    CAST_UNDO_RECORD_COUNTERS.with(|counters| counters.set(CastUndoRecordCounters::default()));
 }
 
 /// One committed bulk token run resolved `n` stack entries.
@@ -828,4 +1580,86 @@ pub fn record_post_action_pipeline_pass() {
 #[cfg(feature = "test-support")]
 pub fn stack_bulk_snapshot() -> StackBulkCounters {
     STACK_BULK_COUNTERS.with(Cell::get)
+}
+
+/// One full `TriggerIndex::rebuild_from_battlefield`.
+#[cfg(feature = "test-support")]
+pub fn record_trigger_index_rebuild() {
+    TRIGGER_INDEX_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.full_rebuilds += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn trigger_index_snapshot() -> TriggerIndexCounters {
+    TRIGGER_INDEX_COUNTERS.with(Cell::get)
+}
+
+/// One `stack_reach::stack_entry_node_reach` call for an entry with an ability.
+#[cfg(feature = "test-support")]
+pub fn record_stack_entry_reach() {
+    STACK_REACH_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.entry_reaches += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn stack_reach_snapshot() -> StackReachCounters {
+    STACK_REACH_COUNTERS.with(Cell::get)
+}
+
+/// One Layer 2 control-dependency preview (a state clone).
+#[cfg(feature = "test-support")]
+pub fn record_control_dependency_preview() {
+    CONTROL_DEPENDENCY_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.previews += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn control_dependency_snapshot() -> ControlDependencyCounters {
+    CONTROL_DEPENDENCY_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+fn with_cast_undo_record(f: impl FnOnce(&mut CastUndoRecordCounters)) {
+    CAST_UNDO_RECORD_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        f(&mut counters);
+        cell.set(counters);
+    });
+}
+
+/// CR 733.1: one changed-member cast-undo value holding `objects` game objects
+/// and `deck_pool_entries` deck pools.
+#[cfg(feature = "test-support")]
+pub fn record_cast_undo_value(objects: usize, deck_pool_entries: usize) {
+    with_cast_undo_record(|c| {
+        c.values += 1;
+        c.objects += objects as u64;
+        c.deck_pool_entries += deck_pool_entries as u64;
+    });
+}
+
+/// CR 733.1: one recorded step also computed over the complete states.
+#[cfg(feature = "test-support")]
+pub fn record_cast_undo_reference_check() {
+    with_cast_undo_record(|c| c.reference_checks += 1);
+}
+
+/// CR 733.1: one reference-checked step that folded a cast-start boundary.
+#[cfg(feature = "test-support")]
+pub fn record_cast_undo_cast_start_reference_check() {
+    with_cast_undo_record(|c| c.cast_start_reference_checks += 1);
+}
+
+#[cfg(feature = "test-support")]
+pub fn cast_undo_record_snapshot() -> CastUndoRecordCounters {
+    CAST_UNDO_RECORD_COUNTERS.with(Cell::get)
 }

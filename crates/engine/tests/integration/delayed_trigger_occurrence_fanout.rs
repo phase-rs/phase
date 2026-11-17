@@ -12,6 +12,7 @@ use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost};
@@ -216,6 +217,12 @@ fn advance_sagas(runner: &mut GameRunner) {
         state.waiting_for = WaitingFor::Priority { player: P0 };
     }
     runner.advance_to_phase(Phase::PreCombatMain);
+    // CR 117.3a + CR 603.3b: a draw-step trigger and a trigger of the turn-based draw are one
+    // batch, so with Nekusar, the Mindrazer ("At the beginning of each player's draw step, that
+    // player draws an additional card." / "Whenever an opponent draws a card, Nekusar deals 1
+    // damage to that player.") the pass stops at its controller's ordering choice in the draw
+    // step. Finish the pass into the main phase through public actions.
+    drive_until(runner, |r| r.state().phase == Phase::PreCombatMain);
     settle(runner, &[]);
 }
 
@@ -1268,10 +1275,7 @@ fn attack_intervening_if_reads_each_narrowed_attacker() {
 fn red_mana(runner: &GameRunner, player: PlayerId) -> usize {
     runner.state().players[player.0 as usize]
         .mana_pool
-        .mana
-        .iter()
-        .filter(|unit| unit.color == engine::types::mana::ManaType::Red)
-        .count()
+        .count_color(engine::types::mana::ManaType::Red)
 }
 
 /// CR 603.2 + CR 603.7b: Reckless Blaze's "a creature you control dealt
@@ -1525,6 +1529,7 @@ fn boa_color_survives_an_intervening_number_choice() {
         .act(GameAction::ActivateAbility {
             source_id: boa,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate");
     let mut answers = vec!["White", "3"].into_iter();
@@ -1781,6 +1786,7 @@ fn boa_color_survives_an_inline_mana_ability_paying_its_cost() {
             .act(GameAction::ActivateAbility {
                 source_id: boa,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activate");
         for _ in 0..32 {

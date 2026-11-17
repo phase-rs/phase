@@ -26,7 +26,9 @@ pub fn resolve(
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // CR 725.1: The monarch is a designation a player can have.
-    let player_id = super::resolve_player_for_context_ref(state, ability, target);
+    let Some(player_id) = super::resolve_player_for_context_ref(state, ability, target) else {
+        return Ok(());
+    };
     state.monarch = Some(player_id);
     events.push(GameEvent::MonarchChanged { player_id });
     Ok(())

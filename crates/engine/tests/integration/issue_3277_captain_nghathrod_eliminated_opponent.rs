@@ -105,16 +105,26 @@ fn captain_nghathrod_end_step_skips_eliminated_opponent_graveyard() {
             linked_exile_snapshot: vec![],
             is_token: false,
             combat_status: Default::default(),
+            block_pairs: Vec::new(),
             co_departed: Vec::new(),
+            co_entered: Vec::new(),
+            instruction_lead: None,
             attached_to: None,
             entered_incarnation: None,
             turn_zone_change_index: 0,
             recorded_turn_number: 0,
             is_suspected: false,
+            was_prepared: false,
+            departure: engine::types::game_state::ZoneDeparture::Moved,
         });
 
     let mut events = Vec::new();
-    eliminate_player(runner.state_mut(), P1, &mut events);
+    eliminate_player(
+        runner.state_mut(),
+        P1,
+        engine::types::events::LossReason::Conceded,
+        &mut events,
+    );
 
     assert!(
         runner.state().players[1].is_eliminated,

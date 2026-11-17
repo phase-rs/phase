@@ -184,8 +184,7 @@ fn amazing_spider_man_grants_web_slinging_to_a_big_legendary_creature_in_hand() 
             .find(|p| p.id == P0)
             .unwrap()
             .mana_pool
-            .mana
-            .len(),
+            .total(),
         0,
         "the {{G}}{{W}}{{U}} web-sling cost must have been paid in full (not the printed cost)"
     );

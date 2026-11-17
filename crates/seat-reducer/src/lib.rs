@@ -18,7 +18,11 @@ pub fn apply(
 
     match mutation {
         SeatMutation::Start => apply_start(state, ctx),
-        SeatMutation::SetKind { seat_index, kind } => apply_set_kind(state, seat_index, kind, ctx),
+        SeatMutation::SetKind {
+            seat_index,
+            kind,
+            expected_kind,
+        } => apply_set_kind(state, seat_index, kind, expected_kind, ctx),
         SeatMutation::Remove { seat_index } => apply_remove(state, seat_index),
     }
 }
@@ -39,11 +43,19 @@ fn apply_set_kind(
     state: &mut SeatState,
     seat_index: u8,
     kind: SeatKind,
+    expected_kind: Option<SeatKind>,
     ctx: &ReducerCtx,
 ) -> Result<SeatDelta, SeatError> {
     let seat = seat_index as usize;
     if seat == 0 || seat >= state.seats.len() {
         return Err(SeatError::SeatImmutable);
+    }
+
+    if expected_kind
+        .as_ref()
+        .is_some_and(|expected| expected != &state.seats[seat])
+    {
+        return Ok(SeatDelta::empty());
     }
 
     let current = state.seats[seat].clone();

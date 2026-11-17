@@ -41,6 +41,7 @@ fn exile_permission() -> CastingPermission {
         single_use: false,
         cast_cost_modifier: None,
         alt_ability_cost: None,
+        without_paying_mana_cost: false,
         land_enter_tapped: EtbTapState::Unspecified,
     }
 }
@@ -96,7 +97,7 @@ fn warped_space_lets_one_exile_cast_pay_zero_each_turn() {
         other => panic!("expected the {{0}}-vs-printed OptionalCostChoice, got {other:?}"),
     }
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("accepting the {0} alternative must succeed");
     assert_eq!(
         runner.state().objects[&first].zone,
@@ -158,7 +159,7 @@ fn warped_space_does_not_reach_a_hand_cast() {
         "reach-guard: the fixture's exile cast must be admitted by the grant"
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("the {0} alternative must be acceptable");
     assert_eq!(
         runner.state().objects[&exiled].zone,
@@ -197,7 +198,7 @@ fn the_once_per_turn_slot_resets_on_the_next_turn() {
 
     assert!(cast(&mut runner, first), "the first cast must be admitted");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("the {0} alternative must be acceptable");
     runner.resolve_top();
     assert!(
@@ -223,7 +224,7 @@ fn the_once_per_turn_slot_resets_on_the_next_turn() {
         other => panic!("expected the fresh {{0}} choice, got {other:?}"),
     }
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("the fresh {0} alternative must be payable");
     assert_eq!(
         runner.state().objects[&second].zone,

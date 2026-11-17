@@ -114,6 +114,9 @@ pub struct InteractionWaitingForKind {
     pub simultaneous: Option<SimultaneousDecisionKind>,
     pub terminal: bool,
     pub code: InteractionWaitingForCode,
+    /// Preference actions are refused while this holds (a shortcut window is open).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub preferences_frozen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,6 +332,8 @@ pub enum InteractionManaSpecialAction {
     RollPlanarDie,
     /// CR 116.2c: pay a continuous effect's printed termination cost to end it.
     EndContinuousEffect,
+    /// CR 116.2h: pay {2} to foretell a card from hand.
+    Foretell,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -541,6 +546,7 @@ pub enum InteractionActionCode {
     TurnFaceUp,
     SubmitSideboard,
     ChoosePlayDraw,
+    ChooseStartingPlayer,
     ChooseOption,
     SubmitVoteCandidate,
     SubmitSpellbookDraft,
@@ -580,6 +586,7 @@ pub enum InteractionActionCode {
     ChooseRoomDoor,
     TapForConvoke,
     HarmonizeTap,
+    ChooseSecretAgendaNames,
     DeclareCompanion,
     CompanionToHand,
     DiscoverChoice,
@@ -627,6 +634,8 @@ pub enum InteractionActionCode {
     PrecastCopyShortcut,
     /// CR 116.2c: pay a continuous effect's printed termination cost to end it.
     EndContinuousEffect,
+    /// Un-card actions: opt-in toggle, gestures, and "Gotcha!" (no CR entry).
+    UnAction,
     Debug,
 }
 
@@ -885,6 +894,7 @@ pub enum InteractionShortcutPointKind {
     MayChoice,
     UnlessBreak,
     ManaColor,
+    Order,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -926,10 +936,7 @@ pub struct InteractionShortcutPin {
     /// outnumber the point's published `max` — and both limbs bind the same partition,
     /// which only an `IterationCount::Fixed` can fill. Under a fixed count that
     /// partition is `amounts`: one part per announced subject, in the sequence's own
-    /// order, every part at least 1, summing to the DECLARED count. An until-lethal
-    /// count has nothing to partition and refuses BOTH limbs — an empty `amounts` does
-    /// not rescue a longer `choice_ids` list — so no announcement order past the head
-    /// is declarable through this ingress.
+    /// order, every part at least 1, summing to the DECLARED count.
     ///
     /// A sequenced pin is admissible only on a `Targets` point whose published `max`
     /// is 1: a multi-position slot needs a per-position carrier a flat list cannot
@@ -990,8 +997,10 @@ pub enum InteractionResponseSpec {
         escape: Option<InteractionChoiceId>,
         confirm: ConfirmSemantics,
     },
+    /// `count` strings answered together, each at most `max_len` long.
     Text {
         allow_arbitrary: bool,
+        count: u32,
         max_len: u32,
         confirm: ConfirmSemantics,
     },
@@ -1060,8 +1069,7 @@ pub enum InteractionResponseSpec {
     /// `declared` is what the DECLARED count does: the same element vocabulary the offer's own
     /// published list carries, minted by the same producer over the allocation the proposer
     /// actually declared. Absent only on a declaration whose PARTITION cannot be stated: an
-    /// order-only one (CR 732.1b: an until-lethal proposal names no count to partition, so a
-    /// magnitude there could only be invented), and one whose segments cannot be read back
+    /// order-only one, and one whose segments cannot be read back
     /// against the announced-target decision's own published ids and total. A declaration whose
     /// partition IS stated and whose magnitudes are not — a proposal carrying no per-period
     /// signature, or one whose per-slot life charge resolves to a seat the declaration never
@@ -1108,7 +1116,7 @@ pub enum InteractionResponseSpec {
 )]
 pub enum InteractionShortcutCountSpec {
     Fixed { min: u32, max: u32, suggested: u32 },
-    UntilLethal,
+    WithoutEnd,
 }
 
 /// The display family one shortcut-preview magnitude belongs to — the projection-layer code
@@ -1185,8 +1193,9 @@ pub struct InteractionShortcutPreview {
     /// second point would state the split over choices the reader cannot identify.
     ///
     /// The amounts come from whichever producer minted the element. In the offer's published list
-    /// (`loop_shortcut_preview`) they are the canonical even split of `count`, remainder on the
-    /// earliest ids, empty exactly when that first point holds no candidate. In a preview of a
+    /// (`loop_shortcut_preview`) they are the offer's suggested declaration cut at `count` when
+    /// the offer publishes one, else the canonical even split of `count`, remainder on the
+    /// earliest ids; empty exactly when that first point holds no candidate. In a preview of a
     /// player's own declaration (`declared_shortcut_preview`) they are the amounts that player
     /// authored — positive parts summing to `count` over a duplicate-free subset of those ids,
     /// enforced by the declaration ingress rather than by this type — and never empty: that
@@ -1194,23 +1203,21 @@ pub struct InteractionShortcutPreview {
     /// responder's view of a declaration (`declared_sequence_preview`) they are the segment
     /// LENGTHS the declared count partitions into over the iterations that decision's
     /// announcements start at: successive differences summing to `count`, one per published id,
-    /// never empty — and NOT necessarily positive, since a step starting exactly at the count
-    /// takes a zero-length segment.
+    /// never empty and each positive, because a step starting at or past the count is never
+    /// reached and is not stated.
     ///
     /// CR 119.3: `entries` follow this allocation ONLY when the period's life map names
     /// exactly one losing seat that this allocation itself announces and the slot's announced
     /// magnitude is the whole of that seat's per-period loss, which is what makes it positive —
-    /// per-seat life magnitudes are then this split multiplied by that rate, and they still
-    /// total the period. On every other offer a non-empty allocation still ships beside entries
-    /// folded from the raw period, because the allocation states the declaration and the
-    /// entries state what the engine can attribute. On the RESPOND side that separation goes one
-    /// step further: a declaration whose partition is stated and whose magnitudes are not ships
-    /// this allocation beside an EMPTY `entries`, rather than withholding the whole element
+    /// per-seat life magnitudes are then each seat's RESOLVING announcements multiplied by that
+    /// rate (CR 603.3d: its part, plus the trigger already in flight when that aims at it, less
+    /// the last announcement, which never resolves), and they still total the period. On every
+    /// other offer a non-empty allocation still ships beside entries folded from the raw period,
+    /// because the allocation states the declaration and the entries state what the engine can
+    /// attribute. On the RESPOND side that separation goes one step further: a declaration whose
+    /// partition is stated and whose magnitudes are not ships this allocation beside an EMPTY
+    /// `entries`, rather than withholding the whole element
     /// (`game::interaction::declared_sequence_preview`).
-    ///
-    /// The magnitudes are this declaration's arithmetic. On a drive whose first cycle resolves
-    /// a target announced before the drive begins, the realized split is shifted one cycle at
-    /// each boundary while the total stays exact.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allocation: Vec<AmountAssignment>,
 }
@@ -1477,7 +1484,7 @@ pub enum InteractionResponse {
         count: u32,
     },
     Text {
-        value: String,
+        values: Vec<String>,
     },
     DeckPartition {
         main: Vec<AmountAssignment>,

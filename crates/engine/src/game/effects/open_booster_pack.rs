@@ -16,6 +16,7 @@ use crate::game::filter::matches_target_filter_against_face;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
+use crate::types::game_state::RandomDraw;
 use crate::types::game_state::{
     GameState, OutsideGameChoiceEntry, OutsideGameChoiceSource, WaitingFor,
 };
@@ -48,7 +49,7 @@ pub fn resolve(
     // open nothing rather than fail the whole resolution.
     let pack = {
         let shelf = state.booster_shelf.clone();
-        let Some(pack) = boosters::open_pack(&shelf, &mut state.rng) else {
+        let Some(pack) = boosters::open_pack(&shelf, state.rng.draw(RandomDraw::Outcome)) else {
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::OpenBoosterPack,
                 source_id: ability.source_id,
@@ -69,6 +70,7 @@ pub fn resolve(
         state.last_revealed_ids.clear();
         events.push(GameEvent::CardsRevealed {
             player,
+            occurrences: Vec::new(),
             card_ids: Vec::new(),
             card_names: cards.iter().map(|card| card.name.clone()).collect(),
         });

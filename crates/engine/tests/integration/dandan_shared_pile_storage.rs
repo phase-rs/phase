@@ -359,11 +359,21 @@ fn v3_mulligan_by_either_seat_shuffles_the_pile() {
 fn shuffling_the_empty_seat_consumes_no_entropy() {
     let mut state = GameState::new_two_player(7);
     let before = state.rng.get_word_pos();
-    engine::util::im_ext::shuffle_vector(&mut im::Vector::<ObjectId>::new(), &mut state.rng);
+    engine::util::im_ext::shuffle_vector(
+        &mut im::Vector::<ObjectId>::new(),
+        state
+            .rng
+            .draw(engine::types::game_state::RandomDraw::Placement),
+    );
     assert_eq!(state.rng.get_word_pos(), before);
 
     let mut pile: im::Vector<ObjectId> = (1..=8).map(ObjectId).collect();
-    engine::util::im_ext::shuffle_vector(&mut pile, &mut state.rng);
+    engine::util::im_ext::shuffle_vector(
+        &mut pile,
+        state
+            .rng
+            .draw(engine::types::game_state::RandomDraw::Placement),
+    );
     assert_ne!(
         state.rng.get_word_pos(),
         before,
@@ -726,6 +736,7 @@ fn v15_dig_choice_reorders_the_pile_for_the_non_canonical_seat() {
         selectable_cards: looked_at.clone(),
         kept_destination: Some(Zone::Library),
         rest_destination: None,
+        rest_remainder: engine::types::ability::DigRestRemainder::Route,
         rest_split_top_count: None,
         rest_order: Default::default(),
         source_id: None,

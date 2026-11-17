@@ -171,6 +171,15 @@ const ARCHENEMY: &str = "Archenemy: one archenemy strengthened by scheme cards f
      heroes. The heroes should coordinate against the archenemy and its schemes; the archenemy \
      should leverage its schemes to snowball.";
 
+// Horde Magic (casual co-op variant): a team of survivors sharing one life
+// total faces a self-piloting Horde deck that reveals and casts a wave of
+// cards every turn instead of drawing. Damage to the Horde mills it, so the
+// survivors win by decking it; the Horde wins by dropping the shared total.
+const HORDE: &str = "Horde: a survivor team sharing one life total faces a self-piloting Horde \
+     deck that reveals and casts a wave each turn. Survivors should coordinate, use their setup \
+     turns to build a board, and push damage — every point mills the Horde toward an empty \
+     library. Do not waste removal on individual Horde tokens; answer the wave as a whole.";
+
 // CR 901.1: Planechase adds plane and phenomenon cards to a normal game.
 const PLANECHASE: &str = "Planechase: plane cards and the planar die add chaos to a normal game. \
      Do not over-rely on a fixed board state, and account for the current plane's effect when \
@@ -209,7 +218,11 @@ fn format_strategy(format: GameFormat) -> Option<&'static [&'static str]> {
         GameFormat::TwoHeadedGiant => &[TWO_HEADED_GIANT],
         GameFormat::Archenemy => &[ARCHENEMY],
         GameFormat::Planechase => &[PLANECHASE],
+        GameFormat::TwoHeadedGiantCommander => &[TWO_HEADED_GIANT, COMMANDER],
+        GameFormat::ArchenemyCommander => &[ARCHENEMY, COMMANDER],
+        GameFormat::PlanechaseCommander => &[PLANECHASE, COMMANDER],
         GameFormat::Momir => &[MOMIR],
+        GameFormat::Horde => &[HORDE],
         // No format-specific approach to teach; configured facts still apply.
         GameFormat::Freeform
         | GameFormat::FreeformCommander
@@ -237,7 +250,7 @@ fn format_facts(state: &GameState, viewer: PlayerId) -> String {
     };
     // CR 103.4 / CR 810.4 / CR 904.5: Starting life is individual except
     // for a shared team total; the archenemy and heroes have different totals.
-    let life = config.starting_life_total_for_player(viewer);
+    let life = config.starting_life_total_for_player(viewer, state.players.len());
     let starting_life = match config.topology() {
         FormatTopology::IndividualSeats => format!("{life} individual starting life"),
         FormatTopology::FixedTeams { .. } => format!("{life} shared team starting life"),
