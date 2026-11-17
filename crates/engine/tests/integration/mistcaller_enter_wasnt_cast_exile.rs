@@ -1445,17 +1445,21 @@ fn drive_prompts(
     panic!("prompts did not settle: {prompts:?}");
 }
 
-/// P0 controls Mimic Vat (a noncreature artifact: the copy model), Grizzly Bears (a
-/// creature: the other model) and a Phyrexian Metamorph, and resolves a token-copy spell
-/// aimed at the Metamorph; when `moonlight`, Hallowed Moonlight resolved first. The new
-/// token carries the Metamorph's as-enters copy, answered with `answer`.
+/// Verbatim Oracle text of Feldon of the Third Path (Scryfall).
+const FELDON: &str = "{2}{R}, {T}: Create a token that's a copy of target creature card in your \
+graveyard, except it's an artifact in addition to its other types. It gains haste. Sacrifice it \
+at the beginning of the next end step.";
+
+/// P0 controls Feldon of the Third Path, Mimic Vat (a noncreature artifact: the copy model) and
+/// Grizzly Bears (a creature: the other model), with a printed 0/0 Phyrexian Metamorph in the
+/// graveyard, and activates Feldon on the Metamorph card; when `moonlight`, Hallowed Moonlight
+/// resolved first. The new token carries the Metamorph's as-enters copy, answered with `answer`.
 ///
-/// DECLARED SYNTHETIC: the copy maker is `COPY_ARTIFACT`, not Mimic Vat's own ability. MEASURED
-/// at the merge base (no Hallowed Moonlight anywhere), a Mimic Vat activation over a Metamorph
-/// that Vat itself imprinted resolves `CopyTokenOf` with no token at all ("a card exiled with
-/// this artifact" finds no copy source), so the printed activation cannot carry this witness.
-/// The entrant under test is the same one Vat's token would be: a token copy of Phyrexian
-/// Metamorph.
+/// Printed producer note: a Mimic Vat activation over a Metamorph that Vat itself imprinted
+/// resolves `CopyTokenOf` with no token at the merge base (MEASURED with no Hallowed Moonlight
+/// anywhere: "a card exiled with this artifact" finds no copy source), so Feldon of the Third
+/// Path — the same shape, a token copy of a Metamorph card, with `spark_double_as_enters.rs` as
+/// precedent — produces the entrant. Mimic Vat stays on the battlefield as the printed model.
 fn run_vat(moonlight: bool, answer: MetamorphAnswer) -> VatRun {
     run_vat_with(moonlight, false, answer)
 }
@@ -1464,8 +1468,17 @@ fn run_vat(moonlight: bool, answer: MetamorphAnswer) -> VatRun {
 /// every noncreature artifact, the Vat and so a copy of it, an artifact creature.
 fn run_vat_with(moonlight: bool, march: bool, answer: MetamorphAnswer) -> VatRun {
     let mut scenario = base_scenario();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
     let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
-    let copy_artifact = add_instant(&mut scenario, P0, "Copy Artifact", COPY_ARTIFACT);
+    let feldon = scenario
+        .add_creature_from_oracle(P0, "Feldon of the Third Path", 2, 3, FELDON)
+        .as_legendary()
+        .id();
     let vat = {
         let mut card = scenario.add_artifact_from_oracle(P0, "Mimic Vat", MIMIC_VAT);
         card.with_mana_cost(ManaCost::generic(3));
@@ -1475,11 +1488,13 @@ fn run_vat_with(moonlight: bool, march: bool, answer: MetamorphAnswer) -> VatRun
         scenario.add_enchantment_from_oracle(P0, "March of the Machines", MARCH_OF_THE_MACHINES);
     }
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
-    let metamorph = scenario
-        .add_creature_from_oracle(P0, "Phyrexian Metamorph", 2, 2, PHYREXIAN_METAMORPH)
-        .as_artifact_creature()
-        .with_subtypes(vec!["Phyrexian", "Shapeshifter"])
-        .id();
+    let metamorph = {
+        let mut card = scenario.add_creature_to_graveyard(P0, "Phyrexian Metamorph", 0, 0);
+        card.from_oracle_text(PHYREXIAN_METAMORPH)
+            .as_artifact_creature()
+            .with_subtypes(vec!["Phyrexian", "Shapeshifter"]);
+        card.id()
+    };
     let mut runner = scenario.build();
     if moonlight {
         cast_hallowed(&mut runner, hallowed);
@@ -1487,7 +1502,7 @@ fn run_vat_with(moonlight: bool, march: bool, answer: MetamorphAnswer) -> VatRun
     let mut prompts = Vec::new();
     let mut events = Vec::new();
     let result = runner
-        .cast(copy_artifact)
+        .activate(feldon, 0)
         .target_object(metamorph)
         .resolve();
     events.extend(result.events().iter().cloned());
