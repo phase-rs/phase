@@ -163,7 +163,7 @@ fn overlay_parser_backed_fixture_card(
 
     db.name_alias_index = crate::database::card_db::build_name_alias_index(db.face_index.keys());
     db.creature_type_vocabulary =
-        crate::database::card_db::collect_creature_type_vocabulary(db.face_index.values());
+        crate::database::card_db::collect_creature_type_vocabulary(db.face_index.card_types());
     db
 }
 

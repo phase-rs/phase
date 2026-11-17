@@ -11,7 +11,7 @@ use super::legality::{normalize_legalities, CardLegalities, LegalityFormat, Lega
 use super::mtgjson::Ruling;
 use crate::game::bracket_estimate::BracketAxis;
 use crate::types::card::{CardFace, CardRules, LayoutKind, PrintedCardRef};
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CardType, CoreType};
 
 use std::io::{BufReader, Read};
 
@@ -59,10 +59,71 @@ impl From<Arc<CardDatabase>> for CardDbHandle {
     }
 }
 
+/// The face store, keyed by lowercased face name.
+#[derive(Default)]
+#[cfg_attr(test, derive(PartialEq))]
+pub(crate) struct FaceIndex(HashMap<String, CardFace>);
+
+impl FaceIndex {
+    pub(crate) fn get(&self, key: &str) -> Option<&CardFace> {
+        self.0.get(key)
+    }
+
+    pub(crate) fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &String> {
+        self.0.keys()
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&String, &CardFace)> {
+        self.0.iter()
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &CardFace> {
+        self.0.values()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, key: String, face: CardFace) -> Option<CardFace> {
+        self.0.insert(key, face)
+    }
+
+    pub(crate) fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.values().map(|face| face.name.as_str())
+    }
+
+    pub(crate) fn oracle_ids(&self) -> impl Iterator<Item = (&String, Option<&str>)> {
+        self.0
+            .iter()
+            .map(|(key, face)| (key, face.scryfall_oracle_id.as_deref()))
+    }
+
+    pub(crate) fn card_types(&self) -> impl Iterator<Item = &CardType> {
+        self.0.values().map(|face| &face.card_type)
+    }
+}
+
+impl From<HashMap<String, CardFace>> for FaceIndex {
+    fn from(faces: HashMap<String, CardFace>) -> Self {
+        Self(faces)
+    }
+}
+
 #[derive(Default)]
 pub struct CardDatabase {
     pub(crate) cards: HashMap<String, CardRules>,
-    pub(crate) face_index: HashMap<String, CardFace>,
+    pub(crate) face_index: FaceIndex,
     pub(crate) name_alias_index: HashMap<String, String>,
     pub(crate) oracle_id_index: HashMap<String, Vec<String>>,
     /// Maps face key (lowercased card name) to its original zero-based position
@@ -74,7 +135,6 @@ pub struct CardDatabase {
     /// every query.
     pub(crate) search_face_keys: Vec<String>,
     /// Maps oracle_id → runtime LayoutKind for multi-face cards.
-    /// Populated only from the export path (the MTGJSON path uses `cards` directly).
     /// Enables `rehydrate_game_from_card_db` to determine the correct layout kind
     /// when `get_by_name` returns None (export path doesn't build `CardRules`).
     pub(crate) layout_index: HashMap<String, LayoutKind>,
@@ -186,9 +246,10 @@ impl CardDatabase {
         for keys in oracle_id_index.values_mut() {
             keys.sort_by_key(|key| face_order_index.get(key).copied().unwrap_or(usize::MAX));
         }
+        let face_index = FaceIndex::from(face_index);
         let search_face_keys = build_search_face_keys(&face_index, &face_order_index);
         let name_alias_index = build_name_alias_index(face_index.keys());
-        let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
+        let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.card_types());
 
         Self {
             cards: HashMap::new(),
@@ -361,6 +422,16 @@ impl CardDatabase {
         self.layout_index.get(oracle_id).copied()
     }
 
+    /// Faces of every card whose layout is `kind`.
+    pub(crate) fn faces_with_layout(&self, kind: LayoutKind) -> impl Iterator<Item = &CardFace> {
+        self.layout_index
+            .iter()
+            .filter(move |(_, layout)| **layout == kind)
+            .filter_map(|(oracle_id, _)| self.oracle_id_index.get(oracle_id))
+            .flatten()
+            .filter_map(|key| self.face_index.get(key))
+    }
+
     pub fn export_integrity_errors(&self) -> Vec<String> {
         let mut errors = Vec::new();
         for (oracle_id, layout_kind) in &self.layout_index {
@@ -495,11 +566,7 @@ impl CardDatabase {
 
     /// Returns all card names (title-cased as stored in face data), sorted.
     pub fn card_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .face_index
-            .values()
-            .map(|face| face.name.clone())
-            .collect();
+        let mut names: Vec<String> = self.face_index.names().map(str::to_string).collect();
         names.sort();
         names.dedup();
         names
@@ -729,15 +796,15 @@ impl CardDatabase {
 }
 
 pub(crate) fn build_search_face_keys(
-    face_index: &HashMap<String, CardFace>,
+    face_index: &FaceIndex,
     face_order_index: &HashMap<String, usize>,
 ) -> Vec<String> {
     // Each face's sort key is read once, not once per comparison.
     let mut keyed: Vec<(&str, usize, &String)> = face_index
-        .iter()
-        .map(|(key, face)| {
+        .oracle_ids()
+        .map(|(key, oracle_id)| {
             (
-                face.scryfall_oracle_id.as_deref().unwrap_or(""),
+                oracle_id.unwrap_or(""),
                 face_order_index.get(key).copied().unwrap_or(usize::MAX),
                 key,
             )
@@ -760,12 +827,12 @@ pub(crate) fn build_search_face_keys(
 /// land/artifact/enchantment/spell types, never creature types. Returns the
 /// sorted, deduped creature-type vocabulary.
 pub(crate) fn collect_creature_type_vocabulary<'a>(
-    faces: impl Iterator<Item = &'a CardFace>,
+    card_types: impl Iterator<Item = &'a CardType>,
 ) -> Vec<String> {
     let mut creature_candidates: HashSet<&str> = HashSet::new();
     let mut non_creature_subtypes: HashSet<&str> = HashSet::new();
-    for face in faces {
-        let core_types = &face.card_type.core_types;
+    for card_type in card_types {
+        let core_types = &card_type.core_types;
         let is_creature_face = core_types.contains(&CoreType::Creature)
             || core_types.contains(&CoreType::Kindred)
             || core_types.contains(&CoreType::Tribal);
@@ -774,7 +841,7 @@ pub(crate) fn collect_creature_type_vocabulary<'a>(
         } else {
             &mut non_creature_subtypes
         };
-        bucket.extend(face.card_type.subtypes.iter().map(String::as_str));
+        bucket.extend(card_type.subtypes.iter().map(String::as_str));
     }
     let mut sorted: Vec<String> = creature_candidates
         .difference(&non_creature_subtypes)
@@ -1047,6 +1114,16 @@ mod tests {
     }
 
     #[test]
+    fn card_names_equal_the_typed_face_walk_on_the_committed_fixture() {
+        let db = crate::test_support::shared_card_db();
+        let mut expected: Vec<String> = db.face_iter().map(|(_, face)| face.name.clone()).collect();
+        expected.sort();
+        expected.dedup();
+        assert!(expected.len() < db.face_index.len());
+        assert_eq!(db.card_names(), expected);
+    }
+
+    #[test]
     fn search_face_keys_order_by_oracle_id_then_face_order_then_key() {
         let rows: [(&str, Option<&str>, Option<usize>); 6] = [
             ("ancestral recall", None, None),
@@ -1067,7 +1144,7 @@ mod tests {
             }
         }
         assert_eq!(
-            build_search_face_keys(&face_index, &face_order_index),
+            build_search_face_keys(&FaceIndex::from(face_index), &face_order_index),
             [
                 "ancestral recall",
                 "black lotus",

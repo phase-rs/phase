@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::database::bracket_lists::BracketSignals;
 use crate::database::card_db::{
     build_name_alias_index, build_search_face_keys, collect_creature_type_vocabulary, CardDatabase,
+    FaceIndex,
 };
 use crate::database::legality::normalize_legalities;
 use crate::database::mtgjson::{load_atomic_cards, AtomicCardsFile};
@@ -156,7 +157,8 @@ pub(crate) fn load_from_atomic_cards(atomic: AtomicCardsFile) -> CardDatabase {
         }
     }
 
-    let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.values());
+    let face_index = FaceIndex::from(face_index);
+    let creature_type_vocabulary = collect_creature_type_vocabulary(face_index.card_types());
     let search_face_keys = build_search_face_keys(&face_index, &face_order_index);
     CardDatabase {
         cards,

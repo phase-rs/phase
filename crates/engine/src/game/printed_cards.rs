@@ -1912,8 +1912,17 @@ fn rehydrate_card_db_metadata(state: &mut GameState, db: &CardDatabase) {
 /// database layout metadata and the parsed meld instruction. A forged effect
 /// whose three named faces are not all database-backed meld faces is excluded.
 fn build_meld_pair_registry(db: &CardDatabase) -> HashMap<String, MeldPairRecord> {
+    // CR 701.42a + CR 712.4a: a meld instruction is printed on one card of a
+    // meld pair, so only meld cards' faces can carry one.
+    meld_pairs_from_faces(db, db.faces_with_layout(LayoutKind::Meld))
+}
+
+fn meld_pairs_from_faces<'a>(
+    db: &CardDatabase,
+    faces: impl Iterator<Item = &'a CardFace>,
+) -> HashMap<String, MeldPairRecord> {
     let mut registry = HashMap::new();
-    for (_, face) in db.face_iter() {
+    for face in faces {
         let mut effects = Vec::new();
         collect_meld_effects_from_face(face, &mut effects);
         for (source, partner, result) in effects {
@@ -5179,6 +5188,14 @@ mod tests {
         }
         let json = serde_json::Value::Object(map).to_string();
         CardDatabase::from_json_str(&json).expect("export db should parse")
+    }
+
+    #[test]
+    fn meld_pair_registry_equals_the_every_face_walk_on_the_committed_fixture() {
+        let db = crate::test_support::shared_card_db();
+        let expected = meld_pairs_from_faces(db, db.face_iter().map(|(_, face)| face));
+        assert!(!expected.is_empty());
+        assert_eq!(build_meld_pair_registry(db), expected);
     }
 
     /// CR 701.42b + CR 712.4: the production JSON loader's layout metadata,
