@@ -658,10 +658,18 @@ fn hideaway_look_latches_a_static_control_effects_controller() {
     });
     give_priority(&mut runner, P1);
     let aura_on = runner.cast(ids[0]).target_objects(&[creature]).resolve();
-    assert!(!aura_on
-        .events()
-        .iter()
-        .any(|e| matches!(e, GameEvent::ControllerChanged { .. })));
+    // CR 613.1b + CR 603.2: the static control effect's change is published once.
+    assert_eq!(
+        aura_on
+            .events()
+            .iter()
+            .filter(|e| matches!(
+                e,
+                GameEvent::ControllerChanged { object_id, .. } if *object_id == creature
+            ))
+            .count(),
+        1
+    );
     assert_eq!(runner.state().objects[&creature].controller, P1);
     assert_ne!(seen_as(runner.state(), P1, card), "Hidden Card");
 

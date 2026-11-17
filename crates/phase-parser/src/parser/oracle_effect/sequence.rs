@@ -1366,18 +1366,26 @@ fn parse_put_all_back_in_any_order(lower: &str) -> bool {
         .is_ok()
 }
 
-fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
-    let (rest, _) = (
+/// CR 701.20e + CR 608.2c: "[you may] put[s] [up to] one of them/those cards
+/// [back] on top [of <library>]" after a look `Dig` — keep one looked-at card
+/// on top of the library it came from. Returns how many are kept and the
+/// remainder order. "You may" / "up to" make the keep optional; the bare
+/// verb is mandatory (Ashnod's Cylix: "puts one of them back on top of their
+/// library"). The third-person "puts" is the same instruction carried by a
+/// player subject ("Target player looks at …, puts …").
+fn parse_put_one_dig_card_on_top(lower: &str) -> Option<(PutCount, DigRestOrder)> {
+    let (rest, (may, up_to, _, _, _, _)) = (
         alt((
-            tag::<_, _, OracleError<'_>>("you may put "),
-            tag("may put "),
-            tag("put "),
+            value(true, tag::<_, _, OracleError<'_>>("you may put ")),
+            value(true, tag("may put ")),
+            value(false, tag("puts ")),
+            value(false, tag("put ")),
         )),
         opt(tag("up to ")),
         alt((tag("one of those cards"), tag("one of them"))),
         opt(tag(" back")),
-        tag(" "),
-        alt((tag("on top of your library"), tag("on top"))),
+        tag(" on top"),
+        opt(preceded(tag(" of "), parse_split_library_owner)),
     )
         .parse(lower.trim())
         .ok()?;
@@ -1392,12 +1400,22 @@ fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
     terminated(opt(tag::<_, _, OracleError<'_>>(".")), eof)
         .parse(rest)
         .ok()?;
-    Some(order.unwrap_or(DigRestOrder::Preserve))
+    let count = if may || up_to.is_some() {
+        PutCount::up(1)
+    } else {
+        PutCount::exactly(1)
+    };
+    Some((count, order.unwrap_or(DigRestOrder::Preserve)))
 }
 
+/// "exile[s] the rest" — the third-person verb is the same instruction carried
+/// by a player subject (Ashnod's Cylix: "…, then exiles the rest").
 fn parse_exile_rest_clause(lower: &str) -> bool {
     (
-        tag::<_, _, OracleError<'_>>("exile the rest"),
+        alt((
+            tag::<_, _, OracleError<'_>>("exile the rest"),
+            tag("exiles the rest"),
+        )),
         opt(tag(".")),
         eof,
     )
@@ -3801,12 +3819,12 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // cluster over and trip the `Choice<...>` trait-bound check at compile
     // time.
     .or(value((), tag("puts ")))
-    // CR 301.5b + CR 608.2c: these attach forms are imperative game actions,
-    // not noun-phrase continuations. Keep the matcher narrow so name-based
-    // chains like "put counters on it and attach Fractal Harness to it" stay
-    // available to the token-counter attach rewriter. "That Equipment" is the
-    // selected-object anaphor used by Grip of Phyresis.
+    // CR 701.3a + CR 608.2c: an attach whose attachment is the source (`~`
+    // after self-reference normalization) or an Equipment anaphor is its own
+    // instruction, never a noun-phrase continuation; "that Equipment" is Grip
+    // of Phyresis's selected-object anaphor.
     .or(alt((
+        value((), tag("attach ~ ")),
         value((), tag("attach this equipment ")),
         value((), tag("attach that equipment ")),
         value((), tag("attach an equipment that was attached ")),
@@ -5470,6 +5488,15 @@ fn dig_intervening_cost_host(
     })
 }
 
+/// Whether the `Dig` patch arm can carry a `DigFromAmong` continuation's kept-card
+/// entry faithfully: `Effect::Dig` has no controller or face-down field.
+pub(super) fn dig_patch_represents_from_among(
+    enters_under: &Option<ControllerRef>,
+    face_down_profile: &Option<FaceDownProfile>,
+) -> bool {
+    enters_under.is_none() && face_down_profile.is_none()
+}
+
 pub(super) fn apply_clause_continuation(
     defs: &mut Vec<AbilityDefinition>,
     continuation: ContinuationAst,
@@ -6250,7 +6277,7 @@ pub(super) fn apply_clause_continuation(
                     if let Some(sac_pos) = sac_pos {
                         // CR 608.2c + CR 701.20e: Birthing Ritual pattern.
                         debug_assert!(
-                            face_down_profile.is_none() && enters_under.is_none(),
+                            dig_patch_represents_from_among(&enters_under, &face_down_profile),
                             "Dig-source face-down from-among with intervening sacrifice \
                              is not yet supported"
                         );
@@ -6405,7 +6432,7 @@ pub(super) fn apply_clause_continuation(
                 // `ChangeZoneAll`/`ChangeZone { face_down_profile, enters_under }`
                 // reading `TrackedSetFiltered`, rather than patching the `Dig`.
                 debug_assert!(
-                    face_down_profile.is_none() && enters_under.is_none(),
+                    dig_patch_represents_from_among(&enters_under, &face_down_profile),
                     "Dig-source face-down/under-control from-among form is not yet \
                      supported; route via the tracked-set push (see Mill branch)"
                 );
@@ -9749,18 +9776,16 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         // Dig — keep up to one looked-at card on top, leaving the remainder
         // for a following rest-placement clause.
         Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower).is_some() => {
+            let (quantity, rest_order) =
+                parse_put_one_dig_card_on_top(&lower).expect("continuation guard just matched");
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::up(1),
+                quantity,
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Library),
-                rest_destination: matches!(
-                    parse_put_one_dig_card_on_top(&lower),
-                    Some(DigRestOrder::Random)
-                )
-                .then_some(Zone::Library),
+                rest_destination: matches!(rest_order, DigRestOrder::Random)
+                    .then_some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: parse_put_one_dig_card_on_top(&lower)
-                    .expect("continuation guard just matched"),
+                rest_order,
                 rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
@@ -12450,6 +12475,21 @@ mod tests {
     }
 
     #[test]
+    fn bare_and_splits_source_attach_after_counters_and_token() {
+        assert_eq!(
+            clause_texts("Put X +1/+1 counters on it and attach ~ to it"),
+            vec!["Put X +1/+1 counters on it", "attach ~ to it"]
+        );
+        assert_eq!(
+            clause_texts("create a 2/2 colorless Robot artifact creature token and attach ~ to it"),
+            vec![
+                "create a 2/2 colorless Robot artifact creature token",
+                "attach ~ to it"
+            ]
+        );
+    }
+
+    #[test]
     fn bare_and_keeps_chosen_name_search_exile_compound() {
         // CR 701.23a + CR 701.18a: "search ... with the chosen name and exile
         // them" is one search compound, not a SearchLibrary followed by a second
@@ -12981,12 +13021,15 @@ mod tests {
     }
 
     #[test]
-    fn bare_and_starts_equipment_attachment_anaphors_but_not_other_attachment_forms() {
-        for clause in ["attach this Equipment to it", "attach that Equipment to it"] {
+    fn bare_and_starts_source_and_equipment_attachment_anaphors_but_not_other_attachment_forms() {
+        for clause in [
+            "attach ~ to it",
+            "attach this Equipment to it",
+            "attach that Equipment to it",
+        ] {
             assert!(starts_bare_and_clause(clause), "must split: {clause}");
         }
         for clause in [
-            "attach ~ to it",
             "attach this Aura to it",
             "attach that Aura to it",
             "attach this Fortification to it",
