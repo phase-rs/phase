@@ -13,10 +13,16 @@
 
 use std::sync::LazyLock;
 
+use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::{char, multispace0, space0};
+use nom::combinator::{all_consuming, recognize};
+use nom::sequence::{preceded, terminated};
+use nom::Parser;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::types::card::TokenImageRef;
 use crate::types::mana::{parse_mtgjson_mana_cost, ManaCost};
+use crate::types::text_grammar::OracleResult;
 use crate::types::token_spec::TokenCharacteristics;
 
 /// CR 111.10: Stable identifier for predefined-ability artifact tokens. Each
@@ -375,27 +381,30 @@ fn unique_token_body_by_name(name: &str) -> Option<&'static TokenCharacteristics
 /// no mana cost means MV 0) or when the declared cost is malformed; callers
 /// keep the zero-cost default then. Total and pure.
 pub fn catalog_token_mana_cost(rules_text: &str) -> Option<ManaCost> {
+    rules_text.lines().find_map(reminder_cost_on_line)
+}
+
+/// Recognize one cost-reminder line as a nom combinator: skip to the marker,
+/// take the brace-delimited cost body, and require the `.)` terminator — the
+/// period sits inside the closing paren — followed by nothing but trailing
+/// whitespace. A braceless middle or a parenthetical that continues past `)`
+/// fails the line, as does a missing marker.
+fn reminder_cost_on_line(line: &str) -> Option<ManaCost> {
+    parse_reminder_cost_text(line)
+        .map(|(_, cost_text)| parse_mtgjson_mana_cost(cost_text))
+        .ok()
+}
+
+fn parse_reminder_cost_text(line: &str) -> OracleResult<'_, &str> {
     const MARKER: &str = "(This token's mana cost is ";
-    for line in rules_text.lines() {
-        let Some(marker_at) = line.find(MARKER) else {
-            continue;
-        };
-        let rest = line[marker_at + MARKER.len()..].trim_end();
-        // The reminder ends the line as `{COST}.)`: the period sits inside
-        // the closing paren, so require the two-character terminator. A
-        // parenthetical that continues past `)` is not the cost declaration.
-        let Some(cost_text) = rest.strip_suffix(".)") else {
-            continue;
-        };
-        let cost_text = cost_text.trim();
-        // Costs are brace-delimited (`{1}`, `{1}{G}`); a braceless middle
-        // (`banana`) is malformed, not a zero cost.
-        if !cost_text.starts_with('{') {
-            continue;
-        }
-        return Some(parse_mtgjson_mana_cost(cost_text));
-    }
-    None
+    preceded(
+        (take_until(MARKER), tag(MARKER), space0),
+        all_consuming(terminated(
+            recognize((char('{'), take_until(".)"))),
+            (tag(".)"), multispace0),
+        )),
+    )
+    .parse(line)
 }
 
 #[cfg(test)]
