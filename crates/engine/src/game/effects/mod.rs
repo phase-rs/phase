@@ -25574,16 +25574,10 @@ fn offer_optional_in_apnap_order(
         };
     };
     let decision_subject_id = resolved_optional_decision_subject_id(state, &hydrated_ability);
+    let offer = OptionalEffectFrame::live_offer(hydrated_ability, state);
     state
         .install_direct_choice_frame(
-            ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                parked_poll: None,
-                ability: Box::new(hydrated_ability),
-                trigger_event: state.current_trigger_event.clone(),
-                trigger_events: state.current_trigger_events.clone(),
-                trigger_match_count: state.current_trigger_match_count,
-                return_result_occurrence: state.active_return_result_occurrence,
-            }),
+            ResolutionFrame::OptionalEffect(offer),
             WaitingFor::OpponentMayChoice {
                 player: first,
                 decision_subject_id,
@@ -27103,16 +27097,13 @@ fn resolve_chain_body(
                 )?;
                 return Ok(progress);
             }
+            let offer = OptionalEffectFrame::live_offer(
+                ability_with_event_context_targets(state, ability),
+                state,
+            );
             state
                 .install_direct_choice_frame(
-                    ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                        parked_poll: None,
-                        ability: Box::new(ability_with_event_context_targets(state, ability)),
-                        trigger_event: state.current_trigger_event.clone(),
-                        trigger_events: state.current_trigger_events.clone(),
-                        trigger_match_count: state.current_trigger_match_count,
-                        return_result_occurrence: state.active_return_result_occurrence,
-                    }),
+                    ResolutionFrame::OptionalEffect(offer),
                     WaitingFor::ResolutionOptionalPaymentChoice {
                         player: payer,
                         source_id: ability.source_id,
@@ -27153,28 +27144,12 @@ fn resolve_chain_body(
         }
         let hydrated_ability = ability_with_event_context_targets(state, ability);
         let decision_subject_id = resolved_optional_decision_subject_id(state, &hydrated_ability);
+        // CR 614.6 + CR 615.5: a "may" reached inside a replacement's own action is offered with
+        // that action's amount (`OptionalEffectFrame::replacement_action`).
+        let offer = OptionalEffectFrame::live_offer(hydrated_ability, state);
         state
             .install_direct_choice_frame(
-                ResolutionFrame::OptionalEffect(OptionalEffectFrame {
-                    parked_poll: None,
-                    ability: Box::new(hydrated_ability),
-                    // CR 608.2: capture the triggering event in lockstep with the stashed
-                    // ability while `current_trigger_event` is still live (we are inside
-                    // `execute_effect`). Restored when the optional decision resumes so an
-                    // optional ("may") trigger's effect resolves `TriggeringPlayer` and
-                    // other event-context refs exactly as a non-optional trigger would.
-                    trigger_event: state.current_trigger_event.clone(),
-                    // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a
-                    // "you may" reproduction (Captain Marvel, Apex Avenger) folds every
-                    // `CounterAdded` occurrence when the decision resumes.
-                    trigger_events: state.current_trigger_events.clone(),
-                    // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a
-                    // "you may" sub-ability of a batched trigger (Ur-Dragon's optional
-                    // permanent-from-hand sub-effect) resumes with the same
-                    // `EventContextAmount` the pre-pause resolution observed.
-                    trigger_match_count: state.current_trigger_match_count,
-                    return_result_occurrence: state.active_return_result_occurrence,
-                }),
+                ResolutionFrame::OptionalEffect(offer),
                 WaitingFor::OptionalEffectChoice {
                     player: prompt_player,
                     decision_subject_id,
@@ -44728,6 +44703,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -44775,6 +44751,7 @@ mod tests {
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             });
             state.waiting_for = WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
@@ -74308,6 +74285,219 @@ mod replacement_action_continuation_tests {
         let beneath = frame(state.resolution_stack.active_predecessor());
         assert_eq!(beneath.replacement_action, action);
         assert_eq!(draws(&beneath.chain), vec![1, 2]);
+    }
+
+    /// The positive life changes in `events`.
+    fn gains(events: &[GameEvent]) -> Vec<i32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::LifeChanged { amount, .. } if *amount > 0 => Some(*amount),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The damage dealt to `player` in `events`.
+    fn dealt_to_player(events: &[GameEvent], player: PlayerId) -> Vec<u32> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    target: TargetRef::Player(target),
+                    amount,
+                    ..
+                } if *target == player => Some(*amount),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The replacement action the live optional prompt was offered in, if any.
+    fn offered_in(state: &GameState) -> Option<ReplacementActionScope> {
+        state
+            .active_optional_effect_frame()
+            .expect("a live optional frame")
+            .replacement_action
+    }
+
+    /// After an answer: the action settled, no frame is left, and no replacement action's
+    /// scope outlived it.
+    fn assert_answer_settled(state: &GameState) {
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { .. }),
+            "got {:?}",
+            state.waiting_for
+        );
+        assert!(state.resolution_stack.is_empty());
+        assert_eq!(crate::game::quantity::current_replacement_action(), None);
+    }
+
+    // A typed seam witness: no printed replacement's action holds a plain "you may gain that
+    // much life". The nearest printed reader is Channel Harm ("If damage is prevented this way,
+    // you may have Channel Harm deal that much damage to target creature."), whose rows are in
+    // `unpreventable_damage_prevention_effects`. The optional gate and the amount reader run
+    // normally.
+    // CR 614.6 + CR 615.5 + CR 608.2d: a "may" reached inside a replacement's own action is
+    // answered by a later action, and its "that much" is still the action's amount.
+    #[test]
+    fn a_may_reached_inside_a_replacement_action_resolves_inside_it() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::actions::GameAction;
+        let mut may = action_life();
+        may.optional = true;
+        for accept in [true, false] {
+            let mut runner = GameScenario::new().build();
+            with_replacement_action_scope(Some(2), || {
+                resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+            });
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OptionalEffectChoice { player: P0, .. }
+                ),
+                "got {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(
+                offered_in(runner.state()),
+                Some(ReplacementActionScope { amount: 2 })
+            );
+            assert_eq!(crate::game::quantity::current_replacement_action(), None);
+            let events = runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .unwrap()
+                .events;
+            assert_eq!(gains(&events), if accept { vec![2] } else { vec![] });
+            assert_eq!(runner.state().players[0].life, if accept { 22 } else { 20 });
+            assert_answer_settled(runner.state());
+        }
+
+        // The positive control: the same "may" offered outside any replacement action, or inside
+        // one that owns no amount, carries none.
+        for scope in [None, Some(None)] {
+            let mut runner = GameScenario::new().build();
+            match scope {
+                None => {
+                    resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+                }
+                Some(amount) => with_replacement_action_scope(amount, || {
+                    resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+                }),
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            assert_eq!(offered_in(runner.state()), None, "scope: {scope:?}");
+        }
+    }
+
+    // A typed seam witness: no printed replacement's action holds an any-player "may" (an
+    // Oracle census finds only activation permissions). Browbeat ("Any player may have
+    // Browbeat deal 5 damage to them. If no one does, target player draws three cards.") is
+    // the nearest printed head shape; these fixtures read the action's amount instead of 5.
+    // CR 614.6 + CR 615.5 + CR 608.2d + CR 101.4: each seat's answer resolves inside the
+    // action the offer was made in, the all-declined completion and the next seat's re-offer
+    // included.
+    #[test]
+    fn an_any_player_may_inside_a_replacement_action_resolves_inside_it() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::actions::GameAction;
+
+        // "Any opponent may gain that much life for you. If no one does, gain that much life."
+        for accept in [true, false] {
+            let mut runner = GameScenario::new().build();
+            let mut may =
+                action_life().sub_ability(action_life().condition(AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::effect_performed()),
+                }));
+            may.optional = true;
+            may.optional_for = Some(OpponentMayScope::AnyOpponent);
+            with_replacement_action_scope(Some(2), || {
+                resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+            });
+            assert!(
+                matches!(
+                    runner.state().waiting_for,
+                    WaitingFor::OpponentMayChoice { player: P1, .. }
+                ),
+                "got {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(
+                offered_in(runner.state()),
+                Some(ReplacementActionScope { amount: 2 })
+            );
+            let events = runner
+                .act(GameAction::DecideOptionalEffect { accept })
+                .unwrap()
+                .events;
+            assert_eq!(gains(&events), vec![2], "accept: {accept}");
+            assert_answer_settled(runner.state());
+        }
+
+        // "Any player may have ~ deal that much damage to them."
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Damage Source", 1, 1).id();
+        let mut runner = scenario.build();
+        let mut may = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Player,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            source,
+            P0,
+        );
+        may.optional = true;
+        may.optional_for = Some(OpponentMayScope::AnyPlayer);
+        with_replacement_action_scope(Some(2), || {
+            resolve_ability_chain(runner.state_mut(), &may, &mut Vec::new(), 1).unwrap();
+        });
+        assert!(
+            matches!(
+                &runner.state().waiting_for,
+                WaitingFor::OpponentMayChoice { player: P0, remaining, .. } if *remaining == [P1]
+            ),
+            "got {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            offered_in(runner.state()),
+            Some(ReplacementActionScope { amount: 2 })
+        );
+        let events = runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap()
+            .events;
+        assert_eq!(dealt_to_player(&events, P0), vec![2]);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OpponentMayChoice { player: P1, .. }
+            ),
+            "the acceptance re-offers the next seat: {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(
+            offered_in(runner.state()),
+            Some(ReplacementActionScope { amount: 2 }),
+            "the re-offer belongs to the same action"
+        );
+        assert_eq!(crate::game::quantity::current_replacement_action(), None);
+        let events = runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap()
+            .events;
+        assert_eq!(dealt_to_player(&events, P1), vec![2]);
+        assert_eq!(runner.state().players[0].life, 18);
+        assert_eq!(runner.state().players[1].life, 18);
+        assert_answer_settled(runner.state());
     }
 }
 

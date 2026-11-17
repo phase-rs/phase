@@ -165,6 +165,7 @@ fn handle_optional_effect_choice_inner(
                 trigger_events: pending_events,
                 trigger_match_count: pending_count,
                 return_result_occurrence,
+                replacement_action,
                 // A parked poll cursor owns no prompt, so it cannot be the frame
                 // an answer consumes: `validate` refuses a state whose top
                 // direct-choice frame does not match the live `WaitingFor`, and a
@@ -202,8 +203,15 @@ fn handle_optional_effect_choice_inner(
                 &mut state.active_return_result_occurrence,
                 return_result_occurrence,
             );
-            let result =
-                effects::resolve_optional_effect_decision(state, *ability, choice, events, 1);
+            // CR 614.6 + CR 615.5 + CR 608.2c: a "may" offered inside a replacement's own action
+            // resolves inside that action, so its "that much" reads the action's amount. The
+            // guard covers only this decision's resolution and drops before
+            // `resume_pending_continuation_if_priority`, so the enclosing spell's tail and any
+            // other work queued beneath this frame read their own amounts.
+            let result = {
+                let _action = crate::game::quantity::resume_replacement_action(replacement_action);
+                effects::resolve_optional_effect_decision(state, *ability, choice, events, 1)
+            };
             state.active_return_result_occurrence = previous_return_occurrence;
             state.current_trigger_event = previous_trigger_event;
             state.current_trigger_events = previous_trigger_events;
@@ -444,7 +452,15 @@ fn handle_opponent_may_choice_inner(
                     // the chosen instruction then does nothing.
                     sub.context = ability.context.clone();
                     sub.context.optional_effect_performed = true;
-                    state.park_ability_continuation(PendingContinuation::new(sub, state));
+                    // CR 614.6 + CR 615.5 + CR 608.2c: the parked rest belongs to the
+                    // replacement action the offer was made in, so it captures that action.
+                    let pending = {
+                        let _action = crate::game::quantity::resume_replacement_action(
+                            frame.replacement_action,
+                        );
+                        PendingContinuation::new(sub, state)
+                    };
+                    state.park_ability_continuation(pending);
                 }
                 state.waiting_for = WaitingFor::MultiTargetSelection {
                     player: promptee,
@@ -468,8 +484,15 @@ fn handle_opponent_may_choice_inner(
                 ability.set_unpinned_targets(vec![TargetRef::Player(promptee)]);
             }
             set_active_priority(state);
-            effects::resolve_ability_chain(state, &ability, events, 1)
-                .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+            // CR 614.6 + CR 615.5 + CR 608.2c: the accepted action resolves inside the
+            // replacement action the offer was made in. The guard covers only this resolution
+            // and drops before the re-offer and `resume_pending_continuation_if_priority`.
+            let resolved = {
+                let _action =
+                    crate::game::quantity::resume_replacement_action(frame.replacement_action);
+                effects::resolve_ability_chain(state, &ability, events, 1)
+            };
+            resolved.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
 
             // CR 118.12 + CR 101.4: an acceptance answers one responder, not
             // the poll. Dash Hopes' ruling is explicit: "As soon as any
@@ -505,13 +528,14 @@ fn handle_opponent_may_choice_inner(
             if acceptance_leaves_the_option_open(&ability.effect) {
                 let mut reoffered = frame.ability.clone();
                 reoffered.context.optional_effect_performed = true;
+                // CR 614.6 + CR 615.5 + CR 608.2c: the next responder's offer belongs to the
+                // same resolution as this one, so it copies this frame's context, the
+                // replacement action it was made in included, rather than capturing the
+                // context now (this action's guard has already dropped).
                 let mut offer = OptionalEffectFrame {
                     parked_poll: None,
                     ability: reoffered,
-                    trigger_event: frame.trigger_event.clone(),
-                    trigger_events: frame.trigger_events.clone(),
-                    trigger_match_count: frame.trigger_match_count,
-                    return_result_occurrence: frame.return_result_occurrence,
+                    ..frame.clone()
                 };
                 // CR 608.2d: each seat is judged when its own offer is made, and
                 // the two branches below make that offer at different times, so
@@ -613,6 +637,10 @@ fn advance_opponent_may_offer(
         .take_active_optional_effect_frame()
         .map_err(|error| EngineError::InvalidAction(error.to_string()))?
     {
+        // CR 614.6 + CR 615.5 + CR 608.2c: the all-declined completion resolves inside the
+        // replacement action the offer was made in. The guard drops at the end of this block,
+        // before `resume_pending_continuation_if_priority`.
+        let _action = crate::game::quantity::resume_replacement_action(frame.replacement_action);
         resolve_all_declined_opponent_may(state, &frame.ability, events)?;
     }
     resume_pending_continuation_if_priority(state, events)?;
@@ -640,13 +668,17 @@ pub(crate) fn arm_parked_opponent_may_poll(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EngineError> {
-    let Some((poll, ability)) = state.active_optional_effect_frame().and_then(|frame| {
-        frame
-            .parked_poll
-            .as_deref()
-            .cloned()
-            .map(|poll| (poll, frame.ability.as_ref().clone()))
-    }) else {
+    let Some((poll, ability, replacement_action)) =
+        state.active_optional_effect_frame().and_then(|frame| {
+            frame.parked_poll.as_deref().cloned().map(|poll| {
+                (
+                    poll,
+                    frame.ability.as_ref().clone(),
+                    frame.replacement_action,
+                )
+            })
+        })
+    else {
         return Ok(());
     };
 
@@ -683,6 +715,9 @@ pub(crate) fn arm_parked_opponent_may_poll(
             .map_err(|error| EngineError::InvalidAction(error.to_string()))?
             .expect("a parked poll's frame stays active until it is armed or closed");
         set_active_priority(state);
+        // CR 614.6 + CR 615.5 + CR 608.2c: like every resolution of this frame's ability, the
+        // completion resolves inside the replacement action the poll was offered in.
+        let _action = crate::game::quantity::resume_replacement_action(replacement_action);
         return resolve_all_declined_opponent_may(state, &ability, events);
     };
 
@@ -5753,6 +5788,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OpponentMayChoice {
             player: PlayerId(0),
@@ -6160,6 +6196,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -6195,6 +6232,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -6236,6 +6274,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -6274,6 +6313,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -6310,6 +6350,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -6345,6 +6386,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),
@@ -6380,6 +6422,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: PlayerId(0),

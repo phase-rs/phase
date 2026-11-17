@@ -59372,6 +59372,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 trigger_events,
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             })
         }
 
@@ -68000,6 +68001,7 @@ mod restored_exact_attack_authority_tests {
                             trigger_events: vec![],
                             trigger_match_count: None,
                             return_result_occurrence: None,
+                            replacement_action: None,
                         });
                     state
                         .resolution_stack
@@ -68242,6 +68244,7 @@ mod restored_exact_attack_authority_tests {
                 trigger_events: trigger_event.clone().into_iter().collect(),
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             });
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: P0,
@@ -68400,6 +68403,7 @@ mod restored_exact_attack_authority_tests {
                         trigger_events: vec![],
                         trigger_match_count: None,
                         return_result_occurrence: None,
+                        replacement_action: None,
                     });
                 state
                     .resolution_stack
@@ -69361,6 +69365,7 @@ mod restored_exact_attack_authority_tests {
                                     trigger_events: trigger_event.clone().into_iter().collect(),
                                     trigger_match_count: None,
                                     return_result_occurrence: None,
+                                    replacement_action: None,
                                 }),
                                 selected: vec![],
                             },

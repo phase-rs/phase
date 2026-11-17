@@ -135,6 +135,16 @@ pub struct OptionalEffectFrame {
     /// prompt, including save/reload before its named result is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    /// CR 614.6 + CR 615.5 + CR 608.2c + CR 608.2d: `Some` when this "may" was reached inside a
+    /// replacement's own action that owns an amount. The answer resumes that action, so its
+    /// "that much" is still the amount the replacement replaced or prevented (Channel Harm: "If
+    /// damage is prevented this way, you may have Channel Harm deal that much damage to target
+    /// creature."). Captured when the offer is made (`quantity::current_replacement_action`),
+    /// like `PendingContinuation::replacement_action`. Re-entered by every resolution of this
+    /// frame's ability. Serde-defaulted: a save taken at the prompt before this field existed
+    /// resumes outside the action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement_action: Option<crate::types::game_state::ReplacementActionScope>,
     /// `Some` when this frame is a parked any-player poll cursor rather than a
     /// live offer: it owns no prompt, so its gate is [`FrameGate::AfterChild`]
     /// and it arms in `resume_resolution_frames` once the frames above it are
@@ -144,6 +154,36 @@ pub struct OptionalEffectFrame {
     /// default to `None`, i.e. an ordinary live offer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parked_poll: Option<Box<ParkedOpponentMayPoll>>,
+}
+
+impl OptionalEffectFrame {
+    /// CR 608.2d: a live offer of `ability`'s "may", carrying the resolution context its answer
+    /// resumes in. Mirrors `PendingContinuation::new`, which captures its own.
+    pub(crate) fn live_offer(ability: ResolvedAbility, state: &GameState) -> Self {
+        Self {
+            ability: Box::new(ability),
+            // CR 608.2: capture the triggering event in lockstep with the stashed ability while
+            // `current_trigger_event` is still live (we are inside `execute_effect`). Restored
+            // when the optional decision resumes so an optional ("may") trigger's effect
+            // resolves `TriggeringPlayer` and other event-context refs exactly as a
+            // non-optional trigger would.
+            trigger_event: state.current_trigger_event.clone(),
+            // CR 603.2c + CR 608.2: capture the PLURAL event batch in lockstep so a "you may"
+            // reproduction (Captain Marvel, Apex Avenger) folds every `CounterAdded` occurrence
+            // when the decision resumes.
+            trigger_events: state.current_trigger_events.clone(),
+            // CR 603.2c + CR 608.2: mirror the batched-trigger subject count so a "you may"
+            // sub-ability of a batched trigger (Ur-Dragon's optional permanent-from-hand
+            // sub-effect) resumes with the same `EventContextAmount` the pre-pause resolution
+            // observed.
+            trigger_match_count: state.current_trigger_match_count,
+            return_result_occurrence: state.active_return_result_occurrence,
+            // CR 614.6 + CR 615.5: the replacement action this offer is made in, if it owns an
+            // amount.
+            replacement_action: crate::game::quantity::current_replacement_action(),
+            parked_poll: None,
+        }
+    }
 }
 
 /// CR 705.1 + CR 614.1a: where a coin-flip run paused for a Krark's Thumb keep choice.
@@ -7139,6 +7179,8 @@ impl LegacyOptionalEffectWire {
             trigger_events: Vec::new(),
             trigger_match_count: self.pending_optional_trigger_match_count,
             return_result_occurrence: None,
+            // v1 wire predates the replacement-action carrier.
+            replacement_action: None,
         }))
     }
 }
@@ -9019,6 +9061,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         }));
         optional_effect
             .validate(&WaitingFor::OpponentMayChoice {
@@ -9109,6 +9152,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         }));
         let optional_payload = v2_fixture_with_frames(optional_state, optional_frames);
         let restored: ResolutionStateWire = serde_json::from_value(optional_payload)
@@ -9196,6 +9240,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         })
     }
 
@@ -9765,6 +9810,7 @@ mod tests {
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             })
         };
         let opponent_may = WaitingFor::OpponentMayChoice {
@@ -9897,6 +9943,7 @@ mod tests {
                 trigger_events: Vec::new(),
                 trigger_match_count: None,
                 return_result_occurrence: None,
+                replacement_action: None,
             },
         );
         apply_as_current(
@@ -11324,6 +11371,7 @@ mod tests {
             trigger_events: Vec::new(),
             trigger_match_count: None,
             return_result_occurrence: None,
+            replacement_action: None,
         }));
         buried_optional_frames.push_inner(continuation_frame(151));
         assert!(

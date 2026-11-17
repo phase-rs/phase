@@ -40,7 +40,7 @@ use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, CombatDamageAssignmentMode, GameState, WaitingFor,
+    CastPaymentMode, CombatDamageAssignmentMode, GameState, ReplacementActionScope, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
@@ -3278,6 +3278,440 @@ fn a_prevention_rider_that_ends_the_game_ends_the_batchs_riders() {
         "{:?}",
         &combat.events[over + 1..]
     );
+}
+
+// ---------------------------------------------------------------------------
+// A rider's own "may" keeps the prevented amount (CR 614.6 + CR 615.5 + CR 608.2d)
+// ---------------------------------------------------------------------------
+
+const SHOCKMAW_DRAGON: &str = "Flying\nWhenever this creature deals combat damage to a player, it deals 1 damage to each creature that player controls.";
+const URZAS_ARMOR: &str = "If a source would deal damage to you, prevent 1 of that damage.";
+const FATEFUL_SHOWDOWN: &str = "Fateful Showdown deals damage to any target equal to the number of cards in your hand. Discard all the cards in your hand, then draw that many cards.";
+
+/// The damage `channel_harm` dealt: (recipient, amount, combat damage).
+fn channel_harm_damage(
+    events: &[GameEvent],
+    channel_harm: ObjectId,
+) -> Vec<(TargetRef, u32, bool)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            GameEvent::DamageDealt {
+                source_id,
+                target,
+                amount,
+                is_combat,
+                ..
+            } if *source_id == channel_harm => Some((target.clone(), *amount, *is_combat)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The positions of `player`'s draws in `events`.
+fn draw_positions(events: &[GameEvent], player: PlayerId) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(
+            |(_, e)| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == player),
+        )
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// The replacement action the live optional prompt was offered in, if any.
+fn offered_in(runner: &GameRunner) -> Option<ReplacementActionScope> {
+    runner
+        .state()
+        .active_optional_effect_frame()
+        .expect("the optional prompt's frame")
+        .replacement_action
+}
+
+/// Answer the live optional prompt, then drive to the next stop.
+fn decide(runner: &mut GameRunner, accept: bool, events: &mut Vec<GameEvent>) {
+    events.extend(
+        runner
+            .act(GameAction::DecideOptionalEffect { accept })
+            .expect("answer the optional prompt")
+            .events,
+    );
+    drive(runner, &mut Vec::new(), events);
+}
+
+/// Channel Harm: "Prevent all damage that would be dealt to you and permanents you control this
+/// turn by sources you don't control. If damage is prevented this way, you may have Channel Harm
+/// deal that much damage to target creature." Outside combat: P0 cast it at P1's Hill Giant, and
+/// P1's Lightning Bolt ("Lightning Bolt deals 3 damage to any target.") at P0's Grizzly Bears, or
+/// at P0, is prevented. The additional effect happens immediately afterward and may refer to the
+/// amount prevented (CR 615.5); the "may" is P0's (CR 608.2d). So "that much" is the 3 prevented
+/// whenever P0 answers, a save and load at the prompt included (CR 614.6): accepted, Channel Harm
+/// deals 3 to the Giant, not combat damage, and the Giant dies; declined, it deals nothing.
+#[test]
+fn channel_harms_may_deals_the_prevented_amount_after_a_spell() {
+    for (at_player, accept, reload) in [
+        (false, true, false),
+        (false, true, true),
+        (false, false, false),
+        (true, true, false),
+    ] {
+        let label = format!("Bolt at P0: {at_player}, accept: {accept}, reload: {reload}");
+        let mut scenario = rider_board();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let giant = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+        let channel_harm = spell(&mut scenario, "Channel Harm", CHANNEL_HARM, true);
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(P1, "Lightning Bolt", true, BOLT)
+            .id();
+        let mut runner = scenario.build();
+        cast(&mut runner, channel_harm, vec![TargetRef::Object(giant)]);
+        let mut events = cast_by_p1(&mut runner, bolt);
+        let target = if at_player {
+            TargetRef::Player(P0)
+        } else {
+            TargetRef::Object(bears)
+        };
+        drive(&mut runner, &mut vec![target], &mut events);
+
+        // Reach guard: the Bolt's 3 was prevented, and P0 is asked.
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player, .. } if player == P0
+            ),
+            "{label}: got {:?}",
+            runner.state().waiting_for
+        );
+        assert_eq!(prevented(&events), 1, "{label}");
+        let action = Some(ReplacementActionScope { amount: 3 });
+        assert_eq!(offered_in(&runner), action, "{label}");
+        if reload {
+            let json = serde_json::to_string(runner.state()).expect("serialize at the prompt");
+            *runner.state_mut() = serde_json::from_str::<GameState>(&json).expect("deserialize");
+            assert_eq!(offered_in(&runner), action, "{label}");
+        }
+        decide(&mut runner, accept, &mut events);
+
+        assert_settled(&runner);
+        assert!(runner.state().resolution_stack.is_empty(), "{label}");
+        let harm = channel_harm_damage(&events, channel_harm);
+        if accept {
+            assert_eq!(harm, vec![(TargetRef::Object(giant), 3, false)], "{label}");
+            assert_eq!(
+                runner.state().objects[&giant].zone,
+                Zone::Graveyard,
+                "{label}"
+            );
+        } else {
+            assert!(harm.is_empty(), "{label}: {harm:?}");
+            assert_eq!(
+                runner.state().objects[&giant].zone,
+                Zone::Battlefield,
+                "{label}"
+            );
+            assert_eq!(runner.state().objects[&giant].damage_marked, 0, "{label}");
+        }
+        assert_eq!(
+            runner.state().objects[&bears].zone,
+            Zone::Battlefield,
+            "{label}"
+        );
+        assert_eq!(runner.state().objects[&bears].damage_marked, 0, "{label}");
+        assert_eq!(life(&runner, P0), 20, "{label}");
+    }
+}
+
+/// Inside a resolving trigger. Shockmaw Dragon: "Whenever this creature deals combat damage to a
+/// player, it deals 1 damage to each creature that player controls." It deals 4 combat damage to
+/// P1, and with its trigger on the stack P1 casts Channel Harm at the Dragon. The trigger's 1 to
+/// P1's Grizzly Bears is prevented, and Channel Harm's "that much" is that 1 (CR 615.5), not the
+/// 4 of the event the trigger resolves for (CR 603.2, CR 614.6): accepted, the Dragon is dealt 1
+/// and survives; declined, it is dealt nothing.
+#[test]
+fn channel_harms_may_reads_the_prevented_amount_inside_a_resolving_trigger() {
+    for accept in [true, false] {
+        let mut scenario = rider_board();
+        let dragon = creature_with_keywords(
+            &mut scenario,
+            P0,
+            "Shockmaw Dragon",
+            (4, 4),
+            &["Flying"],
+            SHOCKMAW_DRAGON,
+        );
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let channel_harm = scenario
+            .add_spell_to_hand_from_oracle(P1, "Channel Harm", true, CHANNEL_HARM)
+            .id();
+        let mut runner = scenario.build();
+        let mut events = Vec::new();
+        let (mut attacked, mut cast_harm, mut asked) = (false, false, false);
+        for _ in 0..400 {
+            let state = runner.state();
+            if asked
+                && state.phase == Phase::EndCombat
+                && state.stack.is_empty()
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            let action = match &state.waiting_for {
+                WaitingFor::DeclareAttackers { .. } => {
+                    let attacks = if attacked {
+                        Vec::new()
+                    } else {
+                        vec![(dragon, AttackTarget::Player(P1))]
+                    };
+                    attacked = true;
+                    GameAction::DeclareAttackers {
+                        attacks,
+                        bands: vec![],
+                    }
+                }
+                WaitingFor::DeclareBlockers { .. } => GameAction::DeclareBlockers {
+                    assignments: Vec::new(),
+                },
+                // CR 117.4: the trigger waits on the stack until both players pass in
+                // succession, so P1 gets priority with it still there.
+                WaitingFor::Priority { player }
+                    if *player == P1 && !cast_harm && !state.stack.is_empty() =>
+                {
+                    assert_eq!(state.phase, Phase::CombatDamage);
+                    assert_eq!(state.stack.len(), 1, "Shockmaw Dragon's trigger");
+                    assert_eq!(life(&runner, P1), 16, "the combat damage was dealt");
+                    cast_harm = true;
+                    GameAction::CastSpell {
+                        object_id: channel_harm,
+                        card_id: state.objects[&channel_harm].card_id,
+                        targets: vec![],
+                        payment_mode: CastPaymentMode::Auto,
+                    }
+                }
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                    GameAction::PassPriority
+                }
+                WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(dragon)),
+                },
+                WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+                    order: (0..triggers.len()).collect(),
+                },
+                WaitingFor::OptionalEffectChoice { player, .. } => {
+                    assert!(!asked, "Channel Harm asks once");
+                    assert_eq!(*player, P1);
+                    assert!(cast_harm);
+                    assert_eq!(life(&runner, P1), 16);
+                    assert_eq!(prevented(&events), 1);
+                    assert_eq!(
+                        offered_in(&runner),
+                        Some(ReplacementActionScope { amount: 1 })
+                    );
+                    asked = true;
+                    GameAction::DecideOptionalEffect { accept }
+                }
+                other => panic!("an unexpected prompt: {other:?}"),
+            };
+            events.extend(runner.act(action).expect("combat action").events);
+        }
+
+        assert!(asked, "P1 was asked");
+        assert_settled(&runner);
+        assert_eq!(runner.state().phase, Phase::EndCombat);
+        assert!(runner.state().pending_combat_lifelink.is_none());
+        assert!(runner.state().resolution_stack.is_empty());
+        let harm = channel_harm_damage(&events, channel_harm);
+        let dragon_state = &runner.state().objects[&dragon];
+        if accept {
+            assert_eq!(harm, vec![(TargetRef::Object(dragon), 1, false)]);
+            assert_eq!(dragon_state.zone, Zone::Battlefield);
+            assert_eq!(dragon_state.damage_marked, 1);
+        } else {
+            assert!(harm.is_empty(), "{harm:?}");
+            assert_eq!(dragon_state.zone, Zone::Battlefield);
+            assert_eq!(dragon_state.damage_marked, 0);
+        }
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&bears].damage_marked, 0);
+    }
+}
+
+/// Channel Harm's ruling: two Channel Harms make "a loop that either player can break by choosing
+/// to not have Channel Harm try to deal damage", and "no damage will be dealt in either case". P0's
+/// Channel Harm is at P1's Hill Giant, P1's at P0's Grizzly Bears, and P1's Lightning Bolt at P0's
+/// Centaur Courser. P0's prevents the Bolt's 3 and asks P0; accepted, its 3 to the Giant is
+/// prevented by P1's, which asks P1; accepted, its 3 to the Bears is prevented by P0's, which asks
+/// P0 again (CR 615.5, CR 608.2d). Each prompt's "that much" is 3, and the first decline ends it.
+#[test]
+fn two_channel_harms_loop_until_a_player_declines() {
+    for answers in [vec![true, true, false], vec![true, false], vec![false]] {
+        let label = format!("{answers:?}");
+        let mut scenario = rider_board();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let courser = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
+        let giant = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+        let p0_harm = spell(&mut scenario, "Channel Harm", CHANNEL_HARM, true);
+        let p1_harm = scenario
+            .add_spell_to_hand_from_oracle(P1, "Channel Harm", true, CHANNEL_HARM)
+            .id();
+        let bolt = scenario
+            .add_spell_to_hand_from_oracle(P1, "Lightning Bolt", true, BOLT)
+            .id();
+        let mut runner = scenario.build();
+        cast(&mut runner, p0_harm, vec![TargetRef::Object(giant)]);
+        let mut events = cast_by_p1(&mut runner, p1_harm);
+        drive(
+            &mut runner,
+            &mut vec![TargetRef::Object(bears)],
+            &mut events,
+        );
+        assert_settled(&runner);
+        events.extend(cast_by_p1(&mut runner, bolt));
+        drive(
+            &mut runner,
+            &mut vec![TargetRef::Object(courser)],
+            &mut events,
+        );
+
+        let mut choosers = Vec::new();
+        for &accept in &answers {
+            let WaitingFor::OptionalEffectChoice { player, .. } = runner.state().waiting_for else {
+                panic!(
+                    "{label}: prompt {} is not asked: {:?}",
+                    choosers.len() + 1,
+                    runner.state().waiting_for
+                );
+            };
+            choosers.push(player);
+            assert_eq!(
+                offered_in(&runner),
+                Some(ReplacementActionScope { amount: 3 }),
+                "{label}"
+            );
+            decide(&mut runner, accept, &mut events);
+        }
+
+        assert_eq!(choosers, [P0, P1, P0][..answers.len()].to_vec(), "{label}");
+        assert_settled(&runner);
+        assert!(runner.state().resolution_stack.is_empty(), "{label}");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::DamageDealt { .. })),
+            "{label}: no damage is dealt"
+        );
+        for id in [bears, courser, giant] {
+            assert_eq!(
+                runner.state().objects[&id].zone,
+                Zone::Battlefield,
+                "{label}"
+            );
+            assert_eq!(runner.state().objects[&id].damage_marked, 0, "{label}");
+        }
+    }
+}
+
+/// CR 615.5 + CR 608.2c + CR 616.1f: a rider's "may" resolves inside its action, and the spell
+/// resolving around it keeps its own amount. P1's Fateful Showdown ("deals damage to any target
+/// equal to the number of cards in your hand. Discard all the cards in your hand, then draw that
+/// many cards.") at P0 with five other cards in hand deals 5 (its ruling: Fateful Showdown "is on
+/// the stack at this time, so it's not counted"). P0's Urza's Armor ("If a source would deal
+/// damage to you, prevent 1 of that damage.") and P0's Channel Harm, cast at P1's Hill Giant, both
+/// apply, so P0 orders them (CR 616.1). Armor first prevents 1 and Channel Harm the other 4, so its
+/// "that much" is 4; Channel Harm first prevents all 5. Its "may" happens immediately afterward,
+/// before the spell resumes (CR 615.5), and then P1 discards five and draws "that many", the five
+/// discarded, never the rider's 4.
+#[test]
+fn a_riders_may_amount_does_not_reach_the_spells_tail() {
+    for (armor_first, accept, rider) in [(true, true, 4), (true, false, 4), (false, true, 5)] {
+        let label = format!("Armor first: {armor_first}, accept: {accept}");
+        let mut scenario = rider_board();
+        let armor = scenario
+            .add_artifact_from_oracle(P0, "Urza's Armor", URZAS_ARMOR)
+            .id();
+        let giant = scenario.add_creature(P1, "Hill Giant", 3, 3).id();
+        let channel_harm = spell(&mut scenario, "Channel Harm", CHANNEL_HARM, true);
+        let showdown = scenario
+            .add_spell_to_hand_from_oracle(P1, "Fateful Showdown", true, FATEFUL_SHOWDOWN)
+            .id();
+        let held: Vec<ObjectId> = (0..5)
+            .map(|index| scenario.add_card_to_hand(P1, &format!("Held {index}")))
+            .collect();
+        let mut runner = scenario.build();
+        cast(&mut runner, channel_harm, vec![TargetRef::Object(giant)]);
+        let mut events = cast_by_p1(&mut runner, showdown);
+        drive(&mut runner, &mut vec![TargetRef::Player(P0)], &mut events);
+        let pick = if armor_first {
+            Pick::From(armor)
+        } else {
+            Pick::NotFrom(armor)
+        };
+        let order = answer_one(&mut runner, pick, giant, &mut events);
+        assert_eq!(order.sources.len(), 2, "{label}: {:?}", order.sources);
+        assert!(order.sources.contains(&armor), "{label}");
+
+        // Reach guard: P0 is asked, and the spell's tail waits beneath the prompt.
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player, .. } if player == P0
+            ),
+            "{label}: got {:?}",
+            runner.state().waiting_for
+        );
+        let p1_hand = &runner.state().players[1].hand;
+        assert!(held.iter().all(|id| p1_hand.contains(id)), "{label}");
+        assert!(draw_positions(&events, P1).is_empty(), "{label}");
+        assert_eq!(life(&runner, P0), 20, "{label}");
+        assert_eq!(
+            offered_in(&runner),
+            Some(ReplacementActionScope {
+                amount: i32::try_from(rider).expect("a small amount")
+            }),
+            "{label}"
+        );
+        decide(&mut runner, accept, &mut events);
+
+        assert_settled(&runner);
+        assert!(runner.state().resolution_stack.is_empty(), "{label}");
+        let harm = channel_harm_damage(&events, channel_harm);
+        let drawn = draw_positions(&events, P1);
+        assert_eq!(drawn.len(), 5, "{label}: P1 draws the five discarded");
+        if accept {
+            assert_eq!(
+                harm,
+                vec![(TargetRef::Object(giant), rider, false)],
+                "{label}"
+            );
+            assert_eq!(
+                runner.state().objects[&giant].zone,
+                Zone::Graveyard,
+                "{label}"
+            );
+            let dealt = events
+                .iter()
+                .position(|e| {
+                    matches!(e, GameEvent::DamageDealt { source_id, .. } if *source_id == channel_harm)
+                })
+                .expect("Channel Harm dealt damage");
+            assert!(
+                drawn.iter().all(|&index| index > dealt),
+                "{label}: the spell's tail follows the rider"
+            );
+        } else {
+            assert!(harm.is_empty(), "{label}: {harm:?}");
+            assert_eq!(
+                runner.state().objects[&giant].zone,
+                Zone::Battlefield,
+                "{label}"
+            );
+            assert_eq!(runner.state().objects[&giant].damage_marked, 0, "{label}");
+        }
+        assert_eq!(hand_size(&runner, P1), 5, "{label}");
+        let p1_graveyard = &runner.state().players[1].graveyard;
+        assert!(held.iter().all(|id| p1_graveyard.contains(id)), "{label}");
+        assert_eq!(life(&runner, P0), 20, "{label}");
+    }
 }
 
 /// P0 passes priority, and P1 casts `spell`; the caller answers its prompts.
