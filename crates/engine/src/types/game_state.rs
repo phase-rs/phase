@@ -4158,7 +4158,11 @@ pub struct PendingRepeatIteration {
     /// unless payment. `Some(n)`: the controller has already fixed the order of
     /// `tracked_members[..n]`, and picks the member for iteration `n` before it
     /// runs (`WaitingFor::MemberOrderChoice`). `None` for every other loop.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "copy_order_fixed"
+    )]
     pub order_fixed: Option<usize>,
 }
 

@@ -645,6 +645,66 @@ fn announced_source_x_is_save_compatible() {
     );
 }
 
+/// CR 608.2f + CR 405.3: a save written with the pre-rename field
+/// `copy_order_fixed` (v0.127.0) must still load its ordering state.
+/// The field was renamed to `order_fixed` in the engine; without
+/// `#[serde(alias = "copy_order_fixed")]` the old key is silently ignored
+/// and the restored loop loses the controller's fixed order choices — the
+/// subsequent `MemberOrderChoice` prompts are never emitted.
+#[test]
+fn pending_repeat_iteration_order_fixed_loads_old_copy_order_fixed_key() {
+    use engine::types::ability::{Effect, ResolvedAbility};
+    use engine::types::game_state::PendingRepeatIteration;
+    use engine::types::identifiers::ObjectId;
+    use engine::types::player::PlayerId;
+
+    // Build a minimal PendingRepeatIteration with a live order_fixed value.
+    let ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(0), PlayerId(0));
+    let iter = PendingRepeatIteration {
+        ability: Box::new(ability),
+        tracked_members: vec![ObjectId(1), ObjectId(2)],
+        iterated_counter_kinds: vec![],
+        next_iteration: 1,
+        total_iterations: 2,
+        order_fixed: Some(1),
+    };
+
+    // (1) NEW SHAPE: round-trips with the current key.
+    let new_shape = serde_json::to_value(&iter).expect("serialize");
+    assert!(
+        new_shape.get("order_fixed").is_some(),
+        "a live order_fixed must be persisted"
+    );
+    let reloaded: PendingRepeatIteration = serde_json::from_value(new_shape).expect("deserialize");
+    assert_eq!(
+        reloaded.order_fixed,
+        Some(1),
+        "order_fixed must round-trip through a save"
+    );
+
+    // (2) OLD SHAPE: the pre-rename key must still bind via #[serde(alias)].
+    let mut pre_rename = serde_json::to_value(&iter).expect("serialize");
+    let carried = pre_rename
+        .as_object_mut()
+        .expect("PendingRepeatIteration serializes as a JSON object")
+        .remove("order_fixed")
+        .expect("the live order_fixed was just set, so the key must be present");
+    pre_rename
+        .as_object_mut()
+        .expect("PendingRepeatIteration serializes as a JSON object")
+        .insert("copy_order_fixed".to_string(), carried);
+
+    let reloaded: PendingRepeatIteration = serde_json::from_value(pre_rename)
+        .expect("a pre-rename save must still deserialize (no deny_unknown_fields)");
+    assert_eq!(
+        reloaded.order_fixed,
+        Some(1),
+        "CR 608.2f: a save written under the OLD field name copy_order_fixed must still load \
+         its fixed order. Without #[serde(alias = \"copy_order_fixed\")] the unknown key is \
+         SILENTLY IGNORED and this reads None — the controller's ordering choices lost on load."
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // THE FILTER-MANA-VALUE SUB-CLASS — t96 left this MEASURED-UNKNOWN, and the totality
 // guard's scoping depends on the answer. These two pin it in BOTH directions.
