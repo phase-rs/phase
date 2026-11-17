@@ -231,6 +231,53 @@ fn object_name(state: &GameState, id: ObjectId) -> Option<String> {
     state.objects.get(&id).map(|object| one_line(&object.name))
 }
 
+/// CR 508.1a + CR 508.1b: one attack a declaration can hold, with the creature
+/// and what it attacks named as the board names them:
+/// `Serra Angel (controlled by You) attacks Player 1`.
+///
+/// `state` is the viewer-filtered state, as for [`describe_action`].
+pub fn describe_attack(
+    state: &GameState,
+    viewer: PlayerId,
+    attacker: ObjectId,
+    target: AttackTarget,
+) -> String {
+    format!(
+        "{} attacks {}",
+        reference_label(state, viewer, TargetRef::Object(attacker)),
+        reference_label(state, viewer, attack_target_reference(target)),
+    )
+}
+
+/// CR 509.1a: one block a declaration can hold, with the blocking creature and
+/// the attacker it blocks named as the board names them:
+/// `Gray Ogre (controlled by You) blocks Hill Giant (controlled by Player 0)`.
+///
+/// `state` is the viewer-filtered state, as for [`describe_action`].
+pub fn describe_block(
+    state: &GameState,
+    viewer: PlayerId,
+    blocker: ObjectId,
+    attacker: ObjectId,
+) -> String {
+    format!(
+        "{} blocks {}",
+        reference_label(state, viewer, TargetRef::Object(blocker)),
+        reference_label(state, viewer, TargetRef::Object(attacker)),
+    )
+}
+
+/// A player or object as the board names it: a player by seat (`You`,
+/// `Player N`), an object by [`object_label`].
+fn reference_label(state: &GameState, viewer: PlayerId, reference: TargetRef) -> String {
+    match reference {
+        TargetRef::Object(id) => {
+            object_label(state, viewer, id).unwrap_or_else(|| format!("object #{}", id.0))
+        }
+        TargetRef::Player(player) => seat_label(player, viewer),
+    }
+}
+
 /// `snake_case` / `CamelCase` -> `Title Case`, with the repository's existing
 /// `id -> ID` convention preserved.
 pub fn humanize_identifier(raw: &str) -> String {
@@ -452,14 +499,9 @@ impl ActionIds<'_> {
         }
     }
 
-    /// A player or object as the board names it: a player by seat (`You`,
-    /// `Player N`), an object by [`object_label`].
+    /// A player or object as the board names it ([`reference_label`]).
     fn named(&self, reference: TargetRef) -> String {
-        match reference {
-            TargetRef::Object(id) => object_label(self.state, self.viewer, id)
-                .unwrap_or_else(|| format!("object #{}", id.0)),
-            TargetRef::Player(player) => seat_label(player, self.viewer),
-        }
+        reference_label(self.state, self.viewer, reference)
     }
 
     /// `object, amount` for each pair, with the object named.
@@ -847,10 +889,7 @@ fn engine_target(value: &Value) -> Option<TargetRef> {
         return Some(target);
     }
     if let Ok(target) = AttackTarget::deserialize(value) {
-        return Some(match target {
-            AttackTarget::Player(player) => TargetRef::Player(player),
-            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => TargetRef::Object(id),
-        });
+        return Some(attack_target_reference(target));
     }
     if let Ok(target) = AttachTarget::deserialize(value) {
         return Some(match target {
@@ -864,6 +903,15 @@ fn engine_target(value: &Value) -> Option<TargetRef> {
     match AnnouncementSubject::deserialize(value).ok()? {
         AnnouncementSubject::Seat(player) => Some(TargetRef::Player(player)),
         AnnouncementSubject::Object(_) => None,
+    }
+}
+
+/// What an attack is aimed at, as a player or an object: CR 508.1b lets a
+/// creature attack a player, a planeswalker or a battle.
+fn attack_target_reference(target: AttackTarget) -> TargetRef {
+    match target {
+        AttackTarget::Player(player) => TargetRef::Player(player),
+        AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => TargetRef::Object(id),
     }
 }
 

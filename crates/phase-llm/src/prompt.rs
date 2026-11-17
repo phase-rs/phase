@@ -18,7 +18,9 @@ pub struct LlmPrompt {
     /// The same decision in structured form, for providers that answer typed
     /// questions rather than chat (Jev). Built from the very strings `system`
     /// and `user` are, so every provider is shown the same position and the same
-    /// option domain.
+    /// option domain, with one exception: a typed Choice names one criterion,
+    /// so for a combat declaration, which a chat model composes from pairs, the
+    /// frame offers the engine's candidates instead.
     pub frame: DecisionFrame,
 }
 
@@ -60,6 +62,7 @@ pub struct DecisionFrame {
     /// The engine-authored question put about the position.
     pub instruction: String,
     /// Sanitized option lines ([`option_value`]); the index is the option number.
+    /// For a game decision these are always the engine's candidates.
     pub options: Vec<String>,
 }
 
@@ -160,6 +163,22 @@ pub const RESPONSE_CONTRACT: &str =
      {\"choice\": <the number of the option you pick>, \"reason\": \"<one short sentence>\"}\n\
      Do not wrap it in markdown. Do not explain outside the JSON. The \"choice\" \
      value must be one of the valid option numbers stated outside the data block.";
+
+/// The reply contract of every game decision. Most game decisions take one
+/// number; a combat declaration takes each attack or block the seat declares,
+/// as a list (`combat_declaration`). The decision message says which, outside
+/// the data block. One contract covers both, so a seat's system prompt stays
+/// the same from one decision to the next, and with it the seat's message
+/// thread ([`crate::game_thread`]), which is kept only under the system prompt
+/// it was opened with.
+pub const GAME_RESPONSE_CONTRACT: &str =
+    "Reply with ONLY a JSON object and nothing else, in this form:\n\
+     {\"choice\": <the number of the option you pick>, \"reason\": \"<one short sentence>\"}\n\
+     When the message outside the data block tells you to choose a list of options, \
+     \"choice\" is a JSON array of every number you choose instead:\n\
+     {\"choice\": [<the numbers of the options you pick>], \"reason\": \"<one short sentence>\"}\n\
+     Do not wrap it in markdown. Do not explain outside the JSON. Every number in \"choice\" \
+     must be one of the valid option numbers stated outside the data block.";
 
 /// Opening marker of the untrusted-data block. Paired with
 /// [`UNTRUSTED_DATA_END`] and explained to the model by
