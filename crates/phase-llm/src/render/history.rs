@@ -38,7 +38,9 @@ pub struct HistoryBudget {
     /// `0` keeps none.
     pub summarized_cycles: usize,
     /// Most recent entries of the turn cycle in progress, rendered verbatim.
-    /// `0` omits the whole history section, summaries included.
+    /// `0` omits the whole history section, summaries included. A
+    /// message-thread continue shows as many of the entries since the seat's
+    /// last decision verbatim ([`push_since_last_decision`]).
     pub current_cycle_entries: usize,
 }
 
@@ -135,34 +137,58 @@ fn push_cycle_summaries(
     cycle: TurnCycle,
     cycles_kept: usize,
 ) {
-    if cycles_kept == 0 || completed.is_empty() {
+    if cycles_kept == 0 {
         return;
-    }
-    // `BTreeMap` keyed by turn so turns render in game order however the log
-    // was interleaved, and the same history always renders identically.
-    let mut turns: BTreeMap<u32, Vec<&GameLogEntry>> = BTreeMap::new();
-    for entry in completed {
-        turns.entry(entry.turn).or_default().push(entry);
     }
     let newest_cycle = cycle.current_index().saturating_sub(1);
     let oldest_kept = newest_cycle.saturating_sub(u32::try_from(cycles_kept - 1).unwrap_or(0));
-    let lines: Vec<String> = turns
-        .into_iter()
-        .filter(|(turn, _)| cycle.index_of(*turn) >= oldest_kept)
-        .map(|(turn, entries)| summarize_turn(turn, &entries))
+    let kept: Vec<&GameLogEntry> = completed
+        .iter()
+        .copied()
+        .filter(|entry| cycle.index_of(entry.turn) >= oldest_kept)
         .collect();
-    if lines.is_empty() {
+    if kept.is_empty() {
         return;
     }
     out.push_str("\n--- EARLIER TURNS (key events, one line per turn) ---\n");
-    for line in lines {
-        out.push_str(&line);
+    push_turn_summaries(out, &kept, None);
+}
+
+/// One line per turn of `entries` ([`summarize_turn`]).
+///
+/// `BTreeMap` keyed by turn so turns render in game order however the log
+/// was interleaved, and the same history always renders identically.
+/// `continued` is a turn whose newer entries follow entry by entry
+/// ([`push_since_last_decision`]): its line covers only the entries here.
+fn push_turn_summaries(out: &mut String, entries: &[&GameLogEntry], continued: Option<u32>) {
+    let mut turns: BTreeMap<u32, Vec<&GameLogEntry>> = BTreeMap::new();
+    for entry in entries {
+        turns.entry(entry.turn).or_default().push(entry);
+    }
+    for (turn, turn_entries) in turns {
+        let part = if continued == Some(turn) {
+            TurnPart::Opening
+        } else {
+            TurnPart::Whole
+        };
+        out.push_str(&summarize_turn(turn, &turn_entries, part));
         out.push('\n');
     }
 }
 
-/// `T5 (Turn 5 — Player 1): Player 1 plays Mountain; Player 1 casts Shock`.
-fn summarize_turn(turn: u32, entries: &[&GameLogEntry]) -> String {
+/// How much of its turn a summary line covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnPart {
+    /// Every entry of the turn the section holds; none follows entry by
+    /// entry.
+    Whole,
+    /// The turn's older entries, whose newer ones follow entry by entry.
+    Opening,
+}
+
+/// `T5 (Turn 5 — Player 1): Player 1 plays Mountain; Player 1 casts Shock`,
+/// or for a turn's opening `T5 (Turn 5 — Player 1, continued below): …`.
+fn summarize_turn(turn: u32, entries: &[&GameLogEntry], part: TurnPart) -> String {
     let header = entries
         .iter()
         .find(|entry| entry.presentation.boundary == LogBoundary::Turn)
@@ -176,8 +202,15 @@ fn summarize_turn(turn: u32, entries: &[&GameLogEntry]) -> String {
         .map(|entry| render_log_entry(entry))
         .filter(|text| !text.is_empty())
         .collect();
+    // An opening is marked in the header, ahead of the events a clamp cuts
+    // from the end, and with no key events it does not call the turn quiet:
+    // its newer entries follow.
+    let (header, quiet) = match part {
+        TurnPart::Whole => (header, "nothing notable"),
+        TurnPart::Opening => (format!("{header}, continued below"), "nothing notable yet"),
+    };
     let body = if events.is_empty() {
-        "nothing notable".to_string()
+        quiet.to_string()
     } else {
         events.join("; ")
     };
@@ -214,19 +247,34 @@ pub fn unseen_timeline_entries(history: &[GameLogEntry], since: Option<u32>) -> 
 }
 
 /// Render `unseen` ([`unseen_timeline_entries`]) as the opening section of a
-/// message-thread continue, in the line format of the turn cycle in progress.
+/// message-thread continue.
 ///
 /// The thread already holds everything up to the seat's last answer, so this
-/// is the only history a continue carries, and every unseen entry is rendered:
-/// a caller with more than the seat's window to show starts a new thread
-/// instead, whose full request summarizes the older turns.
-pub fn push_since_last_decision(out: &mut String, unseen: &[&GameLogEntry]) {
-    out.push_str("--- SINCE YOUR LAST DECISION (oldest first) ---\n");
+/// is the only history a continue carries. The newest `limit` entries are
+/// rendered entry by entry, in the line format of the turn cycle in progress.
+/// Any older ones, which a busy round at a multiplayer table logs before the
+/// seat decides again, are folded into one line of key events per turn, as
+/// completed cycles are ([`push_turn_summaries`]): their context events are
+/// not carried, and a long turn's line is clamped. A turn the split falls
+/// inside gets a line for its older entries, marked as continued, and its
+/// newer entries below. `limit` is the seat's history window, so a continue
+/// shows no more entry by entry than its full request would.
+pub fn push_since_last_decision(out: &mut String, unseen: &[&GameLogEntry], limit: usize) {
     if unseen.is_empty() {
+        out.push_str("--- SINCE YOUR LAST DECISION (oldest first) ---\n");
         out.push_str("Nothing new has been logged.\n");
         return;
     }
-    push_timeline_lines(out, unseen, unseen.len());
+    let (earlier, latest) = unseen.split_at(unseen.len().saturating_sub(limit));
+    if !earlier.is_empty() {
+        out.push_str("--- SINCE YOUR LAST DECISION, EARLIER (key events, one line per turn) ---\n");
+        let continued = latest.first().map(|entry| entry.turn);
+        push_turn_summaries(out, earlier, continued);
+    }
+    if !latest.is_empty() {
+        out.push_str("--- SINCE YOUR LAST DECISION (oldest first) ---\n");
+        push_timeline_lines(out, latest, latest.len());
+    }
 }
 
 /// Whether an entry is one a player's default timeline shows: `Essential` and
@@ -592,9 +640,11 @@ mod tests {
             .collect()
     }
 
-    fn since(history: &[GameLogEntry], seen: Option<u32>) -> String {
+    /// The opening section of a continue, after the entry numbered `seen`,
+    /// with the newest `limit` timeline entries shown entry by entry.
+    fn since(history: &[GameLogEntry], seen: Option<u32>, limit: usize) -> String {
         let mut out = String::new();
-        push_since_last_decision(&mut out, &unseen_timeline_entries(history, seen));
+        push_since_last_decision(&mut out, &unseen_timeline_entries(history, seen), limit);
         out
     }
 
@@ -602,7 +652,7 @@ mod tests {
     fn only_entries_after_the_last_answer_are_rendered() {
         // Four entries per turn: entries 0-7 are turns 1-2, 8-11 turn 3.
         let history = numbered_game(3);
-        let out = since(&history, Some(7));
+        let out = since(&history, Some(7), BUDGET.current_cycle_entries);
         assert!(out.starts_with("--- SINCE YOUR LAST DECISION"), "{out}");
         assert!(out.contains("T3 PreCombatMain: cast on 3"), "{out}");
         assert!(out.contains("T3 PreCombatMain: target on 3"), "{out}");
@@ -620,7 +670,7 @@ mod tests {
     fn a_thread_with_nothing_new_says_so() {
         let history = numbered_game(2);
         let newest = history.last().map(|entry| entry.seq);
-        let out = since(&history, newest);
+        let out = since(&history, newest, BUDGET.current_cycle_entries);
         assert!(out.contains("Nothing new has been logged."), "{out}");
     }
 
@@ -631,15 +681,108 @@ mod tests {
         // Three timeline entries per turn: the turn start, the cast and the
         // target; the detail entry is not a timeline entry.
         assert_eq!(unseen.len(), 90);
-        let out = since(&history, None);
+        let out = since(&history, None, unseen.len());
         assert!(
-            out.contains("cast on 1") && out.contains("cast on 30"),
+            out.contains("T1 PreCombatMain: cast on 1\n")
+                && out.contains("T30 PreCombatMain: cast on 30\n"),
             "{out}"
         );
 
         let mut secret = hidden(31, "Player 0 draws Black Lotus");
         secret.seq = 500;
         assert!(unseen_timeline_entries(&[secret.clone()], None).is_empty());
-        assert!(!since(&[secret], None).contains("Black Lotus"));
+        assert!(!since(&[secret], None, BUDGET.current_cycle_entries).contains("Black Lotus"));
+    }
+
+    /// Exactly the window is shown entry by entry, as before any overflow:
+    /// one section, every entry on its own line.
+    #[test]
+    fn unseen_entries_that_fit_the_window_are_all_shown_entry_by_entry() {
+        // Three turns, three timeline entries each.
+        let history = numbered_game(3);
+        let out = since(&history, None, 9);
+        assert!(out.starts_with("--- SINCE YOUR LAST DECISION (oldest first) ---\n"));
+        assert!(!out.contains("EARLIER"), "{out}");
+        assert!(out.contains("T1 Untap: Turn 1 — Player 0\n"), "{out}");
+        assert!(out.contains("T1 PreCombatMain: target on 1\n"), "{out}");
+        assert!(out.contains("T3 PreCombatMain: target on 3\n"), "{out}");
+    }
+
+    /// The summary lines and the entry-by-entry lines of a continue's opening
+    /// section, each without its heading.
+    fn folded_and_shown(out: &str) -> (Vec<&str>, Vec<&str>) {
+        let earlier = out
+            .find("--- SINCE YOUR LAST DECISION, EARLIER (key events, one line per turn) ---\n")
+            .expect("a section for the entries older than the window");
+        let latest = out
+            .find("--- SINCE YOUR LAST DECISION (oldest first) ---\n")
+            .expect("a section for the window");
+        assert!(earlier < latest, "{out}");
+        let (summaries, window) = out.split_at(latest);
+        (
+            summaries.lines().skip(1).collect(),
+            window.lines().skip(1).collect(),
+        )
+    }
+
+    /// Entries older than the window move into one line per turn, carrying
+    /// the turn's key events, and the window stays entry by entry. A turn the
+    /// split falls inside shows on both sides of it, its line marked as
+    /// continued, and a context event older than the window is not carried.
+    #[test]
+    fn unseen_entries_past_the_window_fold_into_one_line_per_turn() {
+        let history = numbered_game(3);
+        // Nine timeline entries, four shown entry by entry: turn 1 and the
+        // start and cast of turn 2 are older than the window.
+        let out = since(&history, None, 4);
+        let (summaries, window) = folded_and_shown(&out);
+
+        assert_eq!(
+            summaries,
+            [
+                "T1 (Turn 1 — Player 0): cast on 1",
+                "T2 (Turn 2 — Player 1, continued below): cast on 2",
+            ],
+            "{out}"
+        );
+        // The key events of the turns older than the window, not their
+        // context events.
+        assert!(!out.contains("target on 1"), "{out}");
+        assert_eq!(
+            window,
+            [
+                "T2 PreCombatMain: target on 2",
+                "T3 Untap: Turn 3 — Player 0",
+                "T3 PreCombatMain: cast on 3",
+                "T3 PreCombatMain: target on 3",
+            ],
+            "{out}"
+        );
+    }
+
+    /// The split falls right after a turn's start: that turn's older entries
+    /// hold no key event, and its line says so without calling the turn
+    /// quiet, because its key events follow entry by entry.
+    #[test]
+    fn a_turn_continued_below_is_not_summarized_as_quiet() {
+        let history = numbered_game(3);
+        // Nine timeline entries, five shown entry by entry: turn 1 and the
+        // start of turn 2 are older than the window.
+        let out = since(&history, None, 5);
+        let (summaries, window) = folded_and_shown(&out);
+
+        assert_eq!(
+            summaries,
+            [
+                "T1 (Turn 1 — Player 0): cast on 1",
+                "T2 (Turn 2 — Player 1, continued below): nothing notable yet",
+            ],
+            "{out}"
+        );
+        assert_eq!(
+            window.first(),
+            Some(&"T2 PreCombatMain: cast on 2"),
+            "{out}"
+        );
     }
 }

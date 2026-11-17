@@ -21068,6 +21068,22 @@ fn evaluate_trigger_condition_with_source(
             )
             .is_some_and(|pid| eval_is_monarch(state, pid))
         }
+        // CR 122.1f + CR 508.5: "if defending player is poisoned" — poison is a
+        // player-counter read on the scoped player (CR 122.1f DEFINES "poisoned"
+        // as one or more poison counters), and CR 508.5 binds "defending player"
+        // to the player the triggering creature is attacking. CR 810.10a: in
+        // Two-Headed Giant a player is poisoned through their team's shared
+        // total, matching every other poison read.
+        TriggerCondition::IsPoisoned { player } => {
+            crate::game::quantity::resolve_player_scope_for_trigger_check(
+                state,
+                player,
+                controller,
+                source_context,
+                trigger_event,
+            )
+            .is_some_and(|pid| crate::game::players::team_poison_total(state, pid) >= 1)
+        }
         // CR 726.3: True when the controller has the initiative.
         TriggerCondition::IsInitiative => eval_is_initiative(state, controller),
         // CR 725.1: True when no player holds the monarch designation.

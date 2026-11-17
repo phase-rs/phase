@@ -5,7 +5,7 @@ use super::anthem::rewrite_self_pronoun_subject;
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
-use crate::types::ability::BlockPairDirection;
+use crate::types::ability::{BlockPairDirection, PlayerScope};
 use nom::bytes::complete::is_not;
 use nom::character::complete::anychar;
 use nom::combinator::{map_opt, not, success, value};
@@ -1259,6 +1259,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -4362,6 +4363,21 @@ pub(crate) fn parse_affected_scoped_static_condition(
     }
 }
 
+/// Check if a static condition is `PlayerIsPoisoned { DefendingPlayer }`.
+/// Chained Throatseeker's printed "can't attack unless defending player is
+/// poisoned" is a valid attack restriction (CR 508.1c), but the engine does
+/// not yet evaluate a poison condition against each candidate defender during
+/// attack legality, so such a rider stays `Unrecognized` as an honest gap.
+fn is_defending_player_poisoned_for_attack_restriction(cond: &StaticCondition) -> bool {
+    matches!(
+        cond,
+        StaticCondition::PlayerIsPoisoned {
+            player: PlayerScope::DefendingPlayer
+        }
+    ) || matches!(cond, StaticCondition::Not { condition } if is_defending_player_poisoned_for_attack_restriction(condition))
+        || matches!(cond, StaticCondition::And { conditions } | StaticCondition::Or { conditions } if conditions.iter().any(is_defending_player_poisoned_for_attack_restriction))
+}
+
 /// Parse the trailing " unless [condition]" clause of a combat-restriction
 /// static. Delegates `Not`-wrapping (with the `UnlessPay` raw-passthrough
 /// exception) to the shared `parse_unless_condition` combinator so the static
@@ -4378,6 +4394,17 @@ pub(crate) fn parse_unless_static_condition(
     let original = unless_text.original.trim().trim_end_matches('.');
     let lower = original.to_lowercase();
     if let Ok((_, condition)) = nom_condition::parse_unless_condition(&lower) {
+        // CR 508.1c + CR 122.1f: "defending player is poisoned" is a valid attack
+        // restriction, but candidate-defender attack-legality evaluation does not
+        // support a poison condition yet. Keep the rider `Unrecognized` so the
+        // restriction remains an honest gap.
+        if is_defending_player_poisoned_for_attack_restriction(&condition) {
+            return Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::Unrecognized {
+                    text: format!("unless {original}"),
+                }),
+            });
+        }
         return Some(condition);
     }
     // CR 611.3a: "gets +X/+X unless <condition>" applies the grant precisely when
