@@ -114,28 +114,50 @@ function gamePageTree() {
   );
 }
 
+/** CR 118.12a: a disjunctive unless prompt ("unless [player] pays A or B")
+ *  names its object the same way, through the cost-choice modal. */
+function chooseCostPrompt(player: number, affectedObject: number | null) {
+  return {
+    type: "UnlessPaymentChooseCost",
+    data: {
+      player,
+      costs: [
+        { type: "PayLife", amount: 3 },
+        { type: "PayLife", amount: 5 },
+      ],
+      pending_effect: null,
+      effect_description: "put that card into your hand",
+      affected_object: affectedObject,
+    },
+  };
+}
+
+function seedPrompt(waitingFor: unknown, activePlayerId: number) {
+  const cardA = gameObjectFactory.creature(1, 1).named("Revealed Alpha").withId(CARD_A).build();
+  const cardB = gameObjectFactory.creature(1, 1).named("Revealed Beta").withId(CARD_B).build();
+  const state = gameStateFactory.withPlayers(0, 1, 2).withObjects(cardA, cardB).build();
+  act(() => {
+    useGameStore.setState({
+      gameId: "unless-identity",
+      gameMode: "online",
+      gameState: state,
+      waitingFor: waitingFor as never,
+    });
+    useMultiplayerStore.setState({ activePlayerId, isSpectator: false });
+  });
+}
+
+function clearSession() {
+  act(() => {
+    useGameStore.setState({ gameId: null, gameState: null, waitingFor: null, adapter: null });
+    useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false });
+  });
+}
+
 describe("GamePage unless-payment card identity", () => {
   beforeEach(() => {
     dispatchMock.mockClear();
-    const cardA = gameObjectFactory
-      .creature(1, 1)
-      .named("Revealed Alpha")
-      .withId(CARD_A)
-      .build();
-    const cardB = gameObjectFactory
-      .creature(1, 1)
-      .named("Revealed Beta")
-      .withId(CARD_B)
-      .build();
-    const state = gameStateFactory.withPlayers(0, 1, 2).withObjects(cardA, cardB).build();
     act(() => {
-      useGameStore.setState({
-        gameId: "unless-identity",
-        gameMode: "online",
-        gameState: state,
-        waitingFor: paymentPrompt(1, CARD_A) as never,
-      });
-      useMultiplayerStore.setState({ activePlayerId: 1, isSpectator: false });
       usePreferencesStore.setState({
         multiplayerBoardLayout: "focused",
         multiplayerSplitLayoutNudgeDismissed: true,
@@ -146,13 +168,11 @@ describe("GamePage unless-payment card identity", () => {
 
   afterEach(() => {
     cleanup();
-    act(() => {
-      useGameStore.setState({ gameId: null, gameState: null, waitingFor: null, adapter: null });
-      useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false });
-    });
+    clearSession();
   });
 
   it("names the card each prompt decides for every opponent and after a restore", async () => {
+    seedPrompt(paymentPrompt(1, CARD_A), 1);
     render(gamePageTree());
 
     // First opponent's prompt for the first card.
@@ -165,6 +185,7 @@ describe("GamePage unless-payment card identity", () => {
       useGameStore.setState({ waitingFor: paymentPrompt(2, CARD_A) as never });
     });
     expect(await screen.findByText("Revealed Alpha")).toBeInTheDocument();
+    expect(screen.queryByText("Revealed Beta")).not.toBeInTheDocument();
 
     // The following card of the sequence replaces the prompt's identity.
     act(() => {
@@ -173,16 +194,35 @@ describe("GamePage unless-payment card identity", () => {
     expect(await screen.findByText("Revealed Beta")).toBeInTheDocument();
     expect(screen.queryByText("Revealed Alpha")).not.toBeInTheDocument();
 
-    // A reconnect restore republishes the engine prompt; the identity survives.
-    act(() => {
-      useGameStore.setState({ waitingFor: paymentPrompt(2, CARD_B) as never });
-    });
+    // Reconnect: the page is torn down with the session cleared, then a fresh
+    // mount receives the restored engine prompt. The identity is read again
+    // from the restored payload, not from anything the first mount held.
+    cleanup();
+    clearSession();
+    expect(screen.queryByText("Revealed Beta")).not.toBeInTheDocument();
+    seedPrompt(paymentPrompt(2, CARD_B), 2);
+    render(gamePageTree());
     expect(await screen.findByText("Revealed Beta")).toBeInTheDocument();
+    expect(screen.queryByText("Revealed Alpha")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /^Pay/ }));
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "PayUnlessCost",
       data: { pay: true },
     });
+  });
+
+  it("names the card in the disjunctive cost-choice prompt", async () => {
+    seedPrompt(chooseCostPrompt(1, CARD_B), 1);
+    render(gamePageTree());
+    expect(await screen.findByText("Revealed Beta")).toBeInTheDocument();
+    expect(screen.queryByText("Revealed Alpha")).not.toBeInTheDocument();
+
+    act(() => {
+      useMultiplayerStore.setState({ activePlayerId: 2 });
+      useGameStore.setState({ waitingFor: chooseCostPrompt(2, CARD_A) as never });
+    });
+    expect(await screen.findByText("Revealed Alpha")).toBeInTheDocument();
+    expect(screen.queryByText("Revealed Beta")).not.toBeInTheDocument();
   });
 });
