@@ -14,6 +14,7 @@
 
 use engine::ai_support::legal_actions;
 use engine::game::casting::legal_target_slots_for_castable_spell;
+use engine::game::combat::AttackTarget;
 use engine::game::keywords::effective_keyword_instances;
 use engine::game::scenario::{GameRunner, GameScenario, OptionalPolicy, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -21,6 +22,7 @@ use engine::types::ability::{
     AbilityCost, AdditionalCostOrigin, ModalSelectionCondition, ModalSelectionConstraint, TargetRef,
 };
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{CastingVariant, CastingVariantChoiceOption, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -1265,4 +1267,33 @@ fn a_sole_keyed_option_keeps_the_sacrificial_mana_choice() {
     assert_eq!(r.state().objects[&pet].zone, Zone::Graveyard);
     assert_eq!(r.state().objects[&think].zone, Zone::Exile);
     assert_eq!(r.state().players[0].hand.len(), 1, "drew one");
+}
+
+/// CR 702.62a + CR 608.2g: the suspend last-counter cast is a resolution cast;
+/// binding its permission keeps the suspend cast, so it has haste.
+#[test]
+fn a_suspend_cast_keeps_its_haste() {
+    let db = crate::support::shared_card_db().expect("the integration card database");
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::Untap);
+    let baloth = s.add_real_card(P0, "Durkwood Baloth", Zone::Exile, db);
+    s.with_counter(baloth, CounterType::Time, 1);
+    library(&mut s, 2);
+    let mut r = s.build();
+    for _ in 0..8 {
+        if matches!(
+            r.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ) {
+            break;
+        }
+        r.act(GameAction::PassPriority).expect("pass");
+    }
+    r.act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("the last counter offers the cast");
+    r.advance_until_stack_empty();
+    assert_eq!(r.state().objects[&baloth].zone, Zone::Battlefield);
+    r.advance_to_combat();
+    r.declare_attackers(&[(baloth, AttackTarget::Player(P1))])
+        .expect("haste: it attacks the turn it entered");
 }

@@ -58010,6 +58010,34 @@ fn resolution_face_projection_limits_aftermath_half_to_graveyard() {
     }
 }
 
+/// CR 702.127a + CR 608.2g: a resolution cast of an aftermath half from the
+/// graveyard stays an Aftermath cast, so a bounce exiles it rather than
+/// returning it to hand.
+#[test]
+fn resolution_cast_aftermath_half_exiles_when_bounced() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_two_spell_faces(&mut state, CoreType::Instant, CoreType::Sorcery);
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, spell, Zone::Graveyard, &mut events);
+    mark_resolution_test_back_face_as_aftermath(&mut state, spell);
+    let request =
+        resolution_test_request(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)));
+    initiate_cast_during_resolution(&mut state, PlayerId(0), spell, request, &mut events)
+        .expect("the aftermath half is cast during resolution");
+    let bounce = ResolvedAbility::new(
+        Effect::Bounce {
+            target: TargetFilter::StackSpell,
+            destination: None,
+            selection: crate::types::ability::BounceSelection::Targeted,
+        },
+        vec![TargetRef::Object(spell)],
+        ObjectId(100),
+        PlayerId(1),
+    );
+    crate::game::effects::bounce::resolve(&mut state, &bounce, &mut events).expect("bounce");
+    assert_eq!(state.objects[&spell].zone, Zone::Exile);
+}
+
 // --- Conduit of Worlds line-2 end-to-end (Steps 5/6/7) --------------------
 
 /// Conduit of Worlds' `{T}` ability, verbatim minus the (separately-tested) line

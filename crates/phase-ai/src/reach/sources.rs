@@ -200,8 +200,8 @@ impl ReachSource {
     /// The other casting options of a cast whose card has several instances of
     /// one alternative-cost keyword (CR 113.2c + CR 601.2b), each priced at its
     /// own engine-authored cost, at most [`MAX_ALTERNATIVES_PER_OBJECT`] of
-    /// them. The baseline option is among them only when the baseline priced
-    /// it at another method's cost (see [`Self::priced`]).
+    /// them. The baseline route is added too, beyond that cap, when the
+    /// baseline priced it at another method's cost (see [`Self::priced`]).
     pub(super) fn alternatives(&self, state: &GameState, ai_player: PlayerId) -> Vec<PricedSource> {
         let ManaCommitment::Cast { object_id, extra } = &self.commitment else {
             return Vec::new();
@@ -215,8 +215,8 @@ impl ReachSource {
             .and_then(|source| source.steps.first().and_then(|s| s.casting_option.clone()));
         // CR 118.9a: the baseline is priced at the preparation default's cost,
         // which can be another method's (an unpayable Escape's) than the
-        // route's. Then the route at its own price is an alternative too, kept
-        // ahead of the cap.
+        // route's. Then the route at its own price is an alternative too, added
+        // outside the cap so it displaces none of the others.
         let repriced_route = baseline
             .as_ref()
             .zip(route.as_ref())
@@ -229,11 +229,11 @@ impl ReachSource {
                 route
                     .as_ref()
                     .is_none_or(|base| !same_cast_option_but_instance(base, option))
-            });
+            })
+            .take(MAX_ALTERNATIVES_PER_OBJECT);
         repriced_route
             .into_iter()
             .chain(others)
-            .take(MAX_ALTERNATIVES_PER_OBJECT)
             .map(|option| {
                 self.with_option(option.mana_cost.plus(extra), Some(*object_id), Some(option))
             })

@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use engine::ai_support::flat_priority_actions;
 use engine::game::casting::{
-    current_casting_variant_choice_options, default_cast_election, effective_spell_cost,
+    base_auto_cast_option, current_casting_variant_choice_options, default_cast_election,
+    effective_spell_cost,
 };
 use engine::game::deck_loading::DeckEntry;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -1711,17 +1712,38 @@ fn attack_into_postcombat(runner: &mut GameRunner, card: ObjectId, clue: ObjectI
     panic!("the attack never reached the postcombat main phase");
 }
 
+/// The grants on [`newt_dart_board`]'s Lava Dart, in timestamp order. Each
+/// variant names the latest grant, the auto route.
+#[derive(Clone, Copy, PartialEq)]
+enum DartBoard {
+    /// One combat: the Doctor's grant as it attacks, then the Newt's {0} as it
+    /// deals damage, the latest grant and so the auto route.
+    Newt,
+    /// `Newt` plus Underworld Breach's Escape, which no card can pay.
+    BreachNewt,
+    /// Underworld Breach; Relentless Assault's added combat lets the Newt hit
+    /// before the Doctor attacks, so the Doctor's {2}{R}{G} is the auto route.
+    BreachDoctor,
+}
+
+const RELENTLESS_ASSAULT: &str = "Untap all creatures that attacked this turn. After this main phase, there is an additional combat phase followed by an additional main phase.";
+
 /// Lier, the Fugitive Doctor and a saddled Archmage's Newt give Lava Dart four
 /// flashback instances (native sacrifice, Lier {R}, the Doctor's {2}{R}{G},
 /// the Newt's {0}); Devil's Play is in the graveyard. Postcombat: P1 at 4 and
-/// exactly {R}{R}{R}{G} floating beside one tapped Mountain. With `breach`,
-/// Underworld Breach adds an Escape no card can pay (too few other cards).
-fn newt_dart_board(breach: bool) -> (GameRunner, ObjectId, ObjectId) {
+/// exactly {R}{R}{R}{G} floating beside one tapped Mountain.
+fn newt_dart_board(board: DartBoard) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = scenario(1, 10);
     let lier = lier(&mut scenario);
-    if breach {
+    if board != DartBoard::Newt {
         scenario.add_enchantment_from_oracle(P0, "Underworld Breach", UNDERWORLD_BREACH);
     }
+    let assault = (board == DartBoard::BreachDoctor).then(|| {
+        scenario
+            .add_spell_to_hand_from_oracle(P0, "Relentless Assault", false, RELENTLESS_ASSAULT)
+            .with_mana_cost(red(2, 2))
+            .id()
+    });
     let doctor = scenario
         .add_creature(P0, "The Fugitive Doctor", 4, 4)
         .as_legendary()
@@ -1770,14 +1792,25 @@ fn newt_dart_board(breach: bool) -> (GameRunner, ObjectId, ObjectId) {
         .expect("Lier saddles the Newt");
     runner.advance_until_stack_empty();
     assert!(runner.state().objects[&newt].is_saddled);
-    runner.advance_to_combat();
-    runner
-        .declare_attackers(&[
-            (doctor, engine::game::combat::AttackTarget::Player(P1)),
-            (newt, engine::game::combat::AttackTarget::Player(P1)),
-        ])
-        .expect("the Doctor and the Newt attack");
-    attack_into_postcombat(&mut runner, dart, clue);
+    let combats: &[&[ObjectId]] = if let Some(assault) = assault {
+        for color in [ManaType::Red; 4] {
+            let unit = ManaUnit::new(color, ObjectId(9_999), false, vec![]);
+            let _ = runner.state_mut().add_mana_to_pool(P0, unit);
+        }
+        runner.cast(assault).resolve();
+        &[&[newt], &[doctor]]
+    } else {
+        &[&[doctor, newt]]
+    };
+    for attackers in combats {
+        runner.advance_to_combat();
+        let attacks: Vec<_> = attackers
+            .iter()
+            .map(|&id| (id, engine::game::combat::AttackTarget::Player(P1)))
+            .collect();
+        runner.declare_attackers(&attacks).expect("they attack");
+        attack_into_postcombat(&mut runner, dart, clue);
+    }
     assert_eq!(runner.life(P1), 4);
     for color in [ManaType::Red, ManaType::Red, ManaType::Red, ManaType::Green] {
         let _ = runner
@@ -1805,7 +1838,7 @@ fn assert_newt_dart_lethal(runner: &mut GameRunner, dart: ObjectId, devils_play:
 /// Devil's Play (Lier {X}{R}, X = 3) reaches the opponent's 4.
 #[test]
 fn a_fourth_instance_baseline_is_priced() {
-    let (mut runner, dart, devils_play) = newt_dart_board(false);
+    let (mut runner, dart, devils_play) = newt_dart_board(DartBoard::Newt);
     let state = runner.state().clone();
     let options = current_casting_variant_choice_options(&state, P0, dart);
     assert_eq!(options.len(), 4, "{options:?}");
@@ -1820,7 +1853,7 @@ fn a_fourth_instance_baseline_is_priced() {
 /// must still price that route at {0}.
 #[test]
 fn a_route_priced_at_another_methods_cost_is_repriced() {
-    let (mut runner, dart, devils_play) = newt_dart_board(true);
+    let (mut runner, dart, devils_play) = newt_dart_board(DartBoard::BreachNewt);
     let state = runner.state().clone();
     let options = current_casting_variant_choice_options(&state, P0, dart);
     assert_eq!(options.len(), 4, "{options:?}");
@@ -1830,6 +1863,36 @@ fn a_route_priced_at_another_methods_cost_is_repriced() {
     let default = default_cast_election(&state, P0, dart).expect("castable");
     assert_eq!(default.variant, CastingVariant::Escape);
     assert_eq!(default.mana_cost.mana_value(), 1, "Escape's {{R}}");
+    assert_newt_dart_lethal(&mut runner, dart, devils_play);
+}
+
+/// The repriced route is added beyond the alternatives' cap: with the Doctor's
+/// {2}{R}{G} as the auto route, the Newt's {0} is still searched.
+#[test]
+fn a_repriced_route_displaces_no_alternative() {
+    let (mut runner, dart, devils_play) = newt_dart_board(DartBoard::BreachDoctor);
+    let state = runner.state().clone();
+    let options = current_casting_variant_choice_options(&state, P0, dart);
+    let values: Vec<_> = options.iter().map(|o| o.mana_cost.mana_value()).collect();
+    assert_eq!(values, [0, 1, 0, 4], "native, Lier, the Newt, the Doctor");
+    let route = base_auto_cast_option(&state, P0, dart).expect("an auto route");
+    assert_eq!(
+        route.mana_cost.mana_value(),
+        4,
+        "the Doctor's {{2}}{{R}}{{G}}"
+    );
+    let default = default_cast_election(&state, P0, dart).expect("castable");
+    assert_eq!(default.variant, CastingVariant::Escape, "unpayable Escape");
+    assert_eq!(
+        state.players[0].graveyard.len(),
+        3,
+        "two others: no exile three"
+    );
+    assert_eq!(
+        state.players[0].mana_pool.total(),
+        4,
+        "{{R}}{{R}}{{R}}{{G}}"
+    );
     assert_newt_dart_lethal(&mut runner, dart, devils_play);
 }
 

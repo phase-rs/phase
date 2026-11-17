@@ -10031,13 +10031,22 @@ fn prepare_spell_cast_announced(
     // CR 702.34 / CR 702.81 / CR 702.138 / CR 702.180: Cards in graveyard with
     // graveyard-cast keywords.
     let graveyard_keywords_open = graveyard_keyword_routes_open(state, obj, player);
-    let has_escape = graveyard_keywords_open
+    // CR 118.9a + CR 608.2g: a cast bound to a resolution offer's grant pays that
+    // grant's cost. A graveyard keyword whose own alternative cost would be a
+    // second one (Flashback, Escape, Harmonize, Mayhem, Disturb) is not its
+    // route, so no instance of it is elected. Routes with no alternative cost of
+    // their own (Retrace, Jump-start, Aftermath) and exile routes (Suspend) keep
+    // their meaning.
+    let keyword_alternative_costs_open =
+        graveyard_keywords_open && casting_permission_index_override.is_none();
+    let has_escape = keyword_alternative_costs_open
         && super::keywords::object_has_effective_keyword_kind(
             state,
             object_id,
             KeywordKind::Escape,
         );
-    let has_mayhem = mayhem_castable_from_graveyard(state, player, object_id);
+    let has_mayhem = casting_permission_index_override.is_none()
+        && mayhem_castable_from_graveyard(state, player, object_id);
     // CR 601.2a + CR 601.3: A graveyard grant's own condition controls whose
     // turn permits the cast. The exact permission is resolved once the casting
     // method is known (see `graveyard_authority`).
@@ -10441,21 +10450,21 @@ fn prepare_spell_cast_announced(
     // harmonize whose cost equals the card's mana cost (Songcrafter Mage) is paid
     // correctly. Tap cost reduction is handled in
     // casting_costs::pay_and_push_adventure.
-    let harmonize_cost = if graveyard_keywords_open {
+    let harmonize_cost = if keyword_alternative_costs_open {
         super::keywords::effective_harmonize_cost(state, object_id)
     } else {
         None
     };
 
     // CR 702.34a: Flashback — use flashback cost when casting from graveyard.
-    let flashback_cost = if graveyard_keywords_open {
+    let flashback_cost = if keyword_alternative_costs_open {
         super::keywords::effective_flashback_cost(state, object_id)
     } else {
         None
     };
 
     // CR 702.146a: Disturb — use disturb cost when casting from graveyard.
-    let disturb_cost = if graveyard_keywords_open {
+    let disturb_cost = if keyword_alternative_costs_open {
         super::keywords::effective_disturb_cost(state, object_id)
     } else {
         None
@@ -16025,11 +16034,17 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
         };
     };
     let may_choose_back = resolution_spell_face_choice_available(original);
-    // CR 118.9a + CR 608.2g: the indexed resolution permission is this cast's
-    // route. A `NormalCost` grant is a paid normal cast; an `Alternative` grant
-    // ("without paying its mana cost") is itself the one alternative cost. Either
-    // way no native graveyard alternative (Flashback, Escape, and so on) applies,
-    // and no keyword instance is elected, so preparation is bound to `Normal`.
+    // The permission provenance is the authority for whether this is a paid
+    // normal-cost cast.  Preserve that choice for either elected face: omitting
+    // the override here would let a native graveyard alternative (Flashback,
+    // Escape, and so on) replace a resolution `FullCost` offer during probing.
+    let force_normal_cost = matches!(
+        original.casting_permissions.get(permission_index.0),
+        Some(CastingPermission::ExileWithAltCost {
+            cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
+            ..
+        })
+    );
     let mut legality = ResolutionSpellFaceLegality {
         front: false,
         back: false,
@@ -16114,7 +16129,7 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
                 &projected,
                 player,
                 object_id,
-                Some(CastingVariant::Normal),
+                force_normal_cost.then_some(CastingVariant::Normal),
                 None,
                 Some(permission_index),
                 CastingMode::Actual,
@@ -18928,7 +18943,7 @@ pub(super) fn continue_resolution_modal_face_choice(
     choice: ResolutionModalFaceChoice,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (graveyard_replacement, cleanup) = state
+    let (graveyard_replacement, force_normal_cost, cleanup) = state
         .objects
         .get(&object_id)
         .and_then(|object| object.casting_permissions.get(choice.permission_index.0))
@@ -18937,8 +18952,16 @@ pub(super) fn continue_resolution_modal_face_choice(
                 granted_to: Some(grantee),
                 resolution_cleanup: Some(cleanup),
                 graveyard_replacement,
+                cost_provenance,
                 ..
-            } if *grantee == player => Some((graveyard_replacement.clone(), cleanup.clone())),
+            } if *grantee == player => Some((
+                graveyard_replacement.clone(),
+                matches!(
+                    cost_provenance,
+                    crate::types::ability::ExileGrantCostProvenance::NormalCost
+                ),
+                cleanup.clone(),
+            )),
             _ => None,
         })
         .ok_or_else(|| {
@@ -18969,14 +18992,11 @@ pub(super) fn continue_resolution_modal_face_choice(
             destination,
         );
     }
-    // CR 118.9a + CR 608.2g: bound to the indexed permission's route, exactly
-    // as the face probe prepares it (see
-    // `resolution_spell_face_legality_for_permission_from_flushed_state`).
     let mut prepared = prepare_spell_cast_with_variant_override_inner(
         state,
         player,
         object_id,
-        Some(CastingVariant::Normal),
+        force_normal_cost.then_some(CastingVariant::Normal),
         None,
         Some(choice.permission_index),
         CastingMode::Actual,
