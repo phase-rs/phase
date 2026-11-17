@@ -59794,18 +59794,15 @@ fn chain_most_recent_clause_is_cast_grant(clauses: &[ClauseIr]) -> bool {
         })
 }
 
-/// CR 603.7: Checks whether an earlier clause in this chain granted a card-casting
-/// permission that has a declared card target (e.g. `Effect::CastFromZone`).
-///
-/// The delayed trigger condition emitted by `strip_cast_this_way_gate` scopes itself with
-/// `valid_card: ParentTarget`, which binds at runtime to the granting ability's chosen target.
-/// A chain whose cast permission declared no card target (e.g. Discord, Lord of Disharmony:
-/// "you may cast a copy of a spell with that name") has no object target for `ParentTarget`
-/// to bind to, so its consequent is kept unwrapped as a sequential instruction.
 /// CR 603.7a + CR 608.2c: whether the antecedent a temporal anaphor needs is
 /// established by the clauses parsed so far. "That turn's end step" names the
-/// extra turn an earlier clause of the same chain grants (Final Fortune); it does not name "that player's next turn" in a
-/// different chain (Oracle en-Vec), whose referent is not a granted turn.
+/// extra turn an earlier clause of the same chain grants (Final Fortune); it
+/// does not name "that player's next turn" in a different chain (Oracle
+/// en-Vec), whose referent is not a granted turn.
+///
+/// WILDCARD-FREE on purpose, like `render_delayed_condition_descriptions`: a new
+/// `DelayedTriggerCondition` must decide here whether it carries an anaphoric
+/// antecedent, so adding one is a compile error rather than a silent `true`.
 fn temporal_antecedent_is_proven(
     condition: &DelayedTriggerCondition,
     clauses: &[ClauseIr],
@@ -59814,10 +59811,30 @@ fn temporal_antecedent_is_proven(
         DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. } => clauses
             .iter()
             .any(|clause| matches!(clause.parsed.effect, Effect::ExtraTurn { .. })),
-        _ => true,
+        // No anaphoric antecedent to prove: each names its own phase, event or
+        // object (`AtBeginningOfAddedPhase` is bound to its added phase by the
+        // delayed-trigger resolver, not by the chain).
+        DelayedTriggerCondition::AtNextPhase { .. }
+        | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
+        | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        | DelayedTriggerCondition::WhenLeavesPlay { .. }
+        | DelayedTriggerCondition::WhenDies { .. }
+        | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
+        | DelayedTriggerCondition::WhenEntersBattlefield { .. }
+        | DelayedTriggerCondition::WhenDiesOrExiled { .. }
+        | DelayedTriggerCondition::WheneverEvent { .. }
+        | DelayedTriggerCondition::WhenNextEvent { .. } => true,
     }
 }
 
+/// CR 603.7: Checks whether an earlier clause in this chain granted a card-casting
+/// permission that has a declared card target (e.g. `Effect::CastFromZone`).
+///
+/// The delayed trigger condition emitted by `strip_cast_this_way_gate` scopes itself with
+/// `valid_card: ParentTarget`, which binds at runtime to the granting ability's chosen target.
+/// A chain whose cast permission declared no card target (e.g. Discord, Lord of Disharmony:
+/// "you may cast a copy of a spell with that name") has no object target for `ParentTarget`
+/// to bind to, so its consequent is kept unwrapped as a sequential instruction.
 fn chain_granted_cast_permission_has_card_target(clauses: &[ClauseIr]) -> bool {
     for clause in clauses.iter().rev() {
         let target = match &clause.parsed.effect {
