@@ -555,6 +555,7 @@ pub(crate) fn eliminate_players(
                         trigger_event: None,
                         effect_description: None,
                         remaining: Vec::new(),
+                        affected_object: None,
                         repeat: None,
                     };
                     state.pending_player_scope_unless_payment = Some(pending);
@@ -591,6 +592,10 @@ pub(crate) fn eliminate_players(
     // left (CR 800.4d) and the drain puts the rest on the stack together. CR 104.1:
     // once the game is over, nothing triggered goes on the stack.
     if departure_triggers == DepartureTriggers::CollectedByDeparture && game_over_winner.is_none() {
+        // CR 800.4a + CR 603.2: the control changes this departure's layer
+        // passes derived (a "for as long as" control duration that ended with
+        // its departed source) are part of what it collects.
+        super::layers::publish_layer_control_changes(state, events);
         super::triggers::collect_unclaimed_triggers_into_deferred(
             state,
             events,
@@ -2846,6 +2851,7 @@ mod tests {
         PendingReplacement, PendingSpellResolution, PendingZoneChangeDelivery, PromptSourceBinding,
         ResolutionSourceRelatch, ScheduledTurnControl, StackEntry, StackEntryKind,
     };
+    use crate::types::identifiers::ExtraTurnId;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
         ObjectIncarnationRef, TriggerFiring,
@@ -4486,6 +4492,7 @@ mod tests {
         state.extra_turns = vec![ExtraTurn {
             player: PlayerId(2),
             anchor: PlayerId(2),
+            id: ExtraTurnId(1),
         }];
         let queued_before = state.extra_turns.clone();
         let mut events = Vec::new();

@@ -2480,7 +2480,7 @@ mod tests {
             iterated_counter_kinds: vec![],
             next_iteration: 1,
             total_iterations: 2,
-            copy_order_fixed: None,
+            order_fixed: None,
         };
         let held = |holder: Option<PlayerChoiceHolder<'_>>| match holder {
             Some(PlayerChoiceHolder::Continuation(chain)) => {

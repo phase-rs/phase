@@ -28,10 +28,10 @@ use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
     Comparator, ControllerRef, DamageChannel, DigRestOrder, DigRestRemainder, DigSource, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, FilterProp, LibraryPosition, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId, SharedQuality,
-    SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink, TapStateChange,
-    TargetFilter, TypeFilter, TypedFilter,
+    Effect, EffectOutcomeSignal, EffectScope, FilterProp, InstructionJoin, LibraryPosition,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
+    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
+    TapStateChange, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -3189,6 +3189,12 @@ pub(crate) fn assemble_effect_chain_with_provenance(
         // which the referent walk in `oracle_effect::mod` also consults.
         def.sub_link = sub_link_after_boundary(prev_boundary);
         def.sibling_condition = clause_ir.sibling_condition;
+        // CR 608.2c: a chunk the chunk loop stamped as a further target slot
+        // keeps that identity; a clause parse's own list marker (a splitter
+        // product on the clause head) is never `ListSlot`, so this only adds.
+        if clause_ir.instruction_join == InstructionJoin::ListSlot {
+            def.instruction_join = InstructionJoin::ListSlot;
+        }
         // CR 608.2c + CR 614.1a: carry the clause seam's deferred guard verdict onto the
         // def, so `parser::oracle::resolve_unlowered_guards` can settle it on the
         // assembled tree — the only place the body's final parent is visible.

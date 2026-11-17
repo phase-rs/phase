@@ -285,15 +285,15 @@ fn mana_flare_echo_routes_choice_and_bonus_to_tapper() {
 const MIRARI_ORACLE: &str = "Creatures you control get +1/+1.\nWhenever you tap a land for mana, add one mana of any type that land produced.";
 
 /// Cost-payment control: auto-tapping Simic Growth Chamber to help pay for a
-/// spell while Mirari's Wake lives must pause the payment on the same
-/// SingleColor choice — with no stack entry — and resume payment afterwards.
+/// spell while Mirari's Wake lives selects one exact bonus and completes
+/// inline, with no triggered stack entry or unanswered color choice.
 /// CR 605.4a keeps the bonus spendable by the thing it resumes into (the
 /// automatic payment finalizer here). Reverting the choice contract deposits
 /// bonus {G}{U} with no prompt; the leftover-pool asserts below catch both
 /// that and any resumption failure (an unresumed payment never puts the spell
 /// on the stack).
 #[test]
-fn mirari_echo_choice_pauses_cost_payment_without_stack() {
+fn mirari_selected_echo_completes_cost_payment_without_trigger_stack() {
     fn floating_colorless(n: usize) -> Vec<ManaUnit> {
         (0..n)
             .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
@@ -316,7 +316,7 @@ fn mirari_echo_choice_pauses_cost_payment_without_stack() {
     let mut runner = scenario.build();
     let threat_card = runner.state().objects[&threat_id].card_id;
 
-    runner
+    let result = runner
         .act(GameAction::CastSpell {
             object_id: threat_id,
             card_id: threat_card,
@@ -324,8 +324,7 @@ fn mirari_echo_choice_pauses_cost_payment_without_stack() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("starting the cast must succeed");
-    // Mid-payment: the echo paused with no TRIGGERED entry on the stack (the
-    // one entry present is the spell being cast itself) and no priority pass.
+    // Only the spell is stacked; the selected mana trigger resolves inline.
     assert_eq!(
         runner.state().stack.len(),
         1,
@@ -338,37 +337,37 @@ fn mirari_echo_choice_pauses_cost_payment_without_stack() {
         ),
         "the single stack entry must be the spell being cast"
     );
-    match &runner.state().waiting_for {
-        WaitingFor::ChooseManaColor {
-            player,
-            choice: ManaChoicePrompt::SingleColor { options },
-            ..
-        } => {
-            assert_eq!(*player, P0, "P0 pays, so P0 chooses");
-            assert_eq!(options.len(), 2);
-            assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
-        }
-        other => panic!("expected a SingleColor echo choice mid-payment, got {other:?}"),
-    }
-
-    runner
-        .act(GameAction::ChooseManaColor {
-            choice: ManaChoice::SingleColor(ManaType::Green),
-            count: 1,
-        })
-        .expect("answering Green must resume payment");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "the selected ordinary echo must complete payment inline"
+    );
     // Payment resumed and completed: the spell is on the stack, and exactly
     // the chosen bonus {G} is left over (3 floating + base {G}{U} + bonus {G}
     // minus {3}{G}{U}).
     assert_eq!(
         runner.state().stack.len(),
         1,
-        "the paid spell must reach the stack after the choice resumes payment"
+        "the paid spell must reach the stack after selected payment completes"
     );
+    let chosen = result
+        .events
+        .iter()
+        .find_map(|event| match event {
+            GameEvent::ManaAdded {
+                source_id,
+                mana_type,
+                ..
+            } if runner.state().objects[source_id].name == "Mirari's Wake" => Some(*mana_type),
+            _ => None,
+        })
+        .expect("the selected Wake must actually produce its bonus");
     assert_eq!(
-        count(&runner, P0, ManaType::Green),
+        count(&runner, P0, chosen),
         1,
-        "exactly the chosen bonus {{G}} remains"
+        "exactly the selected bonus remains"
     );
     assert_eq!(
         runner.state().players[P0.0 as usize].mana_pool.total(),
@@ -381,11 +380,8 @@ fn mirari_echo_choice_pauses_cost_payment_without_stack() {
 /// TWO floating colorless, the chamber's base {G}{U} is insufficient for
 /// {3}{G}{U} (2 + 2 = 4 < 5) — exactly one chosen echo bonus is REQUIRED.
 /// Before the pre-spend continuation fix this cast failed "Cannot pay mana
-/// cost" (the skipping inline loop omitted the bonus from affordability and
-/// the pre-spend pool). Now the live payment pauses for the real choice
-/// BEFORE spending and resumes this same payment with the bonus.
-/// Reverting the pre-spend suspension fails at `CastSpell` (no prompt);
-/// reverting the preview accounting fails castability (not offered).
+/// cost" because the echo was missing from the payment. The selected source
+/// witness must now produce and spend exactly that bonus inline.
 #[test]
 fn mirari_echo_bonus_required_for_payment_with_two_floating() {
     fn floating_colorless(n: usize) -> Vec<ManaUnit> {
@@ -398,8 +394,7 @@ fn mirari_echo_bonus_required_for_payment_with_two_floating() {
     scenario.add_enchantment_from_oracle(P0, "Mirari's Wake", MIRARI_ORACLE);
     scenario.add_land_from_oracle(P0, "Simic Growth Chamber", CHAMBER_ORACLE);
     // Two floating colorless + base {G}{U} = 4 mana; {3}{G}{U} needs 5.
-    // The auto-tapper must take the chamber, then pause for the echo choice;
-    // the chosen bonus funds the third generic.
+    // The auto-tapper selects the Chamber and the bonus funds the third generic.
     scenario.with_mana_pool(P0, floating_colorless(2));
     let threat_id = scenario
         .add_creature_to_hand(P0, "Big Threat", 6, 6)
@@ -418,10 +413,8 @@ fn mirari_echo_bonus_required_for_payment_with_two_floating() {
             targets: vec![],
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("cast with bonus-dependent payment must pause for choice, not fail Cannot pay");
-    // Pre-spend pause: the spell being cast is already on the stack (601.2a),
-    // the echo adds no TRIGGERED entry, and the choice is required (no
-    // Priority, no auto-completion).
+        .expect("the selected echo must complete the bonus-dependent payment");
+    // CR 601.2a + CR 605.4a: only the paid spell is on the stack.
     assert_eq!(
         runner.state().stack.len(),
         1,
@@ -434,32 +427,20 @@ fn mirari_echo_bonus_required_for_payment_with_two_floating() {
         ),
         "the single stack entry must be the spell being cast"
     );
-    match &runner.state().waiting_for {
-        WaitingFor::ChooseManaColor {
-            player,
-            choice: ManaChoicePrompt::SingleColor { options },
-            ..
-        } => {
-            assert_eq!(*player, P0, "P0 pays, so P0 chooses");
-            assert_eq!(options.len(), 2);
-            assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
-        }
-        other => panic!("expected a required SingleColor echo choice pre-spend, got {other:?}"),
-    }
-
-    runner
-        .act(GameAction::ChooseManaColor {
-            choice: ManaChoice::SingleColor(ManaType::Green),
-            count: 1,
-        })
-        .expect("answering Green must resume payment");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "the selected ordinary echo must complete payment inline"
+    );
     // Payment resumed and completed: the spell is on the stack, the pool is
     // empty (2 floating + base {G}{U} + bonus {G} minus {3}{G}{U} = 0), and
     // the continuation is terminal Priority with no stranded carrier.
     assert_eq!(
         runner.state().stack.len(),
         1,
-        "the paid spell must reach the stack after the choice resumes payment"
+        "the paid spell must reach the stack after selected payment completes"
     );
     assert_eq!(
         runner.state().players[P0.0 as usize].mana_pool.total(),
@@ -481,9 +462,8 @@ fn mirari_echo_bonus_required_for_payment_with_two_floating() {
 /// Mirari's Wakes plus Simic Growth Chamber ({G}{U}), empty pool, casting
 /// {2}{G}{U}: base {G}{U} plus one chosen bonus per Wake. A unioned
 /// single-type preview rejects this (one virtual mana cannot cover it);
-/// per-firing accounting admits it, and the live payment pauses twice in
-/// sequence — answering once must leave the second choice pending, not
-/// complete the payment.
+/// per-firing accounting admits it, and both exact selected bonuses settle
+/// inline before spending. Neither firing may be omitted or duplicated.
 #[test]
 fn two_wake_echoes_fund_cost_requiring_two_bonuses() {
     let mut scenario = GameScenario::new();
@@ -516,50 +496,19 @@ fn two_wake_echoes_fund_cost_requiring_two_bonuses() {
             targets: vec![],
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("first echo firing must pause for choice, not fail Cannot pay");
-    match &runner.state().waiting_for {
-        WaitingFor::ChooseManaColor {
-            player,
-            choice: ManaChoicePrompt::SingleColor { options },
-            ..
-        } => {
-            assert_eq!(*player, P0, "P0 pays, so P0 chooses");
-            assert_eq!(options.len(), 2);
-            assert!(options.contains(&ManaType::Green) && options.contains(&ManaType::Blue));
-        }
-        other => panic!("expected the first SingleColor echo choice, got {other:?}"),
-    }
-
-    runner
-        .act(GameAction::ChooseManaColor {
-            choice: ManaChoice::SingleColor(ManaType::Green),
-            count: 1,
-        })
-        .expect("answering Green must reach the second firing, not complete payment");
-    // The second Wake's firing pauses again: still choosing, no Priority yet.
-    match &runner.state().waiting_for {
-        WaitingFor::ChooseManaColor {
-            player,
-            choice: ManaChoicePrompt::SingleColor { options },
-            ..
-        } => {
-            assert_eq!(*player, P0, "P0 still chooses");
-            assert_eq!(options.len(), 2);
-        }
-        other => panic!("expected the second SingleColor echo choice, got {other:?}"),
-    }
-
-    runner
-        .act(GameAction::ChooseManaColor {
-            choice: ManaChoice::SingleColor(ManaType::Blue),
-            count: 1,
-        })
-        .expect("answering Blue must resume payment");
+        .expect("both selected echo firings must complete inline");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player: P0 }
+        ),
+        "the selected ordinary echo must complete payment inline"
+    );
     // Base {G}{U} + bonus {G} + bonus {U} minus {2}{G}{U}: nothing left.
     assert_eq!(
         runner.state().stack.len(),
         1,
-        "the paid spell must reach the stack after both choices resume payment"
+        "the paid spell must reach the stack after both selected bonuses settle"
     );
     assert_eq!(
         runner.state().players[P0.0 as usize].mana_pool.total(),
