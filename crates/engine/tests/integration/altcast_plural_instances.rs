@@ -1297,3 +1297,93 @@ fn a_suspend_cast_keeps_its_haste() {
     r.declare_attackers(&[(baloth, AttackTarget::Player(P1))])
         .expect("haste: it attacks the turn it entered");
 }
+
+/// CR 608.2g + CR 601.2a: a free cast bound to Invoke Calamity's permission
+/// elects no other graveyard permission, so Kess, Dissident Mage's
+/// once-per-turn slot stays unused for a later cast.
+#[test]
+fn a_resolution_free_cast_leaves_kess_unused() {
+    let db = crate::support::shared_card_db().expect("the integration card database");
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    s.add_real_card(P0, "Kess, Dissident Mage", Zone::Battlefield, db);
+    let invoke = s.add_real_card(P0, "Invoke Calamity", Zone::Hand, db);
+    let da = deep_analysis(&mut s);
+    let divination = s.add_real_card(P0, "Divination", Zone::Graveyard, db);
+    library(&mut s, 6);
+    pool(&mut s, P0, "RRRRC");
+    let mut r = s.build();
+    start_cast(&mut r, invoke);
+    r.act(GameAction::PassPriority).expect("P0 passes");
+    r.act(GameAction::PassPriority).expect("P1 passes");
+    let selection = Some(da);
+    r.act(GameAction::FreeCastWindowChoice { selection })
+        .expect("free cast");
+    let target = Some(player(P0));
+    r.act(GameAction::ChooseTarget { target }).expect("target");
+    r.advance_until_stack_empty();
+    assert_eq!(r.life(P0), 20, "no flashback life");
+    assert_eq!(r.state().players[0].hand.len(), 2, "drew two");
+    assert_settled(&r);
+    fund(&mut r, "UUU");
+    assert_eq!(casts_offered(&r, divination), 1, "Kess is unused");
+    r.cast(divination).resolve();
+    assert_eq!(r.state().players[0].hand.len(), 4, "drew two more");
+    assert_eq!(r.state().objects[&divination].zone, Zone::Exile, "Kess");
+    assert_settled(&r);
+}
+
+/// CR 601.2g-h: the menu answer classifies payment from the elected option.
+/// Printed {2}{U} needs Blood Pet, so it is asked for and kept until chosen;
+/// Lier's {1}{U} is paid by the two Islands and Blood Pet stays.
+#[test]
+fn a_menu_answer_keeps_the_sacrificial_mana_choice() {
+    let db = crate::support::shared_card_db().expect("the integration card database");
+    let printed = Keyword::Flashback(FlashbackCost::Mana(cost(2, vec![ManaCostShard::Blue])));
+    for keyword in [printed, lier_flashback()] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        lier(&mut s);
+        let think = s.add_real_card(P0, "Think Twice", Zone::Graveyard, db);
+        s.add_real_card(P0, "Island", Zone::Battlefield, db);
+        s.add_real_card(P0, "Island", Zone::Battlefield, db);
+        let pet = s.add_real_card(P0, "Blood Pet", Zone::Battlefield, db);
+        library(&mut s, 2);
+        let mut r = s.build();
+        let cast = legal_actions(r.state()).into_iter().find(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == think),
+        );
+        r.act(cast.expect("Think Twice is offered"))
+            .expect("the cast is accepted");
+        let WaitingFor::CastingVariantChoice { options, .. } = r.state().waiting_for.clone() else {
+            panic!("two options, got {:?}", r.state().waiting_for);
+        };
+        assert_eq!(options.len(), 2, "{options:?}");
+        let index = options
+            .iter()
+            .position(|o| o.alternative_cost_keyword.as_ref() == Some(&keyword));
+        let index = index.expect("the instance is offered");
+        r.act(GameAction::ChooseCastingVariant { index })
+            .expect("the option is chosen");
+        let needs_pet = keyword != lier_flashback();
+        if needs_pet {
+            let WaitingFor::ManaSourceSelection { options, .. } = &r.state().waiting_for else {
+                panic!("a mana-source choice, got {:?}", r.state().waiting_for);
+            };
+            assert_eq!(r.state().objects[&pet].zone, Zone::Battlefield);
+            let selection = options.iter().find(|o| o.source.object_id == pet).cloned();
+            let selection = selection.expect("Blood Pet is offered");
+            r.act(GameAction::ActivateManaSource { selection })
+                .expect("Blood Pet pays");
+        }
+        finish(&mut r, &keyword, Answers::default());
+        let pet_zone = if needs_pet {
+            Zone::Graveyard
+        } else {
+            Zone::Battlefield
+        };
+        assert_eq!(r.state().objects[&pet].zone, pet_zone);
+        assert_eq!(r.state().objects[&think].zone, Zone::Exile);
+        assert_eq!(r.state().players[0].hand.len(), 1, "drew one");
+    }
+}

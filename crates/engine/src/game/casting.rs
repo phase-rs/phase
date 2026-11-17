@@ -10052,8 +10052,11 @@ fn prepare_spell_cast_announced(
         && mayhem_castable_from_graveyard(state, player, object_id);
     // CR 601.2a + CR 601.3: A graveyard grant's own condition controls whose
     // turn permits the cast. The exact permission is resolved once the casting
-    // method is known (see `graveyard_authority`).
-    let graveyard_permission_route = obj.zone == Zone::Graveyard;
+    // method is known (see `graveyard_authority`). A cast bound to an indexed
+    // resolution permission (CR 608.2g) already has its authority, so no
+    // graveyard grant (Kess, Dissident Mage) is elected for it.
+    let graveyard_permission_route =
+        obj.zone == Zone::Graveyard && casting_permission_index_override.is_none();
     let has_graveyard_alt_cost = has_graveyard_timed_alt_cost_permission(state, obj, player);
     let has_hand_alt_cost = has_hand_alt_cost_permission(state, obj, player);
     // CR 608.2g: A free-cast window (Invoke Calamity) or targeted
@@ -18034,6 +18037,24 @@ pub fn handle_casting_variant_choice_with_payment_mode(
             "Chosen cast variant is no longer legal".to_string(),
         ));
     }
+    // CR 601.2g-h: the answer elects the option this cast pays, so an automatic
+    // mode is classified from that option's prepared cost under its payment
+    // terms, as a cast offered with one route is when offered. An explicit mode
+    // is kept.
+    let payment_mode = match payment_mode {
+        CastPaymentMode::Auto => {
+            let options_state = &candidate.transformed_state;
+            let terms = prepared_payment_terms_state(options_state, &candidate.prepared);
+            payment_mode_for_prepared_spell_cost(
+                terms.as_ref().unwrap_or(options_state),
+                player,
+                object_id,
+                &candidate.prepared.mana_cost,
+                &super::mana_sources::activatable_mana_source_selections(state, player),
+            )
+        }
+        CastPaymentMode::AutoExceptSacrificialMana | CastPaymentMode::Manual => payment_mode,
+    };
     continue_with_prepared_casting_variant(state, player, candidate, payment_mode, events)
 }
 
