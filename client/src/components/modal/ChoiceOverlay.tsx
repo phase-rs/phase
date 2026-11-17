@@ -7,21 +7,41 @@ import { useHorizontalScroll } from "../../hooks/useHorizontalScroll.ts";
 import { useOptionalDialogPeek } from "./dialogPeekContext.ts";
 import { PeekButton } from "./DialogShell.tsx";
 
+type ChoiceOverlayProps = {
+  title: string;
+  children: React.ReactNode;
+  widthClassName?: string;
+  maxWidthClassName?: string;
+} & (
+  | {
+      subtitle: string;
+      footer?: React.ReactNode;
+      headerActions?: never;
+    }
+  | {
+      /**
+       * Opt-in single-line header, for a short screen where every line of
+       * chrome takes height from the cards. The title is the header's only
+       * text and these actions sit at the end of its line, so the prompt
+       * passes its instruction as the title and its confirm here. The
+       * eyebrow, subtitle and footer are left out: the title already says
+       * what to do, and the confirm has moved up beside it.
+       */
+      headerActions: React.ReactElement;
+      subtitle?: never;
+      footer?: never;
+    }
+);
+
 export function ChoiceOverlay({
   title,
   subtitle,
+  headerActions,
   children,
   footer,
   widthClassName = "w-full",
   maxWidthClassName = "max-w-6xl",
-}: {
-  title: string;
-  subtitle: string;
-  children: React.ReactNode;
-  footer?: React.ReactNode;
-  widthClassName?: string;
-  maxWidthClassName?: string;
-}) {
+}: ChoiceOverlayProps) {
   const { t } = useTranslation("game");
   const contentRef = useRef<HTMLDivElement>(null);
   const peek = useOptionalDialogPeek();
@@ -65,17 +85,33 @@ export function ChoiceOverlay({
           transition={{ duration: 0.24, ease: "easeOut" }}
         >
           <div className="modal-header-compact relative shrink-0 border-b border-white/10">
-            <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500 lg:absolute lg:right-4 lg:top-3">
-              {t("choiceOverlay.eyebrow")}
-            </div>
-            <div className="lg:flex lg:items-baseline lg:gap-3">
-              <h2 className="shrink-0 font-semibold text-white">
-                {title}
-              </h2>
-              <p className="modal-subtitle text-slate-400 lg:mt-0">
-                {subtitle}
-              </p>
-            </div>
+            {headerActions !== undefined ? (
+              // The actions sit in the screen's top corner, which a landscape
+              // phone's rounded corner cuts into under `viewport-fit=cover`, so
+              // the line keeps clear of the safe-area insets (0 elsewhere).
+              <div className="flex items-center gap-3 pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]">
+                <h2 className="min-w-0 flex-1 font-semibold text-white">
+                  {title}
+                </h2>
+                <div className="flex shrink-0 items-center gap-2">
+                  {headerActions}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="modal-eyebrow uppercase tracking-[0.24em] text-slate-500 lg:absolute lg:right-4 lg:top-3">
+                  {t("choiceOverlay.eyebrow")}
+                </div>
+                <div className="lg:flex lg:items-baseline lg:gap-3">
+                  <h2 className="shrink-0 font-semibold text-white">
+                    {title}
+                  </h2>
+                  <p className="modal-subtitle text-slate-400 lg:mt-0">
+                    {subtitle}
+                  </p>
+                </div>
+              </>
+            )}
           </div>
           {/* When the peek tab is mounted it overlaps the card's right edge (~24px),
               so reserve right clearance to keep edge-aligned interactive content

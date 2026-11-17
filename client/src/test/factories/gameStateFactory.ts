@@ -32,6 +32,9 @@ type TriggerTargetSelectionWaitingFor = Extract<
   { type: "TriggerTargetSelection" }
 >;
 type HeroEventChoiceWaitingFor = Extract<WaitingFor, { type: "HeroEventChoice" }>;
+type DiscardToHandSizeWaitingFor = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
+type DiscardChoiceWaitingFor = Extract<WaitingFor, { type: "DiscardChoice" }>;
+type PayCostWaitingFor = Extract<WaitingFor, { type: "PayCost" }>;
 type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
 type PayAmountChoiceWaitingFor = Extract<WaitingFor, { type: "PayAmountChoice" }>;
 type ManaSourceSelectionWaitingFor = Extract<WaitingFor, { type: "ManaSourceSelection" }>;
@@ -386,6 +389,48 @@ export const buildHeroEventChoiceWaitingFor = (
 ): HeroEventChoiceWaitingFor => {
   return heroEventChoiceWaitingForFactory.withData(overrides.data ?? {}).build();
 };
+
+export class DiscardToHandSizeWaitingForFactory extends PlayerWaitingForFactory<DiscardToHandSizeWaitingFor> {}
+
+export const discardToHandSizeWaitingForFactory =
+  DiscardToHandSizeWaitingForFactory.define((): DiscardToHandSizeWaitingFor => ({
+    type: "DiscardToHandSize",
+    data: {
+      player: 0,
+      count: 1,
+      cards: [],
+    },
+  }));
+
+export class DiscardChoiceWaitingForFactory extends PlayerWaitingForFactory<DiscardChoiceWaitingFor> {}
+
+export const discardChoiceWaitingForFactory =
+  DiscardChoiceWaitingForFactory.define((): DiscardChoiceWaitingFor => ({
+    type: "DiscardChoice",
+    data: {
+      player: 0,
+      count: 1,
+      cards: [],
+      source_id: 1,
+      effect_kind: "Discard",
+    },
+  }));
+
+export class PayCostWaitingForFactory extends PlayerWaitingForFactory<PayCostWaitingFor> {}
+
+/** Defaults to a spell's discard cost, the cancellable cost prompt. */
+export const payCostWaitingForFactory =
+  PayCostWaitingForFactory.define((): PayCostWaitingFor => ({
+    type: "PayCost",
+    data: {
+      player: 0,
+      kind: { type: "Discard" },
+      choices: [],
+      count: 1,
+      min_count: 1,
+      resume: { type: "Spell", Spell: buildPendingCast() },
+    },
+  }));
 
 export class TriggerTargetSelectionWaitingForFactory extends PlayerWaitingForFactory<TriggerTargetSelectionWaitingFor> {}
 
@@ -763,6 +808,18 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     return this.variant(heroEventChoiceWaitingForFactory.withData(data).build());
   }
 
+  discardToHandSize(data: Partial<DiscardToHandSizeWaitingFor["data"]> = {}) {
+    return this.variant(discardToHandSizeWaitingForFactory.withData(data).build());
+  }
+
+  discardChoice(data: Partial<DiscardChoiceWaitingFor["data"]> = {}) {
+    return this.variant(discardChoiceWaitingForFactory.withData(data).build());
+  }
+
+  payCost(data: Partial<PayCostWaitingFor["data"]> = {}) {
+    return this.variant(payCostWaitingForFactory.withData(data).build());
+  }
+
   triggerTargetSelection(
     data: Partial<TriggerTargetSelectionWaitingFor["data"]> = {},
   ) {
@@ -1054,6 +1111,18 @@ export class GameStateFactory extends Factory<GameState> {
 
   heroEventChoice(data: Partial<HeroEventChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.heroEventChoice(data).build());
+  }
+
+  discardToHandSize(data: Partial<DiscardToHandSizeWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.discardToHandSize(data).build());
+  }
+
+  discardChoice(data: Partial<DiscardChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.discardChoice(data).build());
+  }
+
+  payCost(data: Partial<PayCostWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.payCost(data).build());
   }
 
   triggerTargetSelection(
