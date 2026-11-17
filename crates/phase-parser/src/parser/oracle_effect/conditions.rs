@@ -7349,6 +7349,42 @@ fn opponent_poison_at_least_as_quantity_check(count: u32) -> AbilityCondition {
     }
 }
 
+/// CR 122.1f + CR 109.5: Bridge `StaticCondition::PlayerIsPoisoned` to a
+/// `QuantityCheck` on the specific player's poison counter total (>= 1).
+/// The player scope carries the subject axis. Only scopes supported by
+/// `CountScope` (Controller, Opponents, All, ScopedPlayer, Owner,
+/// SourceChosenPlayer) are bridged; trigger-specific scopes (DefendingPlayer,
+/// Target, etc.) return `None` since they don't appear in static abilities.
+fn ability_condition_from_poisoned_player(player: &PlayerScope) -> Option<AbilityCondition> {
+    use crate::types::ability::QuantityRef;
+    use crate::types::player::PlayerCounterKind;
+
+    let scope = match player {
+        PlayerScope::Controller => CountScope::Controller,
+        PlayerScope::Opponent { aggregate: _ } => CountScope::Opponents,
+        PlayerScope::ScopedPlayer => CountScope::ScopedPlayer,
+        PlayerScope::AllPlayers { .. } => CountScope::All,
+        // Trigger-specific scopes not supported in static abilities
+        PlayerScope::DefendingPlayer
+        | PlayerScope::Target
+        | PlayerScope::RecipientController
+        | PlayerScope::ParentObjectTarget { .. }
+        | PlayerScope::SourceChosenPlayer
+        | PlayerScope::AnyTurn
+        | PlayerScope::SpecificPlayer { .. } => return None,
+    };
+    Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCounter {
+                kind: PlayerCounterKind::Poison,
+                scope,
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
 /// Bridge a `StaticCondition` (from the nom condition parser) to an
 /// `AbilityCondition`. Returns `None` for variants that have no
 /// effect-resolution equivalent — the caller falls through to the next strategy.
@@ -7438,6 +7474,14 @@ pub(crate) fn static_condition_to_ability_condition(
         StaticCondition::IsRingBearer => Some(AbilityCondition::IsRingBearer),
         StaticCondition::OpponentPoisonAtLeast { count } => {
             Some(opponent_poison_at_least_as_quantity_check(*count))
+        }
+        // CR 122.1f + CR 109.5: "player is poisoned" — bridge to a quantity
+        // check on the player's poison counters. Mirrors the trigger-side
+        // `TriggerCondition::IsPoisoned` with the same subject scope axis.
+        // Only scopes supported by `CountScope` are bridged; trigger-specific
+        // scopes (DefendingPlayer, Target, etc.) return `None`.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            ability_condition_from_poisoned_player(player)
         }
         StaticCondition::DayNightIs { state } => {
             Some(AbilityCondition::DayNightIs { state: *state })

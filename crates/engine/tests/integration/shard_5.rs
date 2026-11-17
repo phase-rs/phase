@@ -115,6 +115,7 @@ mod self_name_of_short_name_rules_words;
 mod sensei_golden_tail_5950;
 mod sentinel_sliver_vigilance_grant;
 mod sephiroth_super_nova_transform_emblem_4359;
+mod septic_rats_defending_player_poisoned;
 mod serpent_society_ward_poison_cost;
 mod serras_emissary_chosen_card_type_protection;
 mod she_hulk_wallbreaker_becomes_blocked_4599;
