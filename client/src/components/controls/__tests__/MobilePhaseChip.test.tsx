@@ -25,6 +25,14 @@ describe("MobilePhaseChip", () => {
     ).toHaveTextContent("Main Phase 1");
   });
 
+  it("shows the short phase name when compact, keeping the full name as the accessible name", () => {
+    render(<MobilePhaseChip compact />);
+
+    const chip = screen.getByRole("button", { name: /Current phase: Main Phase 1\./ });
+    expect(chip).toHaveTextContent("Main 1");
+    expect(chip).not.toHaveTextContent("Main Phase 1");
+  });
+
   it("opens a sheet listing every turn step, including ones absent from the desktop strips", () => {
     render(<MobilePhaseChip />);
     fireEvent.click(screen.getByRole("button", { name: /Current phase/ }));

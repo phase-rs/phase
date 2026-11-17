@@ -2687,6 +2687,20 @@
     "End": "Étape de fin",
     "Cleanup": "Nettoyage"
   },
+  "phaseShortName": {
+    "Untap": "Dégagement",
+    "Upkeep": "Entretien",
+    "Draw": "Pioche",
+    "PreCombatMain": "Principale 1",
+    "BeginCombat": "Combat",
+    "DeclareAttackers": "Attaquants",
+    "DeclareBlockers": "Bloqueurs",
+    "CombatDamage": "Blessures",
+    "EndCombat": "Fin combat",
+    "PostCombatMain": "Principale 2",
+    "End": "Fin",
+    "Cleanup": "Nettoyage"
+  },
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"

@@ -2705,6 +2705,20 @@
     "End": "終了ステップ",
     "Cleanup": "クリンナップ"
   },
+  "phaseShortName": {
+    "Untap": "アンタップ",
+    "Upkeep": "アップキープ",
+    "Draw": "ドロー",
+    "PreCombatMain": "メイン1",
+    "BeginCombat": "戦闘開始",
+    "DeclareAttackers": "攻撃",
+    "DeclareBlockers": "ブロック",
+    "CombatDamage": "ダメージ",
+    "EndCombat": "戦闘終了",
+    "PostCombatMain": "メイン2",
+    "End": "終了",
+    "Cleanup": "クリンナップ"
+  },
   "counterMoveDistribution": {
     "title": "{{counter}}カウンターを移動",
     "subtitle": "{{source}}には{{count}}個あります。残り：{{remaining}}"

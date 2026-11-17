@@ -2687,6 +2687,20 @@
     "End": "Etapa final",
     "Cleanup": "Limpeza"
   },
+  "phaseShortName": {
+    "Untap": "Desvirar",
+    "Upkeep": "Manutenção",
+    "Draw": "Compra",
+    "PreCombatMain": "Principal 1",
+    "BeginCombat": "Combate",
+    "DeclareAttackers": "Atacantes",
+    "DeclareBlockers": "Bloqueadores",
+    "CombatDamage": "Dano",
+    "EndCombat": "Fim combate",
+    "PostCombatMain": "Principal 2",
+    "End": "Final",
+    "Cleanup": "Limpeza"
+  },
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"

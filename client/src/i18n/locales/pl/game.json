@@ -2687,6 +2687,20 @@
     "End": "Krok końcowy",
     "Cleanup": "Sprzątanie"
   },
+  "phaseShortName": {
+    "Untap": "Odwracanie",
+    "Upkeep": "Utrzymanie",
+    "Draw": "Dobieranie",
+    "PreCombatMain": "Główna 1",
+    "BeginCombat": "Walka",
+    "DeclareAttackers": "Atakujący",
+    "DeclareBlockers": "Blokujący",
+    "CombatDamage": "Obrażenia",
+    "EndCombat": "Koniec walki",
+    "PostCombatMain": "Główna 2",
+    "End": "Koniec",
+    "Cleanup": "Sprzątanie"
+  },
   "counterMoveDistribution": {
     "title": "Move {{counter}} counters",
     "subtitle": "{{source}} has {{count}} available. Remaining: {{remaining}}"
