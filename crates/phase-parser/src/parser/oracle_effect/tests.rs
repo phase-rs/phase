@@ -8136,11 +8136,12 @@ fn try_split_damage_compound_player_object_dynamic_x_full_pipeline() {
             };
             assert_eq!(*offset, 1, "where-X \"1 plus …\" must offset by 1");
             let QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCast {
-                    scope,
-                    filter,
-                    window: TurnWindow::ThisTurn,
-                },
+                qty:
+                    QuantityRef::SpellsCast {
+                        scope,
+                        filter,
+                        window: TurnWindow::ThisTurn,
+                    },
             } = inner.as_ref()
             else {
                 panic!("Offset inner must be a SpellsCast ref, got: {inner:?}");
