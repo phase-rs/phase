@@ -1368,6 +1368,10 @@ If you do, return each other card exiled with this artifact to its owner's grave
 {T}: Create a token that's a copy of a card exiled with this artifact. It gains haste. Exile it \
 at the beginning of the next end step.";
 
+/// Verbatim Oracle text of March of the Machines (Scryfall).
+const MARCH_OF_THE_MACHINES: &str = "Each noncreature artifact is an artifact creature with power \
+and toughness each equal to its mana value. (Equipment that's a creature can't equip a creature.)";
+
 /// How the Metamorph token's as-enters copy is answered.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MetamorphAnswer {
@@ -1453,12 +1457,23 @@ fn drive_prompts(
 /// The entrant under test is the same one Vat's token would be: a token copy of Phyrexian
 /// Metamorph.
 fn run_vat(moonlight: bool, answer: MetamorphAnswer) -> VatRun {
+    run_vat_with(moonlight, false, answer)
+}
+
+/// [`run_vat`], optionally with March of the Machines on the battlefield (`march`): it makes
+/// every noncreature artifact, the Vat and so a copy of it, an artifact creature.
+fn run_vat_with(moonlight: bool, march: bool, answer: MetamorphAnswer) -> VatRun {
     let mut scenario = base_scenario();
     let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
     let copy_artifact = add_instant(&mut scenario, P0, "Copy Artifact", COPY_ARTIFACT);
-    let vat = scenario
-        .add_artifact_from_oracle(P0, "Mimic Vat", MIMIC_VAT)
-        .id();
+    let vat = {
+        let mut card = scenario.add_artifact_from_oracle(P0, "Mimic Vat", MIMIC_VAT);
+        card.with_mana_cost(ManaCost::generic(3));
+        card.id()
+    };
+    if march {
+        scenario.add_enchantment_from_oracle(P0, "March of the Machines", MARCH_OF_THE_MACHINES);
+    }
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let metamorph = scenario
         .add_creature_from_oracle(P0, "Phyrexian Metamorph", 2, 2, PHYREXIAN_METAMORPH)
@@ -1755,5 +1770,31 @@ fn moonlight_creates_the_token_copy_of_opalescence_in_exile() {
     assert!(
         battlefield_tokens_named(runner.state(), "Opalescence").is_empty(),
         "no battlefield entry"
+    );
+}
+
+/// F2, liminal entry. CR 614.12: with March of the Machines the Vat copy a Metamorph token
+/// chooses is, as it would exist on the battlefield, an artifact creature, so Hallowed Moonlight
+/// — read through the entrant projection at the token's own entry — creates it in exile; without
+/// March of the Machines the same copy enters.
+#[test]
+fn moonlight_reads_the_liminal_entrant_through_the_battlefield_projection() {
+    let animated = run_vat_with(true, true, MetamorphAnswer::CopyVat);
+    let created = created_tokens_named(&animated.events, "Mimic Vat");
+    assert_eq!(created.len(), 1, "the selected copy is created once");
+    assert_eq!(
+        zone_moves_of(&animated.events, created[0]),
+        vec![(None, Zone::Exile)],
+        "an animated Vat copy is a creature entering"
+    );
+    assert!(
+        battlefield_tokens_named(animated.runner.state(), "Mimic Vat").is_empty(),
+        "no Vat copy entered"
+    );
+    let plain = run_vat_with(true, false, MetamorphAnswer::CopyVat);
+    assert_eq!(
+        battlefield_tokens_named(plain.runner.state(), "Mimic Vat").len(),
+        1,
+        "without March of the Machines the same copy enters"
     );
 }
