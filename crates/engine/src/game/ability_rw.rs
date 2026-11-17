@@ -1760,7 +1760,10 @@ fn zone_of_zone_ref(z: &ZoneRef) -> Zone {
 
 /// A read filter that provably counts only the member's own source (a `SelfRef`
 /// conjunct) — routes to per-member-private `reads_src` (§2 read-carrier closure).
-fn filter_is_self_scoped(f: &TargetFilter) -> bool {
+/// Also the authority for "this filter names only the carrier": a `valid_card` of
+/// `SelfRef` or `And[SelfRef, ..]` can match only the object hosting the
+/// definition (`printed_cards::is_runtime_target_die_exile_replacement`).
+pub(crate) fn filter_is_self_scoped(f: &TargetFilter) -> bool {
     match f {
         TargetFilter::SelfRef => true,
         TargetFilter::And { filters } => filters.iter().any(filter_is_self_scoped),
@@ -2075,6 +2078,7 @@ fn legacy_trigger_condition(x: &TriggerCondition) -> bool {
         // the parser can emit (`Controller`, `ScopedPlayer`) have non-legacy
         // `ControllerRef` analogues, so the monarch subject axis stays here.
         | TriggerCondition::IsMonarch { .. }
+        | TriggerCondition::IsPoisoned { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
@@ -2228,6 +2232,9 @@ fn legacy_static_condition(x: &StaticCondition) -> bool {
         // `legacy_trigger_condition` sibling arm for the same reasoning.
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: no `legacy_player_scope` classifier exists — same
+        // reasoning as the monarch arm above.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -7571,6 +7578,15 @@ fn rw_trigger_condition(x: &TriggerCondition) -> RwProfile {
         // holder's installed boons; like the monarch designation the read
         // profile is entirely determined by the subject scope.
         TriggerCondition::HasBoon { player } => rw_player_scope(player),
+        // CR 122.1f: poison is a player counter (CR 122.1f defines "poisoned"
+        // as having one or more poison counters). The read profile records the
+        // PlayerLife kind (where poison counters live) and merges the subject
+        // scope classification from rw_player_scope.
+        TriggerCondition::IsPoisoned { player } => {
+            let mut p = reads_player_of(StateKind::PlayerLife);
+            p.merge(rw_player_scope(player));
+            p
+        }
         TriggerCondition::GainedLife { minimum: _ }
         | TriggerCondition::LostLife
         | TriggerCondition::LostLifeLastTurn => reads_player_of(StateKind::JournalLife),
@@ -7719,6 +7735,14 @@ fn rw_static_condition(x: &StaticCondition) -> RwProfile {
         // entirely determined by the monarch subject scope.
         StaticCondition::IsMonarch { player } => rw_player_scope(player),
         StaticCondition::HasBoon { player } => rw_player_scope(player),
+        // CR 122.1f: the poison predicate reads the scoped player's poison
+        // total (the sibling-mutable `PlayerLife` row), exactly like the
+        // `TriggerCondition::IsPoisoned` sibling — never a designation.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            let mut p = reads_player_of(StateKind::PlayerLife);
+            p.merge(rw_player_scope(player));
+            p
+        }
         StaticCondition::DevotionGE { .. }
         | StaticCondition::SharesColorWithMostCommonColorAmongPermanents => reads_zone_membership(),
         StaticCondition::IsPresent { filter } => match filter {
@@ -11264,5 +11288,48 @@ mod attacked_referent_classification_tests {
             ),
             "distinct-event siblings: one's damage can remove the other's recipient"
         );
+    }
+}
+
+#[cfg(test)]
+mod poison_condition_rw_tests {
+    use super::*;
+
+    use crate::types::ability::AggregateFunction;
+
+    /// CR 122.1f: the poison predicate reads the player's poison-counter total,
+    /// which rides the sibling-mutable `PlayerLife` row (the same proxy as
+    /// `QuantityRef::PlayerCounter`). `rw_player_scope` classifies only the
+    /// subject and is empty for `DefendingPlayer`, so the profile must record
+    /// the player read itself — otherwise a same-event poison write cannot be
+    /// ordered against the trigger.
+    #[test]
+    fn poison_predicate_reads_the_player_poison_total() {
+        let expected = reads_player_of(StateKind::PlayerLife);
+        for player in [
+            PlayerScope::Controller,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::DefendingPlayer,
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Max,
+            },
+        ] {
+            let profile = trigger_condition_rw_profile(&TriggerCondition::IsPoisoned {
+                player: player.clone(),
+            });
+            assert_eq!(
+                profile, expected,
+                "a poison read is a player-state read ({player:?})"
+            );
+            // The static sibling (`StaticCondition::PlayerIsPoisoned`) feeds the
+            // same ordering model and must record the same player read.
+            let static_profile = rw_static_condition(&StaticCondition::PlayerIsPoisoned {
+                player: player.clone(),
+            });
+            assert_eq!(
+                static_profile, expected,
+                "the static sibling arm records the same player read ({player:?})"
+            );
+        }
     }
 }

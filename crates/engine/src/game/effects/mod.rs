@@ -11710,6 +11710,9 @@ fn static_condition_reads_filter_population(
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: a player-counter predicate carries no filter or counted
+        // population, like the monarch arm above.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -12173,6 +12176,7 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::FirstCombatPhaseOfTurn
         | TriggerCondition::HasMaxSpeed
         | TriggerCondition::IsMonarch { .. }
+        | TriggerCondition::IsPoisoned { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
@@ -16336,6 +16340,17 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
         ..
     } = effect
     {
+        if filter_references_tracked_set(target) {
+            return true;
+        }
+    }
+    // CR 608.2c: `AddTargetReplacement` carries its recipient in `target`, which
+    // `Effect::target_filter()` deliberately hides (exposing it would announce a
+    // phantom target slot). A `TrackedSet`-bound rider ("a creature dealt damage
+    // this way would die this turn, exile it instead"; Anger of the Gods, and the
+    // plural "those Auras would leave the battlefield, exile them instead") still
+    // consumes the producer's published set, so the producer must publish it.
+    if let Effect::AddTargetReplacement { target, .. } = effect {
         if filter_references_tracked_set(target) {
             return true;
         }
@@ -70532,6 +70547,48 @@ mod tests {
         ));
         assert!(!next_sub_needs_tracked_set(
             &tap_all().sub_ability(each_source(wolf))
+        ));
+    }
+
+    /// CR 608.2c: a `TrackedSet`-bound `AddTargetReplacement` consumes the set the
+    /// preceding damage instruction published, so the producer must publish it;
+    /// the identical rider bound to `Any` consumes nothing.
+    #[test]
+    fn add_target_replacement_tracked_set_requires_damage_publication() {
+        let damage_all = || {
+            ResolvedAbility::new(
+                Effect::DamageAll {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                    player_filter: None,
+                    damage_source: None,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        let rider = |target: TargetFilter| {
+            ResolvedAbility::new(
+                Effect::AddTargetReplacement {
+                    replacement: Box::new(
+                        ReplacementDefinition::new(ReplacementEvent::Moved)
+                            .valid_card(TargetFilter::SelfRef),
+                    ),
+                    target,
+                },
+                vec![],
+                ObjectId(1),
+                PlayerId(0),
+            )
+        };
+        assert!(next_sub_needs_tracked_set(&damage_all().sub_ability(
+            rider(TargetFilter::TrackedSet {
+                id: TrackedSetId(0)
+            })
+        )));
+        assert!(!next_sub_needs_tracked_set(
+            &damage_all().sub_ability(rider(TargetFilter::Any))
         ));
     }
 }
