@@ -375,7 +375,7 @@ fn proliferate_addition_plan(
                         object_id: *obj_id,
                         counter_type: ct,
                         count: 1,
-                        // CR 614.16: proliferate (CR 701.27a) is a resolving
+                        // CR 614.16: proliferate (CR 701.34a) is a resolving
                         // effect instruction.
                         cause: CounterCause::ResolvingEffect,
                     });
@@ -397,7 +397,7 @@ fn proliferate_addition_plan(
                                 player_id: *pid,
                                 counter_kind: kind,
                                 count: 1,
-                                // CR 614.16: proliferate (CR 701.27a) is a
+                                // CR 614.16: proliferate (CR 701.34a) is a
                                 // resolving effect instruction.
                                 cause: CounterCause::ResolvingEffect,
                             });
@@ -407,7 +407,7 @@ fn proliferate_addition_plan(
                                 actor,
                                 player_id: *pid,
                                 count: 1,
-                                // CR 614.16: proliferate (CR 701.27a) is a
+                                // CR 614.16: proliferate (CR 701.34a) is a
                                 // resolving effect instruction.
                                 cause: CounterCause::ResolvingEffect,
                             });
