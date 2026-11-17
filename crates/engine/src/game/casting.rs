@@ -27624,7 +27624,13 @@ fn activation_cost_with_alternative_keyword_costs(
     let Some((ability_tag, keyword)) = ability.ability_tag.and_then(|tag| match tag {
         AbilityTag::Equip => Some((tag, KeywordKind::Equip)),
         AbilityTag::Cycling => Some((tag, KeywordKind::Cycling)),
-        _ => None,
+        AbilityTag::Boast
+        | AbilityTag::Evolve
+        | AbilityTag::Exhaust
+        | AbilityTag::Outlast
+        | AbilityTag::Backup
+        | AbilityTag::PowerUp
+        | AbilityTag::Augment => None,
     }) else {
         return base_cost;
     };
@@ -27666,7 +27672,7 @@ fn activation_cost_with_alternative_keyword_costs(
                 }),
             CastFrequency::OncePerTurnPerPermanentType => false,
         };
-        if frequency_available {
+        if frequency_available && !alternatives.contains(cost) {
             alternatives.push(cost.clone());
         }
     }
@@ -27674,14 +27680,48 @@ fn activation_cost_with_alternative_keyword_costs(
     if alternatives.is_empty() {
         return base_cost;
     }
-    match base_cost {
+    // Normalize first so legacy card-data equip disjunctions are already a
+    // `OneOf` when the alternatives are appended to them.
+    let base_cost = activation_cost_for_affordability(base_cost, Some(ability_tag));
+
+    // CR 702.29a: "Cycling [cost]" means "[cost], Discard this card: Draw a
+    // card." An alternative cost replaces only the cycling cost; discarding the
+    // card remains part of the activation cost. Equip's whole activation cost is
+    // the equip cost (CR 702.6a), so it is substituted whole.
+    let (keyword_cost, retained_legs) = match (keyword, base_cost) {
+        (KeywordKind::Cycling, AbilityCost::Composite { costs }) => {
+            let (retained, rest): (Vec<_>, Vec<_>) = costs.into_iter().partition(|leg| {
+                matches!(
+                    leg,
+                    AbilityCost::Discard {
+                        self_scope: crate::types::ability::DiscardSelfScope::SourceCard,
+                        ..
+                    }
+                )
+            });
+            match rest.len() {
+                0 => (AbilityCost::Composite { costs: retained }, Vec::new()),
+                1 => (rest.into_iter().next().expect("one leg"), retained),
+                _ => (AbilityCost::Composite { costs: rest }, retained),
+            }
+        }
+        (_, base_cost) => (base_cost, Vec::new()),
+    };
+    let folded = match keyword_cost {
         AbilityCost::OneOf { mut costs } => {
             costs.extend(alternatives);
             AbilityCost::OneOf { costs }
         }
-        base_cost => AbilityCost::OneOf {
-            costs: std::iter::once(base_cost).chain(alternatives).collect(),
+        keyword_cost => AbilityCost::OneOf {
+            costs: std::iter::once(keyword_cost).chain(alternatives).collect(),
         },
+    };
+    if retained_legs.is_empty() {
+        folded
+    } else {
+        AbilityCost::Composite {
+            costs: std::iter::once(folded).chain(retained_legs).collect(),
+        }
     }
 }
 

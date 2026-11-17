@@ -9878,6 +9878,88 @@ fn kili_alternative_equip_cost_is_conditional_and_once_per_turn() {
     );
 }
 
+// CR 118.9 + CR 702.6a: Bruenor Battlehammer — the "each turn" first-use clause.
+#[test]
+fn bruenor_alternative_equip_cost_is_once_per_turn_and_ungated() {
+    let r = parse(
+        "Each creature you control gets +2/+0 for each Equipment attached to it.
+You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.",
+        "Bruenor Battlehammer",
+        &[],
+        &["Creature", "Dwarf", "Warrior"],
+        &[],
+    );
+    let alt = r.statics.iter().find(|s| {
+        matches!(
+            s.mode,
+            StaticMode::AlternativeKeywordCost {
+                keyword: crate::types::keywords::KeywordKind::Equip,
+                frequency: Some(crate::types::statics::CastFrequency::OncePerTurn),
+                ..
+            }
+        )
+    });
+    let alt = alt.unwrap_or_else(|| {
+        panic!(
+            "expected once-per-turn equip alternative cost, statics: {:?}, warnings: {:?}",
+            r.statics, r.parse_warnings
+        )
+    });
+    assert_eq!(alt.condition, None, "\"each turn\" carries no turn gate");
+}
+
+// CR 118.9 + CR 702.6a: Forge Anew — "during each of your turns" is a your-turn
+// gate on the once-per-turn grant, not a droppable tail.
+#[test]
+fn forge_anew_alternative_equip_cost_is_gated_to_your_turn() {
+    let r = parse(
+        "You may pay {0} rather than pay the equip cost of the first equip ability you activate during each of your turns.",
+        "Forge Anew",
+        &[],
+        &["Enchantment"],
+        &[],
+    );
+    let alt = r.statics.iter().find(|s| {
+        matches!(
+            s.mode,
+            StaticMode::AlternativeKeywordCost {
+                keyword: crate::types::keywords::KeywordKind::Equip,
+                frequency: Some(crate::types::statics::CastFrequency::OncePerTurn),
+                ..
+            }
+        )
+    });
+    let alt = alt.unwrap_or_else(|| {
+        panic!(
+            "expected once-per-turn equip alternative cost, statics: {:?}, warnings: {:?}",
+            r.statics, r.parse_warnings
+        )
+    });
+    assert_eq!(
+        alt.condition,
+        Some(crate::types::ability::StaticCondition::DuringYourTurn)
+    );
+}
+
+// Strict failure: an unmodeled trailing clause must not be silently dropped.
+#[test]
+fn alternative_keyword_cost_with_unmodeled_tail_is_not_parsed() {
+    let r = parse(
+        "You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn if you control a Dwarf.",
+        "Test Card",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    assert!(
+        !r.statics
+            .iter()
+            .any(|s| matches!(s.mode, StaticMode::AlternativeKeywordCost { .. })),
+        "statics: {:?}",
+        r.statics
+    );
+}
+
 // CR 118.9 + CR 701.20a + CR 601.3: Land Grant — "If you have no land cards in
 // hand, you may reveal your hand rather than pay this spell's mana cost."
 // routes to a conditional alternative-cost casting option whose cost is an

@@ -1311,7 +1311,10 @@ pub enum StaticMode {
     ///
     /// `frequency`: None = all activations; Some(OncePerTurn) = first per turn.
     ///
-    /// Parser-complete structured gap; runtime hook deferred. CR 702.29a, CR 702.122a,
+    /// Runtime: `casting::activation_cost_with_alternative_keyword_costs` folds
+    /// active grants into an `AbilityCost::OneOf` for Equip and Cycling
+    /// activations, substituting only the keyword cost and keeping the
+    /// discard-self leg; Crew remains a coverage gap. CR 702.29a, CR 702.122a,
     /// CR 118.9.
     AlternativeKeywordCost {
         keyword: KeywordKind,

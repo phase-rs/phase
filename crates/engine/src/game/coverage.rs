@@ -83,6 +83,10 @@ pub(crate) fn is_data_carrying_static(mode: &StaticMode) -> bool {
             // permanents. Not registry-keyed (mirrors the marker cluster).
             | StaticMode::CantBecomeSuspected
             | StaticMode::ReduceAbilityCost { .. }
+            // CR 118.9 + CR 602.2b: runtime enforcement is
+            // `casting::activation_cost_with_alternative_keyword_costs`, which
+            // folds active grants into the Equip/Cycling activation cost. Crew
+            // has no such hook and stays a coverage gap.
             | StaticMode::AlternativeKeywordCost {
                 keyword: crate::types::keywords::KeywordKind::Cycling
                     | crate::types::keywords::KeywordKind::Equip,
@@ -10141,14 +10145,8 @@ fn is_static_definition_supported(
     static_registry: &HashMap<StaticMode, StaticAbilityHandler>,
     token_static_traversal: TokenStaticTraversal,
 ) -> bool {
-    let mode_supported = match &stat.mode {
-        StaticMode::AlternativeKeywordCost { keyword, .. } => matches!(
-            keyword,
-            crate::types::keywords::KeywordKind::Cycling
-                | crate::types::keywords::KeywordKind::Equip
-        ),
-        _ => static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode),
-    };
+    let mode_supported =
+        static_registry.contains_key(&stat.mode) || is_data_carrying_static(&stat.mode);
     mode_supported
         && !stat
             .condition
@@ -25338,16 +25336,16 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
     #[test]
     fn alternative_keyword_cost_coverage_tracks_runtime_ability_classes() {
         let mut face = make_face();
-        face.oracle_text = Some("You may pay {0} rather than pay equip costs.".to_string());
+        face.oracle_text = Some("You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.".to_string());
         face.static_abilities.push(
             StaticDefinition::new(StaticMode::AlternativeKeywordCost {
                 keyword: KeywordKind::Equip,
                 cost: AbilityCost::Mana {
                     cost: ManaCost::generic(0),
                 },
-                frequency: None,
+                frequency: Some(crate::types::statics::CastFrequency::OncePerTurn),
             })
-            .description("You may pay {0} rather than pay equip costs.".to_string()),
+            .description("You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.".to_string()),
         );
 
         let gaps = card_face_gaps(&face);

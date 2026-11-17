@@ -9,6 +9,9 @@ use engine::types::zones::Zone;
 
 const KILI: &str = "Storied (If you control three or more artifacts, legendaries, and/or Sagas, you have an enduring story for the rest of the game.)\nAs long as you have an enduring story, you may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.\nWhenever another Dwarf or Equipment you control enters, draw a card. This ability triggers only once each turn.";
 
+const VULSHOK_MORNINGSTAR: &str = "Equipped creature gets +2/+2.
+Equip {2} ({2}: Attach to target creature you control. Equip only as a sorcery.)";
+
 fn add_generic_mana(runner: &mut engine::game::scenario::GameRunner, amount: u32) {
     let pool = &mut runner
         .state_mut()
@@ -61,19 +64,20 @@ fn kili_alternative_equip_cost_is_story_gated_and_first_per_turn() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let kili = scenario
-        .add_creature_from_oracle(P0, "Kíli the Resourceful", 2, 2, KILI)
+        .add_creature_from_oracle(P0, "Kíli the Resourceful", 1, 2, KILI)
         .as_legendary()
+        .with_subtypes(vec!["Dwarf", "Scout"])
         .id();
     let first_equipment = scenario
-        .add_artifact_from_oracle(P0, "First Equipment", "Equip {2}")
+        .add_artifact_from_oracle(P0, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
         .with_subtypes(vec!["Equipment"])
         .id();
     let second_equipment = scenario
-        .add_artifact_from_oracle(P0, "Second Equipment", "Equip {2}")
+        .add_artifact_from_oracle(P0, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
         .with_subtypes(vec!["Equipment"])
         .id();
     let third_equipment = scenario
-        .add_artifact_from_oracle(P0, "Third Equipment", "Equip {2}")
+        .add_artifact_from_oracle(P0, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
         .with_subtypes(vec!["Equipment"])
         .id();
     scenario.with_library_top(P0, &["P0 Draw"]);
@@ -169,11 +173,12 @@ fn kili_uses_the_normal_equip_cost_without_an_enduring_story() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let kili = scenario
-        .add_creature_from_oracle(P0, "Kíli the Resourceful", 2, 2, KILI)
+        .add_creature_from_oracle(P0, "Kíli the Resourceful", 1, 2, KILI)
         .as_legendary()
+        .with_subtypes(vec!["Dwarf", "Scout"])
         .id();
     let equipment = scenario
-        .add_artifact_from_oracle(P0, "Equipment", "Equip {2}")
+        .add_artifact_from_oracle(P0, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
         .with_subtypes(vec!["Equipment"])
         .id();
 
@@ -204,4 +209,52 @@ fn kili_uses_the_normal_equip_cost_without_an_enduring_story() {
         Zone::Battlefield,
         "paying the normal Equip cost leaves the Equipment on the battlefield"
     );
+}
+
+/// Scope negative: the grant is "you may pay {0}" — only the controller of the
+/// granting permanent benefits (CR 109.5). An opponent's Kíli with its enduring
+/// story established must not offer the {0} branch to the other player.
+#[test]
+fn opponent_kili_does_not_offer_the_alternative_equip_cost() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature_from_oracle(P1, "Kíli the Resourceful", 1, 2, KILI)
+        .as_legendary()
+        .with_subtypes(vec!["Dwarf", "Scout"]);
+    scenario
+        .add_artifact_from_oracle(P1, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
+        .with_subtypes(vec!["Equipment"]);
+    scenario
+        .add_artifact_from_oracle(P1, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
+        .with_subtypes(vec!["Equipment"]);
+    let bear = scenario.add_vanilla(P0, 2, 2);
+    let equipment = scenario
+        .add_artifact_from_oracle(P0, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+
+    let mut runner = scenario.build();
+    advance_to_postcombat(&mut runner);
+    assert!(
+        runner.state().enduring_story.contains(&P1),
+        "reach guard: the opponent's Kíli has its condition met"
+    );
+    add_generic_mana(&mut runner, 2);
+    let result = activate_equip(&mut runner, equipment);
+    assert!(
+        !matches!(
+            result.waiting_for,
+            WaitingFor::ActivationCostOneOfChoice { .. }
+        ),
+        "an opponent's Kíli must not grant the {{0}} alternative to its opponent"
+    );
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().objects[&bear]
+            .attachments
+            .contains(&equipment),
+        "the Equipment attaches after paying the ordinary {{2}}"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
 }
