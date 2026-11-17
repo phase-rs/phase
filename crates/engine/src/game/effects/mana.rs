@@ -229,10 +229,27 @@ pub fn resolve(
     // below) without a stack entry, so the inline gate must not swallow it.
     // Single-type echo yields no prompt here and falls through to the normal
     // gate, resolving with no interaction.
-    let echo_pause = crate::game::mana_abilities::echo_body_owes_type_choice(
-        ability,
-        state.current_trigger_event.as_ref(),
-    )
+    // CR 106.12a + CR 608.2d: a preselected echo type is usable only if
+    // the actual event produced it. A stale selection owes the normal choice.
+    let selected_echo =
+        if is_triggered_mana_inline && matches!(produced, ManaProduction::TriggerEventManaType) {
+            match &state.current_triggered_mana_override {
+                Some(crate::types::game_state::ProductionOverride::SingleColor(color)) => state
+                    .current_trigger_event
+                    .as_ref()
+                    .map(crate::game::mana_abilities::echo_distinct_types)
+                    .filter(|options| options.contains(color))
+                    .map(|options| (options, *color)),
+                Some(crate::types::game_state::ProductionOverride::Combination(_)) | None => None,
+            }
+        } else {
+            None
+        };
+    let echo_pause = (selected_echo.is_none()
+        && crate::game::mana_abilities::echo_body_owes_type_choice(
+            ability,
+            state.current_trigger_event.as_ref(),
+        ))
     .then(|| {
         crate::game::mana_abilities::mana_choice_prompt(
             &ability.effect,
@@ -303,7 +320,22 @@ pub fn resolve(
     // (Fertile Ground, Utopia Sprawl AnyOneColor), the auto-tap planner may have
     // stored a `current_triggered_mana_override` so the resolver produces the
     // planned color rather than defaulting to the first listed option.
-    let mana_types = if is_triggered_mana_inline {
+    let mana_types = if let Some((options, color)) = selected_echo {
+        // The public choice-completion authority also owns preselected echoes:
+        // exactly one unit, even when the triggering ability produced G/U.
+        chosen_mana_types_for_prompt(
+            state,
+            count_ability,
+            produced,
+            &ManaChoicePrompt::SingleColor { options },
+            ManaChoice::SingleColor(color),
+        )
+        .map_err(|error| EffectError::InvalidParam(error.to_string()))?
+    } else if matches!(produced, ManaProduction::TriggerEventManaType) {
+        // CR 106.5: an absent/invalid selection never manufactures a type.
+        // A multi-type event already paused above; one type resolves normally.
+        resolve_mana_types_with_ability(produced, &*state, count_ability)
+    } else if is_triggered_mana_inline {
         match state.current_triggered_mana_override.clone() {
             Some(crate::types::game_state::ProductionOverride::SingleColor(color)) => {
                 // Resolve the count from the production descriptor, then produce
@@ -3950,17 +3982,35 @@ mod tests {
                 exiled_id: imprinted,
                 kind: ExileLinkKind::TrackedBySource,
             });
-            let mana_actions =
-                crate::game::mana_sources::activatable_mana_actions_for_player(runner.state(), P0);
-            let tap = mana_actions
-                .into_iter()
-                .find(|action| {
-                    matches!(action, GameAction::TapLandForMana { selection }
-                        | GameAction::ActivateManaSource { selection }
-                        if selection.source.object_id == chamber)
+            let ability_index =
+                crate::game::casting::activated_ability_definitions(runner.state(), chamber)
+                    .into_iter()
+                    .find(|(_, ability)| matches!(&*ability.effect, Effect::Mana { .. }))
+                    .expect("the Chamber offers its printed indexed mana ability")
+                    .0;
+            // The semantic source action preselects an echo type; this test
+            // instead exercises the raw activation's real unresolved choice.
+            let tapped = runner
+                .act(GameAction::ActivateAbility {
+                    source_id: chamber,
+                    ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
-                .expect("the Chamber can tap for mana");
-            let tapped = runner.act(tap).expect("the tap applies");
+                .expect("the tap applies");
+            assert_eq!(
+                runner.state().players[0]
+                    .mana_pool
+                    .count_color(ManaType::Green),
+                1,
+                "{mode:?}: reach: the Chamber produced its base G before the echo choice"
+            );
+            assert_eq!(
+                runner.state().players[0]
+                    .mana_pool
+                    .count_color(ManaType::Blue),
+                1,
+                "{mode:?}: reach: the Chamber produced its base U before the echo choice"
+            );
             assert!(
                 matches!(
                     tapped.waiting_for,

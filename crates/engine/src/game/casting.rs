@@ -25803,7 +25803,7 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (spent_units, life_payments) = mana_payment::select_mana_payment(
+    let (spent_units, life_payments) = mana_payment::select_mana_payment_with_life_budget(
         &player_data.mana_pool,
         cost,
         Some(&hand_demand),
@@ -25812,6 +25812,7 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
         phyrexian_choices,
         permissions.life_colors,
         &pins,
+        Some(usize::try_from(permissions.max_life).unwrap_or(usize::MAX)),
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
     let recipient = state.mana_payment_recipient(source_id, player);
@@ -26515,7 +26516,7 @@ fn pay_non_cast_mana_cost(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (spent_units, life_payments) = mana_payment::select_mana_payment(
+    let (spent_units, life_payments) = mana_payment::select_mana_payment_with_life_budget(
         &player_data.mana_pool,
         cost,
         None,
@@ -26525,6 +26526,7 @@ fn pay_non_cast_mana_cost(
         permissions.life_colors,
         // CR 118.3a: non-cast mana costs (effects/special actions) are not pinnable.
         &[],
+        Some(usize::try_from(permissions.max_life).unwrap_or(usize::MAX)),
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
     let recipient = source_id
@@ -26691,7 +26693,7 @@ fn auto_tap_and_pay_cost_excluding(
         .iter()
         .find(|p| p.id == player)
         .expect("player exists");
-    let (spent_units, life_payments) = mana_payment::select_mana_payment(
+    let (spent_units, life_payments) = mana_payment::select_mana_payment_with_life_budget(
         &player_data.mana_pool,
         cost,
         Some(&combined_demand),
@@ -26700,6 +26702,7 @@ fn auto_tap_and_pay_cost_excluding(
         phyrexian_choices,
         permissions.life_colors,
         &pins,
+        Some(usize::try_from(permissions.max_life).unwrap_or(usize::MAX)),
     )
     .map_err(|_| EngineError::ActionNotAllowed("Mana payment failed".to_string()))?;
     let recipient = state.mana_payment_recipient(source_id, player);

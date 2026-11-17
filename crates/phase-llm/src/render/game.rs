@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use engine::database::CardDatabase;
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatParticipation};
 use engine::game::game_object::GameObject;
-use engine::game::mana_sources;
+use engine::game::{casting, commander, mana_sources, players};
 use engine::types::game_state::{GameState, StackEntry};
 use engine::types::identifiers::ObjectId;
 use engine::types::log::GameLogEntry;
@@ -54,9 +54,9 @@ impl Default for GameRenderOptions {
     }
 }
 
-/// Render the whole position: turn, players, stack, pending delayed triggers,
-/// battlefield, the viewer's hand and available mana, what the viewer knows of
-/// other hands, graveyards, visible exile, and the turn-cycle history.
+/// Render the whole position: turn, players, commanders, stack, pending delayed
+/// triggers, battlefield, the viewer's hand and available mana, what the viewer
+/// knows of other hands, graveyards, visible exile, and the turn-cycle history.
 ///
 /// Every section is a function of live state except the history, so the size
 /// of a prompt tracks the size of the position, not the length of the game.
@@ -70,6 +70,7 @@ pub fn render_board(
     let mut out = String::new();
     push_header(&mut out, state, viewer);
     push_players(&mut out, state, viewer);
+    push_commanders(&mut out, state, viewer, db, options);
     push_stack(&mut out, state, viewer);
     push_delayed_triggers(&mut out, state, viewer);
     push_combat(&mut out, state, viewer);
@@ -145,6 +146,195 @@ fn push_players(out: &mut String, state: &GameState, viewer: PlayerId) {
             facts.join(", ")
         ));
     }
+}
+
+/// Each seat's commanders: where each one is, what casting it from the command
+/// zone costs next, and the commander damage it has dealt.
+///
+/// CR 400.2 + CR 903.3: the command zone is public, and a card keeps its
+/// commander designation in every zone, so a commander is listed wherever it
+/// is. CR 800.4a: a player who has left the game takes their cards with them,
+/// so only the seats still in the game are listed, and commander damage only
+/// to those seats.
+///
+/// A commander that is face down in the viewer-filtered state (a hidden zone,
+/// CR 400.2 + CR 401.2, or a face-down permanent, CR 708.2) is never located.
+/// The filter redacts its identity but keeps the commander designation and its
+/// object, so saying which of those places holds it would tell this seat which
+/// hidden card is the commander, or that a tutor took it from the library.
+///
+/// Every figure is read from the engine's authority for it, not rebuilt here:
+/// - the seat's color identity: `commander::defined_commander_color_identity`
+///   (CR 903.4), or the registered identity alone,
+///   `commander::registered_commander_color_identity`, while one of the seat's
+///   commanders is face down;
+/// - the commander tax: `commander::commander_tax` (CR 903.8), the live count
+///   of casts from the command zone. The object's derived `commander_tax`
+///   field is filled only by `derive_display_state` and is never deserialized;
+/// - the whole cost of the next cast: `casting::display_spell_cost`, which adds
+///   the tax and applies every cost modifier the cast would;
+/// - the damage: `GameState::commander_damage`, and how much more eliminates
+///   that player, `commander::commander_lethal_headroom` (CR 903.10a).
+fn push_commanders(
+    out: &mut String,
+    state: &GameState,
+    viewer: PlayerId,
+    db: Option<&CardDatabase>,
+    options: &GameRenderOptions,
+) {
+    // CR 408.3: only a format that starts cards in the command zone has
+    // commanders.
+    if !state.format_config.command_zone {
+        return;
+    }
+    // Grouped by owner in seat order and by id within a seat, so the same
+    // position always renders the same way: `objects` is a hash map.
+    let mut by_owner: BTreeMap<u8, Vec<&GameObject>> = BTreeMap::new();
+    for object in state.objects.values() {
+        if object.is_commander && players::is_alive(state, object.owner) {
+            by_owner.entry(object.owner.0).or_default().push(object);
+        }
+    }
+    if by_owner.is_empty() {
+        return;
+    }
+    out.push_str("\n--- COMMANDERS ---\n");
+    for (owner, mut commanders) in by_owner {
+        let owner = PlayerId(owner);
+        // CR 903.4 + CR 903.5c: the commanders' combined color identity, which
+        // every card in that seat's deck falls within. When no deck pool
+        // registers the seat's commanders, the engine reads it from the
+        // commander objects' printed colors and mana cost, which the filter
+        // redacts from a face-down one. While one is face down, only the
+        // registered identity is stated, and none when there is none.
+        let identity = if commanders.iter().any(|object| object.face_down) {
+            commander::registered_commander_color_identity(state, owner)
+        } else {
+            commander::defined_commander_color_identity(state, owner)
+        };
+        let identity = match identity {
+            Some(colors) if colors.is_empty() => " (color identity: colorless)".to_string(),
+            Some(colors) => format!(
+                " (color identity: {})",
+                mana_symbols(colors.into_iter().map(ManaType::from))
+            ),
+            None => String::new(),
+        };
+        out.push_str(&format!("{}{identity}:\n", seat_label(owner, viewer)));
+        commanders.sort_by_key(|object| object.id);
+        for object in commanders {
+            out.push_str(&format!(
+                "  - {}\n",
+                commander_line(state, viewer, object, db, options)
+            ));
+            for line in commander_damage_lines(state, viewer, object.id) {
+                out.push_str(&format!("    - {line}\n"));
+            }
+        }
+    }
+}
+
+/// A commander's line: what it is, where it is, and what its next cast from the
+/// command zone costs.
+///
+/// A commander on the battlefield is named only, since its battlefield line
+/// states its characteristics. So is a face-down one, named as the filtered
+/// state names it.
+fn commander_line(
+    state: &GameState,
+    viewer: PlayerId,
+    object: &GameObject,
+    db: Option<&CardDatabase>,
+    options: &GameRenderOptions,
+) -> String {
+    let named_only = object.zone == Zone::Battlefield || object.face_down;
+    let mut parts = if named_only {
+        vec![one_line(&object.name)]
+    } else {
+        card_facts(object)
+    };
+    parts.push(commander_place(viewer, object));
+    parts.push(next_cast_text(state, object));
+    let mut line = parts.join(" | ");
+    if named_only {
+        return line;
+    }
+    if let Some(text) = oracle_text(object.name.as_str(), db, options) {
+        line.push_str(&format!(" | \"{text}\""));
+    }
+    line
+}
+
+/// Where a commander is, in the words the rest of the position uses.
+///
+/// A face-down one is not located (see [`push_commanders`]): the words are
+/// the same in a hand, a library, or face down on the battlefield, so they
+/// stay the same as it moves between them. CR 108.4 + CR 110.2: a permanent's
+/// controller may not be its owner, so the battlefield says who controls it.
+fn commander_place(viewer: PlayerId, object: &GameObject) -> String {
+    if object.face_down {
+        return "face down or in a hidden zone".to_string();
+    }
+    match object.zone {
+        Zone::Command => "in the command zone".to_string(),
+        Zone::Battlefield => format!(
+            "on the battlefield, controlled by {}",
+            seat_label(object.controller, viewer)
+        ),
+        Zone::Stack => "on the stack".to_string(),
+        Zone::Graveyard => "in the graveyard".to_string(),
+        Zone::Exile => "in exile".to_string(),
+        Zone::Hand => "in hand".to_string(),
+        Zone::Library => "in the library".to_string(),
+    }
+}
+
+/// What casting a commander from the command zone costs next (CR 903.8).
+///
+/// In the command zone, the whole cost, priced by the engine's cost-display
+/// authority for the commander's owner, the one player who may cast it from
+/// there. Anywhere else, or when that authority prices no mana cost, the tax
+/// alone, which a cast from the command zone adds.
+fn next_cast_text(state: &GameState, object: &GameObject) -> String {
+    let tax = format!("{{{}}}", commander::commander_tax(state, object.id));
+    let cost = if object.zone == Zone::Command {
+        casting::display_spell_cost(state, object.owner, object.id)
+    } else {
+        None
+    };
+    match cost
+        .map(|cost| mana_cost_text(&cost))
+        .filter(|cost| !cost.is_empty())
+    {
+        Some(cost) => format!("next cast costs {cost}, including commander tax {tax}"),
+        None => format!("commander tax {tax} on its next cast from the command zone"),
+    }
+}
+
+/// CR 903.10a: the combat damage a commander has dealt each player, as the
+/// engine tallies it, and how much more from that commander eliminates them.
+///
+/// `commander_lethal_headroom` answers only in a format that eliminates a
+/// player by commander damage, so a format without that rule lists none, as
+/// the engine's own display omits it (`derive_views`).
+fn commander_damage_lines(
+    state: &GameState,
+    viewer: PlayerId,
+    commander_id: ObjectId,
+) -> Vec<String> {
+    state
+        .commander_damage
+        .iter()
+        .filter(|entry| entry.commander == commander_id && players::is_alive(state, entry.player))
+        .filter_map(|entry| {
+            let headroom = commander::commander_lethal_headroom(state, entry.player, commander_id)?;
+            let victim = seat_label(entry.player, viewer);
+            Some(format!(
+                "commander damage dealt to {victim}: {} ({headroom} more eliminates {victim})",
+                entry.damage
+            ))
+        })
+        .collect()
 }
 
 fn push_stack(out: &mut String, state: &GameState, viewer: PlayerId) {
@@ -703,6 +893,16 @@ fn card_line(
     let Some(object) = state.objects.get(&id) else {
         return format!("object #{}", id.0);
     };
+    let mut line = card_facts(object).join(" | ");
+    if let Some(text) = oracle_text(object.name.as_str(), db, options) {
+        line.push_str(&format!(" | \"{text}\""));
+    }
+    line
+}
+
+/// What a card off the battlefield is: its name, and its mana cost, type line,
+/// and power and toughness where it has them.
+fn card_facts(object: &GameObject) -> Vec<String> {
     let mut parts = vec![one_line(&object.name)];
     let cost = mana_cost_text(&object.mana_cost);
     if !cost.is_empty() {
@@ -715,11 +915,7 @@ fn card_line(
     if let (Some(power), Some(toughness)) = (object.power, object.toughness) {
         parts.push(format!("{power}/{toughness}"));
     }
-    let mut line = parts.join(" | ");
-    if let Some(text) = oracle_text(object.name.as_str(), db, options) {
-        line.push_str(&format!(" | \"{text}\""));
-    }
-    line
+    parts
 }
 
 /// A permanent's counters by the names cards give them: `1 +1/+1 counter, 8
@@ -1373,5 +1569,388 @@ mod tests {
                 "{viewer:?} shared={shared}: the viewer's graveyard line"
             );
         }
+    }
+
+    /// The whole COMMANDERS section, ending where the stack section begins.
+    fn commanders_section(lines: &[&str]) -> String {
+        format!("\n--- COMMANDERS ---\n{}\n\n--- STACK", lines.join("\n"))
+    }
+
+    /// Issue #10994: in Commander the position showed no commander in the
+    /// command zone, no cost or tax for its next cast, and no commander damage.
+    /// A Commander game played through the engine: Player 0 casts its commander
+    /// from the command zone, attacks Player 1 with it, then Bolts it and
+    /// returns it to the command zone, where its next cast carries {2} of tax.
+    /// Player 0's Ruby Medallion takes {1} off each cast, so the stated cost is
+    /// the engine's whole cost, not the printed cost plus the tax.
+    #[test]
+    fn the_position_shows_each_commander_its_next_cast_and_its_commander_damage() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::actions::GameAction;
+        use engine::types::game_state::WaitingFor;
+        use engine::types::mana::{ManaCost, ManaCostShard, ManaUnit};
+        use engine::types::phase::Phase;
+
+        const KIKI_JIKI: &str = "Haste\n{T}: Create a token that's a copy of target \
+             nonlegendary creature you control, except it has haste. Sacrifice it at the \
+             beginning of the next end step.";
+        const GIADA: &str = "Flying, vigilance\nEach other Angel you control enters with an \
+             additional +1/+1 counter on it for each Angel you already control.\n{T}: Add \
+             {W}. Spend this mana only to cast an Angel spell.";
+        const RUBY_MEDALLION: &str = "Red spells you cast cost {1} less to cast.";
+
+        let owner = PlayerId(0);
+        let viewer = PlayerId(1);
+        let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 2, 10994);
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_artifact_from_oracle(owner, "Ruby Medallion", RUBY_MEDALLION);
+        let kiki = scenario
+            .add_creature_to_hand(owner, "Kiki-Jiki, Mirror Breaker", 2, 2)
+            .from_oracle_text_with_keywords(&["Haste"], KIKI_JIKI)
+            .as_legendary()
+            .with_subtypes(vec!["Goblin", "Shaman"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red; 3],
+                generic: 2,
+            })
+            .id();
+        scenario.with_commander(kiki);
+        let giada = scenario
+            .add_creature_to_hand(viewer, "Giada, Font of Hope", 2, 2)
+            .from_oracle_text_with_keywords(&["Flying", "Vigilance"], GIADA)
+            .as_legendary()
+            .with_subtypes(vec!["Angel"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 1,
+            })
+            .id();
+        scenario.with_commander(giada);
+        let bolt = scenario.add_bolt_to_hand(owner);
+        // {2}{R}{R}{R}, less the Medallion's {1}.
+        let red: Vec<ManaUnit> = (0..4)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, Vec::new()))
+            .collect();
+        scenario.with_mana_pool(owner, red);
+        let mut runner = scenario.build();
+
+        let giada_line = "  - Giada, Font of Hope | {1}{W} | Legendary Creature — Angel | 2/2 \
+                          | in the command zone | next cast costs {1}{W}, including commander \
+                          tax {0}";
+        let kiki_in_command_zone = |cost: &str, tax: &str| {
+            format!(
+                "  - Kiki-Jiki, Mirror Breaker | {{2}}{{R}}{{R}}{{R}} | Legendary Creature — \
+                 Goblin Shaman | 2/2 | in the command zone | next cast costs {cost}, including \
+                 commander tax {tax}"
+            )
+        };
+
+        // Before any cast, both commanders wait in the command zone, untaxed.
+        // CR 601.2f: the Medallion reduces Kiki-Jiki, a red spell Player 0
+        // casts, and not Giada, which Player 1 casts.
+        let kiki_line = kiki_in_command_zone("{1}{R}{R}{R}", "{0}");
+        let board = rendered(runner.state(), viewer);
+        let expected = commanders_section(&[
+            "Player 0 (color identity: {R}):",
+            &kiki_line,
+            "You (color identity: {W}):",
+            giada_line,
+        ]);
+        assert!(board.contains(&expected), "{board}");
+
+        // CR 903.8: Player 0 casts its commander from the command zone, and
+        // it attacks Player 1 the turn it arrives (CR 702.10b: haste).
+        runner
+            .cast(kiki)
+            .resolve()
+            .assert_zone(&[kiki], Zone::Battlefield);
+        runner.advance_to_combat();
+        runner
+            .declare_attackers(&[(kiki, AttackTarget::Player(viewer))])
+            .expect("Kiki-Jiki attacks Player 1");
+        runner.combat_damage();
+        // Reach: the engine counts the cast and the combat damage.
+        let state = runner.state();
+        assert_eq!(commander::commander_tax(state, kiki), 2);
+        let dealt: Vec<(PlayerId, ObjectId, u32)> = state
+            .commander_damage
+            .iter()
+            .map(|entry| (entry.player, entry.commander, entry.damage))
+            .collect();
+        assert_eq!(dealt, vec![(viewer, kiki, 2)]);
+
+        let damage_line = "    - commander damage dealt to You: 2 (19 more eliminates You)";
+        let board = rendered(state, viewer);
+        let expected = commanders_section(&[
+            "Player 0 (color identity: {R}):",
+            "  - Kiki-Jiki, Mirror Breaker | on the battlefield, controlled by Player 0 | \
+             commander tax {2} on its next cast from the command zone",
+            damage_line,
+            "You (color identity: {W}):",
+            giada_line,
+        ]);
+        assert!(board.contains(&expected), "{board}");
+
+        // Player 0 Bolts its own commander. It dies, and CR 903.9a lets its
+        // owner put it back into the command zone.
+        let bolted = runner.cast(bolt).target_object(kiki).resolve();
+        assert!(
+            matches!(
+                bolted.final_waiting_for(),
+                WaitingFor::CommanderZoneChoice {
+                    player,
+                    commander_id,
+                    current_zone: Zone::Graveyard,
+                } if *player == owner && *commander_id == kiki
+            ),
+            "{:?}",
+            bolted.final_waiting_for()
+        );
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("Player 0 returns its commander to the command zone");
+        assert_eq!(runner.state().objects[&kiki].zone, Zone::Command);
+
+        // Its next cast from there costs {2} more (CR 903.8), still less the
+        // Medallion's {1}, and the damage it dealt stays with it (CR 903.10a).
+        let kiki_line = kiki_in_command_zone("{3}{R}{R}{R}", "{2}");
+        let board = rendered(runner.state(), viewer);
+        let expected = commanders_section(&[
+            "Player 0 (color identity: {R}):",
+            &kiki_line,
+            damage_line,
+            "You (color identity: {W}):",
+            giada_line,
+        ]);
+        assert!(board.contains(&expected), "{board}");
+
+        // Its owner reads the same commanders under its own seat label.
+        let board = rendered(runner.state(), owner);
+        let expected = commanders_section(&[
+            "You (color identity: {R}):",
+            &kiki_line,
+            "    - commander damage dealt to Player 1: 2 (19 more eliminates Player 1)",
+            "Player 1 (color identity: {W}):",
+            giada_line,
+        ]);
+        assert!(board.contains(&expected), "{board}");
+    }
+
+    /// CR 400.2 + CR 401.2 + CR 903.3: a commander stays one in a hidden zone,
+    /// but a seat that may not look at the card is told neither its name nor
+    /// which hidden zone holds it. Its owner shuffled it into their library
+    /// rather than the command zone (CR 903.9b), then a tutor put it into their
+    /// hand: another seat's COMMANDERS section reads the same before and after.
+    #[test]
+    fn a_commander_out_of_sight_is_neither_named_nor_located() {
+        use engine::game::zones::move_to_zone;
+        use engine::types::mana::{ManaCost, ManaCostShard};
+
+        let owner = PlayerId(0);
+        let other = PlayerId(1);
+        let mut state = GameState::new(FormatConfig::commander(), 2, 3);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            owner,
+            "Kenrith, the Returned King".to_string(),
+            Zone::Library,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.is_commander = true;
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 4,
+        };
+        object.mana_cost = cost.clone();
+        object.base_mana_cost = cost;
+
+        // No deck pool registers it, so the engine would read its identity
+        // from its printed colors and cost, which the filter redacts.
+        let hidden = commanders_section(&[
+            "Player 0:",
+            "  - Hidden Card | face down or in a hidden zone | commander tax {0} on its next \
+             cast from the command zone",
+        ]);
+        let in_library = rendered(&state, other);
+        assert!(in_library.contains(&hidden), "{in_library}");
+
+        move_to_zone(&mut state, id, Zone::Hand, &mut Vec::new());
+        assert_eq!(state.objects[&id].zone, Zone::Hand);
+        let in_hand = rendered(&state, other);
+        assert!(in_hand.contains(&hidden), "{in_hand}");
+        assert!(
+            !in_hand.contains("Kenrith"),
+            "hidden card leaked: {in_hand}"
+        );
+
+        // Its owner sees the card in their own hand.
+        let own = rendered(&state, owner);
+        let expected = commanders_section(&[
+            "You (color identity: {W}):",
+            "  - Kenrith, the Returned King | {4}{W} | in hand | commander tax {0} on its \
+             next cast from the command zone",
+        ]);
+        assert!(own.contains(&expected), "{own}");
+    }
+
+    /// CR 903.4 + CR 903.4a: a seat's color identity is the one registered for
+    /// its commanders before the game began, rules-text mana symbols included,
+    /// and it is public even while the commander is out of sight. Kenrith, the
+    /// Returned King costs {4}{W}, and its activated abilities' costs contain
+    /// {R}, {G}, {U} and {B}.
+    #[test]
+    fn a_seats_color_identity_is_the_registered_one() {
+        use engine::game::deck_loading::DeckEntry;
+        use engine::types::card::CardFace;
+        use engine::types::game_state::PlayerDeckPool;
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+        use std::sync::Arc;
+
+        let owner = PlayerId(0);
+        let mut state = GameState::new(FormatConfig::commander(), 2, 3);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            owner,
+            "Kenrith, the Returned King".to_string(),
+            Zone::Hand,
+        );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.is_commander = true;
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 4,
+        };
+        object.mana_cost = cost.clone();
+        object.base_mana_cost = cost;
+        state.deck_pools.push(PlayerDeckPool {
+            player: owner,
+            current_commander: Arc::new(vec![DeckEntry {
+                card: CardFace {
+                    name: "Kenrith, the Returned King".to_string(),
+                    color_identity: vec![
+                        ManaColor::Black,
+                        ManaColor::Green,
+                        ManaColor::Red,
+                        ManaColor::Blue,
+                        ManaColor::White,
+                    ],
+                    ..Default::default()
+                },
+                count: 1,
+            }]),
+            ..Default::default()
+        });
+
+        // Its owner, who sees the card, and another seat, who does not.
+        for (viewer, label, line) in [
+            (
+                owner,
+                "You",
+                "  - Kenrith, the Returned King | {4}{W} | in hand | commander tax {0} on its \
+                 next cast from the command zone",
+            ),
+            (
+                PlayerId(1),
+                "Player 0",
+                "  - Hidden Card | face down or in a hidden zone | commander tax {0} on its \
+                 next cast from the command zone",
+            ),
+        ] {
+            let board = rendered(&state, viewer);
+            let header = format!("{label} (color identity: {{W}}{{U}}{{B}}{{R}}{{G}}):");
+            let expected = commanders_section(&[&header, line]);
+            assert!(board.contains(&expected), "{board}");
+        }
+    }
+
+    /// CR 800.4a: a player who has left the game takes their cards with them,
+    /// so neither their commanders nor commander damage dealt to them is listed.
+    #[test]
+    fn a_seat_that_left_the_game_is_not_listed() {
+        use engine::game::elimination::eliminate_player;
+        use engine::types::events::LossReason;
+        use engine::types::game_state::CommanderDamageEntry;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 3);
+        let mut commander = |owner: PlayerId, name: &str| {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                owner,
+                name.to_string(),
+                Zone::Command,
+            );
+            state.objects.get_mut(&id).unwrap().is_commander = true;
+            id
+        };
+        let kiki = commander(PlayerId(0), "Kiki-Jiki, Mirror Breaker");
+        let giada = commander(PlayerId(2), "Giada, Font of Hope");
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(2),
+            commander: kiki,
+            damage: 2,
+        });
+        let section = |board: &str| -> String {
+            let (_, rest) = board
+                .split_once("--- COMMANDERS ---\n")
+                .expect("the position lists commanders");
+            let (section, _) = rest.split_once("\n--- STACK").expect("the stack follows");
+            section.to_string()
+        };
+
+        // Reach: while Player 2 plays, its commander and the damage dealt to
+        // it are listed.
+        let playing = section(&rendered(&state, PlayerId(1)));
+        assert!(playing.contains("Giada, Font of Hope"), "{playing}");
+        assert!(
+            playing.contains("commander damage dealt to Player 2: 2 (19 more eliminates Player 2)"),
+            "{playing}"
+        );
+
+        eliminate_player(
+            &mut state,
+            PlayerId(2),
+            LossReason::LifeTotal,
+            &mut Vec::new(),
+        );
+        assert!(!players::is_alive(&state, PlayerId(2)));
+        // Reach: its commander leaves the game with it (CR 800.4a), which the
+        // engine models as a move to exile. It stays a commander in a public
+        // zone there, so only the seat's departure keeps it off the list.
+        let departed = &state.objects[&giada];
+        assert!(departed.is_commander && departed.zone == Zone::Exile);
+        let left = section(&rendered(&state, PlayerId(1)));
+        assert!(left.contains("Kiki-Jiki, Mirror Breaker"), "{left}");
+        assert!(!left.contains("Giada"), "{left}");
+        assert!(!left.contains("Player 2"), "{left}");
+    }
+
+    /// The section is only for a format with a command zone, and only once a
+    /// commander is in the game.
+    #[test]
+    fn only_a_game_with_commanders_lists_them() {
+        for (format, listed) in [
+            (FormatConfig::commander(), true),
+            (FormatConfig::standard(), false),
+        ] {
+            let mut state = GameState::new(format, 2, 3);
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Kiki-Jiki, Mirror Breaker".to_string(),
+                Zone::Command,
+            );
+            state.objects.get_mut(&id).unwrap().is_commander = true;
+            let board = rendered(&state, PlayerId(1));
+            assert_eq!(board.contains("--- COMMANDERS ---"), listed, "{board}");
+        }
+        let without = rendered(
+            &GameState::new(FormatConfig::commander(), 2, 3),
+            PlayerId(1),
+        );
+        assert!(!without.contains("--- COMMANDERS ---"), "{without}");
     }
 }
