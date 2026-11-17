@@ -1106,10 +1106,11 @@ pub(crate) fn event_context_incarnation(
                 .and_then(|record| record.incarnation)
                 .map(|incarnation| ObjectIncarnationRef::of(id, incarnation)),
             GameEvent::ZoneChanged {
+                object_id,
                 to: Zone::Battlefield,
                 record,
                 ..
-            } => record
+            } if *object_id == id => record
                 .entered_incarnation
                 .map(|incarnation| ObjectIncarnationRef::of(id, incarnation)),
             GameEvent::ZoneChanged { record, .. } => record
@@ -1118,13 +1119,15 @@ pub(crate) fn event_context_incarnation(
                 .map(|context| context.identity.reference)
                 .filter(|pin| pin.object_id == id),
             GameEvent::PermanentTapped {
+                object_id,
                 incarnation: Some(incarnation),
                 ..
-            } => Some(ObjectIncarnationRef::of(id, *incarnation)),
+            } if *object_id == id => Some(ObjectIncarnationRef::of(id, *incarnation)),
             GameEvent::DamageDealt {
+                source_id,
                 source_incarnation: Some(incarnation),
                 ..
-            } => Some(ObjectIncarnationRef::of(id, *incarnation)),
+            } if *source_id == id => Some(ObjectIncarnationRef::of(id, *incarnation)),
             // CR 509.3c + CR 509.3e: the blocked attacker's stamped incarnation.
             GameEvent::AttackerBecameBlocked {
                 attacker,
@@ -3347,7 +3350,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::HiddenSearchViewed { .. }
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
-        | GameEvent::PhaseChangedForPlayer { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCast { .. }
         | GameEvent::Mutated { .. }
@@ -3573,10 +3576,7 @@ pub(crate) fn extract_player_from_event(
         // creature") would have no player anchor and the sacrifice filter
         // would match across all players.
         GameEvent::PhaseChanged { .. } => Some(state.active_player),
-        // CR 805.4d: a fanned phase occurrence names its own player; the
-        // production `PhaseChanged` event has no such binding and resolves to
-        // whoever holds the turn.
-        GameEvent::PhaseChangedForPlayer { player_id, .. } => Some(*player_id),
+        GameEvent::PhaseChangedFor { player, .. } => Some(*player),
         // CR 603.6 + CR 109.4: For zone-change triggers ("whenever a creature
         // enters", "whenever an opponent's creature enters", "whenever a card
         // is put into a graveyard from anywhere"), the `TriggeringPlayer` /
@@ -4636,6 +4636,49 @@ mod tests {
             record: Box::new(record),
         };
         assert_eq!(extract_player_from_event(&event, &state), Some(PlayerId(1)));
+    }
+
+    /// CR 400.7: an event pins the incarnation it recorded only for the object it names.
+    #[test]
+    fn event_context_incarnation_pins_only_the_events_own_object() {
+        use crate::types::identifiers::ObjectIncarnationRef;
+        let (named, other) = (ObjectId(7), ObjectId(8));
+        let mut entry = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            named,
+            Some(Zone::Hand),
+            Zone::Battlefield,
+        );
+        entry.entered_incarnation = Some(3);
+        let events = [
+            GameEvent::ZoneChanged {
+                object_id: named,
+                from: Some(Zone::Hand),
+                to: Zone::Battlefield,
+                record: Box::new(entry),
+            },
+            GameEvent::PermanentTapped {
+                object_id: named,
+                caused_by: None,
+                incarnation: Some(3),
+            },
+            GameEvent::DamageDealt {
+                source_id: named,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 1,
+                is_combat: false,
+                excess: 0,
+                source_incarnation: Some(3),
+            },
+        ];
+        for event in &events {
+            let pin = |id| event_context_incarnation(&TargetFilter::TriggeringSource, event, id);
+            assert_eq!(
+                pin(named),
+                Some(ObjectIncarnationRef::of(named, 3)),
+                "{event:?}"
+            );
+            assert_eq!(pin(other), None, "{event:?}");
+        }
     }
 
     /// CR 108.3 + CR 400.7: "that card's owner" after a rebound move is the
@@ -9927,7 +9970,12 @@ mod tests {
             read(&state),
             (Some(PlayerId(1)), vec![PlayerId(1)], Some(PlayerId(1)))
         );
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut Vec::new(),
+        );
         assert_eq!(read(&state), (None, vec![], None));
     }
 

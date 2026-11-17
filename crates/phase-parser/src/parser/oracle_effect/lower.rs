@@ -28,9 +28,10 @@ use super::super::oracle_quantity::{
     parse_for_each_short_of_clause_expr, parse_player_attribute_attr_clause, parse_quantity_ref,
 };
 use super::super::oracle_target::{
-    parse_bare_was_dealt_damage_suffix, parse_block_history_clause, parse_target,
-    parse_target_with_ctx, parse_target_with_syntax, parse_that_clause_suffix,
-    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, TargetSyntax,
+    parse_bare_was_dealt_damage_suffix, parse_block_history_clause,
+    parse_controller_predicate_leaves, parse_target, parse_target_with_ctx,
+    parse_target_with_syntax, parse_that_clause_suffix, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, TargetSyntax,
 };
 use super::super::oracle_util::{
     parse_comparator_prefix, parse_count_expr, parse_count_expr_combinator, strip_after, TextPair,
@@ -7893,6 +7894,7 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
     if target_relative_clause_owns_suffix(lower.as_str())
         || bare_dealt_damage_relative_clause_owns_suffix(lower.as_str())
         || player_lookback_relative_clause_owns_suffix(lower.as_str())
+        || whose_controller_lookback_relative_clause_owns_suffix(lower.as_str())
         || spell_history_relative_clause_owns_suffix(lower.as_str())
         || cant_be_activated_clause_owns_tapped_suffix(lower.as_str())
         || combat_history_relative_clause_owns_suffix(lower.as_str())
@@ -8111,6 +8113,39 @@ pub(crate) fn player_lookback_relative_clause_owns_suffix(input: &str) -> bool {
         .and(tag::<_, _, OracleError<'_>>(" this turn"))
         .parse(after_who)
     else {
+        return false;
+    };
+    // The relative clause must own the suffix: nothing but optional punctuation
+    // may follow, so an outer duration ("… until end of turn") is not suppressed.
+    (
+        multispace0,
+        opt(alt((tag::<_, _, OracleError<'_>>("."), tag(",")))),
+        multispace0,
+        eof,
+    )
+        .parse(rest)
+        .is_ok()
+}
+
+/// CR 608.2i + CR 610.1: a "whose controller <look-back> this turn"
+/// possessive-relative controller-predicate clause owns its trailing "this turn"
+/// (Steel Hellkite #3248) — it is the look-back's window, not the effect's
+/// duration. Possessive-relative sibling of
+/// `player_lookback_relative_clause_owns_suffix`. Delegates the predicate to the
+/// shared controller-predicate leaves (the single authority the target parser's
+/// "whose controller" arm also reads), so the stripper preserves exactly the
+/// clauses the target grammar can consume — never more. The clause must run to
+/// end of input (punctuation only), so a genuine OUTER duration after it leaves
+/// a non-empty remainder and still strips.
+fn whose_controller_lookback_relative_clause_owns_suffix(input: &str) -> bool {
+    // Anchor on the LAST " whose controller " so an earlier clause cannot mask
+    // the outer duration on a later clause.
+    // allow-noncombinator: rfind anchors the word-boundary slice for the nom parse below (Pattern 5), not parsing dispatch.
+    let Some(idx) = input.rfind(" whose controller ") else {
+        return false;
+    };
+    let after = &input[idx + " whose controller ".len()..];
+    let Ok((rest, _)) = parse_controller_predicate_leaves(after) else {
         return false;
     };
     // The relative clause must own the suffix: nothing but optional punctuation
@@ -9447,10 +9482,22 @@ fn followed_by_target_article(input: &str) -> bool {
 /// CR 115.1d + CR 601.2c: Strip exact target-count prefix before a targeted
 /// phrase. "two target creatures" and "X target creatures" both set the exact
 /// number of targets, unlike "up to X target creatures".
-pub(crate) fn strip_exact_target_prefix(lower: &str) -> Option<(QuantityExpr, &str)> {
-    let (rest, count) = parse_exact_target_count_expr(lower).ok()?;
+///
+/// The prefix is matched case-insensitively because printed Oracle text carries
+/// an uppercase `X` (Mass Manipulation: "Gain control of X target creatures
+/// and/or planeswalkers"), and the verb branches dispatch on original-case
+/// text. The returned remainder is sliced from `text`, so callers keep the
+/// original casing. `to_ascii_lowercase` preserves byte length, which keeps the
+/// consumed offset a valid boundary in `text`.
+pub(crate) fn strip_exact_target_prefix(text: &str) -> Option<(QuantityExpr, &str)> {
+    let lower = text.to_ascii_lowercase();
+    let (rest, count) = parse_exact_target_count_expr(&lower).ok()?;
     let rest = rest.trim_start();
-    followed_by_target_article(rest).then_some((count, rest))
+    if !followed_by_target_article(rest) {
+        return None;
+    }
+    let consumed = lower.len() - rest.len();
+    Some((count, &text[consumed..]))
 }
 
 fn parse_exact_target_count_expr(input: &str) -> OracleResult<'_, QuantityExpr> {
@@ -17296,7 +17343,8 @@ mod where_x_tests {
     #[test]
     fn beckett_brass_gain_control_target_carries_controller_matches() {
         use crate::types::ability::{
-            DamageKindFilter, Effect, FilterProp, PlayerFilter, TargetFilter, TypeFilter,
+            DamageKindFilter, Effect, FilterProp, PlayerFilter, PlayerRelation, TargetFilter,
+            TypeFilter,
         };
         let parsed = crate::parser::oracle::parse_oracle_text(
             "Other Pirates you control get +1/+1.\nAt the beginning of your end step, gain control of target nonland permanent controlled by a player who was dealt combat damage by three or more Pirates this turn.",
@@ -17340,6 +17388,8 @@ mod where_x_tests {
                             // "three or more Pirates" → the count threshold is
                             // enforced (not dropped), so min_sources must be 3.
                             min_sources: 3,
+                            // CR 608.2c: "a player who …" names no opponent.
+                            relation: PlayerRelation::All,
                         } if matches!(
                             &**src,
                             TargetFilter::Typed(t)
@@ -17351,7 +17401,84 @@ mod where_x_tests {
         });
         assert!(
             has_predicate,
-            "GainControl target must carry ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(Pirate), min_sources: 3}}}}, got {:?}",
+            "GainControl target must carry ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(Pirate), min_sources: 3, All}}}}, got {:?}",
+            typed.properties
+        );
+    }
+
+    /// Issue #3248 — Steel Hellkite: the `{X}` destroy line must carry the CONTROLLER
+    /// PREDICATE `FilterProp::ControllerMatches` wrapping `OpponentDealtDamage {
+    /// CombatOnly, Some(SelfRef), min_sources: 1 }` — the "whose controller was dealt
+    /// combat damage by this creature this turn" relative clause is the
+    /// possessive-relative subject form of the object-side controller-predicate bridge
+    /// (CR 109.4 + CR 608.2i; CR 120.2a combat damage),
+    /// not a dropped tail. Without it the ability destroys every MV-X nonland.
+    #[test]
+    fn steel_hellkite_destroy_target_carries_controller_damage_predicate() {
+        use crate::types::ability::{
+            DamageKindFilter, Effect, FilterProp, PlayerFilter, PlayerRelation, TargetFilter,
+        };
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Flying\n{2}: This creature gets +1/+0 until end of turn.\n{X}: Destroy each nonland permanent with mana value X whose controller was dealt combat damage by this creature this turn. Activate only once each turn.",
+            "Steel Hellkite",
+            &["Flying".to_string()],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Dragon".to_string()],
+        );
+
+        // Positive reach-guards: the `{X}` ability lowers to DestroyAll (not
+        // Unimplemented), keeps its Cmc prop, and raises no swallow warnings.
+        let destroy = parsed
+            .abilities
+            .iter()
+            .find_map(|a| match &*a.effect {
+                Effect::DestroyAll { target, .. } => Some(target.clone()),
+                _ => None,
+            })
+            .expect("Hellkite's {X} line must lower to DestroyAll");
+        assert!(
+            !parsed
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::Unimplemented { .. })),
+            "Hellkite must not produce any Unimplemented effect"
+        );
+        let TargetFilter::Typed(typed) = &destroy else {
+            panic!("expected a Typed DestroyAll target, got {destroy:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Cmc { .. })),
+            "the Cmc EQ Ref(X) prop must be retained, got {:?}",
+            typed.properties
+        );
+        assert!(
+            parsed.parse_warnings.is_empty(),
+            "no swallow detector may fire once the clause is captured (pre-fix: also empty — the drop was silent), got {:?}",
+            parsed.parse_warnings
+        );
+
+        let has_predicate = typed.properties.iter().any(|p| {
+            matches!(
+                p,
+                FilterProp::ControllerMatches { player }
+                    if matches!(
+                        &**player,
+                        PlayerFilter::OpponentDealtDamage {
+                            kind: DamageKindFilter::CombatOnly,
+                            source: Some(src),
+                            min_sources: 1,
+                            // CR 608.2c: "whose controller …" names no opponent.
+                            relation: PlayerRelation::All,
+                        } if matches!(&**src, TargetFilter::SelfRef)
+                    )
+            )
+        });
+        assert!(
+            has_predicate,
+            "DestroyAll target must carry ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(SelfRef), min_sources: 1, All}}}}, got {:?}",
             typed.properties
         );
     }
@@ -17382,6 +17509,25 @@ mod where_x_tests {
         );
         // The guard preserves the full clause (trailing period retained, as for
         // the other `preserves_*` guard tests).
+        assert_eq!(stripped, text.trim());
+    }
+
+    /// Issue #3248 — Steel Hellkite: the "this turn" belongs to the "whose
+    /// controller was dealt combat damage … this turn" look-back relative clause on
+    /// the target, NOT to the destroy effect's duration (which states none,
+    /// CR 610.1). The possessive-relative look-back guard must preserve the whole
+    /// clause and yield no duration — otherwise the stripper amputates the "this
+    /// turn" the target parser's shared leaves require, and the clause is dropped.
+    #[test]
+    fn strip_trailing_duration_preserves_whose_controller_damage_lookback() {
+        use super::strip_trailing_duration;
+
+        let text = "destroy each nonland permanent with mana value x whose controller was dealt combat damage by ~ this turn.";
+        let (stripped, duration) = strip_trailing_duration(text);
+        assert!(
+            duration.is_none(),
+            "the whose-controller look-back 'this turn' must not become an effect duration, got {duration:?}"
+        );
         assert_eq!(stripped, text.trim());
     }
 
