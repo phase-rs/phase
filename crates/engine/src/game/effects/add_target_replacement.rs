@@ -630,6 +630,25 @@ fn replacement_targets(
             .unwrap_or_default();
     }
 
+    // CR 608.2c + CR 400.7: "[noun] dealt damage this way" (and "those Auras")
+    // names the set the preceding instruction published; only members still on
+    // the battlefield can carry the rider, since a changed zone is a new object.
+    // No gate on `ability.targets` or the forwarded-result context: the set path
+    // never reads either, and a fused spell's other half may declare targets in
+    // the same chain without changing which objects the damage reached.
+    if let TargetFilter::TrackedSet { id } = target {
+        return crate::game::quantity::tracked_set_object_ids(state, *id)
+            .into_iter()
+            .filter(|object_id| {
+                state
+                    .objects
+                    .get(object_id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            })
+            .map(TargetRef::Object)
+            .collect();
+    }
+
     resolve_event_context_target(state, target, ability.source_id)
         .into_iter()
         .collect()
@@ -821,7 +840,7 @@ mod tests {
         ForwardedResultContext, ReplacementDefinition, RestrictionExpiry, SourceExclusion,
         TargetFilter, TypeFilter, TypedFilter,
     };
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::ProposedEvent;
     use crate::types::replacements::ReplacementEvent;
@@ -1105,6 +1124,168 @@ mod tests {
             .as_slice()
             .iter()
             .any(|replacement| replacement.event == ReplacementEvent::Moved));
+    }
+
+    /// Board for the `TrackedSet` rows: a source, three battlefield creatures
+    /// `a`, `b`, `c`, and an `AddTargetReplacement` ability bound to `target`
+    /// carrying no declared targets (an each-creature spell declares none).
+    fn tracked_set_rider_fixture(
+        target: TargetFilter,
+    ) -> (GameState, ResolvedAbility, [ObjectId; 3]) {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mass Damage Spell".to_string(),
+            Zone::Battlefield,
+        );
+        let mut creature = |card: u64, name: &str| {
+            create_object(
+                &mut state,
+                CardId(card),
+                PlayerId(1),
+                name.to_string(),
+                Zone::Battlefield,
+            )
+        };
+        let a = creature(2, "Creature A");
+        let b = creature(3, "Creature B");
+        let c = creature(4, "Creature C");
+        let rider = ReplacementDefinition::new(ReplacementEvent::Moved)
+            .valid_card(TargetFilter::SelfRef)
+            .destination_zone(Zone::Graveyard)
+            .expiry(RestrictionExpiry::EndOfTurn);
+        let ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(rider),
+                target,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        (state, ability, [a, b, c])
+    }
+
+    fn carries_rider(state: &GameState, id: ObjectId) -> bool {
+        state.objects[&id]
+            .replacement_definitions
+            .as_slice()
+            .iter()
+            .any(|replacement| replacement.event == ReplacementEvent::Moved)
+    }
+
+    fn sentinel() -> TargetFilter {
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        }
+    }
+
+    /// CR 608.2c + CR 400.7: the `TrackedSet` sentinel installs the carried
+    /// replacement on exactly the chain set's live members, with no declared
+    /// targets, leaving an older non-empty set untouched.
+    #[test]
+    fn tracked_set_rider_installs_on_the_chain_sets_live_members_only() {
+        let (mut state, ability, [a, b, c]) = tracked_set_rider_fixture(sentinel());
+        state.tracked_object_sets.insert(TrackedSetId(1), vec![c]);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(2), vec![a, b]);
+        state.chain_tracked_set_id = Some(TrackedSetId(2));
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(carries_rider(&state, a) && carries_rider(&state, b));
+        assert!(
+            !carries_rider(&state, c),
+            "a member of an older set is not named by this resolution's anaphor"
+        );
+    }
+
+    /// CR 400.7: a member that left the battlefield is a new object the rider can
+    /// never name; the remaining member still receives it (reach-guard).
+    #[test]
+    fn tracked_set_rider_skips_a_member_that_left_the_battlefield() {
+        let (mut state, ability, [a, b, _]) = tracked_set_rider_fixture(sentinel());
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![a, b]);
+        state.chain_tracked_set_id = Some(TrackedSetId(1));
+        state.objects.get_mut(&b).unwrap().zone = Zone::Graveyard;
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(
+            carries_rider(&state, a),
+            "reach-guard: the live member installs"
+        );
+        assert!(!carries_rider(&state, b));
+    }
+
+    /// CR 608.2c: an EMPTY chain set is authoritative. A stale older non-empty
+    /// set must not shadow it. The first resolution in the same test proves the
+    /// arm is live (reach-guard).
+    #[test]
+    fn tracked_set_rider_with_an_empty_chain_set_ignores_an_older_set() {
+        let (mut state, ability, [a, b, c]) = tracked_set_rider_fixture(sentinel());
+        state.tracked_object_sets.insert(TrackedSetId(1), vec![c]);
+        state.tracked_object_sets.insert(TrackedSetId(2), vec![a]);
+        state.chain_tracked_set_id = Some(TrackedSetId(2));
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+        assert!(carries_rider(&state, a), "reach-guard: the arm is live");
+
+        state.tracked_object_sets.insert(TrackedSetId(3), vec![]);
+        state.chain_tracked_set_id = Some(TrackedSetId(3));
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(!carries_rider(&state, c));
+        assert!(!carries_rider(&state, b));
+    }
+
+    /// Pins the shared sentinel ladder's current behavior: with no chain set the
+    /// latest NON-EMPTY set binds (`targeting::resolve_tracked_set_id`), the same
+    /// ladder every other sentinel consumer uses. Not derivable from a printed
+    /// card: no mass-damage face reaches this branch. With no non-empty set at
+    /// all, nothing installs.
+    #[test]
+    fn tracked_set_rider_without_a_chain_set_uses_the_latest_non_empty_set() {
+        let (mut state, ability, [a, b, c]) = tracked_set_rider_fixture(sentinel());
+        state.tracked_object_sets.insert(TrackedSetId(1), vec![c]);
+        state.tracked_object_sets.insert(TrackedSetId(2), vec![]);
+        state.chain_tracked_set_id = None;
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(carries_rider(&state, c));
+        assert!(!carries_rider(&state, a) && !carries_rider(&state, b));
+
+        let (mut empty_state, empty_ability, [a, b, c]) = tracked_set_rider_fixture(sentinel());
+        empty_state
+            .tracked_object_sets
+            .insert(TrackedSetId(1), vec![]);
+        resolve(&mut empty_state, &empty_ability, &mut Vec::new()).unwrap();
+        assert!(!carries_rider(&empty_state, a));
+        assert!(!carries_rider(&empty_state, b));
+        assert!(!carries_rider(&empty_state, c));
+    }
+
+    /// A concrete non-zero id binds exactly that set, whatever the chain id is.
+    #[test]
+    fn tracked_set_rider_with_a_concrete_id_binds_exactly_that_set() {
+        let (mut state, ability, [a, b, c]) = tracked_set_rider_fixture(TargetFilter::TrackedSet {
+            id: TrackedSetId(1),
+        });
+        state.tracked_object_sets.insert(TrackedSetId(1), vec![c]);
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(2), vec![a, b]);
+        state.chain_tracked_set_id = Some(TrackedSetId(2));
+
+        resolve(&mut state, &ability, &mut Vec::new()).unwrap();
+
+        assert!(carries_rider(&state, c));
+        assert!(!carries_rider(&state, a) && !carries_rider(&state, b));
     }
 
     /// CR 611.2a: a stated duration this seam cannot represent must not be
