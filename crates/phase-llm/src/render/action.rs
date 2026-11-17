@@ -2443,9 +2443,10 @@ mod tests {
     /// names no object, and a card in exile by its object. CR 400.11b: Booster
     /// Tutor ("Open a sealed Magic booster pack, reveal the cards, and put one
     /// of them into your hand.") offers a card by its slot in the opened pack.
-    /// CR 702.139a: Mastermind's Acquisition ("Put a card you own from outside
-    /// the game into your hand.") can offer the revealed companion. Each option
-    /// names the card it brings in and where it is.
+    /// CR 702.139a: Living Wish ("You may reveal a creature or land card you
+    /// own from outside the game and put it into your hand.") can offer the
+    /// revealed companion. Each option names the card it brings in and where it
+    /// is.
     #[test]
     fn an_outside_game_option_names_the_card_it_brings_in() {
         use engine::types::actions::OutsideGameSelection;
