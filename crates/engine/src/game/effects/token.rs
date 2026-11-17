@@ -112,10 +112,10 @@ impl TokenAbilityMaterialization {
 ///
 /// When both contribute, the catalog path contributes only what is NOT
 /// semantically present in the predefined payload (compared with the
-/// `*_semantically_equal` predicates below, never card-specific): the token's
-/// ability set is a set, not a multiset (CR 707.2a), so granting the same
-/// ability twice would create two separately-activatable abilities the printed
-/// token does not have. The extras ride a nested `CatalogRulesText`-sourced
+/// `*_semantically_equal` predicates below, never card-specific): both sources
+/// describe the same printed ability, and granting it from each would create
+/// two separately-activatable instances (CR 113.2c) the printed token does not
+/// have. The extras ride a nested `CatalogRulesText`-sourced
 /// sub-payload so the with-clause suppress guard applies to them unchanged;
 /// folding extras into the top-level payload is forbidden because it would
 /// bypass that guard.
