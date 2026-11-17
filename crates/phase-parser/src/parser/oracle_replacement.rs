@@ -7876,6 +7876,7 @@ fn replacement_condition_from_static(
         | StaticCondition::SpellCastWithVariantThisTurn { .. }
         | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
         | StaticCondition::OpponentPoisonAtLeast { .. }
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::DuringYourTurn
         | StaticCondition::DuringOpponentsTurn

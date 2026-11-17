@@ -11743,6 +11743,9 @@ fn static_condition_reads_filter_population(
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: a player-counter predicate carries no filter or counted
+        // population, like the monarch arm above.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -12206,6 +12209,7 @@ fn trigger_condition_reads_filter_population(
         | TriggerCondition::FirstCombatPhaseOfTurn
         | TriggerCondition::HasMaxSpeed
         | TriggerCondition::IsMonarch { .. }
+        | TriggerCondition::IsPoisoned { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
