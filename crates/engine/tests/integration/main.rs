@@ -202,6 +202,7 @@ mod kilo_live_offer_from_real_dump;
 mod later_instruction_unless_bindings;
 mod lathiel_end_step_counters_repro;
 mod layer_boundary_census;
+mod layer_two_control_change_triggers;
 mod leyline_tyrant_pay_any_red_damage;
 mod lost_monarch_combat_damage_by_type_intervening_if;
 mod mana_ability_mana_payment_window;
