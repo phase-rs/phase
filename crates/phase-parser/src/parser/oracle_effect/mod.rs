@@ -4042,6 +4042,14 @@ pub(crate) fn delayed_sweep_is_unbound_anaphor(inner: &AbilityDefinition) -> boo
 /// `AddTargetReplacement` resolver), SelfRef on a replacement resolves
 /// against the carrying object — which IS the target.
 ///
+/// CR 109.2: a subject that names a card type ("a creature dealt damage this
+/// way", Anger of the Gods, Touch of the Void) is only that type, so the carried
+/// `valid_card` is `And[SelfRef, Typed(type)]`. The noun is checked when the
+/// replacement applies (CR 614.1), so a noncreature that was dealt damage this way
+/// (a planeswalker that took redirected damage) goes to the graveyard instead of
+/// being exiled. "a permanent dealt damage this way" (Underworld Fires, CR 110.1),
+/// a declared-target subject and "it" add no type restriction and keep `SelfRef`.
+///
 /// CR 608.2c: the subject is the one place the rider's recipient is named, but
 /// this detector always emits `target: Any`; the clause loop's
 /// [`bind_die_exile_rider_antecedent`] rebinds it from the same subject (the
@@ -4057,16 +4065,31 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
     let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("if "))
         .parse(lower)
         .ok()?;
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("that permanent"),
-        tag::<_, _, OracleError<'_>>("that creature or planeswalker"),
-        tag("that creature"),
-        tag("that planeswalker"),
-        tag("that token"),
-        tag("a permanent dealt damage by ~"),
-        tag("a creature dealt damage by ~"),
-        recognize(parse_dealt_damage_this_way_subject),
-        tag("it"),
+    // The card-type noun the printed subject names, if any (CR 109.2): only the
+    // "a creature dealt damage ..." anaphors carry one. "a permanent dealt damage
+    // ..." (CR 110.1), a declared-target subject (its type is enforced by target
+    // legality, CR 608.2b) and the pronoun "it" add no type restriction.
+    let (rest, subject_noun) = alt((
+        value(
+            None,
+            alt((
+                tag::<_, _, OracleError<'_>>("that permanent"),
+                tag("that creature or planeswalker"),
+                tag("that creature"),
+                tag("that planeswalker"),
+                tag("that token"),
+                tag("a permanent dealt damage by ~"),
+            )),
+        ),
+        value(
+            Some(TypeFilter::Creature),
+            tag("a creature dealt damage by ~"),
+        ),
+        map(parse_dealt_damage_this_way_subject, |noun| match noun {
+            TypeFilter::Permanent => None,
+            noun => Some(noun),
+        }),
+        value(None, tag("it")),
     ))
     .parse(rest)
     .ok()?;
@@ -4116,8 +4139,21 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
             enters_modified_if: None,
         },
     );
+    // CR 614.1: a replacement effect applies continuously as events happen, so the
+    // noun is read from the carrier when it would die, not when the rider installs.
+    // The carrier is the host the resolver attaches this to (`SelfRef`); a subject
+    // that names a card type adds that type as a conjunct (CR 109.2).
+    let valid_card = match subject_noun {
+        None => TargetFilter::SelfRef,
+        Some(noun) => TargetFilter::And {
+            filters: vec![
+                TargetFilter::SelfRef,
+                TargetFilter::Typed(TypedFilter::new(noun)),
+            ],
+        },
+    };
     let mut repl = ReplacementDefinition::new(ReplacementEvent::Moved)
-        .valid_card(TargetFilter::SelfRef)
+        .valid_card(valid_card)
         .destination_zone(Zone::Graveyard)
         .execute(exile_effect);
     repl.consume_on_apply = true;

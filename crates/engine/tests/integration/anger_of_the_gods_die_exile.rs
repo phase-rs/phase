@@ -10,20 +10,31 @@
 //! "After being dealt damage, if they would die for any reason that turn, they'll
 //! be exiled instead.").
 //!
-//! The single-target sibling (Pillar of Flame, Demonfire, ...) is the separate
-//! phase-rs/phase#10965 and is not covered here.
+//! CR 109.2 + CR 614.1 (phase-rs/phase#11021 review): "a creature dealt damage
+//! this way" names creatures only, so the rider's replacement carries the creature
+//! noun and a planeswalker that took redirected damage (Gideon's Sacrifice) is put
+//! into the graveyard at 0 loyalty rather than exiled. Underworld Fires' "a
+//! permanent dealt damage this way" has no such restriction.
+//!
+//! The single-target sibling (Pillar of Flame, Demonfire, ...) installs its rider
+//! even when no damage was dealt: that is the separate phase-rs/phase#10965 and is
+//! not covered here. Only its creature-noun gate is (Touch of the Void on a
+//! planeswalker).
 
-use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::move_to_zone;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastingVariant, CastingVariantFace, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db;
@@ -33,6 +44,7 @@ const ANGER: &str = "Anger of the Gods deals 3 damage to each creature. If a cre
 const CRUSH_THE_WEAK: &str = "Crush the Weak deals 2 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.\nForetell {R} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
 const YAMABUSHIS_STORM: &str = "Yamabushi's Storm deals 1 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.";
 const UNDERWORLD_FIRES: &str = "Underworld Fires deals 1 damage to each creature and each planeswalker. If a permanent dealt damage this way would die this turn, exile it instead.";
+const TOUCH_OF_THE_VOID: &str = "Devoid (This card has no color.)\nTouch of the Void deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.";
 const LILIANA_OF_THE_VEIL: &str = "[+1]: Each player discards a card.\n[−2]: Target player sacrifices a creature.\n[−6]: Separate all permanents target player controls into two piles. That player sacrifices all permanents in the pile of their choice.";
 
 fn pool(mana: &[ManaType]) -> Vec<ManaUnit> {
@@ -723,4 +735,331 @@ fn fused_gallifrey_falls_deals_damage_then_phases_out_targeted_creature() {
         WaitingFor::Priority { .. }
     ));
     assert!(outcome.state().stack.is_empty());
+}
+
+/// P1's half of the redirected-damage rows: real Gideon's Sacrifice in hand with
+/// its {W}, and the permanents it shields.
+struct RedirectBoard {
+    runner: GameRunner,
+    anger: ObjectId,
+    sacrifice: ObjectId,
+}
+
+/// Cast Anger of the Gods as P0 and answer it as P1 with the real Gideon's
+/// Sacrifice choosing `chosen`, through the production cast pipeline, then let the
+/// whole stack resolve (the review's sequence for phase-rs/phase#11021).
+fn anger_answered_by_gideons_sacrifice(board: &mut RedirectBoard, chosen: ObjectId) -> CastOutcome {
+    let mut commit = board.runner.cast(board.anger).commit();
+    commit
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority with Anger on the stack so P1 may respond");
+    assert!(
+        matches!(commit.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "P1 must hold priority to respond: {:?}",
+        commit.state().waiting_for
+    );
+    let outcome = commit.cast(board.sacrifice).target_object(chosen).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the whole stack must finish resolving: {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(outcome.state().stack.is_empty());
+    outcome
+}
+
+/// F1 (phase-rs/phase#11021 review). CR 109.2 + CR 614.1 + CR 704.5i + CR 120.3c:
+/// P0 casts Anger of the Gods and P1 responds with Gideon's Sacrifice choosing
+/// Liliana of the Veil. The redirect makes Liliana a recipient of the damage, so
+/// she is in the "dealt damage this way" set, but she was never a creature: at 0
+/// loyalty she is put into the graveyard by the state-based action and the
+/// "a creature ... would die" rider does not exile her. A creature of the same
+/// cast that the shield does not cover is exiled (the rider is live).
+#[test]
+fn anger_of_the_gods_redirected_damage_does_not_exile_a_planeswalker() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // P1 controls the shielded permanents: Bears (covered by the redirect) and the
+    // planeswalker the redirect lands on.
+    let shielded_bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let liliana = scenario.add_real_card(P1, "Liliana of the Veil", Zone::Battlefield, db);
+    let sacrifice = scenario.add_real_card(P1, "Gideon's Sacrifice", Zone::Hand, db);
+    // P0 controls a creature the shield does not cover.
+    let exposed_bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    scenario.with_mana_pool(P0, pool(&anger().mana));
+    scenario.with_mana_pool(P1, pool(&[ManaType::White]));
+    let anger_card = scenario
+        .add_spell_to_hand(P0, "Anger of the Gods", false)
+        .with_mana_cost(anger().mana_cost)
+        .from_oracle_text(ANGER)
+        .id();
+    let mut board = RedirectBoard {
+        runner: scenario.build(),
+        anger: anger_card,
+        sacrifice,
+    };
+    // Reach-guard for the fixture: the real planeswalker starts at 3 loyalty (counters
+    // and field), so Anger's redirected 3 damage is exactly lethal to her (CR 120.3c).
+    let starting = &board.runner.state().objects[&liliana];
+    assert_eq!(starting.loyalty, Some(3));
+    assert_eq!(starting.counters.get(&CounterType::Loyalty), Some(&3));
+
+    let outcome = anger_answered_by_gideons_sacrifice(&mut board, liliana);
+    let dealt_to = |target: ObjectId| -> Vec<u32> {
+        outcome
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(object),
+                    amount,
+                    ..
+                } if *source_id == anger_card && *object == target => Some(*amount),
+                _ => None,
+            })
+            .collect()
+    };
+
+    // Reach-guards, asserted before the discriminating outcome:
+    // (a) the redirect fired and Liliana was dealt Anger's damage;
+    assert_eq!(
+        dealt_to(liliana),
+        vec![3],
+        "the redirect must deal Anger's 3 damage to Liliana"
+    );
+    // (b) the shield covered the Bears it protects: nothing dealt, nothing marked;
+    assert!(dealt_to(shielded_bears).is_empty());
+    let shielded = &outcome.state().objects[&shielded_bears];
+    assert_eq!(shielded.zone, Zone::Battlefield);
+    assert_eq!(shielded.damage_marked, 0);
+    // (c) the rider is live: the creature the shield does not cover was dealt 3 and
+    // exiled, so Liliana's destination below is the creature gate, not a missing
+    // rider;
+    assert_eq!(dealt_to(exposed_bears), vec![3]);
+    assert_eq!(outcome.state().objects[&exposed_bears].zone, Zone::Exile);
+
+    // CR 704.5i + CR 109.2: a planeswalker with 0 loyalty goes to the graveyard; the
+    // rider names creatures only.
+    assert_eq!(
+        outcome.state().objects[&liliana].zone,
+        Zone::Graveyard,
+        "Liliana was never a creature, so the creature-only rider must not exile her"
+    );
+}
+
+/// F1 sibling, the creature half of the type gate. Rulings for Annihilating Fire
+/// and Pillar of Flame: a creature dealt damage "even if it wasn't the target
+/// (because the damage was redirected somehow)" is exiled. CR 700.4 + CR 614.1a:
+/// P1 shields two Grizzly Bears with Gideon's Sacrifice choosing Bears B; B takes
+/// both 3-damage events (its own and the redirected one) and dies, and is exiled;
+/// Bears A, whose damage was redirected away, is untouched. The creature conjunct
+/// must not be inverted or swapped for another card type.
+#[test]
+fn anger_of_the_gods_exiles_a_creature_that_received_redirected_damage() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let redirected_away = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let recipient = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let sacrifice = scenario.add_real_card(P1, "Gideon's Sacrifice", Zone::Hand, db);
+    let exposed_bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    scenario.with_mana_pool(P0, pool(&anger().mana));
+    scenario.with_mana_pool(P1, pool(&[ManaType::White]));
+    let anger_card = scenario
+        .add_spell_to_hand(P0, "Anger of the Gods", false)
+        .with_mana_cost(anger().mana_cost)
+        .from_oracle_text(ANGER)
+        .id();
+    let mut board = RedirectBoard {
+        runner: scenario.build(),
+        anger: anger_card,
+        sacrifice,
+    };
+
+    let outcome = anger_answered_by_gideons_sacrifice(&mut board, recipient);
+
+    // Reach-guards: the redirect fired (the recipient was dealt both events, the
+    // shielded Bears none) and the rider is live (the exposed Bears is exiled).
+    let dealt_to = |target: ObjectId| -> Vec<u32> {
+        outcome
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::DamageDealt {
+                    source_id,
+                    target: TargetRef::Object(object),
+                    amount,
+                    ..
+                } if *source_id == anger_card && *object == target => Some(*amount),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(
+        dealt_to(recipient),
+        vec![3, 3],
+        "the chosen Bears is dealt its own damage and the redirected damage"
+    );
+    assert!(dealt_to(redirected_away).is_empty());
+    let away = &outcome.state().objects[&redirected_away];
+    assert_eq!(away.zone, Zone::Battlefield);
+    assert_eq!(away.damage_marked, 0);
+    assert_eq!(outcome.state().objects[&exposed_bears].zone, Zone::Exile);
+
+    assert_eq!(
+        outcome.state().objects[&recipient].zone,
+        Zone::Exile,
+        "a creature that took redirected damage is still 'dealt damage this way'"
+    );
+}
+
+/// F1 sibling on the single-target route (the eight "any target" faces share the
+/// detector). CR 109.2 + CR 704.5i + CR 120.3c: Touch of the Void dealing 3 damage
+/// to Liliana of the Veil (loyalty 3) leaves her in the graveyard, since she is not
+/// "a creature"; a second Touch of the Void on a Grizzly Bears exiles it, which is
+/// the positive reach-guard that the rider is live on this route. Touch of the Void
+/// is built from its verbatim Oracle text (as Anger is) because the committed
+/// integration fixture holds its pre-fix parse.
+#[test]
+fn touch_of_the_void_on_a_planeswalker_does_not_exile_it() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let liliana = scenario.add_real_card(P1, "Liliana of the Veil", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let touch_of_the_void = |scenario: &mut GameScenario| {
+        scenario
+            .add_spell_to_hand(P0, "Touch of the Void", false)
+            .with_mana_cost(cost(2, &[ManaCostShard::Red]))
+            .from_oracle_text_with_keywords(&["Devoid"], TOUCH_OF_THE_VOID)
+            .id()
+    };
+    let at_planeswalker = touch_of_the_void(&mut scenario);
+    let at_creature = touch_of_the_void(&mut scenario);
+    let touch_mana = [ManaType::Red, ManaType::Colorless, ManaType::Colorless];
+    scenario.with_mana_pool(P0, pool(&touch_mana));
+    let mut runner = scenario.build();
+
+    let outcome = runner
+        .cast(at_planeswalker)
+        .target_object(liliana)
+        .resolve();
+    // Reach-guard: Liliana was dealt exactly her loyalty.
+    assert!(
+        outcome.events().iter().any(|event| matches!(
+            event,
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(target),
+                amount: 3,
+                ..
+            } if *source_id == at_planeswalker && *target == liliana
+        )),
+        "Touch of the Void must deal 3 damage to Liliana"
+    );
+    assert_eq!(
+        runner.state().objects[&liliana].zone,
+        Zone::Graveyard,
+        "Liliana was never a creature, so the creature-only rider must not exile her"
+    );
+
+    add_mana(&mut runner, &touch_mana);
+    runner.cast(at_creature).target_object(bears).resolve();
+    assert_eq!(
+        runner.state().objects[&bears].zone,
+        Zone::Exile,
+        "reach-guard: the same rider exiles a creature it dealt lethal damage to"
+    );
+}
+
+/// F1 timing (derived, not ruled): CR 614.1 + CR 613.1d + CR 700.4 + CR 109.2. A
+/// replacement effect reads its noun when the event would happen, so a damaged
+/// creature that is no longer a creature when it would die is not "a creature
+/// ... would die". Anger of the Gods damages two Pillarfield Oxen (toughness 4,
+/// both survive); Song of the Dryads makes one a Forest land, Suffering destroys
+/// it and it goes to the graveyard, while Murder on the other (still a creature)
+/// exiles it.
+#[test]
+fn anger_of_the_gods_rider_does_not_exile_a_damaged_creature_that_is_no_longer_a_creature() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forested = scenario.add_real_card(P1, "Pillarfield Ox", Zone::Battlefield, db);
+    let control = scenario.add_real_card(P1, "Pillarfield Ox", Zone::Battlefield, db);
+    let song = scenario.add_real_card(P0, "Song of the Dryads", Zone::Hand, db);
+    let suffering = scenario.add_real_card(P0, "Suffering", Zone::Hand, db);
+    let murder = scenario.add_real_card(P0, "Murder", Zone::Hand, db);
+    scenario.with_mana_pool(P0, pool(&anger().mana));
+    let anger_card = scenario
+        .add_spell_to_hand(P0, "Anger of the Gods", false)
+        .with_mana_cost(anger().mana_cost)
+        .from_oracle_text(ANGER)
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(anger_card).resolve();
+    for ox in [forested, control] {
+        let object = &runner.state().objects[&ox];
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert_eq!(
+            object.damage_marked, 3,
+            "reach-guard: Anger damaged {ox:?} without killing it"
+        );
+    }
+
+    add_mana(
+        &mut runner,
+        &[ManaType::Green, ManaType::Colorless, ManaType::Colorless],
+    );
+    runner.cast(song).target_object(forested).resolve();
+    {
+        // Reach-guards, before the discriminating destroy: the Aura made it a
+        // noncreature (layer-evaluated types), it is still damaged, and the rider
+        // is installed on it.
+        let object = &runner.state().objects[&forested];
+        assert_eq!(object.zone, Zone::Battlefield);
+        assert!(
+            !object.card_types.core_types.contains(&CoreType::Creature),
+            "Song of the Dryads must make the Ox a noncreature: {:?}",
+            object.card_types
+        );
+        assert_eq!(object.damage_marked, 3);
+        assert!(object
+            .replacement_definitions
+            .iter_all()
+            .any(|def| def.event == ReplacementEvent::Moved));
+    }
+
+    add_mana(
+        &mut runner,
+        &[
+            ManaType::Red,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Colorless,
+        ],
+    );
+    runner
+        .cast(suffering)
+        .modal_back_face(false)
+        .target_object(forested)
+        .resolve();
+    assert_eq!(
+        runner.state().objects[&forested].zone,
+        Zone::Graveyard,
+        "an Ox that is no longer a creature is not 'a creature ... would die'"
+    );
+
+    add_mana(
+        &mut runner,
+        &[ManaType::Black, ManaType::Black, ManaType::Colorless],
+    );
+    runner.cast(murder).target_object(control).resolve();
+    assert_eq!(
+        runner.state().objects[&control].zone,
+        Zone::Exile,
+        "reach-guard: the rider is live and its creature conjunct passes for a creature"
+    );
 }

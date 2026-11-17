@@ -103051,6 +103051,10 @@ fn unless_damage_that_much_binds_to_primary_damage_amount() {
 /// whose sub-ability carries the die-exile replacement bound to the set the
 /// damage clause published (`TrackedSet{TrackedSetId(0)}`), not the `Any` route
 /// (which reads declared targets an each-creature spell does not have).
+/// CR 109.2 + CR 614.1: the carried replacement's `valid_card` is the subject's
+/// own card-type noun conjoined with the carrier (`creature_gated`: "a creature
+/// dealt damage this way"), or the bare carrier (Underworld Fires' "a permanent
+/// dealt damage this way", CR 110.1).
 /// SHAPE test: runtime behaviour is pinned by
 /// `tests/integration/anger_of_the_gods_die_exile.rs`.
 fn assert_mass_damage_die_exile_shape(
@@ -103058,6 +103062,7 @@ fn assert_mass_damage_die_exile_shape(
     name: &str,
     types: &[&str],
     keywords: &[&str],
+    expected_valid_card: &TargetFilter,
 ) -> Vec<AbilityDefinition> {
     use crate::types::replacements::ReplacementEvent;
     let parsed = parse_oracle_text(
@@ -103102,7 +103107,11 @@ fn assert_mass_damage_die_exile_shape(
         "{name}: the anaphor names the damaged set, not a declared target"
     );
     assert_eq!(replacement.event, ReplacementEvent::Moved);
-    assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        replacement.valid_card.as_ref(),
+        Some(expected_valid_card),
+        "{name}: the rider's carried valid_card"
+    );
     assert_eq!(
         replacement.destination_zone,
         Some(crate::types::zones::Zone::Graveyard)
@@ -103116,32 +103125,48 @@ fn assert_mass_damage_die_exile_shape(
     parsed.abilities
 }
 
+/// CR 109.2: `And[SelfRef, Typed(creature)]`, the carried `valid_card` of a rider
+/// whose subject is "a creature dealt damage ...".
+fn creature_gated_die_exile_valid_card() -> TargetFilter {
+    TargetFilter::And {
+        filters: vec![
+            TargetFilter::SelfRef,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+        ],
+    }
+}
+
 #[test]
 fn die_exile_rider_after_mass_damage_binds_the_damaged_set() {
+    let creature_gated = creature_gated_die_exile_valid_card();
     // Verbatim Oracle text (MTGJSON 5.3.0+20261116).
     assert_mass_damage_die_exile_shape(
         "Anger of the Gods deals 3 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.",
         "Anger of the Gods",
         &["Sorcery"],
         &[],
+        &creature_gated,
     );
     assert_mass_damage_die_exile_shape(
         "Crush the Weak deals 2 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.\nForetell {R} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)",
         "Crush the Weak",
         &["Sorcery"],
         &["Foretell"],
+        &creature_gated,
     );
     assert_mass_damage_die_exile_shape(
         "Yamabushi's Storm deals 1 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.",
         "Yamabushi's Storm",
         &["Sorcery"],
         &[],
+        &creature_gated,
     );
     assert_mass_damage_die_exile_shape(
         "Underworld Fires deals 1 damage to each creature and each planeswalker. If a permanent dealt damage this way would die this turn, exile it instead.",
         "Underworld Fires",
         &["Sorcery"],
         &[],
+        &TargetFilter::SelfRef,
     );
     // Gallifrey Falls // No More: the left half's text, parsed as its own face.
     assert_mass_damage_die_exile_shape(
@@ -103149,16 +103174,90 @@ fn die_exile_rider_after_mass_damage_binds_the_damaged_set() {
         "Gallifrey Falls",
         &["Instant"],
         &["Fuse"],
+        &creature_gated,
     );
     let draconic = assert_mass_damage_die_exile_shape(
         "As an additional cost to cast this spell, exile an instant or sorcery card from your graveyard.\nDraconic Intervention deals X damage to each non-Dragon creature, where X is the exiled card's mana value. If a creature dealt damage this way would die this turn, exile it instead.\nExile Draconic Intervention.",
         "Draconic Intervention",
         &["Sorcery"],
         &[],
+        &creature_gated,
     );
     assert!(
         draconic.len() >= 2,
         "the trailing 'Exile Draconic Intervention.' line stays its own ability"
+    );
+}
+
+/// The `valid_card` of the die-exile rider a damage-spell chain carries, found
+/// down the sub-ability chain; `None` if the chain has no rider.
+fn die_exile_rider_valid_card(oracle: &str) -> Option<TargetFilter> {
+    let mut cursor = Some(parse_effect_chain(oracle, AbilityKind::Spell));
+    while let Some(def) = cursor {
+        if let Effect::AddTargetReplacement { replacement, .. } = &*def.effect {
+            return replacement.valid_card.clone();
+        }
+        cursor = def.sub_ability.map(|sub| *sub);
+    }
+    None
+}
+
+/// CR 109.2 + CR 110.1 + CR 608.2b + CR 614.1: the rider carries the card-type noun
+/// of its printed subject on every route. SHAPE test: runtime behaviour is pinned by
+/// `tests/integration/anger_of_the_gods_die_exile.rs` (Liliana of the Veil under
+/// Anger of the Gods and Touch of the Void).
+#[test]
+fn die_exile_rider_carries_the_subjects_card_type_noun() {
+    let creature_gated = creature_gated_die_exile_valid_card();
+    // Verbatim Oracle text (MTGJSON 5.3.0+20261116). "a creature dealt damage this
+    // way" after a single-target "any target" clause keeps the `Any` route but still
+    // names creatures only.
+    for oracle in [
+        "Touch of the Void deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+        "Pillar of Flame deals 2 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+    ] {
+        assert_eq!(
+            die_exile_rider_valid_card(oracle),
+            Some(creature_gated.clone()),
+            "{oracle}"
+        );
+    }
+    // No type restriction: "a permanent" (CR 110.1) and a declared-target subject,
+    // whose type target legality already enforces (CR 608.2b). Each still parses to
+    // a rider, so the `SelfRef` below is not a dropped rider.
+    for oracle in [
+        "Spikefield Hazard deals 1 damage to any target. If a permanent dealt damage this way would die this turn, exile it instead.",
+        "Lava Coil deals 4 damage to target creature. If that creature would die this turn, exile it instead.",
+    ] {
+        assert_eq!(
+            die_exile_rider_valid_card(oracle),
+            Some(TargetFilter::SelfRef),
+            "{oracle}"
+        );
+    }
+    // The "~" spelling of the same anaphors. No printed card reaches the creature
+    // form through this detector; it shares the noun grammar, so it is pinned here.
+    assert_eq!(
+        try_parse_die_exile_rider(
+            "if a creature dealt damage by ~ would die this turn, exile it instead.",
+            AbilityKind::Spell
+        )
+        .and_then(|def| match &*def.effect {
+            Effect::AddTargetReplacement { replacement, .. } => replacement.valid_card.clone(),
+            _ => None,
+        }),
+        Some(creature_gated)
+    );
+    assert_eq!(
+        try_parse_die_exile_rider(
+            "if a permanent dealt damage by ~ would die this turn, exile it instead.",
+            AbilityKind::Spell
+        )
+        .and_then(|def| match &*def.effect {
+            Effect::AddTargetReplacement { replacement, .. } => replacement.valid_card.clone(),
+            _ => None,
+        }),
+        Some(TargetFilter::SelfRef)
     );
 }
 

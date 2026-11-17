@@ -4921,14 +4921,22 @@ pub(super) fn parse_leading_subject_application(
 /// `bind_die_exile_rider_antecedent`) and the regen rider
 /// ([`subject_application_for_cant_be_regenerated`]). Prefix match on already
 /// lowercased text; callers decide what must follow.
-pub(super) fn parse_dealt_damage_this_way_subject(i: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
+///
+/// Returns the card-type noun the anaphor names. CR 109.2: a card type or subtype
+/// word on its own describes a permanent of that type, so "a creature dealt damage
+/// this way" is only a creature; CR 110.1: "a permanent" is anything on the
+/// battlefield and adds no type restriction (`TypeFilter::Permanent`).
+pub(super) fn parse_dealt_damage_this_way_subject(i: &str) -> OracleResult<'_, TypeFilter> {
+    alt((
+        value(
+            TypeFilter::Creature,
             tag("a creature dealt damage this way"),
+        ),
+        value(
+            TypeFilter::Permanent,
             tag("a permanent dealt damage this way"),
-        )),
-    )
+        ),
+    ))
     .parse(i)
 }
 
@@ -4953,7 +4961,7 @@ pub(super) fn parse_dealt_damage_this_way_subject(i: &str) -> OracleResult<'_, (
 fn subject_application_for_cant_be_regenerated(subject: &str) -> Option<SubjectApplication> {
     let lower = subject.to_lowercase();
     let matched = all_consuming(alt((
-        parse_dealt_damage_this_way_subject,
+        value((), parse_dealt_damage_this_way_subject),
         value(
             (),
             tag::<_, _, OracleError<'_>>("creatures dealt damage this way"),
