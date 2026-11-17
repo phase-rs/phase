@@ -296,6 +296,18 @@ pub struct TriggerIndexCounters {
     pub full_rebuilds: u64,
 }
 
+/// Test-only counters for the CR 613.8a-c Layer 2 control selector
+/// (`layers::apply_control_effects_in_dependency_order`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that
+/// struct's serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControlDependencyCounters {
+    /// Effect pairs the cheap rejection could not rule out, each of which
+    /// cloned the state to preview the provider.
+    pub previews: u64,
+}
+
 /// Test-only count of `stack_reach::stack_entry_node_reach` calls for an entry with
 /// an ability: the calls that reach `resolution_board`, which copies the board
 /// unless it refuses the entry first. Kept out of [`PerfCounterSnapshot`] for the
@@ -747,6 +759,10 @@ thread_local! {
     #[cfg(feature = "test-support")]
     static STACK_REACH_COUNTERS: Cell<StackReachCounters> = const {
         Cell::new(StackReachCounters { entry_reaches: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static CONTROL_DEPENDENCY_COUNTERS: Cell<ControlDependencyCounters> = const {
+        Cell::new(ControlDependencyCounters { previews: 0 })
     };
     #[cfg(feature = "test-support")]
     static CAST_UNDO_RECORD_COUNTERS: Cell<CastUndoRecordCounters> = const {
@@ -1579,6 +1595,8 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     STACK_REACH_COUNTERS.with(|counters| counters.set(StackReachCounters::default()));
     #[cfg(feature = "test-support")]
+    CONTROL_DEPENDENCY_COUNTERS.with(|counters| counters.set(ControlDependencyCounters::default()));
+    #[cfg(feature = "test-support")]
     CAST_UNDO_RECORD_COUNTERS.with(|counters| counters.set(CastUndoRecordCounters::default()));
 }
 
@@ -1635,6 +1653,21 @@ pub fn record_stack_entry_reach() {
 #[cfg(feature = "test-support")]
 pub fn stack_reach_snapshot() -> StackReachCounters {
     STACK_REACH_COUNTERS.with(Cell::get)
+}
+
+/// One Layer 2 control-dependency preview (a state clone).
+#[cfg(feature = "test-support")]
+pub fn record_control_dependency_preview() {
+    CONTROL_DEPENDENCY_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.previews += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn control_dependency_snapshot() -> ControlDependencyCounters {
+    CONTROL_DEPENDENCY_COUNTERS.with(Cell::get)
 }
 
 #[cfg(feature = "test-support")]
