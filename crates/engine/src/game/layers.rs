@@ -11910,12 +11910,16 @@ fn apply_continuous_effect_filtered(
     };
 
     // CR 613.1b: For Layer 2 ChangeController, the new controller is the effect's
-    // own `controller` field — set authoritatively by the effect that queued the
-    // continuous modification (e.g. gain_control passes `ability.controller`,
-    // exchange_control passes the swapped controller per slot). Reading it from
-    // `state.objects.get(effect.source_id).controller` would be wrong for any
-    // case where source ≠ recipient (e.g. Switcheroo: both transient effects
-    // share one source, but each slot needs the opposite controller).
+    // own `controller` field for transient effects (from resolving spells/abilities),
+    // set authoritatively by the effect that queued the continuous modification
+    // (e.g. gain_control passes `ability.controller`, exchange_control passes the
+    // swapped controller per slot). For static effects (from static abilities on
+    // permanents), CR 109.5 says "you" refers to the current controller of the
+    // source object, so we read the source's controller at application time (after
+    // Layer 2 control changes have applied). This matches condition_controller's
+    // behavior. Reading from the source object at gather time would be wrong for
+    // transient effects where source ≠ recipient (e.g. Switcheroo: both transient
+    // effects share one source, but each slot needs the opposite controller).
 
     // Pre-compute dynamic P/T values (avoids borrow conflict in the loop).
     //
@@ -12577,10 +12581,23 @@ fn apply_continuous_effect_filtered(
                 "combat-damage assignment rule modifications are applied after layer evaluation"
             ),
             // CR 613.1b: Change controller to the effect's own controller field.
-            // See pre-loop comment for why we trust effect.controller (single
-            // authority) rather than re-deriving from the source object.
+            // For transient effects (from resolving spells/abilities), the controller
+            // is captured at effect creation (e.g. gain_control passes ability.controller,
+            // exchange_control passes the swapped controller per slot).
+            // For static effects (from static abilities on permanents), CR 109.5 says
+            // "you" refers to the current controller of the source object, so we must
+            // read the source's controller at application time (after Layer 2 control
+            // changes have applied). This matches condition_controller's behavior.
             ContinuousModification::ChangeController => {
-                obj.controller = effect.controller;
+                let controller = if effect.transient_id.is_some() {
+                    effect.controller
+                } else {
+                    state
+                        .objects
+                        .get(&effect.source_id)
+                        .map_or(effect.controller, |src| src.controller)
+                };
+                obj.controller = controller;
             }
             // CR 305.7: Setting a land's subtype removes all old land subtypes
             // (CR 205.3i) and all abilities generated from its rules text. Non-land
