@@ -1566,7 +1566,12 @@ mod tests {
         // structural failure must keep returning `CannotSeed` — never a veto.
         let mut state = two_hg_priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
         let mut events = Vec::new();
-        super::super::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+        super::super::elimination::eliminate_player(
+            &mut state,
+            PlayerId(0),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         let mut seeded = Vec::new();
         let outcome = seed_remaining_priority_cycle_passes(

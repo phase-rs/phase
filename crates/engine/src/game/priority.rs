@@ -287,7 +287,21 @@ pub(crate) fn handle_priority_pass_with_limit(
 /// `pass_priority_structurally_legal` below call this, so no fast path can drift
 /// from the reducer.
 pub fn pass_priority_legality(state: &GameState, player: PlayerId) -> Result<(), EngineError> {
-    if state.priority_player != turn_control::authorized_submitter_for_player(state, player) {
+    // CR 805.5a: any living teammate may pass when the team holds priority —
+    // the window parks on the representative, but the reducer records the
+    // acting member's pass individually. Without this, the guard rejects
+    // exactly the passes the reducer's teammate arm accepts.
+    let teammate_of_holder = match &state.waiting_for {
+        WaitingFor::Priority { player: holder }
+            if super::topology::side_takes_shared_turn(state, *holder) =>
+        {
+            super::topology::team_members(state, *holder).contains(&player)
+        }
+        _ => false,
+    };
+    if !teammate_of_holder
+        && state.priority_player != turn_control::authorized_submitter_for_player(state, player)
+    {
         return Err(EngineError::NotYourPriority);
     }
     if precast_copy_shortcut::blocks_pass(state, player) {
@@ -1198,6 +1212,28 @@ mod tests {
             message.contains("shortened shortcut"),
             "the reducer's exact message must be preserved by the extraction, got {message:?}"
         );
+    }
+
+    /// T1c. CR 805.5a: on a shared-team window the guard admits every living
+    /// teammate — the reducer records the acting member's pass individually —
+    /// while still refusing the opposing team.
+    #[test]
+    fn pass_priority_legality_admits_teammates_on_a_parked_window() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        assert!(pass_priority_legality(&state, PlayerId(0)).is_ok());
+        assert!(
+            pass_priority_legality(&state, PlayerId(1)).is_ok(),
+            "a teammate may pass on the team's parked window"
+        );
+        assert!(matches!(
+            pass_priority_legality(&state, PlayerId(2)),
+            Err(EngineError::NotYourPriority)
+        ));
     }
 
     /// T1b. `pass_priority_structurally_legal` is the authority PLUS the
