@@ -1,9 +1,9 @@
-//! Runtime witnesses for the `confirmed-misparses.toml` rows released in batch 2: each shape's
-//! Oracle wording runs through the public cast/activate/combat pipeline and behaves as printed,
-//! including the element the misparse entry said was missing. For the first 20 rows, lines that
-//! are not the cited clause (Cycling, Flash, Equip, transform, ETB tokens, keywords) are omitted
-//! from the test cards. The last two rows (Soul-Scar Mage and Szadek, fixed in code by #9670) run at
-//! their full printed Oracle text.
+//! Runtime witnesses for the `confirmed-misparses.toml` rows released in batch 2: each released card
+//! runs under its printed name at its complete printed Oracle text (MTGJSON and the Scryfall API
+//! agree verbatim; a double-faced card runs as the face the row names) through the public
+//! cast/activate/combat pipeline and behaves as printed, including the element the misparse entry
+//! said was missing. Support cards that carry an ability are printed cards too (Soul Warden, Tarpan,
+//! Murder); only textless filler creatures and the textless planeswalker are synthetic.
 use engine::game::combat::AttackTarget;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, Outcome, P0, P1};
@@ -102,41 +102,60 @@ fn attack_to_blockers(r: &mut GameRunner, attacker: ObjectId) {
 // ---- Shape 1: "deals N damage to target opponent or planeswalker" / "target opponent" (Inferno
 // Jet, Vampiric Touch, Syndicate Guildmage, Sif's Spearmaster). CR 115.1 + CR 102.2: an opponent
 // is a player, so an opposing creature is never a legal target, and neither is the caster. ----
-fn opp_or_pw(text: &str) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+fn opp_or_pw(name: &str, text: &str) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let their_creature = s.add_creature(P1, "TheirCreature", 2, 2).id();
     let their_pw = s
         .add_planeswalker_from_oracle(P1, "TheirPW", "Jace", 5, "")
         .id();
-    let spell = s
-        .add_spell_to_hand_from_oracle(P0, "Burn", false, text)
-        .id();
+    let spell = s.add_spell_to_hand_from_oracle(P0, name, false, text).id();
     (s.build(), spell, their_creature, their_pw)
+}
+
+const INFERNO_JET: &str = "Inferno Jet deals 6 damage to target opponent or planeswalker.\nCycling {2} ({2}, Discard this card: Draw a card.)";
+const VAMPIRIC_TOUCH: &str =
+    "Vampiric Touch deals 2 damage to target opponent or planeswalker and you gain 2 life.";
+const SYNDICATE_GUILDMAGE: &str = "{1}{W}, {T}: Tap target creature with power 4 or greater.\n{4}{B}, {T}: This creature deals 2 damage to target opponent or planeswalker.";
+
+/// Syndicate Guildmage (P0, with five Swamps) and an opposing creature and planeswalker.
+fn guildmage_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let c = s.add_creature(P1, "TheirCreature", 2, 2).id();
+    let pw = s
+        .add_planeswalker_from_oracle(P1, "TheirPW", "Jace", 5, "")
+        .id();
+    let g = s
+        .add_creature_from_oracle(P0, "Syndicate Guildmage", 2, 2, SYNDICATE_GUILDMAGE)
+        .id();
+    for _ in 0..5 {
+        s.add_basic_land(P0, ManaColor::Black);
+    }
+    (s.build(), g, c, pw)
 }
 
 #[test]
 fn target_opponent_or_planeswalker_spell() {
-    let t = "Inferno Jet deals 6 damage to target opponent or planeswalker.";
-    let (mut r, sp, c, _pw) = opp_or_pw(t);
+    let (mut r, sp, c, _pw) = opp_or_pw("Inferno Jet", INFERNO_JET);
     assert!(
         target_rejected(|| {
             r.cast(sp).target_object(c).resolve();
         }),
         "opposing creature is not a legal target"
     );
-    let (mut r, sp, _c, _pw) = opp_or_pw(t);
+    let (mut r, sp, _c, _pw) = opp_or_pw("Inferno Jet", INFERNO_JET);
     assert!(
         target_rejected(|| {
             r.cast(sp).target_player(P0).resolve();
         }),
         "own player is not a legal target (opponent only)"
     );
-    let (mut r, sp, c, _pw) = opp_or_pw(t);
+    let (mut r, sp, c, _pw) = opp_or_pw("Inferno Jet", INFERNO_JET);
     r.cast(sp).target_player(P1).resolve();
     assert_eq!(r.life(P1), 14, "opponent player takes 6");
     assert_eq!(r.state().objects[&c].damage_marked, 0, "creature untouched");
-    let (mut r, sp, _c, pw) = opp_or_pw(t);
+    let (mut r, sp, _c, pw) = opp_or_pw("Inferno Jet", INFERNO_JET);
     r.cast(sp).target_object(pw).resolve();
     assert_eq!(r.life(P1), 20, "planeswalker target: no life loss");
     assert!(
@@ -147,24 +166,41 @@ fn target_opponent_or_planeswalker_spell() {
 
 #[test]
 fn target_opponent_or_planeswalker_with_life_gain_vampiric_touch() {
-    let t = "Vampiric Touch deals 2 damage to target opponent or planeswalker and you gain 2 life.";
-    let (mut r, sp, c, _) = opp_or_pw(t);
+    let (mut r, sp, c, _) = opp_or_pw("Vampiric Touch", VAMPIRIC_TOUCH);
     assert!(
         target_rejected(|| {
             r.cast(sp).target_object(c).resolve();
         }),
         "opposing creature not legal"
     );
-    let (mut r, sp, _, _) = opp_or_pw(t);
+    let (mut r, sp, _, _) = opp_or_pw("Vampiric Touch", VAMPIRIC_TOUCH);
     r.cast(sp).target_player(P1).resolve();
     assert_eq!((r.life(P0), r.life(P1)), (22, 18));
+}
+
+/// CR 115.1 + CR 120.3c: the "or planeswalker" alternative is a legal target and the damage removes
+/// loyalty; the caster's "and you gain 2 life" still happens. Fails if the parsed target is
+/// opponent-only (the planeswalker is then rejected).
+#[test]
+fn target_opponent_or_planeswalker_with_life_gain_vampiric_touch_planeswalker() {
+    let (mut r, sp, c, pw) = opp_or_pw("Vampiric Touch", VAMPIRIC_TOUCH);
+    r.cast(sp).target_object(pw).resolve();
+    assert_eq!(
+        r.state().objects[&pw].loyalty,
+        Some(3),
+        "planeswalker lost 2 loyalty"
+    );
+    assert_eq!(r.life(P1), 20, "the opposing player lost no life");
+    assert_eq!(r.life(P0), 22, "the caster gained 2 life");
+    assert_eq!(r.state().objects[&c].damage_marked, 0, "creature untouched");
 }
 
 #[test]
 fn target_opponent_activated_ability() {
     // The activation driver declares the creature; it is only ignored when the engine finds a
     // single legal target (the opponent) and selects it itself. If the creature were legal, it
-    // would be chosen and take the damage.
+    // would be chosen and take the damage. Sif's Spearmaster is printed 1/4; two +1/+1 counters
+    // make its power (3) differ from the printed one, so "equal to its power" is what is read.
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let their_creature = s.add_creature(P1, "TheirCreature", 2, 2).id();
@@ -172,10 +208,11 @@ fn target_opponent_activated_ability() {
         .add_creature_from_oracle(
             P0,
             "Sif's Spearmaster",
-            3,
-            3,
+            1,
+            4,
             "{T}: This creature deals damage equal to its power to target opponent.",
         )
+        .with_plus_counters(2)
         .id();
     let mut r = s.build();
     r.activate(sif, 0).target_object(their_creature).resolve();
@@ -185,23 +222,19 @@ fn target_opponent_activated_ability() {
         0,
         "the opposing creature was not a legal target"
     );
-    let mut s = GameScenario::new();
-    s.at_phase(Phase::PreCombatMain);
-    let c = s.add_creature(P1, "TheirCreature", 2, 2).id();
-    let g = s
-        .add_creature_from_oracle(
-            P0,
-            "Syndicate Guildmage",
-            2,
-            2,
-            "{1}{W}, {T}: Tap target creature with power 4 or greater.\n{4}{B}, {T}: This creature deals 2 damage to target opponent or planeswalker.",
-        )
-        .id();
-    for _ in 0..5 {
-        s.add_basic_land(P0, ManaColor::Black);
-    }
-    let mut r = s.build();
-    r.activate(g, 1).target_object(c).resolve();
+}
+
+#[test]
+fn target_opponent_or_planeswalker_activated_ability_syndicate_guildmage() {
+    let (mut r, g, c, _pw) = guildmage_board();
+    assert!(
+        target_rejected(|| {
+            r.activate(g, 1).target_object(c).resolve();
+        }),
+        "opposing creature is not a legal target"
+    );
+    let (mut r, g, c, _pw) = guildmage_board();
+    r.activate(g, 1).target_player(P1).resolve();
     assert_eq!(r.life(P1), 18, "damage went to the opponent player");
     assert_eq!(
         r.state().objects[&c].damage_marked,
@@ -210,22 +243,38 @@ fn target_opponent_activated_ability() {
     );
 }
 
+/// CR 115.1 + CR 120.3c: the "or planeswalker" alternative is a legal target of the activated
+/// ability and the damage removes loyalty. Fails if the parsed target is opponent-only (the
+/// declared planeswalker is then not a legal target).
+#[test]
+fn target_opponent_or_planeswalker_activated_ability_syndicate_guildmage_planeswalker() {
+    let (mut r, g, c, pw) = guildmage_board();
+    r.activate(g, 1).target_object(pw).resolve();
+    assert_eq!(
+        r.state().objects[&pw].loyalty,
+        Some(3),
+        "planeswalker lost 2 loyalty"
+    );
+    assert_eq!(r.life(P1), 20, "the opposing player lost no life");
+    assert_eq!(r.state().objects[&c].damage_marked, 0, "creature untouched");
+}
+
 // ---- Shape 2: "Whenever this creature deals damage to an opponent, you may draw a card."
 // (Vedalken Heretic). Damage to a blocking creature an opponent controls is not damage to an
 // opponent. ----
-fn heretic_cards_drawn(blocked: bool) -> usize {
+const VEDALKEN_HERETIC: &str =
+    "Whenever this creature deals damage to an opponent, you may draw a card.";
+
+/// Returns (cards drawn, damage marked on the opposing blocker) after Vedalken Heretic attacks and
+/// combat has completed. The combat loop fails on any prompt it does not expect and on running out
+/// of iterations, so a run that never reaches damage cannot return.
+fn heretic_cards_drawn(blocked: bool) -> (usize, u32) {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let h = s
-        .add_creature_from_oracle(
-            P0,
-            "Vedalken Heretic",
-            2,
-            2,
-            "Whenever this creature deals damage to an opponent, you may draw a card.",
-        )
+        .add_creature_from_oracle(P0, "Vedalken Heretic", 1, 1, VEDALKEN_HERETIC)
         .id();
-    let blocker = s.add_creature(P1, "Blocker", 1, 6).id();
+    let blocker = s.add_creature(P1, "Blocker", 0, 6).id();
     s.with_library_top(P0, &["A", "B"]);
     let mut r = s.build();
     let before = r.state().players[0].hand.len();
@@ -235,8 +284,10 @@ fn heretic_cards_drawn(blocked: bool) -> usize {
     } else {
         r.declare_blockers(&[]).expect("no block");
     }
+    let mut reached_end_combat = false;
     for _ in 0..30 {
         if r.state().phase == Phase::EndCombat {
+            reached_end_combat = true;
             break;
         }
         match &r.state().waiting_for {
@@ -250,23 +301,32 @@ fn heretic_cards_drawn(blocked: bool) -> usize {
             WaitingFor::OrderTriggers { .. } => {
                 engine::game::triggers::drain_order_triggers_with_identity(r.state_mut());
             }
-            _ => break,
+            other => panic!("heretic combat: unexpected prompt {other:?}"),
         }
     }
-    r.state().players[0].hand.len() - before
+    assert!(
+        reached_end_combat,
+        "heretic combat did not complete: {:?} in {:?}",
+        r.state().waiting_for,
+        r.state().phase
+    );
+    (
+        r.state().players[0].hand.len() - before,
+        r.state().objects[&blocker].damage_marked,
+    )
 }
 
 #[test]
 fn damage_to_opponent_trigger_not_fired_by_damage_to_their_creature() {
     assert_eq!(
         heretic_cards_drawn(false),
-        1,
+        (1, 0),
         "unblocked: damage to the opponent draws a card"
     );
     assert_eq!(
         heretic_cards_drawn(true),
-        0,
-        "blocked: damage to an opponent's creature must not trigger"
+        (0, 1),
+        "blocked: the blocker took 1 damage and damage to an opponent's creature must not trigger"
     );
 }
 
@@ -313,7 +373,7 @@ fn combat(preventer: Preventer, blocked: bool) -> (i32, u32) {
                     "Knight-Captain of Eos",
                     2,
                     2,
-                    "{W}, Sacrifice a Soldier: Prevent all combat damage that would be dealt this turn.",
+                    "When this creature enters, create two 1/1 white Soldier creature tokens.\n{W}, Sacrifice a Soldier: Prevent all combat damage that would be dealt this turn.",
                 )
                 .id(),
             )
@@ -323,7 +383,8 @@ fn combat(preventer: Preventer, blocked: bool) -> (i32, u32) {
     if let Some(src) = src {
         let payment = match preventer {
             Preventer::Dawnstrider => named(&r, "Discard Fodder"),
-            _ => named(&r, "Soldier Token"),
+            Preventer::KnightCaptain => named(&r, "Soldier Token"),
+            Preventer::None => unreachable!("`src` is None for Preventer::None"),
         };
         let o = r.activate(src, 0).pay_with(&[payment]).resolve();
         assert!(o.state().stack.is_empty(), "prevention resolved");
@@ -371,9 +432,9 @@ fn prevent_all_combat_damage_activated_covers_every_recipient() {
 }
 
 // ---- Shape 4: "Whenever you cast an artifact or creature spell using mana produced by Barracks
-// of the Thousand, ..." (Barracks of the Thousand; transform line omitted). The trigger requires
-// mana from this permanent. ----
-const BARRACKS: &str = "{T}: Add {W}.\nWhenever you cast an artifact or creature spell using mana produced by Barracks of the Thousand, create a white Gnome Soldier artifact creature token with \"This token's power and toughness are each equal to the number of artifacts and/or creatures you control.\"";
+// of the Thousand, ..." (Barracks of the Thousand, the back face of Thousand Moons Smithy). The
+// trigger requires mana from this permanent. ----
+const BARRACKS: &str = "(Transforms from Thousand Moons Smithy.)\n{T}: Add {W}.\nWhenever you cast an artifact or creature spell using mana produced by Barracks of the Thousand, create a white Gnome Soldier artifact creature token with \"This token's power and toughness are each equal to the number of artifacts and/or creatures you control.\"";
 
 /// (colors, is an artifact creature, power, toughness) of each Gnome token on the battlefield.
 type TokenFacts = (Vec<ManaColor>, bool, Option<i32>, Option<i32>);
@@ -433,43 +494,51 @@ fn cast_using_mana_produced_by_this_permanent() {
 // ---- Shape 5: "When this Equipment enters, attach it to target creature you control. That
 // creature gains first strike until end of turn." (Squire's Lightblade, Hidden Footblade). "It"
 // is this Equipment. ----
+const SQUIRES_LIGHTBLADE: &str = "Flash\nWhen this Equipment enters, attach it to target creature you control. That creature gains first strike until end of turn.\nEquipped creature gets +1/+0.\nEquip {3}";
+const HIDDEN_FOOTBLADE: &str = "Flash\nWhen this Equipment enters, attach it to target creature you control. That creature gains first strike until end of turn.\nEquipped creature gets +1/+0 and has haste.\nEquip {2} ({2}: Attach to target creature you control. Equip only as a sorcery.)";
+
 #[test]
 fn equipment_etb_attaches_itself() {
-    let mut s = GameScenario::new();
-    s.at_phase(Phase::PreCombatMain);
-    // "creature you control": an opponent's creature is not a legal target. It is added first so
-    // it would be the first legal target (what `settle` picks) if the qualifier were dropped.
-    let theirs = s.add_creature(P1, "TheirCreature", 2, 2).id();
-    let host = s.add_creature(P0, "Host", 2, 2).id();
-    let eq = s
-        .add_artifact_to_hand_from_oracle(
-            P0,
-            "Blade",
-            "When this Equipment enters, attach it to target creature you control. That creature gains first strike until end of turn.",
-        )
-        .with_subtypes(vec!["Equipment"])
-        .id();
-    let mut r = s.build();
-    r.cast(eq).resolve();
-    settle(&mut r);
-    assert_eq!(zone_of(&r, eq), Zone::Battlefield, "equipment entered");
-    assert_eq!(
-        r.state().objects[&eq].attached_to,
-        Some(AttachTarget::Object(host)),
-        "equipment attached to the host creature"
-    );
-    assert!(
-        r.state().objects[&host].attachments.contains(&eq),
-        "host lists the equipment"
-    );
-    assert!(
-        r.state().objects[&host].has_keyword(&Keyword::FirstStrike),
-        "host gained first strike"
-    );
-    assert!(
-        r.state().objects[&theirs].attachments.is_empty(),
-        "an opponent's creature is not attached to"
-    );
+    for (name, text) in [
+        ("Squire's Lightblade", SQUIRES_LIGHTBLADE),
+        ("Hidden Footblade", HIDDEN_FOOTBLADE),
+    ] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        // "creature you control": an opponent's creature is not a legal target. It is added first so
+        // it would be the first legal target (what `settle` picks) if the qualifier were dropped.
+        let theirs = s.add_creature(P1, "TheirCreature", 2, 2).id();
+        let host = s.add_creature(P0, "Host", 2, 2).id();
+        let eq = s
+            .add_artifact_to_hand_from_oracle(P0, name, text)
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let mut r = s.build();
+        r.cast(eq).resolve();
+        settle(&mut r);
+        assert_eq!(
+            zone_of(&r, eq),
+            Zone::Battlefield,
+            "{name}: equipment entered"
+        );
+        assert_eq!(
+            r.state().objects[&eq].attached_to,
+            Some(AttachTarget::Object(host)),
+            "{name}: equipment attached to the host creature"
+        );
+        assert!(
+            r.state().objects[&host].attachments.contains(&eq),
+            "{name}: host lists the equipment"
+        );
+        assert!(
+            r.state().objects[&host].has_keyword(&Keyword::FirstStrike),
+            "{name}: host gained first strike"
+        );
+        assert!(
+            r.state().objects[&theirs].attachments.is_empty(),
+            "{name}: an opponent's creature is not attached to"
+        );
+    }
 }
 
 // ---- Shape 6: "that creature's power" where the entering creature is the referent (Arni,
@@ -503,21 +572,17 @@ fn enter_and_settle(r: &mut GameRunner, enterer: ObjectId) {
     settle(r);
 }
 
+const ARNI: &str = "Trample\nWhenever another creature you control enters, Arni gets +X/+0 until end of turn, where X is that creature's power.";
+
 #[test]
 fn entering_creature_power_arni_pump() {
-    let (mut r, arni, e) = enter_creature(
-        "Arni, Renowned Champion",
-        (2, 2),
-        "Whenever another creature you control enters, Arni gets +X/+0 until end of turn, where X is that creature's power.",
-        (4, 4),
-        false,
-        0,
-    );
+    let (mut r, arni, e) =
+        enter_creature("Arni, Renowned Champion", (1, 5), ARNI, (4, 4), false, 0);
     enter_and_settle(&mut r, e);
     assert_eq!(
         r.state().objects[&arni].power,
-        Some(6),
-        "2 + entering creature's power 4"
+        Some(5),
+        "1 + entering creature's power 4"
     );
 }
 
@@ -527,20 +592,14 @@ fn entering_creature_power_arni_ignores_an_opponents_creature() {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let arni = s
-        .add_creature_from_oracle(
-            P1,
-            "Arni, Renowned Champion",
-            2,
-            2,
-            "Whenever another creature you control enters, Arni gets +X/+0 until end of turn, where X is that creature's power.",
-        )
+        .add_creature_from_oracle(P1, "Arni, Renowned Champion", 1, 5, ARNI)
         .id();
     let e = s.add_creature_to_hand(P0, "Enterer", 4, 4).id();
     let mut r = s.build();
     enter_and_settle(&mut r, e);
     assert_eq!(
         r.state().objects[&arni].power,
-        Some(2),
+        Some(1),
         "opponent's creature entering does not pump Arni"
     );
 }
@@ -601,8 +660,9 @@ fn entering_creature_pt_eldrazi_mimic_ignores_a_colored_creature() {
 
 #[test]
 fn entering_creature_power_yorvo_compare() {
-    let text = "Whenever another green creature you control enters, put a +1/+1 counter on Yorvo. Then if that creature's power is greater than Yorvo's power, put another +1/+1 counter on Yorvo.";
-    // Yorvo 0/0 with four counters = 4/4 (its "enters with" line is not under test).
+    let text = "Yorvo enters with four +1/+1 counters on it.\nWhenever another green creature you control enters, put a +1/+1 counter on Yorvo. Then if that creature's power is greater than Yorvo's power, put another +1/+1 counter on Yorvo.";
+    // Yorvo is on the battlefield already, so its "enters with" line has no effect: the four counters
+    // it would have entered with are placed by the fixture (0/0 with four counters = 4/4).
     let cases = [
         ((7, 7), true, 6, "entering power 7 > 5: another counter"),
         ((3, 3), true, 5, "entering power 3 not greater: one counter"),
@@ -623,24 +683,58 @@ fn entering_creature_power_yorvo_compare() {
 
 // ---- Shape 7: "If a permanent entering causes a triggered ability of a permanent you control
 // to trigger, that ability triggers an additional time." (Virtue of Knowledge, Yarok, Starfield
-// Vocalist, Elesh Norn, Mother of Machines). ----
-const DOUBLER: &str = "If a permanent entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
+// Vocalist, Elesh Norn, Mother of Machines). Each card runs under its printed name and complete
+// Oracle text; Soul Warden is the printed "another creature enters" trigger it doubles. ----
+const SOUL_WARDEN: &str = "Whenever another creature enters, you gain 1 life.";
+const TARPAN: &str = "When this creature dies, you gain 1 life.";
+const MURDER: &str = "Destroy target creature.";
 
-fn life_gained_on_enter(
-    doubler_text: &str,
-    doubler_player: PlayerId,
-    watcher_player: PlayerId,
-) -> i32 {
+#[derive(Clone, Copy)]
+struct Doubler {
+    name: &'static str,
+    /// (power, toughness) of the creature, or None for an enchantment.
+    pt: Option<(i32, i32)>,
+    text: &'static str,
+}
+
+const VIRTUE_OF_KNOWLEDGE: Doubler = Doubler {
+    name: "Virtue of Knowledge",
+    pt: None,
+    text: "If a permanent entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+};
+const YAROK: Doubler = Doubler {
+    name: "Yarok, the Desecrated",
+    pt: Some((3, 5)),
+    text: "Deathtouch, lifelink\nIf a permanent entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.",
+};
+/// Starfield Vocalist's printed wording of the same line is "entering the battlefield".
+const STARFIELD_VOCALIST: Doubler = Doubler {
+    name: "Starfield Vocalist",
+    pt: Some((3, 4)),
+    text: "If a permanent entering the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.\nWarp {1}{U} (You may cast this card from your hand for its warp cost. Exile this creature at the beginning of the next end step, then you may cast it from exile on a later turn.)",
+};
+const ELESH_NORN: Doubler = Doubler {
+    name: "Elesh Norn, Mother of Machines",
+    pt: Some((4, 7)),
+    text: "Vigilance\nIf a permanent entering causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.\nPermanents entering don't cause abilities of permanents your opponents control to trigger.",
+};
+
+fn add_doubler(s: &mut GameScenario, player: PlayerId, d: Doubler) {
+    match d.pt {
+        Some((p, t)) => {
+            s.add_creature_from_oracle(player, d.name, p, t, d.text);
+        }
+        None => {
+            s.add_enchantment_from_oracle(player, d.name, d.text);
+        }
+    }
+}
+
+fn life_gained_on_enter(d: Doubler, doubler_player: PlayerId, watcher_player: PlayerId) -> i32 {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
-    s.add_creature_from_oracle(doubler_player, "Doubler", 1, 1, doubler_text);
-    s.add_creature_from_oracle(
-        watcher_player,
-        "Watcher",
-        1,
-        1,
-        "Whenever another creature enters, you gain 1 life.",
-    );
+    add_doubler(&mut s, doubler_player, d);
+    s.add_creature_from_oracle(watcher_player, "Soul Warden", 1, 1, SOUL_WARDEN);
     let e = s.add_creature_to_hand(P0, "Enterer", 1, 1).id();
     let mut r = s.build();
     let before = r.life(watcher_player);
@@ -648,77 +742,64 @@ fn life_gained_on_enter(
     r.life(watcher_player) - before
 }
 
-/// Starfield Vocalist's printed wording of the same line ("entering the battlefield").
-const DOUBLER_BATTLEFIELD: &str = "If a permanent entering the battlefield causes a triggered ability of a permanent you control to trigger, that ability triggers an additional time.";
-
 #[test]
 fn double_entry_triggers() {
-    assert_eq!(
-        life_gained_on_enter(DOUBLER_BATTLEFIELD, P0, P0),
-        2,
-        "Starfield Vocalist's wording: own watcher triggers twice"
-    );
-    assert_eq!(
-        life_gained_on_enter(DOUBLER_BATTLEFIELD, P1, P0),
-        1,
-        "Starfield Vocalist's wording: opponent's doubler does not double my triggers"
-    );
-    assert_eq!(
-        life_gained_on_enter(DOUBLER, P0, P0),
-        2,
-        "own watcher triggers twice"
-    );
-    assert_eq!(
-        life_gained_on_enter(DOUBLER, P1, P0),
-        1,
-        "opponent's doubler does not double my triggers"
-    );
-    assert_eq!(
-        life_gained_on_enter(DOUBLER, P0, P1),
-        1,
-        "my doubler does not double the opponent's watcher"
-    );
+    for d in [VIRTUE_OF_KNOWLEDGE, YAROK, STARFIELD_VOCALIST, ELESH_NORN] {
+        let name = d.name;
+        assert_eq!(
+            life_gained_on_enter(d, P0, P0),
+            2,
+            "{name}: own watcher triggers twice"
+        );
+    }
+    // The wording-specific and ownership controls for the three cards without Elesh Norn's second
+    // line: an opponent's doubler does not double my triggers, nor mine the opponent's.
+    for d in [VIRTUE_OF_KNOWLEDGE, YAROK, STARFIELD_VOCALIST] {
+        let name = d.name;
+        assert_eq!(
+            life_gained_on_enter(d, P1, P0),
+            1,
+            "{name}: opponent's doubler does not double my triggers"
+        );
+        assert_eq!(
+            life_gained_on_enter(d, P0, P1),
+            1,
+            "{name}: my doubler does not double the opponent's watcher"
+        );
+    }
 }
 
 #[test]
 fn double_entry_triggers_not_leaves_battlefield() {
     // Only entering causes are doubled: a dies trigger fires once.
-    let mut s = GameScenario::new();
-    s.at_phase(Phase::PreCombatMain);
-    s.add_creature_from_oracle(P0, "Doubler", 1, 1, DOUBLER);
-    let d = s
-        .add_creature_from_oracle(
-            P0,
-            "Dier",
-            1,
-            1,
-            "When this creature dies, you gain 1 life.",
-        )
-        .id();
-    let spell = s
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Smite",
-            true,
-            "Smite deals 5 damage to target creature.",
-        )
-        .id();
-    let mut r = s.build();
-    r.cast(spell).target_object(d).resolve();
-    settle(&mut r);
-    assert_eq!(zone_of(&r, d), Zone::Graveyard, "the creature died");
-    assert_eq!(r.life(P0), 21, "dies trigger fires once");
+    for d in [VIRTUE_OF_KNOWLEDGE, YAROK, STARFIELD_VOCALIST, ELESH_NORN] {
+        let name = d.name;
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        add_doubler(&mut s, P0, d);
+        let tarpan = s.add_creature_from_oracle(P0, "Tarpan", 1, 1, TARPAN).id();
+        let spell = s
+            .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+            .id();
+        let mut r = s.build();
+        r.cast(spell).target_object(tarpan).resolve();
+        settle(&mut r);
+        assert_eq!(zone_of(&r, tarpan), Zone::Graveyard, "{name}: Tarpan died");
+        assert_eq!(r.life(P0), 21, "{name}: dies trigger fires once");
+    }
 }
 
 #[test]
 fn elesh_norn_opponents_entry_triggers_suppressed() {
-    // Elesh Norn, Mother of Machines (Vigilance omitted): both lines.
-    let t = format!(
-        "{DOUBLER}\nPermanents entering don't cause abilities of permanents your opponents control to trigger."
-    );
-    assert_eq!(life_gained_on_enter(&t, P0, P0), 2, "line one doubles mine");
+    // Elesh Norn, Mother of Machines at her full printed text: line one doubles mine, line two
+    // stops an opponent's permanents' abilities from triggering on entry.
     assert_eq!(
-        life_gained_on_enter(&t, P0, P1),
+        life_gained_on_enter(ELESH_NORN, P0, P0),
+        2,
+        "line one doubles mine"
+    );
+    assert_eq!(
+        life_gained_on_enter(ELESH_NORN, P0, P1),
         0,
         "line two: opponent's watcher does not trigger"
     );
@@ -727,30 +808,23 @@ fn elesh_norn_opponents_entry_triggers_suppressed() {
 // ---- Shape 8: triggered abilities that add mana (Su-Chi Cave Guard, The Vision and Scarlet
 // Witch). They trigger on a death and on a cast, not from a mana ability or mana being added, so
 // CR 605.1b does not make them mana abilities: they use the stack. ----
+const SU_CHI_CAVE_GUARD: &str = "Vigilance\nWard {4} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {4}.)\nWhen this creature dies, add eight {C}. Until end of turn, you don't lose this mana as steps and phases end.";
+
 #[test]
 fn su_chi_death_trigger_uses_the_stack() {
+    // Su-Chi's controller (P0) destroys their own Su-Chi with Murder: Ward {4} only taxes a spell or
+    // ability an opponent controls, so nothing else is on the stack but the death trigger.
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let su = s
-        .add_creature_from_oracle(
-            P1,
-            "Su-Chi Cave Guard",
-            2,
-            2,
-            "When this creature dies, add eight {C}. Until end of turn, you don't lose this mana as steps and phases end.",
-        )
+        .add_creature_from_oracle(P0, "Su-Chi Cave Guard", 8, 8, SU_CHI_CAVE_GUARD)
         .id();
     let spell = s
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Smite",
-            true,
-            "Smite deals 5 damage to target creature.",
-        )
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
         .id();
     let mut r = s.build();
     drop(r.cast(spell).target_object(su).commit());
-    // Pass until Smite has resolved and Su-Chi has died; its trigger must then wait on the stack.
+    // Pass until Murder has resolved and Su-Chi has died; its trigger must then wait on the stack.
     for _ in 0..6 {
         if zone_of(&r, su) == Zone::Graveyard && !r.state().stack.is_empty() {
             break;
@@ -764,13 +838,13 @@ fn su_chi_death_trigger_uses_the_stack() {
     assert_eq!(zone_of(&r, su), Zone::Graveyard, "Su-Chi died");
     assert!(!r.state().stack.is_empty(), "death trigger is on the stack");
     assert_eq!(
-        r.state().players[1].mana_pool.total(),
+        r.state().players[0].mana_pool.total(),
         0,
         "no mana before the trigger resolves"
     );
     settle(&mut r);
     assert_eq!(
-        r.state().players[1].mana_pool.total(),
+        r.state().players[0].mana_pool.total(),
         8,
         "eight colorless after resolution"
     );
@@ -788,7 +862,7 @@ fn su_chi_death_trigger_uses_the_stack() {
         "the phase changed after passing priority"
     );
     assert_eq!(
-        r.state().players[1].mana_pool.total(),
+        r.state().players[0].mana_pool.total(),
         8,
         "mana is kept as the phase ends"
     );
@@ -804,12 +878,11 @@ fn vision_and_scarlet_witch_cast_trigger_uses_the_stack() {
             "The Vision and Scarlet Witch",
             3,
             3,
-            "Whenever you cast a spell, add {R} and put a +1/+1 counter on The Vision and Scarlet Witch.",
+            "Flying\nWhenever you cast a spell, add {R} and put a +1/+1 counter on The Vision and Scarlet Witch.",
         )
         .id();
-    let spell = s
-        .add_spell_to_hand_from_oracle(P0, "Gain Me", true, "You gain 1 life.")
-        .id();
+    // A textless filler creature spell: the cast trigger needs only a spell, not a printed one.
+    let spell = s.add_creature_to_hand(P0, "Cast Creature", 1, 1).id();
     let mut r = s.build();
     let c = r.cast(spell).commit();
     let stack_len = c.state().stack.len();
@@ -867,6 +940,8 @@ fn damage_prevented(events: &[GameEvent]) -> bool {
         .any(|e| matches!(e, GameEvent::DamagePrevented { .. }))
 }
 
+const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
+
 /// Soul-Scar Mage's controller (P0) or P1 casts a 3-damage burn spell at `target`.
 enum Burn {
     P0AtOpponentCreature,
@@ -886,9 +961,11 @@ fn soul_scar_burn(case: Burn) -> (ObjectId, ObjectId, ObjectId, Outcome) {
     let ours = s.add_creature(P0, "Own Golem", 4, 4).id();
     let caster = match case {
         Burn::P1AtOwnCreature => P1,
-        _ => P0,
+        Burn::P0AtOpponentCreature | Burn::P0AtOpponentPlayer | Burn::P0AtOwnCreature => P0,
     };
-    let bolt = s.add_bolt_to_hand(caster);
+    let bolt = s
+        .add_spell_to_hand_from_oracle(caster, "Lightning Bolt", true, LIGHTNING_BOLT)
+        .id();
     s.with_mana_pool(caster, red_mana());
     let mut r = s.build();
     give_priority(&mut r, caster);
