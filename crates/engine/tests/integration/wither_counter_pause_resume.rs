@@ -220,7 +220,7 @@ fn damage_dealt_events<'a>(
 
 /// Pump priority until combat settles at end-of-combat or post-combat main —
 /// and no further. Pumping into Cleanup would run the turn-based
-/// remove-all-damage action (CR 514.1), wiping the very `damage_marked == 0`
+/// remove-all-damage action (CR 514.2), wiping the very `damage_marked == 0`
 /// and deathtouch-flag assertions the rows below make.
 fn advance_past_combat_damage(runner: &mut GameRunner) {
     for _ in 0..96 {
