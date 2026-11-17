@@ -9,7 +9,7 @@ import type {
   PersistedGameState,
   SubmitResult,
 } from "../../adapter/types";
-import { persistedGameStateView } from "../../adapter/types";
+import { AdapterError, AdapterErrorCode, persistedGameStateView } from "../../adapter/types";
 import { UndoButton } from "../../components/board/UndoButton";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
 import { useAppNotificationStore } from "../../stores/appToastStore";
@@ -24,6 +24,7 @@ import {
   isDispatchIdle,
   undoLastAction,
 } from "../dispatch";
+import { onEngineLost, type EngineLostEvent } from "../engineRecovery";
 
 // `debugLog` writes into the game log, the very history under test.
 vi.mock("../debugLog", () => ({ debugLog: vi.fn() }));
@@ -134,21 +135,27 @@ async function startGame() {
       }),
     );
   };
-  /** The next restore is still running until the returned function finishes it. */
+  /** The next restore is still running until the test finishes it, or fails it. */
   const restoresSlowly = () => {
-    let finish!: () => void;
+    let settle!: { finish: () => void; fail: (error: Error) => void };
     adapter.restoreState.mockImplementationOnce((restored: PersistedGameState) =>
       inOrder(
         () =>
-          new Promise<void>((resolve) => {
-            finish = () => {
-              live = persistedGameStateView(restored);
-              resolve();
+          new Promise<void>((resolve, reject) => {
+            settle = {
+              finish: () => {
+                live = persistedGameStateView(restored);
+                resolve();
+              },
+              fail: reject,
             };
           }),
       ),
     );
-    return () => finish();
+    return {
+      finish: () => settle.finish(),
+      fail: (error: Error) => settle.fail(error),
+    };
   };
   /** The next restore fails, leaving the engine as it was. */
   const restoreFails = (error: Error) => {
@@ -307,13 +314,13 @@ describe("work in flight when Undo is pressed", () => {
     await dispatchAction({ type: "PassPriority" }, HUMAN);
     expect(useGameStore.getState().stateHistory).toHaveLength(2);
 
-    const finishRestore = restoresSlowly();
+    const restore = restoresSlowly();
     const firstUndo = undoLastAction();
     await vi.advanceTimersByTimeAsync(0);
     await undoLastAction();
     expect(adapter.restoreState).toHaveBeenCalledOnce();
 
-    finishRestore();
+    restore.finish();
     await firstUndo;
     expect(useGameStore.getState().gameState).toEqual(AFTER_FIRST_PASS);
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
@@ -325,24 +332,43 @@ describe("work in flight when Undo is pressed", () => {
     applies(AFTER_FIRST_PASS, FIRST_PASS);
     await dispatchAction({ type: "PassPriority" }, HUMAN);
 
-    const finishRestore = restoresSlowly();
+    const restore = restoresSlowly();
     const undoing = undoLastAction();
     await vi.advanceTimersByTimeAsync(0);
     // The player leaves the game mid-undo.
     useGameStore.getState().reset();
 
-    finishRestore();
+    restore.finish();
     await undoing;
     expect(useGameStore.getState().gameState).toBeNull();
     expect(useGameStore.getState().logHistory).toEqual([]);
     expect(useGameStore.getState().undoInFlight).toBe(false);
   });
 
+  it("reports nothing when the game torn down mid-undo fails the restore", async () => {
+    const { adapter, applies, restoresSlowly } = await startGame();
+    applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+
+    const restore = restoresSlowly();
+    const undoing = undoLastAction();
+    await vi.advanceTimersByTimeAsync(0);
+    // Leaving the game disposes the engine, which fails the restore it held.
+    useGameStore.getState().reset();
+    const readsBefore = adapter.getSnapshot.mock.calls.length;
+
+    restore.fail(new Error("Worker disposed"));
+    await undoing;
+    expect(useAppNotificationStore.getState().notification).toBeNull();
+    expect(adapter.getSnapshot).toHaveBeenCalledTimes(readsBefore);
+    expect(useGameStore.getState().gameState).toBeNull();
+  });
+
   it("keeps a newer game's undo in flight when one from a torn-down game settles", async () => {
     const firstGame = await startGame();
     firstGame.applies(AFTER_FIRST_PASS, FIRST_PASS);
     await dispatchAction({ type: "PassPriority" }, HUMAN);
-    const finishFirstRestore = firstGame.restoresSlowly();
+    const firstRestore = firstGame.restoresSlowly();
     const firstUndo = undoLastAction();
     await vi.advanceTimersByTimeAsync(0);
 
@@ -351,17 +377,17 @@ describe("work in flight when Undo is pressed", () => {
     const secondGame = await startGame();
     secondGame.applies(AFTER_FIRST_PASS, FIRST_PASS);
     await dispatchAction({ type: "PassPriority" }, HUMAN);
-    const finishSecondRestore = secondGame.restoresSlowly();
+    const secondRestore = secondGame.restoresSlowly();
     const secondUndo = undoLastAction();
     await vi.advanceTimersByTimeAsync(0);
     expect(useGameStore.getState().undoInFlight).toBe(true);
 
     // The first game's undo settles while the second's is still restoring.
-    finishFirstRestore();
+    firstRestore.finish();
     await firstUndo;
     expect(useGameStore.getState().undoInFlight).toBe(true);
 
-    finishSecondRestore();
+    secondRestore.finish();
     await secondUndo;
     expect(useGameStore.getState().undoInFlight).toBe(false);
   });
@@ -388,5 +414,44 @@ describe("work in flight when Undo is pressed", () => {
     await vi.runAllTimersAsync();
     await secondPass;
     expect(useGameStore.getState().gameState).toEqual(AFTER_SECOND_PASS);
+  });
+
+  it("rewinds the log and the ring when the read after a restore fails", async () => {
+    const { adapter, applies } = await startGame();
+    applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+    expect(loggedLines()).toEqual([...EARLIER_LINES, "Player 1 passes for the first time"]);
+
+    // The restore succeeds; the snapshot read after it fails.
+    const read = adapter.getSnapshot.getMockImplementation()!;
+    adapter.getSnapshot.mockImplementationOnce(async () => {
+      await read();
+      throw new Error("snapshot failed");
+    });
+    await undoLastAction();
+
+    // The engine holds the restored game, and so does the store: its log and
+    // ring are rewound with it, and the board is read again.
+    expect(adapter.restoreState).toHaveBeenCalledOnce();
+    expect(loggedLines()).toEqual(EARLIER_LINES);
+    expect(useGameStore.getState().stateHistory).toEqual([]);
+    expect(useGameStore.getState().gameState).toEqual(BEFORE_FIRST_PASS);
+    expect(useAppNotificationStore.getState().notification?.description).toBe("snapshot failed");
+  });
+
+  it("hands an engine that stops answering during the undo to the engine-lost path", async () => {
+    const { applies, restoreFails } = await startGame();
+    applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+    const lost: EngineLostEvent[] = [];
+    const stopListening = onEngineLost((event) => lost.push(event));
+
+    restoreFails(new AdapterError(AdapterErrorCode.ENGINE_UNRESPONSIVE, "engine timed out", false));
+    await undoLastAction();
+    stopListening();
+
+    expect(lost).toEqual([{ reason: "undo", panic: undefined }]);
+    expect(useAppNotificationStore.getState().notification).toBeNull();
+    expect(useGameStore.getState().undoInFlight).toBe(false);
   });
 });

@@ -810,6 +810,27 @@ export const useGameStore = create<GameStore>()(
       if (!canUndo(store)) return;
       const { adapter, gameSessionGeneration, stateHistory } = store;
       const previous = stateHistory[stateHistory.length - 1];
+      // A game torn down or replaced while the undo ran is not the one it
+      // restored, and must not take its snapshot or its history.
+      const isSameGame = () => {
+        const current = get();
+        return current.adapter === adapter && current.gameSessionGeneration === gameSessionGeneration;
+      };
+      // The restore rewinds the engine, not this store's log: drop every entry
+      // from the undone action on, a line logged during the restore included,
+      // so the log is read as it stands after the last await. `nextLogSeq`
+      // keeps counting, so a seq still names one entry only, for anything that
+      // remembers one (the log panel keys its rows by seq). The ring keeps step
+      // with the log: it is the ring this undo found, less the checkpoint it
+      // restores, so a checkpoint pushed during the restore goes too. That is
+      // how a store `dispatch` begun before the press is taken back: the engine
+      // answers in call order, so it commits before this undo does.
+      const rewoundHistory = () => ({
+        events: [],
+        logHistory: get().logHistory.filter((entry) => entry.seq < previous.logSeq),
+        stateHistory: stateHistory.slice(0, -1),
+        restoredStackAutomation: null,
+      });
 
       // Before the first await: from the restore on, the engine may hold the
       // restored state while the store still shows the one being undone.
@@ -822,34 +843,14 @@ export const useGameStore = create<GameStore>()(
         // Commit the snapshot's OWN state, not `previous`: post-restore the engine
         // is the source of truth, and taking both halves from one snapshot is what
         // keeps the pair coherent. Newest-by-construction, so it passes the gate.
-        const snapshot = await adapter.getSnapshot();
-
-        // A game torn down or replaced while the undo ran is not the one it
-        // restored, and must not take its snapshot.
-        const current = get();
-        if (current.adapter !== adapter || current.gameSessionGeneration !== gameSessionGeneration) {
-          return;
-        }
-
-        // The restore rewound the engine, not this store's log: drop every entry
-        // from the undone action on, a line logged during the restore included.
-        // The commit replaces the whole log, so it is read after the last await,
-        // as it stands now. `nextLogSeq` keeps counting, so a seq still names one
-        // entry only, for anything that remembers one (the log panel keys its
-        // rows by seq). The ring keeps step with the log: it is the ring this
-        // undo found, less the checkpoint it restores, so a checkpoint pushed
-        // during the restore goes too. That is how a store `dispatch` begun
-        // before the press is taken back: the engine answers in call order, so
-        // it commits before this does.
-        const logHistory = current.logHistory.filter((entry) => entry.seq < previous.logSeq);
-        current.commitEngineSnapshot(snapshot, {
-          extraState: {
-            events: [],
-            logHistory,
-            stateHistory: stateHistory.slice(0, -1),
-            restoredStackAutomation: null,
-          },
+        // The engine holds the restored game from here, so a failed read still
+        // rewinds the history with it; the caller re-syncs the board.
+        const snapshot = await adapter.getSnapshot().catch((error: unknown) => {
+          if (isSameGame()) set(rewoundHistory());
+          throw error;
         });
+        if (!isSameGame()) return;
+        get().commitEngineSnapshot(snapshot, { extraState: rewoundHistory() });
       } finally {
         // Cleared on every exit, a failed restore included, so the AI seats
         // decide again.

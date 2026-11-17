@@ -1313,30 +1313,58 @@ export async function restoreGameState(
 export async function undoLastAction(): Promise<void> {
   const store = useGameStore.getState();
   if (!canUndo(store)) return;
+  const isSameGame = () => {
+    const current = useGameStore.getState();
+    return current.adapter === store.adapter && current.gameSessionGeneration === store.gameSessionGeneration;
+  };
   abandonPendingDispatches();
   try {
     await store.undo();
   } catch (err) {
-    // A failed restore leaves the engine as it was, abandoned work included,
-    // while the store never committed that work. Show the engine's own state,
-    // so the board and every seat's next decision agree with it. The abandoned
-    // work's log lines and checkpoint are lost, as under `restoreGameState`.
-    // Nothing is rethrown: the Undo controls fire and forget.
+    // An undo whose game was torn down or replaced meanwhile has no board to
+    // repair, and its failure (a disposed worker) is no news to the player.
+    if (!isSameGame()) {
+      debugLog(`undo: failed after its game ended: ${err instanceof Error ? err.message : String(err)}`, "info");
+      return;
+    }
+    if (await recoverFromEngineFailure(err, "undo")) return;
+    // The engine is in one piece: the restore failed and left it as it was,
+    // abandoned work included, or the read after a restore failed and `undo`
+    // rewound the history with it. Either way the store never committed the
+    // engine's state, so show it, and the board and every seat's next decision
+    // agree with it. Abandoned work's log lines and checkpoint are lost, as
+    // under `restoreGameState`. Nothing is rethrown: the Undo controls fire
+    // and forget.
     reportActionError(err);
     try {
       const snapshot = await store.adapter.getSnapshot();
-      const current = useGameStore.getState();
-      if (current.adapter !== store.adapter || current.gameSessionGeneration !== store.gameSessionGeneration) {
-        return;
-      }
+      if (!isSameGame()) return;
       await processRemoteUpdate(snapshot, []);
     } catch (resyncErr) {
-      debugLog(
-        `undo: resync after a failed restore failed: ${resyncErr instanceof Error ? resyncErr.message : String(resyncErr)}`,
-        "warn",
-      );
+      // The engine cannot be read, so the board cannot be shown as it is.
+      if (isSameGame() && !(await recoverFromEngineFailure(resyncErr, "undo-resync"))) {
+        notifyEngineLost("undo-resync");
+      }
     }
   }
+}
+
+/**
+ * Hand an engine failure during an undo to the recovery `processAction` uses
+ * for the same failures: a panic is triaged, and an unresponsive or lost engine
+ * prompts a reload. Returns false for any other failure, which the caller
+ * reports itself.
+ */
+async function recoverFromEngineFailure(err: unknown, reason: string): Promise<boolean> {
+  if (isEnginePanic(err)) {
+    await routePanic(`${reason}-panic`, err.panic);
+    return true;
+  }
+  if (isEngineUnresponsive(err) || isStateLost(err)) {
+    notifyEngineLost(reason);
+    return true;
+  }
+  return false;
 }
 
 /**
