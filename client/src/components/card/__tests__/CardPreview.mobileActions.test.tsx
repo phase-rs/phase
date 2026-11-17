@@ -103,7 +103,15 @@ describe("CardPreview mobile action strip", () => {
     inspectInGame("ai");
     const { container } = render(<CardPreview cardName={CARD_NAME} onDismiss={onDismiss} />);
 
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Report a problem" }));
+    const report = screen.getByRole("button", { name: "Report a problem" });
+    fireEvent.pointerDown(report);
+    expect(onDismiss).not.toHaveBeenCalled();
+
+    // A near miss lands on the strip's padding around the pills, not the
+    // backdrop, so it does not dismiss either.
+    const strip = report.closest<HTMLElement>("[data-card-preview-actions]");
+    if (strip == null) throw new Error("the Report button is not in the action strip");
+    fireEvent.pointerDown(strip);
     expect(onDismiss).not.toHaveBeenCalled();
 
     // Reach guard: a tap on the backdrop does dismiss, so the line above is

@@ -887,14 +887,16 @@ function CardPreviewInner({
  * card: the image, the art fallback tile, the skeleton and the card back all
  * fill it, and nothing can anchor to empty space beside the card (#11001). The
  * width is the smallest of three bounds:
- * - a ceiling: 488px, the `normal` image's native width, so the card is never
- *   upscaled (420px for a rotated card's long edge);
+ * - a ceiling: 488px for an upright card, the `normal` image's native width,
+ *   so it is never upscaled; 420px across for a rotated card, the cap this
+ *   preview already used;
  * - the room across: the screen less padding in portrait, and 45vw in
  *   landscape, which keeps the board in view and leaves the action strip room
  *   on the left;
- * - the room down, converted through the card's 488:680 ratio: the screen less
- *   padding, and in portrait less the action strip under the card as well
- *   (5.25rem covers the p-4 padding, the gap-3 and the strip's pill).
+ * - the room down, converted to a width through the frame's ratio (488:680
+ *   upright, 680:488 rotated): the screen less padding, and in portrait less
+ *   the action strip under the card as well (5.25rem covers the p-4 padding,
+ *   the gap-3 and the strip's pill).
  */
 const MOBILE_PREVIEW_FRAME_CLASS = {
   upright: [
@@ -1027,9 +1029,11 @@ function MobilePreviewOverlay({
   const hasActions = isFlip || report != null;
 
   // pointerdown (not click): the touch-release that opened this overlay fires
-  // pointerup, not pointerdown, so a fresh tap is required to dismiss. The card
-  // and its action strip stop it together, so a near miss on an action never
-  // closes the preview; only a tap on the backdrop does.
+  // pointerup, not pointerdown, so a fresh tap is required to dismiss. Only the
+  // card and its action strip take taps, and the wrapper stops their
+  // pointerdown, so tapping either never dismisses. The wrapper itself is
+  // click-through: the empty space it spans beside the card (left of the card
+  // and above the strip, in landscape) still reads as backdrop and dismisses.
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4 landscape:justify-end landscape:p-6"
@@ -1037,14 +1041,14 @@ function MobilePreviewOverlay({
       onPointerDown={onDismiss}
     >
       <div
-        className="flex flex-col items-center gap-3 landscape:flex-row-reverse landscape:items-end"
+        className="pointer-events-none flex flex-col items-center gap-3 landscape:flex-row-reverse landscape:items-end"
         onPointerDown={(event) => event.stopPropagation()}
       >
         {/* The frame's size comes from its own width and aspect ratio alone;
             every child is laid over it, so none depends on a percentage of a
             height the browser might not treat as definite. */}
         <div
-          className={`relative shrink-0 overflow-hidden rounded-lg shadow-2xl ${
+          className={`pointer-events-auto relative shrink-0 overflow-hidden rounded-lg shadow-2xl ${
             isRotated ? MOBILE_PREVIEW_FRAME_CLASS.rotated : MOBILE_PREVIEW_FRAME_CLASS.upright
           }`}
         >
@@ -1069,8 +1073,10 @@ function MobilePreviewOverlay({
           )}
         </div>
         {hasActions && (
+          // `-m-2 p-2` widens the strip's tap area by 8px on every side
+          // without moving the pills, so a near miss lands on the strip.
           <div
-            className="flex items-center gap-2 landscape:flex-col landscape:items-end"
+            className="pointer-events-auto -m-2 flex items-center gap-2 p-2 landscape:flex-col landscape:items-end"
             data-card-preview-actions
           >
             {isFlip && (

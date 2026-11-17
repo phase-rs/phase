@@ -95,6 +95,8 @@ describe("CardReportDialog report status", () => {
   it("says Not sent for a report telemetry dropped, and keeps the row tappable", () => {
     vi.mocked(trackEvent).mockReturnValue(false);
     openPickerOn("oracle-picker-dropped");
+    // Before the report, the idle row shows the parse fraction.
+    expect(screen.getByRole("button", { name: /Starship Enterprise/ })).toHaveTextContent("1/2");
 
     reportTheCard();
 
