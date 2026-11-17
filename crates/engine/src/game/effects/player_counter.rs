@@ -97,6 +97,7 @@ pub(crate) fn try_add_player_counter_with_replacement(
 
 /// The policy-parameterized player-counter add pipeline: replacement, then the
 /// shared settle step (`apply_player_counter_addition`).
+#[allow(clippy::too_many_arguments)]
 fn add_player_counter_core(
     state: &mut GameState,
     actor: PlayerId,

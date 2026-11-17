@@ -1414,6 +1414,7 @@ pub(crate) enum PostCounterFlow {
 /// reread. (Counter placement itself does not touch loyalty/defense; the
 /// creature axis still reads post-counter state, exactly like the inline
 /// path.)
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn wither_infect_post_counter_core(
     state: &mut GameState,
     ctx: &DamageContext,

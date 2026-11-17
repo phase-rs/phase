@@ -1926,6 +1926,7 @@ pub(crate) fn apply_move_counter_after_replacement(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn move_counter_with_replacement(
     state: &mut GameState,
     actor: PlayerId,

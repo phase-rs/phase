@@ -2,11 +2,16 @@
 //!
 //! CR 120.3d + CR 702.80a + CR 616.1: a wither/infect-to-creature leg whose
 //! `-1/-1` counter placement meets two co-applicable counter *modifiers*
-//! (Winding Constrictor +1 and Doubling Season x2 force a CR 616.1 order)
 //! parks a `NeedsChoice` pause. Pre-fix the leg is dropped: no deathtouch
 //! flag, no `DamageDealt`, no CR 120.1 record, no lifelink — the resume below
-//! preserves the leg across the pause, exactly once, on both the combat and
-//! the non-combat paths.
+//! preserves the leg across the pause, exactly once, on the non-combat path.
+//!
+//! CR 614.16 (M3): combat wither is dealt by the CR 510.2 turn-based action,
+//! not by a resolving effect, so the effect-worded Doubling Season no longer
+//! applies in combat — combat rows converge on the single-candidate
+//! Constrictor-only outcome with no prompt. The two-modifier CR 616.1 pause
+//! coverage lives on the non-combat rows (Puncture Blast, Village Pillagers
+//! ETB), where the resolving effect keeps both modifiers applicable.
 //!
 //! Fixture note (see the executor report): the reviewed plan paired Solemnity
 //! prevention with the Constrictor modifier, but CR 614.17c ("if an event
@@ -19,17 +24,20 @@
 //! Rows (every Oracle string below is verbatim card-data export text, except
 //! the bare-`"Wither"` source shorthand documented at `WITHER_ORACLE`, and
 //! the explicit keyword hints documented at `DARKSTEEL_COLOSSUS_ORACLE`):
-//! - combat Doubling-first / Constrictor-first (both CR 616.1 orders, V10):
-//!   prompt reach-guard, `DamageDealt` + record exactly once, lifelink exactly
-//!   once, deathtouch flag exactly once with no marking; the victim is an
+//! - combat Constrictor-only under Doubling Season + Constrictor (V9): no
+//!   prompt, `DamageDealt` + record exactly once, lifelink exactly once,
+//!   deathtouch flag exactly once with no marking; the victim is an
 //!   indestructible Darksteel Colossus (CR 702.12) so its survival under a
 //!   deathtouch source is rules-correct (the #11019 SBA gap is not pinned).
+//! - V1 hostile: Ripper + Doubling Season + Constrictor combat lands 3,
+//!   proving per-def gating (Doubling Season inapplicable, Constrictor +1).
 //! - V0 Necroskitter second vehicle: wither-keyworded, exercising the same
-//!   `has_wither || has_infect` arm.
+//!   `has_wither || has_infect` arm, now Constrictor-only in combat.
 //! - V12 Constrictor-only single candidate: no prompt, remainder inline.
 //! - non-combat single target (Puncture Blast) + multi target (Village
 //!   Pillagers ETB, remaining chain resumes after the pause).
-//! - V13 mid-pause save round-trip + old-save default compat.
+//! - V13 mid-pause save round-trip + old-save default compat (non-combat
+//!   vehicle — combat no longer pauses).
 
 use crate::support::shared_card_db as load_db;
 use engine::database::card_db::CardDatabase;
@@ -316,9 +324,10 @@ fn answer_all_counter_orders(
 }
 
 /// Shared combat board: P0 holds Doubling Season + Winding Constrictor + an
-/// indestructible Darksteel Colossus (11/11, so the doubled wither counters
-/// never kill it by toughness either — Butcher's 4 damage doubles to at most
-/// 10; see the order math in each row); P1 holds a wither attacker granted
+/// indestructible Darksteel Colossus (11/11, so the modified wither counters
+/// never kill it by toughness either — CR 614.16 leaves Doubling Season
+/// inapplicable in combat, so Butcher's 4 damage lands Constrictor-only 5;
+/// see the order math in each row); P1 holds a wither attacker granted
 /// deathtouch + lifelink directly (no Equip drive — the wither flag still
 /// comes from the real wither card, isolating the mechanism under test).
 ///
@@ -350,37 +359,43 @@ fn combat_board(
     (doubling, constrictor, colossus, attacker)
 }
 
-/// CR 120.3d + CR 616.1 + CR 120.1 + CR 702.15b + CR 702.2b, combat,
-/// Doubling-first order: the paused wither leg resumes with its deathtouch
-/// flag, `DamageDealt` event, CR 120.1 record, and lifelink — exactly once.
+/// CR 120.3d + CR 614.16 + CR 120.1 + CR 702.15b + CR 702.2b, combat
+/// (V9): Doubling Season is inapplicable to the combat wither leg (CR 510.2
+/// turn-based action, not a resolving effect), so Winding Constrictor is the
+/// single candidate and auto-applies with no CR 616.1 prompt — the leg runs
+/// inline with its deathtouch flag, `DamageDealt` event, CR 120.1 record, and
+/// lifelink, exactly once.
 ///
-/// Order math (4 wither damage): Doubling first 4x2=8, then Constrictor +1 =
-/// 9 counters. The 11/11 Colossus survives (11-9=2), and CR 702.12
-/// indestructible makes that survival rules-correct under deathtouch (the
-/// pre-existing SBA gap filed as #11019 is not pinned here).
+/// Order math (4 wither damage): Constrictor-only 4+1 = 5 counters. The 11/11
+/// Colossus survives (11-5=6), and CR 702.12 indestructible makes that
+/// survival rules-correct under deathtouch (the pre-existing SBA gap filed
+/// as #11019 is not pinned here).
 ///
-/// REVERT-FAILING ASSERTIONS: at base the leg is dropped, so the record count
-/// is 0 (not 1), no `DamageDealt` names the Colossus, and P1's life stays
-/// 20 (not 24). The prompt reach-guard passes at base (the pause exists); the
-/// remainder assertions redden.
+/// REVERT-FAILING ASSERTIONS: pre-tag the leg pauses on a two-candidate CR
+/// 616.1 prompt, so the no-prompt guard fails and the count is 9 or 10 (not
+/// 5). The two-modifier pause coverage lives on the non-combat rows below.
 #[test]
-fn combat_wither_pause_resumes_doubling_first() {
+fn combat_wither_with_inapplicable_doubling_applies_constrictor_only() {
     let mut scenario = GameScenario::new();
-    let (doubling, constrictor, colossus, butcher) =
+    let (_doubling, _constrictor, colossus, butcher) =
         combat_board(&mut scenario, "Smoldering Butcher", 4, 2);
 
     let mut runner = scenario.build();
     runner.state_mut().active_player = P1;
     let target = TargetRef::Object(colossus);
-    run_combat_with_blocks(
+    let outcome = run_combat_with_blocks(
         &mut runner,
         &[(butcher, AttackTarget::Player(P0))],
         &[(colossus, butcher)],
     );
 
-    // V1 reach-guard: the wither AddCounter event really meets two
-    // replacements (unconditional — an `if let` would skip the covered leg).
-    let resume_events = answer_counter_order(&mut runner, P0, doubling, constrictor);
+    // V9: a single applicable replacement auto-applies — no CR 616.1 prompt
+    // may ever open on this path.
+    assert!(
+        prompt(&runner).is_none(),
+        "CR 614.16 must leave Doubling Season inapplicable in combat, so no ordering prompt opens, got {:?}",
+        runner.state().waiting_for
+    );
     advance_past_combat_damage(&mut runner);
 
     assert!(
@@ -390,28 +405,26 @@ fn combat_wither_pause_resumes_doubling_first() {
     );
     assert!(
         runner.state().stack.is_empty(),
-        "the stack must be empty after the resume"
+        "the stack must be empty after combat"
     );
-    // V10: Doubling-first order lands exactly 9 counters (4x2+1). The
-    // divergent count (9 here vs 10 Constrictor-first) proves the CR 616.1
-    // choice is real, not an identity order.
+    // V9: Constrictor-only lands exactly 5 counters (4+1) — Doubling Season
+    // contributes nothing in combat.
     assert_eq!(
         counter_count(&runner, colossus, &CounterType::Minus1Minus1),
-        9,
-        "Doubling-first must double the 4 wither damage and add one"
+        5,
+        "Constrictor-only must add one to the 4 wither damage with no doubling"
     );
-    // V2: the resumed leg emits DamageDealt + the CR 120.1 record exactly once.
-    let dealt = damage_dealt_events(&resume_events, &target, true);
+    // The inline leg emits DamageDealt + the CR 120.1 record exactly once.
+    let dealt = damage_dealt_events(outcome.events(), &target, true);
     assert_eq!(
         dealt.len(),
         1,
-        "the resume must emit exactly one DamageDealt for the paused leg"
+        "the inline leg must emit exactly one DamageDealt"
     );
     // Excess parity with the never-paused path (pinned in V12): the shared
     // excess formula reads unmarked damage, so a deathtouch wither leg
     // reports `actual - 1` (4 - 1 = 3) even with `damage_marked == 0`.
-    // Pre-existing semantic, preserved verbatim by the core — the resume
-    // must recompute it identically, not "fix" it.
+    // Pre-existing semantic, preserved verbatim by the core.
     assert!(
         matches!(
             dealt[0],
@@ -421,27 +434,26 @@ fn combat_wither_pause_resumes_doubling_first() {
                 ..
             }
         ),
-        "the resumed DamageDealt carries the full dealt amount with formula-parity excess, got {:?}",
+        "the inline DamageDealt carries the full dealt amount with formula-parity excess, got {:?}",
         dealt[0]
     );
     assert_eq!(
         record_count(&runner, butcher, &target, true),
         1,
-        "CR 120.1 must record the paused leg exactly once"
+        "CR 120.1 must record the inline leg exactly once"
     );
-    // V3: lifelink exactly once — the paused leg's folded share drains via
-    // the lifelink tail (F1 split: the remnant runs the core only).
+    // Lifelink exactly once — the inline leg's full share.
     assert_eq!(
         life_of(&runner, P1),
         24,
         "lifelink must gain exactly the 4 dealt (20 + 4)"
     );
-    // V4: deathtouch flag exactly once, no marking. Survival is asserted
+    // Deathtouch flag exactly once, no marking. Survival is asserted
     // because CR 702.12 indestructible makes it rules-correct (not because
     // the engine destroys deathtouch victims — that gap is #11019).
     assert!(
         runner.state().objects[&colossus].dealt_deathtouch_damage,
-        "CR 702.2b must mark the resumed leg's deathtouch source"
+        "CR 702.2b must mark the inline leg's deathtouch source"
     );
     assert_eq!(
         runner.state().objects[&colossus].damage_marked,
@@ -455,78 +467,103 @@ fn combat_wither_pause_resumes_doubling_first() {
     );
 }
 
-/// CR 616.1 order convergence (V10): Constrictor-first must leave the same
-/// remainder rows V2–V4 holding, with its own order math — Constrictor first
-/// 4+1=5, then Doubling x2 = 10 counters (vs 9 Doubling-first).
+/// CR 614.16 multi-authority hostile (V1): Sickle Ripper's 2 wither combat
+/// damage to a Darksteel Colossus under Doubling Season + Winding Constrictor
+/// lands exactly 3 counters — the effect-worded doubler is inapplicable in
+/// combat while the bare-worded Constrictor still applies (+1), proving the
+/// gate is per-def, not placement-scoped. No CR 616.1 prompt opens (single
+/// candidate auto-applies).
+///
+/// REVERT-FAILING: pre-tag both modifiers apply (9 or 10 with a prompt on the
+/// Butcher board; 5 or 6 here with a prompt), so the no-prompt guard and the
+/// count of 3 both redden.
 #[test]
-fn combat_wither_pause_resumes_constrictor_first() {
+fn combat_wither_doubling_plus_constrictor_lands_three() {
     let mut scenario = GameScenario::new();
-    let (doubling, constrictor, colossus, butcher) =
-        combat_board(&mut scenario, "Smoldering Butcher", 4, 2);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    scenario.add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR_ORACLE);
+    let mut victim = scenario.add_creature(P0, "Darksteel Colossus", 11, 11);
+    victim
+        .from_oracle_text_with_keywords(&["Trample", "Indestructible"], DARKSTEEL_COLOSSUS_ORACLE);
+    let colossus = victim.id();
+    let ripper = scenario
+        .add_creature_from_oracle(P1, "Sickle Ripper", 2, 1, SICKLE_RIPPER_ORACLE)
+        .wither()
+        .id();
 
     let mut runner = scenario.build();
     runner.state_mut().active_player = P1;
     let target = TargetRef::Object(colossus);
-    run_combat_with_blocks(
+    let outcome = run_combat_with_blocks(
         &mut runner,
-        &[(butcher, AttackTarget::Player(P0))],
-        &[(colossus, butcher)],
+        &[(ripper, AttackTarget::Player(P0))],
+        &[(colossus, ripper)],
     );
 
-    let resume_events = answer_counter_order(&mut runner, P0, constrictor, doubling);
+    assert!(
+        prompt(&runner).is_none(),
+        "a single applicable replacement auto-applies with no prompt, got {:?}",
+        runner.state().waiting_for
+    );
     advance_past_combat_damage(&mut runner);
 
-    assert_eq!(
-        counter_count(&runner, colossus, &CounterType::Minus1Minus1),
-        10,
-        "Constrictor-first must add one to the 4 wither damage and double it"
-    );
-    assert_eq!(
-        damage_dealt_events(&resume_events, &target, true).len(),
-        1,
-        "the resume must emit exactly one DamageDealt either order"
-    );
-    assert_eq!(
-        record_count(&runner, butcher, &target, true),
-        1,
-        "CR 120.1 must record the paused leg exactly once either order"
-    );
-    assert_eq!(
-        life_of(&runner, P1),
-        24,
-        "lifelink must gain exactly the 4 dealt either order"
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the batch must settle to priority, got {:?}",
+        runner.state().waiting_for
     );
     assert!(
-        runner.state().objects[&colossus].dealt_deathtouch_damage,
-        "the deathtouch flag must set either order"
+        runner.state().stack.is_empty(),
+        "the stack must be empty after combat"
+    );
+    assert_eq!(
+        counter_count(&runner, colossus, &CounterType::Minus1Minus1),
+        3,
+        "CR 614.16: only the Constrictor applies in combat, so the 2 wither damage lands 3 counters"
+    );
+    let dealt = damage_dealt_events(outcome.events(), &target, true);
+    assert_eq!(
+        dealt.len(),
+        1,
+        "reach-guard: the combat leg must emit exactly one DamageDealt"
+    );
+    assert!(
+        matches!(dealt[0], GameEvent::DamageDealt { amount: 2, .. }),
+        "reach-guard: the DamageDealt carries the 2 dealt, got {:?}",
+        dealt[0]
+    );
+    assert_eq!(
+        record_count(&runner, ripper, &target, true),
+        1,
+        "reach-guard: CR 120.1 must record the combat leg exactly once"
     );
     assert_eq!(
         runner.state().objects[&colossus].damage_marked,
         0,
-        "CR 120.3d: wither damage is never marked either order"
+        "CR 120.3d: wither damage is never marked"
     );
     assert_eq!(
         runner.state().objects[&colossus].zone,
         Zone::Battlefield,
-        "indestructible CR 702.12 must keep the Colossus either order"
+        "indestructible CR 702.12 must keep the Colossus on the battlefield"
     );
 }
 
 /// V0 second-vehicle arm-identity row (N1): Necroskitter is wither-keyworded
 /// (not Butcher), exercising the same `has_wither || has_infect` arm. Asserts
-/// the resumed `DamageDealt` + record; lifelink/flag siblings live in V2–V4.
+/// the inline `DamageDealt` + record; lifelink/flag siblings live in the
+/// Constrictor-only row above. CR 614.16 leaves Doubling Season inapplicable
+/// in combat, so the leg lands Constrictor-only with no prompt.
 ///
-/// REVERT-FAILING ASSERTION: the record count (1 vs 0 at base).
+/// REVERT-FAILING ASSERTIONS: pre-tag the leg pauses on a two-candidate CR
+/// 616.1 prompt, so the no-prompt guard fails and the count is 3 or 4 (not 2).
 #[test]
 fn necroskitter_second_vehicle_arm_identity() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-    let doubling = scenario
-        .add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE)
-        .id();
-    let constrictor = scenario
-        .add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR_ORACLE)
-        .id();
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    scenario.add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR_ORACLE);
     let shieldmate = scenario.add_creature(P0, "Shieldmate", 2, 8).id();
     // No deathtouch/lifelink grant: the arm identity is the point, not the
     // riders (Necroskitter's dies trigger is out of scope — nothing dies).
@@ -537,38 +574,42 @@ fn necroskitter_second_vehicle_arm_identity() {
     let mut runner = scenario.build();
     runner.state_mut().active_player = P1;
     let target = TargetRef::Object(shieldmate);
-    run_combat_with_blocks(
+    let outcome = run_combat_with_blocks(
         &mut runner,
         &[(skitter, AttackTarget::Player(P0))],
         &[(shieldmate, skitter)],
     );
 
-    let resume_events = answer_counter_order(&mut runner, P0, doubling, constrictor);
+    assert!(
+        prompt(&runner).is_none(),
+        "a single applicable replacement auto-applies with no prompt, got {:?}",
+        runner.state().waiting_for
+    );
     advance_past_combat_damage(&mut runner);
 
-    // Order math (1 wither damage, Doubling-first): 1x2+1 = 3 counters.
+    // Order math (1 wither damage, Constrictor-only): 1+1 = 2 counters.
     assert_eq!(
         counter_count(&runner, shieldmate, &CounterType::Minus1Minus1),
-        3,
-        "Doubling-first must double the 1 wither damage and add one"
+        2,
+        "Constrictor-only must add one to the 1 wither damage with no doubling"
     );
-    let dealt = damage_dealt_events(&resume_events, &target, true);
+    let dealt = damage_dealt_events(outcome.events(), &target, true);
     assert_eq!(
         dealt.len(),
         1,
-        "the resume must emit exactly one DamageDealt for the paused leg"
+        "the inline leg must emit exactly one DamageDealt"
     );
     assert!(
         matches!(dealt[0], GameEvent::DamageDealt { amount: 1, .. }),
-        "the resumed DamageDealt carries the 1 dealt, got {:?}",
+        "the inline DamageDealt carries the 1 dealt, got {:?}",
         dealt[0]
     );
     assert_eq!(
         record_count(&runner, skitter, &target, true),
         1,
-        "CR 120.1 must record the paused leg exactly once"
+        "CR 120.1 must record the inline leg exactly once"
     );
-    // No survival assertion: no deathtouch rides this leg, and the 3-counter
+    // No survival assertion: no deathtouch rides this leg, and the 2-counter
     // count above already proves the victim is still present.
 }
 
@@ -879,22 +920,39 @@ fn village_pillagers_etb_each_leg_pauses_and_resumes() {
 /// V13 serialized compat: an old save without `pending_damage_post_counter`
 /// deserializes (`#[serde(default)]` → `None`), and a mid-pause save
 /// round-trips and still resumes.
+///
+/// CR 614.16 (V9): combat no longer pauses (Doubling Season inapplicable),
+/// so the mid-pause vehicle is the non-combat Puncture Blast two-modifier
+/// pause — the same `PendingDamagePostCounter` stash with `is_combat` false,
+/// drained through `drain_pending_damage_post_counter` on resume.
 #[test]
 fn mid_pause_save_round_trips_and_resumes() {
     use engine::types::game_state::GameState;
 
     let mut scenario = GameScenario::new();
-    let (doubling, constrictor, colossus, butcher) =
-        combat_board(&mut scenario, "Smoldering Butcher", 4, 2);
+    scenario.at_phase(Phase::PreCombatMain);
+    let doubling = scenario
+        .add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE)
+        .id();
+    let constrictor = scenario
+        .add_creature_from_oracle(P0, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR_ORACLE)
+        .id();
+    // Sized so the doubled wither counters never kill it (3 damage doubles to
+    // at most 8 — see the order math below).
+    let victim = scenario.add_creature(P0, "Victim", 2, 10).id();
+    let blast = scenario
+        .add_spell_to_hand_from_oracle(P1, "Puncture Blast", true, PUNCTURE_BLAST_ORACLE)
+        .wither()
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{R}"))
+        .id();
+    scenario.with_mana_pool(P1, mana(&[(ManaType::Red, 1), (ManaType::Colorless, 2)]));
 
     let mut runner = scenario.build();
-    runner.state_mut().active_player = P1;
-    let target = TargetRef::Object(colossus);
-    run_combat_with_blocks(
-        &mut runner,
-        &[(butcher, AttackTarget::Player(P0))],
-        &[(colossus, butcher)],
-    );
+    give_priority(&mut runner, P1);
+    let target = TargetRef::Object(victim);
+    // The cast driver stops at the CR 616.1 counter-ordering prompt, leaving
+    // the pause open for the snapshot below.
+    runner.cast(blast).target_object(victim).resolve();
     assert!(
         prompt(&runner).is_some(),
         "reach-guard: the pause must be open before snapshotting, got {:?}",
@@ -914,40 +972,54 @@ fn mid_pause_save_round_trips_and_resumes() {
         legacy.pending_damage_post_counter.is_none(),
         "the new slot must default to None on old saves"
     );
-    // Mid-pause round-trip: the combat-flagged stash survives serde.
+    // Mid-pause round-trip: the non-combat counter stash survives serde.
     let revived: GameState = serde_json::from_str(&json).expect("mid-pause save must round-trip");
     assert!(
         revived
             .pending_damage_post_counter
             .as_ref()
-            .is_some_and(|stashed| stashed.is_combat),
-        "the combat-flagged counter stash must survive the round-trip"
+            .is_some_and(|stashed| !stashed.is_combat),
+        "the non-combat counter stash must survive the round-trip"
     );
 
     let mut runner = GameRunner::from_state(revived);
     let resume_events = answer_counter_order(&mut runner, P0, doubling, constrictor);
-    advance_past_combat_damage(&mut runner);
+    runner.advance_until_stack_empty();
 
-    assert_eq!(
-        counter_count(&runner, colossus, &CounterType::Minus1Minus1),
-        9,
-        "Doubling-first must double the 4 wither damage and add one after the round-trip"
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the cast must settle to priority, got {:?}",
+        runner.state().waiting_for
     );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must be empty after the resume"
+    );
+    // Order math (3 wither damage, Doubling-first): 3x2+1 = 7 counters.
     assert_eq!(
-        damage_dealt_events(&resume_events, &target, true).len(),
+        counter_count(&runner, victim, &CounterType::Minus1Minus1),
+        7,
+        "Doubling-first must double the 3 wither damage and add one after the round-trip"
+    );
+    let dealt = damage_dealt_events(&resume_events, &target, false);
+    assert_eq!(
+        dealt.len(),
         1,
         "the resumed leg must emit exactly one DamageDealt after the round-trip"
     );
+    assert!(
+        matches!(dealt[0], GameEvent::DamageDealt { amount: 3, .. }),
+        "the resumed DamageDealt carries the 3 dealt, got {:?}",
+        dealt[0]
+    );
     assert_eq!(
-        record_count(&runner, butcher, &target, true),
+        record_count(&runner, blast, &target, false),
         1,
         "CR 120.1 must record the paused leg exactly once after the round-trip"
     );
-    assert_eq!(
-        life_of(&runner, P1),
-        24,
-        "lifelink must gain exactly the 4 dealt after the round-trip"
-    );
+    // No lifelink on this vehicle: nobody's life moves.
+    assert_eq!(life_of(&runner, P0), 20, "P0's life must not move");
+    assert_eq!(life_of(&runner, P1), 20, "P1's life must not move");
 }
 
 /// Asserts the real card's face text is `oracle`, so the Gideon/Stomp rows run
@@ -1121,26 +1193,30 @@ fn gideon_wither_inline_records_no_excess() {
     );
 }
 
-/// CR 120.10 + CR 616.1, paused: the same wither leg under Doubling Season +
-/// Winding Constrictor pauses on the counter-ordering choice; the resume must
-/// still report `excess: 0` — proving the parked stash carried the pre-damage
-/// loyalty (3), not the live post-damage value (1).
+/// CR 120.10 + CR 614.16 (V9): the same wither leg under Doubling Season +
+/// Winding Constrictor no longer pauses — Doubling Season is inapplicable in
+/// combat, so the Constrictor auto-applies inline. The event must still
+/// report `excess: 0`, proving the single-candidate combat path measures
+/// against the pre-damage loyalty (3), not the live post-damage value (1).
 ///
-/// The 5 doubled counters put the 4/4 Gideon at toughness -1, so CR 704.5f
-/// destroys it at the post-batch SBA; the death is deterministic
-/// counter-lethality and is asserted as destruction. Flag/counter liveness
-/// assertions are impossible post-exit (CR 400.7 clears them), so the event +
-/// record pin the leg.
+/// The 3 Constrictor-only counters leave the 4/4 Gideon at toughness 1, so
+/// Gideon survives with loyalty 1 — asserted as survival (contrast the
+/// pre-tag destruction at 5 doubled counters).
 ///
-/// REVERT-FAILING ASSERTION: the `excess: 0` pin on the resumed event.
+/// REVERT-FAILING ASSERTIONS: pre-tag the leg pauses on a two-candidate CR
+/// 616.1 prompt, so the no-prompt guard fails, the count is 5 or 6 (not 3),
+/// and Gideon dies (not survives).
 #[test]
-fn gideon_wither_pause_resumes_with_predamage_loyalty() {
+fn gideon_wither_constrictor_only_reads_predamage_loyalty() {
     let db = load_db().expect("card db");
     assert_oracle(db, BONECRUSHER, BONECRUSHER_ORACLE);
     assert_oracle(db, STOMP, STOMP_ORACLE);
     let mut scenario = GameScenario::new();
     let (gideon, ripper, giant, mods) = gideon_board(&mut scenario, db, true);
-    let (doubling, constrictor) = mods.expect("the paused leg needs the counter-replacement pair");
+    assert!(
+        mods.is_some(),
+        "the leg needs the counter-replacement pair on the board"
+    );
     let mut runner = scenario.build();
 
     animate_gideon(&mut runner, gideon);
@@ -1148,15 +1224,17 @@ fn gideon_wither_pause_resumes_with_predamage_loyalty() {
 
     runner.state_mut().active_player = P0;
     let target = TargetRef::Object(gideon);
-    run_combat_with_blocks(
+    let outcome = run_combat_with_blocks(
         &mut runner,
         &[(gideon, AttackTarget::Player(P1))],
         &[(ripper, gideon)],
     );
 
-    // V1 reach-guard: the wither AddCounter event really meets two
-    // replacements (chooser P0 per CR 616.1).
-    let resume_events = answer_counter_order(&mut runner, P0, doubling, constrictor);
+    assert!(
+        prompt(&runner).is_none(),
+        "a single applicable replacement auto-applies with no prompt, got {:?}",
+        runner.state().waiting_for
+    );
     advance_past_combat_damage(&mut runner);
 
     assert!(
@@ -1166,13 +1244,19 @@ fn gideon_wither_pause_resumes_with_predamage_loyalty() {
     );
     assert!(
         runner.state().stack.is_empty(),
-        "the stack must be empty after the resume"
+        "the stack must be empty after combat"
     );
-    let dealt = damage_dealt_events(&resume_events, &target, true);
+    // CR 120.3d: 2 wither damage plus the Constrictor's one = 3 counters.
+    assert_eq!(
+        counter_count(&runner, gideon, &CounterType::Minus1Minus1),
+        3,
+        "Constrictor-only must add one to the 2 wither damage with no doubling"
+    );
+    let dealt = damage_dealt_events(outcome.events(), &target, true);
     assert_eq!(
         dealt.len(),
         1,
-        "the resume must emit exactly one DamageDealt for the paused leg"
+        "the inline leg must emit exactly one DamageDealt"
     );
     assert!(
         matches!(
@@ -1183,20 +1267,24 @@ fn gideon_wither_pause_resumes_with_predamage_loyalty() {
                 ..
             }
         ),
-        "CR 120.10: the resumed 2 damage still measures against pre-damage loyalty 3, got {:?}",
+        "CR 120.10: the inline 2 damage still measures against pre-damage loyalty 3, got {:?}",
         dealt[0]
     );
     assert_eq!(
         record_count(&runner, ripper, &target, true),
         1,
-        "CR 120.1 must record the paused leg exactly once"
+        "CR 120.1 must record the inline leg exactly once"
     );
-    // Doubling-first order lands 2x2+1 = 5 counters on the 4/4 Gideon:
-    // CR 704.5f destroys it at the post-batch SBA — asserted as destruction.
+    // CR 120.3c: planeswalker damage removes loyalty (3 -> 1).
+    assert_eq!(
+        runner.state().objects[&gideon].loyalty,
+        Some(1),
+        "the 2 damage must leave Gideon at one loyalty"
+    );
     assert_eq!(
         runner.state().objects[&gideon].zone,
-        Zone::Graveyard,
-        "the 5 doubled counters must destroy the 4/4 Gideon (CR 704.5f)"
+        Zone::Battlefield,
+        "Gideon must survive (4/4 with 3 counters, loyalty 1)"
     );
 }
 
@@ -1411,10 +1499,11 @@ const ELSPETH_CONQUERS_DEATH_ORACLE: &str = "(As this Saga enters and after your
 /// The Vorinclex sibling pins the cause-blind actor wording (same advance →
 /// 2 lore, both before and after the fix).
 ///
-/// REVERT-FAILING (RED at base): lore is 2 (doubled), not 1.
+/// REVERT-FAILING (RED pre-tag): lore is 2 (doubled), not 1.
 /// Reach-guard: the phase advanced and the chapter-I trigger queued and
 /// resolved (its exile proves the Saga machinery ran), so only the count
-/// discriminates.
+/// discriminates. The ordering prompt itself is per-sibling: 1 lore resolves
+/// chapter I directly, 2 lore (Vorinclex) orders chapters I and II.
 #[test]
 fn saga_lore_turn_based_action_is_not_doubled() {
     for (label, use_vorinclex, expected) in [("Doubling Season", false, 1), ("Vorinclex", true, 2)]
@@ -1494,10 +1583,21 @@ fn saga_lore_turn_based_action_is_not_doubled() {
             }
         }
 
-        assert!(
-            saw_order_prompt,
-            "{label} reach-guard: the lore placement must queue chapter triggers (phase advanced, chapters parsed)"
-        );
+        // The ordering prompt is per-sibling: 1 lore queues only chapter I,
+        // which resolves directly with no prompt; 2 lore (Vorinclex) queues
+        // chapters I and II, which P0 must order. Either way the exile below
+        // proves chapter I ran.
+        if use_vorinclex {
+            assert!(
+                saw_order_prompt,
+                "{label} reach-guard: 2 lore must queue chapters I and II behind an ordering prompt"
+            );
+        } else {
+            assert!(
+                !saw_order_prompt,
+                "{label}: a single chapter trigger resolves directly with no ordering prompt"
+            );
+        }
         assert_eq!(
             runner.state().objects[&dummy].zone,
             Zone::Exile,

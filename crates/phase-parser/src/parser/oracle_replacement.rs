@@ -14214,8 +14214,16 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
         .quantity_modification(modification)
         .description(original_text.to_string());
-    if let Some(valid_card) = parse_counter_replacement_valid_card(lower) {
+    if let Some((valid_card, anchor)) = parse_counter_replacement_valid_card(lower) {
         def = def.valid_card(valid_card);
+        // CR 614.16: effect-worded doublers ("if an effect would put ...",
+        // Doubling Season) apply only to effect-caused placements; bare
+        // wordings ("counters would be put on ...", Constrictor) stay
+        // cause-blind. The gate arm reads the placement's `CounterCause` at
+        // runtime.
+        if matches!(anchor, CounterScopeAnchor::EffectWorded) {
+            def = def.condition(ReplacementCondition::EffectCausedPlacement);
+        }
     }
     // CR 614.1a: Vorinclex/Halving Season count doublers-and-halvers scope by the
     // player *putting* the counters (the actor), per the official Vorinclex ruling
@@ -14248,8 +14256,18 @@ fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<Replace
     Some(def)
 }
 
-fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
-    let (_, (), after_anchor) =
+/// CR 614.16: which counter-replacement scope wording the anchor matched —
+/// the effect-worded branch ("an effect would put ...", Doubling Season)
+/// stamps `ReplacementCondition::EffectCausedPlacement` on the def, the bare
+/// branch ("counters would be put on ...", Constrictor) leaves it untagged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CounterScopeAnchor {
+    EffectWorded,
+    Bare,
+}
+
+fn parse_counter_replacement_valid_card(lower: &str) -> Option<(TargetFilter, CounterScopeAnchor)> {
+    let (_, anchor, after_anchor) =
         nom_primitives::scan_preceded(lower, parse_counter_replacement_scope_anchor)?;
     let (filter, rest) = parse_type_phrase_folding(after_anchor);
     if !is_counter_replacement_object_scope(&filter)
@@ -14257,7 +14275,7 @@ fn parse_counter_replacement_valid_card(lower: &str) -> Option<TargetFilter> {
     {
         return None;
     }
-    Some(filter)
+    Some((filter, anchor))
 }
 
 fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
@@ -14271,16 +14289,22 @@ fn is_counter_replacement_object_scope(filter: &TargetFilter) -> bool {
     }
 }
 
-fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        alt((
+fn parse_counter_replacement_scope_anchor(input: &str) -> OracleResult<'_, CounterScopeAnchor> {
+    alt((
+        value(
+            CounterScopeAnchor::Bare,
             tag::<_, _, OracleError<'_>>("counters would be put on "),
-            tag("counter would be put on "),
+        ),
+        value(CounterScopeAnchor::Bare, tag("counter would be put on ")),
+        value(
+            CounterScopeAnchor::EffectWorded,
             tag("an effect would put one or more counters on "),
+        ),
+        value(
+            CounterScopeAnchor::EffectWorded,
             tag("an effect would put a counter on "),
-        )),
-    )
+        ),
+    ))
     .parse(input)
 }
 
@@ -28893,6 +28917,60 @@ mod tests {
         // CR 122.1a + CR 614.1a: Doubling Season's modern wording uses "those
         // counters" — counter-agnostic, so no `counter_match` is set.
         assert_eq!(def.counter_match, None);
+        // CR 614.16 (V8): the effect-worded branch stamps the eligibility
+        // gate — combat wither, costs, and turn-based actions stay undoubled.
+        assert!(
+            matches!(
+                def.condition,
+                Some(ReplacementCondition::EffectCausedPlacement)
+            ),
+            "Doubling Season's counter clause must carry the effect-caused gate, got {:?}",
+            def.condition
+        );
+    }
+
+    #[test]
+    fn counter_replacement_bare_wording_carries_no_effect_gate() {
+        // CR 614.16 (V8): Winding Constrictor's bare "counters would be put
+        // on" wording carries no "effect" restriction, so the def stays
+        // untagged and keeps doubling combat wither.
+        let def = parse_replacement_line(
+            "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.",
+            "Winding Constrictor",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::Plus { value: 1 })
+        );
+        assert_eq!(
+            def.condition, None,
+            "bare-worded doublers must not carry the effect-caused gate, got {:?}",
+            def.condition
+        );
+    }
+
+    #[test]
+    fn counter_replacement_actor_wording_carries_no_effect_gate() {
+        // CR 614.16 (V8): Vorinclex's actor-worded "if you would put"
+        // wording carries no "effect" restriction, so the def stays untagged
+        // and keeps doubling loyalty costs and lore counters.
+        let def = parse_replacement_line(
+            "If you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.",
+            "Vorinclex, Monstrous Raider",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::AddCounter);
+        assert_eq!(
+            def.quantity_modification,
+            Some(QuantityModification::DOUBLE)
+        );
+        assert_eq!(
+            def.condition, None,
+            "actor-worded doublers must not carry the effect-caused gate, got {:?}",
+            def.condition
+        );
     }
 
     #[test]

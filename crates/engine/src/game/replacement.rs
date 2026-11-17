@@ -23282,9 +23282,8 @@ mod tests {
     /// (`ResolvingEffect` or `ReplacementOrPrevention`). Cost payments and
     /// turn-based actions stamp `Other` and fail closed here, as do
     /// non-placement events and the move's remove stage. Hand-built defs over
-    /// hand-built events: no parser-tagged def exists yet (Phase 4), and no
-    /// caller assigns a real cause yet (Phase 3), so every `Other` row doubles
-    /// as the pre-tag neutrality proof — the arm is reachable but inert.
+    /// hand-built events: the unit-level arm proof, complementing the
+    /// parser-tagged production rows (V1–V6, V11–V13).
     #[test]
     fn effect_caused_placement_matches_effect_driven_counter_placements() {
         use crate::types::player::PlayerCounterKind;
