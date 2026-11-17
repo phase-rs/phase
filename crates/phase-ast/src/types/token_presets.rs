@@ -585,7 +585,7 @@ scryfall_oracle_id = "11111111-1111-1111-1111-111111111111"
         assert!(body.core_types.contains(&CoreType::Creature));
         assert!(body.subtypes.iter().any(|subtype| subtype == "Food"));
         assert!(body.subtypes.iter().any(|subtype| subtype == "Golem"));
-        assert!(body.keywords.contains(&Keyword::Haste));
+        assert!(body.keywords.contains(&Keyword::Haste)); // allow-raw-authority: test asserting static catalog data, no game object
     }
 
     /// CR 111.4: the same bare descriptor resolves without a source when the

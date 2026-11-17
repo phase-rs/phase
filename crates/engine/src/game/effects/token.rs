@@ -204,9 +204,9 @@ pub(crate) fn materialize_token_ability_payload(
         let known = merged
             .keywords
             .iter()
-            .chain(extras.keywords.iter())
+            .chain(extras.keywords.iter()) // allow-raw-authority: static keyword-list merge, no game object
             .any(|known| known == keyword)
-            || preset.body.keywords.contains(keyword);
+            || preset.body.keywords.contains(keyword); // allow-raw-authority: static catalog-body keyword comparison
         if !known {
             extras.keywords.push(keyword.clone());
         }
@@ -331,9 +331,9 @@ fn modification_semantically_equal(
             },
         ) => ability_semantically_equal(known_def, candidate_def),
         (_, ContinuousModification::AddKeyword { keyword }) => {
-            predefined.keywords.contains(keyword)
-                || extras.keywords.contains(keyword)
-                || preset.body.keywords.contains(keyword)
+            predefined.keywords.contains(keyword) // allow-raw-authority: pure payload-data comparison for semantic equality
+                || extras.keywords.contains(keyword) // allow-raw-authority: pure payload-data comparison for semantic equality
+                || preset.body.keywords.contains(keyword) // allow-raw-authority: pure catalog-body data comparison for semantic equality
         }
         _ => known == candidate,
     }
@@ -8048,7 +8048,9 @@ mod tests {
                     .iter()
                     .any(|known| static_semantically_equal(known, candidate))
             });
+            // allow-raw-authority: census test over static materialized payloads
             let keyw = catalog.keywords.iter().all(|keyword| {
+                // allow-raw-authority: census test over static materialized payloads
                 predefined.keywords.contains(keyword) || preset.body.keywords.contains(keyword)
             });
             let mods = catalog.modifications.iter().all(|candidate| {
