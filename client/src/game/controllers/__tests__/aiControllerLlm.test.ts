@@ -80,6 +80,7 @@ let storeState: {
   adapter: TestAdapter | null;
   logHistory: unknown[];
   gameSessionGeneration: number;
+  undoInFlight: boolean;
 };
 
 vi.mock("../../../stores/gameStore", () => ({
@@ -150,6 +151,7 @@ beforeEach(() => {
     adapter: null,
     logHistory: [],
     gameSessionGeneration: 1,
+    undoInFlight: false,
   };
 });
 

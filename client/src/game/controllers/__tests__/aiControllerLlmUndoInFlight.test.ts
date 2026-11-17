@@ -357,7 +357,7 @@ describe("an LLM seat's decision when Undo is pressed", () => {
     // The undo ends the decision under way, then fails: the engine, and the
     // seat's decision, stay as they were.
     adapter.restoreState.mockImplementationOnce(() => Promise.reject(new Error("restore failed")));
-    await expect(undoLastAction()).rejects.toThrow("restore failed");
+    await undoLastAction();
     expect(useGameStore.getState().undoInFlight).toBe(false);
     expect(useGameStore.getState().gameState).toEqual(AI_TO_ACT);
 

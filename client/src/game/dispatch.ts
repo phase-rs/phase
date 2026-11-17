@@ -1301,19 +1301,42 @@ export async function restoreGameState(
  * abandons the dispatch pipeline's queued and in-flight work first. A play still
  * animating would otherwise commit after the rewind: its log lines into the
  * rewound log, which the next LLM prompt is built from, and its checkpoint onto
- * the ring, where the next undo would redo it. Work outside the pipeline (the
- * store's own `dispatch`, the AI controller) is fenced by the undo epoch that
- * `undo` advances before its first await.
+ * the ring, where the next undo would redo it. Pressed while one of the
+ * player's own undoable actions animates, the undo takes that action back too:
+ * it never committed, and the restored checkpoint precedes it. Outside the
+ * pipeline, the store's own `dispatch` needs no fence (see `undo`), and the AI
+ * controller drops its decision when `undoInFlight` is set.
  *
  * Nothing is abandoned when `undo` would do nothing, so a press with nothing
- * to undo, or during an undo, leaves work in flight alone. If the restore
- * itself fails, the abandoned commits are lost as they are under
- * `restoreGameState`, and the stale-screen watchdog re-syncs the board.
+ * to undo, or during an undo, leaves the work in flight alone.
  */
 export async function undoLastAction(): Promise<void> {
-  if (!canUndo(useGameStore.getState())) return;
+  const store = useGameStore.getState();
+  if (!canUndo(store)) return;
   abandonPendingDispatches();
-  await useGameStore.getState().undo();
+  try {
+    await store.undo();
+  } catch (err) {
+    // A failed restore leaves the engine as it was, abandoned work included,
+    // while the store never committed that work. Show the engine's own state,
+    // so the board and every seat's next decision agree with it. The abandoned
+    // work's log lines and checkpoint are lost, as under `restoreGameState`.
+    // Nothing is rethrown: the Undo controls fire and forget.
+    reportActionError(err);
+    try {
+      const snapshot = await store.adapter.getSnapshot();
+      const current = useGameStore.getState();
+      if (current.adapter !== store.adapter || current.gameSessionGeneration !== store.gameSessionGeneration) {
+        return;
+      }
+      await processRemoteUpdate(snapshot, []);
+    } catch (resyncErr) {
+      debugLog(
+        `undo: resync after a failed restore failed: ${resyncErr instanceof Error ? resyncErr.message : String(resyncErr)}`,
+        "warn",
+      );
+    }
+  }
 }
 
 /**

@@ -328,8 +328,6 @@ export function createAIController(config: AIControllerConfig): AIController {
   interface AIAttempt {
     generation: number;
     gameSessionGeneration: number;
-    /** The store's `undoEpoch` when the attempt began; no attempt begins during an undo. */
-    undoEpoch: number;
     prompt: AttemptPrompt;
     playerId: number;
   }
@@ -473,7 +471,6 @@ export function createAIController(config: AIControllerConfig): AIController {
     const attempt: AIAttempt = {
       generation: ++attemptGeneration,
       gameSessionGeneration: store.gameSessionGeneration,
-      undoEpoch: store.undoEpoch,
       prompt: { fence: enginePromptFence(state), waitingFor: state.waiting_for },
       playerId,
     };
@@ -485,11 +482,6 @@ export function createAIController(config: AIControllerConfig): AIController {
     if (!active || attempt.generation !== attemptGeneration) return false;
     const store = useGameStore.getState();
     if (store.gameSessionGeneration !== attempt.gameSessionGeneration) return false;
-    // An undo begun since: the engine may hold the restored state while the
-    // store still shows the undone one, so nothing the attempt reads or asks
-    // can be trusted to describe the seat's decision, and a reply refused as
-    // stale is no failure of the seat's provider.
-    if (store.undoEpoch !== attempt.undoEpoch) return false;
     const state = store.gameState;
     const waitingFor = state?.waiting_for ?? null;
     if (!state || !waitingFor) return false;
@@ -840,7 +832,6 @@ export function createAIController(config: AIControllerConfig): AIController {
     let observedWaitingFor = initialStore.waitingFor;
     let observedFence = enginePromptFence(initialStore.gameState);
     let observedSessionGeneration = initialStore.gameSessionGeneration;
-    let observedUndoEpoch = initialStore.undoEpoch;
     let observedUndoInFlight = initialStore.undoInFlight;
     let observedActor = initialStore.gameState
       ? authorizedAiPlayer(initialStore.gameState.waiting_for, initialStore.gameState)
@@ -858,15 +849,14 @@ export function createAIController(config: AIControllerConfig): AIController {
           ? observedFence.identity !== fence.identity || observedFence.revision !== fence.revision || actor !== observedActor
           : store.waitingFor !== observedWaitingFor;
         const sessionChanged = store.gameSessionGeneration !== observedSessionGeneration;
-        // An undo beginning abandons the decision under way, before the
-        // restore's first await; one settling, committed or failed, lets the
-        // seats decide again.
-        const undoChanged = store.undoEpoch !== observedUndoEpoch
-          || store.undoInFlight !== observedUndoInFlight;
+        // An undo beginning ends the decision under way before the restore's
+        // first await, so its reply, which the engine would refuse as stale,
+        // is never read or counted against the seat's provider. One settling,
+        // committed or failed, lets the seats decide again.
+        const undoChanged = store.undoInFlight !== observedUndoInFlight;
         observedWaitingFor = store.waitingFor;
         observedFence = fence;
         observedSessionGeneration = store.gameSessionGeneration;
-        observedUndoEpoch = store.undoEpoch;
         observedUndoInFlight = store.undoInFlight;
         observedActor = actor;
 

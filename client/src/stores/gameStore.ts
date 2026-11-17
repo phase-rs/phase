@@ -265,16 +265,10 @@ interface GameStoreState {
   /** Undo ring: engine-authored trusted checkpoints, never screen projections. */
   stateHistory: UndoCheckpoint[];
   /**
-   * Counts the undos begun since the page loaded; `reset` keeps it. `undo`
-   * advances it before its first await, so work begun earlier can tell, when
-   * it resumes, that an undo took its timeline back: the store's `dispatch`
-   * then commits nothing, and the AI controller drops the decision under way.
-   */
-  undoEpoch: number;
-  /**
-   * True from the moment an undo begins until it has committed or failed. The
-   * AI controller starts no decision meanwhile: the store still shows the
-   * state being undone, while the engine may already hold the restored one.
+   * True from the moment an undo begins, before its first await, until it has
+   * committed or failed. Meanwhile the store still shows the state being
+   * undone while the engine may already hold the restored one, so the AI
+   * controller drops the decision under way and starts none.
    */
   undoInFlight: boolean;
   /** Debug rewind targets: trusted envelopes for the same reason. */
@@ -463,6 +457,13 @@ export function nextGameSessionGeneration(): number {
   return latestGameSessionGeneration;
 }
 
+/**
+ * Numbers each undo begun. An undo clears `undoInFlight` only while it is the
+ * latest, so one still settling from a game torn down meanwhile never clears
+ * the flag a newer game's undo holds.
+ */
+let latestUndoId = 0;
+
 export type GameStore = GameStoreState & GameStoreActions;
 
 /**
@@ -540,7 +541,6 @@ const initialState: GameStoreState = {
   stuckDiagnostic: null,
   viewerInteraction: null,
   stateHistory: [],
-  undoEpoch: 0,
   undoInFlight: false,
   turnCheckpoints: [],
   rewindTargets: [],
@@ -735,7 +735,7 @@ export const useGameStore = create<GameStore>()(
 
     dispatch: async (action) => {
       const submittedAction = applySpellPaymentPreference(action);
-      const { adapter, gameState, gameId, gameMode, gameSessionGeneration, undoEpoch } = get();
+      const { adapter, gameState, gameId, gameMode, gameSessionGeneration } = get();
       if (!adapter || !gameState) {
         throw new Error("Game not initialized");
       }
@@ -772,8 +772,6 @@ export const useGameStore = create<GameStore>()(
       } catch (err) {
         if (reportStructuredActionRejection(err) === "stale") {
           const snapshot = await adapter.getSnapshot();
-          // An undo begun meanwhile commits its own snapshot of the restored game.
-          if (get().undoEpoch !== undoEpoch) return [];
           get().commitEngineSnapshot(snapshot, { events: [], logEntries: [] });
           if (gameId) void saveAuthoritativeGame(gameId, adapter, snapshot.state);
           return [];
@@ -787,11 +785,6 @@ export const useGameStore = create<GameStore>()(
       // Read-then-commit with no `await` between, so no other commit interleaves.
       const checkpoint = checkpointPromise ? await checkpointPromise : null;
       const current = get();
-      // An undo begun while this action was out took it back: the restore
-      // replaced the state it was applied to. Its events, log lines and
-      // checkpoint belong to the undone timeline, and the undo commits the
-      // board itself, so nothing of this action is committed or saved.
-      if (current.undoEpoch !== undoEpoch) return [];
       // The checkpoint was captured before submit; only attach it when the
       // session is unchanged, so a stale checkpoint cannot enter a
       // replacement game's history.
@@ -819,11 +812,10 @@ export const useGameStore = create<GameStore>()(
       const previous = stateHistory[stateHistory.length - 1];
 
       // Before the first await: from the restore on, the engine may hold the
-      // restored state while the store still shows the one being undone. The
-      // new epoch tells work begun before now that its timeline is going, and
-      // `undoInFlight` holds off new AI decisions until this undo settles.
-      const epoch = store.undoEpoch + 1;
-      set({ undoEpoch: epoch, undoInFlight: true });
+      // restored state while the store still shows the one being undone.
+      latestUndoId += 1;
+      const undoId = latestUndoId;
+      set({ undoInFlight: true });
       try {
         // Sync engine state with the restored trusted checkpoint
         await adapter.restoreState(previous.state);
@@ -846,7 +838,9 @@ export const useGameStore = create<GameStore>()(
         // entry only, for anything that remembers one (the log panel keys its
         // rows by seq). The ring keeps step with the log: it is the ring this
         // undo found, less the checkpoint it restores, so a checkpoint pushed
-        // during the restore goes too.
+        // during the restore goes too. That is how a store `dispatch` begun
+        // before the press is taken back: the engine answers in call order, so
+        // it commits before this does.
         const logHistory = current.logHistory.filter((entry) => entry.seq < previous.logSeq);
         current.commitEngineSnapshot(snapshot, {
           extraState: {
@@ -858,9 +852,8 @@ export const useGameStore = create<GameStore>()(
         });
       } finally {
         // Cleared on every exit, a failed restore included, so the AI seats
-        // decide again. Only by this undo: after a game swap, a newer one may
-        // hold the flag.
-        if (get().undoEpoch === epoch) set({ undoInFlight: false });
+        // decide again.
+        if (latestUndoId === undoId) set({ undoInFlight: false });
       }
     },
 
@@ -869,13 +862,11 @@ export const useGameStore = create<GameStore>()(
     },
 
     reset: () => {
-      const { adapter, undoEpoch } = get();
+      const { adapter } = get();
       if (adapter) {
         adapter.dispose();
       }
-      // The epoch only ever grows, so an undo still settling from the last
-      // game never mistakes the next game's undo for its own.
-      set({ ...initialState, gameSessionGeneration: nextGameSessionGeneration(), undoEpoch });
+      set({ ...initialState, gameSessionGeneration: nextGameSessionGeneration() });
     },
 
     setAdapter: (adapter) => {

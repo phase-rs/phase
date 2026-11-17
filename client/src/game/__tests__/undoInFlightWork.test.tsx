@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AiActionProposal,
   GameEvent,
   GameLogEntry,
   GameState,
@@ -11,11 +12,18 @@ import type {
 import { persistedGameStateView } from "../../adapter/types";
 import { UndoButton } from "../../components/board/UndoButton";
 import { useKeyboardShortcuts } from "../../hooks/useKeyboardShortcuts";
+import { useAppNotificationStore } from "../../stores/appToastStore";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import { gameStateFactory } from "../../test/factories/gameStateFactory";
-import { abandonPendingDispatches, dispatchAction, isDispatchIdle, undoLastAction } from "../dispatch";
+import {
+  abandonPendingDispatches,
+  dispatchAction,
+  dispatchAiActionProposal,
+  isDispatchIdle,
+  undoLastAction,
+} from "../dispatch";
 
 // `debugLog` writes into the game log, the very history under test.
 vi.mock("../debugLog", () => ({ debugLog: vi.fn() }));
@@ -49,10 +57,18 @@ function logEntry(text: string): GameLogEntry {
 }
 
 const EARLIER_PLAYS = [logEntry("Player 1 casts Sensei's Divining Top"), logEntry("Player 2 casts Sol Ring")];
+const EARLIER_LINES = ["Player 1 casts Sensei's Divining Top", "Player 2 casts Sol Ring"];
 const FIRST_PASS = logEntry("Player 1 passes for the first time");
 const SECOND_PASS = logEntry("Player 1 passes for the second time");
+const AI_PLAY = logEntry("Player 2 casts Lightning Bolt");
+const AI_PROPOSAL: AiActionProposal = {
+  token: "bolt",
+  semanticOwner: AI_SEAT,
+  actor: AI_SEAT,
+  action: { type: "CastSpell", data: { object_id: 40, card_id: 7, targets: [] } },
+};
 /** Normalizes to an animation step, so the action that carries it waits out a real animation. */
-const LIFE_LOSS: GameEvent = { type: "LifeChanged", data: { player_id: AI_SEAT, amount: -3 } };
+const LIFE_LOSS: GameEvent = { type: "LifeChanged", data: { player_id: HUMAN, amount: -3 } };
 
 /** The store's log as text, oldest first. */
 function loggedLines(): string[] {
@@ -61,48 +77,94 @@ function loggedLines(): string[] {
   );
 }
 
-const EARLIER_LINES = ["Player 1 casts Sensei's Divining Top", "Player 2 casts Sol Ring"];
-
 /**
- * A solo AI game whose engine is a variable: `submitAction` and `restoreState`
- * change it as they are called, as the real engine applies requests in call
- * order, and every read sees it as it stands.
+ * A solo AI game whose engine is a variable that its requests read and change.
+ * Like both engine transports, it answers requests one at a time, in the order
+ * they were made.
  */
 async function startGame() {
   let live: GameState = BEFORE_FIRST_PASS;
+  let lastRequest: Promise<unknown> = Promise.resolve();
+  function inOrder<Answer>(request: () => Answer | Promise<Answer>): Promise<Answer> {
+    const answer = lastRequest.then(request);
+    lastRequest = answer.catch(() => undefined);
+    return answer;
+  }
+
   const adapter = buildEngineAdapterMock(BEFORE_FIRST_PASS, {
-    getState: vi.fn(async () => live),
-    exportPersistenceState: vi.fn(async () =>
-      JSON.stringify({ state: live, precast_shortcut_runtime: null }),
+    getState: vi.fn(() => inOrder(() => live)),
+    exportPersistenceState: vi.fn(() =>
+      inOrder(() => JSON.stringify({ state: live, precast_shortcut_runtime: null })),
     ),
-    restoreState: vi.fn((restored: PersistedGameState) => {
-      live = persistedGameStateView(restored);
-    }),
+    restoreState: vi.fn((restored: PersistedGameState) =>
+      inOrder(() => {
+        live = persistedGameStateView(restored);
+      }),
+    ),
   });
+
   /** The engine applies an action that logs `entry` and moves the game to `next`. */
   const applies = (next: GameState, entry: GameLogEntry, events: GameEvent[] = []) => {
-    adapter.submitAction.mockImplementationOnce(async () => {
-      live = next;
-      return { events, log_entries: [entry] };
-    });
+    adapter.submitAction.mockImplementationOnce(() =>
+      inOrder(() => {
+        live = next;
+        return { events, log_entries: [entry] };
+      }),
+    );
   };
-  /** As `applies`, but the engine's reply waits until the returned function sends it. */
-  const appliesAndHoldsReply = (next: GameState, entry: GameLogEntry) => {
-    let reply!: (result: SubmitResult) => void;
-    adapter.submitAction.mockImplementationOnce(() => {
-      live = next;
-      return new Promise<SubmitResult>((resolve) => {
-        reply = resolve;
-      });
-    });
-    return () => reply({ events: [], log_entries: [entry] });
+  /** As `applies`, but the engine is still answering until the returned function finishes it. */
+  const appliesSlowly = (next: GameState, entry: GameLogEntry) => {
+    let finish!: () => void;
+    adapter.submitAction.mockImplementationOnce(() =>
+      inOrder(() => {
+        live = next;
+        return new Promise<SubmitResult>((resolve) => {
+          finish = () => resolve({ events: [], log_entries: [entry] });
+        });
+      }),
+    );
+    return () => finish();
   };
+  /** The LLM-free AI seat's play, which hands the human priority back. */
+  const aiPlays = (events: GameEvent[]) => {
+    adapter.submitAiActionProposal.mockImplementationOnce(() =>
+      inOrder(() => {
+        live = AFTER_FIRST_PASS;
+        return { status: "applied", result: { events, log_entries: [AI_PLAY] } };
+      }),
+    );
+  };
+  /** The next restore is still running until the returned function finishes it. */
+  const restoresSlowly = () => {
+    let finish!: () => void;
+    adapter.restoreState.mockImplementationOnce((restored: PersistedGameState) =>
+      inOrder(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = () => {
+              live = persistedGameStateView(restored);
+              resolve();
+            };
+          }),
+      ),
+    );
+    return () => finish();
+  };
+  /** The next restore fails, leaving the engine as it was. */
+  const restoreFails = (error: Error) => {
+    adapter.restoreState.mockImplementationOnce(() =>
+      inOrder(() => {
+        throw error;
+      }),
+    );
+  };
+
   useGameStore.setState({ adapter, gameMode: "ai", aiSeatIds: [AI_SEAT] });
   // The game so far, committed the way every action's log lines are.
   useGameStore.getState().commitEngineSnapshot(await adapter.getSnapshot(), {
     logEntries: EARLIER_PLAYS,
   });
-  return { adapter, applies, appliesAndHoldsReply };
+  return { adapter, applies, appliesSlowly, aiPlays, restoresSlowly, restoreFails };
 }
 
 function KeyboardHarness() {
@@ -110,11 +172,18 @@ function KeyboardHarness() {
   return null;
 }
 
+function pressZ(): void {
+  act(() => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "z" }));
+  });
+}
+
 describe("work in flight when Undo is pressed", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     // A real animation window, which is where an in-flight play waits.
     usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
+    useAppNotificationStore.getState().clearNotification();
     abandonPendingDispatches();
     useGameStore.getState().reset();
   });
@@ -157,8 +226,31 @@ describe("work in flight when Undo is pressed", () => {
     expect(useGameStore.getState().gameState).toEqual(BEFORE_FIRST_PASS);
   });
 
-  it("adds no log lines or checkpoint for a store dispatch in flight when Z is pressed", async () => {
-    const { adapter, applies, appliesAndHoldsReply } = await startGame();
+  it("adds no log lines for an AI play still animating when Z is pressed", async () => {
+    const { applies, aiPlays } = await startGame();
+    applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+
+    aiPlays([LIFE_LOSS]);
+    const play = dispatchAiActionProposal(AI_PROPOSAL);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(isDispatchIdle()).toBe(false);
+
+    render(<KeyboardHarness />);
+    pressZ();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useGameStore.getState().gameState).toEqual(BEFORE_FIRST_PASS);
+
+    // The play's animation ends after the undo.
+    await vi.runAllTimersAsync();
+    await play;
+
+    expect(loggedLines()).toEqual(EARLIER_LINES);
+    expect(useGameStore.getState().gameState).toEqual(BEFORE_FIRST_PASS);
+  });
+
+  it("takes back a store dispatch the engine is still answering when Z is pressed", async () => {
+    const { adapter, applies, appliesSlowly } = await startGame();
 
     // The store's own dispatch (the Pass button, mana payment, most modals)
     // checkpoints the first pass.
@@ -166,26 +258,26 @@ describe("work in flight when Undo is pressed", () => {
     await useGameStore.getState().dispatch({ type: "PassPriority" });
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
 
-    // The engine applies the second pass when it is submitted; its reply is
-    // still on the way when Z is pressed.
-    const replySecondPass = appliesAndHoldsReply(AFTER_SECOND_PASS, SECOND_PASS);
+    // The engine is still answering the second pass when Z is pressed.
+    const finishSecondPass = appliesSlowly(AFTER_SECOND_PASS, SECOND_PASS);
     const secondPass = useGameStore.getState().dispatch({ type: "PassPriority" });
     await vi.advanceTimersByTimeAsync(0);
 
     render(<KeyboardHarness />);
-    act(() => {
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "z" }));
-    });
+    pressZ();
     await vi.advanceTimersByTimeAsync(0);
     expect(adapter.restoreState).toHaveBeenCalledOnce();
-    expect(useGameStore.getState().gameState).toEqual(BEFORE_FIRST_PASS);
 
-    // The second pass's reply arrives after the undo.
-    replySecondPass();
+    // The engine answers in call order: the second pass, then the restore. So
+    // the pass commits before the undo does, and the undo's commit takes its
+    // log lines and its checkpoint back with the rest of the undone timeline.
+    finishSecondPass();
     await secondPass;
+    await vi.advanceTimersByTimeAsync(0);
 
     expect(loggedLines()).toEqual(EARLIER_LINES);
     expect(useGameStore.getState().stateHistory).toEqual([]);
+    expect(useGameStore.getState().gameState).toEqual(BEFORE_FIRST_PASS);
   });
 
   it("leaves a play in flight to commit when there is nothing to undo", async () => {
@@ -208,25 +300,16 @@ describe("work in flight when Undo is pressed", () => {
   });
 
   it("ignores a second Undo pressed while the first is restoring", async () => {
-    const { adapter, applies } = await startGame();
+    const { adapter, applies, restoresSlowly } = await startGame();
     applies(AFTER_FIRST_PASS, FIRST_PASS);
     await dispatchAction({ type: "PassPriority" }, HUMAN);
     applies(AFTER_SECOND_PASS, SECOND_PASS);
     await dispatchAction({ type: "PassPriority" }, HUMAN);
     expect(useGameStore.getState().stateHistory).toHaveLength(2);
 
-    // The first undo's restore is still running when the second press lands.
-    const restore = adapter.restoreState.getMockImplementation()!;
-    let finishRestore!: () => void;
-    adapter.restoreState.mockImplementationOnce((restored: PersistedGameState) =>
-      new Promise<void>((resolve) => {
-        finishRestore = () => {
-          restore(restored);
-          resolve();
-        };
-      }),
-    );
+    const finishRestore = restoresSlowly();
     const firstUndo = undoLastAction();
+    await vi.advanceTimersByTimeAsync(0);
     await undoLastAction();
     expect(adapter.restoreState).toHaveBeenCalledOnce();
 
@@ -238,17 +321,13 @@ describe("work in flight when Undo is pressed", () => {
   });
 
   it("commits nothing when the game is torn down while the undo restores", async () => {
-    const { adapter, applies } = await startGame();
+    const { applies, restoresSlowly } = await startGame();
     applies(AFTER_FIRST_PASS, FIRST_PASS);
     await dispatchAction({ type: "PassPriority" }, HUMAN);
 
-    let finishRestore!: () => void;
-    adapter.restoreState.mockImplementationOnce(() =>
-      new Promise<void>((resolve) => {
-        finishRestore = resolve;
-      }),
-    );
+    const finishRestore = restoresSlowly();
     const undoing = undoLastAction();
+    await vi.advanceTimersByTimeAsync(0);
     // The player leaves the game mid-undo.
     useGameStore.getState().reset();
 
@@ -257,5 +336,57 @@ describe("work in flight when Undo is pressed", () => {
     expect(useGameStore.getState().gameState).toBeNull();
     expect(useGameStore.getState().logHistory).toEqual([]);
     expect(useGameStore.getState().undoInFlight).toBe(false);
+  });
+
+  it("keeps a newer game's undo in flight when one from a torn-down game settles", async () => {
+    const firstGame = await startGame();
+    firstGame.applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+    const finishFirstRestore = firstGame.restoresSlowly();
+    const firstUndo = undoLastAction();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The player leaves, starts another game, and presses Undo there too.
+    useGameStore.getState().reset();
+    const secondGame = await startGame();
+    secondGame.applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+    const finishSecondRestore = secondGame.restoresSlowly();
+    const secondUndo = undoLastAction();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(useGameStore.getState().undoInFlight).toBe(true);
+
+    // The first game's undo settles while the second's is still restoring.
+    finishFirstRestore();
+    await firstUndo;
+    expect(useGameStore.getState().undoInFlight).toBe(true);
+
+    finishSecondRestore();
+    await secondUndo;
+    expect(useGameStore.getState().undoInFlight).toBe(false);
+  });
+
+  it("shows the engine's own state and reports the error when the restore fails", async () => {
+    const { applies, restoreFails } = await startGame();
+    applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+
+    // The second pass reaches the engine and waits out its animation.
+    applies(AFTER_SECOND_PASS, SECOND_PASS, [LIFE_LOSS]);
+    const secondPass = dispatchAction({ type: "PassPriority" }, HUMAN);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(isDispatchIdle()).toBe(false);
+
+    // The undo abandons the second pass, then its restore fails: the engine
+    // keeps the second pass, which the store never committed.
+    restoreFails(new Error("restore failed"));
+    await undoLastAction();
+    expect(useGameStore.getState().gameState).toEqual(AFTER_SECOND_PASS);
+    expect(useAppNotificationStore.getState().notification?.description).toBe("restore failed");
+    expect(useGameStore.getState().undoInFlight).toBe(false);
+
+    await vi.runAllTimersAsync();
+    await secondPass;
+    expect(useGameStore.getState().gameState).toEqual(AFTER_SECOND_PASS);
   });
 });
