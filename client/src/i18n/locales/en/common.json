@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "Combo Detector (experimental)",
-    "title": "Detect infinite loops: end mandatory loops automatically and show ∞ resources (off by default)",
+    "title": "Detect infinite loops: end mandatory loops automatically, offer shortcuts for loops a player controls, and show ∞ resources (off by default)",
     "off": "Off",
     "interactive": "Interactive"
   },

@@ -3237,7 +3237,7 @@ export type WaitingFor =
   | { type: "ResolutionOptionalPaymentChoice"; data: { player: PlayerId; source_id: ObjectId; costs: Array<{ index: number; cost: SerializedAbilityCost }> } }
   | { type: "PairChoice"; data: { player: PlayerId; source_id: ObjectId; choices: ObjectId[] } }
   | { type: "OpponentMayChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; source_id: ObjectId; description?: string; remaining: PlayerId[] } }
-  | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema; road: OfferRoad } }
+  | { type: "LoopShortcut"; data: { proposer: PlayerId; predicted_winner: PlayerId | null; certificate: LoopCertificate; schema: ShortcutDecisionSchema } }
   | { type: "RespondToShortcut"; data: { player: PlayerId; remaining_players?: PlayerId[]; proposal: ShortcutProposal } }
   | { type: "PrecastCopyShortcutOffer"; data: { proposer: PlayerId; epoch: number; route_count: number } }
   | { type: "RespondToPrecastCopyShortcut"; data: { player: PlayerId; epoch: number; breakpoint_ids?: number[]; remaining_players?: PlayerId[] } }
@@ -3977,6 +3977,16 @@ export type PlayerActionKind =
 /** CR 602.2 + CR 605.1a + CR 606.1: which kind of activated ability was activated. */
 export type ActivatedAbilityKind = "Normal" | "Loyalty" | "Mana";
 
+/** CR 104.3: why a player lost the game. */
+export type LossReason =
+  | "LifeTotal"
+  | "DrewFromEmptyLibrary"
+  | "Poison"
+  | "CommanderDamage"
+  | "Conceded"
+  | "EffectStatedLoss"
+  | "OpponentWon";
+
 export type GameEvent =
   | { type: "GameStarted" }
   | {
@@ -3986,6 +3996,7 @@ export type GameEvent =
   | { type: "TurnStarted"; data: { player_id: PlayerId; turn_number: number } }
   | { type: "ExtraTurnCreated"; data: { player_id: PlayerId; anchor: PlayerId } }
   | { type: "PhaseChanged"; data: { phase: Phase } }
+  | { type: "PhaseChangedFor"; data: { phase: Phase; player: PlayerId } }
   | { type: "PriorityPassed"; data: { player_id: PlayerId } }
   | { type: "SpellCast"; data: { card_id: CardId; controller: PlayerId; object_id: ObjectId; cast_mana_value?: number } }
   | { type: "XValueChosen"; data: { player: PlayerId; object_id: ObjectId; value: number } }
@@ -4004,7 +4015,7 @@ export type GameEvent =
   | { type: "LifeChanged"; data: { player_id: PlayerId; amount: number; new_total?: number } }
   | { type: "ManaAdded"; data: { player_id: PlayerId; mana_type: ManaType; source_id: ObjectId; tapped_for_mana?: boolean } }
   | { type: "PermanentTapped"; data: { object_id: ObjectId } }
-  | { type: "PlayerLost"; data: { player_id: PlayerId } }
+  | { type: "PlayerLost"; data: { player_id: PlayerId; reasons: LossReason[] } }
   | { type: "MulliganStarted" }
   | { type: "CardsDrawn"; data: { player_id: PlayerId; count: number } }
   | { type: "CardDrawn"; data: { player_id: PlayerId; object_id: ObjectId; nth_in_turn: number; nth_in_step: number } }
@@ -4264,8 +4275,10 @@ export type ResourceAxis =
   | "EtbTriggers"
   | "LtbTriggers"
   | "SacTriggers"
-  // CR 704.5c: poison counters on a player (10 ⇒ that player loses).
-  | { Poison: PlayerId };
+  // CR 704.5c / CR 704.6b: poison counters on a player (its configured threshold ⇒ that player loses).
+  | { Poison: PlayerId }
+  // CR 107.14: energy counters on a player.
+  | { Energy: PlayerId };
 
 /** The externally-tagged discriminant of a `ResourceAxis` (its variant name).
  *  Exhaustive over `ResourceAxis` so a new engine axis forces a TS update. */
@@ -4286,7 +4299,8 @@ export type ResourceAxisTag =
   | "EtbTriggers"
   | "LtbTriggers"
   | "SacTriggers"
-  | "Poison";
+  | "Poison"
+  | "Energy";
 
 /**
  * One `∞` HUD row. Mirrors `engine::game::derived_views::UnboundedResourceView`.
@@ -4435,7 +4449,7 @@ export interface LoopCertificate {
  * Mirrors `engine::analysis::decision_template::IterationCount` (serde externally
  * tagged: unit variant → bare string, data variant → single-key object).
  */
-export type IterationCount = "UntilLethal" | "WithoutEnd" | { Fixed: number };
+export type IterationCount = "WithoutEnd" | { Fixed: number };
 
 /**
  * Mirrors `engine::analysis::decision_template::ShortcutDecisionSchema`
@@ -4470,6 +4484,7 @@ export type DecisionPointKind =
   | { ConvokeTaps: { tappable: ObjectId[] } }
   | { Mode: { available_modes: number[] } }
   | { ManaColor: { color: ManaColor } }
+  | { Order: { pos: number; positions: number } }
   | "MayChoice"
   | "UnlessBreak";
 
@@ -4487,7 +4502,8 @@ export type ChoicePoint =
   | "ManaColor"
   | "ConvokeTaps"
   | "Mode"
-  | "UnlessBreak";
+  | "UnlessBreak"
+  | "ReplacementOrder";
 
 /**
  * Mirrors `engine::analysis::decision_template::DecisionSlot` (`index` is Rust `u8`).
@@ -4516,9 +4532,6 @@ export type DecisionSource =
  */
 export type DecisionTemplate = Record<string, unknown>;
 
-/** Mirrors `engine::analysis::loop_check::OfferRoad`: which producer minted a loop-shortcut offer. */
-export type OfferRoad = "Ring" | "RecordedPeriod";
-
 /**
  * Mirrors `engine::analysis::loop_check::ShortcutProposal`, less the optional fields the frontend
  * never reads. `shortened_by` is the responder whose named place is the proposal's current ending
@@ -4535,7 +4548,6 @@ export interface ShortcutProposal {
   win_kind?: WinKind;
   win_kind_at?: number;
   shortened_by?: PlayerId;
-  road: OfferRoad;
 }
 
 /**
@@ -5179,12 +5191,11 @@ export type AutoPassMode =
 
 /**
  * CR 732.2a: user-controllable opt-in gate for the live combo (infinite-loop)
- * detector. `Off` (default) restores pre-detector behavior; `On` enables it.
+ * detector. `Off` (default) restores pre-detector behavior; `Interactive` enables it.
  * Mirrors `engine::types::game_state::LoopDetectionMode`.
  */
 export type LoopDetectionMode =
   | { type: "Off" }
-  | { type: "On" }
   | { type: "Interactive" };
 
 // ── Source attribution (CR 613 layers) ───────────────────────────────────
@@ -6346,6 +6357,16 @@ export interface PlayerSummary {
   player_key: string;
   display_name: string;
   dropped: boolean;
+  /**
+   * Whether this entrant has submitted a deck for server-hosted play (lobby
+   * protocol v22). A readiness flag only — the deck itself is private and never
+   * crosses the wire, so an opponent cannot see a decklist before the match.
+   *
+   * Optional here so a snapshot from a pre-v22 broker (which omits it) still
+   * types, and so existing fixtures need no churn; a v22 broker always sends it.
+   * `undefined` reads as "not submitted", the same tolerance `report_gate` uses.
+   */
+  deck_submitted?: boolean;
 }
 
 /**

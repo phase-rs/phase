@@ -202,6 +202,20 @@ function statementMayPoint(group: number, subjectId: string, answerId: string) {
   });
 }
 
+/** A read-only replacement-order statement point: the effects' sources in the engine's order. */
+function statementOrderPoint(group: number, ids: string[]): InteractionShortcutPoint {
+  return {
+    group,
+    kind: "order",
+    min: 0,
+    max: 0,
+    unique: true,
+    ordered: true,
+    readOnly: true,
+    candidateIds: ids.map(cid),
+  };
+}
+
 /** A read-only point: `readOnly` is the field the routing rule turns on. */
 function readOnlyPoint(group: number, kind: "convokeTaps" | "manaColor"): InteractionShortcutPoint {
   return {
@@ -301,10 +315,6 @@ const confirmButton = () => screen.getByRole("button", { name: "Take the shortcu
 const allocationRow = (subject: string) =>
   screen.getByRole("spinbutton", { name: `Repetitions for ${subject}` });
 const countBox = () => screen.getByRole("spinbutton", { name: "Number of iterations" });
-/** The announce control, whose accessible name names the subject it announces — so the query
- *  matches the shape rather than a literal. `getAllByRole` returns DOM order, which is the
- *  rendered row order, and the anchors keep a control that lost its subject from still matching. */
-const ANNOUNCE = /^Announce .+$/;
 
 /** Every control this suite's DOM implementation scores focusable, paired with the name assistive
  *  technology announces for it. The population is a computed property — a non-negative `tabIndex`
@@ -364,28 +374,28 @@ describe("LoopShortcutModal", () => {
     seed(buildLoopShortcutWaitingFor({ schema: { points: [convokePoint] } }));
     render(<DeclareShortcutModal />);
 
-    expect(screen.getByText("This loop deals lethal damage.")).toBeInTheDocument();
-    expect(screen.getByText("Repeat until the game ends.")).toBeInTheDocument();
+    expect(screen.getByText("This loop reduces an opponent's life total to 0 or less.")).toBeInTheDocument();
+    expect(screen.getByText("Repeat without end. If every player accepts, the game is a draw.")).toBeInTheDocument();
     expect(
       screen.getByText("Auto-taps up to 2 creatures for convoke each iteration."),
     ).toBeInTheDocument();
   });
 
   // T2: confirm dispatches the exact declare payload, echoing the schema's
-  // iteration_count (UntilLethal) with template: null.
-  it("dispatches DeclareShortcut echoing UntilLethal with template null (T2)", () => {
+  // iteration_count (WithoutEnd) with template: null.
+  it("dispatches DeclareShortcut echoing WithoutEnd with template null (T2)", () => {
     seed(buildLoopShortcutWaitingFor());
     render(<DeclareShortcutModal />);
 
     fireEvent.click(screen.getByRole("button", { name: "Take the shortcut" }));
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "DeclareShortcut",
-      data: { count: "UntilLethal", template: null },
+      data: { count: "WithoutEnd", template: null },
     });
   });
 
   // T2 echo-guard: a Fixed(1) schema must dispatch count:{Fixed:1}, proving the
-  // count is echoed from the schema, not a hardcoded "UntilLethal".
+  // count is echoed from the schema, not a hardcoded "WithoutEnd".
   it("echoes a Fixed iteration_count into the dispatch (T2 echo-guard)", () => {
     seed(buildLoopShortcutWaitingFor({ schema: { iteration_count: { Fixed: 1 } } }));
     render(<DeclareShortcutModal />);
@@ -432,7 +442,7 @@ describe("LoopShortcutModal", () => {
     fireEvent.click(buttons[0]);
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "DeclareShortcut",
-      data: { count: "UntilLethal", template: null },
+      data: { count: "WithoutEnd", template: null },
     });
   });
 
@@ -505,7 +515,7 @@ describe("LoopShortcutModal", () => {
 
   // C5a negative: a window absent from the payload renders NO picker and never invents a
   // client-chosen count — the offer's own `iteration_count` is declared verbatim. Both absent
-  // shapes are covered: no interaction projection at all, and an UntilLethal offer.
+  // shapes are covered: no interaction projection at all, and an offer without end.
   it("renders no picker without a published window (C5a negative)", () => {
     seed(buildLoopShortcutWaitingFor({ schema: { iteration_count: { Fixed: 5 } } }));
     render(<DeclareShortcutModal />);
@@ -522,7 +532,7 @@ describe("LoopShortcutModal", () => {
     seed(
       buildLoopShortcutWaitingFor(),
       {},
-      shortcutInteraction({ count: { type: "untilLethal" } }),
+      shortcutInteraction({ count: { type: "withoutEnd" } }),
     );
     render(<DeclareShortcutModal />);
 
@@ -530,7 +540,7 @@ describe("LoopShortcutModal", () => {
     fireEvent.click(screen.getByRole("button", { name: "Take the shortcut" }));
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "DeclareShortcut",
-      data: expect.objectContaining({ count: "UntilLethal" }),
+      data: expect.objectContaining({ count: "WithoutEnd" }),
     });
   });
 
@@ -713,7 +723,7 @@ describe("LoopShortcutModal", () => {
   // CR 732.2a: a certificate naming no outcome states none, and an outcome the engine decided at
   // one count is stated beside that count only — on the picker and on a proposal alike.
   it("states an outcome only at the count it is decided at", () => {
-    const lethal = "This loop deals lethal damage.";
+    const lethal = "This loop reduces an opponent's life total to 0 or less.";
     seed(
       buildLoopShortcutWaitingFor({
         certificate: { win_kind: undefined, unbounded: [] },
@@ -762,8 +772,8 @@ describe("LoopShortcutModal", () => {
     seed(buildRespondToShortcutWaitingFor());
     render(<RespondToShortcutModal />);
 
-    expect(screen.getByText("This loop deals lethal damage.")).toBeInTheDocument();
-    expect(screen.getByText("Repeat until the game ends.")).toBeInTheDocument();
+    expect(screen.getByText("This loop reduces an opponent's life total to 0 or less.")).toBeInTheDocument();
+    expect(screen.getByText("Repeat without end. If every player accepts, the game is a draw.")).toBeInTheDocument();
 
     // No published reply spec is the other member of "no range to name a place in": nothing to
     // name one with is offered, and the Accept dispatch below is that absence's reach guard.
@@ -942,8 +952,8 @@ describe("LoopShortcutModal", () => {
   });
 
   // R5: the published ceiling is passed through at its extreme rather than clamped. `u32::MAX` is
-  // the ceiling every UntilLethal proposal publishes; a modal that clamped it, or that special-
-  // cased UntilLethal, cannot dispatch it. The floor entry on the same render is the paired
+  // the ceiling a proposal without end publishes; a modal that clamped it, or that special-cased
+  // WithoutEnd, cannot dispatch it. The floor entry on the same render is the paired
   // positive.
   it("names a place at the published u32 ceiling (R5)", () => {
     seedRespondRange(0, 4294967295);
@@ -1024,8 +1034,8 @@ describe("LoopShortcutModal", () => {
     seed(buildRespondToShortcutWaitingFor(), {}, respondInteraction());
     render(<RespondToShortcutModal />);
 
-    expect(screen.getByText("This loop deals lethal damage.")).toBeInTheDocument();
-    expect(screen.getByText("Repeat until the game ends.")).toBeInTheDocument();
+    expect(screen.getByText("This loop reduces an opponent's life total to 0 or less.")).toBeInTheDocument();
+    expect(screen.getByText("Repeat without end. If every player accepts, the game is a draw.")).toBeInTheDocument();
     expect(screen.queryByText("Proposed declaration:")).not.toBeInTheDocument();
     expect(screen.queryByText(/^Repeating /)).not.toBeInTheDocument();
   });
@@ -1154,6 +1164,35 @@ describe("LoopShortcutModal", () => {
     expect(screen.getByText("P2 — ×2")).toBeInTheDocument();
     expect(screen.getByText("P3 — ×5")).toBeInTheDocument();
     expect(screen.queryByText(/^Repeating /)).not.toBeInTheDocument();
+  });
+
+  // CR 732.2b: the replacement order a declaration names is stated in the engine's own candidate
+  // order, beside the announced-target order rows.
+  it("states a declared replacement order in the order the engine publishes it", () => {
+    for (const [ids, first, second] of [
+      [["g", "d"], "Palisade Giant", "Fiendish Duo"],
+      [["d", "g"], "Fiendish Duo", "Palisade Giant"],
+    ] as const) {
+      seed(
+        buildRespondToShortcutWaitingFor(),
+        {},
+        respondInteraction(
+          { points: [statementTargetsPoint(0, ["r0", "r1"]), statementOrderPoint(1, [...ids])] },
+          [
+            seatCandidate("r0", 2),
+            seatCandidate("r1", 0),
+            objectCandidate("g", "Palisade Giant", "5"),
+            objectCandidate("d", "Fiendish Duo", "6"),
+          ],
+        ),
+      );
+      render(<RespondToShortcutModal />);
+
+      expect(screen.getByText("1. P3")).toBeInTheDocument();
+      expect(screen.getByText(`1. ${first}'s replacement effect`)).toBeInTheDocument();
+      expect(screen.getByText(`2. ${second}'s replacement effect`)).toBeInTheDocument();
+      cleanup();
+    }
   });
 
   // The client half of the answered-optional-decision claim. An engine test renders nothing, and
@@ -1526,57 +1565,6 @@ describe("LoopShortcutModal", () => {
     }
   });
 
-  // P5-7: the announce branch. CR 732.2c — an UntilLethal declaration names the ONE subject its
-  // drive resolves at every repetition, so `choiceIds` holds exactly the selected id, `amounts`
-  // is empty and no allocation box renders. The FIXED branch's own dispatch is asserted unchanged
-  // by the allocation rows earlier in this file, so this is a branch change and not a control
-  // deletion.
-  it("announces the one selected subject on an UntilLethal offer with a targets point (P5-7)", () => {
-    seed(
-      buildLoopShortcutWaitingFor(),
-      {},
-      shortcutInteraction(
-        { count: { type: "untilLethal" }, points: [targetsPoint(2, ["k4", "k5", "k6"])] },
-        "session.0.1",
-        [seatCandidate("k4", 1), seatCandidate("k5", 2), seatCandidate("k6", 3)],
-      ),
-    );
-    render(<DeclareShortcutModal />);
-
-    // No allocation amounts — and no count picker either, which is BASE behaviour on UntilLethal.
-    // The positive control for this query is P5-1, where it finds the boxes.
-    expect(screen.queryAllByRole("spinbutton")).toHaveLength(0);
-
-    // NOTHING SELECTED: no client-side default, so Confirm refuses and nothing is dispatched.
-    expect(confirmButton()).toBeDisabled();
-    fireEvent.click(confirmButton());
-    expect(dispatchInteraction).not.toHaveBeenCalled();
-    expect(dispatchMock).not.toHaveBeenCalled();
-
-    // Select the SECOND published candidate. A control that ignored the selection and dispatched
-    // the head of `candidateIds` passes a first-candidate leg and fails this one.
-    const announce = screen.getAllByRole("button", { name: ANNOUNCE });
-    expect(announce).toHaveLength(3);
-    fireEvent.click(announce[1]);
-    expect(screen.getAllByRole("button", { name: ANNOUNCE })[1]).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
-
-    fireEvent.click(confirmButton());
-    expect(dispatchInteraction).toHaveBeenCalledWith({
-      interactionId: "session.0.1",
-      response: {
-        type: "shortcut",
-        data: {
-          decision: { type: "acceptSuggested" },
-          pins: [{ group: 2, choiceIds: ["k5"], amounts: [] }],
-        },
-      },
-    });
-    expect(dispatchMock).not.toHaveBeenCalled();
-  });
-
   // P5-8: an unrenderable point keeps the `GameAction` route AND suppresses every control on the
   // renderable points beside it — a live control whose answer the count-only branch discards is
   // worse than no control. The mixed shapes below — an unrenderable point beside a renderable
@@ -1753,12 +1741,10 @@ describe("LoopShortcutModal", () => {
   });
 
   // P5-13: offer rotation clears every new piece of state, through the existing `key={offerId}`.
-  // Two legs because the allocation and announce controls are mutually exclusive on one offer: a
-  // Fixed offer carries allocation + may, an UntilLethal one carries announce + may.
   //
   // ⚠ Same warning as the rows above that assert offer A's typed count does not survive into
   // offer B: `view.rerender`, never a second `render`.
-  it("clears the allocation, the may pick and the announced subject on a new offer (P5-13)", () => {
+  it("clears the allocation and the may pick on a new offer (P5-13)", () => {
     const fixedOffer = (interactionId: string) =>
       shortcutInteraction(
         {
@@ -1798,32 +1784,6 @@ describe("LoopShortcutModal", () => {
       "aria-pressed",
       "false",
     );
-    cleanup();
-
-    const announceOffer = (interactionId: string) =>
-      shortcutInteraction(
-        {
-          count: { type: "untilLethal" },
-          points: [mayPoint(0, ["m0take", "m0dec"]), targetsPoint(2, ["k4", "k5"])],
-        },
-        interactionId,
-        [...mayCandidates("m0take", "m0dec"), seatCandidate("k4", 1), seatCandidate("k5", 2)],
-      );
-    seed(buildLoopShortcutWaitingFor(), {}, announceOffer("session.0.3"));
-    const announceView = render(<DeclareShortcutModal />);
-
-    const pressed = () =>
-      screen
-        .getAllByRole("button", { name: ANNOUNCE })
-        .map((b) => b.getAttribute("aria-pressed"));
-    // Positive reach-guard: the selection actually LANDED, so "back to nothing selected" cannot
-    // pass on a control that never accepted input.
-    fireEvent.click(screen.getAllByRole("button", { name: ANNOUNCE })[1]);
-    expect(pressed()).toEqual(["false", "true"]);
-
-    seed(buildLoopShortcutWaitingFor(), {}, announceOffer("session.0.4"));
-    announceView.rerender(<DeclareShortcutModal />);
-    expect(pressed()).toEqual(["false", "false"]);
   });
 
   // P5-14: the seat gate runs ABOVE the routing branch, so a full three-point projection renders
@@ -1929,48 +1889,6 @@ describe("LoopShortcutModal", () => {
       type: "DeclareShortcut",
       data: { count: { Fixed: 18 }, template: null },
     });
-  });
-
-  // P5-16: `targetsControl` is computed AFTER `allocationPoint` and is null when it is absent, so
-  // an UntilLethal offer with no targets point renders NO announce control and still answers its
-  // may points. Together with P5-7 this shows the announce control follows the POINT, not the
-  // count spec.
-  it("renders no announce control on an UntilLethal offer with no targets point (P5-16)", () => {
-    seed(
-      buildLoopShortcutWaitingFor(),
-      {},
-      shortcutInteraction(
-        {
-          count: { type: "untilLethal" },
-          points: [mayPoint(0, ["m0take", "m0dec"]), mayPoint(1, ["m1take", "m1dec"])],
-        },
-        "session.0.1",
-        [...mayCandidates("m0take", "m0dec"), ...mayCandidates("m1take", "m1dec")],
-      ),
-    );
-    render(<DeclareShortcutModal />);
-
-    // Positive control for this query: P5-7, where it finds the announce buttons on an
-    // UntilLethal offer that DOES publish a targets point.
-    expect(screen.queryAllByRole("button", { name: ANNOUNCE })).toHaveLength(0);
-
-    fireEvent.click(screen.getByRole("button", { name: "Take optional ability 1" }));
-    fireEvent.click(screen.getByRole("button", { name: "Take optional ability 2" }));
-    fireEvent.click(confirmButton());
-    expect(dispatchInteraction).toHaveBeenCalledWith({
-      interactionId: "session.0.1",
-      response: {
-        type: "shortcut",
-        data: {
-          decision: { type: "acceptSuggested" },
-          pins: [
-            { group: 0, choiceIds: ["m0take"], amounts: [] },
-            { group: 1, choiceIds: ["m1take"], amounts: [] },
-          ],
-        },
-      },
-    });
-    expect(dispatchMock).not.toHaveBeenCalled();
   });
 
   // P5-17: the FAIL-CLOSED end of the unsampled count. This transport cannot preview, so there is
@@ -2148,10 +2066,8 @@ describe("LoopShortcutModal", () => {
   // P5-20: the visible-subject class — a control that asks about a SPECIFIC subject renders that
   // subject where a sighted player can read it. Every assertion is on rendered TEXT, never on an
   // accessible name: the accessible names carry the subject whether or not the visible text does,
-  // so only a visible-text assertion discriminates on this property. All three members of the
-  // class are driven — allocation rows, may panels and announce rows — which takes two offers,
-  // because allocation and ranking cannot coexist: the published count spec selects exactly one
-  // `targetsControl` kind.
+  // so only a visible-text assertion discriminates on this property. Both members of the class
+  // are driven — allocation rows and may panels — on one offer.
   it("renders every per-subject control's subject visibly (P5-20)", () => {
     // A — a fixed-count offer with three victims and two may points.
     seed(
@@ -2196,36 +2112,6 @@ describe("LoopShortcutModal", () => {
       screen.getByText("Optional ability 2 — repeat this choice each iteration?"),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Take optional ability 1" })).toBeInTheDocument();
-
-    // B — the announce member of the class, on the only offer shape that reaches it.
-    cleanup();
-    seed(
-      buildLoopShortcutWaitingFor(),
-      {},
-      shortcutInteraction(
-        {
-          count: { type: "untilLethal" },
-          points: [mayPoint(0, ["m0take", "m0dec"]), targetsPoint(2, ["k4", "k5", "k6"])],
-        },
-        "session.0.1",
-        [
-          ...mayCandidates("m0take", "m0dec"),
-          seatCandidate("k4", 1),
-          seatCandidate("k5", 2),
-          seatCandidate("k6", 3),
-        ],
-      ),
-    );
-    render(<DeclareShortcutModal />);
-
-    // Reach-guard: the announce panel is mounted, one row per candidate.
-    expect(screen.getAllByRole("button", { name: ANNOUNCE })).toHaveLength(3);
-    for (const seat of ["P2", "P3", "P4"]) {
-      expect(screen.getByText(seat), seat).toBeInTheDocument();
-    }
-    expect(
-      screen.getByText("Optional ability 1 — repeat this choice each iteration?"),
-    ).toBeInTheDocument();
   });
   // P5-21: no control in `controlNames`' population is nameless, and no two share a name. P5-20
   // closes the per-subject class on the screen; this closes it for a screen reader, which
@@ -2233,8 +2119,7 @@ describe("LoopShortcutModal", () => {
   // indistinguishable there however clearly the rows read on screen. An invariant over the
   // population `controlNames` computes, not a list of today's controls: a control added later
   // that reaches for a shared subject-free label reds this row without anyone remembering to
-  // extend a list. Both offers are driven because the published count spec selects exactly one
-  // `targetsControl` kind, and neither branch may hand out a duplicate.
+  // extend a list.
   it("gives every focusable control in the a11y tree a distinct accessible name (P5-21)", () => {
     // A — the allocation branch: a count picker and three victim rows, each an amount control
     // with two steppers, plus two may panels.
@@ -2279,34 +2164,6 @@ describe("LoopShortcutModal", () => {
     expect(new Set(allocationNames).size, allocationNames.join(" | ")).toBe(
       allocationNames.length,
     );
-
-    // B — the announce branch, whose selection button repeats once per row.
-    cleanup();
-    seed(
-      buildLoopShortcutWaitingFor(),
-      {},
-      shortcutInteraction(
-        {
-          count: { type: "untilLethal" },
-          points: [mayPoint(0, ["m0take", "m0dec"]), targetsPoint(2, ["k4", "k5", "k6"])],
-        },
-        "session.0.1",
-        [
-          ...mayCandidates("m0take", "m0dec"),
-          seatCandidate("k4", 1),
-          seatCandidate("k5", 2),
-          seatCandidate("k6", 3),
-        ],
-      ),
-    );
-    render(<DeclareShortcutModal />);
-
-    const announceNames = controlNames();
-    expect(announceNames).toEqual(
-      expect.arrayContaining(["Announce P2", "Announce P3", "Announce P4"]),
-    );
-    expect(announceNames.filter((n) => n.length === 0)).toEqual([]);
-    expect(new Set(announceNames).size, announceNames.join(" | ")).toBe(announceNames.length);
   });
 
   // P5-22: the may panel's ordinal counts the panels ON SCREEN, not the published points.
@@ -2357,7 +2214,7 @@ describe("LoopShortcutModal", () => {
       {},
       shortcutInteraction(
         {
-          count: { type: "untilLethal" },
+          count: { type: "withoutEnd" },
           points: [
             readOnlyPoint(0, "convokeTaps"),
             mayPoint(1, ["m1take", "m1dec"]),
@@ -2842,7 +2699,6 @@ const WITHOUT_END_OFFER: WaitingFor = {
     predicted_winner: null,
     certificate: { unbounded: [], mandatory: false, residual_board_delta: { added: [], removed: [] } },
     schema: { iteration_count: "WithoutEnd", points: [], convoke_tappable_count: 0 },
-    road: "Ring",
   },
 };
 const WITHOUT_END_OFFER_VIEW: ViewerInteraction = {
@@ -2875,7 +2731,7 @@ const WITHOUT_END_REPLY: WaitingFor = {
   type: "RespondToShortcut",
   data: {
     player: 1,
-    proposal: { proposer: 0, predicted_winner: null, count: "WithoutEnd", unbounded: [], road: "Ring" },
+    proposal: { proposer: 0, predicted_winner: null, count: "WithoutEnd", unbounded: [] },
   },
 };
 const WITHOUT_END_REPLY_VIEW: ViewerInteraction = {
