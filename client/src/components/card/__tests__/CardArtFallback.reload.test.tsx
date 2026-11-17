@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
@@ -22,12 +22,6 @@ vi.mock("../../../hooks/useEngineCardData.ts", () => ({
   useLocalizedCardName: (name: string | null) => name,
 }));
 
-const viewport = vi.hoisted(() => ({ isMobile: false }));
-
-vi.mock("../../../hooks/useIsMobile.ts", () => ({
-  useIsMobile: () => viewport.isMobile,
-}));
-
 const CARD_NAME = "Etherium Sculptor";
 const RULES_TEXT = "Artifact spells you cast cost {1} less to cast.";
 const RELOAD = "Tap to reload art";
@@ -48,10 +42,6 @@ function placeSculptorOnBattlefield(): number {
   });
   return card.id;
 }
-
-beforeEach(() => {
-  viewport.isMobile = false;
-});
 
 afterEach(() => {
   cleanup();
@@ -101,29 +91,44 @@ describe("CardArtFallback reload", () => {
     expect(screen.getByRole("img", { name: CARD_NAME })).toHaveTextContent(CARD_NAME);
     expect(screen.queryByRole("button")).toBeNull();
   });
+
+  // happy-dom applies no CSS, so where the button shows is pinned by class: a
+  // container query on the tile's width keeps it off tiles too small for it.
+  it("shows a full card's button under the name only on a tile wide enough for both", () => {
+    const { container } = render(<CardArtFallback name={CARD_NAME} className="h-40 w-28" onReload={vi.fn()} />);
+
+    expect(container.firstElementChild).toHaveClass("@container");
+    expect(screen.getByRole("button", { name: RELOAD })).toHaveClass("hidden", "@min-[4rem]:block");
+    expect(screen.getByRole("img", { name: CARD_NAME })).not.toHaveClass("@min-[6rem]:sr-only");
+  });
+
+  it("lets an art crop's button take the name's place only where it fits", () => {
+    const { container } = render(
+      <CardArtFallback name={CARD_NAME} variant="artCrop" className="h-16 w-20" onReload={vi.fn()} />,
+    );
+
+    expect(container.firstElementChild).toHaveClass("@container");
+    expect(screen.getByRole("button", { name: RELOAD })).toHaveClass("hidden", "@min-[6rem]:block");
+    // Below the threshold the name stays on the tile; above it, it stays the
+    // tile's label for assistive tech.
+    expect(screen.getByRole("img", { name: CARD_NAME })).toHaveClass("@min-[6rem]:sr-only");
+  });
 });
 
 describe("ArtCropCard art reload", () => {
-  it("offers the reload on a desktop tile whose art failed", () => {
+  it("offers the reload only when the caller opts in", () => {
     const reload = vi.fn();
     vi.mocked(useCardImage).mockReturnValue(failedArt(reload));
-    render(<ArtCropCard objectId={placeSculptorOnBattlefield()} />);
+    const objectId = placeSculptorOnBattlefield();
+    const { rerender } = render(<ArtCropCard objectId={objectId} />);
 
-    fireEvent.click(screen.getByRole("button", { name: RELOAD }));
-    expect(reload).toHaveBeenCalledTimes(1);
-    // The button takes the name's place in the art box; the frame header still
-    // shows the name, and the tile keeps it as its label.
-    expect(screen.getByRole("img", { name: CARD_NAME })).toBeInTheDocument();
-  });
-
-  it("leaves a phone's tile to the game: the long-press preview carries the reload", () => {
-    viewport.isMobile = true;
-    vi.mocked(useCardImage).mockReturnValue(failedArt(vi.fn()));
-    render(<ArtCropCard objectId={placeSculptorOnBattlefield()} />);
-
-    // Reach guard: the artless tile is on screen.
+    // Reach guard: the artless tile is on screen without the opt-in.
     expect(screen.getByRole("img", { name: CARD_NAME })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: RELOAD })).toBeNull();
+
+    rerender(<ArtCropCard objectId={objectId} offerArtReload />);
+    fireEvent.click(screen.getByRole("button", { name: RELOAD }));
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 });
 

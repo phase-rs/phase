@@ -504,6 +504,24 @@ describe("owner printing non-gating overlay", () => {
     expect(hook.result.current.source?.kind).toBe("installed");
   });
 
+  // The owner's oracle id can differ from the one the normal lookup resolves,
+  // so the normal hook's re-render can't be what restarts the owner ladder.
+  it("reloads owner art whose oracle id differs from the normal lookup's", async () => {
+    const env = await setup();
+    env.installPrinting(O1, "/owner-a.jpg");
+    const hook = renderHook(() => env.useCardImage("Beta", {
+      oracleId: B, ownerPrinting: owner, ownerPrintedRef: { oracle_id: A, face_name: "Alpha" },
+    }));
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+    act(() => hook.result.current.advanceFailedSource?.("/owner-a.jpg"));
+    await waitFor(() => expect(hook.result.current.source?.kind).toBe("remote"));
+    act(() => hook.result.current.advanceFailedSource?.("https://img.example/11111111-1111-4111-8111-111111111111-front.jpg"));
+    expect(hook.result.current).toMatchObject({ src: null, isLoading: false, source: { kind: "fallback" } });
+
+    act(() => hook.result.current.reload?.());
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+  });
+
   it.each([false, true])("discards stale repository completions before publication, cache, and remote continuation; unmount=%s", async (unmount) => {
     const env = await setup();
     env.installPrinting(P, "/viewer.jpg");

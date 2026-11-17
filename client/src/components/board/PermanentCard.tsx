@@ -513,6 +513,13 @@ export const PermanentCard = memo(function PermanentCard({
 
   if (!obj) return null;
 
+  // An artless permanent offers its art reload on the tile itself on a
+  // desktop-sized screen, and the tile shows the button only where it fits. A
+  // phone's tile is the permanent's tap target, and a button over its art would
+  // also block the long-press that opens the preview, which carries the reload
+  // there. The exile ghosts peeking under a permanent never offer it.
+  const offerArtReload = !isMobile;
+
   const isLand = obj.card_types.core_types.includes("Land");
   const displayColors = getCardDisplayColors(
     obj.color,
@@ -942,7 +949,7 @@ export const PermanentCard = memo(function PermanentCard({
       {/* Main card — art crop or full card based on preference */}
       {useArtCrop ? (
         <div className="relative z-10 rounded-lg">
-          <ArtCropCard objectId={objectId} />
+          <ArtCropCard objectId={objectId} offerArtReload={offerArtReload} />
           {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
               matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
           {isPhasedOut && (
@@ -964,7 +971,7 @@ export const PermanentCard = memo(function PermanentCard({
       ) : (
         <>
           <div className="relative z-10 rounded-lg overflow-hidden">
-            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} ownerPrinting={ownerPrinting} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={renderCardBack} faceDownCause={obj.face_down ? obj.face_down_cause : undefined} offerArtReload={!isMobile && !isCompactHeight} />
+            <CardImage cardName={imgName} faceIndex={imgFace} oracleId={imgOracleId} faceName={imgFaceName} ownerPrinting={ownerPrinting} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? tokenFiltersForObject(obj) : undefined} tokenImageRef={obj.token_image_ref} oracleText={obj.display_source === "Token" ? obj.token_rules_text : undefined} faceDown={renderCardBack} faceDownCause={obj.face_down ? obj.face_down_cause : undefined} offerArtReload={offerArtReload} />
             {/* CR 702.26: phased-out tint overlay — sky-blue mix-blend-screen
                 matches the player-area treatment (PlayerArea.tsx 4d6cfb506). */}
             {isPhasedOut && (

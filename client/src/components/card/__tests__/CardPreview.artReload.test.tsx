@@ -21,13 +21,11 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
 
 const SCULPTOR = "Etherium Sculptor";
 
-// The factory runs before this file's constants exist, so it spells them out.
+/** The engine card database, by lookup name. */
+const engineFaces = vi.hoisted(() => new Map<string, { name: string; oracle_text: string }>());
+
 vi.mock("../../../hooks/useEngineCardData.ts", () => ({
-  useEngineCardData: vi.fn((name: string | null) => (
-    name === "Etherium Sculptor"
-      ? { name: "Etherium Sculptor", oracle_text: "Artifact spells you cast cost {1} less to cast." }
-      : null
-  )),
+  useEngineCardData: vi.fn((name: string | null) => (name == null ? null : engineFaces.get(name) ?? null)),
   useCardParseDetails: () => null,
   useCardRulings: () => [],
 }));
@@ -62,6 +60,8 @@ function sculptor(): GameObject {
 }
 
 beforeEach(() => {
+  engineFaces.clear();
+  engineFaces.set(SCULPTOR, { name: SCULPTOR, oracle_text: "Artifact spells you cast cost {1} less to cast." });
   vi.mocked(useCardImage).mockImplementation(() => failedArt(vi.fn()));
 });
 
@@ -113,6 +113,38 @@ describe("CardPreview artless mobile tile", () => {
     rerender(<CardPreview cardName={SCULPTOR} />);
     expect(useEngineCardData).toHaveBeenCalledWith(SCULPTOR);
     expect(screen.getByRole("img", { name: SCULPTOR })).toHaveTextContent("less to cast.");
+  });
+
+  it("names the tile in the language of its rules text", () => {
+    engineFaces.set(SCULPTOR, {
+      name: "エーテリウムの彫刻家",
+      oracle_text: "あなたが唱えるアーティファクト・呪文は{1}少ないコストで唱えられる。",
+    });
+    inspect(sculptor());
+    render(<CardPreview cardName={SCULPTOR} />);
+
+    expect(screen.getByRole("img", { name: "エーテリウムの彫刻家" })).toHaveTextContent("少ないコストで唱えられる。");
+  });
+
+  it("never looks up or offers a reload for a face-down card the viewer may not see", () => {
+    const hidden = gameObjectFactory
+      .creature(2, 2)
+      .onBattlefield()
+      .named("")
+      .build({
+        face_down: true,
+        face_down_cause: "Morph",
+        printed_ref: { oracle_id: "secret-oracle-id", face_name: "Hooded Hydra" },
+      });
+    inspect(hidden);
+    const { container } = render(<CardPreview cardName="Morph" />);
+
+    // Reach guard: the marker's art failed, so the preview drew the card back.
+    const srcs = [...container.querySelectorAll("img")].map((img) => img.getAttribute("src"));
+    expect(srcs).toContain("card-back.png");
+    expect(useEngineCardData).toHaveBeenCalled();
+    for (const [name] of vi.mocked(useEngineCardData).mock.calls) expect(name).toBeNull();
+    expect(screen.queryByRole("button", { name: RELOAD })).toBeNull();
   });
 
   it("shows a token's own rules text without a card lookup", () => {

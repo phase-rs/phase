@@ -20,6 +20,12 @@ import { frameNeedsLightText, getCardDisplayColors, getFrameGradient } from "./c
 
 interface ArtCropCardProps {
   objectId: number;
+  /**
+   * Offers "Tap to reload art" on the art fallback tile. The caller decides,
+   * because the tile must own its taps: on a phone the battlefield tile's tap
+   * belongs to the game.
+   */
+  offerArtReload?: boolean;
 }
 
 const PT_COLORS: Record<PTColor, string> = {
@@ -28,7 +34,7 @@ const PT_COLORS: Record<PTColor, string> = {
   white: "text-[#111]",
 };
 
-export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardProps) {
+export const ArtCropCard = memo(function ArtCropCard({ objectId, offerArtReload = false }: ArtCropCardProps) {
   const { t } = useTranslation("game");
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const counterDisplay = useCounterDisplay(objectId);
@@ -92,12 +98,6 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   const src = cardSrc;
   const isLoading = renderCardBack ? false : cardLoading;
-  // The tile offers its own art reload only on a desktop-sized screen, where
-  // battlefield rows keep it at least 80px tall, so its art box fits the 44px
-  // button (the smaller overflow-strip and split-overview tiles clip it). A
-  // phone's tile is the permanent's tap target and too short for the button;
-  // there the long-press preview carries the reload.
-  const offersArtReload = !isMobile && !isCompactHeight;
   // CR 712 vs CR 710: `back_face != null` is NOT "has a second face" — a
   // Kamigawa flip card stores its alternative half in the same slot and has no
   // face 1 to inspect. Use the engine-provided layout discriminant.
@@ -221,7 +221,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                   name={cardName}
                   variant="artCrop"
                   className="absolute inset-0 w-full h-full"
-                  onReload={offersArtReload ? reload : undefined}
+                  onReload={offerArtReload ? reload : undefined}
                 />
               )}
 

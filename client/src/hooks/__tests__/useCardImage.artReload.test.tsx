@@ -49,7 +49,9 @@ async function setup() {
     },
   }));
   const { useCardImage } = await import("../useCardImage.ts");
-  return { useCardImage, fetchCardImageAssetByOracleId };
+  const { useConnectivityStore } = await import("../../stores/connectivityStore.ts");
+  useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
+  return { useCardImage, useConnectivityStore, fetchCardImageAssetByOracleId };
 }
 
 /** Lets every pending promise chain in the hook run to completion. */
@@ -68,6 +70,7 @@ describe("useCardImage art reload (#11008)", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -82,18 +85,22 @@ describe("useCardImage art reload (#11008)", () => {
 
     const first = mount();
     await waitFor(() => expect(first.result.current.src).toBe(SCULPTOR_ART));
+    // Fake timers from the failure on, so a retry it scheduled would run below.
+    vi.useFakeTimers();
     act(() => first.result.current.advanceFailedSource?.(SCULPTOR_ART));
     expect(first.result.current).toMatchObject({ src: null, isLoading: false });
     expect(first.result.current.reload).toBeTypeOf("function");
 
-    // No automatic retry: regaining focus, time passing and a remount all keep
-    // the failure, and the failed image is never offered again.
+    // No automatic retry: ten minutes passing, regaining focus and a remount
+    // all keep the failure, and the failed image is never offered again.
     rendered.length = 0;
     act(() => {
+      vi.advanceTimersByTime(10 * 60_000);
       window.dispatchEvent(new Event("focus"));
       document.dispatchEvent(new Event("visibilitychange"));
     });
     await settle();
+    vi.useRealTimers();
     first.unmount();
     const second = mount();
     await settle();
@@ -122,6 +129,23 @@ describe("useCardImage art reload (#11008)", () => {
     await waitFor(() => expect(sculptor.result.current.src).toBe(SCULPTOR_ART));
     await settle();
     expect(mite.result.current).toMatchObject({ src: null, isLoading: false });
+  });
+
+  it("offers no reload while offline, where the lookup never goes remote", async () => {
+    const env = await setup();
+    env.useConnectivityStore.setState({ forcedOffline: true });
+    const { result } = renderHook(() => env.useCardImage("Etherium Sculptor", { oracleId: SCULPTOR }));
+
+    // Reach guard: the offline lookup settles on the artless tile.
+    await waitFor(() => expect(result.current).toMatchObject({ src: null, isLoading: false }));
+    expect(result.current.reload).toBeUndefined();
+
+    // Online, the same card offers the reload once its art has failed.
+    act(() => env.useConnectivityStore.setState({ forcedOffline: false }));
+    await waitFor(() => expect(result.current.src).toBe(SCULPTOR_ART));
+    act(() => result.current.advanceFailedSource?.(SCULPTOR_ART));
+    expect(result.current).toMatchObject({ src: null, isLoading: false });
+    expect(result.current.reload).toBeTypeOf("function");
   });
 
   it("offers no reload for a token whose art has no oracle id to scope it", async () => {

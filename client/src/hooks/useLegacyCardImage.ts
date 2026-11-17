@@ -92,8 +92,8 @@ interface UseCardImageResult {
   advanceFailedSource?(failedSrc: string): void;
   /**
    * Discards this card's cached art, failed sources included, and resolves it
-   * again, for every surface showing the card. Only the player's tap calls it:
-   * a failed image is never retried on its own. Absent without an oracle id.
+   * again, for every surface showing the card. Nothing calls it but the
+   * player's tap. Absent without an oracle id, and while offline.
    */
   reload?(): void;
 }
@@ -945,12 +945,12 @@ export function useCardImage(
   }, []);
 
   // A reload moves this oracle id's invalidation generation, so the request key
-  // changes and the new request starts with no failed sources. A token or
-  // unmapped name has no oracle id to scope it, and its missing art may not
-  // exist at all (#6156), so it offers no reload.
+  // changes and the new request starts with no failed sources. It is scoped by
+  // oracle id, so a token or a name without one offers no reload. Offline, the
+  // lookup never goes remote, so a reload could only land on the same fallback.
   const reload = useMemo(
-    () => (resolvedOracleId ? () => reloadCardArt(resolvedOracleId) : undefined),
-    [resolvedOracleId],
+    () => (resolvedOracleId && !effectiveOffline ? () => reloadCardArt(resolvedOracleId) : undefined),
+    [effectiveOffline, resolvedOracleId],
   );
 
   useEffect(() => visualPackRepository.subscribe(() => {

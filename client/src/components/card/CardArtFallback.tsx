@@ -34,6 +34,19 @@ export interface CardArtFallbackProps {
 }
 
 /**
+ * The reload button needs a 44px row, which a small tile doesn't have, so a
+ * container query on the tile's width shows it only where it fits; a smaller
+ * tile keeps its name and shows no button. Width stands in for height because
+ * each variant keeps its shape: a battlefield art box is 4:3, so at 6rem wide
+ * it is tall enough for the button alone (the frame header above it shows the
+ * name), and a 5:7 card at 4rem wide fits the button under the name.
+ */
+const reloadButtonClassByVariant = {
+  artCrop: "hidden @min-[6rem]:block text-[10px]",
+  fullCard: "mt-1 hidden @min-[4rem]:block text-xs",
+} as const satisfies Record<CardArtFallbackVariant, string>;
+
+/**
  * Deliberate text tile shown when a card/token has no renderable art — either
  * because art resolution produced no src (issue #6156: tokens with no official
  * paper printing, e.g. Kibo, Uktabi Prince's Banana) or because the resolved
@@ -62,14 +75,19 @@ export function CardArtFallback({
 }: CardArtFallbackProps) {
   const { t } = useTranslation("game");
   const isArtCrop = variant === "artCrop";
-  // A battlefield art crop has room for a 44px button or the name, not both,
-  // and the tile's frame header already shows the name. The label stays for
-  // assistive tech.
-  const hidesName = isArtCrop && onReload != null;
+  const offersReload = onReload != null;
+  // Where the button shows, an art crop has room for it or the name, not both;
+  // the name then stays only as the label for assistive tech.
+  const nameGivesWayClass = isArtCrop && offersReload ? "@min-[6rem]:sr-only" : "";
 
   return (
     <div
-      className={`${className} bg-gray-800 shadow-md overflow-hidden flex flex-col ${isArtCrop ? "justify-center p-1" : "p-2"}`}
+      className={[
+        className,
+        "bg-gray-800 shadow-md overflow-hidden flex flex-col",
+        isArtCrop ? "justify-center p-1" : "p-2",
+        offersReload ? "@container" : "",
+      ].join(" ")}
       style={style}
     >
       {/* The image role sits on the text alone: an `img` hides whatever it
@@ -78,9 +96,7 @@ export function CardArtFallback({
       <div
         role="img"
         aria-label={name}
-        className={hidesName
-          ? "sr-only"
-          : `flex min-h-0 flex-1 flex-col overflow-hidden ${isArtCrop ? "justify-center" : ""}`}
+        className={`flex min-h-0 flex-1 flex-col overflow-hidden ${isArtCrop ? "justify-center" : ""} ${nameGivesWayClass}`}
       >
         <div
           className={
@@ -111,7 +127,7 @@ export function CardArtFallback({
           className={[
             "min-h-11 w-full shrink-0 rounded-md bg-black/40 px-2 font-semibold leading-tight",
             "text-gray-100 ring-1 ring-white/20 hover:bg-black/60",
-            isArtCrop ? "text-[10px]" : "mt-1 text-xs",
+            reloadButtonClassByVariant[variant],
           ].join(" ")}
         >
           {t("card.reloadArt")}

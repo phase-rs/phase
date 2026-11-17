@@ -308,5 +308,7 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): I
   }
   const overlay = useOwnerCardImageOverlay(input);
   if (!overlay) return normal;
-  return { ...overlay, reload: ownerArt.reload };
+  // Offline, the owner ladder never goes remote, so a reload could only land
+  // on the same fallback.
+  return { ...overlay, reload: offline ? undefined : ownerArt.reload };
 }
