@@ -13608,27 +13608,22 @@ fn super_intelligence_upkeep_scoped_to_enchanted_creature_controller() {
 }
 
 #[test]
-fn each_player_upkeep_phase_trigger_stays_unscoped() {
-    // Regression: a genuine "each player's upkeep" Howling-Mine trigger must keep
-    // firing on every player's upkeep (no valid_target), unaffected by the
-    // enchanted-creature's-controller scoping.
+fn each_players_upkeep_trigger_is_scoped_to_whose_turn_it_is() {
+    // CR 603.2b + CR 102.1: "each player's upkeep" is the upkeep of whoever's turn it is, so the trigger is Player-scoped, not Super Intelligence's ParentTargetController.
     let r = parse(
-        "At the beginning of each player's upkeep, that player draws a card.",
-        "Howling Mine Test",
-        &[],
-        &["Artifact"],
-        &[],
+        "Defender (This creature can't attack.)\nThis creature enters with a +1/+1 counter on it.\nAt the beginning of each player's upkeep, that player draws a card for each +1/+1 counter on this creature.\n{2}{W}{U}: Put a +1/+1 counter on this creature.",
+        "Walking Archive",
+        &[Keyword::Defender],
+        &["Artifact", "Creature"],
+        &["Golem"],
     );
     let trigger = r
         .triggers
         .iter()
         .find(|t| t.mode == TriggerMode::Phase)
         .expect("expected a Phase trigger");
-    assert_eq!(
-        trigger.valid_target, None,
-        "each-player's-upkeep must remain unscoped: {:?}",
-        trigger.valid_target
-    );
+    assert_eq!(trigger.phase, Some(Phase::Upkeep));
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
 }
 
 #[test]
@@ -36346,4 +36341,86 @@ fn ltb_return_promotion_keeps_the_actor() {
     assert_eq!(promoted_actor, &actor);
     assert_eq!(*target, TargetFilter::ExiledBySource);
     assert!(ltb_return_of_exiled_by_source(&promoted).is_none());
+}
+
+/// CR 109.5 + CR 608.2c (#8751): in "Then if you control eight or more artifacts,
+/// each opponent loses life equal to that card's power" the guard is about the
+/// ability's controller ("you"), so its artifact count keeps `ControllerRef::You`;
+/// only the effect fans out over opponents (`player_scope: Opponent`), and the
+/// amount is the returned card's power, not an opponent-scoped value.
+#[test]
+fn if_you_control_guard_stays_controller_bound_under_each_opponent_scope() {
+    let r = parse(
+        "At the beginning of your end step, if you control four or more artifacts, return target creature card from your graveyard to your hand. Then if you control eight or more artifacts, each opponent loses life equal to that card's power.",
+        "Golbez, Crystal Collector",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let ret = r.triggers[0]
+        .execute
+        .as_deref()
+        .expect("the end-step trigger has a body");
+    let drain = ret
+        .sub_ability
+        .as_deref()
+        .expect("the life loss follows the return");
+    assert_eq!(drain.player_scope, Some(PlayerFilter::Opponent));
+    assert!(matches!(*drain.effect, Effect::LoseLife { .. }));
+    let Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 8 },
+    }) = &drain.condition
+    else {
+        panic!(
+            "expected an artifact-count guard, got {:?}",
+            drain.condition
+        );
+    };
+    let TargetFilter::Typed(typed) = filter else {
+        panic!("expected a typed artifact filter, got {filter:?}");
+    };
+    assert_eq!(typed.controller, Some(ControllerRef::You));
+}
+
+/// Negative control for the same class: "they control" names the iterated
+/// player, so it must stay `ScopedPlayer` under the same scope.
+#[test]
+fn they_control_guard_stays_scoped_under_each_opponent_scope() {
+    let r = parse(
+        // Synthetic probe (no printed card): the "they control" analogue of the Golbez guard.
+        "Each opponent loses 2 life if they control three or more creatures.",
+        "Scoped Guard Probe",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    let def = r.abilities.first().expect("a spell ability");
+    assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+    let dump = format!("{:?}", def.condition);
+    assert!(dump.contains("ScopedPlayer"), "{dump}");
+}
+
+/// Negative control (Tinybones, Trinket Thief): "each opponent with no cards in
+/// hand" is a subject qualifier on the iterated player, so its hand-size guard
+/// stays rescoped to that player and must not be read as the controller's.
+#[test]
+fn each_opponent_with_no_cards_in_hand_guard_stays_scoped() {
+    let r = parse(
+        "{4}{B}{B}: Each opponent with no cards in hand loses 10 life.",
+        "Tinybones, Trinket Thief",
+        &[],
+        &["Creature"],
+        &[],
+    );
+    let def = r.abilities.first().expect("an activated ability");
+    assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+    let dump = format!("{:?}", def.condition);
+    assert!(
+        dump.contains("HandSize") && dump.contains("ScopedPlayer"),
+        "{dump}"
+    );
 }

@@ -355,20 +355,7 @@ fn advance_phase_hop(state: &mut GameState, events: &mut Vec<GameEvent>) -> Phas
     if turn_ends {
         start_next_turn(state, events);
     } else {
-        // CR 614.1b + CR 614.10 + CR 500.11: Route phase/step starts through the
-        // replacement pipeline so condition-gated skip replacements can prevent
-        // the phase. Simple static-based skips (`StaticMode::SkipStep`) still
-        // short-circuit at dedicated call sites (`step_skip`, for untap, upkeep
-        // and draw); this path handles event-context-aware replacements.
-        // CR 508.8: a combat step with nothing attacking is skipped before it
-        // could begin, so it proposes no begin event.
-        let proposed = ProposedEvent::begin_phase(state.active_player, next);
-        let begin = if combat_step_skipped(state, next) {
-            ReplacementResult::Prevented
-        } else {
-            replacement::replace_event(state, proposed, events)
-        };
-        match begin {
+        match propose_step_begin(state, next, events) {
             ReplacementResult::Prevented => {
                 skip_past_prevented_step(state, next);
                 return PhaseHop::Skipped;
@@ -388,6 +375,24 @@ fn advance_phase_hop(state: &mut GameState, events: &mut Vec<GameEvent>) -> Phas
         events,
         apnap_anchor,
     )))
+}
+
+/// CR 614.1b + CR 614.10 + CR 500.11: Route phase/step starts through the
+/// replacement pipeline so condition-gated skip replacements can prevent the
+/// phase. Simple static-based skips (`StaticMode::SkipStep`) still short-circuit
+/// at dedicated call sites (`step_skip`, for untap, upkeep and draw); this path
+/// handles event-context-aware replacements. CR 508.8: a combat step with nothing
+/// attacking is skipped before it could begin, so it proposes no begin event.
+fn propose_step_begin(
+    state: &mut GameState,
+    next: Phase,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    if combat_step_skipped(state, next) {
+        return ReplacementResult::Prevented;
+    }
+    let proposed = ProposedEvent::begin_phase(state.active_player, next);
+    replacement::replace_event(state, proposed, events)
 }
 
 /// CR 500.11: "To skip a step, phase, or turn is to proceed past it as though it
@@ -467,9 +472,50 @@ pub(super) fn resume_phase_begin_choice(
     resume_deferred_step_triggers(state, events).unwrap_or_else(|| state.waiting_for.clone())
 }
 
-/// CR 800.4a: the affected player left with their choice unanswered, so the
-/// transition it held is gone with it. The turn continues through CR 800.4j's
-/// skip of the departed player's remaining phases.
+/// CR 800.4a + CR 800.4j: the player whose choice held a phase transition left with
+/// it unanswered and the turn continues, so the transition resumes for the players
+/// still in the game as an answered choice's would.
+pub(super) fn resume_abandoned_phase_transition(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) {
+    use crate::types::game_state::PhaseTransitionDrainState;
+
+    if state.pending_replacement.is_some() {
+        return;
+    }
+    let Some(progress) = state.pending_phase_transition_progress.as_ref() else {
+        return;
+    };
+    match progress.drain_state {
+        // The step the held transition reached is proposed again and, unless a
+        // remaining player must choose, begins.
+        PhaseTransitionDrainState::AwaitingBeginChoice => {
+            let next = progress.next_phase;
+            state.waiting_for = match propose_step_begin(state, next, events) {
+                ReplacementResult::NeedsChoice(player) => {
+                    replacement::replacement_choice_waiting_for(player, state)
+                }
+                result => resume_phase_begin_choice(state, result, events),
+            };
+        }
+        // CR 500.5 + CR 117.3a: the remaining players' pools empty, then the step
+        // begins and its beginning triggers are put on the stack before the
+        // active player receives priority.
+        PhaseTransitionDrainState::Ready => {
+            state.waiting_for = WaitingFor::Priority {
+                player: state.active_player,
+            };
+            drain_pending_phase_transition_progress(state, events);
+            if let Some(resumed) = resume_deferred_step_triggers(state, events) {
+                state.waiting_for = resumed;
+            }
+        }
+        PhaseTransitionDrainState::AwaitingPostReplacementContinuation => {}
+    }
+}
+
+/// CR 104.1: a finished game owes no transition a parked choice held.
 pub(super) fn abandon_phase_begin_choice(state: &mut GameState) {
     let parked = state
         .pending_phase_transition_progress
@@ -722,17 +768,16 @@ fn enter_phase(
     // (`combat_damage::drain_combat_lifelink`), so the field is `None` for the whole
     // time a drain is executing. A `Some` observed HERE is therefore necessarily a
     // record whose answer can never arrive, never a live batch — which is why this
-    // clear cannot destroy work in progress. The three doors that can strand one
-    // all pass through here: CR 800.4 `skip_eliminated_active_turn` (the active player
-    // conceded or lost while their own CR 616.1 prompt was open), CR 724.1d
-    // `end_turn_to_cleanup`, and CR 724.2d `end_combat_phase_to_postcombat`. Without
-    // this, the stale record is drained by `resolve_combat_damage`'s guard on a LATER
-    // turn's combat-damage step, re-emitting that batch's events and then writing
-    // `regular_damage_done` on the new combat — silently skipping that turn's combat
-    // damage (CR 510.2 / CR 510.4).
+    // clear cannot destroy work in progress. The two doors that can strand one
+    // both pass through here: CR 724.1d `end_turn_to_cleanup` and CR 724.2d
+    // `end_combat_phase_to_postcombat`. Without this, the stale record is drained
+    // by `resolve_combat_damage`'s guard on a LATER turn's combat-damage step,
+    // re-emitting that batch's events and then writing `regular_damage_done` on
+    // the new combat — silently skipping that turn's combat damage (CR 510.2 /
+    // CR 510.4).
     //
     // What authorises DISCARDING the batch's still-waiting CR 603.3b triggers
-    // differs per door, and neither CR 500.4 nor CR 510.2 addresses them:
+    // (neither CR 500.4 nor CR 510.2 addresses them):
     //   * CR 724.1d `end_turn_to_cleanup` and CR 724.2d
     //     `end_combat_phase_to_postcombat`: CR 724.1a and CR 724.2a each state
     //     that abilities which triggered before the process began but have not
@@ -742,12 +787,6 @@ fn enter_phase(
     //     abandoning the record on these two doors is CONSISTENT with the
     //     engine's existing CR 724.1a implementation rather than in tension with
     //     it.
-    //   * CR 800.4 `skip_eliminated_active_turn`: this door no longer reaches
-    //     here with a live record. CR 800.4j keeps the turn running to its
-    //     completion, so the batch still owes its triggers to the OTHER seats;
-    //     `auto_advance_once`'s CR 800.4 branch now discharges the record through
-    //     `resume_pending_combat_lifelink` BEFORE the skip. A `Some` observed at
-    //     the line below can therefore no longer have come from that door.
     state.pending_combat_lifelink = None;
     // CR 510.2 + CR 724.1a: abandoning the batch abandons its Phase C remnant
     // too — drop a combat-flagged post-loss stash with it (a non-combat stash
@@ -1505,11 +1544,21 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.priority_player = turn_control::turn_decision_maker(state);
     priority::clear_priority_passes(state);
     state.players_attacked_this_step.clear();
-    // CR 400.7: LKI persists within a step but is invalidated on step transition.
+    // Engine policy (not a CR rule): step-scoped LKI tables are cleared on step
+    // transition; the incarnation-keyed tables keep what a pending copy can
+    // still read (below).
+    //
+    // CR 608.2h + CR 707.2 + CR 603.7e: a copy effect that reads its own departed
+    // source in a later step (Esoteric Duplicator's delayed copy of "that artifact")
+    // uses the source's last known copiable values and its departure snapshot's
+    // token image, so the step clear keeps exactly the incarnations a pending
+    // carrier can still read as its own copy source (the collector loop
+    // normalisation uses), read before either table is pruned; every other
+    // entry is history.
+    let readable = state.readable_own_copy_sources();
     state.lki_cache.clear();
     state.lki_copiable_values.clear();
-    state.lki_by_incarnation.clear();
-    state.lki_copiable_values_by_incarnation.clear();
+    state.retain_own_copy_source_lki(&readable);
     state.clear_departed_stack_records();
     // CR 607.2b + CR 113.7a: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.
@@ -3277,6 +3326,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 613.1b: recompute layer-2 control now the effect is gone, then emit the
     // loss event for every object whose controller actually reverted.
+    // CR 603.2c: the occurrences this cleanup publishes, as positions in the
+    // action's event buffer.
+    let reversion_start = events.len();
     if let Some(boundary) = control_revert_boundary {
         // CR 514.2: the members' pre-revert evidence was fixed above, before
         // the prune; read it now, then publish against the reverted board.
@@ -3287,9 +3339,6 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             })
             .collect();
         super::layers::flush_layers(state);
-        // CR 603.2c: the occurrences this reversion publishes, as positions in
-        // the action's event buffer.
-        let reversion_start = events.len();
         let mut seen_reverting = HashSet::new();
         for (object_id, member) in control_reverting.into_iter().zip(members) {
             if !seen_reverting.insert(object_id) {
@@ -3307,7 +3356,14 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
                 new_controller,
             );
         }
-
+    }
+    // CR 514.2 + CR 613.1b + CR 603.2: the control changes the layer pass
+    // derived and no instruction published — a "for as long as" control
+    // duration that lapsed because the reversion returned its source (Rubinia
+    // Soulsinger), or one derived earlier in the turn — are published with the
+    // reversion, so CR 514.3a settles their abilities in this cleanup step.
+    super::layers::publish_layer_control_changes(state, events);
+    if events.len() > reversion_start {
         // CR 603.2 + CR 603.10d + CR 603.7: the reversion triggers its
         // abilities as it happens. The printed lose-side abilities come from the
         // watchers its boundary latched before the prune above. The printed
@@ -3805,8 +3861,8 @@ enum StepSkip {
 /// CR 500.11 + CR 614.10: the skip, if any, that replaces the beginning of
 /// `step` for the active player. Only the untap, upkeep and draw steps are
 /// decided here. The begin-phase replacement pipeline (CR 614.1b) runs first;
-/// CR 508.8, CR 724.1d / CR 724.2d and CR 800.4 skip past a step without
-/// entering it. Pure: a pending one-shot skip is reported, not used up.
+/// CR 508.8 and CR 724.1d / CR 724.2d skip past a step without entering it.
+/// Pure: a pending one-shot skip is reported, not used up.
 fn step_skip(state: &GameState, step: Phase) -> Option<StepSkip> {
     let first_draw = match step {
         // CR 103.8: The starting player skips their first-turn draw step only
@@ -4184,30 +4240,6 @@ fn active_player_priority(state: &GameState) -> WaitingFor {
     }
 }
 
-/// CR 800.4: Skip an eliminated active player's remaining turn through the
-/// normal Cleanup-to-next-turn transition. This intentionally shares the
-/// phase-entry pipeline rather than fabricating a replacement priority prompt.
-fn skip_eliminated_active_turn(
-    state: &mut GameState,
-    events: &mut Vec<GameEvent>,
-) -> AutoAdvanceStep {
-    state.phase = Phase::Cleanup;
-    // CR 800.4j + CR 514.2: the turn still ends without an active player, and
-    // `execute_cleanup` isn't reached from here, so a skip limited to this turn
-    // can't carry into the target's next turn.
-    end_turn_limited_combat_phase_skips(state);
-    // CR 500.8 + CR 800.4: the phases added to the turn are part of the
-    // remainder skipped here; a unit still scheduled or open would otherwise
-    // follow this cleanup step instead of the next turn.
-    discard_scheduled_units(state);
-    // CR 800.4 + CR 500.5: leaving the cleanup step is one transition unit
-    // (`advance_phase_once`).
-    match advance_phase_once(state, events) {
-        AdvancePhaseOnce::Deferred => AutoAdvanceStep::Deferred,
-        AdvancePhaseOnce::Entry(_) => AutoAdvanceStep::Continue,
-    }
-}
-
 /// One production turn-interpreter iteration. The outer [`auto_advance`] loop
 /// is the only normal caller that may repeat these units; a future bounded
 /// prospective transition can therefore share one committed unit without
@@ -4259,8 +4291,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
         return AutoAdvanceStep::waiting(state.waiting_for.clone());
     }
 
-    // CR 800.4: If the active player has been eliminated, skip their
-    // remaining phases and proceed to the next player's turn.
+    // CR 800.4j: a turn whose active player has left continues to its completion.
     if !super::players::is_alive(state, state.active_player) {
         // CR 800.4j + CR 704.3 + CR 800.4d: the turn continues to its completion,
         // so a combat-damage batch parked on a CR 616.1 answer that died with the
@@ -4279,11 +4310,9 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
         // `elimination` has already pruned that seat's owed gains per-entry, so the
         // gains drained here belong to living controllers.
         //
-        // Placed HERE and not in `skip_eliminated_active_turn` (which returns a
-        // turn-interpreter step and would orphan a prompt the drain raises) and
-        // not in `enter_phase`
-        // (the shared funnel for all three abandonment doors, which cannot tell
-        // this one from the CR 724.1a/724.2a doors that must NOT discharge).
+        // Placed HERE and not in `enter_phase` (the shared funnel for every
+        // abandonment door, which cannot tell this one from the CR 724.1a/724.2a
+        // doors that must NOT discharge).
         if state.pending_combat_lifelink.is_some() {
             let event_start = events.len();
             if let Some(waiting_for) = super::combat_damage::resume_pending_combat_lifelink(
@@ -4294,7 +4323,7 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
             ) {
                 // `Priority` is the resume's "nothing further is owed" sentinel and
                 // is always addressed to `state.active_player` — the seat that just
-                // left. Fall through to the skip rather than surfacing it.
+                // left. Fall through to the turn's step rather than surfacing it.
                 //
                 // CR 800.4a: everything else is a real prompt, but this is the one
                 // call site of `resume_pending_combat_lifelink` reached while the
@@ -4316,7 +4345,6 @@ fn auto_advance_once(state: &mut GameState, events: &mut Vec<GameEvent>) -> Auto
                 }
             }
         }
-        return skip_eliminated_active_turn(state, events);
     }
 
     match state.phase {
@@ -4894,7 +4922,7 @@ mod tests {
                 .lines()
                 .filter(|line| line.trim_start().starts_with("state.phase ="))
                 .count(),
-            4,
+            3,
             "a new direct phase assignment needs a B7 transition-authority row"
         );
 
@@ -5897,6 +5925,10 @@ card into your hand at the beginning of your next end step.";
         );
         crate::game::layers::flush_layers(state);
         assert_eq!(state.objects[&kharn].controller, P0);
+        // The steal itself was published (and its own trigger handled) by the
+        // instruction this direct install stands in for; only the reversion
+        // is under test.
+        state.layer_control_changes.clear();
         let starting_turn = state.turn_number;
 
         let mut events = Vec::new();
@@ -9654,7 +9686,12 @@ card into your hand at the beginning of your next end step.";
         state
             .attacked_defenders_last_turn
             .insert(PlayerId(1), [PlayerId(0)].into_iter().collect());
-        eliminate_player(&mut state, PlayerId(1), &mut Vec::new());
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut Vec::new(),
+        );
 
         assert!(
             state.player_attacked_player_last_turn(PlayerId(1), PlayerId(0)),
@@ -11129,8 +11166,7 @@ card into your hand at the beginning of your next end step.";
     /// CR 500.8 + CR 500.9 + CR 500.10: an untap step begins a turn exactly
     /// when no added unit is open. A turn's own untap step has none, including
     /// the first one after a turn whose cleanup step was followed by an added
-    /// unit and the one after an eliminated player's skipped turn (CR 800.4);
-    /// every added untap step has one.
+    /// unit; every added untap step has one.
     #[test]
     fn an_untap_step_begins_a_turn_exactly_when_no_added_unit_is_open() {
         let untap_at = |state: &mut GameState| {
@@ -11173,29 +11209,6 @@ card into your hand at the beginning of your next end step.";
             );
             assert!(!in_added_unit(&state), "the turn after {segment:?}");
         }
-
-        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
-        state.turn_number = 2;
-        state.active_player = PlayerId(1);
-        state.phase = Phase::PreCombatMain;
-        state.extra_phases = vec![scheduled(
-            Phase::PreCombatMain,
-            TurnSegment::CreatedPhase(Phase::Untap),
-        )];
-        untap_at(&mut state);
-        assert!(
-            in_added_unit(&state),
-            "reach guard: the skip starts inside a unit"
-        );
-        state.players[1].is_eliminated = true;
-        state.eliminated_players.push(PlayerId(1));
-        skip_eliminated_active_turn(&mut state, &mut Vec::new());
-        assert_eq!(
-            (state.phase, state.active_player),
-            (Phase::Untap, PlayerId(2)),
-            "reach guard: the next player's turn began"
-        );
-        assert!(!in_added_unit(&state), "the turn after a skipped turn");
 
         for (anchor, segment) in [
             (
@@ -12724,71 +12737,20 @@ card into your hand at the beginning of your next end step.";
                 if *source_id == attacker)));
     }
 
-    /// CR 800.4: When the active player is eliminated mid-turn in multiplayer,
-    /// their remaining phases are skipped and the next player's turn begins.
+    /// CR 800.4j: a turn whose active player has left continues to its completion.
     #[test]
-    fn auto_advance_skips_eliminated_active_player_turn() {
+    fn auto_advance_continues_a_departed_active_players_turn() {
         let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
         state.turn_number = 2;
         state.active_player = PlayerId(1);
         state.phase = Phase::PreCombatMain;
-
-        // Mark P1 as eliminated (as if SBA just fired)
         state.players[1].is_eliminated = true;
         state.eliminated_players.push(PlayerId(1));
 
-        let mut events = Vec::new();
-        let wf = auto_advance(&mut state, &mut events);
+        let wf = auto_advance(&mut state, &mut Vec::new());
 
-        // Should have advanced to the next living player's turn
-        assert_ne!(
-            state.active_player,
-            PlayerId(1),
-            "eliminated player should no longer be active"
-        );
-        // Next living player after P1 is P2
-        assert_eq!(state.active_player, PlayerId(2));
-        // Game should not be over (P0 and P2 still alive)
-        assert!(
-            !matches!(wf, WaitingFor::GameOver { .. }),
-            "game should continue with 2 living players"
-        );
-    }
-
-    /// CR 500.8 + CR 800.4: skipping an eliminated active player's remaining
-    /// turn skips the phases added to it too. A combat added after the cleanup
-    /// step does not begin; the next player's turn starts in one hop.
-    #[test]
-    fn eliminated_active_player_skip_discards_units_added_to_the_turn() {
-        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
-        state.turn_number = 2;
-        state.active_player = PlayerId(1);
-        state.phase = Phase::PostCombatMain;
-        state.extra_phases = vec![scheduled(
-            Phase::Cleanup,
-            TurnSegment::Phase(PhaseGroup::Combat),
-        )];
-        state.players[1].is_eliminated = true;
-        state.eliminated_players.push(PlayerId(1));
-
-        let mut events = Vec::new();
-        auto_advance(&mut state, &mut events);
-
-        let turn_started = events
-            .iter()
-            .position(|event| matches!(event, GameEvent::TurnStarted { .. }))
-            .expect("reach guard: the next player's turn starts");
-        assert!(
-            !events[..turn_started]
-                .iter()
-                .any(|event| matches!(event, GameEvent::PhaseChanged { .. })),
-            "no step of the eliminated player's turn begins: {:?}",
-            &events[..turn_started]
-        );
-        assert_eq!(state.turn_number, 3);
-        assert_eq!(state.active_player, PlayerId(2));
-        assert!(state.extra_phases.is_empty());
-        assert!(state.extra_phase_resume.is_empty());
+        assert_eq!((state.turn_number, state.active_player), (2, PlayerId(1)));
+        assert!(!matches!(wf, WaitingFor::GameOver { .. }));
     }
 
     #[test]
@@ -12840,7 +12802,7 @@ card into your hand at the beginning of your next end step.";
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 }
+                GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1, .. }
                     if *object_id == obj_id
             )),
             "CounterRemoved event should be emitted"

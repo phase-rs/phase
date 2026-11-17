@@ -1162,6 +1162,7 @@ pub fn ability_definition_is_cast_stable_for_pre_cast(definition: &AbilityDefini
         entry_onset: _,  // ContinuousEffectOnset tag, no quantity of its own
         iteration_kind_binding: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -1301,6 +1302,7 @@ pub fn ability_definition_has_only_unbound_variable_quantities_for_pre_cast(
         entry_onset: _,  // ContinuousEffectOnset tag, no quantity of its own
         iteration_kind_binding: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker
@@ -14244,7 +14246,12 @@ mod tests {
         state.players[2].poison_counters = 40;
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(
             state.players[2].is_eliminated,
             "precondition: P2 must have actually left the game"
@@ -14283,7 +14290,12 @@ mod tests {
         state.players[2].poison_counters = 40;
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert_eq!(
             state.players[2].poison_counters, 40,
             "non-vacuity: see the All-scope sibling"
@@ -14330,7 +14342,12 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(state.players[2].is_eliminated && state.players[3].is_eliminated);
         assert_eq!(state.players[2].poison_counters, 2);
         assert_eq!(state.players[3].poison_counters, 3);
@@ -14382,7 +14399,12 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(state.players[2].is_eliminated && state.players[3].is_eliminated);
         for card in opponent_cards {
             assert!(state.exile.contains(&card));
@@ -14422,7 +14444,12 @@ mod tests {
         );
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(
             state.exile.contains(&card),
             "non-vacuity: this engine routes a departed player's cards INTO exile, so the \
@@ -27030,7 +27057,12 @@ mod tests {
         add_lands(&mut state, PlayerId(2), 2);
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(
             state.players[2].is_eliminated,
             "precondition: P2 must have actually left the game"

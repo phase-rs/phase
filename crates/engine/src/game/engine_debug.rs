@@ -4737,7 +4737,12 @@ mod tests {
             let mut runner = debug_runner(scenario);
             let p2 = PlayerId(2);
             let mut events = Vec::new();
-            crate::game::elimination::eliminate_player(runner.state_mut(), p2, &mut events);
+            crate::game::elimination::eliminate_player(
+                runner.state_mut(),
+                p2,
+                crate::types::events::LossReason::Conceded,
+                &mut events,
+            );
             let p2_life = life(&runner, p2);
             let revision = runner.state().state_revision;
 
@@ -5873,7 +5878,12 @@ mod tests {
                 let mut runner = debug_runner(three_player);
                 let p2 = PlayerId(2);
                 let mut events = Vec::new();
-                crate::game::elimination::eliminate_player(runner.state_mut(), p2, &mut events);
+                crate::game::elimination::eliminate_player(
+                    runner.state_mut(),
+                    p2,
+                    crate::types::events::LossReason::Conceded,
+                    &mut events,
+                );
                 let before = counter_rollback_set(&runner);
                 let error = runner
                     .act(give(p2, PlayerCounterKind::Experience, 1))
