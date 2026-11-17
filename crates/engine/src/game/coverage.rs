@@ -18581,6 +18581,7 @@ mod tests {
             back_face: None,
             rules_text: None,
             unparsed_rules_text_lines: Vec::new(),
+            merged_extras: None,
         }
     }
 

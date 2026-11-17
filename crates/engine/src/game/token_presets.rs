@@ -1216,4 +1216,44 @@ mod tests {
             );
         }
     }
+
+    /// CR 111.4 + CR 707.2a (F1): the parsed `Effect::Token` spec body for
+    /// `create a Gingerbrute token` (name `"Gingerbrute Token"`, 1/1,
+    /// Artifact Creature — Food Golem, colorless, haste) matches the
+    /// Gingerbrute catalog preset body, so creation links a
+    /// `token_image_ref` through the source-gated `find_token_ref_with_mode`
+    /// path. The RED integration test exercises this linkage end to end;
+    /// this probe pins the body-equality leg without the full runner.
+    #[test]
+    fn gingerbrute_parsed_spec_body_matches_its_catalog_preset() {
+        let preset = known_token_preset_by_id("c770e27a-6846-59be-82f0-b2b61dd95d9f")
+            .expect("Gingerbrute preset");
+        // The parsed spec body, built from the characteristics the parser
+        // fills (registry display name + catalog P/T-colors-keywords), not
+        // cloned from the preset — otherwise the assertion is circular.
+        let parsed_spec_body = TokenCharacteristics {
+            display_name: "Gingerbrute Token".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            loyalty: None,
+            core_types: vec![CoreType::Artifact, CoreType::Creature],
+            subtypes: vec!["Food".to_string(), "Golem".to_string()],
+            supertypes: Vec::new(),
+            colors: Vec::new(),
+            keywords: vec![Keyword::Haste],
+        };
+        assert!(
+            token_body_matches(&preset.body, &parsed_spec_body),
+            "the parsed Gingerbrute spec body must match its catalog preset"
+        );
+        // Paired negative: a body with different P/T does NOT match, so the
+        // probe above cannot pass on a vacuous comparator.
+        let mut wrong_pt = parsed_spec_body.clone();
+        wrong_pt.power = Some(2);
+        wrong_pt.toughness = Some(2);
+        assert!(
+            !token_body_matches(&preset.body, &wrong_pt),
+            "a 2/2 body must not match the 1/1 Gingerbrute preset"
+        );
+    }
 }

@@ -305,28 +305,52 @@ pub fn known_token_body_by_name(name: &str) -> Option<&'static TokenCharacterist
 /// Source-scoped variant for Oracle parsing: when a display name is ambiguous,
 /// prefer the preset linked to the card currently being parsed. Fall back to a
 /// global match only if every matching body is identical.
+///
+/// CR 111.4: The catalog names some named tokens with a trailing " Token"
+/// (`"Gingerbrute Token"`, `"Spirit Sorcerer Token"`) while Oracle text names
+/// the bare descriptor (`create a Gingerbrute token`). After the exact-name
+/// passes miss, retry both passes with a `"<name> Token"`-suffixed candidate
+/// key so the bare descriptor still resolves through this single authority —
+/// both parser call sites (`token.rs` fill + registry identity) share it.
 pub fn known_token_body_by_name_for_source(
     name: &str,
     source_name: Option<&str>,
 ) -> Option<&'static TokenCharacteristics> {
     let name = name.trim();
     if let Some(source_name) = source_name.map(str::trim).filter(|name| !name.is_empty()) {
-        let mut source_matches = known_token_presets().iter().filter(|preset| {
-            preset.body.display_name.eq_ignore_ascii_case(name)
-                && preset
-                    .source_card_names
-                    .iter()
-                    .any(|candidate| candidate.eq_ignore_ascii_case(source_name))
-        });
-        if let Some(first) = source_matches.next() {
-            let first_body = &first.body;
-            return source_matches
-                .all(|preset| &preset.body == first_body)
-                .then_some(first_body);
+        if let Some(body) = source_scoped_body_by_name(name, source_name) {
+            return Some(body);
+        }
+        let suffixed = format!("{name} Token");
+        if let Some(body) = source_scoped_body_by_name(&suffixed, source_name) {
+            return Some(body);
         }
     }
 
-    unique_token_body_by_name(name)
+    unique_token_body_by_name(name).or_else(|| {
+        let suffixed = format!("{name} Token");
+        unique_token_body_by_name(&suffixed)
+    })
+}
+
+fn source_scoped_body_by_name(
+    name: &str,
+    source_name: &str,
+) -> Option<&'static TokenCharacteristics> {
+    let mut source_matches = known_token_presets().iter().filter(|preset| {
+        preset.body.display_name.eq_ignore_ascii_case(name)
+            && preset
+                .source_card_names
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(source_name))
+    });
+    if let Some(first) = source_matches.next() {
+        let first_body = &first.body;
+        return source_matches
+            .all(|preset| &preset.body == first_body)
+            .then_some(first_body);
+    }
+    None
 }
 
 fn unique_token_body_by_name(name: &str) -> Option<&'static TokenCharacteristics> {
@@ -507,5 +531,58 @@ scryfall_oracle_id = "11111111-1111-1111-1111-111111111111"
         // keep the unknown-key check itself under test.
         parse_overlay(include_str!("../../data/known-tokens.overlay.toml"))
             .expect("the committed overlay passes the same check");
+    }
+
+    /// CR 111.4: a bare Oracle-text descriptor (`create a Gingerbrute token`)
+    /// resolves to the catalog's `" Token"`-suffixed display name through the
+    /// source-scoped pass when the source card is linked.
+    #[test]
+    fn bare_descriptor_resolves_suffixed_display_name_for_its_source() {
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+
+        let body =
+            known_token_body_by_name_for_source("Gingerbrute", Some("Ginger, Queen of Sweets"))
+                .expect("Gingerbrute must resolve for its source card");
+        assert_eq!(body.display_name, "Gingerbrute Token");
+        assert_eq!(body.power, Some(1));
+        assert_eq!(body.toughness, Some(1));
+        assert!(body.core_types.contains(&CoreType::Artifact));
+        assert!(body.core_types.contains(&CoreType::Creature));
+        assert!(body.subtypes.iter().any(|subtype| subtype == "Food"));
+        assert!(body.subtypes.iter().any(|subtype| subtype == "Golem"));
+        assert!(body.keywords.contains(&Keyword::Haste));
+    }
+
+    /// CR 111.4: the same bare descriptor resolves without a source when the
+    /// suffixed key is globally unique.
+    #[test]
+    fn bare_descriptor_resolves_suffixed_display_name_globally() {
+        let body = known_token_body_by_name_for_source("Gingerbrute", None)
+            .expect("Gingerbrute Token is the only body under that name");
+        assert_eq!(body.display_name, "Gingerbrute Token");
+    }
+
+    /// The suffix retry must not manufacture ambiguity: a bare subtype shared
+    /// by many distinct bodies still resolves to nothing.
+    #[test]
+    fn ambiguous_bare_descriptor_still_resolves_to_nothing() {
+        assert!(
+            known_token_body_by_name_for_source("Golem", Some("Ginger, Queen of Sweets")).is_none(),
+            "Golem names many distinct bodies — the suffix retry must not pick one"
+        );
+        assert!(
+            known_token_body_by_name_for_source("Golem", None).is_none(),
+            "Golem names many distinct bodies — the suffix retry must not pick one"
+        );
+    }
+
+    /// Exact hits are unchanged: the registry control still resolves by its
+    /// unsuffixed display name.
+    #[test]
+    fn exact_display_name_hits_are_unchanged() {
+        let body = known_token_body_by_name_for_source("Heartwood", Some("Soul Tether"))
+            .expect("Heartwood must keep resolving exactly");
+        assert_eq!(body.display_name, "Heartwood");
     }
 }
