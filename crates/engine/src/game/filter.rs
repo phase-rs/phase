@@ -6816,6 +6816,29 @@ pub fn matches_target_filter_on_attack_declaration_record(
     )
 }
 
+/// CR 120.1 + CR 400.7: The `DamageRecord` written for one damage event — the
+/// same source incarnation, recipient, amount, and combat class. The newest
+/// matching row wins, so a repeated identical event (a double-strike source
+/// hitting the same player twice) reads its own row. `None` when no row was
+/// written (zero damage dealt, CR 120.3) or the event did not come from the
+/// damage pipeline.
+pub fn damage_record_for_event<'a>(
+    state: &'a GameState,
+    source_id: ObjectId,
+    source_incarnation: Option<u64>,
+    target: &TargetRef,
+    amount: u32,
+    is_combat: bool,
+) -> Option<&'a DamageRecord> {
+    state.damage_dealt_this_turn.iter().rev().find(|record| {
+        record.source_id == source_id
+            && record.source_incarnation == source_incarnation
+            && record.target == *target
+            && record.amount == amount
+            && record.is_combat == is_combat
+    })
+}
+
 /// CR 120.9 + CR 608.2i + CR 608.2h: Check whether a per-turn combat-damage
 /// snapshot's *source* matches a target filter using the source's event-time
 /// characteristics. Look-back queries ("opponents who were dealt combat damage

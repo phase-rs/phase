@@ -7,8 +7,8 @@ use crate::types::ability::{
     OriginConstraint, TargetFilter, TargetRef, TriggerDefinition, TypedFilter,
 };
 use crate::types::events::{BoundActivationCost, ExertOrigin, GameEvent, PlayerActionKind};
-use crate::types::game_state::{GameState, TriggerSourceContext};
-use crate::types::identifiers::ObjectId;
+use crate::types::game_state::{DamageRecord, GameState, TriggerSourceContext};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::triggers::{
     AbilityLifecyclePoint, ControlChangeSide, PlaneswalkRole, TriggerMode,
@@ -738,6 +738,99 @@ pub(super) fn valid_source_matches(
     match &trigger.valid_source {
         None => true,
         Some(filter) => target_filter_matches_object(state, object_id, filter, source_context),
+    }
+}
+
+/// The identity of one damage event, as carried by `GameEvent::DamageDealt`
+/// or by one source leg of `GameEvent::CombatDamageDealtToPlayer`.
+#[derive(Clone, Copy)]
+struct DamageEventSource<'a> {
+    source_id: ObjectId,
+    source_incarnation: Option<u64>,
+    target: &'a TargetRef,
+    amount: u32,
+    is_combat: bool,
+}
+
+/// CR 400.7: the `ObjectIncarnationRef` set an aggregate combat-damage event
+/// carries, resolved to the incarnation of one of its sources.
+pub(super) fn combat_source_incarnation(
+    source_incarnations: &[ObjectIncarnationRef],
+    source_id: ObjectId,
+) -> Option<u64> {
+    source_incarnations
+        .iter()
+        .find(|source| source.object_id == source_id)
+        .map(|source| source.incarnation)
+}
+
+/// CR 603.2 + CR 120.1 + CR 400.7: whether the source of one damage event
+/// satisfies a damage trigger's source qualifier ("dealt damage by a red
+/// instant or sorcery spell you control", "a creature you control deals
+/// damage").
+///
+/// The qualifier describes the damage event, so it is answered by the source
+/// as it was when it dealt the damage. While the source is still that object
+/// (same incarnation, same zone) the live object is that source, and the live
+/// read keeps every relation a damage snapshot does not carry (attachments,
+/// token and commander status, counters). Once the source has become a new
+/// object (CR 400.7) — a resolved spell put into its owner's graveyard or
+/// exile, an Adventure restored to its creature card (CR 715.3b +
+/// CR 715.3d), a permanent moved by the same resolution — the live object no
+/// longer describes the event, and the `DamageRecord` snapshot written when
+/// the damage was dealt answers instead. The trigger source's own departure
+/// keeps its existing departure-record path in `target_filter_matches_object`.
+fn damage_event_source_matches(
+    state: &GameState,
+    filter: &TargetFilter,
+    damage: DamageEventSource<'_>,
+    source_context: &TriggerSourceContext,
+) -> bool {
+    if departed_subject_record(state, damage.source_id, source_context).is_none() {
+        if let Some(record) = super::filter::damage_record_for_event(
+            state,
+            damage.source_id,
+            damage.source_incarnation,
+            damage.target,
+            damage.amount,
+            damage.is_combat,
+        )
+        .filter(|record| !damage_source_is_still_recorded_object(state, record))
+        {
+            return super::filter::matches_target_filter_on_damage_record_source(
+                state,
+                record,
+                filter,
+                &super::filter::FilterContext::from_trigger_source(source_context),
+            );
+        }
+    }
+    target_filter_matches_object(state, damage.source_id, filter, source_context)
+}
+
+/// CR 400.7: whether the live object at a damage record's source id is still
+/// the object that dealt that damage — the recorded incarnation in the
+/// recorded zone.
+fn damage_source_is_still_recorded_object(state: &GameState, record: &DamageRecord) -> bool {
+    state.objects.get(&record.source_id).is_some_and(|object| {
+        object.zone == record.source_zone
+            && record
+                .source_incarnation
+                .is_none_or(|incarnation| incarnation == object.incarnation)
+    })
+}
+
+/// `valid_source_matches` for a damage trigger: the source qualifier is
+/// evaluated for the damage event (see `damage_event_source_matches`).
+fn valid_damage_source_matches(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    damage: DamageEventSource<'_>,
+    source_context: &TriggerSourceContext,
+) -> bool {
+    match &trigger.valid_source {
+        None => true,
+        Some(filter) => damage_event_source_matches(state, filter, damage, source_context),
     }
 }
 
@@ -1702,6 +1795,7 @@ fn matching_combat_damage_to_player_sources(
     state: &GameState,
     player_id: PlayerId,
     source_amounts: &[(ObjectId, u32)],
+    source_incarnations: &[ObjectIncarnationRef],
 ) -> Vec<(ObjectId, u32)> {
     if trigger.damage_kind == DamageKindFilter::NoncombatOnly {
         return Vec::new();
@@ -1726,6 +1820,7 @@ fn matching_combat_damage_to_player_sources(
             return Vec::new();
         }
     }
+    let recipient = TargetRef::Player(player_id);
     source_amounts
         .iter()
         .filter(|(src, amt)| {
@@ -1734,7 +1829,18 @@ fn matching_combat_damage_to_player_sources(
                     return false;
                 }
             }
-            valid_source_matches(trigger, state, *src, source_context)
+            valid_damage_source_matches(
+                trigger,
+                state,
+                DamageEventSource {
+                    source_id: *src,
+                    source_incarnation: combat_source_incarnation(source_incarnations, *src),
+                    target: &recipient,
+                    amount: *amt,
+                    is_combat: true,
+                },
+                source_context,
+            )
         })
         .copied()
         .collect()
@@ -1767,6 +1873,7 @@ pub(super) fn match_damage_done(
 ) -> bool {
     if let GameEvent::DamageDealt {
         source_id: dmg_source,
+        source_incarnation,
         target,
         is_combat,
         amount,
@@ -1779,8 +1886,16 @@ pub(super) fn match_damage_done(
         {
             return false;
         }
-        // Check if trigger requires damage from a specific source
-        if !valid_source_matches(trigger, state, *dmg_source, source_context) {
+        // CR 603.2 + CR 120.1: the source qualifier describes this damage
+        // event's source.
+        let damage = DamageEventSource {
+            source_id: *dmg_source,
+            source_incarnation: *source_incarnation,
+            target,
+            amount: *amount,
+            is_combat: *is_combat,
+        };
+        if !valid_damage_source_matches(trigger, state, damage, source_context) {
             return false;
         }
         // CR 120.2a + CR 120.2b: Check damage kind filter
@@ -1848,6 +1963,7 @@ pub(super) fn match_damage_done(
     } else if let GameEvent::CombatDamageDealtToPlayer {
         player_id,
         source_amounts,
+        source_incarnations,
         ..
     } = event
     {
@@ -1860,6 +1976,7 @@ pub(super) fn match_damage_done(
             state,
             *player_id,
             source_amounts,
+            source_incarnations,
         )
         .is_empty()
     } else {
@@ -1898,6 +2015,7 @@ pub(super) fn matching_damage_done_events(
         state,
         *player_id,
         source_amounts,
+        source_incarnations,
     )
     .into_iter()
     .map(|(src, amt)| GameEvent::DamageDealt {
@@ -1908,10 +2026,7 @@ pub(super) fn matching_damage_done_events(
         excess: 0,
         // CR 400.7: the source as it dealt the damage, not a later object
         // at the same id.
-        source_incarnation: source_incarnations
-            .iter()
-            .find(|source| source.object_id == src)
-            .map(|source| source.incarnation),
+        source_incarnation: combat_source_incarnation(source_incarnations, src),
     })
     .collect()
 }
@@ -1926,6 +2041,7 @@ pub(super) fn match_damage_done_once_by_controller(
         GameEvent::CombatDamageDealtToPlayer {
             player_id,
             source_amounts,
+            source_incarnations,
             ..
         } => {
             if !damage_kind_matches(trigger.damage_kind, true) {
@@ -1937,6 +2053,7 @@ pub(super) fn match_damage_done_once_by_controller(
                 state,
                 *player_id,
                 source_amounts,
+                source_incarnations,
             )
             .next()
             .is_some()
@@ -1946,16 +2063,24 @@ pub(super) fn match_damage_done_once_by_controller(
         // `DamageDealt` events as well as combat aggregates.
         GameEvent::DamageDealt {
             source_id: damage_source,
-            target: TargetRef::Player(player_id),
+            source_incarnation,
+            target: target @ TargetRef::Player(player_id),
             amount,
             is_combat,
             ..
         } => {
+            let damage = DamageEventSource {
+                source_id: *damage_source,
+                source_incarnation: *source_incarnation,
+                target,
+                amount: *amount,
+                is_combat: *is_combat,
+            };
             if *is_combat
                 || !damage_kind_matches(trigger.damage_kind, *is_combat)
                 || !damage_amount_matches(trigger, *amount)
                 || !valid_damage_done_once_player_target(trigger, state, *player_id, source_context)
-                || !damage_done_once_source_matches(trigger, state, *damage_source, source_context)
+                || !damage_done_once_source_matches(trigger, state, damage, source_context)
             {
                 return false;
             }
@@ -1986,13 +2111,13 @@ fn valid_damage_done_once_player_target(
 fn damage_done_once_source_matches(
     trigger: &TriggerDefinition,
     state: &GameState,
-    damage_source: ObjectId,
+    damage: DamageEventSource<'_>,
     source_context: &TriggerSourceContext,
 ) -> bool {
     if let Some(filter) = &trigger.valid_source {
-        target_filter_matches_object(state, damage_source, filter, source_context)
+        damage_event_source_matches(state, filter, damage, source_context)
     } else {
-        damage_source == source_event_subject_id(source_context)
+        damage.source_id == source_event_subject_id(source_context)
     }
 }
 
@@ -2004,16 +2129,29 @@ fn matching_combat_damage_once_by_controller_sources<'a>(
     state: &'a GameState,
     player_id: PlayerId,
     source_amounts: &'a [(ObjectId, u32)],
+    source_incarnations: &'a [ObjectIncarnationRef],
 ) -> impl Iterator<Item = (ObjectId, u32)> + 'a {
     let player_matches =
         valid_damage_done_once_player_target(trigger, state, player_id, source_context);
+    let recipient = TargetRef::Player(player_id);
     source_amounts
         .iter()
         .copied()
         .filter(move |(source, amount)| {
             player_matches
                 && damage_amount_matches(trigger, *amount)
-                && damage_done_once_source_matches(trigger, state, *source, source_context)
+                && damage_done_once_source_matches(
+                    trigger,
+                    state,
+                    DamageEventSource {
+                        source_id: *source,
+                        source_incarnation: combat_source_incarnation(source_incarnations, *source),
+                        target: &recipient,
+                        amount: *amount,
+                        is_combat: true,
+                    },
+                    source_context,
+                )
         })
 }
 
@@ -2050,6 +2188,7 @@ pub(super) fn matching_damage_done_once_by_controller_event(
                     state,
                     *player_id,
                     source_amounts,
+                    source_incarnations,
                 )
                 .collect();
 
@@ -2081,16 +2220,24 @@ pub(super) fn matching_damage_done_once_by_controller_event(
         // avoid firing once per source and once for the batch.
         GameEvent::DamageDealt {
             source_id: damage_source,
-            target: TargetRef::Player(player_id),
+            source_incarnation,
+            target: target @ TargetRef::Player(player_id),
             amount,
             is_combat,
             ..
         } => {
+            let damage = DamageEventSource {
+                source_id: *damage_source,
+                source_incarnation: *source_incarnation,
+                target,
+                amount: *amount,
+                is_combat: *is_combat,
+            };
             if !is_combat
                 && damage_kind_matches(trigger.damage_kind, *is_combat)
                 && damage_amount_matches(trigger, *amount)
                 && valid_damage_done_once_player_target(trigger, state, *player_id, source_context)
-                && damage_done_once_source_matches(trigger, state, *damage_source, source_context)
+                && damage_done_once_source_matches(trigger, state, damage, source_context)
             {
                 Some(event.clone())
             } else {
@@ -5075,10 +5222,22 @@ pub(super) fn damage_received_filters_match(
     if let GameEvent::DamageDealt {
         target,
         is_combat,
+        amount,
         source_id: damagesource_id,
+        source_incarnation,
         ..
     } = event
     {
+        // CR 603.2 + CR 120.1: the source qualifier ("dealt damage by a red
+        // instant or sorcery spell you control") describes this damage event's
+        // source.
+        let damage = DamageEventSource {
+            source_id: *damagesource_id,
+            source_incarnation: *source_incarnation,
+            target,
+            amount: *amount,
+            is_combat: *is_combat,
+        };
         match trigger.damage_kind {
             DamageKindFilter::Any => {}
             DamageKindFilter::CombatOnly if !is_combat => return false,
@@ -5102,7 +5261,7 @@ pub(super) fn damage_received_filters_match(
                     }
                 };
                 recipient_matches
-                    && valid_source_matches(trigger, state, *damagesource_id, source_context)
+                    && valid_damage_source_matches(trigger, state, damage, source_context)
             }
             TargetRef::Player(pid) => {
                 // CR 120.3: Object-scoped triggers ("~ is dealt damage", Enrage) must
@@ -5116,7 +5275,7 @@ pub(super) fn damage_received_filters_match(
                 if !valid_player_matches(trigger, state, *pid, source_context) {
                     return false;
                 }
-                valid_source_matches(trigger, state, *damagesource_id, source_context)
+                valid_damage_source_matches(trigger, state, damage, source_context)
             }
         }
     } else {
@@ -11819,7 +11978,8 @@ mod tests {
             &test_trigger_source_context(&state, watcher),
             &state,
             PlayerId(1),
-            &[(attacker, 3)]
+            &[(attacker, 3)],
+            &[]
         )
         .is_empty());
 
@@ -11836,7 +11996,8 @@ mod tests {
                 &test_trigger_source_context(&state, watcher),
                 &state,
                 PlayerId(0),
-                &[(attacker, 3)]
+                &[(attacker, 3)],
+                &[]
             ),
             vec![(attacker, 3)]
         );
@@ -16434,6 +16595,214 @@ mod tests {
         assert!(
             !fires(opponent_red_sorcery),
             "an opponent's red sorcery must NOT satisfy 'you control'"
+        );
+    }
+
+    /// Deals `amount` damage from a fresh P0 object to P1 through the damage
+    /// record shape the damage pipeline writes, then moves the source to
+    /// `departs_to` (CR 400.7: a new object) and gives the new object
+    /// `later_types` / `later_colors`, as an Adventure restored to its
+    /// creature card would be (CR 715.3d). Returns the source and the
+    /// incarnation it dealt the damage as.
+    fn damage_then_depart(
+        state: &mut GameState,
+        card_id: CardId,
+        dealt_as: (Zone, CoreType, crate::types::mana::ManaColor),
+        is_combat: bool,
+        departs_to: Zone,
+        later: (CoreType, crate::types::mana::ManaColor),
+    ) -> (ObjectId, u64) {
+        let (dealt_zone, dealt_type, dealt_color) = dealt_as;
+        let source = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            "Damage Source".to_string(),
+            dealt_zone,
+        );
+        let incarnation = state.objects[&source].incarnation;
+        state
+            .damage_dealt_this_turn
+            .push_back(crate::types::game_state::DamageRecord {
+                source_id: source,
+                source_controller: PlayerId(0),
+                target: TargetRef::Player(PlayerId(1)),
+                target_controller: PlayerId(1),
+                source_incarnation: Some(incarnation),
+                amount: 2,
+                is_combat,
+                source_core_types: vec![dealt_type],
+                source_colors: vec![dealt_color],
+                source_controller_snapshot: PlayerId(0),
+                source_owner: PlayerId(0),
+                source_zone: dealt_zone,
+                ..Default::default()
+            });
+        crate::game::zones::move_to_zone(state, source, departs_to, &mut Vec::new());
+        let obj = state.objects.get_mut(&source).expect("moved source");
+        assert_ne!(obj.incarnation, incarnation, "CR 400.7: a new object");
+        obj.card_types.core_types = vec![later.0];
+        obj.color = vec![later.1];
+        (source, incarnation)
+    }
+
+    /// GitHub #9637 + CR 603.2 + CR 400.7: every damage-trigger matcher reads
+    /// a damage source that has since become a new object from the damage
+    /// record written when it dealt the damage, not from the object it became.
+    /// Each matcher path is exercised with a source whose damage-time snapshot
+    /// satisfies the qualifier while its later object does not (must fire),
+    /// and the reverse (must not fire).
+    #[test]
+    fn damage_source_qualifier_reads_departed_source_at_damage_time() {
+        use crate::types::mana::ManaColor;
+
+        let mut state = setup();
+        let watcher = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Watcher".to_string(),
+            Zone::Battlefield,
+        );
+        // "a red instant or sorcery spell you control" (Chandra's Phoenix leg).
+        let red_spell = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::AnyOf(vec![
+                TypeFilter::Instant,
+                TypeFilter::Sorcery,
+            ]))
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::HasColor {
+                color: ManaColor::Red,
+            }]),
+        );
+        // "a red creature you control".
+        let red_creature = TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::HasColor {
+                    color: ManaColor::Red,
+                }]),
+        );
+
+        // A red instant that resolved into exile as a blue creature card, and
+        // a blue creature spell that became a red instant card afterwards.
+        let (instant_then_creature, instant_inc) = damage_then_depart(
+            &mut state,
+            CardId(2),
+            (Zone::Stack, CoreType::Instant, ManaColor::Red),
+            false,
+            Zone::Exile,
+            (CoreType::Creature, ManaColor::Blue),
+        );
+        let (creature_then_instant, creature_inc) = damage_then_depart(
+            &mut state,
+            CardId(3),
+            (Zone::Stack, CoreType::Creature, ManaColor::Blue),
+            false,
+            Zone::Graveyard,
+            (CoreType::Instant, ManaColor::Red),
+        );
+        let spell_damage = |source: ObjectId, incarnation: u64| GameEvent::DamageDealt {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 2,
+            is_combat: false,
+            excess: 0,
+            source_incarnation: Some(incarnation),
+        };
+
+        let ctx = test_trigger_source_context(&state, watcher);
+        let with_source = |mode: TriggerMode, filter: &TargetFilter| {
+            let mut trigger = make_trigger(mode);
+            trigger.valid_source = Some(filter.clone());
+            trigger
+        };
+
+        // DamageReceived: "an opponent is dealt damage by <source>".
+        let mut received = with_source(TriggerMode::DamageReceived, &red_spell);
+        received.valid_target = Some(TargetFilter::Typed(
+            TypedFilter::default().controller(ControllerRef::Opponent),
+        ));
+        // DamageDone: "<source> deals damage".
+        let done = with_source(TriggerMode::DamageDone, &red_spell);
+        // DamageDoneOnceByController: "one or more <sources> deal damage".
+        let batched = with_source(TriggerMode::DamageDoneOnceByController, &red_spell);
+
+        let paths: [(&str, &TriggerDefinition, TriggerMatcher); 3] = [
+            ("DamageReceived", &received, match_damage_received),
+            ("DamageDone", &done, match_damage_done),
+            (
+                "DamageDoneOnceByController",
+                &batched,
+                match_damage_done_once_by_controller,
+            ),
+        ];
+        for (path, trigger, matcher) in paths {
+            assert!(
+                matcher(
+                    &spell_damage(instant_then_creature, instant_inc),
+                    trigger,
+                    &ctx,
+                    &state
+                ),
+                "{path}: the source was a red instant spell you controlled when it dealt the damage"
+            );
+            assert!(
+                !matcher(
+                    &spell_damage(creature_then_instant, creature_inc),
+                    trigger,
+                    &ctx,
+                    &state
+                ),
+                "{path}: the source was a blue creature spell when it dealt the damage"
+            );
+        }
+
+        // The aggregate combat-damage event: a red creature that dealt combat
+        // damage and then died (its graveyard card is now a blue instant).
+        let (dead_attacker, attacker_inc) = damage_then_depart(
+            &mut state,
+            CardId(4),
+            (Zone::Battlefield, CoreType::Creature, ManaColor::Red),
+            true,
+            Zone::Graveyard,
+            (CoreType::Instant, ManaColor::Blue),
+        );
+        let ctx = test_trigger_source_context(&state, watcher);
+        let combat = GameEvent::CombatDamageDealtToPlayer {
+            player_id: PlayerId(1),
+            source_amounts: vec![(dead_attacker, 2)],
+            total_damage: 2,
+            source_incarnations: vec![ObjectIncarnationRef::of(dead_attacker, attacker_inc)],
+        };
+        let aggregate_done = with_source(TriggerMode::DamageDone, &red_creature);
+        assert!(listens_on_aggregate_combat_damage_done(&aggregate_done));
+        assert!(
+            match_damage_done(&combat, &aggregate_done, &ctx, &state),
+            "aggregate DamageDone: the attacker was a red creature you controlled"
+        );
+        assert!(
+            !match_damage_done(
+                &combat,
+                &with_source(TriggerMode::DamageDone, &red_spell),
+                &ctx,
+                &state
+            ),
+            "aggregate DamageDone: the attacker was not an instant or sorcery spell"
+        );
+        let aggregate_batched = with_source(TriggerMode::DamageDoneOnceByController, &red_creature);
+        assert!(
+            match_damage_done_once_by_controller(&combat, &aggregate_batched, &ctx, &state),
+            "aggregate DamageDoneOnceByController: the attacker was a red creature you controlled"
+        );
+        assert!(
+            !match_damage_done_once_by_controller(
+                &combat,
+                &with_source(TriggerMode::DamageDoneOnceByController, &red_spell),
+                &ctx,
+                &state
+            ),
+            "aggregate DamageDoneOnceByController: the attacker was not a spell"
         );
     }
 
