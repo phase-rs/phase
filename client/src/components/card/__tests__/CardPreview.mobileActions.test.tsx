@@ -115,8 +115,8 @@ describe("CardPreview mobile action strip", () => {
     expect(cardFrame?.parentElement).toHaveClass("pointer-events-none");
     expect(strip).toHaveClass("pointer-events-auto", "-m-2", "p-2");
 
-    // Reach guard: a tap on the backdrop does dismiss, so the line above is
-    // not passing because nothing listens.
+    // Reach guard: a tap on the backdrop does dismiss, so the not-dismissed
+    // assertions above are not passing because nothing listens.
     const backdrop = container.querySelector<HTMLElement>("[data-card-preview]");
     if (backdrop == null) throw new Error("the mobile preview rendered no backdrop");
     fireEvent.pointerDown(backdrop);
