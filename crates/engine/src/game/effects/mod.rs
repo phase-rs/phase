@@ -27752,6 +27752,24 @@ fn resolve_chain_body(
                             },
                             stack_depth_before_iteration,
                         );
+                    } else if iterations == 1 {
+                        // CR 608.2c: For a non-loop ability whose effect pauses
+                        // (e.g. PutAtLibraryPosition waiting for EffectZoneChoice),
+                        // park the SequentialSibling sub-ability as a continuation
+                        // so it resumes after the choice resolves. This ensures
+                        // "then exile the rest" (Ashnod's Cylix) runs with the
+                        // correct tracked set (the remainder, not the kept card).
+                        if let Some(sibling) = iter_effective
+                            .sub_ability
+                            .as_deref()
+                            .filter(|sub| sub.sub_link == SubAbilityLink::SequentialSibling)
+                        {
+                            park_following_instruction_after_repetition(
+                                state,
+                                iter_effective,
+                                sibling,
+                            );
+                        }
                     }
                     if per_object {
                         // CR 608.2c: the following instruction is owned by the
