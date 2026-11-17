@@ -7223,6 +7223,11 @@ pub(crate) fn filter_selects_players(filter: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        // CR 608.2c: a resolving ability's object→player assignment names the
+        // objects a choice was recorded for (or, per object, the player it was
+        // recorded with); the handler that acts on those objects reads it. It
+        // is a context reference, not a declared player role.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
