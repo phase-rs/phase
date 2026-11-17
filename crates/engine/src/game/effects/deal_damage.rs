@@ -1007,7 +1007,7 @@ pub(crate) fn apply_damage_after_replacement(
     // captured above, before any counter removal.
     let excess = damage_excess_beyond_lethal(
         state,
-        &t,
+        t,
         actual_amount,
         ctx.has_deathtouch,
         loyalty_before,

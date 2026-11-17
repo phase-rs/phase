@@ -1199,3 +1199,455 @@ fn gideon_wither_pause_resumes_with_predamage_loyalty() {
         "the 5 doubled counters must destroy the 4/4 Gideon (CR 704.5f)"
     );
 }
+
+/// CR 614.16 + CR 120.3d + CR 510.2 (V1): Sickle Ripper's 2 wither combat
+/// damage to a Darksteel Colossus under Doubling Season puts exactly 2
+/// -1/-1 counters — the combat leg is a turn-based action (CR 510.2), not
+/// "the effect of a resolving spell or ability", so the effect-worded
+/// doubler must not apply. No CR 616.1 prompt opens either way (single
+/// candidate at base, zero candidates after the fix).
+///
+/// REVERT-FAILING (RED at base): the count is 4 (doubled), not 2.
+/// The DamageDealt + CR 120.1 record reach-guards prove the leg ran.
+#[test]
+fn combat_wither_under_doubling_season_is_not_doubled() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    let mut victim = scenario.add_creature(P0, "Darksteel Colossus", 11, 11);
+    victim
+        .from_oracle_text_with_keywords(&["Trample", "Indestructible"], DARKSTEEL_COLOSSUS_ORACLE);
+    let colossus = victim.id();
+    let ripper = scenario
+        .add_creature_from_oracle(P1, "Sickle Ripper", 2, 1, SICKLE_RIPPER_ORACLE)
+        .wither()
+        .id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().active_player = P1;
+    let target = TargetRef::Object(colossus);
+    let outcome = run_combat_with_blocks(
+        &mut runner,
+        &[(ripper, AttackTarget::Player(P0))],
+        &[(colossus, ripper)],
+    );
+    advance_past_combat_damage(&mut runner);
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "combat must settle to priority with no prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must be empty after combat"
+    );
+    assert_eq!(
+        counter_count(&runner, colossus, &CounterType::Minus1Minus1),
+        2,
+        "CR 614.16: combat wither is not a resolving effect, so Doubling Season must not double the 2 damage"
+    );
+    let dealt = damage_dealt_events(outcome.events(), &target, true);
+    assert_eq!(
+        dealt.len(),
+        1,
+        "reach-guard: the combat leg must emit exactly one DamageDealt"
+    );
+    assert!(
+        matches!(dealt[0], GameEvent::DamageDealt { amount: 2, .. }),
+        "reach-guard: the DamageDealt carries the 2 dealt, got {:?}",
+        dealt[0]
+    );
+    assert_eq!(
+        record_count(&runner, ripper, &target, true),
+        1,
+        "reach-guard: CR 120.1 must record the combat leg exactly once"
+    );
+    assert_eq!(
+        runner.state().objects[&colossus].damage_marked,
+        0,
+        "CR 120.3d: wither damage is never marked"
+    );
+}
+
+/// CR 614.16 first clause + CR 120.3d (V2): Puncture Blast's 3 wither damage
+/// is dealt by a resolving spell effect, so Doubling Season still doubles it
+/// to 6 counters. Preservation pin: 6 both before and after the fix (the
+/// single-candidate auto-apply path takes no prompt either way).
+#[test]
+fn effect_wither_under_doubling_season_still_doubles() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    // Sized so the doubled wither counters never kill it (3 damage doubles
+    // to 6 — no toughness pressure either way).
+    let victim = scenario.add_creature(P0, "Victim", 2, 10).id();
+    let blast = scenario
+        .add_spell_to_hand_from_oracle(P1, "Puncture Blast", true, PUNCTURE_BLAST_ORACLE)
+        .wither()
+        .with_mana_cost(parse_mtgjson_mana_cost("{2}{R}"))
+        .id();
+    scenario.with_mana_pool(P1, mana(&[(ManaType::Red, 1), (ManaType::Colorless, 2)]));
+
+    let mut runner = scenario.build();
+    give_priority(&mut runner, P1);
+    let target = TargetRef::Object(victim);
+    let outcome = runner.cast(blast).target_object(victim).resolve();
+
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the cast must settle to priority with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must be empty after the cast resolves"
+    );
+    assert_eq!(
+        counter_count(&runner, victim, &CounterType::Minus1Minus1),
+        6,
+        "CR 614.16: resolving-spell wither is an eligible effect, so the 3 damage must double to 6"
+    );
+    // Reach-guard: the spell resolved (graveyard, no short-circuit) and the
+    // leg provably ran (DamageDealt + CR 120.1 record).
+    assert_eq!(
+        outcome.zone_of(blast),
+        Zone::Graveyard,
+        "reach-guard: Puncture Blast must resolve to the graveyard"
+    );
+    let dealt = damage_dealt_events(outcome.events(), &target, false);
+    assert_eq!(
+        dealt.len(),
+        1,
+        "reach-guard: the leg must emit exactly one DamageDealt"
+    );
+    assert!(
+        matches!(dealt[0], GameEvent::DamageDealt { amount: 3, .. }),
+        "reach-guard: the DamageDealt carries the 3 dealt, got {:?}",
+        dealt[0]
+    );
+    assert_eq!(
+        record_count(&runner, blast, &target, false),
+        1,
+        "reach-guard: CR 120.1 must record the leg exactly once"
+    );
+    assert_eq!(
+        runner.state().objects[&victim].damage_marked,
+        0,
+        "CR 120.3d: wither damage is never marked"
+    );
+}
+
+/// Vorinclex, Monstrous Raider's VERBATIM Oracle text (card-data export; 6/6).
+/// Actor-worded ("If you would put ...") with no "effect" restriction, so its
+/// doubling is cause-blind by construction — the F1 gate must leave it alone.
+const VORINCLEX_ORACLE: &str = "Trample, haste\nIf you would put one or more counters on a permanent or player, put twice that many of each of those kinds of counters on that permanent or player instead.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.";
+
+/// CR 614.16 Selesnya-ruling row (V4): activating Gideon's [+1] under
+/// Doubling Season adds exactly 1 loyalty — paying a loyalty cost is not "an
+/// effect", so the effect-worded doubler must not apply. The Vorinclex
+/// sibling pins the cause-blind actor wording (same activation → +2, both
+/// before and after the fix).
+///
+/// REVERT-FAILING (RED at base): loyalty is 5 (doubled), not 4.
+/// Reach-guard: the activation completed and loyalty moved up (no
+/// short-circuit), so only the count discriminates.
+#[test]
+fn loyalty_cost_under_doubling_season_is_not_doubled() {
+    for (label, doubler, expected) in [("Doubling Season", false, 4), ("Vorinclex", true, 5)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let gideon = scenario
+            .add_planeswalker_from_oracle(
+                P0,
+                "Gideon of the Trials",
+                "Gideon",
+                3,
+                GIDEON_OF_THE_TRIALS_ORACLE,
+            )
+            .id();
+        if doubler {
+            scenario.add_creature_from_oracle(
+                P0,
+                "Vorinclex, Monstrous Raider",
+                6,
+                6,
+                VORINCLEX_ORACLE,
+            );
+        } else {
+            scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+        }
+
+        let mut runner = scenario.build();
+        give_priority(&mut runner, P0);
+        runner.activate(gideon, 0).resolve();
+
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "{label}: the activation must settle to priority, got {:?}",
+            runner.state().waiting_for
+        );
+        let loyalty = runner.state().objects[&gideon].loyalty;
+        assert!(
+            loyalty.is_some_and(|l| l > 3),
+            "{label} reach-guard: the [+1] must resolve and raise loyalty, got {loyalty:?}"
+        );
+        assert_eq!(
+            loyalty,
+            Some(expected),
+            "{label}: the [+1] loyalty cost must land exactly (4 under Doubling Season per CR 614.16, 5 under cause-blind Vorinclex), got {loyalty:?}"
+        );
+    }
+}
+
+/// Elspeth Conquers Death's VERBATIM Oracle text (card-data export; Saga).
+/// No Oracle clause places lore counters — lore arrives via the CR 714
+/// turn-based action, cited instead of Oracle (em dashes as \u{2014}).
+const ELSPETH_CONQUERS_DEATH_ORACLE: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI \u{2014} Exile target permanent an opponent controls with mana value 3 or greater.\nII \u{2014} Noncreature spells your opponents cast cost {2} more to cast until your next turn.\nIII \u{2014} Return target creature or planeswalker card from your graveyard to the battlefield. Put a +1/+1 counter or a loyalty counter on it.";
+
+/// CR 714.3c + CR 614.16 (V5): advancing into the precombat main with a Saga
+/// under Doubling Season places exactly 1 lore counter — the turn-based
+/// action is not "an effect", so the effect-worded doubler must not apply.
+/// The Vorinclex sibling pins the cause-blind actor wording (same advance →
+/// 2 lore, both before and after the fix).
+///
+/// REVERT-FAILING (RED at base): lore is 2 (doubled), not 1.
+/// Reach-guard: the phase advanced and the chapter-I trigger queued and
+/// resolved (its exile proves the Saga machinery ran), so only the count
+/// discriminates.
+#[test]
+fn saga_lore_turn_based_action_is_not_doubled() {
+    for (label, use_vorinclex, expected) in [("Doubling Season", false, 1), ("Vorinclex", true, 2)]
+    {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        // Stage the subtype BEFORE parsing: the parser's saga route
+        // (`parse_saga_chapters`) only runs when the staged subtypes include
+        // "Saga" (modal-saga idiom — `add_enchantment_from_oracle` parses
+        // with no subtypes, which yields zero chapters).
+        let saga = scenario
+            .add_creature(P0, "Elspeth Conquers Death", 0, 0)
+            .as_enchantment()
+            .with_subtypes(vec!["Saga"])
+            .from_oracle_text(ELSPETH_CONQUERS_DEATH_ORACLE)
+            .id();
+        if use_vorinclex {
+            scenario.add_creature_from_oracle(
+                P0,
+                "Vorinclex, Monstrous Raider",
+                6,
+                6,
+                VORINCLEX_ORACLE,
+            );
+        } else {
+            scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+        }
+        // Chapter-I exile target: MV 3 or greater, controlled by the opponent.
+        let dummy = scenario
+            .add_creature(P1, "Target Dummy", 2, 2)
+            .with_mana_cost(parse_mtgjson_mana_cost("{3}"))
+            .id();
+        scenario.with_library_top(P0, &["Plains"; 10]);
+        scenario.with_library_top(P1, &["Plains"; 10]);
+
+        let mut runner = scenario.build();
+        {
+            let state = runner.state_mut();
+            state.turn_number = 2;
+            state.active_player = P0;
+            state.priority_player = P0;
+            state.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        runner.advance_to_phase(Phase::PreCombatMain);
+
+        // Drain the chapter triggers the lore spins up: order (identity),
+        // then priority passes. Chapter I's exile finds exactly one legal
+        // target (the MV-3 dummy) and the engine applies it without a
+        // target prompt — the queued order plus the exile itself prove
+        // chapter I ran, so both paths are accepted below.
+        let mut saw_order_prompt = false;
+        for _ in 0..64 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::OrderTriggers { triggers, .. } => {
+                    saw_order_prompt = true;
+                    assert!(
+                        triggers.iter().any(|t| t.description.contains("Chapter 1")),
+                        "{label} reach-guard: the lore must queue chapter I, got {triggers:?}"
+                    );
+                    let order = (0..triggers.len()).collect();
+                    runner
+                        .act(GameAction::OrderTriggers { order })
+                        .expect("order triggers");
+                }
+                WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                    runner
+                        .act(GameAction::ChooseTarget {
+                            target: Some(TargetRef::Object(dummy)),
+                        })
+                        .expect("exile the MV-3 dummy");
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).expect("pass priority");
+                }
+                other => panic!("{label}: unexpected prompt while settling chapter I: {other:?}"),
+            }
+        }
+
+        assert!(
+            saw_order_prompt,
+            "{label} reach-guard: the lore placement must queue chapter triggers (phase advanced, chapters parsed)"
+        );
+        assert_eq!(
+            runner.state().objects[&dummy].zone,
+            Zone::Exile,
+            "{label} reach-guard: chapter I must exile the dummy"
+        );
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .get(&saga)
+                .and_then(|o| o.counters.get(&CounterType::Lore).copied())
+                .unwrap_or(0),
+            expected,
+            "{label}: the CR 714.3c turn-based action must place exactly 1 lore (2 under cause-blind Vorinclex), got {:?}",
+            runner.state().objects.get(&saga).and_then(|o| o.counters.get(&CounterType::Lore).copied())
+        );
+    }
+}
+
+/// Hypnotic Grifter's VERBATIM Oracle text ({U} 1/2; verified against
+/// MTGJSON: ability line plus reminder parenthetical, keyword `Connive`).
+const HYPNOTIC_GRIFTER_ABILITY: &str =
+    "{3}: This creature connives. (Draw a card, then discard a card. If you discarded a nonland card, put a +1/+1 counter on this creature.)";
+
+/// CR 701.50a + CR 614.16 (V11): a resolving connive ability's +1/+1 counter
+/// is placed by an effect, so Doubling Season still doubles it (2 counters).
+/// Preservation pin: 2 both before and after the fix — a default-`Other`
+/// slip in the connive direct construction would un-double it to 1 with no
+/// other row catching it.
+#[test]
+fn connive_counter_under_doubling_season_still_doubles() {
+    use engine::types::ability::Effect;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    scenario.with_library_top(P0, &["Nonland Top"]);
+    // Empty hand plus the drawn card: the auto-discard path, no
+    // ConniveDiscard choice.
+    let grifter = scenario
+        .add_creature_from_oracle(P0, "Hypnotic Grifter", 1, 2, HYPNOTIC_GRIFTER_ABILITY)
+        .id();
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Colorless, 3)]));
+    let mut runner = scenario.build();
+    let idx = runner.state().objects[&grifter]
+        .abilities
+        .iter()
+        .position(|a| matches!(a.effect.as_ref(), Effect::Connive { .. }))
+        .expect("Hypnotic Grifter must carry a Connive activated ability");
+
+    // P0 pays {3} from the pool staged above.
+    give_priority(&mut runner, P0);
+    runner.activate(grifter, idx).resolve();
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the connive activation must settle to priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must be empty after connive resolves"
+    );
+    // Reach-guard: the full connive process ran (drew the only library card,
+    // discarded it from hand).
+    assert!(
+        runner.state().players[P0.0 as usize].library.is_empty(),
+        "reach-guard: connive must draw the stocked card, library: {:?}",
+        runner.state().players[P0.0 as usize].library.len()
+    );
+    assert!(
+        runner.state().players[P0.0 as usize].hand.is_empty(),
+        "reach-guard: connive must discard the drawn card"
+    );
+    assert_eq!(
+        counter_count(&runner, grifter, &CounterType::Plus1Plus1),
+        2,
+        "CR 701.50a + CR 614.16: the resolving connive effect's counter must double to 2 under Doubling Season"
+    );
+}
+
+/// Forgotten Ancient's VERBATIM Oracle text (0/3; verified against MTGJSON).
+const FORGOTTEN_ANCIENT_ORACLE: &str = "Whenever a player casts a spell, you may put a +1/+1 counter on this creature.\nAt the beginning of your upkeep, you may move any number of +1/+1 counters from this creature onto other creatures.";
+
+/// CR 122.5 + CR 614.16 (V12): moving 2 counters under Doubling Season lands
+/// 4 on the destination — the move's Add stage inherits the initiating
+/// cause (a resolving upkeep trigger ability), which stays eligible.
+/// Preservation pin: 4 both before and after the fix — a dropped cause on
+/// `PendingCounterMove` regresses this to 2 with no other row catching it.
+/// Reach-guard: the source is emptied AND the destination holds counters
+/// (a no-op move fails both).
+#[test]
+fn moved_counters_under_doubling_season_still_double() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::Upkeep);
+    scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON_ORACLE);
+    let ancient = scenario
+        .add_creature_from_oracle(P0, "Forgotten Ancient", 0, 3, FORGOTTEN_ANCIENT_ORACLE)
+        .with_plus_counters(2)
+        .id();
+    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
+
+    let mut runner = scenario.build();
+    runner.state_mut().turn_number = 2;
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+
+    // Pump the turn machinery once: beginning-of-upkeep triggers queue
+    // lazily on the first pass after upkeep entry, never at scenario setup
+    // (issue-680 idiom — without this the loop below breaks immediately).
+    runner.auto_advance_to_main_phase();
+
+    let mut guard = 0;
+    loop {
+        guard += 1;
+        assert!(guard < 50, "stuck at {:?}", runner.state().waiting_for);
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept upkeep move");
+            }
+            WaitingFor::MoveCountersDistribution { .. } => {
+                runner
+                    .act(GameAction::ChooseCounterMoveDistribution {
+                        selections: vec![engine::types::game_state::CounterMoveChoice {
+                            destination_id: bear,
+                            counter_type: CounterType::Plus1Plus1,
+                            count: 2,
+                        }],
+                    })
+                    .expect("move both counters to bear");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        counter_count(&runner, ancient, &CounterType::Plus1Plus1),
+        0,
+        "reach-guard: the move must empty the Ancient"
+    );
+    assert_eq!(
+        counter_count(&runner, bear, &CounterType::Plus1Plus1),
+        4,
+        "CR 122.5 + CR 614.16: the moved 2 counters must double to 4 on the destination"
+    );
+}
