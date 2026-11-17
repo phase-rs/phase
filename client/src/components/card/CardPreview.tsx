@@ -882,7 +882,52 @@ function CardPreviewInner({
   );
 }
 
-/** Mobile/tablet: card anchored right (landscape) or center (portrait), whole card visible. */
+/**
+ * The mobile modal preview's frame, sized to the drawn card so the frame IS the
+ * card: the image, the art fallback tile, the skeleton and the card back all
+ * fill it, and nothing can anchor to empty space beside the card (#11001). The
+ * width is the smallest of three bounds:
+ * - a ceiling: 488px, the `normal` image's native width, so the card is never
+ *   upscaled (420px for a rotated card's long edge);
+ * - the room across: the screen less padding in portrait, and 45vw in
+ *   landscape, which keeps the board in view and leaves the action strip room
+ *   on the left;
+ * - the room down, converted through the card's 488:680 ratio: the screen less
+ *   padding, and in portrait less the action strip under the card as well
+ *   (5.25rem covers the p-4 padding, the gap-3 and the strip's pill).
+ */
+const MOBILE_PREVIEW_FRAME_CLASS = {
+  upright: [
+    "aspect-[488/680]",
+    "w-[min(488px,calc(100vw_-_2rem),calc((100dvh_-_5.25rem)*488/680))]",
+    "landscape:w-[min(488px,45vw,calc((100dvh_-_3rem)*488/680))]",
+  ].join(" "),
+  rotated: [
+    "aspect-[680/488]",
+    "w-[min(420px,calc(100vw_-_2rem),calc((100dvh_-_5.25rem)*680/488))]",
+    "landscape:w-[min(420px,45vw,calc((100dvh_-_3rem)*680/488))]",
+  ].join(" "),
+};
+
+/** A rotated card's art is upright art turned a quarter inside the 680:488
+ *  frame: as wide as the frame is tall and as tall as it is wide, centered
+ *  before the turn. */
+const MOBILE_PREVIEW_ROTATED_IMAGE_CLASS = [
+  "absolute left-1/2 top-1/2 h-[calc(100%*680/488)] w-[calc(100%*488/680)]",
+  "-translate-x-1/2 -translate-y-1/2 rotate-90 object-cover",
+].join(" ");
+
+/** One button in the mobile preview's action strip, without a text color. */
+const MOBILE_ACTION_PILL_CLASS = [
+  "rounded-full border border-white/20 bg-black/70 px-4 py-2",
+  "text-sm font-semibold shadow-lg backdrop-blur active:bg-black/80",
+].join(" ");
+
+/**
+ * Mobile/tablet: card anchored right (landscape) or center (portrait), whole
+ * card visible. Its actions (Flip, Report) sit in a strip beside the card, left
+ * of it in landscape and below it in portrait, so they never cover the card.
+ */
 function MobilePreviewOverlay({
   cardName,
   art,
@@ -979,54 +1024,66 @@ function MobilePreviewOverlay({
     );
   }
 
+  const hasActions = isFlip || report != null;
+
   // pointerdown (not click): the touch-release that opened this overlay fires
-  // pointerup, not pointerdown, so a fresh tap is required to dismiss.
+  // pointerup, not pointerdown, so a fresh tap is required to dismiss. The card
+  // and the action strip each stop it, so only a tap on the backdrop dismisses.
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4 landscape:justify-end landscape:p-6"
       data-card-preview
       onPointerDown={onDismiss}
     >
-      <div
-        className={isRotated
-          ? "relative h-[min(60vw,300px)] w-[min(84vw,420px)] max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"
-          : "relative max-h-[calc(100dvh-2rem)] max-w-full overflow-hidden rounded-lg shadow-2xl landscape:max-w-[45vw]"}
-        onPointerDown={(e) => e.stopPropagation()}
-      >
-        {art.kind === "back" ? (
-          <CardBackFallback className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full rounded-lg" />
-        ) : showArtFallback ? (
-          <CardArtFallback
-            name={cardName}
-            className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full rounded-lg"
-          />
-        ) : !src ? (
-          // Still resolving — skeleton, not the artless tile.
-          <div className="aspect-[5/7] max-h-[calc(100dvh-2rem)] w-[68vw] max-w-full animate-pulse rounded-lg bg-gray-700" />
-        ) : (
-          <img
-            src={src}
-            {...getCardImageSrcSetProps(src, art.rungs)}
-            alt={cardName}
-            draggable={false}
-            onError={() => art.advanceFailedSource?.(src)}
-            className={isRotated
-              ? "absolute left-1/2 top-1/2 h-[min(84vw,420px)] w-[min(60vw,300px)] -translate-x-1/2 -translate-y-1/2 rotate-90 object-cover"
-              : `max-h-[calc(100dvh-2rem)] max-w-full object-contain${isFlip ? " transition-transform duration-200" : ""}${flipped ? " rotate-180" : ""}`}
-          />
-        )}
-        {isFlip && (
-          <button
-            type="button"
-            onClick={() => setFlipped((f) => !f)}
-            className="pointer-events-auto absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full border border-white/20 bg-black/70 px-4 py-2 text-sm font-semibold text-white shadow-lg backdrop-blur active:bg-black/80"
+      <div className="flex flex-col items-center gap-3 landscape:flex-row-reverse landscape:items-end">
+        <div
+          className={`relative shrink-0 overflow-hidden rounded-lg shadow-2xl ${
+            isRotated ? MOBILE_PREVIEW_FRAME_CLASS.rotated : MOBILE_PREVIEW_FRAME_CLASS.upright
+          }`}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          {art.kind === "back" ? (
+            <CardBackFallback className="h-full w-full" />
+          ) : showArtFallback ? (
+            <CardArtFallback name={cardName} className="h-full w-full" />
+          ) : !src ? (
+            // Still resolving: a skeleton, not the artless tile.
+            <div className="h-full w-full animate-pulse bg-gray-700" />
+          ) : (
+            <img
+              src={src}
+              {...getCardImageSrcSetProps(src, art.rungs)}
+              alt={cardName}
+              draggable={false}
+              onError={() => art.advanceFailedSource?.(src)}
+              className={isRotated
+                ? MOBILE_PREVIEW_ROTATED_IMAGE_CLASS
+                : `h-full w-full object-cover${isFlip ? " transition-transform duration-200" : ""}${flipped ? " rotate-180" : ""}`}
+            />
+          )}
+        </div>
+        {hasActions && (
+          <div
+            className="flex items-center gap-2 landscape:flex-col landscape:items-end"
+            onPointerDown={(event) => event.stopPropagation()}
+            data-card-preview-actions
           >
-            ⟳ {t("preview.flip")}
-          </button>
-        )}
-        {report && (
-          <div className="absolute bottom-3 left-3 rounded-full border border-white/20 bg-black/70 px-3 py-1.5 shadow-lg backdrop-blur">
-            <ReportCardButton key={report.oracleId || report.name} {...report} />
+            {isFlip && (
+              <button
+                type="button"
+                onClick={() => setFlipped((isFlipped) => !isFlipped)}
+                className={`${MOBILE_ACTION_PILL_CLASS} text-white`}
+              >
+                ⟳ {t("preview.flip")}
+              </button>
+            )}
+            {report && (
+              <ReportCardButton
+                key={report.oracleId || report.name}
+                className={MOBILE_ACTION_PILL_CLASS}
+                {...report}
+              />
+            )}
           </div>
         )}
       </div>
@@ -1364,7 +1421,11 @@ function ParsedAbilitiesPanel({ name, cardTypes, keywords, localizedTypeLine, pa
         <SupportSummary items={items} />
         {report && (
           <div className="mt-1 flex justify-end">
-            <ReportCardButton key={report.oracleId || report.name} {...report} />
+            <ReportCardButton
+              key={report.oracleId || report.name}
+              className="text-[11px]"
+              {...report}
+            />
           </div>
         )}
       </div>

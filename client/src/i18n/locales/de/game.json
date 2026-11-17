@@ -161,6 +161,7 @@
     "flip": "Umdrehen",
     "report": "Problem melden",
     "reported": "Gemeldet ✓",
+    "reportNotSent": "Nicht gesendet",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",

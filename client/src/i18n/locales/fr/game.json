@@ -161,6 +161,7 @@
     "flip": "Pivoter",
     "report": "Signaler un problème",
     "reported": "Signalé ✓",
+    "reportNotSent": "Non envoyé",
     "altParsedAbilities": "Alt : capacités analysées",
     "debugId": "ID : {{id}}",
     "engineParse": "Analyse du moteur",

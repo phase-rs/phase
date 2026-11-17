@@ -161,6 +161,7 @@
     "flip": "Girar",
     "report": "Informar de un problema",
     "reported": "Informado ✓",
+    "reportNotSent": "No enviado",
     "altParsedAbilities": "Alt: habilidades analizadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análisis del motor",

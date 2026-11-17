@@ -161,6 +161,7 @@
     "flip": "Flip",
     "report": "Report a problem",
     "reported": "Reported ✓",
+    "reportNotSent": "Not sent",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",
