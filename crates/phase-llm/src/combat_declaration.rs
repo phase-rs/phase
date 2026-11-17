@@ -22,9 +22,12 @@
 //! set of them, so it keeps choosing one of the engine's candidates
 //! ([`crate::game_decision`]).
 
+use std::collections::HashMap;
+
 use engine::game::combat::{
     complete_attacker_proposal, complete_blocker_proposal, validate_attack_declaration,
-    validate_blockers_for_player, AttackTarget, CombatTaxPosture,
+    validate_blockers_for_player, AttackTarget, BlockRequirement, CombatRequirement,
+    CombatTaxPosture,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -90,11 +93,11 @@ impl ComposedDeclaration {
     /// describes.
     pub(crate) fn instruction(&self) -> &'static str {
         match (&self.pairs, &self.nothing) {
-            (DeclarationPairs::Attacks(_), Some(_)) => {
+            (DeclarationPairs::Attacks { .. }, Some(_)) => {
                 "Choose a list of options: every attack you list is declared together, and \
                  each creature attacks only once. To declare no attackers, choose 0 alone."
             }
-            (DeclarationPairs::Attacks(_), None) => {
+            (DeclarationPairs::Attacks { .. }, None) => {
                 "Choose a list of options: every attack you list is declared together, and \
                  each creature attacks only once."
             }
@@ -138,17 +141,26 @@ impl ComposedDeclaration {
 }
 
 /// The pairs one pending combat declaration is composed from, in the order
-/// the engine lists them.
+/// the engine lists them, with the prompt's records of what it requires.
 #[derive(Debug)]
 enum DeclarationPairs {
-    /// CR 508.1a + CR 508.1b: each creature that can attack, with each
-    /// player, planeswalker or battle it can attack.
-    Attacks(Vec<(ObjectId, AttackTarget)>),
-    /// CR 509.1a: each creature the defending player controls that can block,
-    /// with each attacker it can block.
+    Attacks {
+        /// CR 508.1a + CR 508.1b: each creature that can attack, with each
+        /// player, planeswalker or battle it can attack.
+        attacks: Vec<(ObjectId, AttackTarget)>,
+        /// CR 508.1d: what the prompt requires of each attacker.
+        requirements: HashMap<ObjectId, CombatRequirement>,
+    },
     Blocks {
         defender: PlayerId,
+        /// CR 509.1a: each creature the defending player controls that can
+        /// block, with each attacker it can block.
         blocks: Vec<(ObjectId, ObjectId)>,
+        /// CR 509.1c: what the prompt requires of each blocker.
+        requirements: HashMap<ObjectId, CombatRequirement>,
+        /// CR 509.1b + CR 702.111b: the attackers that can't be blocked
+        /// except by two or more creatures, and how many.
+        minimums: HashMap<ObjectId, BlockRequirement>,
     },
 }
 
@@ -166,6 +178,7 @@ impl DeclarationPairs {
                 valid_attacker_ids,
                 valid_attack_targets,
                 valid_attack_targets_by_attacker,
+                attacker_constraints,
                 ..
             } if *player == owner => {
                 let attacks = valid_attacker_ids
@@ -183,12 +196,17 @@ impl DeclarationPairs {
                         targets.iter().map(move |&target| (attacker, target))
                     })
                     .collect();
-                Some(Self::Attacks(attacks))
+                Some(Self::Attacks {
+                    attacks,
+                    requirements: attacker_constraints.clone(),
+                })
             }
             WaitingFor::DeclareBlockers {
                 player,
                 valid_blocker_ids,
                 valid_block_targets,
+                block_requirements,
+                blocker_constraints,
                 ..
             } if *player == owner => {
                 let blocks = valid_blocker_ids
@@ -204,6 +222,8 @@ impl DeclarationPairs {
                 Some(Self::Blocks {
                     defender: *player,
                     blocks,
+                    requirements: blocker_constraints.clone(),
+                    minimums: block_requirements.clone(),
                 })
             }
             _ => None,
@@ -212,7 +232,7 @@ impl DeclarationPairs {
 
     fn len(&self) -> usize {
         match self {
-            Self::Attacks(attacks) => attacks.len(),
+            Self::Attacks { attacks, .. } => attacks.len(),
             Self::Blocks { blocks, .. } => blocks.len(),
         }
     }
@@ -220,21 +240,45 @@ impl DeclarationPairs {
     /// The label of the empty declaration's option.
     fn nothing_label(&self) -> &'static str {
         match self {
-            Self::Attacks(_) => "Declare no attackers",
+            Self::Attacks { .. } => "Declare no attackers",
             Self::Blocks { .. } => "Declare no blockers",
         }
     }
 
-    /// One label per pair, named as `viewer` sees the board in `visible`.
+    /// One label per pair, named as `viewer` sees the board in `visible`,
+    /// with what the prompt requires of its creatures.
     fn labels(&self, visible: &GameState, viewer: PlayerId) -> Vec<String> {
         match self {
-            Self::Attacks(attacks) => attacks
+            Self::Attacks {
+                attacks,
+                requirements,
+            } => attacks
                 .iter()
-                .map(|&(attacker, target)| describe_attack(visible, viewer, attacker, target))
+                .map(|&(attacker, target)| {
+                    describe_attack(
+                        visible,
+                        viewer,
+                        (attacker, target),
+                        requirements.get(&attacker),
+                    )
+                })
                 .collect(),
-            Self::Blocks { blocks, .. } => blocks
+            Self::Blocks {
+                blocks,
+                requirements,
+                minimums,
+                ..
+            } => blocks
                 .iter()
-                .map(|&(blocker, attacker)| describe_block(visible, viewer, blocker, attacker))
+                .map(|&(blocker, attacker)| {
+                    describe_block(
+                        visible,
+                        viewer,
+                        (blocker, attacker),
+                        requirements.get(&blocker),
+                        minimums.get(&attacker),
+                    )
+                })
                 .collect(),
         }
     }
@@ -250,7 +294,7 @@ impl DeclarationPairs {
     /// engine's own candidates are completed.
     fn declare(&self, state: &GameState, chosen: &[usize]) -> Result<GameAction, String> {
         match self {
-            Self::Attacks(pairs) => {
+            Self::Attacks { attacks: pairs, .. } => {
                 let attacks: Vec<(ObjectId, AttackTarget)> =
                     chosen.iter().map(|&index| pairs[index]).collect();
                 let declared = GameAction::DeclareAttackers {
@@ -269,6 +313,7 @@ impl DeclarationPairs {
             Self::Blocks {
                 defender,
                 blocks: pairs,
+                ..
             } => {
                 let assignments: Vec<(ObjectId, ObjectId)> =
                     chosen.iter().map(|&index| pairs[index]).collect();
@@ -320,6 +365,11 @@ mod tests {
     const BOGGART_BRUTE: &str =
         "Menace (This creature can't be blocked except by two or more creatures.)";
     const BLOODROCK_CYCLOPS: &str = "This creature attacks each combat if able.";
+    const RAZORGRASS_SCREEN: &str =
+        "Defender (This creature can't attack.)\nThis creature blocks each combat if able.";
+    /// What a block line on Boggart Brute adds, read from the prompt's
+    /// minimum-blocker record.
+    const NEEDS_TWO_BLOCKERS: &str = "the attacker can't be blocked except by 2 or more creatures";
     const GHOSTLY_PRISON: &str = "Creatures can't attack you unless their controller pays {2} \
          for each creature they control that's attacking you.";
 
@@ -655,7 +705,8 @@ mod tests {
                 option_number(
                     &request,
                     &format!(
-                        "{name} (controlled by You) blocks Boggart Brute (controlled by Player 0)"
+                        "{name} (controlled by You) blocks Boggart Brute (controlled by Player \
+                         0); {NEEDS_TWO_BLOCKERS}"
                     ),
                 )
             }),
@@ -692,7 +743,10 @@ mod tests {
             &request,
             &[option_number(
                 &request,
-                "Grizzly Bears (controlled by You) blocks Boggart Brute (controlled by Player 0)",
+                &format!(
+                    "Grizzly Bears (controlled by You) blocks Boggart Brute (controlled by Player \
+                     0); {NEEDS_TWO_BLOCKERS}"
+                ),
             )],
         ));
         assert!(
@@ -796,8 +850,8 @@ mod tests {
     }
 
     /// CR 508.1d: a creature that attacks each combat if able makes declaring
-    /// no attackers illegal, so that option is not offered, and a declaration
-    /// that leaves the creature home is refused.
+    /// no attackers illegal, so that option is not offered. Its lines say it
+    /// must attack, and a declaration that leaves it home is refused.
     #[test]
     fn a_creature_that_must_attack_takes_declaring_nothing_off_the_list() {
         let mut scenario = GameScenario::new();
@@ -818,7 +872,7 @@ mod tests {
         assert!(!request.prompt.user.contains("choose 0 alone"));
         let cyclops_attacks = option_number(
             &request,
-            "Bloodrock Cyclops (controlled by You) attacks Player 1",
+            "Bloodrock Cyclops (controlled by You) attacks Player 1; it must attack if able",
         );
         let bears_attack = option_number(
             &request,
@@ -840,6 +894,49 @@ mod tests {
                     (bears, AttackTarget::Player(P1)),
                 ],
                 bands: vec![],
+            })
+        );
+    }
+
+    /// CR 509.1c: a creature that blocks each combat if able makes declaring
+    /// no blockers illegal, so that option is not offered. Its lines say it
+    /// must block, and a declaration that leaves it out is refused.
+    #[test]
+    fn a_creature_that_must_block_takes_declaring_nothing_off_the_list() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let screen = scenario
+            .add_creature(P1, "Razorgrass Screen", 2, 1)
+            .from_oracle_text_with_keywords(&["Defender"], RAZORGRASS_SCREEN)
+            .id();
+        let ogre = scenario.add_creature(P1, "Gray Ogre", 2, 2).id();
+        let mut runner = scenario.build();
+        attack_player_one(&mut runner, &[giant, bears]);
+
+        let (contract, request) = decision(&runner, P1);
+        assert!(
+            !request.prompt.user.contains("Declare no blockers"),
+            "{}",
+            request.prompt.user
+        );
+        let screen_blocks = option_number(
+            &request,
+            "Razorgrass Screen (controlled by You) blocks Grizzly Bears (controlled by Player 0); \
+             it must block if able",
+        );
+        let ogre_blocks = option_number(
+            &request,
+            "Gray Ogre (controlled by You) blocks Hill Giant (controlled by Player 0)",
+        );
+        refusal(answer(&runner, &contract, &request, &[ogre_blocks]));
+        let declared = answer(&runner, &contract, &request, &[screen_blocks, ogre_blocks])
+            .expect("the Screen blocking obeys the requirement");
+        assert_eq!(
+            normalized(&declared),
+            normalized(&GameAction::DeclareBlockers {
+                assignments: vec![(screen, bears), (ogre, giant)],
             })
         );
     }

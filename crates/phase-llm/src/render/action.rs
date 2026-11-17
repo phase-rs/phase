@@ -35,7 +35,7 @@
 use std::collections::BTreeMap;
 
 use engine::analysis::decision_template::AnnouncementSubject;
-use engine::game::combat::AttackTarget;
+use engine::game::combat::{AttackTarget, BlockRequirement, CombatRequirement};
 use engine::game::game_object::AttachTarget;
 use engine::game::mana_sources::produced_mana_for_action;
 use engine::types::ability::TargetRef;
@@ -235,36 +235,108 @@ fn object_name(state: &GameState, id: ObjectId) -> Option<String> {
 /// and what it attacks named as the board names them:
 /// `Serra Angel (controlled by You) attacks Player 1`.
 ///
+/// `requirement` is the engine's record of what the declaring prompt requires
+/// of the attacker (`attacker_constraints` on `WaitingFor::DeclareAttackers`).
+/// CR 508.1d: a requirement to attack is stated after the pair, so the model
+/// knows a declaration that leaves the creature home is refused:
+/// `Bloodrock Cyclops (controlled by You) attacks Player 1; it must attack if able`.
+///
 /// `state` is the viewer-filtered state, as for [`describe_action`].
 pub fn describe_attack(
     state: &GameState,
     viewer: PlayerId,
-    attacker: ObjectId,
-    target: AttackTarget,
+    (attacker, target): (ObjectId, AttackTarget),
+    requirement: Option<&CombatRequirement>,
 ) -> String {
-    format!(
+    let mut line = format!(
         "{} attacks {}",
         reference_label(state, viewer, TargetRef::Object(attacker)),
         reference_label(state, viewer, attack_target_reference(target)),
-    )
+    );
+    match requirement {
+        Some(CombatRequirement::MustAttack { defenders, .. }) => {
+            let defenders = defenders
+                .iter()
+                .map(|defender| attack_target_reference(*defender))
+                .collect();
+            line.push_str("; ");
+            line.push_str(&requirement_fact(state, viewer, "attack", defenders));
+        }
+        // A creature that can't attack is never offered, and the block
+        // records say nothing about attacking.
+        Some(
+            CombatRequirement::CantAttack { .. }
+            | CombatRequirement::MustBlock { .. }
+            | CombatRequirement::CantBlock { .. },
+        )
+        | None => {}
+    }
+    line
 }
 
 /// CR 509.1a: one block a declaration can hold, with the blocking creature and
 /// the attacker it blocks named as the board names them:
 /// `Gray Ogre (controlled by You) blocks Hill Giant (controlled by Player 0)`.
 ///
+/// `requirement` and `minimum` are the engine's records of the declaring
+/// prompt (`blocker_constraints` for the blocker and `block_requirements` for
+/// the attacker, on `WaitingFor::DeclareBlockers`), stated after the pair: CR
+/// 509.1c, a requirement to block, and CR 509.1b + CR 702.111b, an attacker
+/// that can't be blocked except by two or more creatures.
+///
 /// `state` is the viewer-filtered state, as for [`describe_action`].
 pub fn describe_block(
     state: &GameState,
     viewer: PlayerId,
-    blocker: ObjectId,
-    attacker: ObjectId,
+    (blocker, attacker): (ObjectId, ObjectId),
+    requirement: Option<&CombatRequirement>,
+    minimum: Option<&BlockRequirement>,
 ) -> String {
-    format!(
+    let mut line = format!(
         "{} blocks {}",
         reference_label(state, viewer, TargetRef::Object(blocker)),
         reference_label(state, viewer, TargetRef::Object(attacker)),
-    )
+    );
+    match requirement {
+        Some(CombatRequirement::MustBlock { attackers, .. }) => {
+            let attackers = attackers.iter().copied().map(TargetRef::Object).collect();
+            line.push_str("; ");
+            line.push_str(&requirement_fact(state, viewer, "block", attackers));
+        }
+        // A creature that can't block is never offered, and the attack
+        // records say nothing about blocking.
+        Some(
+            CombatRequirement::CantBlock { .. }
+            | CombatRequirement::MustAttack { .. }
+            | CombatRequirement::CantAttack { .. },
+        )
+        | None => {}
+    }
+    if let Some(minimum) = minimum {
+        line.push_str(&format!(
+            "; the attacker can't be blocked except by {} or more creatures",
+            minimum.count
+        ));
+    }
+    line
+}
+
+/// A requirement to `verb` (attack or block) if able, naming whom it
+/// requires when it names anyone: `it must attack Player 2 if able`.
+fn requirement_fact(
+    state: &GameState,
+    viewer: PlayerId,
+    verb: &str,
+    whom: Vec<TargetRef>,
+) -> String {
+    if whom.is_empty() {
+        return format!("it must {verb} if able");
+    }
+    let named: Vec<String> = whom
+        .into_iter()
+        .map(|reference| reference_label(state, viewer, reference))
+        .collect();
+    format!("it must {verb} {} if able", named.join(" or "))
 }
 
 /// A player or object as the board names it: a player by seat (`You`,
