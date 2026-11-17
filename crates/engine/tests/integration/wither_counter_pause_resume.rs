@@ -630,7 +630,7 @@ fn necroskitter_second_vehicle_arm_identity() {
         1,
         "CR 120.1 must record the inline leg exactly once"
     );
-    // No survival assertion: no deathtouch rides this leg, and the 2-counter
+    // No survival assertion: no deathtouch rides this leg, and the 4-counter
     // count above already proves the victim is still present.
 }
 
@@ -942,7 +942,7 @@ fn village_pillagers_etb_each_leg_pauses_and_resumes() {
 /// deserializes (`#[serde(default)]` → `None`), and a mid-pause save
 /// round-trips and still resumes.
 ///
-/// CR 614.16 (V9): combat no longer pauses (Doubling Season inapplicable),
+/// CR 614.16 (V9): combat never pauses (sequential single candidates auto-apply),
 /// so the mid-pause vehicle is the non-combat Puncture Blast two-modifier
 /// pause — the same `PendingDamagePostCounter` stash with `is_combat` false,
 /// drained through `drain_pending_damage_post_counter` on resume.
