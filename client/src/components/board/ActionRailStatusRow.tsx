@@ -80,8 +80,8 @@ interface HudClusterBounds {
  * disabled, not mounted, not level with the cluster, or with less room right
  * of the cluster than its widest chip needs.
  *
- * Remeasures on every size change and on every drag of either widget, so the
- * bound follows a moved rail or plate.
+ * Remeasures on every size change, on every chip mounting or unmounting, and on
+ * every drag of either widget, so the bound follows a moved rail or plate.
  */
 function useHudClearanceWidth(
   row: HTMLElement | null,

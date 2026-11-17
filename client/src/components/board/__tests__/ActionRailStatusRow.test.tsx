@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
+import { useUiStore } from "../../../stores/uiStore.ts";
 import {
   buildGameState,
   buildPlayers,
@@ -24,6 +25,7 @@ import { ActionRailStatusRow } from "../ActionRailStatusRow.tsx";
 
 const initialViewport = { width: window.innerWidth, height: window.innerHeight };
 const initialFlexLayout = usePreferencesStore.getState().flexLayout;
+const initialFullControl = useUiStore.getState().fullControl;
 
 function setViewport(width: number, height: number) {
   Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
@@ -91,6 +93,7 @@ describe("ActionRailStatusRow", () => {
     useGameStore.getState().reset();
     useMultiplayerStore.setState({ activePlayerId: null, isSpectator: false, playerNames: new Map() });
     usePreferencesStore.setState({ flexLayout: initialFlexLayout });
+    useUiStore.setState({ fullControl: initialFullControl });
   });
 
   it("shows compact chips on a short landscape screen and wraps them upward", () => {
@@ -143,6 +146,23 @@ describe("ActionRailStatusRow", () => {
     sideControls.getBoundingClientRect = () => new DOMRect(714, 296, 46, 54);
     widget.setAttribute("style", "transform: translateX(230px)");
     await waitFor(() => expect(row.style.maxWidth).toBe(""));
+  });
+
+  it("remeasures when a chip mounts, even when nothing it observes resizes", async () => {
+    const { playerHud, sideControls } = mountPlayerHud();
+    const row = renderRow(playerHud);
+    expect(row.style.maxWidth).toBe("302px");
+
+    // The plate has moved, but no observed resize or drag reports it (Happy
+    // DOM's ResizeObserver never fires). Turning Full Control on mounts its
+    // chip in the row, and that alone has to bring the bound up to date.
+    playerHud.getBoundingClientRect = () => new DOMRect(400, 300, 150, 46);
+    sideControls.getBoundingClientRect = () => new DOMRect(554, 296, 46, 54);
+    await act(async () => {
+      useUiStore.setState({ fullControl: true });
+    });
+    expect(screen.getByRole("button", { name: "Full Control On" })).toBeInTheDocument();
+    await waitFor(() => expect(row.style.maxWidth).toBe("232px"));
   });
 
   it("follows the rail when it is dragged", async () => {
