@@ -28,6 +28,7 @@ use crate::types::zones::Zone;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_static::{
     classify_quoted_inner, parse_static_line_multi, promote_nested_ability_quotes,
+    strip_enclosing_sentence_comma,
 };
 use super::super::oracle_target::parse_target_with_ctx;
 use super::super::oracle_util::{
@@ -1484,7 +1485,7 @@ fn push_parsed_statics(
         let token_refs = granting_self_reference_count(&normalized).saturating_sub(creator_refs);
         (normalized, token_refs)
     };
-    let static_text = static_text.trim().trim_end_matches(',').trim();
+    let static_text = strip_enclosing_sentence_comma(&static_text);
     let mut defs = parse_static_line_multi(static_text);
     if defs.is_empty() {
         let modifications = classify_quoted_inner(static_text);

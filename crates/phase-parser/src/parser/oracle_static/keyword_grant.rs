@@ -2050,6 +2050,24 @@ pub fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousModificat
     modifications
 }
 
+/// Strip the *enclosing* sentence's comma that Oracle's punctuation convention
+/// carries INSIDE the closing quote of a granted ability when a clause follows —
+/// e.g. Bronzehide Lion's `..."{G}{W}: Enchanted creature gains indestructible
+/// until end of turn," and it loses all other abilities.` That trailing `,` is
+/// sentence punctuation, not part of the ability; left attached it defeats the
+/// inner duration combinator ("until end of turn," != "until end of turn") and
+/// the phrase falls through to prose, silently dropping the UntilEndOfTurn
+/// duration.
+///
+/// Only the comma is stripped — a trailing PERIOD is the ability's own terminal
+/// punctuation ("{T}: Add {G}." / "...equal to the difference.") that must be
+/// preserved in the serialized `description` (#5599), and it does not defeat
+/// any inner combinator. `split_keyword_list` strips `['.', ',']` because there
+/// the text is consumed structurally, not surfaced as a description.
+pub(crate) fn strip_enclosing_sentence_comma(text: &str) -> &str {
+    text.trim().trim_end_matches(',').trim()
+}
+
 /// CR 604.1: Classify already-stripped inner-quote text into the appropriate
 /// `ContinuousModification` variant. Extracted from
 /// `parse_quoted_ability_modifications` so callers that already have the
@@ -2072,23 +2090,10 @@ pub fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousModificat
 /// canonical inner classifier without exposing the private
 /// `parse_quoted_ability` / `parse_quoted_rule_static_modifications` helpers.
 pub fn classify_quoted_inner(ability_text: &str) -> Vec<ContinuousModification> {
-    // Oracle's punctuation convention carries the *enclosing* sentence's comma
-    // INSIDE the closing quote of a granted ability when a clause follows — e.g.
-    // Bronzehide Lion's `..."{G}{W}: Enchanted creature gains indestructible until
-    // end of turn," and it loses all other abilities.` That trailing `,` is
-    // sentence punctuation, not part of the ability; left attached it defeats the
-    // inner duration combinator ("until end of turn," ≠ "until end of turn") and
-    // the phrase falls through to prose, silently dropping the UntilEndOfTurn
-    // duration. Strip it here, at the single boundary every quoted-grant caller
-    // funnels through (aura grants, token grants, keyword-list grants), so a
-    // quoted ability parses identically to its unquoted form.
-    //
-    // Only the comma is stripped — a trailing PERIOD is the ability's own terminal
-    // punctuation ("{T}: Add {G}." / "...equal to the difference.") that must be
-    // preserved in the serialized `description` (#5599), and it does not defeat
-    // any inner combinator. `split_keyword_list` strips `['.', ',']` because there
-    // the text is consumed structurally, not surfaced as a description.
-    let ability_text = ability_text.trim().trim_end_matches(',').trim();
+    // The enclosing sentence's comma is stripped here and, for the token
+    // quoted-static path, in `oracle_effect/token.rs`, both via
+    // `strip_enclosing_sentence_comma`.
+    let ability_text = strip_enclosing_sentence_comma(ability_text);
     if ability_text.is_empty() {
         return Vec::new();
     }

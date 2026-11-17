@@ -7529,14 +7529,25 @@ fn parse_number_of_objects_exiled_under_controller_this_turn(
         tag(" that was exiled under "),
     ))
     .parse(rest)?;
+    // CR 109.4 + CR 109.5: the possessor is a typed controller reference.
+    // `parse_opponent_possessive` is the shared opponent-possessive combinator
+    // (straight and curly apostrophes), also used by the "died under ... control"
+    // condition grammar.
     let (rest, controller) = alt((
-        value(ControllerRef::Opponent, tag("your opponents'")),
-        value(ControllerRef::Opponent, tag("your opponent's")),
-        value(ControllerRef::Opponent, tag("an opponent's")),
-        value(ControllerRef::You, tag("your")),
+        value(ControllerRef::You, tag("your control")),
+        value(
+            ControllerRef::Opponent,
+            preceded(
+                (
+                    opt(tag("your ")),
+                    super::condition::parse_opponent_possessive,
+                ),
+                tag("control"),
+            ),
+        ),
     ))
     .parse(rest)?;
-    let (rest, _) = tag(" control this turn").parse(rest)?;
+    let (rest, _) = tag(" this turn").parse(rest)?;
     let TargetFilter::Typed(typed) = filter else {
         return Err(oracle_err(input));
     };
@@ -9433,6 +9444,10 @@ mod tests {
             (
                 "artifacts that were exiled under your control this turn",
                 TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+            ),
+            (
+                "creatures that were exiled under your opponents\u{2019} control this turn",
+                TypedFilter::creature().controller(ControllerRef::Opponent),
             ),
         ] {
             let expected = QuantityRef::ZoneChangeCountThisTurn {
