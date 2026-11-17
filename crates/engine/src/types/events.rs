@@ -449,6 +449,12 @@ pub struct ControlChangeObservation {
     /// the board.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gain_watchers: Option<std::sync::Arc<Vec<TriggerSourceContext>>>,
+    /// CR 603.2d + CR 603.10: the functioning trigger-doubling statics, with
+    /// their controllers, on the same post-change board `gain_watchers` was
+    /// latched on. A latched gain-side trigger is counted against these, not
+    /// against the board at publication (where a doubler may have left).
+    #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
+    pub gain_doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
 }
 
 /// CR 603.2d: one functioning "triggers an additional time" static ability
@@ -506,6 +512,7 @@ impl ControlChangeInstructionCapture {
                 watchers: self.watchers.clone(),
                 doublers: self.doublers.clone(),
                 gain_watchers: None,
+                gain_doublers: std::sync::Arc::default(),
             })
     }
 }

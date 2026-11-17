@@ -10,9 +10,11 @@
 //! phase-rs/phase#10947 remains.
 //!
 //! Every row drives the production cast / activation / priority pipeline with
-//! cards built from their verbatim Oracle text (Scryfall).
+//! cards built from their verbatim Oracle text (Scryfall), or, for Mirror Room //
+//! Fractured Realm, the card-data fixture.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{TargetFilter, TypedFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -940,15 +942,21 @@ fn austere_command_returns_kharn_between_its_two_destroys() {
     assert_eq!(library_size(&runner, P0), p0_lib);
 }
 
-/// Matt's F1 witness (CR 603.10 + CR 113.7a): P1's Vedalken Shackles holds P0's
-/// animated Risky Move. P0's Austere Command destroys all artifacts, then all
-/// enchantments. Destroying the Shackles ends its duration, so Risky Move
-/// returns to P0 while it is still on the battlefield; the next mode destroys
-/// it before the change is published. Risky Move existed immediately after it
-/// returned, so P0's gain trigger triggered then, and it survives its source's
-/// destruction: exactly one P0 trigger, which resolves.
-#[test]
-fn shackles_destroyed_before_risky_move_still_fires_its_gain_trigger_for_p0() {
+/// Matt's witness board: P0 controls Opalescence, Risky Move (a 6/6 under it)
+/// and a 2/2; P1's Vedalken Shackles and six Islands take Risky Move, and P1's
+/// gain trigger resolves as a won flip. P0 has a free Austere Command.
+struct ShacklesHoldRiskyMove<T> {
+    runner: GameRunner,
+    risky: ObjectId,
+    bear: ObjectId,
+    shackles: ObjectId,
+    command: ObjectId,
+    staged: T,
+}
+
+fn shackles_hold_risky_move<T>(
+    stage: impl FnOnce(&mut GameScenario) -> T,
+) -> ShacklesHoldRiskyMove<T> {
     let mut scenario = kharn_board(2);
     scenario
         .add_enchantment_from_oracle(P0, "Opalescence", OPALESCENCE)
@@ -983,6 +991,7 @@ fn shackles_destroyed_before_risky_move_still_fires_its_gain_trigger_for_p0() {
         CoreType::Sorcery,
         AUSTERE_COMMAND,
     );
+    let staged = stage(&mut scenario);
     let mut runner = scenario.build();
     // The scenario places objects directly; settle the board they form once.
     engine::game::layers::evaluate_layers(runner.state_mut());
@@ -1015,36 +1024,67 @@ fn shackles_destroyed_before_risky_move_still_fires_its_gain_trigger_for_p0() {
         )),
         "REACH: P1's gain trigger resolved as a win"
     );
+    ShacklesHoldRiskyMove {
+        runner,
+        risky,
+        bear,
+        shackles,
+        command,
+        staged,
+    }
+}
 
-    give_priority(&mut runner, P0);
+/// P0 casts Austere Command choosing "Destroy all artifacts." then "Destroy all
+/// enchantments." Destroying the Shackles ends its duration, so Risky Move
+/// returns to P0 while it is still on the battlefield; the next mode destroys
+/// it before the change is published. Returns the controllers of the Risky Move
+/// triggers on the stack when P0 next receives priority.
+fn austere_returns_then_destroys_risky_move<T>(
+    board: &mut ShacklesHoldRiskyMove<T>,
+) -> Vec<PlayerId> {
+    let runner = &mut board.runner;
+    give_priority(runner, P0);
     let mut events = Vec::new();
-    runner.cast(command).modes(&[0, 1]).commit();
-    drive_until(
-        &mut runner,
-        &mut events,
-        "Austere Command resolved",
-        |state| state.stack.iter().all(|entry| entry.source_id != command),
-    );
+    runner.cast(board.command).modes(&[0, 1]).commit();
+    let command = board.command;
+    drive_until(runner, &mut events, "Austere Command resolved", |state| {
+        state.stack.iter().all(|entry| entry.source_id != command)
+    });
     let state = runner.state();
-    assert_eq!(state.objects[&shackles].zone, Zone::Graveyard, "REACH");
-    assert_eq!(state.objects[&risky].zone, Zone::Graveyard, "REACH");
-    assert_eq!(changes_of(&events, risky), vec![(P1, P0)]);
-    let gain_triggers: Vec<_> = state
+    assert_eq!(
+        state.objects[&board.shackles].zone,
+        Zone::Graveyard,
+        "REACH"
+    );
+    assert_eq!(state.objects[&board.risky].zone, Zone::Graveyard, "REACH");
+    assert_eq!(changes_of(&events, board.risky), vec![(P1, P0)]);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    state
         .stack
         .iter()
-        .filter(|entry| entry.source_id == risky)
+        .filter(|entry| entry.source_id == board.risky)
         .map(|entry| entry.controller)
-        .collect();
-    assert_eq!(gain_triggers, vec![P0], "exactly one P0 gain trigger");
-    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        .collect()
+}
 
+/// Matt's F1 witness (CR 603.10 + CR 113.7a), and the control for the
+/// Fractured Realm row below: Risky Move existed immediately after it returned,
+/// so P0's gain trigger triggered then, and it survives its source's
+/// destruction. With no trigger doubler, exactly one P0 trigger, which resolves.
+#[test]
+fn shackles_destroyed_before_risky_move_still_fires_its_gain_trigger_for_p0() {
+    let mut board = shackles_hold_risky_move(|_| ());
+    let gain_triggers = austere_returns_then_destroys_risky_move(&mut board);
+    assert_eq!(gain_triggers, vec![P0], "exactly one P0 gain trigger");
+
+    let runner = &mut board.runner;
     let seed = seed_for_flip(false);
     let state = runner.state_mut();
     state.rng_seed = seed;
     state.rng_word_pos = 0;
     state.rng = GameRng::seed_from_u64(seed);
     let mut events = Vec::new();
-    settle_answering_risky_move(&mut runner, &mut events);
+    settle_answering_risky_move(runner, &mut events);
     let flips: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -1053,7 +1093,64 @@ fn shackles_destroyed_before_risky_move_still_fires_its_gain_trigger_for_p0() {
         })
         .collect();
     assert_eq!(flips, vec![(P0, false)], "P0 flipped once and lost");
-    assert_eq!(controller(&runner, bear), P1, "P1 gained P0's creature");
+    assert_eq!(
+        controller(runner, board.bear),
+        P1,
+        "P1 gained P0's creature"
+    );
+}
+
+/// Matt's round-2 witness (CR 603.2d + CR 603.10): the same board, plus P0's
+/// Mirror Room // Fractured Realm cast as Fractured Realm ("If a triggered
+/// ability of a permanent you control triggers, that ability triggers an
+/// additional time."). Fractured Realm still functions when Risky Move returns
+/// to P0, so P0's gain trigger triggers twice, although the same mode destroys
+/// both enchantments before the change is published.
+#[test]
+fn fractured_realm_destroyed_with_risky_move_still_doubles_its_gain_trigger() {
+    let mut board = shackles_hold_risky_move(|scenario| {
+        let db = crate::support::shared_card_db().expect("card db");
+        scenario.add_real_card(P0, "Mirror Room", Zone::Hand, db)
+    });
+    let room = board.staged;
+    let runner = &mut board.runner;
+    give_priority(runner, P0);
+    let pool = &mut runner.state_mut().players[0].mana_pool;
+    for _ in 0..7 {
+        pool.add(ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]));
+    }
+    runner.cast(room).modal_back_face(true).resolve();
+    let unlocks = runner.state().objects[&room].room_unlocks;
+    assert_eq!(
+        unlocks.map(|u| (u.left_unlocked, u.right_unlocked)),
+        Some((false, true)),
+        "REACH: cast as Fractured Realm, its door unlocked (CR 709.5d)"
+    );
+    assert!(
+        runner.state().objects[&room]
+            .static_definitions
+            .iter_all()
+            .any(|s| matches!(
+                s.mode,
+                engine::types::statics::StaticMode::DoubleTriggers { .. }
+            )),
+        "REACH: Fractured Realm's doubler functions"
+    );
+    assert_eq!(controller(runner, board.risky), P1, "REACH");
+
+    let gain_triggers = austere_returns_then_destroys_risky_move(&mut board);
+    assert_eq!(
+        board.runner.state().objects[&room].zone,
+        Zone::Graveyard,
+        "REACH: Fractured Realm left with Risky Move"
+    );
+    assert_eq!(
+        gain_triggers,
+        vec![P0, P0],
+        "Risky Move's gain trigger triggers an additional time"
+    );
+    let mut events = Vec::new();
+    settle_answering_risky_move(&mut board.runner, &mut events);
 }
 
 /// Negative control (CR 400.7): Khârn destroyed while Control Magic still

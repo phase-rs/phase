@@ -14603,7 +14603,9 @@ fn trigger_source_matches_doubler_filter(
 /// the board stands now. CR 702.26b + CR 604.1: `active_static_definitions`
 /// owns the gating, so a phased-out doubler doubles nothing. Also latched by
 /// each control-change instruction's capture
-/// (`gain_control::capture_control_change_instruction`).
+/// (`gain_control::capture_control_change_instruction`) and, for a gain side,
+/// by the layer pass that derives a control change
+/// (`layers::queue_derived_control_changes`).
 pub(crate) fn active_trigger_doublers(
     state: &GameState,
 ) -> Vec<crate::types::events::LatchedTriggerDoubler> {
@@ -14626,12 +14628,13 @@ pub(crate) fn active_trigger_doublers(
         .collect()
 }
 
-/// CR 603.10d + CR 603.2d: a look-back control-change trigger triggers, and is
-/// counted, as of immediately before its change. When `trigger` was collected
-/// from one of its event's latched watchers, returns the doublers that
-/// instruction latched with it and that watcher's source context; the trigger
-/// is qualified against those, not against the post-resolution board (where
-/// its source or a doubler may have changed hands or left).
+/// CR 603.10 + CR 603.2d: a control-change trigger collected from one of its
+/// event's latched watchers is counted as of that latch: a look-back trigger
+/// against the doublers its instruction latched immediately before the change,
+/// a latched gain-side trigger against the doublers latched immediately after
+/// a layer-derived change. Returns those doublers and that watcher's source
+/// context; the trigger is qualified against them, not against the board at
+/// publication (where its source or a doubler may have changed hands or left).
 fn control_change_doubling_authority<'a>(
     state: &'a GameState,
     trigger: &'a PendingTrigger,
@@ -14639,30 +14642,37 @@ fn control_change_doubling_authority<'a>(
     &'a [crate::types::events::LatchedTriggerDoubler],
     &'a TriggerSourceContext,
 )> {
+    use crate::types::triggers::ControlChangeSide;
     let Some(GameEvent::ControllerChanged { evidence, .. }) = trigger.trigger_event.as_ref() else {
         return None;
     };
     let observation = state.control_change_observation(*evidence)?;
     let source = trigger.ability.trigger_source.as_ref()?;
     let definition = trigger.ability.trigger_definition_ref.as_ref()?;
-    // The trigger is one of a latched watcher's look-back definitions (not a
-    // gain-side trigger of the same source, collected after the event).
-    observation
-        .watchers
-        .iter()
-        .find(|watcher| watcher.identity == source.identity)?
-        .trigger_entries
-        .iter()
-        .any(|entry| {
-            entry.occurrence == definition.occurrence
-                && is_look_back_control_change(&entry.definition.mode)
-        })
-        .then_some((observation.doublers.as_slice(), source))
+    // The trigger is one of a latched watcher's definitions of that latch's
+    // side (a source can carry both sides).
+    let latched_by = |watchers: &[TriggerSourceContext], side: ControlChangeSide| {
+        watchers
+            .iter()
+            .find(|watcher| watcher.identity == source.identity)
+            .is_some_and(|watcher| {
+                watcher.trigger_entries.iter().any(|entry| {
+                    entry.occurrence == definition.occurrence
+                        && is_control_change_side(&entry.definition.mode, side)
+                })
+            })
+    };
+    if latched_by(&observation.watchers, ControlChangeSide::Loses) {
+        return Some((observation.doublers.as_slice(), source));
+    }
+    let gain_watchers = observation.gain_watchers.as_deref()?;
+    latched_by(gain_watchers, ControlChangeSide::Gains)
+        .then_some((observation.gain_doublers.as_slice(), source))
 }
 
-/// CR 603.2d + CR 603.10d: match a look-back trigger's latched source (the
+/// CR 603.2d + CR 603.10: match a latched control-change trigger's source (the
 /// watcher, `source`) against a latched doubler's scope, entirely as both
-/// stood immediately before the change: no live object, no
+/// stood when latched: no live object, no
 /// `TriggerSourceContext::source_read`. `None` is a scope this evaluator can't
 /// judge from the captured data alone; the trigger is then not doubled (fail
 /// closed; no printed doubler's scope is in that class: see
@@ -15199,8 +15209,8 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerCon
             }
         }
     }
-    // CR 603.10d: a look-back control-change trigger is counted against the
-    // doublers its instruction latched, judged on its latched source.
+    // CR 603.10: a control-change trigger collected from a latch is counted
+    // against the doublers latched with it, judged on its latched source.
     for trigger_context in pending.iter() {
         let Some((doublers, source)) =
             control_change_doubling_authority(state, &trigger_context.pending)

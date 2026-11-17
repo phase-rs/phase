@@ -4475,13 +4475,15 @@ fn finish_layer_evaluation(
 /// on the board this pass settled, immediately after the change. The change is
 /// published at a later drain, after which its watcher (the changed permanent
 /// itself, for "when you gain control of ~") may already have left; its
-/// trigger is collected from this latch, not from that later board.
+/// trigger is collected from this latch, not from that later board. CR 603.2d:
+/// the trigger-doubling statics on that same board are latched with them, so
+/// the trigger is counted as of the event too.
 fn queue_derived_control_changes(
     state: &mut GameState,
     derived: &[(ObjectId, PlayerId, PlayerId)],
     capture: Option<&crate::types::events::ControlChangeInstructionCapture>,
 ) {
-    let mut gain_watchers = None;
+    let mut gain_latch = None;
     for &(object_id, old_controller, new_controller) in derived {
         let Some(subject) = state
             .objects
@@ -4503,13 +4505,17 @@ fn queue_derived_control_changes(
             .filter(|observation| observation.subject.identity == subject)
         {
             Some(mut observation) => {
-                observation.gain_watchers =
-                    Some(Arc::clone(gain_watchers.get_or_insert_with(|| {
+                let (watchers, doublers) = gain_latch.get_or_insert_with(|| {
+                    (
                         Arc::new(super::triggers::latch_control_change_watchers(
                             state,
                             crate::types::triggers::ControlChangeSide::Gains,
-                        ))
-                    })));
+                        )),
+                        Arc::new(super::triggers::active_trigger_doublers(state)),
+                    )
+                });
+                observation.gain_watchers = Some(Arc::clone(watchers));
+                observation.gain_doublers = Arc::clone(doublers);
                 state.record_control_change_observation(observation)
             }
             None => crate::types::events::ControlChangeEvidence::Unrecorded,
