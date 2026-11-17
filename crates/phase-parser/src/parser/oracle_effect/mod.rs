@@ -34579,6 +34579,25 @@ fn proven_subject_player_ref(
     })
 }
 
+/// CR 608.2c + CR 701.21a: the player who performs a `Sacrifice` clause. A
+/// "that player" subject bound to a declared player group (Speedbrood Stalker's
+/// "choose target opponent. ... That player sacrifices ...") is that declared
+/// player, so the sacrificed permanent is one that player controls. Scoped to
+/// the `Sacrifice` arm only: the zone-change arms keep reading the subject
+/// through [`proven_subject_player_ref`], whose shape their chooser and
+/// parent-target inheritance depend on.
+fn sacrifice_subject_player_ref(
+    subject_filter: &TargetFilter,
+    inherits_parent: bool,
+) -> Option<ControllerRef> {
+    match subject_filter {
+        TargetFilter::DeclaredPlayer { group } => {
+            Some(ControllerRef::DeclaredPlayer { group: *group })
+        }
+        _ => proven_subject_player_ref(subject_filter, inherits_parent),
+    }
+}
+
 /// CR 115.1a/c/d: Preserve whether a targeted sacrifice subject is
 /// any player or specifically an opponent while converting the player subject
 /// into the sacrificed permanent filter's controller reference.
@@ -36135,10 +36154,10 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst, origin
         // Also rewrite "they control" refs inside the count expression so
         // the dynamic count resolves against the targeted player's board.
         Effect::Sacrifice { target, count, .. }
-            if proven_subject_player_ref(&subject_filter, subject.inherits_parent).is_some() =>
+            if sacrifice_subject_player_ref(&subject_filter, subject.inherits_parent).is_some() =>
         {
             if let Some(ctrl) =
-                proven_subject_player_ref(&subject_filter, subject.inherits_parent)
+                sacrifice_subject_player_ref(&subject_filter, subject.inherits_parent)
             {
                 let effective_ctrl =
                     sacrifice_subject_controller(ctrl, subject.target.is_some());

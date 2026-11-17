@@ -69,6 +69,7 @@ mod s07_this_way_conditions;
 mod sacrifice_all_cost;
 mod sacrifice_cost_context_identity;
 mod sacrifice_cost_selection_validation;
+mod sacrifice_subject_declared_player;
 mod sacrificial_mana_choice;
 mod saddle_become_effect;
 mod saddle_state_model;

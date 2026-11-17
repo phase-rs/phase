@@ -103628,3 +103628,134 @@ fn unless_damage_that_much_binds_to_primary_damage_amount() {
         "the alternative's amount must share the primary damage quantity"
     );
 }
+
+/// Every `Typed` leg of a (possibly `Or`/`And`-wrapped) filter.
+fn typed_legs(filter: &TargetFilter) -> Vec<&TypedFilter> {
+    match filter {
+        TargetFilter::Typed(tf) => vec![tf],
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().flat_map(typed_legs).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The first `Sacrifice` node of a parsed card, with its target filter.
+fn first_sacrifice<'a>(nodes: &[&'a AbilityDefinition]) -> &'a TargetFilter {
+    nodes
+        .iter()
+        .find_map(|d| match &*d.effect {
+            Effect::Sacrifice { target, .. } => Some(target),
+            _ => None,
+        })
+        .expect("a Sacrifice node")
+}
+
+/// CR 608.2c + CR 701.21a: a "that player sacrifices ..." subject that reaches
+/// back past an unparsed clause to a declared target player scopes the
+/// sacrificed permanent to that declared player. Speedbrood Stalker: every
+/// `Typed` leg of the first sacrifice is controlled by the group the
+/// "choose target opponent" node declares.
+#[test]
+fn sacrifice_subject_declared_player_scopes_the_sacrificed_permanent() {
+    let parsed = parse_oracle_text(
+        "When this creature enters, choose target opponent. Secretly choose a creature or planeswalker that player controls. That player sacrifices a creature or planeswalker of their choice.",
+        "Speedbrood Stalker",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let nodes = all_card_defs(&parsed);
+    let group = nodes
+        .iter()
+        .find(|d| matches!(&*d.effect, Effect::TargetOnly { .. }))
+        .and_then(|d| d.declares_chosen_group)
+        .expect("the target node declares a group");
+    let legs = typed_legs(first_sacrifice(&nodes));
+    assert!(!legs.is_empty());
+    for leg in legs {
+        assert_eq!(
+            leg.controller,
+            Some(ControllerRef::DeclaredPlayer { group }),
+            "{leg:?}"
+        );
+    }
+}
+
+/// CR 608.2c + CR 701.21a: Undercity Plague's "then sacrifices a permanent of
+/// their choice" continues the target player's instructions, so the target
+/// player controls the sacrificed permanent.
+#[test]
+fn undercity_plague_sacrifice_is_scoped_to_target_player() {
+    let parsed = parse_oracle_text(
+        "Target player loses 1 life, discards a card, then sacrifices a permanent of their choice.",
+        "Undercity Plague",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let nodes = all_card_defs(&parsed);
+    let legs = typed_legs(first_sacrifice(&nodes));
+    assert_eq!(legs.len(), 1);
+    assert_eq!(legs[0].controller, Some(ControllerRef::TargetPlayer));
+}
+
+/// CR 608.2c + CR 701.21a: Nicol Bolas, Planeswalker's −9 "That player or that
+/// planeswalker's controller ... then sacrifices seven permanents" is the
+/// player declared by the damage node, the same one its discard reads.
+#[test]
+fn nicol_bolas_minus_nine_sacrifice_is_the_declared_player() {
+    let parsed = parse_oracle_text(
+        "[+3]: Destroy target noncreature permanent.\n[\u{2212}2]: Gain control of target creature.\n[\u{2212}9]: Nicol Bolas deals 7 damage to target player or planeswalker. That player or that planeswalker's controller discards seven cards, then sacrifices seven permanents of their choice.",
+        "Nicol Bolas, Planeswalker",
+        &[],
+        &["Planeswalker".to_string()],
+        &["Bolas".to_string()],
+    );
+    let nodes = all_card_defs(&parsed);
+    let group = nodes
+        .iter()
+        .find(|d| matches!(&*d.effect, Effect::DealDamage { .. }))
+        .and_then(|d| d.declares_chosen_group)
+        .expect("the damage node declares a group");
+    let legs = typed_legs(first_sacrifice(&nodes));
+    assert_eq!(legs.len(), 1);
+    assert_eq!(
+        legs[0].controller,
+        Some(ControllerRef::DeclaredPlayer { group })
+    );
+}
+
+/// CR 608.2c: the declared-player sacrifice scope does not reach zone changes.
+/// Arcane Artisan's "then exiles a card from their hand" keeps its subject
+/// possessive (`Owned{ScopedPlayer}`), no controller and no declared group, so
+/// the target player, not the activator, still makes the choice.
+#[test]
+fn arcane_artisan_exile_from_hand_keeps_scoped_owner() {
+    let parsed = parse_oracle_text(
+        "{2}{U}, {T}: Target player draws a card, then exiles a card from their hand. If a creature card is exiled this way, that player creates a token that's a copy of that card.\nWhen this creature leaves the battlefield, exile all tokens created with it at the beginning of the next end step.",
+        "Arcane Artisan",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let nodes = all_card_defs(&parsed);
+    let (node, target) = nodes
+        .iter()
+        .find_map(|d| match &*d.effect {
+            Effect::ChangeZone {
+                origin: Some(Zone::Hand),
+                target,
+                ..
+            } => Some((d, target)),
+            _ => None,
+        })
+        .expect("the exile-from-hand node");
+    assert_eq!(node.declares_chosen_group, None);
+    let legs = typed_legs(target);
+    assert_eq!(legs.len(), 1);
+    assert_eq!(legs[0].controller, None);
+    assert!(legs[0].properties.contains(&FilterProp::Owned {
+        controller: ControllerRef::ScopedPlayer
+    }));
+}
