@@ -3076,12 +3076,12 @@ enum ReferentNoun {
 /// The characteristic a referent clause tests.
 enum ReferentPredicate {
     Filter(TargetFilter),
-    /// A power/toughness comparison. `from_x` records that the threshold was written "X".
+    /// A power/toughness comparison. The threshold is a fixed number, or `X` written as the
+    /// variable quantity.
     Stat {
         stat: PtStat,
         comparator: Comparator,
-        value: i32,
-        from_x: bool,
+        threshold: QuantityExpr,
     },
 }
 
@@ -3125,13 +3125,17 @@ fn mana_value_filter(comparator: Comparator, value: QuantityExpr) -> TargetFilte
     )
 }
 
-fn stat_threshold_filter(stat: PtStat, comparator: Comparator, value: i32) -> TargetFilter {
+fn stat_threshold_filter(
+    stat: PtStat,
+    comparator: Comparator,
+    threshold: QuantityExpr,
+) -> TargetFilter {
     TargetFilter::Typed(
         TypedFilter::default().properties(vec![FilterProp::PtComparison {
             stat,
             scope: PtValueScope::Current,
             comparator,
-            value: QuantityExpr::Fixed { value },
+            value: threshold,
         }]),
     )
 }
@@ -3177,8 +3181,7 @@ fn parse_referent_predicate(
                     predicate: ReferentPredicate::Stat {
                         stat,
                         comparator,
-                        value,
-                        from_x: false,
+                        threshold: QuantityExpr::Fixed { value },
                     },
                     noun: None,
                 },
@@ -3321,7 +3324,15 @@ fn parse_referent_predicate(
             let threshold = rest.trim_end_matches('.');
             let (comparator, value) =
                 parse_comparison_suffix(threshold).ok_or_else(|| oracle_err(input))?;
-            let from_x = tag::<_, _, OracleError<'_>>("x").parse(threshold).is_ok();
+            let threshold = if tag::<_, _, OracleError<'_>>("x").parse(threshold).is_ok() {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                }
+            } else {
+                QuantityExpr::Fixed { value }
+            };
             Ok((
                 "",
                 ReferentClause {
@@ -3330,8 +3341,7 @@ fn parse_referent_predicate(
                     predicate: ReferentPredicate::Stat {
                         stat,
                         comparator,
-                        value,
-                        from_x,
+                        threshold,
                     },
                     noun: None,
                 },
@@ -3441,25 +3451,27 @@ fn bind_possessive_it(ctx: &ParseContext, gated_instruction: &str) -> ItsReferen
 /// B1 — the ability's own `Source` ("its" is the permanent the ability belongs to, so the
 /// condition is a quantity comparison on the source, not a predicate on a declared, event or
 /// host object); B2 — a cost-paid referent whose threshold is written "X" (Welcome to the
-/// Fold's madness clause), a recorded legacy defect that reads X as 0 and is not fixed here.
+/// Fold's madness clause), which keeps the quantity form with the threshold as written (the
+/// variable `X`).
 fn lower_referent_stat(
     referent: ItsReferent,
     stat: PtStat,
     comparator: Comparator,
-    value: i32,
-    from_x: bool,
+    threshold: QuantityExpr,
 ) -> Option<AbilityCondition> {
-    let scope = match (referent, from_x) {
-        (ItsReferent::Target, _) | (ItsReferent::CostPaid, false) => {
+    let scope = match referent {
+        ItsReferent::Source => ObjectScope::Source,
+        ItsReferent::CostPaid if !matches!(threshold, QuantityExpr::Fixed { .. }) => {
+            ObjectScope::CostPaidObject
+        }
+        ItsReferent::Target | ItsReferent::CostPaid => {
             return Some(referent_condition(
-                stat_threshold_filter(stat, comparator, value),
+                stat_threshold_filter(stat, comparator, threshold),
                 false,
                 ObjectScope::Target,
                 None,
             ));
         }
-        (ItsReferent::Source, _) => ObjectScope::Source,
-        (ItsReferent::CostPaid, true) => ObjectScope::CostPaidObject,
     };
     let qty = match stat {
         PtStat::Power => QuantityRef::Power { scope },
@@ -3469,7 +3481,7 @@ fn lower_referent_stat(
     Some(AbilityCondition::QuantityCheck {
         lhs: QuantityExpr::Ref { qty },
         comparator,
-        rhs: QuantityExpr::Fixed { value },
+        rhs: threshold,
     })
 }
 
@@ -3486,9 +3498,8 @@ fn lower_referent_clause(clause: ReferentClause, subject: ObjectScope) -> Abilit
         ReferentPredicate::Stat {
             stat,
             comparator,
-            value,
-            from_x: _,
-        } => stat_threshold_filter(stat, comparator, value),
+            threshold,
+        } => stat_threshold_filter(stat, comparator, threshold),
     };
     maybe_negate(referent_condition(filter, use_lki, subject, None), negated)
 }
@@ -3782,14 +3793,13 @@ pub(super) fn strip_property_conditional(
         let ReferentPredicate::Stat {
             stat,
             comparator,
-            value,
-            from_x,
+            threshold,
         } = clause.predicate
         else {
             continue;
         };
         let referent = bind_possessive_it(ctx, before.original);
-        let Some(condition) = lower_referent_stat(referent, stat, comparator, value, from_x) else {
+        let Some(condition) = lower_referent_stat(referent, stat, comparator, threshold) else {
             return (None, text.to_string());
         };
         return (Some(condition), before.original.to_string());
@@ -18200,16 +18210,16 @@ mod referent_owner_tests {
         use crate::types::ability::PtStat;
         let stat_filter = |stat, comparator, value| {
             referent_condition(
-                stat_threshold_filter(stat, comparator, value),
+                stat_threshold_filter(stat, comparator, QuantityExpr::Fixed { value }),
                 false,
                 ObjectScope::Target,
                 None,
             )
         };
-        let quantity = |qty, comparator, value| AbilityCondition::QuantityCheck {
+        let quantity = |qty, comparator, rhs| AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref { qty },
             comparator,
-            rhs: QuantityExpr::Fixed { value },
+            rhs,
         };
         let target_ctx = ParseContext::default();
         // Ent's Fury / Savage Swipe / Welcome to the Fold: one declared object target.
@@ -18255,7 +18265,7 @@ mod referent_owner_tests {
             Some(stat_filter(PtStat::Power, Comparator::GE, 3)),
             "Tribute"
         );
-        // B2: Welcome to the Fold's madness clause keeps the legacy quantity form (X read as 0).
+        // B2: Welcome to the Fold's madness clause keeps the quantity form, threshold `X`.
         let (condition, _) = strip_property_conditional(
             "Instead gain control of that creature if its toughness is X or less",
             &target_ctx,
@@ -18267,7 +18277,11 @@ mod referent_owner_tests {
                     scope: ObjectScope::CostPaidObject
                 },
                 Comparator::LE,
-                0
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string()
+                    }
+                }
             )),
             "Welcome to the Fold madness clause (boundary B2)"
         );
@@ -18287,7 +18301,7 @@ mod referent_owner_tests {
                     scope: ObjectScope::Source
                 },
                 Comparator::LE,
-                16
+                QuantityExpr::Fixed { value: 16 }
             )),
             "Lily Bowen (boundary B1)"
         );

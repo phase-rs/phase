@@ -31640,10 +31640,10 @@ struct ConditionReferent {
     /// nothing proves the incarnation (a referent resolved from the live board, a
     /// legacy save): the read then keeps the id-keyed chain it always had.
     pin: Option<ObjectIncarnationRef>,
-    /// An `ObjectScope::EventSource` referent whose incarnation has no surviving
-    /// last-known-information record answers false (the engine limit) instead of
-    /// reading whatever object now holds the storage id.
-    event_subject: bool,
+    /// The scope the referent was resolved under. An `ObjectScope::EventSource` referent whose
+    /// incarnation has no surviving last-known-information record answers false (the engine
+    /// limit) instead of reading whatever object now holds the storage id.
+    scope: ObjectScope,
 }
 
 /// CR 603.2 + CR 608.2h: the incarnation of the spell a `SpellCopied` event (or a `SpellCast`
@@ -31682,7 +31682,7 @@ fn resolve_condition_referent(
     let unpinned = |id| ConditionReferent {
         id,
         pin: None,
-        event_subject: false,
+        scope: ObjectScope::Target,
     };
     match subject {
         ObjectScope::EventSource => {
@@ -31713,7 +31713,7 @@ fn resolve_condition_referent(
             Some(ConditionReferent {
                 id,
                 pin,
-                event_subject: true,
+                scope: ObjectScope::EventSource,
             })
         }
         ObjectScope::Target => {
@@ -31763,17 +31763,30 @@ fn resolve_condition_referent(
                 return Some(ConditionReferent {
                     id,
                     pin: ability.target_pin_at(index),
-                    event_subject: false,
+                    scope: ObjectScope::Target,
                 });
             }
-            // CR 603.2: no chosen target — the triggering event's subject object.
+            // CR 603.2 + CR 400.7: no chosen target — the triggering event's subject object,
+            // with the incarnation the event itself proves (Tribute to the World Tree: the
+            // entrant may be gone before the trigger resolves, and its last known power is
+            // read from the snapshot of THAT incarnation's exit).
             targeting::resolve_event_context_target(
                 state,
                 &TargetFilter::TriggeringSource,
                 ability.source_id,
             )
             .and_then(|t| match t {
-                TargetRef::Object(id) => Some(unpinned(id)),
+                TargetRef::Object(id) => Some(ConditionReferent {
+                    id,
+                    pin: state.current_trigger_event.as_ref().and_then(|event| {
+                        targeting::event_context_incarnation(
+                            &TargetFilter::TriggeringSource,
+                            event,
+                            id,
+                        )
+                    }),
+                    scope: ObjectScope::Target,
+                }),
                 TargetRef::Player(_) => None,
             })
         }
@@ -31852,7 +31865,7 @@ fn evaluate_target_matches_filter(
                 Some(lki) => crate::game::filter::matches_target_filter_on_lki_snapshot(
                     state, id, lki, filter, &ctx,
                 ),
-                None if referent.event_subject => false,
+                None if matches!(referent.scope, ObjectScope::EventSource) => false,
                 None => id_keyed_chain(),
             }
         }

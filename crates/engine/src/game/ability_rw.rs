@@ -4039,84 +4039,6 @@ fn legacy_choice_type(choice_type: &crate::types::ability::ChoiceType) -> bool {
 // Read builders.
 // ---------------------------------------------------------------------------
 
-/// CR 122.1: whether a filter tests counters anywhere in its structure.
-fn filter_reads_counters(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(typed) => typed.properties.iter().any(|prop| {
-            matches!(
-                prop,
-                FilterProp::Counters {
-                    counters: _,
-                    comparator: _,
-                    count: _
-                }
-            )
-        }),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_reads_counters)
-        }
-        TargetFilter::Not { filter } => filter_reads_counters(filter),
-        TargetFilter::None
-        | TargetFilter::Any
-        | TargetFilter::Player
-        | TargetFilter::Controller
-        | TargetFilter::SourceController
-        | TargetFilter::ControllerAndControlledPermanents { .. }
-        | TargetFilter::Opponent
-        | TargetFilter::SelfRef
-        | TargetFilter::GrantingObject { .. }
-        | TargetFilter::SourceOrPaired
-        | TargetFilter::StackAbility { .. }
-        | TargetFilter::StackSpell
-        | TargetFilter::CastingSpell
-        | TargetFilter::SpecificObject { .. }
-        | TargetFilter::SpecificPlayer { .. }
-        | TargetFilter::PlayerWhoChoseLabel { .. }
-        | TargetFilter::PlayerMatching { .. }
-        | TargetFilter::Neighbor { .. }
-        | TargetFilter::ScopedPlayer
-        | TargetFilter::AttachedTo
-        | TargetFilter::LastCreated
-        | TargetFilter::LastRevealed
-        | TargetFilter::LastZoneChanged
-        | TargetFilter::CostPaidObject
-        | TargetFilter::AmassedArmy
-        | TargetFilter::ChosenCard
-        | TargetFilter::TrackedSet { .. }
-        | TargetFilter::TrackedSetFiltered { .. }
-        | TargetFilter::ChoiceAssignment { .. }
-        | TargetFilter::ExiledBySource
-        | TargetFilter::ExiledCardByIndex { .. }
-        | TargetFilter::TriggeringSpellController
-        | TargetFilter::TriggeringSpellOwner
-        | TargetFilter::TriggeringPlayer
-        | TargetFilter::TriggeringSource
-        | TargetFilter::AttackedPlayerOrPlaneswalker
-        | TargetFilter::EventTarget
-        | TargetFilter::TriggeringSourceController
-        | TargetFilter::EventTargetController
-        | TargetFilter::ParentTarget
-        | TargetFilter::ParentTargetSlot { .. }
-        | TargetFilter::DeclaredPlayer { .. }
-        | TargetFilter::ParentTargetController
-        | TargetFilter::ParentTargetOwner
-        | TargetFilter::AffectedObjectOwner
-        | TargetFilter::SourceChosenPlayer
-        | TargetFilter::OriginalController
-        | TargetFilter::OriginalSource
-        | TargetFilter::PostReplacementSourceController
-        | TargetFilter::PostReplacementDamageSource
-        | TargetFilter::PostReplacementDamageTarget
-        | TargetFilter::PostReplacementDamageTargetOwner
-        | TargetFilter::DefendingPlayer
-        | TargetFilter::HasChosenName
-        | TargetFilter::ChosenDamageSource { .. }
-        | TargetFilter::Named { .. }
-        | TargetFilter::Owner
-        | TargetFilter::AllPlayers => false,
-    }
-}
-
 fn reads_board_of(k: StateKind) -> RwProfile {
     let mut p = RwProfile::empty();
     p.reads_board = KindSet::one(k);
@@ -7512,7 +7434,11 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
             // CR 122.1 + CR 603.3b: a counter leaf reads the referent's counters, so a
             // sibling that puts or removes counters must feed this condition (Hadana's
             // Climb, the Ordeals); a fail-open read would let two such triggers auto-order.
-            if !*use_lki && filter_reads_counters(filter) {
+            if !*use_lki
+                && crate::types::ability::filter_contains_filter_prop(filter, &|prop| {
+                    matches!(prop, FilterProp::Counters { .. })
+                })
+            {
                 p.merge(reads_board_of(StateKind::ObjectCounters));
             }
             // CR 603.2: `EventSource` reads the object the trigger event names.
@@ -10484,6 +10410,59 @@ mod tests {
             conflicts(&neg, &se()),
             "live 'is X' read × self counter ⇒ conflict"
         );
+    }
+
+    /// CR 122.1 + CR 603.3b: a referent condition whose filter tests counters reads the
+    /// referent's counters, wherever the counter property sits in the filter. The shared
+    /// `filter_contains_filter_prop` walker reaches a property nested in `AnyOf` / `Not`,
+    /// which a walk that treats the typed properties as leaves does not.
+    #[test]
+    fn target_matches_filter_counter_property_nested_in_a_prop_reads_counters() {
+        let counters = FilterProp::Counters {
+            counters: crate::types::counter::CounterMatch::Any,
+            comparator: Comparator::GE,
+            count: qfix(1),
+        };
+        let reads_counters = |filter: TargetFilter, use_lki: bool| {
+            rw_ability_condition(&AbilityCondition::TargetMatchesFilter {
+                filter,
+                use_lki,
+                subject_slot: None,
+                subject: ObjectScope::Target,
+            })
+            .reads_board
+            .object_counters
+        };
+        let typed =
+            |props: Vec<FilterProp>| TargetFilter::Typed(TypedFilter::creature().properties(props));
+        // POS: the counter leaf directly, nested in `AnyOf`, nested in `Not`, under a filter `Not`.
+        assert!(reads_counters(typed(vec![counters.clone()]), false));
+        assert!(reads_counters(
+            typed(vec![FilterProp::AnyOf {
+                props: vec![FilterProp::Token, counters.clone()],
+            }]),
+            false
+        ));
+        assert!(reads_counters(
+            typed(vec![FilterProp::Not {
+                prop: Box::new(counters.clone()),
+            }]),
+            false
+        ));
+        assert!(reads_counters(
+            TargetFilter::Not {
+                filter: Box::new(typed(vec![counters.clone()])),
+            },
+            false
+        ));
+        // NEG: no counter property anywhere, and a past-tense (frozen last-known) read.
+        assert!(!reads_counters(
+            typed(vec![FilterProp::AnyOf {
+                props: vec![FilterProp::Token, FilterProp::NonToken],
+            }]),
+            false
+        ));
+        assert!(!reads_counters(typed(vec![counters]), true));
     }
 
     /// §L6 (CR 303.4d + CR 301.5c): an Aura/Equipment is never attached to itself
