@@ -3,7 +3,7 @@
 //! agree verbatim; a double-faced card runs as the face the row names) through the public
 //! cast/activate/combat pipeline and behaves as printed, including the element the misparse entry
 //! said was missing. Support cards that carry an ability are printed cards too (Soul Warden, Tarpan,
-//! Murder); only textless filler creatures and the textless planeswalker are synthetic.
+//! Murder, Hover Barrier); only textless filler creatures and the textless planeswalker are synthetic.
 use engine::game::combat::AttackTarget;
 use engine::game::game_object::AttachTarget;
 use engine::game::scenario::{GameRunner, GameScenario, Outcome, P0, P1};
@@ -1089,21 +1089,26 @@ fn library_len(r: &GameRunner, p: PlayerId) -> usize {
         .len()
 }
 
-/// Szadek (5/5 Flying) attacking P1 with a ten-card library. `blocker`: a creature P1 controls.
+/// Hover Barrier, printed Oracle text in full (MTGJSON and the Scryfall API agree verbatim): the
+/// flying blocker that can legally block Szadek. Its Defender line cannot affect a block.
+const HOVER_BARRIER: &str = "Defender, flying";
+
+/// Szadek (5/5 Flying) attacking P1 with a ten-card library. `blocker`: a creature P1 controls,
+/// as (name, power, toughness, printed Oracle text); the text is empty for a textless filler.
 fn szadek_board(
-    blocker: Option<(&str, i32, i32, bool)>,
+    blocker: Option<(&str, i32, i32, &str)>,
 ) -> (GameRunner, ObjectId, Option<ObjectId>) {
     let mut s = GameScenario::new();
     s.at_phase(Phase::PreCombatMain);
     let szadek = s
         .add_creature_from_oracle(P0, "Szadek, Lord of Secrets", 5, 5, SZADEK)
         .id();
-    let blocker = blocker.map(|(name, p, t, flying)| {
-        let mut b = s.add_creature(P1, name, p, t);
-        if flying {
-            b.with_keyword(Keyword::Flying);
+    let blocker = blocker.map(|(name, p, t, text)| {
+        if text.is_empty() {
+            s.add_creature(P1, name, p, t).id()
+        } else {
+            s.add_creature_from_oracle(P1, name, p, t, text).id()
         }
-        b.id()
     });
     s.with_library_top(
         P1,
@@ -1117,7 +1122,7 @@ fn szadek_board(
 /// (Flying line), so the engine offers no block at all.
 #[test]
 fn szadek_unblocked_combat_damage_becomes_counters_and_mill() {
-    let (mut r, szadek, wall) = szadek_board(Some(("Ground Wall", 0, 7, false)));
+    let (mut r, szadek, wall) = szadek_board(Some(("Ground Wall", 0, 7, "")));
     assert!(r.state().objects[&szadek]
         .keywords
         .contains(&Keyword::Flying));
@@ -1144,8 +1149,11 @@ fn szadek_unblocked_combat_damage_becomes_counters_and_mill() {
 /// Flying, so the block is legal) is dealt normally and nothing is substituted.
 #[test]
 fn szadek_blocked_combat_damage_to_a_creature_is_dealt_normally() {
-    let (mut r, szadek, blocker) = szadek_board(Some(("Flying Wall", 0, 7, true)));
+    let (mut r, szadek, blocker) = szadek_board(Some(("Hover Barrier", 0, 6, HOVER_BARRIER)));
     let blocker = blocker.unwrap();
+    assert!(r.state().objects[&blocker]
+        .keywords
+        .contains(&Keyword::Flying));
     assert!(
         attack_and_offer_blocks(&mut r, &[szadek]),
         "a flyer may block a flyer"
