@@ -641,51 +641,6 @@ pub fn synthesize_fortify(face: &mut CardFace) {
     face.abilities.extend(fortify_abilities);
 }
 
-/// CR 303.4a + CR 702.5a: Aura spell ability — an Aura spell targets via its
-/// Enchant keyword. This synthesis creates the spell-kind ability that the
-/// AI's `modal_spell_mode_ability_refs` expects to find, so that
-/// `PolicyContext::effects()` reports the Aura's targeting effect during
-/// pre-cast assessment instead of returning empty (which would mis-score the
-/// cast) or leaking the permanent's activated/static abilities (which would
-/// cause the tactical gate to reject the cast as redundant removal).
-pub fn synthesize_aura_spell_ability(face: &mut CardFace) {
-    // Only Auras have Enchant keyword targeting.
-    let is_aura = face.card_type.subtypes.iter().any(|s| s == "Aura");
-    if !is_aura {
-        return;
-    }
-
-    // Find the Enchant keyword that defines the spell's target.
-    let enchant_filter = face.keywords.iter().find_map(|kw| {
-        if let Keyword::Enchant(filter) = kw {
-            Some(filter.clone())
-        } else {
-            None
-        }
-    });
-
-    let Some(target_filter) = enchant_filter else {
-        // No Enchant keyword — not a valid Aura spell (should not happen for
-        // parsed cards, but fail gracefully).
-        return;
-    };
-
-    // Create the spell ability: "Enchant <target_filter>" → Attach this Aura
-    // to a target matching the filter. The attachment is the Aura itself
-    // (SelfRef), the target is the Enchant filter, and selection is Targeted
-    // because the target is chosen during spell announcement (CR 601.2c).
-    let spell_ability = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Attach {
-            attachment: TargetFilter::SelfRef,
-            target: target_filter,
-            // CR 601.2c + CR 303.4a: the Aura's target is chosen at cast time.
-            selection: AttachSelection::Targeted,
-        },
-    );
-    face.abilities.push(spell_ability);
-}
-
 /// CR 702.151a: Reconfigure represents two activated abilities —
 /// "[Cost]: Attach this permanent to another target creature you control.
 /// Activate only as a sorcery." and "[Cost]: Unattach this permanent. Activate
@@ -9499,7 +9454,6 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_equip(face);
     // CR 702.67a: Fortify — attach-to-land activated ability.
     synthesize_fortify(face);
-    synthesize_aura_spell_ability(face);
     // CR 702.151a: Reconfigure — attach/unattach activated abilities.
     synthesize_reconfigure(face);
     // CR 702.167a/b: Craft — sorcery-speed activated ability that exiles the

@@ -136,6 +136,28 @@ pub fn resolve(
     }
 
     let needs_reveal_choice = reveal_hand_parks_card_choice(&card_filter, choice_optional);
+    // CR 701.20a + CR 608.2c: "reveals each <filter> card in their hand. You
+    // choose one of those cards." reveals only the matching cards, and "those
+    // cards" is exactly that revealed set. The choice is made by the chain's
+    // `ChooseFromZone` (a single `ChooseFromZoneChoice` prompt over the revealed
+    // cards, not a `RevealChoice` acknowledgement first), so narrow the revealed
+    // hand to the filter before it is shown or published as the chain's set.
+    let chosen_by_chain_choose_from_zone = needs_reveal_choice
+        && !choice_optional
+        && is_reveal
+        && ability.sub_ability.as_ref().is_some_and(|sub| {
+            matches!(
+                &sub.effect,
+                Effect::ChooseFromZone {
+                    candidate_source: ZoneChoiceCandidateSource::Legacy,
+                    ..
+                }
+            )
+        });
+    if chosen_by_chain_choose_from_zone && !matches!(card_filter, TargetFilter::Any) {
+        let ctx = FilterContext::from_ability(ability);
+        hand.retain(|&id| matches_target_filter(state, id, &card_filter, &ctx));
+    }
     // CR 109.5 + CR 608.2c + CR 608.2d: the post-reveal choice belongs to the
     // player the choosing instruction addresses. The parser only produces a
     // card-parking reveal inside a player scope when that instruction is
@@ -235,17 +257,9 @@ pub fn resolve(
             .collect()
     };
 
-    // If this RevealHand has a ChooseFromZone sub_ability with Legacy candidate
-    // source (the "you choose one of those cards" anaphor), the post-reveal
-    // choice is handled by ChooseFromZone's ChooseFromZoneChoice prompt, not by
-    // RevealChoice. Publish the eligible cards as the chain's tracked set so
-    // ChooseFromZone reads them, and skip the redundant RevealChoice prompt.
-    // CR 701.20a: the reveal remains public until the effect completes.
-    let has_legacy_choose_from_zone = ability
-        .sub_ability
-        .as_ref()
-        .is_some_and(|sub| matches!(&sub.effect, Effect::ChooseFromZone { candidate_source: ZoneChoiceCandidateSource::Legacy, .. }));
-    if needs_reveal_choice && !choice_optional && is_reveal && has_legacy_choose_from_zone {
+    if chosen_by_chain_choose_from_zone {
+        // The chain's `ChooseFromZone` reads the published set; the revealed
+        // cards stay public until the effect completes (CR 701.20a).
         super::publish_reveal_result(state, eligible.clone());
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Reveal,

@@ -4457,15 +4457,35 @@ fn parse_hand_reveal_target_and_card_filter(
         }
     }
 
-    if let Ok((after_all, _)) = tag::<_, _, OracleError<'_>>("all ").parse(after_reveal_lower) {
-        let Ok((hand_phrase, descriptor)) = terminated(
-            take_until::<_, _, OracleError<'_>>(" cards"),
-            alt((
-                tag::<_, _, OracleError<'_>>(" cards in "),
-                tag(" cards from "),
-            )),
-        )
-        .parse(after_all) else {
+    // CR 701.20a: "all <filter> cards in <hand>" / "each <filter> card in <hand>"
+    // (Thought Rattle) name the same whole-hand filtered reveal; the determiner
+    // selects the plural or singular noun that closes the descriptor.
+    if let Ok((after_det, plural)) = alt((
+        value(true, tag::<_, _, OracleError<'_>>("all ")),
+        value(false, tag("each ")),
+    ))
+    .parse(after_reveal_lower)
+    {
+        let descriptor_and_hand = if plural {
+            terminated(
+                take_until::<_, _, OracleError<'_>>(" cards"),
+                alt((
+                    tag::<_, _, OracleError<'_>>(" cards in "),
+                    tag(" cards from "),
+                )),
+            )
+            .parse(after_det)
+        } else {
+            terminated(
+                take_until::<_, _, OracleError<'_>>(" card"),
+                alt((
+                    tag::<_, _, OracleError<'_>>(" card in "),
+                    tag(" card from "),
+                )),
+            )
+            .parse(after_det)
+        };
+        let Ok((hand_phrase, descriptor)) = descriptor_and_hand else {
             return (TargetFilter::Any, TargetFilter::None);
         };
         let target = parse_hand_possessive_target(hand_phrase)
@@ -29987,6 +30007,22 @@ mod tests {
             }
             other => panic!("expected ZoneCardCount, got {other:?}"),
         }
+    }
+
+    /// CR 701.20a: "reveals each nonland card in their hand" (Thought Rattle)
+    /// is a whole-hand reveal restricted to a typed filter, not an unfiltered one.
+    #[test]
+    fn parse_hand_reveal_each_filtered_card() {
+        let input = "reveals each nonland card in their hand";
+        let lower = input.to_lowercase();
+        let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+        let Some(HandRevealImperativeAst::RevealAll { card_filter, .. }) = result else {
+            panic!("{input}: expected RevealAll, got {result:?}");
+        };
+        assert!(
+            matches!(card_filter, TargetFilter::Typed(_)),
+            "expected typed nonland filter, got {card_filter:?}"
+        );
     }
 
     /// CR 107.1: Bare-ref subsumption regression — "equal to the number of

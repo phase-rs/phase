@@ -286,6 +286,7 @@ mod base_pt_designation_filter;
 mod controller_anaphor_binds_through_context;
 
 mod resolution_progress_contract;
+mod reveal_hand_choose_single_prompt_9841;
 
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;
