@@ -162,6 +162,13 @@
 //! library-placement entry above boxed `library_placement`. That is under the
 //! 16,384 ceiling, so the ceiling is unchanged.
 //!
+//! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-18`) at
+//! 15,856 B when the two-phase damage batch merged main through `91639fdf`: the
+//! branch's boxed `damage_batch_ledger` (8 B) and `damage_event_losses` unioned
+//! with main's fields since the branch's last merge, and main's combat one-shot
+//! application slot (`combat_one_shot_applications`, now the ledger's
+//! `applications`) dropped. That is under the unchanged 16,384 ceiling.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
