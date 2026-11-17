@@ -200,7 +200,8 @@ impl ReachSource {
     /// The other casting options of a cast whose card has several instances of
     /// one alternative-cost keyword (CR 113.2c + CR 601.2b), each priced at its
     /// own engine-authored cost, at most [`MAX_ALTERNATIVES_PER_OBJECT`] of
-    /// them. The baseline option is never among them (see [`Self::priced`]).
+    /// them. The baseline option is among them only when the baseline priced
+    /// it at another method's cost (see [`Self::priced`]).
     pub(super) fn alternatives(&self, state: &GameState, ai_player: PlayerId) -> Vec<PricedSource> {
         let ManaCommitment::Cast { object_id, extra } = &self.commitment else {
             return Vec::new();
@@ -208,16 +209,30 @@ impl ReachSource {
         if !has_alternative_cost_instance_choice(state, *object_id) {
             return Vec::new();
         }
-        let baseline = self
-            .priced(state, ai_player)
+        let baseline = self.priced(state, ai_player);
+        let route = baseline
+            .as_ref()
             .and_then(|source| source.steps.first().and_then(|s| s.casting_option.clone()));
-        current_casting_variant_choice_options(state, ai_player, *object_id)
+        // CR 118.9a: the baseline is priced at the preparation default's cost,
+        // which can be another method's (an unpayable Escape's) than the
+        // route's. Then the route at its own price is an alternative too, kept
+        // ahead of the cap.
+        let repriced_route = baseline
+            .as_ref()
+            .zip(route.as_ref())
+            .and_then(|(source, option)| {
+                (source.mana != option.mana_cost.plus(extra)).then(|| option.clone())
+            });
+        let others = current_casting_variant_choice_options(state, ai_player, *object_id)
             .into_iter()
             .filter(|option| {
-                baseline
+                route
                     .as_ref()
                     .is_none_or(|base| !same_cast_option_but_instance(base, option))
-            })
+            });
+        repriced_route
+            .into_iter()
+            .chain(others)
             .take(MAX_ALTERNATIVES_PER_OBJECT)
             .map(|option| {
                 self.with_option(option.mana_cost.plus(extra), Some(*object_id), Some(option))

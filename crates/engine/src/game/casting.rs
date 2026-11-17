@@ -9298,6 +9298,36 @@ pub fn base_auto_cast_option(
     (options.len() == 1).then(|| options.remove(0))
 }
 
+/// CR 113.2c + CR 601.2b: the menu's only option when it names a keyword
+/// instance — the cast an unannounced `CastSpell` goes ahead with, no menu.
+fn sole_keyed_option(choices: &CastingVariantChoiceSet) -> Option<&CastingVariantChoiceOption> {
+    match choices.options.as_slice() {
+        [option] if option.alternative_cost_keyword.is_some() => Some(option),
+        _ => None,
+    }
+}
+
+/// CR 113.2c + CR 601.2b: prepare `option` for the instance it names, the way
+/// the cast announces it.
+fn prepare_keyed_option(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    option: &CastingVariantChoiceOption,
+) -> Result<PreparedSpellCast, EngineError> {
+    prepare_spell_cast_announced(
+        state,
+        player,
+        object_id,
+        Some(option.variant),
+        None,
+        None,
+        CastingMode::Actual,
+        None,
+        InstanceElection::Announced(option.alternative_cost_keyword.as_ref()),
+    )
+}
+
 /// CR 601.2b: two options that pay the same method, face, total and non-mana
 /// cost under the same authority are the same choice for the caster, whichever
 /// keyword instance stands for them.
@@ -15995,17 +16025,11 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
         };
     };
     let may_choose_back = resolution_spell_face_choice_available(original);
-    // The permission provenance is the authority for whether this is a paid
-    // normal-cost cast.  Preserve that choice for either elected face: omitting
-    // the override here would let a native graveyard alternative (Flashback,
-    // Escape, and so on) replace a resolution `FullCost` offer during probing.
-    let force_normal_cost = matches!(
-        original.casting_permissions.get(permission_index.0),
-        Some(CastingPermission::ExileWithAltCost {
-            cost_provenance: crate::types::ability::ExileGrantCostProvenance::NormalCost,
-            ..
-        })
-    );
+    // CR 118.9a + CR 608.2g: the indexed resolution permission is this cast's
+    // route. A `NormalCost` grant is a paid normal cast; an `Alternative` grant
+    // ("without paying its mana cost") is itself the one alternative cost. Either
+    // way no native graveyard alternative (Flashback, Escape, and so on) applies,
+    // and no keyword instance is elected, so preparation is bound to `Normal`.
     let mut legality = ResolutionSpellFaceLegality {
         front: false,
         back: false,
@@ -16090,7 +16114,7 @@ fn resolution_spell_face_legality_for_permission_from_flushed_state(
                 &projected,
                 player,
                 object_id,
-                force_normal_cost.then_some(CastingVariant::Normal),
+                Some(CastingVariant::Normal),
                 None,
                 Some(permission_index),
                 CastingMode::Actual,
@@ -18904,7 +18928,7 @@ pub(super) fn continue_resolution_modal_face_choice(
     choice: ResolutionModalFaceChoice,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    let (graveyard_replacement, force_normal_cost, cleanup) = state
+    let (graveyard_replacement, cleanup) = state
         .objects
         .get(&object_id)
         .and_then(|object| object.casting_permissions.get(choice.permission_index.0))
@@ -18913,16 +18937,8 @@ pub(super) fn continue_resolution_modal_face_choice(
                 granted_to: Some(grantee),
                 resolution_cleanup: Some(cleanup),
                 graveyard_replacement,
-                cost_provenance,
                 ..
-            } if *grantee == player => Some((
-                graveyard_replacement.clone(),
-                matches!(
-                    cost_provenance,
-                    crate::types::ability::ExileGrantCostProvenance::NormalCost
-                ),
-                cleanup.clone(),
-            )),
+            } if *grantee == player => Some((graveyard_replacement.clone(), cleanup.clone())),
             _ => None,
         })
         .ok_or_else(|| {
@@ -18953,11 +18969,14 @@ pub(super) fn continue_resolution_modal_face_choice(
             destination,
         );
     }
+    // CR 118.9a + CR 608.2g: bound to the indexed permission's route, exactly
+    // as the face probe prepares it (see
+    // `resolution_spell_face_legality_for_permission_from_flushed_state`).
     let mut prepared = prepare_spell_cast_with_variant_override_inner(
         state,
         player,
         object_id,
-        force_normal_cost.then_some(CastingVariant::Normal),
+        Some(CastingVariant::Normal),
         None,
         Some(choice.permission_index),
         CastingMode::Actual,
@@ -21684,19 +21703,9 @@ fn legal_target_slots_for_castable_spell_in_flushed_state(
 
     // CR 113.2c + CR 601.2b: a sole option that names a keyword instance is
     // prepared for that instance, exactly as the cast announces it.
-    let prepared = match choices.options.first() {
-        Some(option) if option.alternative_cost_keyword.is_some() => prepare_spell_cast_announced(
-            state,
-            player,
-            object_id,
-            Some(option.variant),
-            None,
-            None,
-            CastingMode::Actual,
-            None,
-            InstanceElection::Announced(option.alternative_cost_keyword.as_ref()),
-        )?,
-        _ => prepare_spell_cast(state, player, object_id)?,
+    let prepared = match sole_keyed_option(&choices) {
+        Some(option) => prepare_keyed_option(state, player, object_id, option)?,
+        None => prepare_spell_cast(state, player, object_id)?,
     };
     // CR 601.2b: Modal choices are announced before targets, so a modal spell
     // has no single target-slot preview until modes are chosen.
@@ -22279,6 +22288,17 @@ fn castable_spell_verdict_with_probe(
             });
         }
         let choices = casting_variant_choice_set(state, player, object_id, probe);
+        // CR 113.2c + CR 601.2g-h: a sole keyed option is the cast that goes
+        // ahead without a menu, so its prepared cost and terms classify the
+        // payment mode (a sacrificial source keeps its explicit choice).
+        if let Some(prepared) = sole_keyed_option(&choices)
+            .and_then(|option| prepare_keyed_option(state, player, object_id, option).ok())
+        {
+            return Some(CastableSpellVerdict {
+                payment_state: prepared_payment_terms_state(state, &prepared),
+                prepared_cost: Some(prepared.mana_cost),
+            });
+        }
         return (!choices.options.is_empty()).then_some(CastableSpellVerdict {
             payment_state: None,
             prepared_cost: None,

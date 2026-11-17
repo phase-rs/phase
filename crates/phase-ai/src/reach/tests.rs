@@ -1711,14 +1711,17 @@ fn attack_into_postcombat(runner: &mut GameRunner, card: ObjectId, clue: ObjectI
     panic!("the attack never reached the postcombat main phase");
 }
 
-/// P3-B: Lava Dart with four flashback instances (native sacrifice, Lier {R},
-/// the Doctor's {2}{R}{G}, the saddled Newt's {0}). The Newt's {0} is the
-/// baseline (the latest grant), so Dart {0} + Devil's Play (Lier {X}{R},
-/// X = 3) reaches the opponent's 4.
-#[test]
-fn a_fourth_instance_baseline_is_priced() {
+/// Lier, the Fugitive Doctor and a saddled Archmage's Newt give Lava Dart four
+/// flashback instances (native sacrifice, Lier {R}, the Doctor's {2}{R}{G},
+/// the Newt's {0}); Devil's Play is in the graveyard. Postcombat: P1 at 4 and
+/// exactly {R}{R}{R}{G} floating beside one tapped Mountain. With `breach`,
+/// Underworld Breach adds an Escape no card can pay (too few other cards).
+fn newt_dart_board(breach: bool) -> (GameRunner, ObjectId, ObjectId) {
     let mut scenario = scenario(1, 10);
     let lier = lier(&mut scenario);
+    if breach {
+        scenario.add_enchantment_from_oracle(P0, "Underworld Breach", UNDERWORLD_BREACH);
+    }
     let doctor = scenario
         .add_creature(P0, "The Fugitive Doctor", 4, 4)
         .as_legendary()
@@ -1782,13 +1785,11 @@ fn a_fourth_instance_baseline_is_priced() {
             .add_mana_to_pool(P0, ManaUnit::new(color, ObjectId(9_999), false, vec![]));
     }
 
-    let state = runner.state().clone();
-    let options = current_casting_variant_choice_options(&state, P0, dart);
-    assert_eq!(options.len(), 4, "{options:?}");
-    let default = default_cast_election(&state, P0, dart).expect("castable");
-    assert_eq!(default.mana_cost.mana_value(), 0, "the Newt's {{0}}");
-    assert!(default.alternative_cost_keyword.is_some());
+    (runner, dart, devils_play)
+}
 
+fn assert_newt_dart_lethal(runner: &mut GameRunner, dart: ObjectId, devils_play: ObjectId) {
+    let state = runner.state().clone();
     let admitted = admitted_actions(&state);
     let line = find_lethal_line(&state, P0, &admitted, &production_admission)
         .expect("Dart {0} + Devil's Play X = 3 is lethal");
@@ -1797,7 +1798,39 @@ fn a_fourth_instance_baseline_is_priced() {
     let mut expected = vec![dart, devils_play];
     expected.sort();
     assert_eq!(cast, expected);
-    assert!(ai_wins_this_turn(&mut runner, AiDifficulty::Medium));
+    assert!(ai_wins_this_turn(runner, AiDifficulty::Medium));
+}
+
+/// P3-B: the Newt's {0} is the baseline (the latest grant), so Dart {0} +
+/// Devil's Play (Lier {X}{R}, X = 3) reaches the opponent's 4.
+#[test]
+fn a_fourth_instance_baseline_is_priced() {
+    let (mut runner, dart, devils_play) = newt_dart_board(false);
+    let state = runner.state().clone();
+    let options = current_casting_variant_choice_options(&state, P0, dart);
+    assert_eq!(options.len(), 4, "{options:?}");
+    let default = default_cast_election(&state, P0, dart).expect("castable");
+    assert_eq!(default.mana_cost.mana_value(), 0, "the Newt's {{0}}");
+    assert!(default.alternative_cost_keyword.is_some());
+    assert_newt_dart_lethal(&mut runner, dart, devils_play);
+}
+
+/// CR 118.9a: with Underworld Breach, the preparation default is an unpayable
+/// Escape at {R}, while the cast goes ahead as the Newt's {0} flashback. Reach
+/// must still price that route at {0}.
+#[test]
+fn a_route_priced_at_another_methods_cost_is_repriced() {
+    let (mut runner, dart, devils_play) = newt_dart_board(true);
+    let state = runner.state().clone();
+    let options = current_casting_variant_choice_options(&state, P0, dart);
+    assert_eq!(options.len(), 4, "{options:?}");
+    assert!(options
+        .iter()
+        .all(|o| o.variant == CastingVariant::Flashback));
+    let default = default_cast_election(&state, P0, dart).expect("castable");
+    assert_eq!(default.variant, CastingVariant::Escape);
+    assert_eq!(default.mana_cost.mana_value(), 1, "Escape's {{R}}");
+    assert_newt_dart_lethal(&mut runner, dart, devils_play);
 }
 
 /// P4-A: Underworld Breach makes Escape the preparation default, so the

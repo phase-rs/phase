@@ -21,6 +21,7 @@ use engine::types::ability::{
     AbilityCost, AdditionalCostOrigin, ModalSelectionCondition, ModalSelectionConstraint, TargetRef,
 };
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{CastingVariant, CastingVariantChoiceOption, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{FlashbackCost, Keyword, KeywordKind};
@@ -1188,4 +1189,80 @@ fn legacy_single_instance_pending_cast_completes() {
     assert_eq!(r.life(P0), 17);
     assert_eq!(r.state().objects[&da].zone, Zone::Exile);
     assert_settled(&r);
+}
+
+/// CR 608.2g + CR 118.9a: a free cast an effect offers during resolution
+/// (Invoke Calamity) is bound to that offer's permission, its one alternative
+/// cost: it pays neither flashback cost, with Lier or without.
+#[test]
+fn a_resolution_free_cast_pays_no_flashback_cost() {
+    let db = crate::support::shared_card_db().expect("the integration card database");
+    for with_lier in [true, false] {
+        let mut s = GameScenario::new();
+        s.at_phase(Phase::PreCombatMain);
+        if with_lier {
+            lier(&mut s);
+        }
+        let invoke = s.add_real_card(P0, "Invoke Calamity", Zone::Hand, db);
+        let da = deep_analysis(&mut s);
+        library(&mut s, 3);
+        pool(&mut s, P0, "RRRRC");
+        let mut r = s.build();
+        start_cast(&mut r, invoke);
+        r.act(GameAction::PassPriority).expect("P0 passes");
+        r.act(GameAction::PassPriority).expect("P1 passes");
+        let w = &r.state().waiting_for;
+        let offered = matches!(w, WaitingFor::CastOffer { .. } if format!("{w:?}").contains(&format!("candidates: [{da:?}]")));
+        assert!(
+            offered,
+            "Deep Analysis is offered (Lier: {with_lier}): {w:?}"
+        );
+        let selection = Some(da);
+        r.act(GameAction::FreeCastWindowChoice { selection })
+            .expect("free cast");
+        let target = Some(player(P0));
+        r.act(GameAction::ChooseTarget { target }).expect("target");
+        r.advance_until_stack_empty();
+        assert_eq!(r.life(P0), 20, "no flashback life (Lier: {with_lier})");
+        assert_eq!(r.state().players[0].hand.len(), 2, "drew two");
+        assert_paid(&r, da, 1, None);
+        assert_settled(&r);
+    }
+}
+
+/// CR 601.2g-h: a sole keyed option (Lier's {1}{U} Think Twice; the printed
+/// {2}{U} isn't affordable) payable only with Blood Pet keeps the explicit
+/// choice of that sacrificial source.
+#[test]
+fn a_sole_keyed_option_keeps_the_sacrificial_mana_choice() {
+    let db = crate::support::shared_card_db().expect("the integration card database");
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    lier(&mut s);
+    let think = s.add_real_card(P0, "Think Twice", Zone::Graveyard, db);
+    s.add_real_card(P0, "Island", Zone::Battlefield, db);
+    let pet = s.add_real_card(P0, "Blood Pet", Zone::Battlefield, db);
+    library(&mut s, 2);
+    let mut r = s.build();
+    let cast = legal_actions(r.state()).into_iter().find(|action| {
+        matches!(action, GameAction::CastSpell { object_id, payment_mode: CastPaymentMode::AutoExceptSacrificialMana, .. } if *object_id == think)
+    });
+    let cast = cast.expect("the cast keeps the sacrificial-source choice");
+    r.act(cast).expect("the cast is accepted");
+    let WaitingFor::ManaSourceSelection { options, .. } = &r.state().waiting_for else {
+        panic!("a mana-source choice, got {:?}", r.state().waiting_for);
+    };
+    assert_eq!(
+        r.state().objects[&pet].zone,
+        Zone::Battlefield,
+        "not yet sacrificed"
+    );
+    let selection = options.iter().find(|o| o.source.object_id == pet).cloned();
+    let selection = selection.expect("Blood Pet is offered");
+    r.act(GameAction::ActivateManaSource { selection })
+        .expect("Blood Pet pays");
+    finish(&mut r, &lier_flashback(), Answers::default());
+    assert_eq!(r.state().objects[&pet].zone, Zone::Graveyard);
+    assert_eq!(r.state().objects[&think].zone, Zone::Exile);
+    assert_eq!(r.state().players[0].hand.len(), 1, "drew one");
 }
