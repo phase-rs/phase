@@ -8435,11 +8435,17 @@ pub(super) fn handle_resolution_choice(
                     let departures = owner_arranged_batches.as_ref().map(|batches| {
                         effects::change_zone::fold_physical_order_to_departures(batches)
                     });
-                    let seeds = owner_arranged_batches.map_or_else(Vec::new, |batches| {
-                        library_position.as_ref().map_or_else(Vec::new, |position| {
-                            effects::change_zone::submitted_owner_arrangements(batches, position)
+                    let seeds = owner_arranged_batches
+                        .filter(|batches| {
+                            effects::change_zone::submitted_owner_order_is_physical(state, batches)
                         })
-                    });
+                        .map_or_else(Vec::new, |batches| {
+                            library_position.as_ref().map_or_else(Vec::new, |position| {
+                                effects::change_zone::submitted_owner_arrangements(
+                                    batches, position,
+                                )
+                            })
+                        });
                     let library_position = match library_position {
                         Some(LibraryPosition::Bottom) => LibraryPosition::Bottom,
                         Some(LibraryPosition::NthFromTop { n }) => {

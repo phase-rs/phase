@@ -1664,16 +1664,27 @@ fn move_arranged_batch_then(
     let logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &ids);
     let group_id = logical_zone_change_group.logical_group_id;
-    // CR 730.3a: merged components are a simultaneous positional population
-    // whose owner orders the new library objects, including as a linked child
-    // of the parent permanent's delivery. Admit that family with a parent;
-    // every other component batch stays legacy.
+    // Component populations keep per-member delivery unless numbered placement
+    // or a complete submitted physical order supplies arrangement authority.
+    // Ordinary staged populations retain their existing admission policy.
+    let delegated = component_delivery_parent.is_some();
     let component_family = reqs
         .iter()
         .all(|req| matches!(req.cause, ZoneChangeCause::MergedComponentRouting));
+    let arrangement_seeds = component_delivery_parent
+        .as_ref()
+        .map_or(arrangements.as_slice(), |link| {
+            link.inherited_arrangements.as_slice()
+        });
     let staged_entry = if staged_batch_admission(state, &reqs)
-        && (component_delivery_parent.is_none() || component_family)
-    {
+        && (!delegated || component_family)
+        && (!component_family
+            || component_arrangement_admission(
+                state,
+                &reqs,
+                arrangement_seeds,
+                component_delivery_parent.as_ref(),
+            )) {
         let arrangements = component_delivery_parent
             .as_ref()
             .map_or(arrangements, |link| link.inherited_arrangements.clone());
@@ -1759,7 +1770,7 @@ fn move_arranged_batch_then(
             // announcing owner leaves its events in that owner's slice; the
             // owner collects the one departure once. Only an unowned move's
             // component batch is its own collector.
-            if component_delivery_parent.is_none() {
+            if !delegated {
                 crate::game::triggers::complete_logical_zone_trigger_collection(
                     state,
                     &mut logical_zone_change_group,
@@ -1885,19 +1896,20 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
 }
 
 /// CR 603.2c + CR 730.3: retain one delivered segment on its logical owner and
-/// collect its triggers there. A component batch that delivers for an
-/// announcing owner (`handback`) retains the segment only to classify its
-/// members; the announcing owner collects the departure once, from the events
-/// handed back to it.
+/// collect the occurrences selected by `collector` there. A component batch
+/// delivering for an announcing owner (`handback`) retains without collecting,
+/// regardless of occurrence policy; the announcing owner alone collects the
+/// handed-back departure.
 fn retain_batch_segment(
     state: &mut GameState,
     group: &mut LogicalZoneChangeGroup,
     events: &[GameEvent],
     handback: Option<&PendingComponentDeliveryParent>,
+    collector: crate::game::triggers::EntryOccurrenceCollector,
 ) -> Result<(), String> {
     match handback {
-        None => crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
-            state, group, events,
+        None => crate::game::triggers::append_and_collect_logical_zone_trigger_segment_for(
+            state, group, events, collector,
         ),
         Some(_) => group.append_delivery_events(events),
     }
@@ -2017,6 +2029,7 @@ fn deliver_batch(
                     &mut logical_zone_change_group,
                     &events[segment_start..delivery_start],
                     handback,
+                    crate::game::triggers::EntryOccurrenceCollector::Owner,
                 )
                 .expect("paused batch retains its exact delivered segment");
                 stash_batch_tail(
@@ -2058,6 +2071,7 @@ fn deliver_batch(
                     &mut logical_zone_change_group,
                     &events[segment_start..delivery_start],
                     handback,
+                    crate::game::triggers::EntryOccurrenceCollector::Owner,
                 )
                 .expect("paused Aura batch retains its exact delivered segment");
                 stash_batch_tail(
@@ -2107,6 +2121,62 @@ fn staged_batch_admission(state: &GameState, reqs: &[ZoneMoveRequest]) -> bool {
                     .get(&req.object_id)
                     .is_some_and(|object| object.zone == Zone::Library)
         })
+}
+
+fn component_arrangement_admission(
+    state: &GameState,
+    reqs: &[ZoneMoveRequest],
+    arrangements: &[StagedLibraryArrangement],
+    parent: Option<&PendingComponentDeliveryParent>,
+) -> bool {
+    let positioned = reqs.iter().all(|req| {
+        req.to == Zone::Library
+            && req.library_shuffle == LibraryShuffleMode::PerObject
+            && req
+                .placement
+                .as_ref()
+                .is_some_and(LibraryPosition::is_owner_arrangeable)
+    });
+    if !positioned {
+        return false;
+    }
+    // Mirror numbered grouping's stable-base restriction, not just its position.
+    let numbered = reqs.iter().all(|req| {
+        matches!(
+            req.placement,
+            Some(LibraryPosition::NthFromTop { .. } | LibraryPosition::BeneathTop { .. })
+        ) && reqs.iter().all(|other| {
+            state.objects[&req.object_id].owner != state.objects[&other.object_id].owner
+                || req.placement == other.placement
+        })
+    });
+    if numbered {
+        return true;
+    }
+    reqs.iter().all(|req| {
+        let object = &state.objects[&req.object_id];
+        arrangements.iter().any(|arrangement| {
+            arrangement.status == StagedArrangementStatus::Submitted
+                && arrangement.batch.owner == object.owner
+                && Some(&arrangement.position) == req.placement.as_ref()
+                && arrangement.batch.members.iter().any(|member| {
+                    member.identity == ObjectIncarnationRef::from_object(object)
+                        && member.origin == object.zone
+                        && parent.is_none_or(|link| member.departing_permanent == Some(link.member))
+                })
+        })
+    })
+}
+
+fn staged_segment_collector(
+    owner: &PendingBatchDeliveries,
+) -> crate::game::triggers::EntryOccurrenceCollector {
+    match owner.completion.as_ref() {
+        Some(BatchCompletion::DestroyPopulationSettled { .. }) => {
+            crate::game::triggers::EntryOccurrenceCollector::AfterSimultaneousEntryEffects
+        }
+        _ => crate::game::triggers::EntryOccurrenceCollector::Owner,
+    }
 }
 
 /// CR 400.3: freeze the original membership, pre-consultation
@@ -2292,15 +2362,15 @@ enum StagedConsult {
 /// CR 603.10a: leaves-the-battlefield abilities look back in time, so every
 /// departure of one logical action must reach them as one co-departure batch.
 /// A staged owner that parks therefore keeps everything its run produced.
-/// Occurrences in `events[run_start..approval_end]` go into the batch's own
-/// logical group through the same segment collector a delivery pause uses, so
-/// that group is their one collector and settlement finds their exact
-/// incarnation. That segment is the run's approval-time departures (a
-/// replacement applied while a member was consulted, such as an Umbra's armor
-/// destroying its Aura), or, for a buried owner's reconcile, the whole run it
-/// delivered. The run's events are then held on the owner until the batch
-/// settles, so no ordinary collector sees them twice. A delivery pause has
-/// already retained its own delivered segment, which starts at `approval_end`.
+/// Occurrences in `events[run_start..approval_end]` join the batch's logical
+/// group through the same retention authority a delivery pause uses. Delegated
+/// children retain only; an unlinked owner collects according to its occurrence
+/// policy, leaving Destroy's replacement-created entries for the ordinary
+/// instruction-aware collector. Settlement still finds every exact incarnation.
+/// The segment includes approval-time departures (such as an Umbra's armor
+/// destroying its Aura), or a buried owner's whole delivered reconcile run.
+/// Its events stay held until settlement; a delivery pause already retained
+/// the delivered segment starting at `approval_end`.
 fn park_staged_run_events(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
@@ -2308,10 +2378,13 @@ fn park_staged_run_events(
     run_start: usize,
     approval_end: usize,
 ) {
-    crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+    let collector = staged_segment_collector(owner);
+    retain_batch_segment(
         state,
         &mut owner.logical_zone_change_group,
         &events[run_start..approval_end],
+        owner.component_delivery_parent.as_ref(),
+        collector,
     )
     .expect("paused staged batch retains its exact approval segment");
     owner.deferred_events.extend(events.drain(run_start..));
@@ -4011,17 +4084,19 @@ fn begin_staged_arrangement(state: &GameState, owner: &mut PendingBatchDeliverie
             .iter()
             .map(|&index| &staged.members[index])
             .collect();
-        // CR 730.3a + CR 401.4: a merged permanent's absorbed components are
-        // new objects put into the same library; their owner arranges them
-        // even when the inherited position itself is unchanged.
-        let merged_components = announced.iter().any(|member| {
+        // Only numbered component placement or replacement-origin placement
+        // needs a fresh prompt; a submitted physical seed was handled above.
+        let numbered_components = matches!(
+            position,
+            LibraryPosition::NthFromTop { .. } | LibraryPosition::BeneathTop { .. }
+        ) && announced.iter().any(|member| {
             matches!(
                 member.request.cause,
                 crate::types::game_state::PendingBatchZoneChangeCause::MergedComponentRouting
             )
         });
         let needs_prompt = announced.len() >= 2
-            && (merged_components
+            && (numbered_components
                 || announced
                     .iter()
                     .any(|member| staged_member_placement_is_replacement(member)));
@@ -4318,10 +4393,13 @@ fn deliver_staged_members(
                     &event,
                     &events[delivery_start..],
                 );
-                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+                let collector = staged_segment_collector(owner);
+                retain_batch_segment(
                     state,
                     &mut owner.logical_zone_change_group,
                     &events[segment_start..delivery_start],
+                    owner.component_delivery_parent.as_ref(),
+                    collector,
                 )
                 .expect("staged batch retains its exact delivered segment");
                 owner.paused_current = Some(paused_current);
@@ -5620,10 +5698,9 @@ fn settle_batch_owner(
         &mut pending,
         deferred_events.iter().chain(events.iter()),
     );
-    // CR 603.10 + CR 603.6a + CR 611.2e: a ChangeZone population whose resolution applies a later
-    // "is/has" instruction with the entry hands its battlefield-entry occurrences to the
-    // post-action collector, whole group or none (CR 603.2c): only when every occurrence of the
-    // group is an entry this action delivered. Every other population keeps its owner collector.
+    // ChangeZone's simultaneous entry effects require a whole-entry-group
+    // handoff. Destroy instead leaves each replacement-created entry to the
+    // ordinary instruction-aware collector while retaining its departures.
     let collector = match completion.as_ref() {
         Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }) => {
             let action_events: Vec<GameEvent> = deferred_events
@@ -5636,6 +5713,9 @@ fn settle_batch_owner(
                 std::iter::empty(),
                 &action_events,
             )
+        }
+        Some(BatchCompletion::DestroyPopulationSettled { .. }) => {
+            crate::game::triggers::EntryOccurrenceCollector::AfterSimultaneousEntryEffects
         }
         _ => crate::game::triggers::EntryOccurrenceCollector::Owner,
     };
@@ -6002,6 +6082,7 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             &mut logical_zone_change_group,
             &paused_current.delivery_events,
             component_delivery_parent.as_ref(),
+            crate::game::triggers::EntryOccurrenceCollector::Owner,
         )
         .expect("resumed batch retains its exact paused delivery");
         // CR 603.10a + CR 616.1: the resumed segment's terminal outcome was
@@ -6113,20 +6194,22 @@ fn drain_staged_batch(
     let completion = owner.completion.clone();
     let attempted = owner.attempted.clone();
     let zone_change_record_start = owner.zone_change_record_start;
+    let collector = staged_segment_collector(&owner);
     // The resumed window (the answer or child that let this owner continue) is
     // held on the owner like every earlier parked segment. While approving, it
-    // is this member's consultation: retain its occurrences in the group, the
-    // one collector for them (see `park_staged_run_events`). A delivery-stage
-    // window is the paused member's own delivery, retained below from its
-    // boundary.
+    // is this member's consultation: retain it under the same delegation and
+    // occurrence policy as `park_staged_run_events`. A delivery-stage window
+    // belongs to the paused member's delivery, retained below from its boundary.
     let resume_start = owner.deferred_events.len();
     owner.deferred_events.append(events);
     let stage = owner.staged.as_ref().map(|staged| staged.stage);
     if stage == Some(BatchDeliveryStage::Approving) {
-        crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+        retain_batch_segment(
             state,
             &mut owner.logical_zone_change_group,
             &owner.deferred_events[resume_start..],
+            component_delivery_parent.as_ref(),
+            collector,
         )
         .expect("resumed staged approval retains its exact consultation segment");
     }
@@ -6137,10 +6220,12 @@ fn drain_staged_batch(
             // sidecar classification is absent: its own retained events are the
             // authoritative witness (the same rule the legacy drain applies).
             let terminal = paused.terminal_completion_after_resume();
-            crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
+            retain_batch_segment(
                 state,
                 &mut owner.logical_zone_change_group,
                 &paused.delivery_events,
+                component_delivery_parent.as_ref(),
+                collector,
             )
             .expect("resumed staged batch retains its exact paused delivery");
             owner

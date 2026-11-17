@@ -6354,6 +6354,9 @@ pub(crate) enum EntryOccurrenceCollector {
     /// the entry: the post-action collector of this action checks the entry, after that effect
     /// exists unless the instruction applying it pauses first (known gap: a multi-host
     /// ReturnAsAura host choice, CR 303.4f).
+    /// Destroy also selects this policy directly for its replacement-created entries: the
+    /// ordinary instruction-aware collector checks those entries while the owner retains
+    /// collection of the announced departures.
     AfterSimultaneousEntryEffects,
 }
 
@@ -6389,13 +6392,11 @@ impl EntryOccurrenceCollector {
         })
     }
 
-    /// CR 603.2c + CR 603.10a: the hand-off is all-or-nothing per logical group. The group's
-    /// zone changes are one event, and the owner's latched batched pass and the post-action
-    /// collector would each see "one or more" of its occurrences, but a batched trigger triggers
-    /// only once for the event. So the owner hands off only when every zone-change occurrence
-    /// of the group is a battlefield entry delivered by this action; one that ends in another
-    /// zone (Storm of Souls' return with one member exiled instead) or was delivered by an
-    /// earlier action keeps the whole group with the owner.
+    /// CR 603.2c + CR 603.10a: ChangeZone's simultaneous-entry-effect handoff is
+    /// all-or-nothing per logical group. Its owner and post-action batched passes must not each
+    /// see part of the same entry event. A non-entry or an earlier action's entry therefore
+    /// keeps that whole group with its owner. Destroy's replacement-created entries use the
+    /// per-occurrence policy directly, without this whole-entry-group narrowing.
     fn for_group_delivered_by<'a>(
         self,
         group: &'a LogicalZoneChangeGroup,
@@ -6425,11 +6426,11 @@ impl EntryOccurrenceCollector {
 }
 
 /// CR 603.10 + CR 611.2e: does the logical owner itself check `event`'s ordinary triggers?
-/// Only moves to the battlefield are handed off. A move to the battlefield from a graveyard is
-/// handed off whole, its CR 603.10a leaves-the-graveyard half included. The completion sites
-/// pick the collector through [`EntryOccurrenceCollector::for_group`] /
-/// [`EntryOccurrenceCollector::within_action`], so under `AfterSimultaneousEntryEffects` every
-/// zone-change occurrence of the group is a battlefield entry and the owner keeps none of them.
+/// Only moves to the battlefield are handed off, including their leaves-the-graveyard half.
+/// ChangeZone selects this policy through [`EntryOccurrenceCollector::for_group`] /
+/// [`EntryOccurrenceCollector::within_action`] for a whole entry group. Destroy selects it
+/// directly for replacement-created entries in a mixed population; the owner still collects
+/// all of that population's non-entry occurrences.
 fn owner_collects_occurrence(collector: EntryOccurrenceCollector, event: &GameEvent) -> bool {
     match collector {
         EntryOccurrenceCollector::Owner => true,
@@ -6469,14 +6470,13 @@ pub(crate) fn complete_logical_zone_trigger_collection(
 /// CR 603.10 + CR 603.6a + CR 611.2e: under
 /// `EntryOccurrenceCollector::AfterSimultaneousEntryEffects` the owner checks no ordinary
 /// trigger for its battlefield-entry occurrences (segment, settlement, or latched batched pass).
-/// A handed-off entry therefore carries no witness in `deferred_triggers`, so the post-action
-/// collector of this action is its sole collector and checks it once (CR 603.2c), after the
-/// resolution's simultaneous "is/has" effects exist when no instruction pauses before applying
-/// one (a multi-host ReturnAsAura host choice is a known gap). It is chosen only when no
-/// instruction that starts after the entry acts on a moved object, so that collector reads no
-/// change CR 608.2c makes after the entry (`effects::entry_occurrence_collector`), and only for
-/// a group whose every zone-change occurrence is such an entry
-/// ([`EntryOccurrenceCollector::for_group`], CR 603.2c).
+/// A handed-off entry therefore carries no witness in `deferred_triggers`, so the ordinary
+/// collector is its sole collector and checks it once (CR 603.2c). ChangeZone chooses this only
+/// for a whole entry group with no later instruction acting on a moved object; collection
+/// waits for the resolution's simultaneous "is/has" effects unless their instruction pauses
+/// first (a multi-host ReturnAsAura host choice is a known gap). Destroy instead selects the
+/// policy directly: replacement-created entries reach the ordinary raw instruction-aware
+/// collector, while this owner keeps every departure and retains all occurrences for settlement.
 pub(crate) fn complete_logical_zone_trigger_collection_for(
     state: &mut GameState,
     group: &mut LogicalZoneChangeGroup,
@@ -6691,9 +6691,9 @@ pub(crate) fn mark_logical_zone_events_consumed_before_priority(
 }
 
 /// `mark_logical_zone_events_consumed_before_priority` restricted to the occurrences
-/// `collector` left with the owner. A handed-off entry stays unclaimed, so the post-action
-/// collector checks it once the resolution's simultaneous "is/has" effects exist
-/// (CR 603.2c + CR 603.10 + CR 611.2e).
+/// `collector` left with the owner. A handed-off entry stays unclaimed for the ordinary
+/// collector: after simultaneous entry effects for ChangeZone, or with the raw instruction's
+/// departure window for Destroy's replacement-created entries.
 pub(crate) fn mark_logical_zone_events_consumed_before_priority_for(
     state: &mut GameState,
     group: &LogicalZoneChangeGroup,

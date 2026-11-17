@@ -2940,17 +2940,47 @@ pub(crate) fn submit_owner_library_order(
     instruction: &OwnerArrangementInstruction,
     chosen: &[ObjectId],
 ) -> OwnerLibraryOrderProgress {
+    // Keep the answered prompt's frozen identities and departure references;
+    // resnapshotting a logical selection must not manufacture component ranks.
+    let submitted = match &state.waiting_for {
+        WaitingFor::EffectZoneChoice {
+            mass_library_order: Some(batch),
+            source_id,
+            library_position: Some(position),
+            track_exiled_by_source,
+            duration,
+            ..
+        } if batch.owner == owner
+            && batch.arranger == arranger
+            && *source_id == instruction.source_id
+            && position == instruction.library_position
+            && *track_exiled_by_source == instruction.track_exiled_by_source
+            && duration.as_ref() == instruction.duration =>
+        {
+            MassLibraryOrderBatch {
+                owner,
+                arranger,
+                members: chosen
+                    .iter()
+                    .map(|id| {
+                        batch
+                            .members
+                            .iter()
+                            .find(|member| member.identity.object_id == *id)
+                            .expect("validated owner order selects only frozen members")
+                            .clone()
+                    })
+                    .collect(),
+            }
+        }
+        _ => snapshot_mass_library_order_batch(state, owner, arranger, chosen.to_vec()),
+    };
     let carrier = state.pending_mass_library_order_choice.take();
     // CR 608.2c: a carrier of another instruction or resolution is discarded, never merged.
     let Some(mut pending) =
         carrier.filter(|pending| owner_arrangement_carrier_binds(state, pending, instruction))
     else {
-        return OwnerLibraryOrderProgress::Complete(vec![snapshot_mass_library_order_batch(
-            state,
-            owner,
-            arranger,
-            chosen.to_vec(),
-        )]);
+        return OwnerLibraryOrderProgress::Complete(vec![submitted]);
     };
     if pending.remaining_batches.is_empty() {
         // CR 400.7: a collected member that changed zones is a new object the instruction no longer finds.
@@ -2959,22 +2989,10 @@ pub(crate) fn submit_owner_library_order(
             .iter()
             .map(|batch| live_mass_library_order_batch(state, batch))
             .collect();
-        arranged.push(snapshot_mass_library_order_batch(
-            state,
-            owner,
-            arranger,
-            chosen.to_vec(),
-        ));
+        arranged.push(submitted);
         return OwnerLibraryOrderProgress::Complete(arranged);
     }
-    pending
-        .arranged_batches
-        .push(snapshot_mass_library_order_batch(
-            state,
-            owner,
-            arranger,
-            chosen.to_vec(),
-        ));
+    pending.arranged_batches.push(submitted);
     OwnerLibraryOrderProgress::NextOwner(open_next_owner_library_order(state, pending))
 }
 
@@ -2994,6 +3012,48 @@ pub(crate) fn fold_physical_order_to_departures(
         }
     }
     departures
+}
+
+/// CR 400.7 + CR 730.3a: only a complete, still-current physical population
+/// supplies component ranks. A logical permanent selection does not rank its
+/// unselected components, and must not be expanded after submission.
+pub(crate) fn submitted_owner_order_is_physical(
+    state: &GameState,
+    batches: &[MassLibraryOrderBatch],
+) -> bool {
+    batches.iter().all(|batch| {
+        batch.members.iter().all(|member| {
+            if !mass_library_order_member_is_current(state, batch.owner, member)
+                || merged_departure_of(state, member.identity.object_id)
+                    != member.departing_permanent
+            {
+                return false;
+            }
+            let Some(departure) = member.departing_permanent else {
+                return true;
+            };
+            let Some(permanent) = state.objects.get(&departure.object_id) else {
+                return false;
+            };
+            ObjectIncarnationRef::from_object(permanent) == departure
+                && permanent.merged_components.iter().all(|component| {
+                    let Some(object) = state.objects.get(component) else {
+                        return false;
+                    };
+                    batches
+                        .iter()
+                        .filter(|submitted| submitted.owner == object.owner)
+                        .flat_map(|submitted| &submitted.members)
+                        .filter(|submitted| {
+                            submitted.identity == ObjectIncarnationRef::from_object(object)
+                                && submitted.origin == object.zone
+                                && submitted.departing_permanent == Some(departure)
+                        })
+                        .count()
+                        == 1
+                })
+        })
+    })
 }
 
 /// CR 401.4 + CR 730.3a: the submitted physical order remains the one order
@@ -3057,19 +3117,26 @@ pub(crate) fn open_owner_library_arrangement(
     track_exiled_by_source: bool,
     duration: Option<Duration>,
 ) {
-    // CR 401.4 + CR 730.3a: owners arrange physical cards, including every
-    // component of any merged permanent; each card goes to its own owner.
-    let physical: Vec<ObjectId> = owner_batches
-        .into_iter()
-        .flat_map(|(_, ids)| ids)
-        .flat_map(|id| {
-            let components = merged_components_of(&state.objects[&id]);
-            std::iter::once(id)
-                .filter(move |_| components.is_none())
-                .chain(components.into_iter().flatten().copied())
-        })
-        .collect();
-    let owner_batches = group_object_ids_by_owner_apnap(state, &physical);
+    // Numbered arrangements rank physical cards. Legacy Top/Bottom prompts
+    // retain the supplied logical permanent population and per-member timing.
+    let owner_batches = if matches!(
+        library_position,
+        LibraryPosition::NthFromTop { .. } | LibraryPosition::BeneathTop { .. }
+    ) {
+        let physical: Vec<ObjectId> = owner_batches
+            .into_iter()
+            .flat_map(|(_, ids)| ids)
+            .flat_map(|id| {
+                let components = merged_components_of(&state.objects[&id]);
+                std::iter::once(id)
+                    .filter(move |_| components.is_none())
+                    .chain(components.into_iter().flatten().copied())
+            })
+            .collect();
+        group_object_ids_by_owner_apnap(state, &physical)
+    } else {
+        owner_batches
+    };
     let (first_owner, first_cards) = owner_batches
         .first()
         .expect("an owner library arrangement requires at least one owner batch")

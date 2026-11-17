@@ -537,7 +537,30 @@ pub(crate) fn settle_replacement_after_departure(
     let mut resumed = Vec::new();
     let settlement = settle_replacement_after_departure_inner(state, interrupted, &mut resumed);
     if !resumed.is_empty() {
-        super::triggers::collect_unclaimed_triggers_into_deferred(state, &resumed, 0, None);
+        // CR 603.2 + CR 603.7: both the direct phase drain and the shared
+        // continuation epilogue can resume the turn interpreter, which already
+        // owns ordinary and delayed phase-entry collection. Exclude only that
+        // input; all public events and unowned substitute events remain intact.
+        let instruction_events;
+        let collection_events = if resumed
+            .iter()
+            .any(|event| matches!(event, GameEvent::PhaseChanged { .. }))
+        {
+            instruction_events = resumed
+                .iter()
+                .filter(|event| !matches!(event, GameEvent::PhaseChanged { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            &instruction_events
+        } else {
+            &resumed
+        };
+        super::triggers::collect_unclaimed_triggers_into_deferred(
+            state,
+            collection_events,
+            0,
+            None,
+        );
         events.extend(resumed);
     }
     settlement
@@ -698,9 +721,10 @@ fn finish_abandoned_replacement(
 ) -> Result<WaitingFor, EngineError> {
     // This is cancellation, not replacement prevention: no paid-cost completion,
     // occurrence, or Prevented staged terminal is fabricated for the lost member.
-    if let ProposedEvent::BeginPhase { phase, .. } = boundary {
-        super::turns::abandon_phase_begin_choice(state, *phase);
-    }
+    // CR 800.4j + CR 500.8: a continuing game's BeginPhase menu is obsolete,
+    // not its committed next phase or scheduled entry. Keep the typed cursor
+    // and step-entry debt for `resume_abandoned_phase_transition` to repropose
+    // with the current active-player authority. Terminal retirement is separate.
     finish_replacement_execute_epilogue(
         state,
         ReplacementExecuteEpilogue {

@@ -205,12 +205,13 @@ pub(crate) fn concede(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub enum DepartureResume {
-    /// Nothing of a resolution is left for the caller to finish.
+    /// No interrupted resolution needs the caller's convergence boundary.
     Settled,
-    /// The departure canceled the current replacement-choice pause of a parked
-    /// zone-change owner. Its surviving tail is still owed: the caller resumes
-    /// it and settles the action before any player receives priority, and the
-    /// departure left its queued triggers for that settlement to place.
+    /// The departure resumed an interrupted resolution or released its parked
+    /// zone-change tail. The caller still owes final-part/SBA/trigger convergence,
+    /// even if reconciliation already finished the tail and retired its owner.
+    /// Any remaining work resumes before priority; the departure leaves its
+    /// queued triggers for that settlement to place.
     ParkedZoneChangeTail,
 }
 
@@ -306,6 +307,18 @@ pub(crate) fn eliminate_players(
     let mut resume = DepartureResume::Settled;
     let first_event = events.len();
     let first_record = state.zone_changes_this_turn.len();
+    // CR 117.2e + CR 117.5: reconciliation may finish and retire an interrupted
+    // owner, but cannot discharge the caller's final-part/SBA/trigger boundary.
+    // Latch that authority before payment retirement or replacement settlement.
+    let interrupted_resolution = state.resolving_stack_entry.is_some()
+        || state.resolution_stack.active_zone_change_owner_is_parked();
+    // CR 800.4a + CR 117.2e: retain the original zone-owner pause even if its
+    // replacement or staged reconciler consumes the owner below.
+    let live_zone_change_pause = state
+        .pending_replacement
+        .is_some()
+        .then(|| state.resolution_stack.active_zone_change_owner_pause())
+        .flatten();
     // CR 733: the CR 800.4a stack step is batch-scoped over the whole
     // `leaving_set` (below), so each player's own leave node is collected here
     // — in elimination order, never via the `HashSet` — for
@@ -417,15 +430,6 @@ pub(crate) fn eliminate_players(
             super::stack::stack_object_controller(state, entry),
         )
     });
-
-    // CR 800.4a + CR 117.2e: the member a parked zone-change owner's
-    // replacement choice is paused on, when that choice is the current
-    // operation as the departures begin.
-    let live_zone_change_pause = state
-        .pending_replacement
-        .is_some()
-        .then(|| state.resolution_stack.active_zone_change_owner_pause())
-        .flatten();
 
     let interrupted_ordinary_search = state
         .pending_scoped_library_search
@@ -811,30 +815,6 @@ pub(crate) fn eliminate_players(
                 }
             };
 
-        // CR 800.4a + CR 117.2e + CR 608.2c: a departure that canceled the
-        // current replacement-choice pause of a parked zone-change owner (a
-        // batch delivery or a ChangeZone iteration, or a merged permanent's
-        // component child and the owner that announced it) leaves that owner's
-        // surviving tail owed. No player has priority while it resolves, so
-        // the departure reports it — a concession to its action, a player-loss
-        // safety net to its caller — which finishes the resolution and then
-        // settles it like any action that completed one: final part, state-based
-        // actions, then the queue below (CR 608.2n, CR 117.5).
-        // Only when the departure itself took that pause (its member left the
-        // game): a prompt cleared while its member stays in the game leaves the
-        // owner paused, as at base.
-        if live_zone_change_pause.is_some()
-            && state.pending_replacement.is_none()
-            && matches!(state.waiting_for, WaitingFor::Priority { .. })
-            && state.resolution_stack.active_zone_change_owner_is_parked()
-            && state
-                .resolution_stack
-                .active_zone_change_owner_pause()
-                .is_none()
-        {
-            resume = DepartureResume::ParkedZoneChangeTail;
-        }
-
         if let Some(frame) = staged_optional_sacrifice_decline {
             state.push_optional_effect_frame(frame);
             if let Err(error) =
@@ -851,13 +831,6 @@ pub(crate) fn eliminate_players(
         // CR 800.4j: a phase transition held on a departed player's choice is resumed for
         // the players still in the game before the triggers below are put on the stack.
         super::turns::resume_abandoned_phase_transition(state, events);
-
-        // CR 603.3b: If prune collapsed an ordering pass into
-        // `deferred_triggers` while `waiting_for` is Priority, dispatch now so
-        // combat auto-advance does not skip them (issue #1350).
-        if resume == DepartureResume::Settled {
-            drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
-        }
 
         // CR 800.4a: If the active `WaitingFor` was waiting on any
         // newly-eliminated player, advance to `Priority` for the next living
@@ -1128,6 +1101,49 @@ pub(crate) fn eliminate_players(
                 }
             }
         }
+
+        // CR 117.2e + CR 608.2c + CR 608.2n + CR 117.5: final classification
+        // follows every reconciler, dead-actor repair and abandoned payment.
+        // Instruction settlement can have removed the original owner already;
+        // it does not pay the caller's convergence debt. A settled phase menu
+        // alone is not a resolution, and a surviving prompt keeps its authority.
+        let settled_interrupted_resolution = interrupted_resolution
+            && ([
+                replacement_settlement,
+                owner_arrangement,
+                player_scope_sacrifice,
+                player_scope_choice,
+                resolution_object_choice,
+                resolution_player_choice,
+                staged_batch_settlement,
+            ]
+            .contains(&super::engine_resolution_choices::DepartureSettlement::Settled)
+                || super::engine::resolution_instructions_are_done(state)
+                || (state.resolving_stack_entry.is_none() && state.resolution_stack.is_empty())
+                || abandoned_payment.as_ref().is_some_and(|transaction| {
+                    players::is_alive(state, transaction.root.controller)
+                }));
+        // A canceled member can instead leave its original owner parked with an
+        // unpaused tail. A member still paused after its menu cleared stays held.
+        let unpaused_zone_tail = live_zone_change_pause.is_some()
+            && state.resolution_stack.active_zone_change_owner_is_parked()
+            && state
+                .resolution_stack
+                .active_zone_change_owner_pause()
+                .is_none();
+        if state.pending_replacement.is_none()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            && (settled_interrupted_resolution || unpaused_zone_tail)
+        {
+            resume = DepartureResume::ParkedZoneChangeTail;
+        }
+
+        // CR 603.3b + CR 117.5: dispatch a non-convergence-owned queue once,
+        // after late reconciliation; a resumed resolution's caller first owes
+        // its final part and state-based actions, then places the whole queue.
+        if resume == DepartureResume::Settled {
+            drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
+        }
     }
     // CR 800.4a: the departure's events belong to the departure, not to a
     // surviving player's paused announcement.
@@ -1352,10 +1368,8 @@ pub(crate) fn drain_or_clear_deferred_triggers_after_elimination(
 ) {
     // CR 117.5 + CR 603.3b: a post-action pass in progress places its queue whole at its
     // settle to priority.
-    if matches!(
-        departure_triggers,
-        DepartureTriggers::PlacedByPass | DepartureTriggers::CollectedByDeparture
-    ) || state.deferred_triggers.is_empty()
+    if departure_triggers == DepartureTriggers::PlacedByPass
+        || state.deferred_triggers.is_empty()
         || state.pending_trigger.is_some()
         || state.pending_trigger_order.is_some()
     {
