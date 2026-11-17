@@ -57,8 +57,9 @@ fn controlled_tokens(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
         .collect()
 }
 
-/// CR 111.3 + CR 111.4: the creating spell defines the token's name (its
-/// Dragon subtype), 5/5 P/T, red color, Creature type, and flying.
+/// CR 111.3: the creating spell defines the token's Dragon subtype, 5/5 P/T,
+/// red color, Creature type, and flying. The name check pins the engine's
+/// subtype-named token convention; CR 111.4 would name it "Dragon Token".
 fn assert_dragon(state: &GameState, id: ObjectId, controller: PlayerId) {
     let token = &state.objects[&id];
     assert_eq!(token.controller, controller);
