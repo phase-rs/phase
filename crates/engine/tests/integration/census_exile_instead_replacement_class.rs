@@ -1,5 +1,10 @@
-//! Census-flagged "exile it instead" damage spells (confirmed-misparses.toml): runtime
-//! observations of the printed behavior. Oracle texts are the MTGJSON `oracle_text` of
+//! "Exile it instead" damage spells: runtime observations of the printed behavior. The rows
+//! for Ob Nixilis's Cruelty, Pinecone Strike, Brutal Expulsion and Sparks Ablaze's rider
+//! clause were census false positives (confirmed-misparses.toml) released by this file;
+//! Feed the Flames, Narset's Rebuke, Khaaaaaaaaaaaannn!, Suplex, Bouncer's Beatdown and Bot
+//! Bashing Time share the clause shape and are kept as extra class coverage (the first five
+//! were released upstream in #10952). Sparks Ablaze's planeswalker branch is the same rider
+//! as Brutal Expulsion's planeswalker test. Oracle texts are the MTGJSON `oracle_text` of
 //! each face as exported in card-data.json (checked against Scryfall).
 //!
 //! Clause shape: "If that creature would die this turn, exile it instead." (CR 614.1a +
