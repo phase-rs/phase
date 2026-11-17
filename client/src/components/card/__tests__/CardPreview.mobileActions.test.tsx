@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useCardImage } from "../../../hooks/useCardImage.ts";
 import { type GameMode, useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
-import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
-import { buildGameState } from "../../../test/factories/gameStateFactory.ts";
+import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
+import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
 import { CardPreview } from "../CardPreview.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
@@ -33,25 +33,17 @@ function cardImage(isFlip: boolean) {
 /** Inspect a battlefield card in a live game, which is what gives the preview
  *  its report context. */
 function inspectInGame(gameMode: GameMode): void {
-  const object = buildGameObject({
-    id: 101,
-    card_id: 1,
-    zone: "Battlefield",
-    name: CARD_NAME,
-    printed_ref: { oracle_id: "oracle-starship-enterprise", face_name: CARD_NAME },
-  });
+  const card = gameObjectFactory
+    .onBattlefield()
+    .named(CARD_NAME)
+    .build({ printed_ref: { oracle_id: "oracle-starship-enterprise", face_name: CARD_NAME } });
   useGameStore.setState({
     gameId: "game-11001",
     gameMode,
-    gameState: buildGameState({
-      objects: buildObjectMap(object),
-      next_object_id: 102,
-      battlefield: [object.id],
-      next_timestamp: 2,
-    }),
+    gameState: gameStateFactory.withPlayers(0, 1).withObjects(card).build(),
     spellCosts: {},
   });
-  useUiStore.setState({ inspectedObjectId: object.id });
+  useUiStore.setState({ inspectedObjectId: card.id });
 }
 
 beforeEach(() => {
@@ -107,12 +99,21 @@ describe("CardPreview mobile action strip", () => {
     fireEvent.pointerDown(report);
     expect(onDismiss).not.toHaveBeenCalled();
 
-    // A near miss lands on the strip's padding around the pills, not the
-    // backdrop, so it does not dismiss either.
+    // The strip, its padding included, sits inside the wrapper that stops the
+    // event, so a tap on it does not dismiss either.
     const strip = report.closest<HTMLElement>("[data-card-preview-actions]");
     if (strip == null) throw new Error("the Report button is not in the action strip");
     fireEvent.pointerDown(strip);
     expect(onDismiss).not.toHaveBeenCalled();
+
+    // happy-dom does no hit testing, so which areas take taps is pinned by
+    // class: the wrapper is click-through (the space beside the card reads as
+    // backdrop), and only the card and the strip, with 8px of padding past its
+    // pills for near misses, take taps.
+    const cardFrame = screen.getByAltText(CARD_NAME).parentElement;
+    expect(cardFrame).toHaveClass("pointer-events-auto");
+    expect(cardFrame?.parentElement).toHaveClass("pointer-events-none");
+    expect(strip).toHaveClass("pointer-events-auto", "-m-2", "p-2");
 
     // Reach guard: a tap on the backdrop does dismiss, so the line above is
     // not passing because nothing listens.

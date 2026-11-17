@@ -6,8 +6,8 @@ import type { ParsedItem } from "../../../hooks/useEngineCardData.ts";
 import { trackEvent } from "../../../services/telemetry.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
-import { buildGameObject, buildObjectMap } from "../../../test/factories/gameObjectFactory.ts";
-import { buildGameState, buildPlayers } from "../../../test/factories/gameStateFactory.ts";
+import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
+import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
 import { CardReportDialog } from "../CardReportDialog.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({ useCardImage: vi.fn() }));
@@ -34,23 +34,17 @@ vi.mock("../../../services/telemetry.ts", () => ({
  * reset, so a shared card would carry one case's "Reported" into the next.
  */
 function openPickerOn(oracleId: string): void {
-  const card = buildGameObject({
-    id: 41,
-    owner: 0,
-    controller: 0,
-    zone: "Battlefield",
-    name: "Starship Enterprise",
-    display_visible_to_viewer: true,
-    printed_ref: { oracle_id: oracleId, face_name: "Starship Enterprise" },
-  });
+  const card = gameObjectFactory
+    .onBattlefield()
+    .named("Starship Enterprise")
+    .ownedBy(0)
+    .build({
+      display_visible_to_viewer: true,
+      printed_ref: { oracle_id: oracleId, face_name: "Starship Enterprise" },
+    });
   useGameStore.setState({
     gameMode: "local",
-    gameState: buildGameState({
-      players: buildPlayers([0, 1]),
-      objects: buildObjectMap(card),
-      battlefield: [card.id],
-      seat_order: [0, 1],
-    }),
+    gameState: gameStateFactory.withPlayers(0, 1).withObjects(card).build(),
   });
   useUiStore.setState({ cardReportDialogOpen: true });
   render(<CardReportDialog />);
