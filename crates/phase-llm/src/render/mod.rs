@@ -9,4 +9,5 @@ pub mod action;
 pub mod draft;
 pub mod game;
 pub mod history;
+pub mod keyword;
 pub mod text;
