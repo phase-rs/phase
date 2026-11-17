@@ -7,6 +7,7 @@ import {
   opponentMayChoiceWaitingForFactory,
   optionalEffectChoiceWaitingForFactory,
 } from "../../../test/factories/gameStateFactory.ts";
+import { SHORT_LANDSCAPE_QUERY } from "../../../hooks/useIsShortLandscape.ts";
 import { OptionalEffectModalContent } from "../OptionalEffectModal.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
@@ -232,7 +233,6 @@ describe("OptionalEffectModalContent", () => {
 // remember checkboxes on the right. happy-dom does no layout, so these pin the
 // structure, against happy-dom's real `matchMedia`.
 describe("OptionalEffectModalContent on a short landscape screen", () => {
-  const SHORT_LANDSCAPE_QUERY = "(max-height: 500px) and (orientation: landscape)";
   const DEFAULT_SCREEN = { innerWidth: window.innerWidth, innerHeight: window.innerHeight };
   const REMEMBER_LABEL = "Don't ask again this game";
   const SAME_CARD_LABEL = "Use this choice for every copy of this card this game";
@@ -346,17 +346,30 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
     expectStacked();
   });
 
-  it("splits when the phone turns to landscape with the prompt open", () => {
+  it("follows the phone as it turns with the prompt open, keeping its buttons", () => {
     setScreen(390, 844);
     renderRhysticStudy();
     expectStacked();
+    const yes = screen.getByRole("button", { name: "Yes" });
+    const dialog = screen.getByRole("dialog", { name: "Rhystic Study - Optional Effect" });
 
     setScreen(844, 390);
     act(() => {
       window.dispatchEvent(new Event("resize"));
     });
 
-    expect(screen.getByRole("dialog", { name: "Rhystic Study - Optional Effect" })).toHaveClass("max-w-3xl");
-    expect(screen.getByRole("button", { name: "Yes" }).parentElement).toHaveClass("grid-cols-2");
+    expect(dialog).toHaveClass("max-w-3xl");
+    expect(yes.parentElement).toHaveClass("grid-cols-2");
+    // One element tree serves both layouts, so the turn keeps the buttons
+    // (and any focus on them) instead of rebuilding them.
+    expect(screen.getByRole("button", { name: "Yes" })).toBe(yes);
+
+    setScreen(390, 844);
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+
+    expectStacked();
+    expect(screen.getByRole("button", { name: "Yes" })).toBe(yes);
   });
 });

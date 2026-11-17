@@ -36,9 +36,44 @@ export interface ChoiceOption {
  *   preview sits in a left column; the options, side by side, sit above the
  *   footer in a right column. The dialog widens to hold both, and the prompt
  *   comes out far shorter than stacked. It needs a preview to fill the left
- *   column, and stacks without one.
+ *   column, and stacks without one. Its height budget assumes the standard
+ *   rules-text band; a taller band (a Saga's) makes the card column taller.
  */
 export type ChoiceModalLayout = "stacked" | "columns";
+
+/**
+ * Each layout's dialog width and body classes. Both layouts share one element
+ * tree, so a phone that turns with a prompt open keeps the prompt's nodes, and
+ * with them focus and the preview's loaded image.
+ */
+const LAYOUT_STYLES = {
+  stacked: {
+    dialogSize: "sm",
+    body: "",
+    cardColumn: "px-3 pt-3 lg:px-5 lg:pt-4",
+    actionColumn: "px-3 py-3 lg:px-5 lg:py-5",
+    options: "flex flex-col gap-2",
+    footer: "mt-3",
+  },
+  columns: {
+    dialogSize: "lg",
+    body: "grid grid-cols-2 gap-3 p-3",
+    cardColumn: "flex flex-col gap-1.5",
+    actionColumn: "flex flex-col gap-3",
+    options: "grid grid-cols-2 gap-2",
+    footer: "",
+  },
+} as const satisfies Record<
+  ChoiceModalLayout,
+  {
+    dialogSize: "sm" | "lg";
+    body: string;
+    cardColumn: string;
+    actionColumn: string;
+    options: string;
+    footer: string;
+  }
+>;
 
 interface ChoiceModalProps {
   title: string;
@@ -113,43 +148,37 @@ export function ChoiceModal({
       )}
     </button>
   ));
-  const isColumns = layout === "columns" && preview != null;
+  const resolvedLayout: ChoiceModalLayout =
+    layout === "columns" && preview != null ? "columns" : "stacked";
+  const styles = LAYOUT_STYLES[resolvedLayout];
 
   return (
     <DialogShell
       title={<RichLabel text={title} size="md" />}
       subtitle={subtitle ? <RichLabel text={subtitle} size="xs" /> : undefined}
-      size={isColumns ? "lg" : "sm"}
+      size={styles.dialogSize}
       onClose={onClose}
       previewObjectId={previewObjectId}
     >
-      {isColumns ? (
-        <div className="grid grid-cols-2 gap-3 p-3">
-          <div className="flex flex-col gap-1.5">
+      <div className={styles.body}>
+        {preview && (
+          <div className={styles.cardColumn}>
             {preview}
             {/* Holding the card opens the full-card preview, which DialogShell
                 wires through `previewObjectId`. A mouse previews on hover
                 instead, so only a coarse pointer gets the hint. */}
-            {previewObjectId != null && (
+            {resolvedLayout === "columns" && previewObjectId != null && (
               <p className="hidden text-center text-xs text-slate-400 pointer-coarse:block">
                 {t("choiceModal.holdForFullCard")}
               </p>
             )}
           </div>
-          <div className="flex flex-col gap-3">
-            <div className="grid grid-cols-2 gap-2">{optionButtons}</div>
-            {footer}
-          </div>
+        )}
+        <div className={styles.actionColumn}>
+          <div className={styles.options}>{optionButtons}</div>
+          {footer && <div className={styles.footer}>{footer}</div>}
         </div>
-      ) : (
-        <>
-          {preview && <div className="px-3 pt-3 lg:px-5 lg:pt-4">{preview}</div>}
-          <div className="px-3 py-3 lg:px-5 lg:py-5">
-            <div className="flex flex-col gap-2">{optionButtons}</div>
-            {footer && <div className="mt-3">{footer}</div>}
-          </div>
-        </>
-      )}
+      </div>
     </DialogShell>
   );
 }

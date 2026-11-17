@@ -2,6 +2,7 @@ import type { ComponentProps } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { SHORT_LANDSCAPE_QUERY } from "../../../hooks/useIsShortLandscape.ts";
 import { ChoiceModal } from "../ChoiceModal.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
@@ -57,7 +58,7 @@ describe("ChoiceModal layout", () => {
     // happy-dom, whose `matchMedia` reads its own size.
     Object.assign(window, { innerWidth: 844, innerHeight: 390 });
     // Reach guard: this is the screen the optional-effect prompt splits on.
-    expect(window.matchMedia("(max-height: 500px) and (orientation: landscape)").matches).toBe(true);
+    expect(window.matchMedia(SHORT_LANDSCAPE_QUERY).matches).toBe(true);
 
     renderChoice();
 
@@ -82,7 +83,14 @@ describe("ChoiceModal layout", () => {
     const columns = actionColumn.parentElement as HTMLElement;
     const cardColumn = columns.firstElementChild as HTMLElement;
 
-    expect(screen.getByRole("dialog")).toHaveClass("max-w-3xl");
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveClass("max-w-3xl");
+    // A dialog this wide nears a landscape phone's full width, so the overlay
+    // keeps it clear of each side's safe-area inset (a notch or a camera cutout).
+    expect(dialog.parentElement).toHaveClass(
+      "pl-[max(env(safe-area-inset-left),0.5rem)]",
+      "pr-[max(env(safe-area-inset-right),0.5rem)]",
+    );
     expect(columns).toHaveClass("grid", "grid-cols-2");
     expect(Array.from(columns.children)).toEqual([cardColumn, actionColumn]);
     expect(cardColumn).toContainElement(screen.getByRole("img", { name: CARD_NAME }));
@@ -110,5 +118,10 @@ describe("ChoiceModal layout", () => {
     expect(options).toHaveClass("flex", "flex-col");
     expect(options).not.toHaveClass("grid-cols-2");
     expect(screen.queryByText(HOLD_HINT)).not.toBeInTheDocument();
+
+    // Paired positive: the same prompt with a card does split.
+    cleanup();
+    renderChoice({ layout: "columns" });
+    expect(screen.getByRole("dialog")).toHaveClass("max-w-3xl");
   });
 });

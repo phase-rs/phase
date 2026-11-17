@@ -2,34 +2,13 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameAction, GameState, WaitingFor } from "../../adapter/types.ts";
+import { useIsShortLandscape } from "../../hooks/useIsShortLandscape.ts";
 import { ChoiceModal } from "./ChoiceModal.tsx";
 
 type OptionalEffectWaitingFor = Extract<
   WaitingFor,
   { type: "OptionalEffectChoice" | "OpponentMayChoice" }
 >;
-
-/** A phone on its side: the short screens that index.css's compact styles
- * target (`max-height: 500px`), in landscape. */
-const SHORT_LANDSCAPE_QUERY = "(max-height: 500px) and (orientation: landscape)";
-
-/** True while the screen is short and landscape, following the phone as it turns. */
-function useIsShortLandscape(): boolean {
-  const [isShortLandscape, setIsShortLandscape] = useState(() =>
-    typeof window !== "undefined"
-      ? window.matchMedia(SHORT_LANDSCAPE_QUERY).matches
-      : false,
-  );
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia(SHORT_LANDSCAPE_QUERY);
-    const handleChange = () => setIsShortLandscape(mediaQuery.matches);
-    mediaQuery.addEventListener("change", handleChange);
-    return () => mediaQuery.removeEventListener("change", handleChange);
-  }, []);
-
-  return isShortLandscape;
-}
 
 interface OptionalEffectModalProps {
   waitingFor: OptionalEffectWaitingFor;
