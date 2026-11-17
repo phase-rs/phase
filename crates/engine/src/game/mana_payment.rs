@@ -5425,7 +5425,9 @@ mod tests {
             assert_eq!(*repeatability, AdditionalCostRepeatability::Repeatable);
             assert_eq!(*cost, printed);
             runner
-                .act(GameAction::DecideOptionalCost { pay: paid + 1 < n })
+                .act(GameAction::DecideOptionalCost {
+                    index: usize::from(paid + 1 >= n),
+                })
                 .unwrap();
         }
         assert!(matches!(
