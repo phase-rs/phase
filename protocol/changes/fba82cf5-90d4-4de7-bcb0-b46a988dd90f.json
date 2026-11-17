@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "LiminalEntry carries an optional copy_settlement (the chosen as-enters copy of a liminal token entrant, held across a prompt raised by the post-copy rediscovery); an older build ignores it and would drop the copy's entry completion when such a state resumes."
+}
