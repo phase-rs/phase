@@ -272,6 +272,7 @@ fn rewrite_resolved_ability(
         legacy_selected_target_incarnations: _,
         chosen_target_slots: _,
         activation_record: _,
+        announced_usage_key: _,
         illegal_target_slots: _,
         unjudged_target_slots: _,
         illegal_local_target_slots: _,
@@ -311,6 +312,7 @@ fn rewrite_resolved_ability(
         replacement_applied: _,
         sub_link: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         modal: _,
         parent_target_missing_reason: _,
         illegal_targets_disposition: _,

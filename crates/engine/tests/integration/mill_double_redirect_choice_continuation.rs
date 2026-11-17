@@ -42,6 +42,7 @@ fn graveyard_exile_replacement(description: &str) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,
@@ -92,6 +93,7 @@ fn mill_under_two_graveyard_redirects_delivers_every_card_through_ordering_choic
             count: QuantityExpr::Fixed { value: 3 },
             target: TargetFilter::Any,
             destination: Zone::Graveyard,
+            position: engine::types::ability::LibraryPosition::Top,
         },
         vec![TargetRef::Player(P1)],
         runner.state().objects.keys().next().copied().unwrap(),

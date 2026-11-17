@@ -147,6 +147,7 @@ export const formatConfigFactory = Factory.define<FormatConfig>(() => ({
   singleton: false,
   command_zone: false,
   commander_damage_threshold: null,
+  poison_counter_threshold: 10,
   range_of_influence: null,
   team_based: false,
   sideboard_policy: { type: "Limited", data: 15 },
@@ -829,11 +830,10 @@ export const loopShortcutWaitingForFactory = LoopShortcutWaitingForFactory.defin
       residual_board_delta: { added: [], removed: [] },
     },
     schema: {
-      iteration_count: "UntilLethal",
+      iteration_count: "WithoutEnd",
       points: [],
       convoke_tappable_count: 0,
     },
-    road: "Ring",
   },
 }));
 
@@ -873,10 +873,9 @@ export const respondToShortcutWaitingForFactory =
       proposal: {
         proposer: 1,
         predicted_winner: 1,
-        count: "UntilLethal",
+        count: "WithoutEnd",
         unbounded: [{ DamageDealt: 1 }],
         win_kind: "LethalDamage",
-        road: "Ring",
       },
     },
   }));

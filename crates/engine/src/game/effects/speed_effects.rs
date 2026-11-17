@@ -57,25 +57,15 @@ pub(crate) fn players_for_filter(
         // no live speed-effect recipient meaning.
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => Vec::new(),
         // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Each
-        // opponent who was dealt damage of the given kind this turn, optionally
-        // restricted to a matching source.
-        PlayerFilter::OpponentDealtDamage {
-            kind,
-            source,
-            min_sources,
-        } => state
+        // player in `relation` who was dealt damage of the given kind this
+        // turn, optionally restricted to a matching source.
+        PlayerFilter::OpponentDealtDamage { .. } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
                 crate::game::quantity::opponent_dealt_damage_matches(
-                    state,
-                    player.id,
-                    controller,
-                    *kind,
-                    source,
-                    *min_sources,
-                    source_id,
+                    state, player.id, controller, filter, source_id,
                 )
             })
             .map(|player| player.id)

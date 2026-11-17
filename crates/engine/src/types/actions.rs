@@ -143,6 +143,9 @@ pub enum OutsideGameSelection {
     /// the only stable identity — and it keeps two identically named cards in
     /// the same pack distinguishable.
     BoosterPack { pack_slot: usize },
+    /// CR 702.139a + CR 400.11: the player's revealed, not-yet-used companion.
+    /// There is at most one per player, so the selection needs no identity.
+    Companion,
 }
 
 #[derive(
@@ -249,9 +252,10 @@ pub enum GameAction {
     ChooseAnnouncingOpponent {
         opponent: PlayerId,
     },
-    /// CR 702.174a: The spell controller's answer to
-    /// `WaitingFor::ChooseGiftRecipient` — which opponent receives the promised
-    /// gift. `opponent` must be one of that prompt's `candidates`.
+    /// CR 601.2 + CR 115.10a: the caster's answer to `WaitingFor::ChooseGiftRecipient`
+    /// — which opponent is chosen for the prompt's `purpose` (Gift recipient,
+    /// CR 702.174a, or an effect-as-cost's player, CR 601.2h). `opponent` must be
+    /// one of the prompt's `candidates`.
     ChooseGiftRecipient {
         opponent: PlayerId,
     },
@@ -450,6 +454,10 @@ pub enum GameAction {
     ChoosePlayDraw {
         play_first: bool,
     },
+    /// CR 103.1: answer to `WaitingFor::ChooseStartingPlayer` — the seat that takes the first turn.
+    ChooseStartingPlayer {
+        player: PlayerId,
+    },
     ChooseOption {
         choice: String,
     },
@@ -501,8 +509,13 @@ pub enum GameAction {
     SelectModes {
         indices: Vec<usize>,
     },
+    /// CR 601.2b: Resolve a `WaitingFor::OptionalCostChoice` by selecting an
+    /// option index. For `AdditionalCost::Optional`, index 0 = pay the cost,
+    /// index 1 = skip. For `AdditionalCost::Choice`, the index selects which
+    /// alternative cost to pay. For `AdditionalCost::Kicker`, index 0 = pay
+    /// kicker, index 1 = decline (handled separately for repeatable kicker).
     DecideOptionalCost {
-        pay: bool,
+        index: usize,
     },
     /// CR 715.3a: Choose creature face (true) or Adventure half (false).
     ChooseAdventureFace {
@@ -980,10 +993,9 @@ pub enum GameAction {
         player_id: PlayerId,
     },
     /// CR 732.2a: the proposer (the loop's determinate winner, holding priority)
-    /// declares the loop shortcut. `count` is the repeat count — Phase 3 only produces
-    /// [`IterationCount::UntilLethal`]. `template` pins the per-iteration choices for a
-    /// choice-bearing loop, and `Some` IS accepted and consumed: the declare handler binds
-    /// `template.owner` to the engine-issued `offer.proposer` (CR 603.5 — a proposer may pin only
+    /// declares the loop shortcut. `count` is the repeat count. `template` pins the
+    /// per-iteration choices for a choice-bearing loop, and `Some` IS accepted and consumed: the
+    /// declare handler binds `template.owner` to the engine-issued `offer.proposer` (CR 603.5 — a proposer may pin only
     /// their own choices) and, for a non-empty schema, requires
     /// `decision_template::{predictability_gate, validate_pins}` to pass before the pins drive the
     /// cycle; any failure rejects the declaration and hands back to manual play. That owner binding
@@ -2058,8 +2070,9 @@ impl GameAction {
 
     /// Whether this is an actor-scoped UI preference action.
     ///
-    /// These mutations are legal in every `WaitingFor` state, do not change game
-    /// progression, and must not trigger auto-pass advancement at the engine
+    /// These mutations are legal in every `WaitingFor` state except an open
+    /// shortcut window (`preference_frozen`, hand order excepted), do not change
+    /// game progression, and must not trigger auto-pass advancement at the engine
     /// boundary. The authenticated actor is the only preference owner.
     pub fn is_actor_scoped_preference(&self) -> bool {
         matches!(
@@ -2176,6 +2189,7 @@ impl GameAction {
             | Self::CancelCast
             | Self::SubmitSideboard { .. }
             | Self::ChoosePlayDraw { .. }
+            | Self::ChooseStartingPlayer { .. }
             | Self::ChooseOption { .. }
             | Self::SubmitVoteCandidate { .. }
             | Self::SubmitSpellbookDraft { .. }
@@ -2524,6 +2538,7 @@ impl GameAction {
             | GameAction::BackToManaPayment
             | GameAction::SubmitSideboard { .. }
             | GameAction::ChoosePlayDraw { .. }
+            | GameAction::ChooseStartingPlayer { .. }
             | GameAction::ChooseOption { .. }
             | GameAction::SubmitVoteCandidate { .. }
             | GameAction::SubmitSpellbookDraft { .. }

@@ -31,7 +31,6 @@
     "accept": "Accept",
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
-    "untilLethal": "Repeat until the game ends.",
     "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
@@ -51,16 +50,13 @@
     "allocationSum": "{{allocated}} de {{total}} repetições distribuídas.",
     "evenSplit": "Restaurar a divisão igual",
     "customDistribution": "Distribuição personalizada — o motor não pré-visualizou esta divisão.",
-    "announceTitle": "Escolha o alvo que cada repetição anuncia:",
-    "announce": "Anunciar",
-    "announceAria": "Anunciar {{subject}}",
     "mayTitle": "Habilidade opcional {{group}} — repetir esta escolha em cada iteração?",
     "mayTake": "Usar",
     "mayDecline": "Recusar",
     "mayTakeAria": "Usar a habilidade opcional {{group}}",
     "mayDeclineAria": "Recusar a habilidade opcional {{group}}",
     "winKind": {
-      "LethalDamage": "This loop deals lethal damage.",
+      "LethalDamage": "This loop reduces an opponent's life total to 0 or less.",
       "PoisonLoss": "This loop gives lethal poison counters.",
       "Decking": "This loop decks an opponent.",
       "ImmediateWin": "This loop wins the game.",
@@ -70,6 +66,7 @@
     "respondDeclaredTitle": "Declaração proposta:",
     "respondAllocationEntry": "{{subject}} — ×{{repetitions}}",
     "respondOrderEntry": "{{position}}. {{subject}}",
+    "respondReplacementOrderEntry": "{{position}}. Efeito de substituição de {{subject}}",
     "respondDecision": {
       "take": "{{subject}} — usar em cada iteração",
       "decline": "{{subject}} — recusar em cada iteração"
@@ -204,6 +201,14 @@
         "label": "Rótulo",
         "fallback": "Escolha"
       }
+    },
+    "attacking": {
+      "you": "Atacando você",
+      "player": "Atacando {{player}}",
+      "yourPlaneswalker": "Atacando seu planeswalker {{name}}",
+      "planeswalker": "Atacando o planeswalker {{name}} de {{player}}",
+      "battle": "Atacando a batalha {{name}}",
+      "nothing": "Atacando, mas nenhum jogador, planeswalker ou batalha"
     }
   },
   "actionButton": {
@@ -346,7 +351,6 @@
     "pickNone": "Nenhuma",
     "underAttack_one": "Atacado por {{count}} criatura",
     "underAttack_other": "Atacado por {{count}} criaturas",
-    "target": "Alvo",
     "token": "Ficha",
     "tokenTooltip": "Ficha que é uma cópia de uma carta real",
     "copy": "Cópia",
@@ -436,7 +440,12 @@
     "assignRemaining_other": "Atribuir mais {{count}}",
     "confirmDistribute_one": "Declarar {{count}} Atacante",
     "confirmDistribute_other": "Declarar {{count}} Atacantes",
-    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker."
+    "noCommonTarget": "No shared target — switch to Distribute to aim each attacker.",
+    "totalsHeading": "Totais de ataque",
+    "targetTotal_few": "{{count}} atacantes · {{damage}} de dano",
+    "targetTotal_many": "{{count}} atacantes · {{damage}} de dano",
+    "targetTotal_one": "{{count}} atacante · {{damage}} de dano",
+    "targetTotal_other": "{{count}} atacantes · {{damage}} de dano"
   },
   "fullControl": {
     "label": "Controle",
@@ -562,7 +571,9 @@
     "dungeonTooltip": "Aventurando-se em {{name}}",
     "poisonAriaLabel_one": "{{count}} marcador de veneno",
     "poisonAriaLabel_other": "{{count}} marcadores de veneno",
-    "poisonTooltip": "Marcadores de veneno: {{count}}\nUm jogador com dez ou mais marcadores de veneno perde o jogo.",
+    "poisonTooltip": "Marcadores de veneno: {{count}}",
+    "poisonLossPlayer": "Um jogador com {{threshold}} ou mais marcadores de veneno perde o jogo.",
+    "poisonLossTeam": "Uma equipe com {{threshold}} ou mais marcadores de veneno perde o jogo.",
     "energyAriaLabel_one": "{{count}} marcador de energia",
     "energyAriaLabel_other": "{{count}} marcadores de energia",
     "energyTooltip": "Marcadores de energia: {{count}}\nMarcadores de energia são um recurso do jogador gasto por habilidades de cards.",
@@ -659,6 +670,8 @@
     "commander": "Comandante",
     "commanderTitle": "Comandante: {{name}}",
     "commanderTitleTax": "Comandante: {{name}} (Taxa: +{{tax}})",
+    "boss": "Chefe",
+    "bossTitle": "Chefe: {{name}}",
     "castCommander": "Conjure {{name}} — clique duas vezes ou arraste para jogar",
     "castCommanderTax": "Conjure {{name}} (Taxa: +{{tax}}) — clique duas vezes ou arraste para jogar",
     "ninjutsuCommander": "Ninjutsu de comandante: {{name}} — clique para devolver um atacante não bloqueado à mão e colocar este comandante no campo de batalha virado e atacando",
@@ -822,7 +835,12 @@
     "lethalBadge": "Letal",
     "planeswalkerLoyalty": "Planeswalker (lealdade: {{loyalty}})",
     "defendingPlayerTrample": "Jogador Defensor (Atropelar)",
-    "pwControllerTrample": "Controlador do PW (Atropelar Sobre PW)"
+    "pwControllerTrample": "Controlador do PW (Atropelar Sobre PW)",
+    "assignRemainingButton": "+{{amount}}",
+    "assignRemainingTo_few": "Atribuir os {{count}} de dano restantes a {{target}}",
+    "assignRemainingTo_many": "Atribuir os {{count}} de dano restantes a {{target}}",
+    "assignRemainingTo_one": "Atribuir o {{count}} de dano restante a {{target}}",
+    "assignRemainingTo_other": "Atribuir os {{count}} de dano restantes a {{target}}"
   },
   "cardTextReference": {
     "title": "Printed card text (reference)",
@@ -1167,6 +1185,11 @@
       "drawFirst": "Comprar Primeiro",
       "drawFirstDescription": "Faça a compra extra em seu primeiro turno"
     },
+    "startingPlayer": {
+      "title": "Escolha quem joga primeiro",
+      "playerPlaysFirst": "{{name}} joga primeiro",
+      "opponentChoosing": "{{name}} está escolhendo quem joga primeiro…"
+    },
     "mulligan": {
       "opponentDeciding": "O oponente está decidindo sua mão inicial…",
       "londonTitle": "London Mulligan ({{count}} feitos)",
@@ -1189,7 +1212,10 @@
       "subtitleKeepWithBottom": "Mantenha esta mão (você colocará {{count}} no fundo) ou faça mulligan novamente para 7 cartas novas.",
       "subtitleKeepFree": "Mantenha esta mão (mulligan grátis — nenhuma carta para o fundo) ou faça mulligan novamente para 7 cartas novas.",
       "subtitleOpeningFree": "Mantenha esta mão ou faça um mulligan grátis (nenhuma carta para o fundo).",
-      "subtitleOpeningOne": "Mantenha esta mão ou faça mulligan para 7 cartas novas (você colocará 1 no fundo ao manter)."
+      "subtitleOpeningOne": "Mantenha esta mão ou faça mulligan para 7 cartas novas (você colocará 1 no fundo ao manter).",
+      "onThePlay": "Você joga primeiro",
+      "onTheDraw": "Você compra primeiro",
+      "takeTurn": "Você joga no turno {{turn}}"
     },
     "companion": {
       "eyebrow": "Pré-Jogo",
@@ -1214,6 +1240,7 @@
       "draw": "EMPATE",
       "victory": "VITÓRIA",
       "defeat": "DERROTA",
+      "complete": "FIM DE JOGO",
       "lifeSummary": "Você: <player>{{playerLife}}</player> <sep>/</sep> Oponente: <opponent>{{opponentLife}}</opponent>",
       "turns": "Turnos: {{count}}",
       "duration": "Duração: {{time}}",
@@ -1310,7 +1337,10 @@
         "Ticket": "ticket"
       },
       "generic": "um custo",
-      "pay": "Pagar {{cost}}"
+      "pay": "Pagar {{cost}}",
+      "draw": "compre uma carta",
+      "drawCount_one": "compre {{count}} carta",
+      "drawCount_other": "compre {{count}} cartas"
     },
     "unlessPayment": {
       "defaultEffect": "Anular a Menos Que Você Pague",
@@ -1401,6 +1431,8 @@
     },
     "config": {
       "startingLife": "Vida Inicial",
+      "commanderDamage": "Dano de Comandante",
+      "poisonCounters": "Marcadores de veneno",
       "players": "Jogadores",
       "whoGoesFirst": "Quem Começa",
       "firstPlayer": {
@@ -1514,7 +1546,9 @@
       "titleReveal": "Revelar da Mão",
       "titleOpponentHand": "Mão do Oponente",
       "subtitleReveal": "Escolha uma carta para revelar ou recuse",
-      "subtitleChoose": "Escolha uma carta"
+      "subtitleChoose": "Escolha uma carta",
+      "subtitleRevealAnyNumber": "Escolha qualquer número de cartas para revelar",
+      "subtitleChooseCount": "Escolha {{count}} cartas"
     },
     "search": {
       "title": "Procurar no Grimório",
@@ -1777,6 +1811,10 @@
     "spellCopyOrder": {
       "title": "Ordenar as cópias",
       "subtitle": "Escolha a mágica cuja cópia vai para a pilha em seguida"
+    },
+    "memberOrder": {
+      "title": "Ordene os cards",
+      "subtitle": "Escolha qual card é processado em seguida"
     },
     "collectEvidence": {
       "title": "Coletar Evidências",
@@ -2100,6 +2138,10 @@
   "giftRecipient": {
     "title": "Escolher destinatário do presente",
     "subtitle": "Escolha qual oponente recebe o presente prometido."
+  },
+  "costRecipient": {
+    "title": "Escolha um oponente",
+    "subtitle": "Escolha o oponente para este custo: {{cost}}."
   },
   "entryController": {
     "title": "Escolher controlador ao entrar",
@@ -2455,6 +2497,8 @@
       "zoneHand": "sua mão",
       "discard": "Descarte {{count}} {{cards}}",
       "exile": "Exile {{count}} {{cards}} de {{zone}}",
+      "haveOpponentGainLife": "Faça um oponente ganhar {{amount}} pontos de vida",
+      "haveEachOtherPlayerGainLife": "Faça cada outro jogador ganhar {{amount}} pontos de vida",
       "reveal": "Revele {{count}} {{cards}} de {{zone}}"
     }
   },
@@ -2620,6 +2664,7 @@
   },
   "outsideGame": {
     "fromExile": "Do exílio",
+    "fromCompanion": "Do companheiro",
     "fromSideboard": "Do sideboard",
     "fromBoosterPack": "De um booster de {{setCode}}",
     "fromCubeBoosterPack": "De um booster do cube"

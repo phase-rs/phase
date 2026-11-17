@@ -42,6 +42,17 @@ pub const MAX_ATTRACTION_DECK_ENTRIES: usize = 200;
 /// Max supplementary Contraption-deck entries accepted on the wire (Contraptions are
 /// outside the Comprehensive Rules, CR 701.45a; 200 mirrors the other supplementary decks).
 pub const MAX_CONTRAPTION_DECK_ENTRIES: usize = 200;
+/// Max sticker-sheet entries accepted on the wire. CR 123.2a: a player playing
+/// with stickers "must start the game with at least ten sticker sheets... There is
+/// no maximum number of sticker sheets a player may start the game with." So the
+/// legal floor is ten and there is no legal ceiling — a hard cap at ten would
+/// reject the eleven-sheet pool the rules permit. 200 mirrors the other
+/// no-maximum supplementary name lists (attraction/planar/scheme/contraption) as a
+/// pure anti-abuse wire ceiling far above any real pool, not a rules bound. Each
+/// entry is still capped at [`MAX_DECK_CARD_NAME_LEN`] and the whole tournament
+/// payload at [`crate::tournament::MAX_SINGLE_DECK_ENCODED_BYTES`], so the encoded
+/// size — not this count — is what actually bounds the DoS surface.
+pub const MAX_STICKER_SHEET_ENTRIES: usize = 200;
 /// Max byte length of a single card name string inside a deck payload. Defined once
 /// in the engine (`engine::types::card_printing`), where the printings sidecar's
 /// bound reads it too; re-exported so this path stays valid.
@@ -90,11 +101,12 @@ pub fn validate_deck_list(field: &str, cards: &[String], max_entries: usize) -> 
     Ok(())
 }
 
-/// Bound the deck half of Create/Join lobby messages: every card-section name list,
-/// and the printings sidecar through the engine's single bound
-/// (`validate_deck_printings_bounds`). Sticker sheets are not bounded here (recorded
-/// pre-existing gap). Lobby-only mode ignores deck contents for matchmaking, but the
-/// native shell still deserializes and clones the full structure on every frame.
+/// Bound the deck half of Create/Join lobby messages: every card-section name list
+/// (`sticker_sheets` included), and the printings sidecar through the engine's single
+/// bound (`validate_deck_printings_bounds`). Every `DeckData` name list is now bounded
+/// here — none is left as an unbounded `Vec<String>`. Lobby-only mode ignores deck
+/// contents for matchmaking, but the native shell still deserializes and clones the
+/// full structure on every frame.
 pub fn validate_deck_payload(field: &str, deck: &DeckData) -> Result<(), String> {
     validate_deck_list(
         &format!("{field}.main_deck"),
@@ -140,6 +152,11 @@ pub fn validate_deck_payload(field: &str, deck: &DeckData) -> Result<(), String>
         &format!("{field}.signature_spell"),
         &deck.signature_spell,
         MAX_SIGNATURE_SPELL_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.sticker_sheets"),
+        &deck.sticker_sheets,
+        MAX_STICKER_SHEET_ENTRIES,
     )?;
     validate_deck_printings_bounds(&format!("{field}.printings"), &deck.printings)
 }
@@ -589,6 +606,47 @@ mod tests {
             assert_eq!(create, Err(expected.clone()), "{name} control name");
             assert_eq!(join, Err(expected), "{name} control name");
         }
+    }
+
+    /// CR 123.2a shared-guard proof on the CASUAL ingress path. A constructed
+    /// sticker pool "must start the game with at least ten sticker sheets... There
+    /// is no maximum". Eleven distinct sheets — one past the legal floor — pass BOTH
+    /// casual deck-carrying guards (create-game and join-with-password), confirming
+    /// the raised [`MAX_STICKER_SHEET_ENTRIES`] ceiling is the *shared* behavior and
+    /// not only the tournament submission path's; only an abusive count past the
+    /// ceiling is refused, naming the section. REVERT-FAIL: a sticker cap of ten
+    /// rejects the legal eleven-sheet pool on casual ingress.
+    #[test]
+    fn sticker_sheets_follow_cr_123_2a_on_casual_ingress() {
+        let mut legal = deck(1, 0);
+        legal.sticker_sheets = (0..11).map(|i| format!("Sticker Sheet {i}")).collect();
+        let (create, join) = guard_both(&legal);
+        assert_eq!(
+            create,
+            Ok(()),
+            "eleven distinct sticker sheets are a legal pool on create (CR 123.2a)"
+        );
+        assert_eq!(
+            join,
+            Ok(()),
+            "eleven distinct sticker sheets are a legal pool on join (CR 123.2a)"
+        );
+
+        let mut over = deck(1, 0);
+        over.sticker_sheets = vec!["Sheet".to_string(); MAX_STICKER_SHEET_ENTRIES + 1];
+        let (create, join) = guard_both(&over);
+        let expected =
+            format!("deck.sticker_sheets must contain at most {MAX_STICKER_SHEET_ENTRIES} entries");
+        assert_eq!(
+            create,
+            Err(expected.clone()),
+            "a count past the ceiling is refused on create"
+        );
+        assert_eq!(
+            join,
+            Err(expected),
+            "a count past the ceiling is refused on join"
+        );
     }
 
     fn printing(

@@ -8,6 +8,7 @@
 //! The reveal step follows the card's wording ("their library" = that owner).
 
 use engine::game::scenario::{GameScenario, P0, P1};
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -61,25 +62,43 @@ fn chaos_warp_cast_reveals_target_owner_library_not_caster() {
     let mut runner = scenario.build();
     put_library_top(&mut runner, caster_library_creature);
 
-    runner.cast(warp).target_object(target).resolve();
+    let outcome = runner.cast(warp).target_object(target).resolve();
+    let shuffled_players: Vec<engine::types::player::PlayerId> = outcome
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        shuffled_players,
+        vec![P1],
+        "the target owner's library is randomized exactly once: {:?}",
+        outcome.events()
+    );
 
     assert_eq!(
-        runner.state().last_revealed_ids,
+        outcome.state().last_revealed_ids,
         vec![target],
         "Chaos Warp must reveal the top of the targeted permanent owner's library"
     );
     assert_eq!(
-        runner.state().objects[&target].zone,
+        outcome.state().objects[&target].zone,
         Zone::Battlefield,
         "revealed permanent from the target owner's library must enter the battlefield"
     );
     assert_eq!(
-        runner.state().objects[&caster_library_creature].zone,
+        outcome.state().objects[&caster_library_creature].zone,
         Zone::Library,
         "caster's library top must stay in the library when reveal routes to the target owner"
     );
     assert!(
-        !runner
+        !outcome
             .state()
             .last_revealed_ids
             .contains(&caster_library_creature),

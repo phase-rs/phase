@@ -148,6 +148,56 @@ fn self_poison_drawback_not_counted() {
     assert_eq!(feature.direct_count, 0);
 }
 
+/// CR 102.3: a controller-recipient poison clause under a `player_scope` counts only
+/// when the scope reaches opponents alone.
+#[test]
+fn scoped_poison_counts_only_for_opponent_only_scopes() {
+    use engine::types::ability::{PlayerFilter, PlayerRelation};
+    let all_except = |relation| PlayerFilter::AllExcept {
+        exclude: Box::new(PlayerFilter::ParentObjectTargetController),
+        relation,
+    };
+    let cases = [
+        (Some(PlayerFilter::Opponent), true),
+        (Some(PlayerFilter::All), false),
+        (Some(PlayerFilter::Controller), false),
+        (
+            Some(PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Controller, PlayerFilter::Opponent],
+            }),
+            false,
+        ),
+        (
+            Some(PlayerFilter::AnyOf {
+                filters: vec![PlayerFilter::Opponent, PlayerFilter::OpponentLostLife],
+            }),
+            true,
+        ),
+        (Some(PlayerFilter::AnyOf { filters: vec![] }), false),
+        (Some(PlayerFilter::OpponentOtherThanTriggering), true),
+        (Some(all_except(PlayerRelation::Opponent)), true),
+        (Some(all_except(PlayerRelation::All)), false),
+    ];
+    for (player_scope, credited) in cases {
+        // No printed card has the `Controller` / `AnyOf` / `OpponentOtherThanTriggering` / `AllExcept` scope shapes; nearest printed: Prologue to Phyresis.
+        let mut face = poison_spell("Scoped Poisoner", TargetFilter::Controller);
+        face.abilities[0].player_scope = player_scope.clone();
+        for scope in [AbilityScope::Potential, AbilityScope::Unconditional] {
+            assert_eq!(
+                opponent_poison_recipients_parts(&face.abilities, scope).is_some(),
+                credited,
+                "{player_scope:?} at {scope:?}"
+            );
+        }
+        let expected = if credited { 3 } else { 0 };
+        assert_eq!(
+            detect(&[entry(face, 3)]).direct_count,
+            expected,
+            "{player_scope:?}"
+        );
+    }
+}
+
 /// Counts scale per playset copy, not per unique face.
 #[test]
 fn counts_scale_by_copy_count() {
@@ -484,14 +534,8 @@ fn detects_poison_inside_a_modal_ability_mode() {
 #[test]
 fn modal_poison_mode_is_not_unconditional() {
     let abilities = vec![modal_poison_ability()];
-    assert!(gives_opponents_poison_parts(
-        &abilities,
-        AbilityScope::Potential
-    ));
-    assert!(!gives_opponents_poison_parts(
-        &abilities,
-        AbilityScope::Unconditional
-    ));
+    assert!(opponent_poison_recipients_parts(&abilities, AbilityScope::Potential).is_some());
+    assert!(opponent_poison_recipients_parts(&abilities, AbilityScope::Unconditional).is_none());
 }
 
 /// CR 608.2c: an "Otherwise, ..." branch is a reachable outcome, so deck-time

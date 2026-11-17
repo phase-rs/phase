@@ -4,7 +4,7 @@
  * The component exists because a per-keystroke clamp corrupts what the user
  * typed (see the component docstring). These tests pin both halves of the
  * contract it replaced that clamp with: a reading is committed only when it is
- * a whole number at or above `min`, and anything else leaves the last
+ * a whole number within `min`..=`max`, and anything else leaves the last
  * committed value standing while the box keeps showing what was typed.
  */
 import { cleanup, render, screen } from "@testing-library/react";
@@ -115,28 +115,32 @@ describe("IntegerField", () => {
     expect(onCommit).not.toHaveBeenCalled();
   });
 
-  it("does not commit a reading above max", async () => {
+  it("commits a reading equal to max", async () => {
     const user = userEvent.setup();
     const onCommit = vi.fn();
-    render(<Harness initial={21} min={1} max={255} onCommit={onCommit} />);
+    render(<Harness initial={10} max={255} onCommit={onCommit} />);
 
     const field = screen.getByLabelText("Starting Life");
-    await user.clear(field);
-    await user.click(field);
-    await user.paste("256");
-
-    expect(onCommit).not.toHaveBeenCalled();
-  });
-
-  it("commits a reading at max", async () => {
-    const user = userEvent.setup();
-    const onCommit = vi.fn();
-    render(<Harness initial={21} min={1} max={255} onCommit={onCommit} />);
-
-    const field = screen.getByLabelText("Starting Life");
+    expect(field).toHaveAttribute("max", "255");
     await user.clear(field);
     await user.type(field, "255");
 
-    expect(onCommit).toHaveBeenCalledWith(255);
+    expect(onCommit).toHaveBeenLastCalledWith(255);
+  });
+
+  it("does not commit a reading above max", async () => {
+    const user = userEvent.setup();
+    const onCommit = vi.fn();
+    render(<Harness initial={10} max={255} onCommit={onCommit} />);
+
+    const field = screen.getByLabelText("Starting Life");
+    await user.clear(field);
+    await user.type(field, "256");
+
+    // Reach guard: the in-range prefix "25" was committed on the way, so the
+    // handler ran on these keystrokes and only the final reading was refused.
+    expect(onCommit).toHaveBeenLastCalledWith(25);
+    expect(onCommit).not.toHaveBeenCalledWith(256);
+    expect(field).toHaveValue(256);
   });
 });

@@ -2000,6 +2000,7 @@ mod preroll_tests {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 origin: Some(origin),
                 destination,
@@ -2480,7 +2481,19 @@ mod preroll_tests {
                 }
                 crate::game::trigger_index::reindex_object_triggers(&mut state, id);
                 let mut events = vec![];
-                crate::game::attractions::roll_to_visit_attractions(&mut state, P0, &mut events);
+                let roll_pause = crate::game::attractions::roll_to_visit_attractions(
+                    &mut state,
+                    P0,
+                    &mut events,
+                );
+                assert!(matches!(
+                    &roll_pause,
+                    Some(WaitingFor::ReplacementChoice {
+                        candidate_count: 2,
+                        ..
+                    })
+                ));
+                assert_eq!(roll_pause.as_ref(), Some(&state.waiting_for));
                 assert!(matches!(
                     state.waiting_for,
                     WaitingFor::ReplacementChoice {

@@ -41,6 +41,25 @@ use super::zones;
 use crate::database::CardDatabase;
 use crate::game::token_presets::TokenPtProvenance;
 
+/// CR 704.3 + CR 603.2c: the sandbox's state-based-action check and the
+/// trigger scan that follows it. A player who leaves in that check has the
+/// departure's triggers collected and its occurrences claimed
+/// (CR 603.10a), so the scan takes only what is unclaimed, and the queued
+/// departure triggers are then placed.
+fn run_state_based_actions_and_triggers(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    super::sba::check_state_based_actions(state, events);
+    let consumed = state.consumed_before_priority_trigger_events.clone();
+    let unclaimed =
+        super::triggers::filter_already_collected_trigger_events_from(state, events, 0, &consumed);
+    super::triggers::process_triggers(state, &unclaimed);
+    // CR 603.3 + CR 117.5: what a departure queued goes on the stack with them.
+    super::elimination::drain_or_clear_deferred_triggers_after_elimination(
+        state,
+        super::elimination::DepartureTriggers::ScannedByCaller,
+        events,
+    );
+}
+
 pub fn apply_debug_action(
     state: &mut GameState,
     actor: PlayerId,
@@ -80,8 +99,7 @@ pub fn apply_debug_action(
                 }
                 crate::game::zone_pipeline::move_object(state, req, events);
                 if simulate {
-                    super::sba::check_state_based_actions(state, events);
-                    super::triggers::process_triggers(state, events);
+                    run_state_based_actions_and_triggers(state, events);
                 }
             }
             crate::game::layers::mark_layers_full(state);
@@ -610,8 +628,7 @@ pub fn apply_debug_action(
         }
 
         DebugAction::RunStateBasedActions => {
-            super::sba::check_state_based_actions(state, events);
-            super::triggers::process_triggers(state, events);
+            run_state_based_actions_and_triggers(state, events);
         }
 
         DebugAction::CreateToken {
@@ -1126,6 +1143,7 @@ fn enter_battlefield_with_etb(
     }
 
     let mut proposed = ProposedEvent::ZoneChange {
+        library_placement: None,
         object_id,
         from,
         to: Zone::Battlefield,
@@ -1134,15 +1152,20 @@ fn enter_battlefield_with_etb(
         enter_tapped: Default::default(),
         enters_attacking: false,
         enter_with_counters: vec![],
+        enter_with_grants: None,
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        with_entry_effect: None,
+        co_entrants: None,
         face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         chain_referent: crate::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
         enter_with_choices: None,
         discard_frame: None,
         performed_by: None,
+        ownership_actor: crate::types::proposed_event::EntryOwnershipActor::NoPlayer,
+        library_shuffle: crate::types::ability::LibraryShuffleMode::PerObject,
         applied: HashSet::new(),
     };
     // CR 306.5b + CR 310.4b + CR 614.1c: seed the intrinsic enters-with
@@ -1164,7 +1187,6 @@ fn enter_battlefield_with_etb(
                 None,
                 false,
                 crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                None,
                 events,
             ) {
                 super::effects::change_zone::ZoneDeliveryResult::Done => {}
@@ -1232,6 +1254,9 @@ fn route_debug_token_to_battlefield(
         controller: staged.controller,
         // Debug-token route stages no donor; empty mods are stamp-proof.
         donor: None,
+        // The debug sandbox stages one printed face as a token; no copy effect creates
+        // it (CR 707.8a).
+        double_faced: None,
     };
     let mut token = super::game_object::GameObject::new(
         object_id,
@@ -4712,7 +4737,12 @@ mod tests {
             let mut runner = debug_runner(scenario);
             let p2 = PlayerId(2);
             let mut events = Vec::new();
-            crate::game::elimination::eliminate_player(runner.state_mut(), p2, &mut events);
+            crate::game::elimination::eliminate_player(
+                runner.state_mut(),
+                p2,
+                crate::types::events::LossReason::Conceded,
+                &mut events,
+            );
             let p2_life = life(&runner, p2);
             let revision = runner.state().state_revision;
 
@@ -5848,7 +5878,12 @@ mod tests {
                 let mut runner = debug_runner(three_player);
                 let p2 = PlayerId(2);
                 let mut events = Vec::new();
-                crate::game::elimination::eliminate_player(runner.state_mut(), p2, &mut events);
+                crate::game::elimination::eliminate_player(
+                    runner.state_mut(),
+                    p2,
+                    crate::types::events::LossReason::Conceded,
+                    &mut events,
+                );
                 let before = counter_rollback_set(&runner);
                 let error = runner
                     .act(give(p2, PlayerCounterKind::Experience, 1))

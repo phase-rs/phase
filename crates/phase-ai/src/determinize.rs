@@ -403,6 +403,7 @@ mod tests {
                 selection: CardSelectionMode::Chosen,
                 choice_optional: false,
                 reveal: false,
+                cardinality: engine::types::ability::ObjectSelectionCardinality::SINGLE,
             },
             vec![TargetRef::Player(PlayerId(1))],
             source,

@@ -12,8 +12,8 @@ use engine::game::effects::life::{apply_damage_life_loss, ReplacementDeferred};
 use engine::game::scenario::GameRunner;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityRef, ReplacementDefinition,
-    ReplacementPlayerScope, TargetFilter,
+    AbilityDefinition, AbilityKind, Effect, LibraryPosition, QuantityExpr, QuantityRef,
+    ReplacementDefinition, ReplacementPlayerScope, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
@@ -69,6 +69,8 @@ fn bruvac_replacement() -> ReplacementDefinition {
                 },
                 target: TargetFilter::Controller,
                 destination: Zone::Graveyard,
+                // CR 701.17a: the doubled event is a top-edge mill.
+                position: LibraryPosition::Top,
             },
         ));
     def.valid_player = Some(ReplacementPlayerScope::Opponent);
@@ -85,6 +87,7 @@ fn graveyard_exile_redirect(description: &str) -> ReplacementDefinition {
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
                 library_shuffle: Default::default(),
                 destination: Zone::Exile,
                 origin: None,

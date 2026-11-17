@@ -169,8 +169,9 @@ pub fn commander_eligible_for_zone_return(state: &GameState) -> Option<(ObjectId
 /// commanders combine (CR 702.124c).
 ///
 /// Source of truth, in order:
-/// 1. The registered deck pool's `current_commander` faces (CR 903.4a: identity
-///    is established for the card as the game began, and includes back faces per
+/// 1. The registered deck pool's `current_commander` faces, read by
+///    [`registered_commander_color_identity`] (CR 903.4a: identity is
+///    established for the card as the game began, and includes back faces per
 ///    CR 903.4d). A registered colorless commander is authoritative: its empty
 ///    union is returned as `Some(vec![])` rather than falling through.
 /// 2. When no pool with a non-empty `current_commander` is registered for `player`
@@ -186,20 +187,11 @@ pub fn defined_commander_color_identity(
     state: &GameState,
     player: PlayerId,
 ) -> Option<Vec<ManaColor>> {
-    let mut identity: Vec<ManaColor> = Vec::new();
-    if let Some(pool) = state
-        .deck_pools
-        .iter()
-        .find(|pool| pool.player == player && !pool.current_commander.is_empty())
-    {
-        for entry in pool.current_commander.iter() {
-            for color in card_face_color_identity(&entry.card) {
-                push_identity_color(&mut identity, color);
-            }
-        }
+    if let Some(identity) = registered_commander_color_identity(state, player) {
         return Some(identity);
     }
 
+    let mut identity: Vec<ManaColor> = Vec::new();
     let mut has_commander = false;
     for obj in state
         .objects
@@ -219,6 +211,34 @@ pub fn defined_commander_color_identity(
         }
     }
     has_commander.then_some(identity)
+}
+
+/// CR 903.4 + CR 903.4a + CR 702.124c: The combined color identity of the
+/// commander(s) registered for `player` in this game, or `None` when no pool
+/// with a non-empty `current_commander` is registered for `player`.
+///
+/// It reads the pool's `current_commander` (this game's commanders), not its
+/// `registered_commander`.
+///
+/// This is source 1 of [`defined_commander_color_identity`], which tries it
+/// first. It reads only the registered card faces, never a game object, so a
+/// commander's current zone, face, or a viewer projection's redaction of it
+/// cannot change the answer.
+pub fn registered_commander_color_identity(
+    state: &GameState,
+    player: PlayerId,
+) -> Option<Vec<ManaColor>> {
+    let pool = state
+        .deck_pools
+        .iter()
+        .find(|pool| pool.player == player && !pool.current_commander.is_empty())?;
+    let mut identity: Vec<ManaColor> = Vec::new();
+    for entry in pool.current_commander.iter() {
+        for color in card_face_color_identity(&entry.card) {
+            push_identity_color(&mut identity, color);
+        }
+    }
+    Some(identity)
 }
 
 /// CR 903.4: Compute the combined color identity of `player`'s commander(s).
@@ -702,7 +722,12 @@ mod tests {
         );
 
         let (mut departed, cmd_id, mut events) = build();
-        crate::game::elimination::eliminate_player(&mut departed, PlayerId(1), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut departed,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert_eq!(
             departed.objects[&cmd_id].zone,
             Zone::Exile,
@@ -1844,6 +1869,7 @@ mod tests {
             is_commander: true,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],

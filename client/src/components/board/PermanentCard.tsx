@@ -1,12 +1,18 @@
 import { motion, useReducedMotion } from "framer-motion";
 import type React from "react";
-import { memo, useCallback, useId, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import {
+  ATTACHMENT_CONTROL_ATTRIBUTE,
+  retainTouchTracking,
+  UN_TOUCH_ATTRIBUTE,
+  UN_TOUCH_INCARNATION_ATTRIBUTE,
+} from "../../game/unTouch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
@@ -15,6 +21,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -446,6 +453,24 @@ export const PermanentCard = memo(function PermanentCard({
   // deliver honest pointer events: a remote-desktop session advertises no
   // hover-capable input while sending `pointerType: "mouse"`. See useCardHover
   // for why this is a denylist on "touch" rather than a "mouse" allowlist.
+  //
+  // Un-card touch (Vile Bile): the engine lists the objects whose touch
+  // abilities function (`un_actions.touchable`). An opted-in player's pointer
+  // entering one is a touch — each entry one instance — and any pointer type
+  // counts, since a finger on the screen touches the card too. The card only
+  // marks itself with `UN_TOUCH_ATTRIBUTE`; the shared tracker in
+  // game/unTouch.ts resolves the card under the pointer (never a host whose
+  // attachment the pointer is on) and counts each entry once.
+  const spectator = useSpectatorMode();
+  const touchableRef = useGameStore((s) => {
+    const unActions = s.gameState?.un_actions;
+    if (spectator || !(unActions?.enabled_players?.includes(playerId) ?? false)) {
+      return null;
+    }
+    return unActions?.touchable?.find((t) => t.object_id === objectId) ?? null;
+  });
+  const reportsTouch = touchableRef != null;
+  useEffect(() => (reportsTouch ? retainTouchTracking() : undefined), [reportsTouch]);
   const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (isMobile || event.pointerType === "touch") return;
     hoverObject(objectId); inspectObject(objectId);
@@ -562,11 +587,17 @@ export const PermanentCard = memo(function PermanentCard({
   const isUnderAttack = incomingAttackerCount > 0;
 
   // Glow ring styles.
-  // Priority tiers: (1) action I'm taking — attacking / blocking, (2) passive
-  // imposed state — under attack, (3) affordances offered — mana cost selection,
-  // valid target, activatable, tap undo, (4) idle selection.
+  // Priority tiers: (0) a candidate of the current target/choice prompt — the
+  // lime outline is the only target signal (no label), so it outranks combat
+  // rings; combat keeps its arrow/slide and ⚔ badge, (1) action I'm taking —
+  // attacking / blocking, (2) passive imposed state — under attack,
+  // (3) affordances offered — mana cost selection, activatable, tap undo,
+  // (4) idle selection.
   let glowClass = "";
-  if (isAttacking) {
+  if (isValidTarget) {
+    glowClass =
+      "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]";
+  } else if (isAttacking) {
     glowClass =
       "ring-2 ring-teal-300 shadow-[0_0_12px_3px_rgba(94,234,212,0.6)]";
   } else if (isBlocking) {
@@ -585,9 +616,6 @@ export const PermanentCard = memo(function PermanentCard({
   } else if (isSelectableForManaCost) {
     glowClass =
       "ring-2 ring-emerald-300/70 shadow-[0_0_10px_3px_rgba(74,222,128,0.35)]";
-  } else if (isValidTarget) {
-    glowClass =
-      "outline outline-2 outline-black/80 ring-4 ring-lime-300 shadow-[0_0_18px_6px_rgba(190,242,100,0.72),inset_0_0_18px_4px_rgba(190,242,100,0.22)]";
   } else if (isActivatable) {
     glowClass =
       "ring-2 ring-cyan-400 shadow-[0_0_14px_4px_rgba(34,211,238,0.55)]";
@@ -810,6 +838,8 @@ export const PermanentCard = memo(function PermanentCard({
       ref={cardRef}
       data-object-id={objectId}
       data-permanent-card={objectId}
+      data-tap-angle={isRotatedFull ? tapAngle : undefined}
+      {...(touchableRef ? { [UN_TOUCH_ATTRIBUTE]: objectId, [UN_TOUCH_INCARNATION_ATTRIBUTE]: touchableRef.incarnation } : {})}
       data-grouped-ids={coveredIds && coveredIds.length > 1 ? coveredIds.join(" ") : undefined}
       data-card-hover
       layoutId={`permanent-${objectId}`}
@@ -879,6 +909,7 @@ export const PermanentCard = memo(function PermanentCard({
       {hiddenAttachmentCount > 0 && (
         <button
           type="button"
+          {...{ [ATTACHMENT_CONTROL_ATTRIBUTE]: "true" }}
           className="absolute -right-3 top-6 z-30 flex h-6 min-w-6 items-center justify-center rounded-full bg-amber-300 px-1.5 text-[11px] font-black leading-none text-amber-950 ring-2 ring-amber-950/80 shadow transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           title={t("permanent.hiddenAttachmentsAria", { count: hiddenAttachmentCount })}
           aria-label={t("permanent.hiddenAttachmentsAria", { count: hiddenAttachmentCount })}
@@ -1066,13 +1097,7 @@ export const PermanentCard = memo(function PermanentCard({
           ("needs 2") and that the rules make public. The engine owns and
           documents the contract on `battlefield_keyword_badges` itself and pins
           both halves (`face_down_keyword_badges_carry_only_granted_keywords`,
-          `a_face_down_profile_ward_is_badged_like_any_public_keyword`).
-
-          Known gap: `KeywordStrip` styles printed vs granted off
-          `base_keywords`, which `visibility.rs` clears for observers of a
-          face-down permanent — so the same ward reads as printed to its
-          controller and as granted to everyone else. Cosmetic only, and in the
-          safe direction; not addressed here. */}
+          `a_face_down_profile_ward_is_badged_like_any_public_keyword`). */}
       {showKeywordStrip && battlefieldKeywordBadges.length > 0 && (
         <KeywordStrip
           keywords={battlefieldKeywordBadges}
@@ -1121,30 +1146,22 @@ export const PermanentCard = memo(function PermanentCard({
         />
       )}
 
-      {isValidTarget && (
-        <div
-          className={`pointer-events-none absolute ${isUnderAttack ? "left-1 top-7" : "left-1 top-1"} z-40 rounded bg-lime-300 px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal text-black ring-1 ring-black/70 shadow-[0_1px_4px_rgba(0,0,0,0.75)]`}
-        >
-          {t("permanent.target")}
-        </div>
-      )}
-
       {isSelectableForBoardChoice && boardChoice && (
         // Selected cards get a checkmark + solid, white-ringed badge; eligible-
         // but-unselected cards get the same opaque label, so the current
         // selection is unambiguous and the badge reads as a toggle.
         <div
-          className={`pointer-events-none absolute ${isUnderAttack || isValidTarget ? "right-1 top-7" : "right-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal shadow-[0_1px_4px_rgba(0,0,0,0.75)] ${isSelectedForBoardChoice ? "ring-1 ring-white/90" : "ring-1 ring-black/70"}`}
+          className={`pointer-events-none absolute ${isUnderAttack ? "right-1 top-7" : "right-1 top-1"} z-40 rounded ${boardChoiceBadgeClass(boardChoice.intent)} px-1.5 py-0.5 text-[9px] font-black uppercase leading-none tracking-normal shadow-[0_1px_4px_rgba(0,0,0,0.75)] ${isSelectedForBoardChoice ? "ring-1 ring-white/90" : "ring-1 ring-black/70"}`}
         >
           {isSelectedForBoardChoice ? `✓ ${t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}` : t(`permanent.boardChoiceBadges.${boardChoice.intent}`)}
         </div>
       )}
 
       {/* CR 707.2: provenance badge for card-art token copies and nontoken
-          permanents under copy effects. Hidden while the card is a valid target
-          (the lime "Target" tag owns the corner during targeting) and shifted
-          down under attack to clear the ⚔ badge. */}
-      {(isTokenCopy || isNontokenCopy) && !isValidTarget && (
+          permanents under copy effects. Stays visible while the card is a valid
+          target — the lime outline marks the candidate — and shifts down under
+          attack to clear the ⚔ badge. */}
+      {(isTokenCopy || isNontokenCopy) && (
         <div
           className={`pointer-events-none absolute left-1 ${isUnderAttack ? "top-7" : "top-1"} z-20 rounded bg-indigo-600/90 px-1 py-0.5 text-[9px] font-black uppercase leading-none tracking-wide text-white ring-1 ring-black/60 shadow-[0_1px_4px_rgba(0,0,0,0.6)]`}
           title={t(isTokenCopy ? "permanent.tokenTooltip" : "permanent.copyTooltip")}
@@ -1208,6 +1225,7 @@ export const PermanentCard = memo(function PermanentCard({
       {attachmentFanCardCount > 0 && attachmentsExpanded && (
         <button
           type="button"
+          {...{ [ATTACHMENT_CONTROL_ATTRIBUTE]: "true" }}
           className="absolute -left-2.5 -top-2.5 z-40 flex items-center justify-center rounded-full bg-black/90 leading-none text-amber-200 ring-2 ring-amber-200/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           style={{
             width: attachmentBadgeSize,

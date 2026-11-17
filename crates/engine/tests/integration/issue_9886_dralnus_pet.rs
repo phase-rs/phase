@@ -206,7 +206,7 @@ fn cast_and_resolve(board: &mut PetBoard, discard: Option<ObjectId>) -> usize {
     );
     runner
         .act(GameAction::DecideOptionalCost {
-            pay: discard.is_some(),
+            index: if discard.is_some() { 0 } else { 1 },
         })
         .expect("P0 decides the kicker");
 

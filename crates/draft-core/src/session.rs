@@ -12,7 +12,7 @@ use crate::pack_source::PackSource;
 use crate::pick_pass;
 use crate::shared_stack;
 use crate::types::*;
-use crate::validation::{validate_limited_deck, LimitedDeckError};
+use crate::validation::{validate_companion_eligibility, validate_limited_deck, LimitedDeckError};
 // Deep-path import by design: `engine::game::mod` re-exports `deck_validation`'s
 // public surface, but this phase must not edit that file.
 use engine::game::deck_validation::{draft_set_concessions_for, DraftSetConcessions};
@@ -36,6 +36,28 @@ impl DraftSession {
     /// re-deriving it; callers outside this crate must never recompute it.
     pub(crate) fn next_pairing_round(&self) -> u8 {
         self.current_round + 1
+    }
+
+    /// Whether this session accepts a `SubmitDeck` now: always while
+    /// deckbuilding; between rounds only where the pod policy permits deck
+    /// changes between matches (MTR 7.3). Single authority for the reducer and
+    /// for `DraftPlayerView::deck_submission_open`.
+    pub(crate) fn deck_submission_open(&self) -> bool {
+        match self.status {
+            DraftStatus::Deckbuilding => true,
+            DraftStatus::RoundComplete => self
+                .config
+                .pod_policy
+                .permits_deck_changes_between_matches(),
+            DraftStatus::Lobby
+            | DraftStatus::Drafting
+            | DraftStatus::Review
+            | DraftStatus::Paused
+            | DraftStatus::Pairing
+            | DraftStatus::MatchInProgress
+            | DraftStatus::Complete
+            | DraftStatus::Abandoned => false,
+        }
     }
 
     /// The shared-stack state, or the error a session that should have one but
@@ -451,8 +473,9 @@ fn apply_existing(
             seat,
             main_deck,
             commanders,
+            companion,
             printings,
-        } => apply_submit_deck(session, seat, main_deck, commanders, printings),
+        } => apply_submit_deck(session, seat, main_deck, commanders, companion, printings),
         DraftAction::GeneratePairings => apply_generate_pairings(session),
         DraftAction::ReportMatchResult {
             match_id,
@@ -2620,14 +2643,49 @@ pub(crate) fn concession_set_codes(session: &DraftSession) -> Vec<&str> {
     }
 }
 
+/// CR 702.139a/b: the companion half of deck-submission validation, which needs
+/// the card database `apply` does not carry. A submission path that holds one
+/// (draft-wasm's host/local/recovered submits) MUST call this before `apply` so
+/// an ineligible designation is refused before the reducer mutates and before
+/// the draft acknowledges or advances; it reads the session's own
+/// `min_deck_size`, the same minimum match admission measures Yorion against.
+/// A submission without a companion has nothing to check. The submitted
+/// `commanders` are the Commander-deck context (CR 903.11a).
+pub fn check_submission_companion(
+    session: &DraftSession,
+    db: Option<&engine::database::CardDatabase>,
+    main_deck: &[String],
+    commanders: &[String],
+    companion: Option<&str>,
+) -> Result<(), DraftError> {
+    let Some(companion) = companion else {
+        return Ok(());
+    };
+    // CR 903.3: a kind whose decks require commanders builds Commander decks,
+    // so admission measures the companion with the commanders in context.
+    let uses_commander = session.kind.procedure().commanders_required > 0;
+    validate_companion_eligibility(
+        db,
+        main_deck,
+        commanders,
+        uses_commander,
+        companion,
+        session.config.min_deck_size,
+    )
+    .map_err(|error| DraftError::ValidationFailed {
+        errors: vec![error],
+    })
+}
+
 fn apply_submit_deck(
     session: &mut DraftSession,
     seat: u8,
     main_deck: Vec<String>,
     commanders: Vec<String>,
+    companion: Option<String>,
     printings: Vec<DeckPrinting>,
 ) -> Result<Vec<DraftDelta>, DraftError> {
-    if session.status != DraftStatus::Deckbuilding {
+    if !session.deck_submission_open() {
         return Err(DraftError::InvalidTransition {
             from: session.status,
             action: "SubmitDeck".to_string(),
@@ -2676,6 +2734,7 @@ fn apply_submit_deck(
         // assumed -- `0` for every kind whose decks are not Commander decks
         // (the four CR 905.1a kinds and `Winston`), `1` for CommanderDraft.
         usize::from(session.kind.procedure().commanders_required),
+        companion.as_deref(),
     ) {
         return Err(DraftError::ValidationFailed { errors });
     }
@@ -2694,12 +2753,20 @@ fn apply_submit_deck(
             // CR 903.3: snapshotted, not re-derived. A later pool change
             // must never silently re-designate this seat's commander(s).
             commanders,
+            companion,
             // Replace names and owner choices together, including empty clearing.
             printings,
         },
     );
 
     let mut deltas = vec![DraftDelta::DeckSubmitted { seat }];
+
+    // `deck_submission_open` admits exactly two statuses, and only deckbuilding
+    // completes on the last submission. A between-rounds revision (MTR 7.3)
+    // never moves the pod; the host still advances the round.
+    if session.status != DraftStatus::Deckbuilding {
+        return Ok(deltas);
+    }
 
     // Check if all human seats have submitted
     let human_count = session
@@ -2763,6 +2830,7 @@ mod tests {
             seat: 0,
             main_deck: vec![name.into(); 40],
             commanders: Vec::new(),
+            companion: None,
             printings: set
                 .into_iter()
                 .map(|set| DeckPrinting {
@@ -2801,6 +2869,7 @@ mod tests {
                     seat: 0,
                     main_deck,
                     commanders,
+                    companion: None,
                     printings
                 },
                 "accepted resubmission replaces names and printings, including empty clearing"
@@ -3697,6 +3766,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -3732,6 +3802,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -3794,6 +3865,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -3839,6 +3911,7 @@ mod tests {
                 seat: 0,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -3852,6 +3925,7 @@ mod tests {
                 seat: 1,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -3928,6 +4002,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4034,6 +4109,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4058,6 +4134,7 @@ mod tests {
                 // so `CommanderNotInDeck` cannot fire. The row's subject is
                 // unchanged -- only what makes a Commander deck legal is.
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4122,6 +4199,7 @@ mod tests {
                 seat: 0,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4137,6 +4215,7 @@ mod tests {
                 seat: 1,
                 main_deck: make_deck(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4162,6 +4241,7 @@ mod tests {
                 seat: 0,
                 main_deck: vec![],
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -4173,6 +4253,94 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A seat-0 basics-only deck: `test_session` pools are empty, so only the
+    /// addable basics validate.
+    fn basics_submission(name: &str) -> DraftAction {
+        DraftAction::SubmitDeck {
+            seat: 0,
+            main_deck: vec![name.into(); 40],
+            commanders: Vec::new(),
+            printings: Vec::new(),
+            companion: None,
+        }
+    }
+
+    /// A pod between rounds whose seat 0 already submitted 40 Plains.
+    fn round_complete_session(policy: PodPolicy) -> DraftSession {
+        let (mut session, _) = test_session(2);
+        session.config.pod_policy = policy;
+        session.status = DraftStatus::Deckbuilding;
+        apply(&mut session, basics_submission("Plains"), None).unwrap();
+        session.status = DraftStatus::RoundComplete;
+        session
+    }
+
+    #[test]
+    fn casual_pod_accepts_a_deck_revision_between_rounds_without_moving_the_pod() {
+        let mut session = round_complete_session(PodPolicy::Casual);
+
+        let deltas = apply(&mut session, basics_submission("Island"), None).unwrap();
+
+        assert_eq!(deltas, vec![DraftDelta::DeckSubmitted { seat: 0 }]);
+        assert_eq!(
+            session.submitted_decks[&PlayerId(0)].main_deck,
+            vec!["Island".to_string(); 40],
+            "MTR 7.3: the revision replaces the submission the next round reads"
+        );
+        assert_eq!(session.status, DraftStatus::RoundComplete);
+    }
+
+    #[test]
+    fn competitive_pod_refuses_a_deck_revision_between_rounds() {
+        // Reach guard: the identical payload is accepted in a Casual pod.
+        let mut casual = round_complete_session(PodPolicy::Casual);
+        assert!(apply(&mut casual, basics_submission("Island"), None).is_ok());
+
+        let mut session = round_complete_session(PodPolicy::Competitive);
+        let before = session.submitted_decks.clone();
+        let result = apply(&mut session, basics_submission("Island"), None);
+
+        assert!(matches!(
+            result,
+            Err(DraftError::InvalidTransition {
+                from: DraftStatus::RoundComplete,
+                ..
+            })
+        ));
+        assert_eq!(session.submitted_decks, before);
+    }
+
+    #[test]
+    fn between_rounds_revision_is_validated_against_the_seat_pool() {
+        let mut session = round_complete_session(PodPolicy::Casual);
+        let before = session.submitted_decks.clone();
+
+        let result = apply(&mut session, basics_submission("Not in pool"), None);
+
+        assert!(matches!(result, Err(DraftError::ValidationFailed { .. })));
+        assert_eq!(session.submitted_decks, before);
+        assert_eq!(session.status, DraftStatus::RoundComplete);
+    }
+
+    #[test]
+    fn casual_pod_refuses_a_deck_revision_outside_the_between_rounds_window() {
+        // Reach guard: `round_complete_session` itself proves Casual accepts at
+        // `RoundComplete` (the casual acceptance test covers the revision).
+        for status in [DraftStatus::Pairing, DraftStatus::MatchInProgress] {
+            let mut session = round_complete_session(PodPolicy::Casual);
+            session.status = status;
+            let before = session.submitted_decks.clone();
+
+            let result = apply(&mut session, basics_submission("Island"), None);
+
+            assert!(
+                matches!(result, Err(DraftError::InvalidTransition { from, .. }) if from == status),
+                "{status:?} must refuse SubmitDeck"
+            );
+            assert_eq!(session.submitted_decks, before);
+        }
     }
 
     #[test]
@@ -5760,6 +5928,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck_with(2),
                 commanders: designations.clone(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5775,6 +5944,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck_with(3),
                 commanders: designations,
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5801,6 +5971,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: vec![filler.card_name.clone()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5832,6 +6003,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: over_bound,
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5860,6 +6032,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: at_bound,
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5886,6 +6059,7 @@ mod tests {
                 seat: 0,
                 main_deck: main_deck.clone(),
                 commanders: vec!["Card 999".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -5908,6 +6082,7 @@ mod tests {
                 seat: 0,
                 main_deck,
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -6083,6 +6258,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck.clone(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -6109,6 +6285,7 @@ mod tests {
                     seat: 0,
                     main_deck: deck.clone(),
                     commanders: Vec::new(),
+                    companion: None,
                     printings: Vec::new(),
                 },
                 None,
@@ -6143,6 +6320,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck.clone(),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -6172,6 +6350,7 @@ mod tests {
                 seat: 0,
                 main_deck: deck,
                 commanders: vec!["Card 0".to_string()],
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -6193,6 +6372,7 @@ mod tests {
                 seat: 0,
                 main_deck: pooled_deck(40),
                 commanders: Vec::new(),
+                companion: None,
                 printings: Vec::new(),
             },
             None,
@@ -6214,6 +6394,7 @@ mod tests {
                     "Card 1".to_string(),
                     "Card 2".to_string(),
                 ],
+                companion: None,
                 printings: Vec::new(),
             },
             None,

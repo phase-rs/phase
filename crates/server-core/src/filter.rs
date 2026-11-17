@@ -243,6 +243,7 @@ mod tests {
                 is_commander: false,
                 is_oathbreaker: false,
                 deck_copy_limit: None,
+                deck_size_override: None,
                 metadata: Default::default(),
                 rarities: Default::default(),
                 attraction_lights: vec![],
@@ -396,6 +397,7 @@ mod tests {
         );
 
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![card_a, card_b],
             count: 1,
@@ -413,11 +415,13 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             is_cost_payment: false,
             library_position: None,
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: None,
             enters_modified_if: None,
             duration: None,
@@ -436,6 +440,63 @@ mod tests {
         assert_eq!(filtered.objects[&card_b].name, "Hidden Card");
     }
 
+    /// CR 608.2c: who performs the chosen move is a public effect parameter,
+    /// like the move's duration, so every viewer's projection keeps it while an
+    /// opponent's projection still hides which hand cards are offered.
+    #[test]
+    fn effect_zone_choice_projection_keeps_the_performer() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(22),
+            PlayerId(1),
+            "Held".to_string(),
+            Zone::Hand,
+        );
+        state.waiting_for = WaitingFor::EffectZoneChoice {
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
+            performed_by: Some(PlayerId(1)),
+            player: PlayerId(1),
+            cards: vec![card],
+            count: 1,
+            min_count: 1,
+            up_to: false,
+            source_id: ObjectId(100),
+            effect_kind: engine::types::ability::EffectKind::ChangeZone,
+            zone: Zone::Hand,
+            destination: Some(Zone::Exile),
+            enter_tapped: engine::types::zones::EtbTapState::Unspecified,
+            enter_transformed: false,
+            enters_under_player: None,
+            enters_attacking: false,
+            owner_library: false,
+            track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
+            face_down_profile: None,
+            with_entry_effect: None,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            count_param: 0,
+            is_cost_payment: false,
+            library_position: None,
+            mass_library_order: None,
+            enters_modified_if: None,
+            duration: None,
+        };
+        for (viewer, offered) in [(PlayerId(1), card), (PlayerId(0), ObjectId(0))] {
+            match filter_state_for_player(&state, viewer).waiting_for {
+                WaitingFor::EffectZoneChoice {
+                    cards,
+                    performed_by,
+                    ..
+                } => {
+                    assert_eq!(cards, vec![offered], "viewer {viewer:?}");
+                    assert_eq!(performed_by, Some(PlayerId(1)), "viewer {viewer:?}");
+                }
+                other => panic!("Expected EffectZoneChoice, got {other:?}"),
+            }
+        }
+    }
     #[test]
     fn mass_library_order_choice_redacts_cards_and_provenance_for_opponent() {
         let mut state = GameState::new_two_player(42);
@@ -476,6 +537,7 @@ mod tests {
             .collect();
 
         state.waiting_for = WaitingFor::EffectZoneChoice {
+            performed_by: None,
             player: PlayerId(0),
             cards: vec![card_a, card_b],
             count: 2,
@@ -493,10 +555,12 @@ mod tests {
             track_exiled_by_source: false,
             face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
+            with_entry_effect: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
             count_param: 0,
             library_position: Some(LibraryPosition::Bottom),
+            library_shuffle: engine::types::ability::LibraryShuffleMode::PerObject,
             mass_library_order: Some(MassLibraryOrderBatch {
                 owner: PlayerId(0),
                 members,

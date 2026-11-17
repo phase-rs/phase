@@ -83,9 +83,9 @@ pub use replay::{
 };
 pub use resolution::{
     AbilityContinuationFrame, ChangeZoneFrame, ChildStackDepth, DirectChoiceGate, FrameGate,
-    FrameKind, MultiDrawFrame, OptionalEffectFrame, PerCategoryZoneChoiceFrame,
-    RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack, ResolutionStackError,
-    ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
+    FrameKind, MultiDrawFrame, OptionalEffectFrame, ParkedOpponentMayPoll,
+    PerCategoryZoneChoiceFrame, RepeatedOptionalPaymentFrame, ResolutionFrame, ResolutionStack,
+    ResolutionStackError, ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION,
 };
 pub use resolved_commands::{
     ManaPaymentRecipient, ProducedManaUnit, ResolvedCommandJournalEntry, ResolvedCommandOrdinal,
@@ -112,3 +112,13 @@ pub use statics::StaticMode;
 pub use stickers::{AppliedSticker, StickerKind, StickerLocator};
 pub use triggers::{TriggerEventKey, TriggerMode};
 pub use zones::Zone;
+
+#[cfg(test)]
+mod test_trigger_mode {
+    use crate::types::triggers::TriggerMode;
+
+    #[test]
+    fn test_touched() {
+        let _ = TriggerMode::Touched;
+    }
+}

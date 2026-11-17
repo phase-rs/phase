@@ -64,20 +64,50 @@ export function measureSurface(
   let c = 0;
   let d = 1;
   let opacity = 1;
+  let selfStyle: CSSStyleDeclaration | null = null;
   for (let node: Element | null = el; node; node = node.parentElement) {
     const style = getComputedStyle(node);
+    if (!selfStyle) selfStyle = style;
     // An empty value is the initial value (1), as an empty transform is `none`.
     opacity *= style.opacity === "" ? 1 : Number(style.opacity);
     const m = nodeLinear(style);
     if (!m) continue;
     [a, b, c, d] = [m.a * a + m.c * b, m.b * a + m.d * b, m.a * c + m.c * d, m.b * c + m.d * d];
   }
+  let layoutW = el.offsetWidth;
+  let layoutH = el.offsetHeight;
+  if (selfStyle) {
+    const pw = parseFloat(selfStyle.width);
+    const ph = parseFloat(selfStyle.height);
+    if (Number.isFinite(pw) && pw > 0) {
+      if (selfStyle.boxSizing === "border-box") {
+        layoutW = pw;
+      } else {
+        const pl = parseFloat(selfStyle.paddingLeft) || 0;
+        const pr = parseFloat(selfStyle.paddingRight) || 0;
+        const bl = parseFloat(selfStyle.borderLeftWidth) || 0;
+        const br = parseFloat(selfStyle.borderRightWidth) || 0;
+        layoutW = pw + pl + pr + bl + br;
+      }
+    }
+    if (Number.isFinite(ph) && ph > 0) {
+      if (selfStyle.boxSizing === "border-box") {
+        layoutH = ph;
+      } else {
+        const pt = parseFloat(selfStyle.paddingTop) || 0;
+        const pb = parseFloat(selfStyle.paddingBottom) || 0;
+        const bt = parseFloat(selfStyle.borderTopWidth) || 0;
+        const bb = parseFloat(selfStyle.borderBottomWidth) || 0;
+        layoutH = ph + pt + pb + bt + bb;
+      }
+    }
+  }
   return {
     pose: {
       x: rect.left + rect.width / 2 - origin.left,
       y: rect.top + rect.height / 2 - origin.top,
-      w: el.offsetWidth * Math.hypot(a, b),
-      h: el.offsetHeight * Math.hypot(c, d),
+      w: layoutW * Math.hypot(a, b),
+      h: layoutH * Math.hypot(c, d),
       angleDeg: (Math.atan2(b, a) * 180) / Math.PI,
     },
     opacity,

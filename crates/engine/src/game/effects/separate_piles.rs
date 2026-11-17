@@ -226,6 +226,7 @@ fn resolve_revealed_from_library_top(
         .collect();
     events.push(GameEvent::CardsRevealed {
         player: controller,
+        occurrences: state.disclosed_occurrences(&revealed_ids),
         card_ids: revealed_ids.clone(),
         card_names,
     });
@@ -479,6 +480,8 @@ fn sub_effect_as_resolved(
     resolved.sub_link = def.sub_link;
     // CR 611.2e: carry the parser-stamped onset like every other def → resolved copy.
     resolved.entry_onset = def.entry_onset;
+    // CR 608.2c: carry the parser-stamped list-slot identity like `sub_link`.
+    resolved.instruction_join = def.instruction_join;
     resolved
 }
 
@@ -616,7 +619,12 @@ mod tests {
                 state.players[1].is_phased_out(),
                 "P1 must read as phased out"
             );
-            crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut setup_events);
+            crate::game::elimination::eliminate_player(
+                &mut state,
+                PlayerId(2),
+                crate::types::events::LossReason::Conceded,
+                &mut setup_events,
+            );
             assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
             state
         }

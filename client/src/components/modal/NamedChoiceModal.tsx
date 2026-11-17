@@ -3,12 +3,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
 
+import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { usePlayerAvatarImage } from "../../hooks/usePlayerAvatarImage.ts";
 import { getCardNames } from "../../services/cardNames.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import {
   getPlayerDisplayName,
   useMultiplayerStore,
@@ -86,7 +88,10 @@ export function SecretAgendaModal({ data }: { data: SecretAgendaChoice["data"] }
 
 export function NamedChoiceModal({ data }: { data: OptionChoice["data"] }) {
   const typeKey = getChoiceTypeKey(data.choice_type);
-  if (typeKey === "CardName") {
+  // CR 201.4: the open card-name prompt publishes no options (any card name may
+  // be typed). A closed card-name domain (Garth One-Eye) publishes exactly its
+  // legal names, so it renders them like any other enumerated choice.
+  if (typeKey === "CardName" && data.options.length === 0) {
     return <CardNameSearch />;
   }
   // CR 107.1a/b: the engine publishes a free-entry contract when the answer is
@@ -335,6 +340,13 @@ function ButtonGrid({ data, typeKey }: { data: OptionChoice["data"]; typeKey: st
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
+  // CR 608.2c + CR 608.2d: a per-object choice ("for each of those permanents,
+  // choose a different opponent") publishes the object the answer is for;
+  // render it through the shared card display, nothing derived client-side.
+  const subjectId = "decision_subject_id" in data ? data.decision_subject_id : undefined;
+  const subject = useGameStore((s) =>
+    subjectId == null ? undefined : s.gameState?.objects[subjectId],
+  );
 
   const handleConfirm = useCallback(() => {
     if (selected !== null) {
@@ -360,6 +372,15 @@ function ButtonGrid({ data, typeKey }: { data: OptionChoice["data"]; typeKey: st
       maxWidthClassName="max-w-3xl"
       footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
     >
+      {subject && (
+        <div className="mx-auto mb-4 w-full max-w-sm px-6" data-testid="named-choice-subject">
+          <CardTextboxPreview
+            cardName={subject.name}
+            ownerPrinting={subject.printing}
+            ownerPrintedRef={subject.printed_ref}
+          />
+        </div>
+      )}
       {showFilter && (
         <div className="mx-auto mb-4 w-full max-w-md">
           <input
