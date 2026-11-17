@@ -16332,6 +16332,111 @@ mod tests {
         );
     }
 
+    /// GitHub #9637 + CR 120.1 + CR 120.3: Chandra's Phoenix's printed source
+    /// qualifier must exclude creature damage at runtime, not only in the AST.
+    /// The trigger comes from the verbatim Oracle text through the production
+    /// parser, so this test fails if the parser drops the filter OR the matcher
+    /// ignores it.
+    #[test]
+    fn damage_received_chandras_phoenix_excludes_creature_damage() {
+        let mut state = setup();
+        let phoenix = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chandra's Phoenix".to_string(),
+            Zone::Graveyard,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever an opponent is dealt damage by a red instant or sorcery spell you control or by a red planeswalker you control, return this card from your graveyard to your hand.",
+            "Chandra's Phoenix",
+        );
+        assert_eq!(trigger.mode, TriggerMode::DamageReceived);
+
+        fn typed_source(
+            state: &mut GameState,
+            card_id: CardId,
+            owner: PlayerId,
+            name: &str,
+            zone: Zone,
+            core_type: CoreType,
+        ) -> ObjectId {
+            let id = create_object(state, card_id, owner, name.to_string(), zone);
+            let obj = state.objects.get_mut(&id).expect("created source object");
+            obj.card_types.core_types.push(core_type);
+            obj.color.push(crate::types::mana::ManaColor::Red);
+            obj.controller = owner;
+            id
+        }
+
+        let red_creature = typed_source(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Red Creature",
+            Zone::Battlefield,
+            CoreType::Creature,
+        );
+        let red_instant = typed_source(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Lightning Bolt",
+            Zone::Stack,
+            CoreType::Instant,
+        );
+        let red_planeswalker = typed_source(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Chandra, Torch of Defiance",
+            Zone::Battlefield,
+            CoreType::Planeswalker,
+        );
+        let opponent_red_sorcery = typed_source(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Pyroclasm",
+            Zone::Stack,
+            CoreType::Sorcery,
+        );
+
+        let fires = |source_id: ObjectId| {
+            let event = GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Player(PlayerId(1)),
+                amount: 3,
+                is_combat: false,
+                excess: 0,
+                source_incarnation: None,
+            };
+            match_damage_received(
+                &event,
+                &trigger,
+                &test_trigger_source_context(&state, phoenix),
+                &state,
+            )
+        };
+
+        assert!(
+            fires(red_instant),
+            "a red instant you control must satisfy the printed qualifier"
+        );
+        assert!(
+            fires(red_planeswalker),
+            "a red planeswalker you control must satisfy the printed qualifier"
+        );
+        assert!(
+            !fires(red_creature),
+            "a red creature must NOT satisfy 'a red instant or sorcery spell you control or … a red planeswalker you control'"
+        );
+        assert!(
+            !fires(opponent_red_sorcery),
+            "an opponent's red sorcery must NOT satisfy 'you control'"
+        );
+    }
+
     /// CR 120.3: Enrage / "~ is dealt damage" — object-scoped triggers must not
     /// fire when the controller takes damage (Vrondiss #1306).
     #[test]

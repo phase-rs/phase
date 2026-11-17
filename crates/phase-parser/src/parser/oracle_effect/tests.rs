@@ -27533,6 +27533,7 @@ fn effect_emblem_with_whenever_trigger_extracts_trigger_definition() {
 
 #[test]
 fn effect_emblem_trigger_with_subject_predicate_text_stays_emblem() {
+    use crate::types::ability::TriggerCondition;
     use crate::types::triggers::TriggerMode;
 
     let def = parse_effect_chain(
@@ -27540,13 +27541,35 @@ fn effect_emblem_trigger_with_subject_predicate_text_stays_emblem() {
             AbilityKind::Activated,
         );
 
-    // The emblem's trigger has an unparsable "by one or more creatures" source
-    // qualifier, so the entire emblem effect is honestly unimplemented.
+    let Effect::CreateEmblem { triggers, .. } = &*def.effect else {
+        panic!("expected CreateEmblem, got {:?}", def.effect);
+    };
+    assert_eq!(triggers.len(), 1);
+    let trigger = &triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::DamageReceived);
     assert!(
-        matches!(def.effect.as_ref(), Effect::Unimplemented { .. }),
-        "emblem with unparsable trigger must be Unimplemented, got {:?}",
-        def.effect
+        matches!(
+            trigger.condition,
+            Some(TriggerCondition::QuantityComparison { .. })
+        ),
+        "emblem trigger must gate on life lost < 8, got {:?}",
+        trigger.condition
     );
+    let execute = trigger.execute.as_ref().expect("emblem trigger execute");
+    match execute.effect.as_ref() {
+        Effect::LoseLife { amount, target } => {
+            assert_eq!(
+                *target,
+                Some(TargetFilter::ParentTarget),
+                "life loss must hit the damaged player"
+            );
+            assert!(
+                matches!(amount, QuantityExpr::Difference { .. }),
+                "loss amount must be Difference, got {amount:?}"
+            );
+        }
+        other => panic!("expected LoseLife difference, got {other:?}"),
+    }
 }
 
 #[test]
@@ -97219,25 +97242,12 @@ fn difference_draw_keeps_the_trigger_rewrite_contract() {
         &["Planeswalker"],
     );
     let lolth = to_json(&lolth);
-    // The emblem's trigger has an unparsable "by one or more creatures" source
-    // qualifier, so the emblem effect is Unimplemented with name "emblem_creation".
-    fn find_emblem_creation(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Object(map) => {
-                if map.get("type").and_then(|v| v.as_str()) == Some("Unimplemented")
-                    && map.get("name").and_then(|v| v.as_str()) == Some("emblem_creation")
-                {
-                    return true;
-                }
-                map.values().any(find_emblem_creation)
-            }
-            serde_json::Value::Array(items) => items.iter().any(find_emblem_creation),
-            _ => false,
-        }
-    }
     assert!(
-        find_emblem_creation(&lolth),
-        "Lolth's emblem should be Unimplemented with name emblem_creation: {lolth}"
+        serialized_effects(&lolth, "LoseLife").iter().any(|effect| {
+            effect["amount"]["type"] == "Difference"
+                && effect["target"] == to_json(&TargetFilter::ParentTarget)
+        }),
+        "Lolth's emblem keeps the difference loss on its parent target: {lolth}"
     );
 }
 

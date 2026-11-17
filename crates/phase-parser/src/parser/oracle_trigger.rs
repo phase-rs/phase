@@ -17657,16 +17657,33 @@ fn try_parse_event(
         .parse(input)
     }
     /// CR 120.1 + CR 120.3: Parse the passive-voice damage source qualifier
-    /// ("by a creature", "by a red source you control", etc.). Spell types
-    /// (instant/sorcery) and source disjunctions ("or by …") are not modeled;
-    /// such qualifiers are rejected honestly by the caller. Returns the source
-    /// `TargetFilter` and the remainder.
+    /// ("by a creature", "by a red source you control", "by a red instant or
+    /// sorcery spell you control or by a red planeswalker you control"). A
+    /// source disjunction becomes the existing `TargetFilter::Or` building
+    /// block; any qualifier this grammar cannot represent is left unconsumed so
+    /// the caller's tail guard reports the line unsupported instead of dropping
+    /// the restriction. Returns the source `TargetFilter` and the remainder.
     fn parse_passive_damage_source(input: &str) -> OracleResult<'_, TargetFilter> {
         let (rest, _) = preceded(opt(space1), tag("by ")).parse(input)?;
-        // Delegate to the shared source subject parser used by the active voice,
-        // but without the trailing space requirement (the active voice requires
-        // a space before "deals", here we're at the end of the clause).
-        parse_damage_source_subject_shared(rest, false, false)
+        // Passive voice: no trailing space requirement (we are at the end of
+        // the event phrase), and the passive-only source forms are admitted.
+        let (rest, first) =
+            parse_damage_source_subject_shared(rest, DamageSourceSubjectVoice::Passive)?;
+        // CR 120.1 + CR 120.3: "… or by <source>" is a disjunction over the
+        // damage source; either branch satisfies the qualifier. Composes the
+        // existing `TargetFilter::Or` evaluator rather than adding a second
+        // source-filter slot to `TriggerDefinition`.
+        let (rest, additional) = many0(preceded(tag(" or by "), |i| {
+            parse_damage_source_subject_shared(i, DamageSourceSubjectVoice::Passive)
+        }))
+        .parse(rest)?;
+        if additional.is_empty() {
+            return Ok((rest, first));
+        }
+        let mut filters = Vec::with_capacity(additional.len() + 1);
+        filters.push(first);
+        filters.extend(additional);
+        Ok((rest, TargetFilter::Or { filters }))
     }
     /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10 + CR 510 + CR 603.2:
     /// Passive-voice damage-received trigger event —
@@ -17721,12 +17738,9 @@ fn try_parse_event(
         // The restriction is carried on `DamageAmountThreshold`, which exists
         // only when an amount is present — so with no amount there is nowhere
         // for the scope to live. Do not consume the tail at all in that case:
-        // leaving it unconsumed hands it to the arm's existing unconsumed-tail
-        // guard, which already refuses it in every newly-opened cell AND
-        // preserves the four `previously_covered` cells byte-identically
-        // (Chandra's Phoenix, Glyph of Life). Consuming it unconditionally
-        // would emit `DamageReceived` with the restriction silently dropped in
-        // every newly-opened cell that has no threshold to carry the scope.
+        // leaving it unconsumed hands it to the arm's single unconsumed-tail
+        // invariant, which refuses the line rather than emitting
+        // `DamageReceived` with the restriction silently dropped.
         let (rest, scope) = if amount.is_some() {
             opt(parse_single_source_scope).parse(rest)?
         } else {
@@ -17744,6 +17758,12 @@ fn try_parse_event(
         // ability at all (Chandra's Phoenix: "by a red instant or sorcery spell
         // you control or by a red planeswalker you control").
         let (rest, source_filter) = opt(parse_passive_damage_source).parse(rest)?;
+        // CR 603.7a: a trailing "this turn" on a delayed-trigger event
+        // ("Whenever that creature is dealt damage by an attacking creature
+        // this turn") bounds the delayed ability's duration; the creating
+        // effect carries that duration and the trigger event itself is
+        // unqualified by it.
+        let (rest, _) = opt(tag::<_, _, OracleError<'_>>(" this turn")).parse(rest)?;
         Ok((
             rest,
             SimpleEvent::DealtDamage {
@@ -18116,42 +18136,21 @@ fn try_parse_event(
                 if has_untyped_event_window(remaining) {
                     return None;
                 }
-                // CR 603.2: an ability triggers when a game event matches ITS trigger
-                // event. The four triples below are exactly the cells the former eight
-                // `tag()` arms already reached; on those, a trailing restriction has
-                // been dropped since long before this change (Chandra's Phoenix's
-                // source clause, Glyph of Life's "by an attacking creature"), and
-                // re-adjudicating them is a separate defect class with its own
-                // population and its own coverage delta. For every OTHER cell this
-                // parameterization newly opens, this arm is the sole cause of the
-                // resulting def, so it must refuse a def it cannot fully model: an
-                // unconsumed tail is an unmodeled restriction ("by a single source"
-                // — Pain Magnification), and emitting `DamageReceived` anyway would
-                // assert a DIFFERENT trigger event and over-fire. Falling through to
-                // `TriggerMode::Unknown` keeps the line honestly unsupported. Mirrors
-                // the F1 guard on `SimpleEvent::BecomesTargetAbility` above, which is
-                // likewise scoped to the seam that owns the tail rather than applied
-                // to shared siblings.
-                let previously_covered = matches!(
-                    (channel, kind, amount),
-                    (DamageChannel::Total, DamageKindFilter::Any, None)
-                        | (DamageChannel::Total, DamageKindFilter::CombatOnly, None)
-                        | (DamageChannel::Excess, DamageKindFilter::Any, None)
-                        | (DamageChannel::Excess, DamageKindFilter::NoncombatOnly, None)
-                );
-                // CR 120.1 + CR 120.3: if a "by <source>" qualifier is present but
-                // could not be parsed into a source_filter (e.g. "by a red instant or
-                // sorcery spell you control" — spell types not modeled), reject the
-                // line honestly rather than emitting an unrestricted DamageReceived
-                // that would over-fire on creature damage. Mirrors the BecomesBlocked
-                // guard at line ~17119.
-                let has_unparsed_by = peek(tag::<_, _, OracleError<'_>>("by "))
-                    .parse(remaining.trim_start())
-                    .is_ok();
-                if has_unparsed_by && source_filter.is_none() {
-                    return None;
-                }
-                if !previously_covered && !remaining.trim().is_empty() {
+                // CR 603.2: an ability triggers when a game event matches ITS
+                // trigger event. Every word of the printed event phrase must be
+                // represented on the def: an unconsumed tail is an unmodeled
+                // qualifier ("by a single source" with no amount to carry the
+                // scope, "by a spell or ability", "from a source with
+                // deathtouch"), and emitting `DamageReceived` anyway would
+                // assert a DIFFERENT trigger event — the defect this issue
+                // reports, where the qualifier was dropped and the trigger
+                // fired on any source. Falling through to `TriggerMode::Unknown`
+                // keeps the line honestly unsupported. This is the single
+                // invariant for every cell of the damage axes; it replaces the
+                // former per-cell `previously_covered` carve-out, whose four
+                // cells (Chandra's Phoenix, Glyph of Life, …) now parse their
+                // qualifiers and are no longer exempt.
+                if !remaining.trim().is_empty() {
                     return None;
                 }
                 def.mode = match channel {
@@ -18956,22 +18955,49 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
     Some((TriggerMode::DamageDone, def))
 }
 
+/// CR 120.1 + CR 120.3: grammatical voice of a damage-source subject.
+///
+/// The two voices are not independent booleans: each exposes a different set
+/// of capabilities, so the capability set is named once here and read at the
+/// capability sites below instead of being spread across positional flags.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DamageSourceSubjectVoice {
+    /// `"<source> deals damage …"` — the subject precedes the verb, so a
+    /// trailing space is required before `"deals"`, and Aura/Equipment
+    /// attached-creature subjects are recognized.
+    Active,
+    /// `"damage is dealt by <source>"` — the subject ends the event phrase, so
+    /// no trailing space is required, and the forms only this voice prints are
+    /// admitted: the spell-type disjunction `"instant or sorcery spell"`, the
+    /// quantified plural `"one or more creatures"`, combat-status adjectives,
+    /// and the source disjunction `"or by <source>"` (Chandra's Phoenix,
+    /// Lolth, Spider Queen, Glyph of Life).
+    Passive,
+}
+
+/// CR 109.1 + CR 400.7: determiner of a damage-source subject — the article
+/// (`"a source"`), the article-less identity determiner `"another source"`
+/// (an object distinct from the ability source; enforced by
+/// `FilterProp::Another` at the `game/filter.rs` runtime evaluator), or the
+/// quantified plural `"one or more creatures"` (an existential over the damage
+/// event's sources, CR 120.4b).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DamageSourceDeterminer {
+    Article,
+    Another,
+    OneOrMore,
+}
+
 /// CR 120.1 + CR 120.3: Shared damage source subject parser for both
 /// active-voice ("a creature deals damage") and passive-voice ("dealt damage by a creature")
-/// grammars. Parses article, "another", color, renowned, head noun, controller, and
-/// "with property" clauses. Returns the `TargetFilter` and the remainder.
-///
-/// Parameters:
-/// - `require_trailing_space`: if true, require a space before the next verb
-///   (active voice needs this before "deals"; passive voice does not).
-/// - `allow_attached_creature`: if true, recognize "enchanted creature " and
-///   "equipped creature " as `TargetFilter::AttachedTo` (active voice only).
+/// grammars. Parses determiner, color, renowned, combat-status adjectives, head
+/// noun, controller, and "with property" clauses. Returns the `TargetFilter`
+/// and the remainder.
 fn parse_damage_source_subject_shared(
     input: &str,
-    require_trailing_space: bool,
-    allow_attached_creature: bool,
+    voice: DamageSourceSubjectVoice,
 ) -> OracleResult<'_, TargetFilter> {
-    if allow_attached_creature {
+    if voice == DamageSourceSubjectVoice::Active {
         // CR 303.4b + CR 301.5a: Aura/Equipment self-referential
         // damage-source subjects are article-less determiners — "enchanted creature"
         // (the creature an Aura is attached to, CR 303.4b) and "equipped creature"
@@ -19005,24 +19031,36 @@ fn parse_damage_source_subject_shared(
         }
     }
 
-    // CR 109.4: printed damage-source phrases either use an article
-    // ("a source") or the article-less determiner "another source" (Ghyrson).
-    // Parse "another" on the same axis as the article so it can feed the
-    // existing `FilterProp::Another` runtime evaluator.
-    let (rest, another) = alt((
+    // CR 109.1 + CR 400.7: printed damage-source phrases use an article
+    // ("a source"), the article-less determiner "another source" (Ghyrson), or
+    // the passive voice's quantified plural "one or more creatures" (Lolth,
+    // Spider Queen's emblem). Parse all three on one axis so the head noun
+    // below is shared.
+    let (rest, determiner) = alt((
         value(
-            Some(FilterProp::Another),
+            DamageSourceDeterminer::Another,
             tag::<_, _, OracleError<'_>>("another "),
         ),
-        value(None, tag::<_, _, OracleError<'_>>("a ")),
-        value(None, tag::<_, _, OracleError<'_>>("an ")),
+        value(DamageSourceDeterminer::OneOrMore, tag("one or more ")),
+        value(DamageSourceDeterminer::Article, tag("a ")),
+        value(DamageSourceDeterminer::Article, tag("an ")),
     ))
     .parse(input)?;
+    // CR 120.4b: "one or more <type>s" is a plural existential over the damage
+    // event's sources. Only the passive voice names a set of sources this way;
+    // the active voice's subject is a single actor in every printed card.
+    if determiner == DamageSourceDeterminer::OneOrMore && voice != DamageSourceSubjectVoice::Passive
+    {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
-    // Optional post-article "another " → FilterProp::Another. CR 109.4 governs object
-    // identity in references; "another" reads "an object distinct from the
-    // ability source" and is enforced by `FilterProp::Another` at the
-    // `game/filter.rs` runtime evaluator.
+    // Optional post-article "another " → FilterProp::Another. CR 109.1 +
+    // CR 400.7: "another" reads "an object distinct from the ability source"
+    // and is enforced by `FilterProp::Another` at the `game/filter.rs` runtime
+    // evaluator.
     let (rest, post_article_another) = opt(value(
         FilterProp::Another,
         tag::<_, _, OracleError<'_>>("another "),
@@ -19044,28 +19082,78 @@ fn parse_damage_source_subject_shared(
     // misclassify the subject.
     let (rest, color) = opt(terminated(nom_primitives::parse_color, tag(" "))).parse(rest)?;
 
+    // CR 509.1g: a combat-status adjective narrows the damage source — "an
+    // attacking creature" (Glyph of Life). Delegates to the shared
+    // `parse_property_filter` authority, the same adjective loop the damage
+    // recipient parser uses, so the source filter carries the combat state
+    // instead of failing the head noun and dropping the qualifier. Passive
+    // voice only: no printed active-voice subject uses this form.
+    let (rest, status_props) = if voice == DamageSourceSubjectVoice::Passive {
+        many0(terminated(parse_property_filter, space1)).parse(rest)?
+    } else {
+        (rest, Vec::new())
+    };
+
+    // CR 120.1 + CR 304 + CR 307: the passive voice's spell-type disjunction
+    // — "instant or sorcery spell" (Chandra's Phoenix). `TypeFilter::AnyOf` is
+    // the existing type-disjunction building block. The noun "spell" is part
+    // of the phrase: it selects the object on the stack, not a permanent.
+    let (rest, disjunctive_head) = if voice == DamageSourceSubjectVoice::Passive {
+        opt(value(
+            TypeFilter::AnyOf(vec![TypeFilter::Instant, TypeFilter::Sorcery]),
+            tag::<_, _, OracleError<'_>>("instant or sorcery spell"),
+        ))
+        .parse(rest)?
+    } else {
+        (rest, None)
+    };
+
     // Head noun — "source" (any damage source, CR 120.3), a card type
-    // (CR 205), or a negated type prefix ("noncreature source"). The negated
-    // variant uses `TypeFilter::Non(Box::new(…))` so the runtime filter
-    // excludes that type.
+    // (CR 205), or a negated type prefix ("noncreature source"). Each
+    // alternative reports its grammatical number so the quantified "one or
+    // more …" determiner can require a plural. The negated variant uses
+    // `TypeFilter::Non(Box::new(…))` so the runtime filter excludes that type.
     let core_head = alt((
-        value(
-            Some(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+        map(
             (
                 tag::<_, _, OracleError<'_>>("noncreature source"),
                 opt(tag("s")),
             ),
+            |(_, plural)| {
+                (
+                    Some(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+                    plural.is_some(),
+                )
+            },
         ),
-        value(
-            None,
+        map(
             (tag::<_, _, OracleError<'_>>("source"), opt(tag("s"))),
+            |(_, plural)| (None, plural.is_some()),
         ),
-        value(Some(TypeFilter::Creature), tag("creature")),
-        value(Some(TypeFilter::Artifact), tag("artifact")),
-        value(Some(TypeFilter::Enchantment), tag("enchantment")),
-        value(Some(TypeFilter::Planeswalker), tag("planeswalker")),
-        value(Some(TypeFilter::Battle), tag("battle")),
-        value(Some(TypeFilter::Land), tag("land")),
+        map(
+            (tag::<_, _, OracleError<'_>>("creature"), opt(tag("s"))),
+            |(_, plural)| (Some(TypeFilter::Creature), plural.is_some()),
+        ),
+        map(
+            (tag::<_, _, OracleError<'_>>("artifact"), opt(tag("s"))),
+            |(_, plural)| (Some(TypeFilter::Artifact), plural.is_some()),
+        ),
+        map(
+            (tag::<_, _, OracleError<'_>>("enchantment"), opt(tag("s"))),
+            |(_, plural)| (Some(TypeFilter::Enchantment), plural.is_some()),
+        ),
+        map(
+            (tag::<_, _, OracleError<'_>>("planeswalker"), opt(tag("s"))),
+            |(_, plural)| (Some(TypeFilter::Planeswalker), plural.is_some()),
+        ),
+        map(
+            (tag::<_, _, OracleError<'_>>("battle"), opt(tag("s"))),
+            |(_, plural)| (Some(TypeFilter::Battle), plural.is_some()),
+        ),
+        map(
+            (tag::<_, _, OracleError<'_>>("land"), opt(tag("s"))),
+            |(_, plural)| (Some(TypeFilter::Land), plural.is_some()),
+        ),
     ))
     .parse(rest);
     // CR 205.3 + CR 603.2: When the damage source is named by a creature subtype
@@ -19074,18 +19162,33 @@ fn parse_damage_source_subject_shared(
     // recognizer so the DamageDone trigger pattern is detected and "that player"
     // binds to TriggeringPlayer. `parse_subtype` is the single subtype authority
     // (oracle_util.rs); it returns the canonical name and consumed byte length.
-    let (rest, head_type) = match core_head {
-        Ok((rest, head_type)) => (rest, head_type),
-        Err(_) => match crate::parser::oracle_util::parse_subtype(rest) {
-            Some((subtype, consumed)) => (&rest[consumed..], Some(TypeFilter::Subtype(subtype))),
-            None => {
-                return Err(nom::Err::Error(OracleError::new(
-                    rest,
-                    nom::error::ErrorKind::Alt,
-                )))
-            }
+    let (rest, (head_type, plural)) = match disjunctive_head {
+        Some(head) => (rest, (Some(head), false)),
+        None => match core_head {
+            Ok(parsed) => parsed,
+            Err(_) => match crate::parser::oracle_util::parse_subtype(rest) {
+                Some((subtype, consumed)) => (
+                    &rest[consumed..],
+                    (Some(TypeFilter::Subtype(subtype)), false),
+                ),
+                None => {
+                    return Err(nom::Err::Error(OracleError::new(
+                        rest,
+                        nom::error::ErrorKind::Alt,
+                    )))
+                }
+            },
         },
     };
+    // CR 120.1: grammatical number is part of the qualifier. "one or more"
+    // requires a plural head ("one or more creatures you control"); an article
+    // requires a singular one ("a creatures" is not printed English).
+    if (determiner == DamageSourceDeterminer::OneOrMore) != plural {
+        return Err(nom::Err::Error(OracleError::new(
+            rest,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
 
     // Optional controller scope. Absence → no controller restriction
     // (matches any source — Phyrexian Obliterator class, deferred).
@@ -19110,7 +19213,7 @@ fn parse_damage_source_subject_shared(
     let (rest, with_prop) = opt(preceded(space1, parse_with_property)).parse(rest)?;
 
     let mut rest = rest;
-    if require_trailing_space {
+    if voice == DamageSourceSubjectVoice::Active {
         // Require trailing space before the "deals" verb so we don't match
         // "sourceless" / "sourced".
         let (new_rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest)?;
@@ -19122,7 +19225,10 @@ fn parse_damage_source_subject_shared(
         typed = typed.controller(c);
     }
     let mut props = Vec::new();
-    if let Some(p) = another.or(post_article_another) {
+    if determiner == DamageSourceDeterminer::Another {
+        props.push(FilterProp::Another);
+    }
+    if let Some(p) = post_article_another {
         props.push(p);
     }
     if let Some(p) = renowned {
@@ -19131,6 +19237,7 @@ fn parse_damage_source_subject_shared(
     if let Some(col) = color {
         props.push(FilterProp::HasColor { color: col });
     }
+    props.extend(status_props);
     if let Some(p) = with_prop {
         props.push(p);
     }
@@ -19151,9 +19258,9 @@ fn parse_damage_source_subject_shared(
 ///   * head noun       — "source" | supported object type head nouns
 ///   * controller      — optional " you control" → `ControllerRef::You`
 fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
-    // Delegate to the shared parser with active-voice options:
-    // require trailing space before "deals", allow "enchanted/equipped creature".
-    parse_damage_source_subject_shared(input, true, true)
+    // Active voice: require the space before "deals" and allow the
+    // "enchanted/equipped creature" attached-subject forms.
+    parse_damage_source_subject_shared(input, DamageSourceSubjectVoice::Active)
 }
 
 /// CR 120.2a + CR 120.2b: Parse the damage-kind adjective (`"combat "` / `"noncombat "`).

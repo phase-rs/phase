@@ -7494,6 +7494,7 @@ pub enum FilterProp {
     /// means "other than the newly-entered Mountain," not "other than Valakut."
     /// Resolves against
     /// `FilterContext::triggering_object`, populated at trigger-condition
+    /// evaluation from the current `GameEvent`.
     ///
     /// CR 400.7: the exclusion is keyed on the triggering object's exact IDENTITY
     /// (id + incarnation), not on its storage id — an object that left and
