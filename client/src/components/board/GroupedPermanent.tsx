@@ -371,7 +371,7 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
             zIndex: manaPaymentPreviewSourceIds.includes(id) ? group.count + i : i,
           }}
         >
-          <PermanentCard objectId={id} />
+          <PermanentCard objectId={id} partlyCovered={i < group.ids.length - 1} />
         </div>
       ))}
 

@@ -482,16 +482,17 @@ function CardPreviewInner({
   // The mobile preview's artless tile shows the card's rules text, so the card
   // stays readable while its art is missing, and names the card in the same
   // language. As in `CardImage`, the lookup waits until the tile shows, and it
-  // goes through `lookupName`, which is null for a face the preview may not
-  // reveal. Without a game object the front face is already looked up, and a
-  // token carries its own rules text.
+  // looks up the face the tile names, which a hidden face never reaches: its
+  // art is the card back. Without a game object the front face is already
+  // looked up, and a token carries its own rules text.
   const showsMobileArtFallback = isMobile
     && !handPreview
+    && !suppressArtLookup
     && activeArt.kind === "face"
     && !activeArt.isLoading
     && !activeArt.src;
   const objectFallbackFace = useEngineCardData(
-    showsMobileArtFallback && obj && !isToken ? lookupName : null,
+    showsMobileArtFallback && obj && !isToken ? cardName : null,
   );
   const fallbackFace = obj ? objectFallbackFace : engineFrontFace;
   const artFallback = {

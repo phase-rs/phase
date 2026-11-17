@@ -37,13 +37,16 @@ export interface CardArtFallbackProps {
  * The reload button needs a 44px row, which a small tile doesn't have, so a
  * container query on the tile's width shows it only where it fits; a smaller
  * tile keeps its name and shows no button. Width stands in for height because
- * each variant keeps its shape: a battlefield art box is 4:3, so at 6rem wide
- * it is tall enough for the button alone (the frame header above it shows the
- * name), and a 5:7 card at 4rem wide fits the button under the name.
+ * each surface keeps its shape. A battlefield art tile is 4:3 or taller, so
+ * when its art box's content is 6rem wide, the content is about 52px tall:
+ * room for the button alone (the frame header shows the name). A 5:7 card
+ * whose content is 4rem wide has about 98px: room for the name and the button,
+ * whose label wraps to as many as five lines in a longer language. The label
+ * grows to `text-xs` only on a large tile such as the mobile preview.
  */
 const reloadButtonClassByVariant = {
   artCrop: "hidden @min-[6rem]:block text-[10px]",
-  fullCard: "mt-1 hidden @min-[4rem]:block text-xs",
+  fullCard: "mt-1 hidden @min-[4rem]:block text-[10px] @min-[12rem]:text-xs",
 } as const satisfies Record<CardArtFallbackVariant, string>;
 
 /**
@@ -125,7 +128,7 @@ export function CardArtFallback({
             onReload();
           }}
           className={[
-            "min-h-11 w-full shrink-0 rounded-md bg-black/40 px-2 font-semibold leading-tight",
+            "min-h-11 w-full shrink-0 rounded-md bg-black/40 px-2 font-semibold leading-tight break-words",
             "text-gray-100 ring-1 ring-white/20 hover:bg-black/60",
             reloadButtonClassByVariant[variant],
           ].join(" ")}

@@ -61,6 +61,11 @@ interface PermanentCardProps {
    *  (card slam, position lookup) can resolve a non-rendered swarm member to this
    *  visible card instead of silently no-op'ing. */
   coveredIds?: number[];
+  /** True for a card under another in a staggered stack of identical
+   *  permanents, where only a sliver of it shows. Its artless tile offers no
+   *  art reload: the button would take the clicks meant for that sliver, and
+   *  the top card's reload covers the whole stack. */
+  partlyCovered?: boolean;
 }
 
 const EXILE_GHOST_OFFSET_PX = 20;
@@ -276,6 +281,7 @@ export const PermanentCard = memo(function PermanentCard({
   objectId,
   attachmentsLiftedByAncestor = false,
   attachmentRenderPath = [],
+  partlyCovered = false,
   onPrimaryClickOverride,
   coveredIds,
 }: PermanentCardProps) {
@@ -517,8 +523,10 @@ export const PermanentCard = memo(function PermanentCard({
   // desktop-sized screen, and the tile shows the button only where it fits. A
   // phone's tile is the permanent's tap target, and a button over its art would
   // also block the long-press that opens the preview, which carries the reload
-  // there. The exile ghosts peeking under a permanent never offer it.
-  const offerArtReload = !isMobile;
+  // there. A card that shows only a sliver (an attachment's peek, a covered
+  // stack member, an exile ghost) never offers it: the button would take the
+  // clicks meant for the sliver.
+  const offerArtReload = !isMobile && attachmentRenderPath.length === 0 && !partlyCovered;
 
   const isLand = obj.card_types.core_types.includes("Land");
   const displayColors = getCardDisplayColors(

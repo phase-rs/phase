@@ -22,7 +22,7 @@ async function setup() {
     fetchCardImageAsset: vi.fn(),
     fetchCardImageAssetByOracleId,
     fetchTokenImageAssetByRef: vi.fn(),
-    // Kibo's Banana (#6156): a token with no paper printing finds no art.
+    // A token search that finds no art, as for a token with no paper printing (#6156).
     fetchTokenImageUrl: vi.fn().mockRejectedValue(new Error("no printing")),
     findPrintingById: vi.fn(),
     getCardPrintings: vi.fn().mockResolvedValue([]),
@@ -150,7 +150,7 @@ describe("useCardImage art reload (#11008)", () => {
 
   it("offers no reload for a token whose art has no oracle id to scope it", async () => {
     const env = await setup();
-    const { result } = renderHook(() => env.useCardImage("Banana", { isToken: true }));
+    const { result } = renderHook(() => env.useCardImage("Test Token", { isToken: true }));
 
     // Reach guard: the lookup settles on the artless tile first.
     await waitFor(() => expect(result.current).toMatchObject({ src: null, isLoading: false }));

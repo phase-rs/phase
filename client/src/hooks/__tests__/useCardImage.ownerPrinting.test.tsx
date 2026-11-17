@@ -522,6 +522,23 @@ describe("owner printing non-gating overlay", () => {
     await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
   });
 
+  it("offers no reload for exhausted owner art while offline, where the ladder never goes remote", async () => {
+    const env = await setup({ offline: true });
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O1, "/owner-a.jpg");
+    vi.stubGlobal("caches", {
+      match: vi.fn(async (url: string) => json(url.includes("printings") ? env.data.catalog : env.data.main)),
+    });
+    const hook = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+    act(() => hook.result.current.advanceFailedSource?.("/owner-a.jpg"));
+
+    // Reach guard: the owner ladder is what ended on the fallback; the normal
+    // lookup alone would show the viewer's printing.
+    expect(hook.result.current).toMatchObject({ src: null, isLoading: false, source: { kind: "fallback" } });
+    expect(hook.result.current.reload).toBeUndefined();
+  });
+
   it.each([false, true])("discards stale repository completions before publication, cache, and remote continuation; unmount=%s", async (unmount) => {
     const env = await setup();
     env.installPrinting(P, "/viewer.jpg");

@@ -74,6 +74,8 @@ afterEach(() => {
 });
 
 describe("CardPreview artless mobile tile", () => {
+  // The button's own propagation guard is pinned in CardArtFallback.reload;
+  // here the preview wires the reload in and stays open around it.
   it("shows the card's rules text and a reload that keeps the preview open", () => {
     const reload = vi.fn();
     vi.mocked(useCardImage).mockImplementation(() => failedArt(reload));
@@ -126,6 +128,8 @@ describe("CardPreview artless mobile tile", () => {
     expect(screen.getByRole("img", { name: "エーテリウムの彫刻家" })).toHaveTextContent("少ないコストで唱えられる。");
   });
 
+  // A hidden face's art is the card back, so the artless tile, and with it
+  // the lookup, is never reached; the lookup's own guard is defence in depth.
   it("never looks up or offers a reload for a face-down card the viewer may not see", () => {
     const hidden = gameObjectFactory
       .creature(2, 2)
@@ -151,16 +155,16 @@ describe("CardPreview artless mobile tile", () => {
     const token = gameObjectFactory
       .artifact()
       .onBattlefield()
-      .named("Banana")
+      .named("Test Token")
       .build({
         display_source: "Token",
-        token_rules_text: "Sacrifice this token: Add one mana. You gain 2 life.",
+        token_rules_text: "Sacrifice this token: You gain 2 life.",
       });
     inspect(token);
-    render(<CardPreview cardName="Banana" />);
+    render(<CardPreview cardName="Test Token" />);
 
-    expect(screen.getByRole("img", { name: "Banana" })).toHaveTextContent("You gain 2 life.");
-    expect(useEngineCardData).not.toHaveBeenCalledWith("Banana");
+    expect(screen.getByRole("img", { name: "Test Token" })).toHaveTextContent("You gain 2 life.");
+    expect(useEngineCardData).not.toHaveBeenCalledWith("Test Token");
   });
 
   it("keeps the rules text but no reload on the compact peek, which dismisses on any tap", () => {
