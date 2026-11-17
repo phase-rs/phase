@@ -2091,7 +2091,10 @@ pub(crate) fn replacement_mode_is_optional(mode: &ReplacementMode) -> bool {
 
 /// Whether a replacement needs the shared accept/decline prompt. Rules-source
 /// replacements use the same prompt seam as optional card definitions.
-fn replacement_is_optional(state: &GameState, rid: ReplacementId) -> bool {
+///
+/// CR 608.2f (F1): shared with the simultaneous-token gate, which admits only
+/// mandatory candidates to the compound path.
+pub(crate) fn replacement_is_optional(state: &GameState, rid: ReplacementId) -> bool {
     is_commander_hand_or_library_return_replacement(rid)
         // CR 702.52a: granted dredge is always `ReplacementMode::Optional`
         // ("you may instead..."), but it has no object-carried definition for

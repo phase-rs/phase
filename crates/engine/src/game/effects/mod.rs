@@ -25205,6 +25205,250 @@ fn offer_optional_in_apnap_order(
     Ok(ResolutionProgress::Waiting)
 }
 
+/// CR 608.2f (F1): outcome of the simultaneous multi-seat token attempt.
+enum SimultaneousTokenOutcome {
+    /// The compound event resolved synchronously (or was prevented);
+    /// per-seat results are filled and the driver continues to the shared
+    /// clause publication below.
+    Done,
+    /// The pipeline or delivery parked for a choice. Unreachable for gated
+    /// shapes (every admitted candidate is mandatory; every gated batch is
+    /// pause-free — vanilla delivery with no counters, hosts, or attacking
+    /// seats); `waiting_for` is set exactly as the single-seat path sets it
+    /// and the driver returns to the waiter. Per-seat clause bookkeeping is
+    /// best-effort in this arm (documented limitation, no silent corruption:
+    /// the tokens themselves are delivered by the existing resume machinery).
+    Waiting,
+    /// The shape is not eligible (or a proposal parked/failed); the driver
+    /// runs the legacy per-seat legs. No state was mutated.
+    NotApplicable,
+}
+
+/// CR 608.2f (F1): gate for the simultaneous multi-seat token path. Admits a
+/// bare `Token` fan-out with no detached tail and no interactive riders, so
+/// one compound `CreateToken` event can carry every seat's batch through a
+/// single replacement-pipeline run. Everything else keeps the legacy legs.
+fn simultaneous_token_fan_out_applies(
+    scoped_template: &ResolvedAbility,
+    matching_players: &[PlayerId],
+    after_scope: &Option<Box<ResolvedAbility>>,
+    ability: &ResolvedAbility,
+) -> bool {
+    if matching_players.len() < 2 || after_scope.is_some() {
+        return false;
+    }
+    let Effect::Token {
+        count,
+        owner,
+        attach_to,
+        enters_attacking,
+        attack_destination,
+        enter_with_counters,
+        ..
+    } = &scoped_template.effect
+    else {
+        return false;
+    };
+    // Bare creation only: fixed per-seat count, seat-held ownership, no host,
+    // no counters, no attacking seats. Spec-level characteristics (types,
+    // power/toughness, keywords, tapped) resolve per seat-bound ability.
+    if !matches!(count, QuantityExpr::Fixed { .. }) {
+        return false;
+    }
+    // `ScopedPlayer` is the fan-out's own seat binding (the instructed seat
+    // resolves as the creator); `Controller` falls back to the seat-bound
+    // controller the same way. Anything else is not seat-relative.
+    if !matches!(owner, TargetFilter::Controller | TargetFilter::ScopedPlayer) {
+        return false;
+    }
+    if attach_to.is_some() || !enter_with_counters.is_empty() {
+        return false;
+    }
+    if *enters_attacking || !attack_destination.is_controller_chooses() {
+        return false;
+    }
+    // No interactive riders: nothing may pause a seat mid-clause.
+    if scoped_template.optional
+        || scoped_template.optional_player.is_some()
+        || scoped_template.optional_for.is_some()
+        || scoped_template.unless_pay.is_some()
+        || scoped_template.sub_ability.is_some()
+        || scoped_template.else_ability.is_some()
+        || scoped_template.condition.is_some()
+        || scoped_template.repeat_for.is_some()
+        || scoped_template.repeat_until.is_some()
+        || scoped_template.declares_return_result.is_some()
+    {
+        return false;
+    }
+    // Mirrors the simultaneous-draw arm: a tracked-set consumer splits the
+    // template, so it never reaches a compound proposal.
+    if next_sub_needs_tracked_set(ability) {
+        return false;
+    }
+    true
+}
+
+/// CR 608.2f + CR 614.5 (F1): resolve a gated multi-seat bare-token clause as
+/// one simultaneous action. Every seat's batch is proposed from its
+/// seat-bound ability (the legacy legs' `bind_scoped_seat` binding), then the
+/// seats ride one compound `CreateToken` event through the pipeline once — a
+/// consumed one-shot (Mystic Reflection) converts every seat instead of only
+/// the first seat's. Returns `Done` with per-seat results filled (the driver
+/// continues to the shared clause publication), `Waiting` when the pipeline
+/// or delivery parked (unreachable for gated shapes; see the enum docs), or
+/// `NotApplicable` without mutating state.
+fn try_resolve_simultaneous_token_fan_out(
+    state: &mut GameState,
+    scoped_template: &ResolvedAbility,
+    controller: PlayerId,
+    matching_players: &[PlayerId],
+    seat_results: &mut Vec<SeatCreatedTokens>,
+    events: &mut Vec<GameEvent>,
+    scoped_events_before: usize,
+) -> SimultaneousTokenOutcome {
+    // Per-seat proposals, exactly as the legacy legs bind them (CR 109.5: the
+    // seat is the acting player).
+    state.cost_payment_failed_flag = false;
+    let waiting_before = state.waiting_for.clone();
+    let mut singles: Vec<crate::types::proposed_event::ProposedEvent> =
+        Vec::with_capacity(matching_players.len());
+    for seat in matching_players {
+        let bound = bind_scoped_seat(scoped_template, controller, *seat);
+        match token::propose_token_batch(state, &bound, None) {
+            token::TokenBatchProposal::Ready(event) => singles.push(event),
+            token::TokenBatchProposal::Parked | token::TokenBatchProposal::NoToken => {
+                state.waiting_for = waiting_before;
+                return SimultaneousTokenOutcome::NotApplicable;
+            }
+        }
+    }
+
+    // Assemble one compound event: the first seat's batch is the event's own
+    // batch, every later seat's batch rides appended in seat order.
+    let mut singles = singles.into_iter();
+    let Some(first) = singles.next() else {
+        return SimultaneousTokenOutcome::NotApplicable;
+    };
+    let crate::types::proposed_event::ProposedEvent::CreateToken {
+        owner,
+        spec,
+        enter_tapped,
+        count,
+        applied,
+        ..
+    } = first
+    else {
+        return SimultaneousTokenOutcome::NotApplicable;
+    };
+    let mut appended = Vec::new();
+    for single in singles {
+        let crate::types::proposed_event::ProposedEvent::CreateToken {
+            owner,
+            spec,
+            enter_tapped,
+            count,
+            ..
+        } = single
+        else {
+            return SimultaneousTokenOutcome::NotApplicable;
+        };
+        appended.push(crate::types::proposed_event::TokenBatch {
+            owner,
+            spec,
+            copy: None,
+            enter_tapped,
+            count,
+        });
+    }
+    let compound = crate::types::proposed_event::ProposedEvent::CreateToken {
+        owner,
+        spec,
+        copy: None,
+        enter_tapped,
+        count,
+        appended,
+        applied,
+    };
+
+    // CR 616.1: only shapes the synchronous arms below can finish take the
+    // compound path — at most one applicable replacement, and it must be
+    // mandatory. Anything needing an ordering or optional choice keeps the
+    // legacy legs (identical behavior, sequential consumption).
+    let candidates = crate::game::replacement::find_applicable_replacements(
+        state,
+        &compound,
+        crate::game::replacement::replacement_registry(),
+    );
+    if candidates.len() > 1 {
+        return SimultaneousTokenOutcome::NotApplicable;
+    }
+    if let Some(rid) = candidates.first() {
+        // Sentinel-aware (commander/dredge/registry-hosted included): only a
+        // mandatory candidate auto-applies without a prompt.
+        if crate::game::replacement::replacement_is_optional(state, *rid) {
+            return SimultaneousTokenOutcome::NotApplicable;
+        }
+    }
+
+    match crate::game::replacement::replace_event(state, compound, events) {
+        crate::game::replacement::ReplacementResult::Execute(event) => {
+            let completed = token::deliver_create_token_event(
+                state,
+                event,
+                Vec::new(),
+                crate::types::game_state::PendingEffectResolutionEvent::Emit,
+                events,
+            )
+            .is_completed();
+            if !completed {
+                debug_assert!(false, "simultaneous token delivery paused on a gated shape");
+                return SimultaneousTokenOutcome::Waiting;
+            }
+        }
+        crate::game::replacement::ReplacementResult::Prevented => {
+            // CR 609.3: nothing was created — mirror the single-seat Prevented
+            // arm so the previous result cannot read as this one's.
+            state.last_created_token_ids = Vec::new();
+        }
+        crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(player, state);
+            debug_assert!(false, "simultaneous token pipeline parked on a gated shape");
+            return SimultaneousTokenOutcome::Waiting;
+        }
+    }
+
+    // One terminal event per instructed seat (the legacy legs emit one each),
+    // then the same ledger scan the shared publication runs over the clause.
+    for _ in matching_players {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&scoped_template.effect),
+            source_id: scoped_template.source_id,
+            subject: None,
+        });
+    }
+    record_player_actions_performed(state, &events[scoped_events_before..]);
+
+    // Attribute the delivered union to seats by token controller. The gate
+    // pins the controller to the instructed seat (`Controller` owner, no
+    // control-changing shape among gated candidates), so this matches the
+    // legacy per-leg seat keying.
+    let union = created_token_union_from_events(state, &events[scoped_events_before..]);
+    for seat in matching_players {
+        begin_seat_created_tokens_if_absent(seat_results, *seat);
+    }
+    for pin in union {
+        let holder = state
+            .objects
+            .get(&pin.object_id)
+            .map(|object| object.controller)
+            .unwrap_or(matching_players[0]);
+        extend_seat_created_tokens(seat_results, holder, vec![pin]);
+    }
+    SimultaneousTokenOutcome::Done
+}
+
 /// One full pass of an ability's resolution chain — the parent effect (with its
 /// `repeat_for` count loop) and the entire `sub_ability` chain. This is one
 /// "process" for the purposes of "repeat this process" (CR 608.2c). Extracted
@@ -25930,7 +26174,40 @@ fn resolve_chain_body(
         // ordinary reset (Court of Locthwain's linked-exile permission,
         // CR 406.6).
         let ledger_before_fan_out = state.last_zone_changed_ids.clone();
-        for (i, pid) in matching_players.iter().enumerate() {
+        // CR 608.2f (F1): a gated bare-token fan-out resolves as one
+        // simultaneous action (one compound event, one pipeline run), so a
+        // consumed one-shot converts every seat. Declined shapes — and any
+        // gated shape that parks mid-proposal — keep the legacy legs below.
+        let mut simultaneous_token_done = false;
+        if simultaneous_token_fan_out_applies(
+            &scoped_template,
+            &matching_players,
+            &after_scope,
+            ability,
+        ) {
+            match try_resolve_simultaneous_token_fan_out(
+                state,
+                &scoped_template,
+                controller,
+                &matching_players,
+                &mut seat_results,
+                events,
+                scoped_events_before,
+            ) {
+                SimultaneousTokenOutcome::Done => simultaneous_token_done = true,
+                SimultaneousTokenOutcome::Waiting => return Ok(ResolutionProgress::Waiting),
+                SimultaneousTokenOutcome::NotApplicable => {}
+            }
+        }
+        // When the compound path completed, the legs below are skipped via an
+        // empty seat list (the shared clause publication below still runs
+        // over the compound span). This keeps the legacy loop untouched.
+        let seats: &[PlayerId] = if simultaneous_token_done {
+            &[]
+        } else {
+            &matching_players
+        };
+        for (i, pid) in seats.iter().enumerate() {
             // CR 608.2c + CR 101.3: Each scoped iteration is a fresh
             // sub-resolution of the scoped template — read the whole
             // instruction per iteration. The cost-payment-failed signal is

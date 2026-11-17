@@ -120,6 +120,66 @@ fn death_by_dragons_each_non_target_player_creates_one_dragon() {
     }
 }
 
+/// CR 608.2f + CR 614.5 (F1): Mystic Reflection's one-shot copy replacement
+/// applies once to the whole simultaneous entry, so every non-target seat's
+/// Dragon enters as a copy of the chosen creature and the target creates none.
+#[test]
+fn death_by_dragons_mystic_reflection_converts_every_seat() {
+    const MYSTIC_REFLECTION: &str = "Choose target nonlegendary creature. The next time one or more creatures or planeswalkers enter this turn, they enter as copies of the chosen creature.\nForetell {U} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
+    let mut scenario = game();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mystic = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mystic Reflection", true, MYSTIC_REFLECTION)
+        .id();
+    let dragons = scenario
+        .add_spell_to_hand_from_oracle(P0, "Death by Dragons", false, DEATH_BY_DRAGONS)
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(mystic).target_object(bears).resolve();
+    assert!(
+        runner.state().stack.is_empty(),
+        "reach guard: Mystic Reflection resolved"
+    );
+    let outcome = runner.cast(dragons).target_player(P2).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "resolution must complete to Priority, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(
+        outcome.state().stack.is_empty(),
+        "stack must be empty after resolution"
+    );
+    for player in [P0, P1] {
+        let tokens = controlled_tokens(outcome.state(), player);
+        assert_eq!(tokens.len(), 1, "{player:?} must create exactly one token");
+        let token = &outcome.state().objects[&tokens[0]];
+        assert_eq!(
+            token.name, "Grizzly Bears",
+            "{player:?}'s token must enter as a copy of Grizzly Bears"
+        );
+        assert_eq!(
+            (token.power, token.toughness),
+            (Some(2), Some(2)),
+            "{player:?}'s token must be 2/2"
+        );
+    }
+    assert!(
+        controlled_tokens(outcome.state(), P2).is_empty(),
+        "the targeted player creates no tokens"
+    );
+    let dragons_left: Vec<_> = outcome
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| outcome.state().objects[id].name == "Dragon")
+        .collect();
+    assert!(
+        dragons_left.is_empty(),
+        "no Dragon tokens should remain once Mystic Reflection converts the entry"
+    );
+}
+
 /// CR 608.2b + R1: the exclusion anchor declares the spell's only target, so
 /// when the target is illegal as the spell resolves, the spell doesn't
 /// resolve and no player creates a token.
