@@ -3229,7 +3229,9 @@ pub(crate) fn lower_trigger_ir_with_provenance(
     // references ControllerRef::TargetPlayer, when the effect text names a
     // target opponent/player (Sméagol, Helpful Guide RingTemptsYou), or when a
     // RevealUntil names an opponent library without TargetPlayer binding.
-    if def.valid_target.is_none() {
+    // A phase trigger's `valid_target` scopes whose step it is, which a target in
+    // its effect does not.
+    if def.valid_target.is_none() && def.mode != TriggerMode::Phase {
         let effect_lower = modifiers.effect_lower.as_str();
         if scan_contains(effect_lower, "target opponent")
             || scan_contains(effect_lower, "target player")
@@ -20996,7 +20998,10 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     } else {
         turn_constraint
     };
-    if scan_contains(phase_text, "enchanted player's") {
+    // CR 303.4m: "enchanted player's/opponent's [step]" is a step of the enchanted player's turn.
+    if nom_primitives::scan_at_word_boundaries(phase_text, parse_enchanted_player_possessive)
+        .is_some()
+    {
         def.valid_target = Some(TargetFilter::AttachedTo);
     }
     // CR 303.4e + CR 109.4 + CR 503.1: "the upkeep of enchanted creature's
@@ -21013,6 +21018,12 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
         .is_some()
     {
         def.valid_target = Some(TargetFilter::ParentTargetController);
+    }
+    // CR 102.1 + CR 800.4j: "each [other] player's / each opponent's [step]" is a step of a
+    // player's turn, a scope the unscoped "each [step]" does not carry.
+    if def.valid_target.is_none() {
+        def.valid_target =
+            nom_primitives::scan_at_word_boundaries(phase_text, parse_each_players_possessive);
     }
     if scan_contains(phase_text, "chosen player's")
         || scan_contains(phase_text, "chosen player\u{2019}s ")
@@ -25251,6 +25262,41 @@ fn parse_phase_determiner_prefix(input: &str) -> OracleResult<'_, ()> {
     value((), alt((tag("each player's "), tag("each "), tag("the ")))).parse(input)
 }
 
+fn parse_each_players_possessive(input: &str) -> OracleResult<'_, TargetFilter> {
+    delimited(
+        tag("each "),
+        alt((
+            value(TargetFilter::Player, tag("player")),
+            value(
+                TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::AllExcept {
+                        exclude: Box::new(PlayerFilter::Controller),
+                        relation: PlayerRelation::All,
+                    }),
+                },
+                tag("other player"),
+            ),
+            // CR 805.4d: "each opponent's" step is each opponent's, unlike the collective
+            // "your opponents'", which keeps only its turn constraint.
+            value(TargetFilter::Opponent, tag("opponent")),
+        )),
+        alt((tag("'s "), tag("\u{2019}s "), tag("s "))),
+    )
+    .parse(input)
+}
+
+fn parse_enchanted_player_possessive(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        (
+            tag("enchanted "),
+            alt((tag("player"), tag("opponent"))),
+            tag("'s"),
+        ),
+    )
+    .parse(input)
+}
+
 /// CR 603.1 + CR 603.7: a triggered ability is printed as "[When/Whenever/At]
 /// [trigger event], [effect]", and a DELAYED triggered ability "will contain
 /// 'when,' 'whenever,' or 'at,' although that word won't usually begin the
@@ -25316,18 +25362,9 @@ fn parse_turn_constraint(phase_text: &str) -> Option<TriggerConstraint> {
     // Suffix-based: "combat on your turn", "combat on each opponent's turn".
     // The spec after "on " runs through the shared turn-spec authority rather
     // than a second literal table, so the suffix can never drift from it.
-    let mut remaining = phase_text;
-    while !remaining.is_empty() {
-        if let Ok((_, constraint)) =
-            preceded(tag::<_, _, OracleError<'_>>("on "), parse_during_turn_spec).parse(remaining)
-        {
-            return Some(constraint);
-        }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
-    }
-    None
+    nom_primitives::scan_at_word_boundaries(phase_text, |i| {
+        preceded(tag("on "), parse_during_turn_spec).parse(i)
+    })
 }
 
 /// The "on <spec>" phase-head suffix shares [`parse_during_turn_spec`], so every

@@ -95,13 +95,22 @@ static OFFER_STATE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     ))
 });
 
-/// The dump's offer, re-reached live: the captured offer carries no confirmed period, so it is
-/// declined and one more real Sprout Swarm cycle (buyback, convoking an untapped Saproling) brings
-/// the offer back with its period.
+/// The dump's offer, re-reached live: the save stands at P0's priority, and one more real Sprout
+/// Swarm cycle (buyback, convoking an untapped Saproling) brings the offer with its period.
 pub(crate) fn offer_state() -> GameState {
-    let mut state: GameState = serde_json::from_str(&OFFER_STATE)
+    let state: GameState = serde_json::from_str(&OFFER_STATE)
         .expect("the real 4p offer dump must deserialize into the current GameState");
-    apply(&mut state, P0, GameAction::DeclineShortcut).expect("P0 declines the captured offer");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the save stands at P0's priority, got {:?}",
+        state.waiting_for
+    );
+    recast_to_offer(state)
+}
+
+/// One real Sprout Swarm cycle (buyback, convoking P0's lowest untapped Saproling), back to P0's
+/// offer with its period.
+fn recast_to_offer(state: GameState) -> GameState {
     let fodder = state
         .battlefield
         .iter()
@@ -4157,5 +4166,62 @@ fn the_confirmer_rebinds_a_recorded_convoke_to_the_replayed_board() {
     assert!(
         verdicts.iter().any(|(_, verdict)| verdict.is_ok()),
         "a span confirms with its convoke rebound: {verdicts:?}"
+    );
+}
+
+/// Decoction Module: "Whenever a creature you control enters, you get {E} (an energy counter)."
+/// Each Sprout Swarm cycle's Saproling gives P0 one {E}, and a take of five performs the five
+/// cycles (CR 107.14 + CR 732.2c), so the energy lands at the take and no ∞ mark outlives it.
+#[test]
+fn an_energy_growing_loop_is_performed_at_the_take() {
+    use engine::analysis::resource::ResourceAxis;
+
+    let db = shared_card_db().expect("card db");
+    let mut state: GameState =
+        serde_json::from_str(&OFFER_STATE).expect("the real 4p offer dump deserializes");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "{:?}",
+        state.waiting_for
+    );
+    place_card(&mut state, P0, "Decoction Module", Zone::Battlefield, db);
+    mark_layers_full(&mut state);
+    flush_layers(&mut state);
+    let mut state = recast_to_offer(state);
+    let WaitingFor::LoopShortcut { certificate, .. } = &state.waiting_for else {
+        unreachable!("recast_to_offer asserts the offer")
+    };
+    assert!(
+        certificate.unbounded.contains(&ResourceAxis::Energy(P0))
+            && certificate.unbounded.contains(&ResourceAxis::TokensCreated),
+        "{:?}",
+        certificate.unbounded
+    );
+    assert_eq!(state.players[0].energy, 1);
+    assert_eq!(p0_saproling_ids(&state).len(), 9);
+
+    drive_all_accept_n(&mut state, 5);
+    assert_eq!(state.players[0].energy, 6);
+    assert_eq!(p0_saproling_ids(&state).len(), 14);
+
+    drive_priority_to_next_boundary(&mut state);
+    assert!(
+        !matches!(
+            state.waiting_for,
+            WaitingFor::PayAmountChoice {
+                resource: PayableResource::LoopCollapse { .. },
+                ..
+            }
+        ),
+        "{:?}",
+        state.waiting_for
+    );
+    assert!(
+        !state
+            .unbounded_resources
+            .get(&P0)
+            .is_some_and(|axes| axes.contains(&ResourceAxis::Energy(P0))),
+        "{:?}",
+        state.unbounded_resources.get(&P0)
     );
 }

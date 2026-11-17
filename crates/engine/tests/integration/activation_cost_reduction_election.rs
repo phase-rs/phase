@@ -1001,7 +1001,8 @@ fn an_x_lock_reversal_restores_the_mana_undo_window_and_the_loop_period() {
             },
         );
         let land = land.expect("the land");
-        board.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+        board.runner.state_mut().loop_detection =
+            engine::types::game_state::LoopDetectionMode::Interactive;
         // A real manual mana-ability activation, through the engine-authored
         // selection.
         let (_, _, grouped) = engine::ai_support::legal_actions_full(board.state());
@@ -1391,7 +1392,8 @@ const TOKEN_MAKER: &str = "{3}: Create a 1/1 white Soldier creature token.";
 
 fn loop_board(modifiers: &[Modifier], text: &'static str, pool: usize) -> Board {
     let mut board = Board::with_activator(modifiers, Activator::Oracle(text), pool);
-    board.runner.state_mut().loop_detection = engine::types::game_state::LoopDetectionMode::On;
+    board.runner.state_mut().loop_detection =
+        engine::types::game_state::LoopDetectionMode::Interactive;
     board
 }
 
