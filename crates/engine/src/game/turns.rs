@@ -761,6 +761,16 @@ fn enter_phase(
     {
         state.pending_damage_post_loss = None;
     }
+    // CR 120.3d + CR 724.1a: same abandonment mirror for a combat-flagged
+    // counter stash (a non-combat stash belongs to an unrelated resolution
+    // and survives).
+    if state
+        .pending_damage_post_counter
+        .as_ref()
+        .is_some_and(|stashed| stashed.is_combat)
+    {
+        state.pending_damage_post_counter = None;
+    }
 
     // CR 500.1: captured BEFORE the assignment below, which is the only place
     // the outgoing phase still exists. A phase-group crossing is a property of

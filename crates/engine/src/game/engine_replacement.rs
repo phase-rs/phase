@@ -1750,6 +1750,35 @@ fn handle_replacement_choice_inner(
                 }
             }
 
+            // CR 120.3d + CR 120.1 + CR 616.1: a non-combat wither/infect leg
+            // whose `-1/-1` counter placement paused owes its post-counter
+            // remainder (deathtouch flag, `DamageDealt` event, CR 120.1 record,
+            // lifelink gain). Drain here — after the batch drain retires with
+            // no re-park and before outer continuations, so each target
+            // completes before later targets resume (same contract as the
+            // post-loss site above). A lifelink gain that parks is owned by
+            // the pending replacement (the drain consumes the stash);
+            // propagate its prompt. A combat-flagged stash is skipped: the
+            // combat batch remnant owns it, and the outer wrapper resumes that
+            // remnant below.
+            if matches!(waiting_for, WaitingFor::Priority { .. })
+                && state
+                    .pending_damage_post_counter
+                    .as_ref()
+                    .is_some_and(|stashed| !stashed.is_combat)
+                && state.active_batch_delivery().is_none()
+            {
+                let outcome = crate::game::effects::deal_damage::drain_pending_damage_post_counter(
+                    state, events,
+                );
+                if matches!(
+                    outcome,
+                    crate::game::effects::deal_damage::DamagePostCounterDrainOutcome::PausedForReplacement
+                ) {
+                    waiting_for = state.waiting_for.clone();
+                }
+            }
+
             // CR 614.6 + CR 616.1: settling a batch parked above its member's
             // delivery-tail child exposes that child's counter-removal queue. Finish
             // it here, in the same order as the queue drain above, before any parked

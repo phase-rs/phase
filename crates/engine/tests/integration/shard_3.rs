@@ -664,3 +664,4 @@ mod issue_5263_chaos_warp;
 mod issue_5268_invincible_iron_man;
 mod issue_5271_overencumbered_tokens;
 mod self_named_damage_bindings;
+mod wither_counter_pause_resume;

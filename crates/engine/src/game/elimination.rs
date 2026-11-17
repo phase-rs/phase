@@ -2399,6 +2399,7 @@ fn retire_parked_resolution_work(state: &mut GameState) {
     state.pending_discard_batch = None;
     state.pending_single_discard = None;
     state.pending_damage_post_loss = None;
+    state.pending_damage_post_counter = None;
     state.pending_exile_from_top_until = None;
     state.pending_scoped_library_search = None;
     state.pending_library_search_delivery = None;

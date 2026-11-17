@@ -21,7 +21,8 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DamageRecord, DistributionScope, GameState, TriggerSourceRead, WaitingFor,
+    DamageRecord, DistributionScope, GameState, PendingDamagePostCounter, TriggerSourceRead,
+    WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{Keyword, KeywordKind};
@@ -773,7 +774,10 @@ pub(crate) fn apply_damage_after_replacement(
                 // `CounterAdded` event is emitted for triggers, and layers
                 // are marked by the authority. A parked replacement choice
                 // propagates as `NeedsChoice`, as in the infect-to-player
-                // arm below.
+                // arm below — but unlike that arm, the current leg's
+                // remainder rides `pending_damage_post_counter` so the resume
+                // still owes the deathtouch flag, the CR 120.1 record, and
+                // lifelink exactly once.
                 if !counters::add_counter_with_replacement(
                     state,
                     ctx.controller,
@@ -782,12 +786,53 @@ pub(crate) fn apply_damage_after_replacement(
                     actual_amount,
                     events,
                 ) {
+                    // CR 120.3d + CR 616.1: stash the post-counter remainder
+                    // (the target, amount, and context snapshot) so the resume
+                    // runs it exactly once. Combat-flagged for the batch
+                    // remnant, which the combat resume consumes; the shared
+                    // funnel drain skips combat stashes.
+                    state.pending_damage_post_counter = Some(Box::new(PendingDamagePostCounter {
+                        ctx: DamageContextSnapshot::from(ctx),
+                        target: (*t).clone(),
+                        actual_amount,
+                        is_combat,
+                    }));
                     return DamageResult::NeedsChoice;
                 }
-                if let Some(target_obj) = state.objects.get_mut(obj_id) {
-                    // CR 702.2b: Track deathtouch for SBA lethal-damage check.
-                    if ctx.has_deathtouch {
-                        target_obj.dealt_deathtouch_damage = true;
+                // Inline success runs core + lifelink (the F1 split: the
+                // combat remnant resume runs the core ONLY, since the paused
+                // leg's lifelink share was already folded at park time).
+                match wither_infect_post_counter_core(
+                    state,
+                    ctx,
+                    t,
+                    actual_amount,
+                    is_combat,
+                    events,
+                ) {
+                    PostCounterFlow::Paused => return DamageResult::NeedsChoice,
+                    PostCounterFlow::Continue {
+                        primary_amount,
+                        redirected,
+                    } => {
+                        if !redirected {
+                            let lifelink_amount = primary_amount + ctx.lifelink_bonus;
+                            if gain_lifelink_for_damage_leg(
+                                state,
+                                ctx.has_lifelink,
+                                lifelink_amount,
+                                ctx.controller,
+                                events,
+                            ) {
+                                // CR 616.1: two or more co-applicable life-gain
+                                // replacements — the gaining player must choose
+                                // which applies first. All damage has already
+                                // been dealt; only this final lifelink gain is
+                                // deferred.
+                                return DamageResult::NeedsChoice;
+                            }
+                        }
+                        return DamageResult::Applied(actual_amount);
                     }
                 }
             } else if is_creature {
@@ -1280,6 +1325,302 @@ pub(crate) fn drain_pending_damage_post_loss(
         return DamagePostLossDrainOutcome::PausedForReplacement;
     }
     DamagePostLossDrainOutcome::Settled
+}
+
+/// Outcome of running a wither/infect leg's post-counter remainder up to (but
+/// not including) its own lifelink gain.
+pub(crate) enum PostCounterFlow {
+    /// A downstream leg of the remainder (the CR 120.4a redirect leg) parked
+    /// its own replacement choice; ownership rides that leg's own stash or
+    /// pending replacement.
+    Paused,
+    /// The remainder ran. The caller still owes this leg's lifelink gain for
+    /// `primary_amount` (plus the context bonus) unless `redirected` handed
+    /// both the excess and this leg's lifelink to the redirect leg.
+    Continue {
+        primary_amount: u32,
+        redirected: bool,
+    },
+}
+
+/// CR 120.3d + CR 702.80a / CR 702.90c + CR 702.2b + CR 120.1 + CR 120.10 +
+/// CR 120.4a: everything a wither/infect-to-creature leg owes AFTER its
+/// `-1/-1` counter placement settles — the deathtouch flag, excess computed
+/// from post-counter state, the `DamageDealt` event + CR 120.1 record, and the
+/// redirect-leg passthrough. Shared by the inline success path, the
+/// non-combat funnel drain (which adds lifelink after), and the combat
+/// remnant resume (which runs the core ONLY — the F1 split — since the paused
+/// leg's lifelink share was already folded into `lifelink_by_source` at park
+/// time and drains via the lifelink tail; running the inline lifelink here
+/// would gain twice).
+pub(crate) fn wither_infect_post_counter_core(
+    state: &mut GameState,
+    ctx: &DamageContext,
+    target: &TargetRef,
+    actual_amount: u32,
+    is_combat: bool,
+    events: &mut Vec<GameEvent>,
+) -> PostCounterFlow {
+    // CR 120.10: Excess damage to a planeswalker/battle is measured against its
+    // loyalty/defense *before* this damage was dealt. Counter placement does
+    // not touch loyalty/defense, so the live read here matches the never-paused
+    // path (which captured them before mutating).
+    let (is_creature, loyalty_before, defense_before) = match target {
+        TargetRef::Object(obj_id) => state
+            .objects
+            .get(obj_id)
+            .map(|obj| {
+                (
+                    obj.card_types.core_types.contains(&CoreType::Creature),
+                    obj.loyalty,
+                    obj.defense,
+                )
+            })
+            .unwrap_or((false, None, None)),
+        TargetRef::Player(_) => (false, None, None),
+    };
+
+    if let TargetRef::Object(obj_id) = target {
+        if is_creature {
+            if let Some(target_obj) = state.objects.get_mut(obj_id) {
+                // CR 702.2b: Track deathtouch for SBA lethal-damage check.
+                if ctx.has_deathtouch {
+                    target_obj.dealt_deathtouch_damage = true;
+                }
+            }
+        }
+    }
+
+    // CR 120.10: Compute excess damage beyond lethal/loyalty/defense. If a
+    // permanent has multiple card types among creature, planeswalker, and battle,
+    // its excess damage is the greatest calculated amount among those types.
+    let excess = match target {
+        TargetRef::Object(obj_id) => state
+            .objects
+            .get(obj_id)
+            .map(|obj| {
+                let mut excess = 0;
+
+                if obj.card_types.core_types.contains(&CoreType::Creature) {
+                    if let Some(toughness) = obj.toughness {
+                        // damage_marked already includes actual_amount.
+                        let damage_before = obj.damage_marked.saturating_sub(actual_amount);
+                        let lethal = if ctx.has_deathtouch {
+                            // CR 702.2c: Any nonzero damage from deathtouch = lethal.
+                            if damage_before == 0 {
+                                1u32
+                            } else {
+                                0
+                            }
+                        } else {
+                            (toughness as u32).saturating_sub(damage_before)
+                        };
+                        excess = excess.max(actual_amount.saturating_sub(lethal));
+                    }
+                }
+
+                if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
+                    // CR 120.10: Excess for a planeswalker = damage beyond the
+                    // loyalty it had before the damage was dealt (captured above,
+                    // since the loyalty counters have since been removed).
+                    excess = excess.max(actual_amount.saturating_sub(loyalty_before.unwrap_or(0)));
+                }
+
+                if obj.card_types.core_types.contains(&CoreType::Battle) {
+                    // CR 120.10: Excess for a battle = damage beyond the defense it
+                    // had before the damage was dealt (captured above).
+                    excess = excess.max(actual_amount.saturating_sub(defense_before.unwrap_or(0)));
+                }
+
+                excess
+            })
+            .unwrap_or(0),
+        TargetRef::Player(_) => 0,
+    };
+
+    // CR 120.4a: an excess-redirect rider modifies the damage event so that only
+    // the lethal portion is dealt to the permanent and the excess is dealt to its
+    // controller *instead* (redirected below), NOT on top. Without this, a 4-damage
+    // hit on a 2-toughness creature would mark 4 on the creature AND deal 2 to the
+    // controller (6 total); the rules-correct outcome is 2 marked + 2 redirected
+    // (4 total). Reduce the primary hit to the lethal portion for the creature's
+    // marked damage, DamageDealt event, and damage record; lifelink and the return
+    // value keep `actual_amount` because the total damage dealt is unchanged.
+    // CR 120.4a "that creature's controller": the rider only redirects when the
+    // damaged permanent is a creature (real class cards all read "target creature").
+    let redirect_excess = if is_creature
+        && matches!(
+            (ctx.excess_recipient, target),
+            (
+                Some(ExcessRecipient::TargetController {
+                    source_keyword: None
+                }),
+                TargetRef::Object(_)
+            )
+        ) {
+        excess
+    } else {
+        0
+    };
+    let primary_amount = actual_amount.saturating_sub(redirect_excess);
+    // CR 120.4a: when the excess is redirected, the creature was dealt only its
+    // lethal portion — it was NOT "dealt excess damage" (the excess went to its
+    // controller instead). Report zero excess on the creature's event and record
+    // so "was dealt excess damage" triggers (Maarika, Rith, Aegar, …) do not
+    // fire on the creature. Without a rider `redirect_excess == 0`, so this is the
+    // normal computed `excess` (e.g. plain overkill still reports its excess).
+    let primary_excess = excess.saturating_sub(redirect_excess);
+    if redirect_excess > 0 {
+        if let TargetRef::Object(obj_id) = target {
+            // Only the marked-damage path over-marks above; wither/infect deal
+            // -1/-1 counters instead (no excess-redirect card uses them).
+            if !ctx.has_wither && !ctx.has_infect {
+                if let Some(o) = state.objects.get_mut(obj_id) {
+                    o.damage_marked = o.damage_marked.saturating_sub(redirect_excess);
+                }
+            }
+        }
+    }
+
+    emit_damage_dealt_and_record(
+        state,
+        ctx.source_id,
+        ctx.source_incarnation,
+        ctx.controller,
+        target,
+        actual_amount,
+        primary_amount,
+        primary_excess,
+        is_combat,
+        events,
+    );
+
+    // CR 120.4a treats the redirect as ONE modified damage event. The excess is
+    // dealt to the controller by a redirect leg that carries `lifelink_bonus` (this
+    // creature's lethal `primary_amount`) plus the source's real lifelink, so THAT
+    // leg gains the COMBINED lifelink (its own dealt + the bonus) when it resolves —
+    // inline OR after its own replacement pause+resume (the bonus is threaded through
+    // the snapshot / PendingReplacement). `redirected` records that the excess and
+    // this leg's lifelink were handed off, so the creature leg gains nothing here.
+    let mut redirected = false;
+    if let (
+        Some(ExcessRecipient::TargetController {
+            source_keyword: None,
+        }),
+        TargetRef::Object(obj_id),
+    ) = (ctx.excess_recipient, target)
+    {
+        if redirect_excess > 0 {
+            if let Some(controller) = state.objects.get(obj_id).map(|o| o.controller) {
+                // CR 120.7: same source object as the primary damage (source_id /
+                // controller / keywords reused). `excess_recipient: None` is a
+                // re-entrancy guard; `lifelink_bonus: primary_amount` hands this
+                // creature leg's lethal to the redirect leg so the combined lifelink
+                // is gained even if the redirected damage itself pauses on a
+                // replacement choice.
+                let redirect_ctx = DamageContext {
+                    excess_recipient: None,
+                    lifelink_bonus: primary_amount,
+                    ..ctx.clone()
+                };
+                redirected = true;
+                // Route through the same non-combat single-target pipeline the
+                // primary player-damage path uses (gate + CR 614/615 replacement).
+                // A pause here propagates NeedsChoice; the redirect leg carries
+                // `lifelink_bonus`, so the combined lifelink is still gained on resume.
+                match apply_damage_to_target(
+                    state,
+                    &redirect_ctx,
+                    TargetRef::Player(controller),
+                    redirect_excess,
+                    false,
+                    events,
+                ) {
+                    // The redirect leg gains the combined lifelink (its own dealt +
+                    // the bonus) itself — but ONLY when it actually reaches its
+                    // lifelink path by dealing damage. A fully prevented, gated, or
+                    // phased redirect returns `Applied(0)` from the prevention/early
+                    // paths BEFORE that gain, so fall through to have the creature leg
+                    // gain lifelink for the lethal `primary_amount` it did deal.
+                    Ok(DamageResult::Applied(0)) => redirected = false,
+                    Ok(DamageResult::Applied(_)) => {}
+                    Ok(DamageResult::NeedsChoice) => return PostCounterFlow::Paused,
+                    // A redirect gate failure must not corrupt the primary result;
+                    // fall through so the source still gains lifelink for the lethal
+                    // portion it actually dealt (the excess was simply not redirected).
+                    Err(_) => redirected = false,
+                }
+            }
+        }
+    }
+
+    PostCounterFlow::Continue {
+        primary_amount,
+        redirected,
+    }
+}
+
+/// Outcome of [`drain_pending_damage_post_counter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DamagePostCounterDrainOutcome {
+    /// The stashed work fully settled (or nothing was stashed).
+    Settled,
+    /// The lifelink gain parked on a life-gain replacement choice. Nothing is
+    /// re-stashed: the gain is owned by `state.pending_replacement` and the
+    /// LifeGain arm settles it — re-stashing would re-propose a second gain.
+    PausedForReplacement,
+}
+
+/// CR 120.3d + CR 120.1 + CR 616.1: run a non-combat wither/infect leg's
+/// stashed post-counter work (deathtouch flag, excess, the `DamageDealt`
+/// event, the CR 120.1 record, the lifelink gain) once the counter event fully
+/// settles. Called from the post-replacement funnel after the batch drain
+/// retires with no re-park, before outer continuations (matching sync order:
+/// each damage target completes before later targets resume). A lifelink gain
+/// that parks hands ownership to the pending replacement (mirroring `:1275`),
+/// never re-stashing.
+pub(crate) fn drain_pending_damage_post_counter(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DamagePostCounterDrainOutcome {
+    let Some(stashed) = state.pending_damage_post_counter.take() else {
+        return DamagePostCounterDrainOutcome::Settled;
+    };
+    let ctx = DamageContext::from(stashed.ctx);
+    match wither_infect_post_counter_core(
+        state,
+        &ctx,
+        &stashed.target,
+        stashed.actual_amount,
+        stashed.is_combat,
+        events,
+    ) {
+        PostCounterFlow::Paused => DamagePostCounterDrainOutcome::PausedForReplacement,
+        PostCounterFlow::Continue {
+            primary_amount,
+            redirected,
+        } => {
+            if redirected {
+                return DamagePostCounterDrainOutcome::Settled;
+            }
+            if gain_lifelink_for_damage_leg(
+                state,
+                ctx.has_lifelink,
+                primary_amount + ctx.lifelink_bonus,
+                ctx.controller,
+                events,
+            ) {
+                // CR 616.1: the gaining player must choose which replacement
+                // applies first. Nothing was applied for this leg.
+                // `state.pending_replacement` is left populated ON PURPOSE —
+                // it is the resume's authority, and this leg is deliberately
+                // NOT re-stashed (that would gain the life twice) — mirroring
+                // `drain_pending_damage_post_loss` above.
+                return DamagePostCounterDrainOutcome::PausedForReplacement;
+            }
+            DamagePostCounterDrainOutcome::Settled
+        }
+    }
 }
 
 /// CR 120.3 + CR 616.1e: Build a one-shot, single-target non-combat `DealDamage`
