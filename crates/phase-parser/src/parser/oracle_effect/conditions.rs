@@ -7113,7 +7113,7 @@ pub(crate) fn static_condition_to_ability_condition(
         // Only scopes supported by `CountScope` are bridged; trigger-specific
         // scopes (DefendingPlayer, Target, etc.) return `None`.
         StaticCondition::PlayerIsPoisoned { player } => {
-            ability_condition_from_poisoned_player(&player)
+            ability_condition_from_poisoned_player(player)
         }
         StaticCondition::DayNightIs { state } => {
             Some(AbilityCondition::DayNightIs { state: *state })

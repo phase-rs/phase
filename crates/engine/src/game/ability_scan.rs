@@ -15548,18 +15548,17 @@ mod poison_condition_scan_tests {
                 aggregate: AggregateFunction::Max,
             },
         ] {
-            let axes = scan_trigger_condition(
-                &TriggerCondition::IsPoisoned {
-                    player: player.clone(),
-                },
-                ScanMode::Conservative,
-            );
+            // Bound before the scan: `Axes` borrows the scanned condition.
+            let condition = TriggerCondition::IsPoisoned {
+                player: player.clone(),
+            };
+            let axes = scan_trigger_condition(&condition, ScanMode::Conservative);
             assert!(
                 axes.projected,
                 "the poison total is a projected player resource ({player:?})"
             );
             assert!(
-                !axes.event && !axes.sibling,
+                !axes.event && !axes.sibling.is_read(),
                 "the predicate alone reads no event or sibling axis ({player:?})"
             );
         }
