@@ -21275,6 +21275,7 @@ mod tests {
             paused_at_index,
             completion: PendingSacrificeCostCompletion::ResolutionOptionalPayment {
                 frame: Box::new(OptionalEffectFrame {
+                    parked_poll: None,
                     ability: Box::new(ability),
                     trigger_event: None,
                     trigger_events: Vec::new(),

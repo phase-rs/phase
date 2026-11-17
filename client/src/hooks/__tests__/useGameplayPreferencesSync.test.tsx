@@ -1,7 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EngineAdapter, GameState } from "../../adapter/types";
+import type { EngineAdapter, GameState, ViewerInteraction } from "../../adapter/types";
 import { dispatchActionForGameSession } from "../../game/dispatch";
 import { useGameplayPreferencesSync } from "../useGameplayPreferencesSync";
 import {
@@ -29,6 +29,7 @@ describe("useGameplayPreferencesSync", () => {
       gameState: null,
       engineCommitEpoch: 0,
       gameSessionGeneration: nextGameSessionGeneration(),
+      viewerInteraction: null,
     });
     useUiStore.setState({ fullControl: false });
   });
@@ -134,6 +135,30 @@ describe("useGameplayPreferencesSync", () => {
 
     act(() => usePreferencesStore.getState().setPhaseStops([]));
     await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(4));
+  });
+
+  it("holds preferences while the engine freezes them, and sends them once it stops", async () => {
+    const endStop = { phase: "End", scope: "AllTurns" } as const;
+    const offerOpen = (preferencesFrozen: boolean) =>
+      ({
+        waitingForKind: { simultaneous: null, terminal: false, code: "shortcut", preferencesFrozen },
+      }) as ViewerInteraction;
+    useGameStore.setState({ adapter, gameState, engineCommitEpoch: 1, viewerInteraction: offerOpen(true) });
+    renderHook(() => useGameplayPreferencesSync());
+
+    act(() => usePreferencesStore.getState().setPhaseStops([endStop]));
+    act(() => useGameStore.setState({ engineCommitEpoch: 2 }));
+    await act(async () => {});
+    expect(dispatchActionForGameSession).not.toHaveBeenCalled();
+
+    act(() => useGameStore.setState({ engineCommitEpoch: 3, viewerInteraction: offerOpen(false) }));
+    await waitFor(() => expect(dispatchActionForGameSession).toHaveBeenCalledTimes(3));
+    expect(dispatchActionForGameSession).toHaveBeenNthCalledWith(
+      1,
+      { type: "SetPhaseStops", data: { stops: [endStop] } },
+      adapter,
+      expect.any(Number),
+    );
   });
 
   it("overrides the synced mode while Full Control is on, and restores it when off", async () => {

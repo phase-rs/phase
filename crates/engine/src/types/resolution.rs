@@ -90,6 +90,32 @@ pub struct RepeatedOptionalPaymentFrame {
     pub optional_cost_payments_this_resolution: u32,
 }
 
+/// CR 101.4 + CR 608.2d: the responders a continuing any-player poll still owes
+/// an offer, carried while the accepted action's own child prompt owns the stack
+/// top.
+///
+/// CR 101.4 polls every eligible player, so an acceptance whose action stays
+/// available (see `acceptance_leaves_the_option_open`) must still reach the
+/// responders after it. When the accepted action resolves to completion the next
+/// offer is installed immediately and this is never set. When that action
+/// instead suspends on a prompt of its own — a CR 616.1 replacement-ordering
+/// choice, say — the poll cannot also own the prompt (only one frame may), so
+/// the cursor parks here and arms once the frames above it are gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkedOpponentMayPoll {
+    /// The responder owed the next offer.
+    pub next: PlayerId,
+    /// The responders after `next`, in CR 101.4 turn order.
+    pub remaining: Vec<PlayerId>,
+    /// The prompt's decision subject, preserved verbatim so the re-offer asks
+    /// the same question about the same object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_subject_id: Option<ObjectId>,
+    pub source_id: ObjectId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 /// The complete parked optional-effect authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OptionalEffectFrame {
@@ -109,6 +135,15 @@ pub struct OptionalEffectFrame {
     /// prompt, including save/reload before its named result is published.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
+    /// `Some` when this frame is a parked any-player poll cursor rather than a
+    /// live offer: it owns no prompt, so its gate is [`FrameGate::AfterChild`]
+    /// and it arms in `resume_resolution_frames` once the frames above it are
+    /// gone. Mirrors [`CipherEncodeStage::Parked`] and
+    /// [`RepeatedOptionalPaymentFrame::pending`], whose gates are likewise a
+    /// direct choice only while they actually hold a live offer. Legacy saves
+    /// default to `None`, i.e. an ordinary live offer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parked_poll: Option<Box<ParkedOpponentMayPoll>>,
 }
 
 /// CR 705.1 + CR 614.1a: where a coin-flip run paused for a Krark's Thumb keep choice.
@@ -962,6 +997,18 @@ impl ResolutionFrame {
                 pending: Some(_),
                 ..
             }) => FrameGate::DirectChoice(DirectChoiceGate::RepeatedOptionalPayment),
+            // CR 101.4 + the single-prompt-owner invariant: a parked poll cursor
+            // carries the responders still owed an offer while the accepted
+            // action's OWN prompt owns the stack top. It raises nothing in that
+            // role — the child does — so it waits on that child like every other
+            // `AfterChild` owner, exactly as a past-cursor-0 `DieRoll` and a
+            // `Parked` Cipher offer do. Reporting `DirectChoice` here would
+            // demand the top frame match an `OpponentMayChoice` that is not, and
+            // must not be, the active prompt.
+            Self::OptionalEffect(OptionalEffectFrame {
+                parked_poll: Some(_),
+                ..
+            }) => FrameGate::AfterChild,
             Self::OptionalEffect(_) => FrameGate::DirectChoice(DirectChoiceGate::OptionalEffect),
             Self::CoinFlip(_) => FrameGate::DirectChoice(DirectChoiceGate::CoinFlipKeep),
             // CR 706.6 + CR 706.3a: the die-roll frame serves two distinct
@@ -7026,6 +7073,7 @@ impl LegacyOptionalEffectWire {
             return Ok(None);
         };
         Ok(Some(OptionalEffectFrame {
+            parked_poll: None,
             ability,
             trigger_event: self.pending_optional_trigger_event,
             // Legacy wire predates the plural batch; empty is the correct default
@@ -8907,6 +8955,7 @@ mod tests {
 
         let mut optional_effect = ResolutionStack::default();
         optional_effect.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(resolved_draw(6)),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -8996,6 +9045,7 @@ mod tests {
         optional_state.waiting_for = waiting_for;
         let mut optional_frames = ResolutionStack::default();
         optional_frames.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(resolved_draw(10)),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -9082,6 +9132,7 @@ mod tests {
 
     fn opponent_may_owner_frame() -> ResolutionFrame {
         ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(resolved_draw(7)),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -9650,6 +9701,7 @@ mod tests {
     fn validation_admits_the_live_direct_choice_owner_above_a_paused_drain_pair() {
         let optional_effect_frame = || {
             ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                parked_poll: None,
                 ability: Box::new(resolved_draw(81)),
                 trigger_event: None,
                 trigger_events: Vec::new(),
@@ -9781,6 +9833,7 @@ mod tests {
         let mut optional = restore_v1_optional_effect_fixture(
             optional,
             OptionalEffectFrame {
+                parked_poll: None,
                 ability: Box::new(resolved_draw(102)),
                 trigger_event: None,
                 trigger_events: Vec::new(),
@@ -11206,6 +11259,7 @@ mod tests {
         };
         let mut buried_optional_frames = ResolutionStack::default();
         buried_optional_frames.push_inner(ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(resolved_draw(151)),
             trigger_event: None,
             trigger_events: Vec::new(),
