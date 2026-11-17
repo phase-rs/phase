@@ -17515,9 +17515,10 @@ fn auto_tap_mana_sources_inner(
     });
     let available = filtered.as_deref().unwrap_or(available);
 
-    let needs_snow = matches!(cost, ManaCost::Cost { shards, .. }
-        if shards.contains(&crate::types::mana::ManaCostShard::Snow));
-    let output = auto_tap_output_projection(state, available, needs_snow);
+    let required_supertype = matches!(cost, ManaCost::Cost { shards, .. }
+        if shards.contains(&crate::types::mana::ManaCostShard::Snow))
+    .then_some(ManaSupertype::Snow);
+    let output = auto_tap_output_projection(state, available, required_supertype);
     let output_projection = output.as_ref();
     let floating_mana = state
         .players
@@ -18022,11 +18023,11 @@ fn projected_mana_output<'a>(
 fn auto_tap_output_projection(
     state: &GameState,
     available: &[ManaSourceOption],
-    needs_snow: bool,
+    required_supertype: Option<ManaSupertype>,
 ) -> Option<AutoTapOutput> {
     let mut rows = AutoTapOutput::new();
     for option in available.iter().filter(|option| {
-        needs_snow
+        required_supertype.is_some()
             || !option.taps_for_mana_overrides.is_empty()
             || (single_color_choice_source(state, option)
                 && !proven_scalar_single_color_choice(state, option))
@@ -18999,13 +19000,13 @@ fn planned_mana_sub_costs_fundable(
             Some(ability_index),
         );
         let activation_ctx = activation_context.as_payment_context();
-        let needs_snow = needs.iter().any(|need| need.4.is_some());
-        let needs_projection = needs_snow
+        let required_supertype = needs.iter().find_map(|need| need.4);
+        let needs_projection = required_supertype.is_some()
             && remaining
                 .iter()
                 .any(|row| projected_mana_output(row, output_projection).is_none());
         let nested_output = needs_projection
-            .then(|| auto_tap_output_projection(state, &remaining, true))
+            .then(|| auto_tap_output_projection(state, &remaining, required_supertype))
             .flatten();
         let output_projection = nested_output.as_ref().or(output_projection);
         let nested = match policy {
@@ -21633,11 +21634,11 @@ mod tests {
     fn fixed_one_grants_skip_projection_but_conditional_snow_and_triggers_keep_it() {
         use crate::game::scenario::GameScenario;
 
-        for (conditional, snow, enchanted) in [
-            (false, false, false),
-            (true, false, false),
-            (false, true, false),
-            (false, false, true),
+        for (conditional, required_supertype, enchanted) in [
+            (false, None, false),
+            (true, None, false),
+            (false, Some(ManaSupertype::Snow), false),
+            (false, None, true),
         ] {
             let mut scenario = GameScenario::new();
             scenario.add_artifact_from_oracle(P0, "Chromatic Lantern",
@@ -21648,7 +21649,7 @@ mod tests {
                     "{T}: Add one mana of any color. If you control a creature with power 4 or greater, add two mana of any one color instead.")
                     .with_subtypes(vec!["Plant"])
                     .with_mana_cost(crate::types::mana::parse_mtgjson_mana_cost("{1}{G}")).id()
-            } else if snow {
+            } else if required_supertype.is_some() {
                 scenario
                     .add_land_from_oracle(P0, "Snow-Covered Forest", "({T}: Add {G}.)")
                     .with_subtypes(vec!["Forest"])
@@ -21685,8 +21686,8 @@ mod tests {
                 !selected.is_empty(),
                 "real fixed-one/conditional color rows must exist"
             );
-            let output = auto_tap_output_projection(runner.state(), &selected, snow);
-            if !conditional && !snow && !enchanted {
+            let output = auto_tap_output_projection(runner.state(), &selected, required_supertype);
+            if !conditional && required_supertype.is_none() && !enchanted {
                 assert_eq!(selected.len(), 5, "Lantern actually grants every color");
                 assert!(selected
                     .iter()
@@ -21705,7 +21706,7 @@ mod tests {
                     if conditional {
                         assert!(!proven_scalar_single_color_choice(runner.state(), row));
                     }
-                    if snow {
+                    if required_supertype.is_some() {
                         assert!(groups
                             .base
                             .iter()
@@ -21783,7 +21784,7 @@ mod tests {
         );
         assert!(!row.restrictions.is_empty());
         assert!(row.taps_for_mana_overrides.is_empty());
-        let output = auto_tap_output_projection(runner.state(), &available, false);
+        let output = auto_tap_output_projection(runner.state(), &available, None);
         assert!(projected_mana_output(row, output.as_ref()).is_none());
         let draw_index =
             super::super::casting::activated_ability_definitions(runner.state(), stone)
@@ -21908,7 +21909,7 @@ mod tests {
         .collect();
         assert_eq!(trigger_refs.len(), 1);
         assert_eq!(row.taps_for_mana_overrides[0].0, trigger_refs[0]);
-        let output = auto_tap_output_projection(runner.state(), &available, false).unwrap();
+        let output = auto_tap_output_projection(runner.state(), &available, None).unwrap();
         let groups =
             projected_mana_output(row, Some(&output)).expect("exact nonempty Maze projection");
         assert_eq!(groups.base.len(), 2);
@@ -22104,7 +22105,7 @@ mod tests {
                 None,
             );
             assert_eq!(available.len(), if with_fertile { 5 } else { 1 });
-            let output = auto_tap_output_projection(runner.state(), &available, false).unwrap();
+            let output = auto_tap_output_projection(runner.state(), &available, None).unwrap();
             // Colored Aura markers can widen a canonical row. No such row
             // may confer that union on the actual fixed-colorless base producer.
             for row in &available {
