@@ -20,6 +20,9 @@ fn lost_in_the_maze_stuns_only_targeted_creatures_not_controlled_by_its_controll
     scenario.at_phase(Phase::PreCombatMain);
     let own = scenario.add_creature(P0, "Own creature", 2, 2).id();
     let opponent = scenario.add_creature(P1, "Opponent creature", 2, 2).id();
+    // CR 109.5 + CR 110.2: "you don't control" is read against the trigger
+    // controller's current control of each tapped creature, not ownership — a
+    // creature P1 owns but P0 controls gets no stun counter.
     let stolen = scenario
         .add_creature(P1, "Stolen creature", 2, 2)
         .controlled_by(P0)
