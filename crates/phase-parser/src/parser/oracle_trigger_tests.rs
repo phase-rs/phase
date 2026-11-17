@@ -11872,17 +11872,20 @@ fn trigger_becomes_blocked_by_a_qualified_creature_preserves_blocker_filter() {
 }
 
 #[test]
-fn trigger_becomes_blocked_by_two_or_more_creatures_stays_bare() {
+fn trigger_becomes_blocked_by_two_or_more_creatures_unsupported() {
+    // CR 509.3c vs 509.3d: "by two or more creatures" is a threshold form
+    // that is not modeled by the singular-article blocker filter. The parser
+    // honestly rejects it rather than silently dropping the qualifier and
+    // degrading to the bare once-per-combat form.
     let def = parse_trigger_line(
         "Whenever Vicious Battlerager becomes blocked by two or more creatures, draw a card.",
         "Vicious Battlerager",
     );
 
-    assert_eq!(def.mode, TriggerMode::BecomesBlocked);
-    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
     assert!(
-        def.valid_target.is_none(),
-        "threshold wording must not be treated as a per-blocker qualifier"
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "threshold blocker wording must stay unsupported, got {:?}",
+        def.mode
     );
 }
 
