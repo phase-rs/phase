@@ -2242,3 +2242,41 @@ fn a_model_that_leaves_during_the_rediscovery_prompt_does_not_change_the_selecte
         "with its own enters-with counters"
     );
 }
+
+/// CR 614.5: a replacement affects an event once. Feldon of the Third Path copies a printed
+/// Grizzly Bears card with Grumgully, the Generous on the battlefield: the Bears copy token enters
+/// with exactly one additional +1/+1 counter, not two.
+#[test]
+fn grumgullys_counter_is_applied_once_to_a_feldon_copy() {
+    let mut scenario = base_scenario();
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let feldon = scenario
+        .add_creature_from_oracle(P0, "Feldon of the Third Path", 2, 3, FELDON)
+        .as_legendary()
+        .id();
+    scenario
+        .add_creature_from_oracle(P0, "Grumgully, the Generous", 3, 3, GRUMGULLY)
+        .as_legendary()
+        .with_subtypes(vec!["Elemental"]);
+    let bears = scenario
+        .add_creature_to_graveyard(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .id();
+    let mut runner = scenario.build();
+    runner.activate(feldon, 0).target_object(bears).resolve();
+    let tokens = battlefield_tokens_named(runner.state(), "Grizzly Bears");
+    assert_eq!(tokens.len(), 1, "the Bears copy entered");
+    assert_eq!(
+        runner.state().objects[&tokens[0]]
+            .counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied(),
+        Some(1),
+        "Grumgully's counter is placed once"
+    );
+}

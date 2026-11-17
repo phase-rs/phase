@@ -1222,8 +1222,11 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
 
     // Liminal choice is loop-invariant; compute once so the terminal drain below
     // can mirror the former continue_liminal_copy_token_batch tail for this path.
-    let liminal_immediate =
-        copy_batch_enters_through_liminal_entry(&values, &additional_modifications);
+    let liminal_immediate = copy_batch_enters_through_liminal_entry(
+        &values,
+        &additional_modifications,
+        &enter_with_counters,
+    );
     // CR 205.3m: the live creature-type list the CR 707.9 subtype exceptions
     // resolve against. Loop-invariant, and cloned once so the per-token CR
     // 303.4f/g projection below can be built while `state` is borrowed.
@@ -2735,9 +2738,15 @@ fn apply_token_modifications(
 pub(crate) fn copy_batch_enters_through_liminal_entry(
     values: &CopiableValues,
     additional_modifications: &[ContinuousModification],
+    enter_with_counters: &[(crate::types::counter::CounterType, u32)],
 ) -> bool {
     let loyalty = copy_starting_loyalty_override(additional_modifications).or(values.loyalty);
     copy_token_modifications_are_liminal_immediate(additional_modifications)
+        // CR 614.5: entry counters the batch already carries ride the liminal entry only when the
+        // entrant's own as-enters copy defers every non-copy entry replacement to it (so none is
+        // applied a second time there); any other counter-bearing batch keeps its direct path.
+        && (enter_with_counters.is_empty()
+            || crate::game::replacement::copy_entrant_has_own_entry_copy(values))
         && crate::game::printed_cards::intrinsic_face_counters(loyalty, None).is_empty()
         && crate::game::printed_cards::self_etb_counter_replacement_entries(
             &values.replacement_definitions,

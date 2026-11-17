@@ -3552,6 +3552,11 @@ fn complete_token_entry_after_copy(
                 },
                 events,
             );
+            // CR 603.12 + CR 608.2c: the copy effect's rider chain (Superior Spider-Man's
+            // "when you do, exile that card") still runs after the captured copy is installed.
+            if let Some(riders) = ability.sub_ability.as_deref() {
+                let _ = effects::resolve_ability_chain(state, riders, events, 0);
+            }
         }
         _ => {
             let _ = effects::resolve_ability_chain(state, ability, events, 0);

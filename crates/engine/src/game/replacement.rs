@@ -7222,7 +7222,9 @@ fn replacement_condition_quantity_ctx(
 /// (Mystic Reflection's "enter as copies") stays batch-wide.
 fn entry_effects_deferred_to_entrant(def: &ReplacementDefinition, event: &ProposedEvent) -> bool {
     let ProposedEvent::CreateToken {
-        copy: Some(copy), ..
+        copy: Some(copy),
+        spec,
+        ..
     } = event
     else {
         return false;
@@ -7233,12 +7235,15 @@ fn entry_effects_deferred_to_entrant(def: &ReplacementDefinition, event: &Propos
         && crate::game::effects::token_copy::copy_batch_enters_through_liminal_entry(
             &copy.values,
             &copy.additional_modifications,
+            &spec.enter_with_counters,
         )
 }
 
 /// CR 614.12 + CR 616.1c: whether a copied token's own copiable replacements include an
 /// as-enters "enter as a copy of ..." (Phyrexian Metamorph, Clone).
-fn copy_entrant_has_own_entry_copy(values: &crate::types::ability::CopiableValues) -> bool {
+pub(crate) fn copy_entrant_has_own_entry_copy(
+    values: &crate::types::ability::CopiableValues,
+) -> bool {
     values.replacement_definitions.iter().any(|def| {
         def.event == ReplacementEvent::Moved
             && def.destination_zone == Some(Zone::Battlefield)
