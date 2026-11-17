@@ -31823,9 +31823,10 @@ fn effect_reads_announced_root_slots(
         || matches!(
             condition,
             Some(AbilityCondition::TargetMatchesFilter {
+                filter: _,
                 use_lki: false,
                 subject_slot: None,
-                ..
+                subject: ObjectScope::Target,
             })
         )
     {

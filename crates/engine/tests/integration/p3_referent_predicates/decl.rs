@@ -304,7 +304,9 @@ fn p3s2a_canopy_mv5_destroys_without_proliferate() {
 }
 
 /// CR 608.2h: the destroy does not happen (Darksteel Ingot is indestructible), the permanent is still where it was
-/// expected to be, so its current information (MV 3) answers "was 3 or less": the proliferate still happens.
+/// expected to be, so it is answered from its current information (MV 3, "3 or less"): the proliferate still happens.
+/// The Ingot never moves, so this pins the not-departed read; the departed reads are pinned by the counter and
+/// bounce witnesses.
 #[test]
 fn p3s2a_canopy_indestructible_target_is_read_live() {
     let (r, v, w) = canopy(&DARKSTEEL_INGOT);

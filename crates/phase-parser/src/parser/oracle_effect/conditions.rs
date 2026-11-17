@@ -18441,13 +18441,17 @@ mod referent_owner_tests {
         found
     }
 
-    /// Control for the guard's own instrument: it flags a constructor, and ignores patterns,
+    /// Control for the guard's own instrument: it flags a constructor (also one bound by `let x =`), and ignores patterns,
     /// comment prose and test modules.
     #[test]
     fn single_writer_guard_detects_a_planted_constructor() {
         let source = r#"
             fn writer() -> AbilityCondition {
                 AbilityCondition::TargetMatchesFilter { filter, use_lki, subject_slot, subject }
+            }
+            fn let_writer() -> AbilityCondition {
+                let built = AbilityCondition::TargetMatchesFilter { filter, use_lki, subject_slot, subject };
+                built
             }
             fn reader(c: &AbilityCondition) -> bool {
                 matches!(c, AbilityCondition::TargetMatchesFilter { filter, .. })
@@ -18467,8 +18471,9 @@ mod referent_owner_tests {
             }
         "#;
         let found = constructors(&production_source(source));
-        assert_eq!(found.len(), 1, "one planted constructor, got {found:?}");
+        assert_eq!(found.len(), 2, "two planted constructors, got {found:?}");
         assert!(found[0].contains("fn writer")); // allow-noncombinator: source-reading test instrument, not Oracle parsing
+        assert!(found[1].contains("fn let_writer")); // allow-noncombinator: source-reading test instrument, not Oracle parsing
     }
 
     /// Single writer, NO allow-list: the only constructor of `TargetMatchesFilter` in the

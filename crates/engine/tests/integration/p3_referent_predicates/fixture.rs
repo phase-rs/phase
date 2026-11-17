@@ -33,10 +33,6 @@ fn split_type_line(type_line: &str) -> (Vec<&str>, Vec<&str>) {
 fn apply_printed(b: &mut CardBuilder<'_>, card: &Printed) {
     let (words, subtypes) = split_type_line(card.type_line);
     let has = |w: &str| words.contains(&w);
-    // The production path hands the parser the card's keyword names (MTGJSON `keywords`), which is how a keyword-only
-    // line ("Indestructible", "Epic") is read as a keyword.
-    b.from_oracle_text_with_keywords(card.keywords, card.oracle);
-    b.with_mana_cost(cost(card.cost));
     if has("Legendary") {
         b.as_legendary();
     }
@@ -48,6 +44,16 @@ fn apply_printed(b: &mut CardBuilder<'_>, card: &Printed) {
     if !subtypes.is_empty() {
         b.with_subtypes(subtypes);
     }
+    // The production path hands the parser the card's types and its lower-cased MTGJSON `keywords`
+    // (`prepare_oracle_parser_input`), which is how a keyword-only line ("Indestructible", "Epic") is read as a keyword.
+    let keywords: Vec<String> = card
+        .keywords
+        .iter()
+        .map(|k| k.to_ascii_lowercase())
+        .collect();
+    let keywords: Vec<&str> = keywords.iter().map(String::as_str).collect();
+    b.from_oracle_text_with_keywords(&keywords, card.oracle);
+    b.with_mana_cost(cost(card.cost));
 }
 
 fn power_toughness(card: &Printed) -> (i32, i32) {

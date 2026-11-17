@@ -36380,7 +36380,7 @@ fn mana_value_referent_gate_binds_the_object_the_clause_names() {
         }
     }
     /// Parse `text` as the printed card `name` with printed `type_line` ("Legendary Creature — Human Shaman") and the
-    /// keywords MTGJSON lists for it, and collect its mana-value gates.
+    /// given keywords, and collect its mana-value gates.
     fn gates_of(
         text: &str,
         name: &str,
@@ -36478,6 +36478,14 @@ fn mana_value_referent_gate_binds_the_object_the_clause_names() {
         assert!(
             gates_of(text, name, type_line, &[]).is_empty(),
             "{name}: the present-tense `is` form is not a TargetMatchesFilter mana-value gate"
+        );
+        // Reach guard: the card does parse, with its mana-value clause on the quantity route.
+        let (head, subtypes) = type_line.split_once(" — ").unwrap_or((type_line, ""));
+        let subtypes: Vec<&str> = subtypes.split_whitespace().collect();
+        let parsed = format!("{:?}", parse(text, name, &[], &[head.trim_start_matches("Legendary ")], &subtypes).triggers);
+        assert!(
+            parsed.contains("QuantityCheck") && !parsed.contains("Unimplemented"), // allow-noncombinator: test instrument reading a Debug dump
+            "{name}: reach guard, the mana-value clause parses to a quantity check, got {parsed}"
         );
     }
 }
