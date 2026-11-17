@@ -271,9 +271,20 @@ fn lady_octopus_tap_ability_decline_leaves_hand_unchanged() {
     let (mut runner, lady, mind_stone, relic) = lady_with_two_counters();
     let hand_before = runner.state().players[P0.0 as usize].hand.clone();
 
-    // The accept test reaches the cast prompt for this same activation, so
-    // declining here is a real decision that leaves the hand untouched.
-    runner.activate(lady, 0).decline_optional().resolve();
+    // Stop at the "you may cast" prompt and assert it appears, so declining
+    // is a real decision rather than a no-op on a prompt that never arose.
+    runner.activate(lady, 0).stop_at_optional().resolve();
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ),
+        "the optional cast prompt must appear; waiting_for = {:?}",
+        runner.state().waiting_for
+    );
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the optional free cast");
 
     assert!(
         runner.state().objects[&lady].tapped,
