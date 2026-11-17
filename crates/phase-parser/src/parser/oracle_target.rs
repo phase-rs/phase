@@ -4612,6 +4612,7 @@ fn parse_type_phrase_folding_unbound<'a>(
         pos += consumed;
     }
 
+    // CR 608.2c: "that weren't put there this way" names the complement of the objects the preceding instruction in the same ability moved (Bringer of the Last Gift: "…returns all creature cards from their graveyard that weren't put there this way…"). Lowered to Not(InTrackedSet(0)); the sentinel binds at resolution to the chain set the sacrifice published.
     if let Some((prop, consumed)) = parse_not_put_there_this_way_suffix(&lower[pos..]) {
         properties.push(prop);
         pos += consumed;
@@ -9952,20 +9953,11 @@ pub(crate) fn parse_zone_changed_this_turn_suffix(
     parse_zone_change_provenance(input, to, false)
 }
 
+/// CR 608.2c: "that weren't put there this way" names the complement of the objects the preceding instruction in the same ability moved (Bringer of the Last Gift: "…returns all creature cards from their graveyard that weren't put there this way…"). Lowered to Not(InTrackedSet(0)); the sentinel binds at resolution to the chain set the sacrifice published.
 fn parse_not_put_there_this_way_suffix(input: &str) -> Option<(FilterProp, usize)> {
     let trimmed = input.trim_start();
     let offset = input.len() - trimmed.len();
-    let (rest, _) = (
-        tag::<_, _, OracleError<'_>>("that "),
-        alt((
-            tag("weren't "),
-            tag("were not "),
-            tag("wasn't "),
-            tag("was not "),
-        )),
-        alt((tag("put "), tag("placed "), tag("moved "))),
-        tag("there this way"),
-    )
+    let (rest, _) = tag::<_, _, OracleError<'_>>("that weren't put there this way")
         .parse(trimmed)
         .ok()?;
 
@@ -22444,7 +22436,7 @@ mod tests {
     #[test]
     fn type_phrase_cards_not_put_there_this_way_excludes_tracked_set() {
         let (filter, rest) = parse_type_phrase_folding(
-            "creature cards from your graveyard that weren't put there this way",
+            "creature cards from their graveyard that weren't put there this way",
         );
         let TargetFilter::Typed(tf) = filter else {
             panic!("expected Typed filter, got {filter:?}");
