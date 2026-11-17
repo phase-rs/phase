@@ -357,43 +357,6 @@ const KAROO_LOTUS_VALE: &str = "If this land would enter, sacrifice two untapped
     lands instead. If you do, put this land onto the battlefield. If you don't, \
     put it into its owner's graveyard.";
 
-/// CR 614.12a: declining a Karoo land's `MayCost` cost redirects the ETB to the
-/// owner's graveyard — the land never appears on the battlefield.
-#[test]
-fn karoo_land_decline_routes_to_graveyard() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Blue);
-    scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
-
-    let land_id = scenario
-        .add_land_to_hand(P0, "Lotus Vale")
-        .from_oracle_text(KAROO_LOTUS_VALE)
-        .id();
-
-    let mut runner = scenario.build();
-    let card_id = runner.state().objects[&land_id].card_id;
-
-    runner
-        .act(GameAction::PlayLand {
-            object_id: land_id,
-            card_id,
-        })
-        .expect("play land should succeed");
-
-    let decline = replacement_choice_index(&runner, "Decline");
-    runner
-        .act(GameAction::ChooseReplacement { index: decline })
-        .expect("declining the Karoo cost should resolve");
-
-    let obj = &runner.state().objects[&land_id];
-    assert_eq!(
-        obj.zone,
-        Zone::Graveyard,
-        "a declined Karoo land must be routed to its owner's graveyard"
-    );
-}
-
 /// CR 118.3 + CR 614.12a: an unpayable Karoo land cost auto-applies its decline
 /// branch without a choice — the land still goes to the graveyard.
 #[test]

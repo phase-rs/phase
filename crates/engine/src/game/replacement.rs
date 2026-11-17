@@ -14525,22 +14525,29 @@ fn replay_pending_replacement(
     };
     // CR 118.3 + CR 614.12a: when a MayCost replacement is unpayable, only
     // declining remains legal, so apply its decline branch without prompting.
-    let index = index.or_else(|| {
-        let pending = state.pending_replacement.as_ref()?;
-        if !pending.is_optional {
-            return None;
-        }
-        let rid = *pending.candidates.first()?;
-        let replacement = replacement_definition_for_id(state, rid)?;
-        let ReplacementMode::MayCost { cost, .. } = &replacement.mode else {
-            return None;
-        };
-        let payer = pending
-            .choice_player
-            .or_else(|| replacement_choice_player(state, &pending.proposed, rid))?;
-        (!cost.is_payable_for_replacement(state, payer, rid.source)).then_some(1)
-    });
-    let Some(index) = index else {
+    // No decision is made here, so a forced decline is not recorded as a remembered
+    // answer (it never counts toward the optional-decision tally, CR 732.4).
+    let saved_answer = index;
+    let forced_decline = if saved_answer.is_none() {
+        (|| {
+            let pending = state.pending_replacement.as_ref()?;
+            if !pending.is_optional {
+                return None;
+            }
+            let rid = *pending.candidates.first()?;
+            let replacement = replacement_definition_for_id(state, rid)?;
+            let ReplacementMode::MayCost { cost, .. } = &replacement.mode else {
+                return None;
+            };
+            let payer = pending
+                .choice_player
+                .or_else(|| replacement_choice_player(state, &pending.proposed, rid))?;
+            (!cost.is_payable_for_replacement(state, payer, rid.source)).then_some(1)
+        })()
+    } else {
+        None
+    };
+    let Some(index) = saved_answer.or(forced_decline) else {
         // A nested optional prompt never inherits acceptance from an order.
         if had_tail {
             state.replacement_auto_choice_tail = None;
@@ -14549,11 +14556,14 @@ fn replay_pending_replacement(
     };
     // CR 616.1e + CR 616.1: a replayed answer is still the affected player's choice —
     // whether to apply an optional effect, or which effect applies next.
-    if optional {
-        state
-            .record_remembered_answer(player, crate::game::play_trace::AnswerOptionality::Optional);
-    } else {
-        state.record_point_answer(crate::game::play_trace::AnswerOptionality::Mandatory, point);
+    match saved_answer {
+        // Forced decline: nothing was answered, so nothing is recorded.
+        None => {}
+        Some(_) if optional => state
+            .record_remembered_answer(player, crate::game::play_trace::AnswerOptionality::Optional),
+        Some(_) => {
+            state.record_point_answer(crate::game::play_trace::AnswerOptionality::Mandatory, point)
+        }
     }
     let result = continue_replacement_impl(state, index, events);
     if !matches!(result, ReplacementResult::Execute(_)) {
@@ -18169,6 +18179,52 @@ mod tests {
         };
         assert!(enter_tapped.resolve(false));
         assert_eq!(state.players[0].life, 20);
+    }
+
+    /// CR 118.3 + CR 614.12a + CR 104.4b: an unpayable `MayCost` auto-declines without a
+    /// prompt, and that forced decline is not an answered optional decision — it neither
+    /// bumps the loop-decision tally nor records a remembered answer.
+    #[test]
+    fn unpayable_may_cost_auto_decline_records_no_remembered_answer() {
+        // Reach guard: a payable cost prompts instead of auto-declining.
+        let mut payable = test_state_with_object(
+            ObjectId(10),
+            Zone::Hand,
+            vec![may_cost_tapped_replacement(2)],
+        );
+        let result = replace_event(
+            &mut payable,
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None),
+            &mut Vec::new(),
+        );
+        assert!(matches!(
+            result,
+            ReplacementResult::NeedsChoice(PlayerId(0))
+        ));
+
+        // 25 life exceeds the player's 20, so the payment is impossible (CR 119.4).
+        let mut state = test_state_with_object(
+            ObjectId(10),
+            Zone::Hand,
+            vec![may_cost_tapped_replacement(25)],
+        );
+        let tally_before = state.loop_decision_tally;
+        let result = replace_event(
+            &mut state,
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None),
+            &mut Vec::new(),
+        );
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange { enter_tapped, .. }) = result
+        else {
+            panic!("expected the decline branch to execute without a prompt, got {result:?}");
+        };
+        assert!(enter_tapped.resolve(false), "the decline branch applies");
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(
+            state.loop_decision_tally, tally_before,
+            "a forced decline is not an answered optional decision"
+        );
+        assert_eq!(state.loop_decision_tally.optional, 0);
     }
 
     #[test]

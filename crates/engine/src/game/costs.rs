@@ -3133,19 +3133,16 @@ fn pay_ability_cost_inner(
             action: crate::types::ability::BeholdCostAction::ChooseOrReveal,
             type_choice: None,
         } if matches!(scope, PaymentScope::Resolution { .. }) => {
-            let choices =
-                super::casting_costs::eligible_behold_choices(state, player, source_id, filter);
-            if choices.is_empty() {
-                return Ok(payment_failed("no eligible object to behold"));
-            }
-            if choices.len() == 1 {
-                super::effects::behold::reveal_if_from_hand(state, player, choices[0], events);
-                return Ok(PaymentOutcome::Paid);
-            }
-            state.waiting_for = WaitingFor::BeholdChoice { player, choices };
-            return Ok(PaymentOutcome::Paused {
-                remaining_cost: None,
-            });
+            use super::effects::behold::{begin_behold, BeholdStart};
+            return Ok(
+                match begin_behold(state, player, source_id, filter, events) {
+                    BeholdStart::Unavailable => payment_failed("no eligible object to behold"),
+                    BeholdStart::Selected => PaymentOutcome::Paid,
+                    BeholdStart::Parked => PaymentOutcome::Paused {
+                        remaining_cost: None,
+                    },
+                },
+            );
         }
         AbilityCost::Behold { .. } => {}
         AbilityCost::Discard { .. } | AbilityCost::NinjutsuFamily { .. } => {

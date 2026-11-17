@@ -184,3 +184,135 @@ fn theorists_sanctum_without_a_jace_enters_tapped_without_prompt() {
         "CR 118.3 + CR 614.12a: without a legal Jace the cost cannot be paid"
     );
 }
+
+const JACE_WIELDER_OF_MYSTERIES: &str =
+    "If you would draw a card while your library has no cards in it, you win the game instead.\n\
++1: Target player mills two cards. Draw a card.\n\
+\u{2212}8: Draw seven cards. Then if your library has no cards in it, you win the game.";
+
+const JACE_BELEREN: &str = "+2: Each player draws a card.\n\
+\u{2212}1: Target player draws a card.\n\
+\u{2212}10: Target player mills twenty cards.";
+
+/// Theorist's Sanctum in hand, Jace, Wielder of Mysteries on the battlefield and,
+/// optionally, Jace Beleren in hand.
+fn setup_with_battlefield_jace(
+    hand_jace: bool,
+) -> (GameRunner, ObjectId, ObjectId, Option<ObjectId>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario
+        .add_land_to_hand(P0, "Theorist's Sanctum")
+        .from_oracle_text(THEORISTS_SANCTUM)
+        .id();
+    let battlefield_jace = scenario
+        .add_planeswalker_from_oracle(
+            P0,
+            "Jace, Wielder of Mysteries",
+            "Jace",
+            4,
+            JACE_WIELDER_OF_MYSTERIES,
+        )
+        .id();
+    let hand_jace = hand_jace.then(|| {
+        scenario
+            .add_creature_to_hand_from_oracle(P0, "Jace Beleren", 0, 0, JACE_BELEREN)
+            .as_planeswalker_with_loyalty("Jace", 3)
+            .id()
+    });
+    (scenario.build(), land, battlefield_jace, hand_jace)
+}
+
+fn reveals(events: &[GameEvent]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event, GameEvent::CardsRevealed { .. }))
+}
+
+/// CR 701.4a: a Jace you control is the sole candidate, so it is auto-chosen; a
+/// battlefield permanent is already public, so nothing is revealed.
+#[test]
+fn theorists_sanctum_sole_battlefield_jace_auto_pays_without_reveal() {
+    let (mut runner, land, _, _) = setup_with_battlefield_jace(false);
+    let card_id = runner.state().objects[&land].card_id;
+
+    let played = runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .expect("playing Theorist's Sanctum must be accepted");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { .. }
+    ));
+    let accepted = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("beholding the battlefield Jace must be accepted");
+
+    assert!(
+        !reveals(&played.events) && !reveals(&accepted.events),
+        "CR 701.4a: choosing a Jace you control reveals nothing"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().objects[&land].zone, Zone::Battlefield);
+    assert!(
+        !runner.state().objects[&land].tapped,
+        "CR 614.12a: paying the Behold cost means the land enters untapped"
+    );
+}
+
+/// CR 701.4a + CR 608.2d: a Jace on the battlefield plus one in hand is a real
+/// choice; picking the battlefield Jace reveals nothing.
+#[test]
+fn theorists_sanctum_battlefield_and_hand_jace_choose_battlefield_reveals_nothing() {
+    let (mut runner, land, battlefield_jace, hand_jace) = setup_with_battlefield_jace(true);
+    let hand_jace = hand_jace.expect("hand Jace is staged");
+    let card_id = runner.state().objects[&land].card_id;
+
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land,
+            card_id,
+        })
+        .expect("playing Theorist's Sanctum must be accepted");
+    let accepted = runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accepting the Behold cost must be accepted");
+    let WaitingFor::BeholdChoice { choices, .. } = &runner.state().waiting_for else {
+        panic!(
+            "a battlefield Jace and a hand Jace should require a Behold choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(
+        choices.contains(&battlefield_jace) && choices.contains(&hand_jace),
+        "both Jaces are legal choices"
+    );
+    assert!(
+        !reveals(&accepted.events),
+        "nothing is revealed before the choice"
+    );
+
+    let chosen = runner
+        .act(GameAction::SelectCards {
+            cards: vec![battlefield_jace],
+        })
+        .expect("choosing the battlefield Jace must resume the entry replacement");
+    assert!(
+        !reveals(&chosen.events),
+        "CR 701.4a: choosing a Jace you control reveals nothing"
+    );
+    assert_eq!(runner.state().objects[&land].zone, Zone::Battlefield);
+    assert!(
+        !runner.state().objects[&land].tapped,
+        "CR 614.12a: paying the Behold cost means the land enters untapped"
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
