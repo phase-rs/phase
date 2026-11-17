@@ -27,8 +27,8 @@ const CARD_NAME = "Rhystic Study";
 const HOLD_HINT = "Hold to see the full card";
 const DEFAULT_SCREEN = { innerWidth: window.innerWidth, innerHeight: window.innerHeight };
 
-function renderChoice(props: Partial<ComponentProps<typeof ChoiceModal>> = {}) {
-  render(
+function choiceModal(props: Partial<ComponentProps<typeof ChoiceModal>> = {}) {
+  return (
     <ChoiceModal
       title="Rhystic Study - Optional Effect"
       options={[
@@ -45,8 +45,12 @@ function renderChoice(props: Partial<ComponentProps<typeof ChoiceModal>> = {}) {
         </label>
       }
       {...props}
-    />,
+    />
   );
+}
+
+function renderChoice(props: Partial<ComponentProps<typeof ChoiceModal>> = {}) {
+  return render(choiceModal(props));
 }
 
 afterEach(() => {
@@ -99,16 +103,30 @@ describe("ChoiceModal layout", () => {
   it("keeps the columns while the card's art loads, so the prompt does not jump when it arrives", () => {
     cardImage.isLoading = true;
 
-    renderChoice({ layout: "columns" });
+    const { rerender } = renderChoice({ layout: "columns" });
 
     const actionRow = screen.getByRole("button", { name: "Yes" }).parentElement as HTMLElement;
-    const columns = actionRow.parentElement?.parentElement as HTMLElement;
+    const actionColumn = actionRow.parentElement as HTMLElement;
+    const columns = actionColumn.parentElement as HTMLElement;
+    const cardColumn = columns.firstElementChild as HTMLElement;
 
     // Reach guard: the art is still loading, so the card column has no card yet.
     expect(screen.queryByRole("img", { name: CARD_NAME })).not.toBeInTheDocument();
     expect(screen.getByRole("dialog")).toHaveClass("max-w-3xl");
     expect(columns).toHaveClass("grid", "grid-cols-2");
+    // The card column holds its place, with the hint, so Yes and No already
+    // sit in the right column and stay there.
+    expect(columns.children).toHaveLength(2);
+    expect(columns.lastElementChild).toBe(actionColumn);
+    expect(cardColumn).toContainElement(screen.getByText(HOLD_HINT));
     expect(actionRow).toHaveClass("grid", "grid-cols-2");
+
+    cardImage.isLoading = false;
+    rerender(choiceModal({ layout: "columns" }));
+
+    // The art lands in the same card column, and nothing else moves.
+    expect(cardColumn).toContainElement(screen.getByRole("img", { name: CARD_NAME }));
+    expect(screen.getByRole("button", { name: "Yes" }).parentElement).toBe(actionRow);
   });
 
   it("offers the hold hint only when holding the card opens its preview", () => {

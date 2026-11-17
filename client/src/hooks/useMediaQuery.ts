@@ -1,23 +1,26 @@
-import { useEffect, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 /**
  * True while the screen matches the CSS media `query`, following it as the
  * screen changes: a phone turning, a window resizing.
+ *
+ * `useSyncExternalStore` reads the query during render, so a new `query`
+ * answers for itself on its first render, and React re-reads it after
+ * subscribing, so a change before the subscription is not missed.
  */
 export function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(() =>
-    typeof window !== "undefined" ? window.matchMedia(query).matches : false,
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      const mediaQuery = window.matchMedia(query);
+      mediaQuery.addEventListener("change", onChange);
+      return () => mediaQuery.removeEventListener("change", onChange);
+    },
+    [query],
   );
 
-  useEffect(() => {
-    const mediaQuery = window.matchMedia(query);
-    const handleChange = () => setMatches(mediaQuery.matches);
-    mediaQuery.addEventListener("change", handleChange);
-    // Catch a change between the first render and this subscription, and pick
-    // up a new `query`.
-    handleChange();
-    return () => mediaQuery.removeEventListener("change", handleChange);
-  }, [query]);
-
-  return matches;
+  return useSyncExternalStore(
+    subscribe,
+    () => window.matchMedia(query).matches,
+    () => false,
+  );
 }

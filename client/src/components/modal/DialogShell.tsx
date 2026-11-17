@@ -32,10 +32,11 @@ interface DialogShellProps {
   previewObjectId?: ObjectId;
 }
 
-// The overlay's gutter, which the card never crosses. Each side also clears
-// that side's safe-area inset: under `viewport-fit=cover`, a landscape phone's
+// The overlay's gutter, which the card sits inside at rest; a drag by the
+// header can still carry it into the gutter. Each side also clears that
+// side's safe-area inset: under `viewport-fit=cover`, a landscape phone's
 // notch or camera cutout sits inside the left or right inset, and a wide
-// dialog would otherwise run under it.
+// dialog would otherwise rest under it.
 const OVERLAY_CLASS = [
   "fixed inset-0 z-50 flex py-2 lg:py-6",
   "pl-[max(env(safe-area-inset-left),0.5rem)] pr-[max(env(safe-area-inset-right),0.5rem)]",
