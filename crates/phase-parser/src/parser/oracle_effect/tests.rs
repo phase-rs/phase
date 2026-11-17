@@ -102755,3 +102755,149 @@ fn unless_damage_that_much_binds_to_primary_damage_amount() {
         "the alternative's amount must share the primary damage quantity"
     );
 }
+
+/// CR 608.2c + CR 614.1a: each printed mass-damage face of "[noun] dealt damage
+/// this way would die this turn, exile it instead" lowers to a head `DamageAll`
+/// whose sub-ability carries the die-exile replacement bound to the set the
+/// damage clause published (`TrackedSet{TrackedSetId(0)}`), not the `Any` route
+/// (which reads declared targets an each-creature spell does not have).
+/// SHAPE test: runtime behaviour is pinned by
+/// `tests/integration/anger_of_the_gods_die_exile.rs`.
+fn assert_mass_damage_die_exile_shape(
+    oracle: &str,
+    name: &str,
+    types: &[&str],
+    keywords: &[&str],
+) -> Vec<AbilityDefinition> {
+    use crate::types::replacements::ReplacementEvent;
+    let parsed = parse_oracle_text(
+        oracle,
+        name,
+        &keywords.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+        &types.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+        &[],
+    );
+    assert!(
+        !parsed
+            .abilities
+            .iter()
+            .any(crate::parser::oracle::has_unimplemented),
+        "{name}: no clause may be left unimplemented: {:?}",
+        parsed.abilities
+    );
+    let head = &parsed.abilities[0];
+    assert!(
+        matches!(&*head.effect, Effect::DamageAll { .. }),
+        "{name}: head must be DamageAll, got {:?}",
+        head.effect
+    );
+    let rider = head.sub_ability.as_ref().unwrap_or_else(|| {
+        panic!("{name}: the die-exile rider must absorb into the damage clause")
+    });
+    let Effect::AddTargetReplacement {
+        replacement,
+        target,
+    } = &*rider.effect
+    else {
+        panic!(
+            "{name}: expected AddTargetReplacement rider, got {:?}",
+            rider.effect
+        );
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        },
+        "{name}: the anaphor names the damaged set, not a declared target"
+    );
+    assert_eq!(replacement.event, ReplacementEvent::Moved);
+    assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(
+        replacement.destination_zone,
+        Some(crate::types::zones::Zone::Graveyard)
+    );
+    assert_eq!(replacement.expiry, Some(RestrictionExpiry::EndOfTurn));
+    assert!(replacement.consume_on_apply);
+    assert!(
+        rider.sub_ability.is_none(),
+        "{name}: the rider ends the chain"
+    );
+    parsed.abilities
+}
+
+#[test]
+fn die_exile_rider_after_mass_damage_binds_the_damaged_set() {
+    // Verbatim Oracle text (MTGJSON 5.3.0+20261116).
+    assert_mass_damage_die_exile_shape(
+        "Anger of the Gods deals 3 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.",
+        "Anger of the Gods",
+        &["Sorcery"],
+        &[],
+    );
+    assert_mass_damage_die_exile_shape(
+        "Crush the Weak deals 2 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.\nForetell {R} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)",
+        "Crush the Weak",
+        &["Sorcery"],
+        &["Foretell"],
+    );
+    assert_mass_damage_die_exile_shape(
+        "Yamabushi's Storm deals 1 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.",
+        "Yamabushi's Storm",
+        &["Sorcery"],
+        &[],
+    );
+    assert_mass_damage_die_exile_shape(
+        "Underworld Fires deals 1 damage to each creature and each planeswalker. If a permanent dealt damage this way would die this turn, exile it instead.",
+        "Underworld Fires",
+        &["Sorcery"],
+        &[],
+    );
+    // Gallifrey Falls // No More: the left half's text, parsed as its own face.
+    assert_mass_damage_die_exile_shape(
+        "Gallifrey Falls deals 4 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.\nFuse (You may cast one or both halves of this card from your hand.)",
+        "Gallifrey Falls",
+        &["Instant"],
+        &["Fuse"],
+    );
+    let draconic = assert_mass_damage_die_exile_shape(
+        "As an additional cost to cast this spell, exile an instant or sorcery card from your graveyard.\nDraconic Intervention deals X damage to each non-Dragon creature, where X is the exiled card's mana value. If a creature dealt damage this way would die this turn, exile it instead.\nExile Draconic Intervention.",
+        "Draconic Intervention",
+        &["Sorcery"],
+        &[],
+    );
+    assert!(
+        draconic.len() >= 2,
+        "the trailing 'Exile Draconic Intervention.' line stays its own ability"
+    );
+}
+
+/// Scope boundary, NOT a correctness claim: a SINGLE-target damage clause keeps
+/// the `Any` route (its declared target is the recipient). That rider installs
+/// regardless of whether damage was dealt, a pre-existing defect tracked as
+/// phase-rs/phase#10965; this pin flips when that issue lands. Reach-guard: the
+/// head is `DealDamage` and the rider exists.
+#[test]
+fn die_exile_rider_after_single_target_damage_keeps_any_route() {
+    let def = parse_effect_chain(
+        "Pillar of Flame deals 2 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::DealDamage { .. }),
+        "head must be DealDamage, got {:?}",
+        def.effect
+    );
+    let rider = def.sub_ability.as_ref().expect("die-exile rider");
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::AddTargetReplacement {
+                target: TargetFilter::Any,
+                ..
+            }
+        ),
+        "single-target riders keep Any (#10965), got {:?}",
+        rider.effect
+    );
+}
