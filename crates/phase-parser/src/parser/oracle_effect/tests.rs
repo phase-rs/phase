@@ -8129,7 +8129,11 @@ fn try_split_damage_compound_player_object_dynamic_x_full_pipeline() {
             };
             assert_eq!(*offset, 1, "where-X \"1 plus …\" must offset by 1");
             let QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCast { scope, filter, .. },
+                qty: QuantityRef::SpellsCast {
+                    scope,
+                    filter,
+                    window: TurnWindow::ThisTurn,
+                },
             } = inner.as_ref()
             else {
                 panic!("Offset inner must be a SpellsCast ref, got: {inner:?}");
@@ -36722,6 +36726,7 @@ fn seek_with_opponent_cast_mana_value_condition_keeps_filter_clean() {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::SpellsCast {
                     scope: crate::types::ability::CountScope::Opponents,
+                    window: TurnWindow::ThisTurn,
                     ..
                 }
             },
@@ -42955,7 +42960,7 @@ fn conduit_of_worlds_line2_paid_graveyard_during_resolution() {
                     qty: QuantityRef::SpellsCast {
                         scope: crate::types::ability::CountScope::Controller,
                         filter: None,
-                        ..
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 comparator: Comparator::EQ,
@@ -55780,7 +55785,7 @@ fn assert_life_lost_villainous_chooser(chooser: &PlayerFilter, expected_relation
                 attr.as_ref(),
                 QuantityRef::LifeLost {
                     player: PlayerScope::ScopedPlayer,
-                    ..
+                    window: TurnWindow::ThisTurn,
                 }
             ));
             assert_eq!(value.as_ref(), &QuantityExpr::Fixed { value: 3 });
@@ -59659,6 +59664,7 @@ fn veil_of_summer_effect_chain_parses_supported_clauses() {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::SpellsCast {
                     scope: crate::types::ability::CountScope::Opponents,
+                    window: TurnWindow::ThisTurn,
                     ..
                 }
             },

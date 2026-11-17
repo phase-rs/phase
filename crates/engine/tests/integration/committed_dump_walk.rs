@@ -157,9 +157,11 @@ fn every_committed_dump_with_a_nonzero_legacy_spells_cast_total_is_refused() {
     let mut files: Vec<PathBuf> = Vec::new();
     collect_gz(&root, &mut files);
     files.sort();
-    let mut refused = Vec::new();
-    let mut restorable_despite_total = Vec::new();
-    let mut refused_for_another_reason = Vec::new();
+    // Relative paths stay `PathBuf`s and are compared component-wise, so the assertions hold with
+    // either native separator.
+    let mut refused: Vec<PathBuf> = Vec::new();
+    let mut restorable_despite_total: Vec<PathBuf> = Vec::new();
+    let mut refused_for_another_reason: Vec<PathBuf> = Vec::new();
     for path in &files {
         let recorded = committed_document_as_recorded(path);
         let Some(total) = recorded_legacy_spells_cast_total(&recorded) else {
@@ -168,29 +170,29 @@ fn every_committed_dump_with_a_nonzero_legacy_spells_cast_total_is_refused() {
         if total == 0 {
             continue;
         }
-        let name = path
+        let relative = path
             .strip_prefix(&root)
             .expect("collected under the root")
-            .to_string_lossy()
-            .into_owned();
+            .to_path_buf();
         match restore_committed_as_recorded(path) {
             Err(error) if error.contains("legacy spells_cast_last_turn snapshot") => {
-                refused.push(name)
+                refused.push(relative)
             }
-            Err(_) => refused_for_another_reason.push(name),
-            Ok(_) => restorable_despite_total.push(name),
+            Err(_) => refused_for_another_reason.push(relative),
+            Ok(_) => restorable_despite_total.push(relative),
         }
     }
     // Reach: the refusal population is the one the ticket measured, not an empty walk.
     assert!(refused.len() >= 14, "refused dumps: {refused:#?}");
-    for name in &refused {
-        let path = root.join(name);
-        assert!(
-            restore_committed(&path)
-                .err()
-                .is_none_or(|error| !error.contains("legacy spells_cast_last_turn snapshot")),
-            "{name}: the total alone is the refusal"
-        );
+    for relative in &refused {
+        // The positive control: with the total declared absent the dump restores. Any restore
+        // error, the legacy one or an unrelated one, means the total alone is not the refusal.
+        if let Err(error) = restore_committed(&root.join(relative)) {
+            panic!(
+                "{}: the paired restore without the total must succeed, but failed: {error}",
+                relative.display()
+            );
+        }
     }
     // These carry a nonzero total yet restore as recorded: their restore goes through the
     // resolution-stack projection (`projected_capture_snapshot`), which rebuilds the state from the
@@ -198,9 +200,9 @@ fn every_committed_dump_with_a_nonzero_legacy_spells_cast_total_is_refused() {
     assert_eq!(
         restorable_despite_total,
         [
-            "engine/tests/integration/fixtures/issue_8024_spell_rest_turn26.json.gz",
-            "engine/tests/integration/fixtures/mycoloth_devour_wedge_turn15.json.gz",
-            "engine/tests/integration/fixtures/mycoloth_devour_wedge_turn20.json.gz",
+            Path::new("engine/tests/integration/fixtures/issue_8024_spell_rest_turn26.json.gz"),
+            Path::new("engine/tests/integration/fixtures/mycoloth_devour_wedge_turn15.json.gz"),
+            Path::new("engine/tests/integration/fixtures/mycoloth_devour_wedge_turn20.json.gz"),
         ],
         "{restorable_despite_total:#?}"
     );
@@ -208,7 +210,9 @@ fn every_committed_dump_with_a_nonzero_legacy_spells_cast_total_is_refused() {
     // the private rules record"); its total is pinned by `committed_dump_walk`'s EXPECTED row only.
     assert_eq!(
         refused_for_another_reason,
-        ["engine/tests/integration/fixtures/ureni_turn10_raw_resolution_stack.json.gz"]
+        [Path::new(
+            "engine/tests/integration/fixtures/ureni_turn10_raw_resolution_stack.json.gz"
+        )]
     );
 }
 

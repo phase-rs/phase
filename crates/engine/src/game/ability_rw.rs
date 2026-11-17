@@ -7330,7 +7330,10 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
         // (Fairgrounds Trumpeter). Fail-closed on a departure reentry hazard.
         QuantityRef::CounterAddedThisTurn { .. } => reads_frozen_of(StateKind::ObjectCounters),
         // Player-resource journals.
-        QuantityRef::LifeLost { .. }
+        QuantityRef::LifeLost {
+            player: _,
+            window: _,
+        }
         | QuantityRef::LifeGainedThisTurn { player: _ }
         | QuantityRef::DamageDealtThisTurn { .. } => reads_player_of(StateKind::JournalLife),
         QuantityRef::CardsDrawnThisTurn { player: _ }

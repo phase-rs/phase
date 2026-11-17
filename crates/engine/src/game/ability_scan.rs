@@ -2898,7 +2898,10 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             aggregate: _,
         } => Axes::NONE,
         QuantityRef::PreviousEffectCount => Axes::NONE,
-        QuantityRef::LifeLost { player, .. } => {
+        // `window` is bound and ignored on purpose: both windows read the same
+        // per-player journal class (the this-turn counter or its turn-boundary
+        // snapshot), so neither changes an axis. A new field forces a decision.
+        QuantityRef::LifeLost { player, window: _ } => {
             let mut acc = Axes {
                 event: false,
                 sibling: false,
@@ -2956,7 +2959,12 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             source_counters: false,
             history: HistoryReads::NONE,
         },
-        QuantityRef::SpellsCast { scope, filter, .. } => {
+        // `window` is bound and ignored on purpose, as for `LifeLost` above.
+        QuantityRef::SpellsCast {
+            scope,
+            filter,
+            window: _,
+        } => {
             let mut acc = Axes {
                 event: false,
                 sibling: false,
