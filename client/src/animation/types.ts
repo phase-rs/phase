@@ -183,7 +183,18 @@ export function lifeChangeImpactDelayMs(
  *  pacing multipliers apply. */
 export const TURN_BANNER_DURATION_MS = 1500;
 
-/** Base dice-roll overlay display duration (the 3D tumble + settle + a beat to
- *  read the result), before pacing multipliers. The tumble itself is ~1.6s
- *  inside Dice3D; this is the total time the overlay stays mounted. */
-export const DICE_ROLL_DURATION_MS = 2400;
+/** Base time an ability roll's result stays on screen after its dice or coin
+ *  land, before the animation speed multiplier. The overlay's close countdown
+ *  starts at the landing (uiStore `settleDiceRoll`), so however long the 3D
+ *  chunk and WebGL take to start, the result keeps its full beat. */
+export const DICE_RESULT_HOLD_MS = 1200;
+
+/** Floor for that beat at fast animation speeds, so the result stays readable
+ *  however fast the tumble plays. Instant speed (0) skips the overlay instead. */
+export const DICE_RESULT_MIN_HOLD_MS = 800;
+
+/** Wall-clock backstop for an ability roll whose landing is never reported (a
+ *  renderer that stalls, or a hidden tab that pauses animation frames). It is
+ *  not speed-scaled: it must outlast the slowest landing, a 3.2s tumble at the
+ *  slowest speed, plus the 3D chunk's load and WebGL start-up. */
+export const DICE_ROLL_LANDING_TIMEOUT_MS = 8000;

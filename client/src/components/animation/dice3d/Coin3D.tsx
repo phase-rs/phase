@@ -10,20 +10,19 @@ import { useEffect, useRef } from "react";
 import {
   AmbientLight,
   CanvasTexture,
-  CylinderGeometry,
   DirectionalLight,
   Mesh,
   MeshStandardMaterial,
   PerspectiveCamera,
   Scene,
-  Vector3,
   WebGLRenderer,
 } from "three";
+import { COIN_REST_ANGLE, createCoinGeometry, FLIP_AXIS, type CoinFace } from "./coinGeometry.ts";
 import { useFrameFailure } from "./useFrameFailure.ts";
 
 interface Coin3DProps {
   /** Which face to land on after the flip. */
-  face: "heads" | "tails";
+  face: CoinFace;
   /** Scales animation duration (default 1). */
   speedMultiplier?: number;
   /** Fired once when the coin finishes settling. */
@@ -38,11 +37,6 @@ const DEFAULT_SIZE = 120;
 const TOTAL_MS = 1500;
 const FACE_TEXTURE_PX = 256;
 const DEFAULT_LABELS = { heads: "H", tails: "T" } as const;
-
-// The flip axis: a horizontal axis (X). The coin's flat faces point along ±Y
-// in local space (CylinderGeometry's axis is Y), so flipping about X swaps
-// which flat face points toward the camera.
-const FLIP_AXIS = new Vector3(1, 0, 0);
 
 /** Quadratic ease-out. */
 function easeOutQuad(t: number): number {
@@ -114,7 +108,7 @@ export function Coin3D({
     scene.add(dirLight);
 
     // ─── Coin mesh: flattened cylinder ───
-    // Material group order for CylinderGeometry: [side, top (+Y), bottom (-Y)].
+    // Material group order (see `createCoinGeometry`): [side, heads, tails].
     const headsTexture = makeFaceTexture(labels.heads, "#ffd700");
     const tailsTexture = makeFaceTexture(labels.tails, "#e0c060");
     const sideMaterial = new MeshStandardMaterial({
@@ -133,16 +127,12 @@ export function Coin3D({
       metalness: 0.3,
     });
 
-    const geometry = new CylinderGeometry(1, 1, 0.18, 48);
+    const geometry = createCoinGeometry();
     const mesh = new Mesh(geometry, [sideMaterial, headsMaterial, tailsMaterial]);
 
-    // Orient the coin so its flat faces face the camera at rest. The cylinder's
-    // top (+Y, heads) must point toward +Z (camera). Rotate +90° about X maps
-    // local +Y → +Z, showing heads; rotate -90° about X shows tails (local -Y
-    // → +Z).
-    const headsRest = Math.PI / 2;
-    const tailsRest = -Math.PI / 2;
-    const restAngle = face === "heads" ? headsRest : tailsRest;
+    // The rotation about FLIP_AXIS that rests the requested face toward the
+    // camera, with its label upright.
+    const restAngle = COIN_REST_ANGLE[face];
 
     scene.add(mesh);
 
