@@ -2625,15 +2625,30 @@ pub(crate) fn commit_liminal_copy_token_entry(
     events: &mut Vec<GameEvent>,
 ) -> bool {
     let continuation = liminal_copy_token_continuation_for_event(state, &event);
-    commit_liminal_copy_token_entry_with_continuation(state, event, continuation, events)
+    commit_liminal_copy_token_entry_with_continuation(state, event, continuation, false, events)
 }
 
 fn commit_liminal_copy_token_entry_with_continuation(
     state: &mut GameState,
     event: ProposedEvent,
     continuation: Option<LiminalCopyTokenContinuation>,
+    rediscover: bool,
     events: &mut Vec<GameEvent>,
 ) -> bool {
+    let entry_ref = match &event {
+        ProposedEvent::TokenEntry { entry_ref, .. } => *entry_ref,
+        _ => return true,
+    };
+    let event = match crate::game::engine_replacement::settle_liminal_token_entry_replacements(
+        state, event, rediscover, events,
+    ) {
+        crate::game::replacement::ReplacementResult::Execute(event) => event,
+        crate::game::replacement::ReplacementResult::NeedsChoice(_) => return false,
+        crate::game::replacement::ReplacementResult::Prevented => {
+            state.liminal_entries.remove(&entry_ref);
+            return true;
+        }
+    };
     let post_actions = continuation
         .map(liminal_copy_token_continuation_post_action)
         .into_iter()
@@ -2652,11 +2667,30 @@ pub(crate) fn commit_liminal_token_entry_and_continue_copy_batch(
     event: ProposedEvent,
     events: &mut Vec<GameEvent>,
 ) -> bool {
+    complete_liminal_token_entry_and_continue_copy_batch(state, event, false, events)
+}
+
+/// Resume after the selected entry replacement's paused work has finished.
+pub(crate) fn resume_liminal_token_entry_and_continue_copy_batch(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    complete_liminal_token_entry_and_continue_copy_batch(state, event, true, events)
+}
+
+fn complete_liminal_token_entry_and_continue_copy_batch(
+    state: &mut GameState,
+    event: ProposedEvent,
+    rediscover: bool,
+    events: &mut Vec<GameEvent>,
+) -> bool {
     let continuation = liminal_copy_token_continuation_for_event(state, &event);
     if !commit_liminal_copy_token_entry_with_continuation(
         state,
         event,
         continuation.clone(),
+        rediscover,
         events,
     ) {
         return false;

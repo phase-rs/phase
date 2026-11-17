@@ -948,29 +948,6 @@ fn handle_replacement_choice_inner(
                         super::engine::resume_pending_continuation_if_priority(state, events)?;
                         return Ok(state.waiting_for.clone());
                     }
-                    if state.has_post_replacement_drain() {
-                        state.waiting_for = WaitingFor::Priority {
-                            player: state.active_player,
-                        };
-                        if let Some(waiting_for) = apply_pending_post_replacement_effect(
-                            state,
-                            Some(entry_ref),
-                            None,
-                            Some(ReplacementEvent::Moved),
-                            events,
-                        ) {
-                            state.pending_liminal_entry_resume =
-                                Some(crate::types::game_state::PendingLiminalEntryResume::Token {
-                                    source_id: entry_ref,
-                                    player: waiting_for
-                                        .acting_player()
-                                        .unwrap_or(state.active_player),
-                                    event,
-                                });
-                            state.waiting_for = waiting_for;
-                            return Ok(state.waiting_for.clone());
-                        }
-                    }
                     if !crate::game::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
                         state, event, events,
                     ) {
@@ -5077,12 +5054,9 @@ pub(crate) fn apply_pending_post_replacement_effect(
     event: Option<ReplacementEvent>,
     events: &mut Vec<GameEvent>,
 ) -> Option<WaitingFor> {
-    // CR 614.12a (approximation): sacrifice prompt fires after ZoneChange completes,
-    // matching Siege/Tribute precedent. A strict reading of 614.12a says the choice
-    // is made *before* the permanent enters, but the engine's pipeline applies the
-    // zone change first and then drains the post-replacement continuation; the
-    // observable behavior is equivalent for as-enters sacrifice/counter mechanics
-    // (Devour, Siege protector, Tribute) where the choice doesn't gate entry.
+    // CR 614.12a: liminal token entries dispatch selected own-entry work before
+    // rediscovering remaining replacements and committing the birth. Card-backed
+    // ZoneChange callers retain their existing post-delivery dispatch timing.
     //
     // CR 615.5 + CR 616.1g: Resident-top dispatch. `begin_dispatch` takes the
     // continuation and marks the drain `Dispatching` WITHOUT removing it, so:
@@ -5624,17 +5598,124 @@ pub fn find_copy_targets(
         .collect()
 }
 
+/// CR 614.12 + CR 616.1f: settle the selected entrant's own entry work before
+/// rediscovering replacements. `rediscover` is true on a paused work item's
+/// priority-boundary resume; the inline path discovers only after dispatching.
+pub(crate) fn settle_liminal_token_entry_replacements(
+    state: &mut GameState,
+    mut event: ProposedEvent,
+    mut rediscover: bool,
+    events: &mut Vec<GameEvent>,
+) -> super::replacement::ReplacementResult {
+    use super::replacement::{self, ReplacementResult};
+    loop {
+        if rediscover {
+            match replacement::replace_event(state, event, events) {
+                ReplacementResult::Execute(next) => event = next,
+                ReplacementResult::NeedsChoice(player) => {
+                    state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+                    return ReplacementResult::NeedsChoice(player);
+                }
+                ReplacementResult::Prevented => return ReplacementResult::Prevented,
+            }
+        }
+        let settles_own_entry = replacement::token_entry_awaits_own_entry_settlement(state, &event);
+        if !state.has_post_replacement_drain() {
+            return ReplacementResult::Execute(event);
+        }
+        let ProposedEvent::TokenEntry { entry_ref, .. } = &event else {
+            unreachable!("only a token entry can own entry replacement work")
+        };
+        let source_id = *entry_ref;
+        // Park the event before own-entry work runs, so counters it earns are
+        // written to this entrant's event rather than the batch's reusable seed.
+        let mut terminal_event = Some(event);
+        let previous_resume = if settles_own_entry {
+            state.pending_liminal_entry_resume.replace(
+                crate::types::game_state::PendingLiminalEntryResume::Token {
+                    source_id,
+                    player: state.active_player,
+                    event: terminal_event
+                        .take()
+                        .expect("the own entry event is present"),
+                },
+            )
+        } else {
+            None
+        };
+        state.waiting_for = WaitingFor::Priority {
+            player: state.active_player,
+        };
+        if let Some(waiting_for) = apply_pending_post_replacement_effect(
+            state,
+            Some(source_id),
+            None,
+            Some(ReplacementEvent::Moved),
+            events,
+        ) {
+            let player = waiting_for.acting_player().unwrap_or(state.active_player);
+            if !settles_own_entry {
+                state.pending_liminal_entry_resume =
+                    Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+                        source_id,
+                        player,
+                        event: terminal_event
+                            .take()
+                            .expect("the terminal entry event is present"),
+                    });
+            } else if let Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+                source_id: pending_source,
+                player: pending_player,
+                event: ProposedEvent::TokenEntry { entry_ref, .. },
+            }) = state.pending_liminal_entry_resume.as_mut()
+            {
+                if *pending_source == source_id && *entry_ref == source_id {
+                    *pending_player = player;
+                }
+            }
+            state.waiting_for = waiting_for;
+            return ReplacementResult::NeedsChoice(player);
+        }
+        // Preserve terminal delivery of foreign entry work, too. Only selected own
+        // work stopped discovery at the barrier and therefore owes rediscovery here.
+        if !settles_own_entry {
+            return ReplacementResult::Execute(
+                terminal_event.expect("terminal work retains its entry event"),
+            );
+        }
+        // Take only the event this dispatch parked; an unrelated resume is never
+        // consumed as this entrant's completed work.
+        assert!(matches!(
+            state.pending_liminal_entry_resume.as_ref(),
+            Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+                source_id: pending_source,
+                event: ProposedEvent::TokenEntry { entry_ref, .. },
+                ..
+            }) if *pending_source == source_id && *entry_ref == source_id
+        ));
+        let Some(crate::types::game_state::PendingLiminalEntryResume::Token {
+            event: settled_event,
+            ..
+        }) = state.pending_liminal_entry_resume.take()
+        else {
+            unreachable!("the matched own entry resume is present")
+        };
+        event = settled_event;
+        state.pending_liminal_entry_resume = previous_resume;
+        rediscover = true;
+    }
+}
+
 /// CR 614.12a + CR 111.1: commit a liminal (decided-but-not-yet-entered) token
 /// entry whose "as enters" chain paused on a player prompt, once that prompt —
 /// and every continuation it spawned — has drained back to a priority boundary.
 ///
 /// # The defect this exists to close
 ///
-/// `GameState::pending_liminal_entry_resume` has three producers
-/// (`handle_replacement_choice_inner`'s `TokenEntry` arm,
-/// `zone_pipeline::deliver_zone_change`, and
-/// `token_copy::apply_copy_token_after_replacement_with_created_ids`) and, before
-/// this drain, exactly ONE consumer: `handle_copy_target_choice`. That handler
+/// `GameState::pending_liminal_entry_resume` is produced by the shared
+/// `settle_liminal_token_entry_replacements` authority and
+/// `zone_pipeline::deliver_zone_change`. Before this drain, its only consumer
+/// was `handle_copy_target_choice`. That handler
 /// answers `WaitingFor::CopyTargetChoice` only, so an entry whose chain paused on
 /// any other prompt was never resumed — `commit_liminal_copy_token_entry` was
 /// never reached, the entry stayed in `state.liminal_entries` for the rest of the
@@ -5709,12 +5790,9 @@ pub(super) fn resume_pending_liminal_token_entry(
         unreachable!("the guard above matched a Token resume with a live liminal entry")
     };
 
-    // The single authority the UNPAUSED path uses for exactly this step
-    // (`handle_replacement_choice_inner`'s `TokenEntry` arm): commit this entry,
-    // then continue the rest of the CR 707.2 copy batch and drain the pending
-    // copy-token resolution. Resuming through it is what makes a paused entry
-    // and an unpaused one converge on the same board.
-    if !crate::game::effects::token::commit_liminal_token_entry_and_continue_copy_batch(
+    // CR 616.1f: the paused selected work has finished. Rediscover on its same
+    // event (including applied identities), then use the shared entry completion.
+    if !crate::game::effects::token::resume_liminal_token_entry_and_continue_copy_batch(
         state, event, events,
     ) {
         return Some(state.waiting_for.clone());

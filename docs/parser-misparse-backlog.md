@@ -48,6 +48,9 @@ replacement-ordering pauses: Superior Spider-Man retains its selected graveyard 
 exile rider, and a Sculpting Steel token retains its chosen Triskelion values when the model's
 owner concedes. Redirected Saw in Half copies retain their halved power/toughness in both the
 creation snapshot and replay, without battlefield-entry counters (CR 608.2c, CR 707.9b, CR 614.6).
+Saw in Half's Metamorph copies each offer their own copy choice before Moonlight.
+Mycoloth copies can resolve Devour before redirection; Moonlight-first skips Devour.
+Devour counters belong only to that entrant's event, never the next copy's batch seed.
 
 ## Ranked root causes
 

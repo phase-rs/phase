@@ -17,7 +17,7 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CopyTokenEntryTail, GameState, LiminalEntry, OfferedBatchCustody, PendingCopyTokenBatch,
-    PendingCopyTokenResolution, PendingCounterPostAction, PendingLiminalEntryResume, WaitingFor,
+    PendingCopyTokenResolution, PendingCounterPostAction, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
@@ -660,9 +660,28 @@ fn drain_copy_token_resolution(
             .created_ids
             .extend(state.last_created_token_ids.clone());
     }
-    while let Some(batch) = pending.remaining.pop_front() {
+    while let Some(mut batch) = pending.remaining.pop_front() {
         if batch.count == 0 {
             continue;
+        }
+        // CR 707.9b + CR 608.2h: settle donor-dependent exceptions before deciding whether
+        // this batch can consult entry replacements on liminal entrants. The same fixed
+        // values then ride the offered batch through every replacement pause and delivery.
+        if let Some(donor) = batch.copy.donor {
+            for modification in &mut batch.copy.additional_modifications {
+                if matches!(
+                    modification,
+                    ContinuousModification::SetPowerDynamic { .. }
+                        | ContinuousModification::SetToughnessDynamic { .. }
+                ) {
+                    *modification = resolve_copy_token_modification(
+                        state,
+                        modification,
+                        batch.owner,
+                        donor.object_id,
+                    );
+                }
+            }
         }
         let stack_depth_before_batch = state.resolution_stack.capture_child_boundary();
         let mut spec = copy_entry_probe_spec(&batch.copy, &state.all_creature_types);
@@ -1400,30 +1419,6 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 entry_board.as_ref().map(|cached| cached.board()),
             ) {
                 crate::game::replacement::ReplacementResult::Execute(event) => {
-                    if state.has_post_replacement_drain() {
-                        if let Some(waiting_for) =
-                            crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                                state,
-                                Some(token_id),
-                                None,
-                                Some(crate::types::replacements::ReplacementEvent::Moved),
-                                events,
-                            )
-                        {
-                            state.pending_liminal_entry_resume =
-                                Some(PendingLiminalEntryResume::Token {
-                                    source_id: token_id,
-                                    player: waiting_for.acting_player().unwrap_or(controller),
-                                    event: event.clone(),
-                                });
-                            state.waiting_for = waiting_for;
-                            state.last_created_token_ids = created_ids.clone();
-                            return CopyTokenApplyStatus {
-                                created_ids,
-                                completion: CopyTokenApplyCompletion::Paused,
-                            };
-                        }
-                    }
                     if !super::token::commit_liminal_copy_token_entry(state, event, events) {
                         created_ids = state.last_created_token_ids.clone();
                         return CopyTokenApplyStatus {

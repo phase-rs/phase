@@ -37,7 +37,8 @@ use engine::types::actions::{DebugCardCreationKind, GameAction};
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    GameState, PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
+    CastPaymentMode, GameState, PersistedGameState, PersistedRestoreFinalization,
+    ReplacementChoiceKind, ShardChoice, StackEntryKind, WaitingFor,
 };
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -2695,4 +2696,734 @@ fn grumgullys_counter_is_applied_once_to_a_feldon_copy() {
         Some(1),
         "Grumgully's counter is placed once"
     );
+}
+
+// Full Oracle text, including the printed mana reminder omitted by the older fixture.
+const SAW_METAMORPH: &str = "({U/P} can be paid with either {U} or 2 life.)\nYou may have this creature enter as a copy of any artifact or creature on the battlefield, except it's an artifact in addition to its other types.";
+const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
+const MYCOLOTH: &str = "Devour 2 (As this creature enters, you may sacrifice any number of creatures. It enters with twice that many +1/+1 counters on it.)\nAt the beginning of your upkeep, create a 1/1 green Saproling creature token for each +1/+1 counter on this creature.";
+
+fn assert_entry_resolution_complete(state: &GameState) {
+    assert_settled(state, "entry replacement completion");
+    assert!(
+        state.resolution_stack.is_empty(),
+        "no suspended resolution frames"
+    );
+    assert!(
+        state.resolving_stack_entry.is_none(),
+        "no unresolved carrier"
+    );
+    assert!(state.liminal_entries.is_empty(), "no stranded entrant");
+    assert!(
+        state.pending_liminal_entry_resume.is_none(),
+        "no stranded entry resume"
+    );
+}
+
+/// Public-action driver that counts every own-copy offer and declines Vat's imprint trigger.
+fn finish_saw_metamorph(
+    runner: &mut GameRunner,
+    vat: ObjectId,
+    copy_vat: bool,
+) -> (usize, usize, Vec<GameEvent>) {
+    let mut offers = 0;
+    let mut targets = 0;
+    let mut events = Vec::new();
+    for _ in 0..64 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => {
+                assert_entry_resolution_complete(runner.state());
+                return (offers, targets, events);
+            }
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::ReplacementChoice {
+                player,
+                candidates,
+                kind,
+                ..
+            } => {
+                assert_eq!(player, P0);
+                assert_eq!(kind, ReplacementChoiceKind::OptionalBranch);
+                let accept = candidates
+                    .iter()
+                    .position(|candidate| candidate.description.contains("enter as a copy"))
+                    .expect("the entrant's own copy must be offered");
+                let source = candidates[accept].source_id;
+                let source_name = runner
+                    .state()
+                    .objects
+                    .get(&source)
+                    .map(|object| object.name.as_str())
+                    .or_else(|| {
+                        runner
+                            .state()
+                            .liminal_entries
+                            .get(&source)
+                            .map(|entry| entry.name.as_str())
+                    });
+                assert_eq!(
+                    source_name,
+                    Some("Phyrexian Metamorph"),
+                    "the offer belongs to this entrant, not a resident replacement"
+                );
+                let decline = candidates
+                    .iter()
+                    .position(|candidate| candidate.description == "Decline")
+                    .expect("the own copy may be declined");
+                offers += 1;
+                GameAction::ChooseReplacement {
+                    index: if copy_vat { accept } else { decline },
+                }
+            }
+            WaitingFor::CopyTargetChoice {
+                player,
+                valid_targets,
+                ..
+            } => {
+                assert_eq!(player, P0);
+                assert!(copy_vat, "declining the copy must not request a model");
+                assert!(
+                    valid_targets.contains(&vat),
+                    "the noncreature Vat is offered"
+                );
+                targets += 1;
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(vat)),
+                }
+            }
+            WaitingFor::OptionalEffectChoice {
+                player, source_id, ..
+            } => {
+                assert_eq!(player, P0);
+                assert_eq!(
+                    source_id, vat,
+                    "only the resident Vat's imprint is optional"
+                );
+                GameAction::DecideOptionalEffect { accept: false }
+            }
+            other => panic!("unexpected Saw/Metamorph prompt: {other:?}"),
+        };
+        events.extend(
+            runner
+                .act(action)
+                .expect("public entry answer accepted")
+                .events,
+        );
+    }
+    panic!("Saw/Metamorph did not fully settle");
+}
+
+/// CR 707.5 + CR 616.1c: even Saw's dynamically halved copies offer their own
+/// copy replacement before Moonlight. CR 707.9b: the halving is a copy exception.
+fn saw_metamorph_entry_choices(copy_vat: bool) {
+    let mut scenario = base_scenario();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::Blue,
+            ManaType::White,
+            ManaType::Black,
+            ManaType::Colorless,
+        ]
+        .into_iter()
+        .flat_map(|kind| (0..8).map(move |_| ManaUnit::new(kind, ObjectId(0), false, vec![])))
+        .collect(),
+    );
+    scenario
+        .add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White, ManaCostShard::White],
+        });
+    let vat = scenario
+        .add_artifact_from_oracle(P0, "Mimic Vat", MIMIC_VAT)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    let metamorph = scenario
+        .add_creature_to_hand(P0, "Phyrexian Metamorph", 0, 0)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Phyrexian", "Shapeshifter"])
+        .from_oracle_text_with_keywords(&[], SAW_METAMORPH)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::PhyrexianBlue],
+        })
+        .id();
+    let moonlight = scenario
+        .add_spell_to_hand_from_oracle(P0, "Hallowed Moonlight", true, HALLOWED_MOONLIGHT)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    let saw = scenario
+        .add_spell_to_hand_from_oracle(P0, "Saw in Half", true, SAW_IN_HALF)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .act(GameAction::CastSpell {
+            object_id: metamorph,
+            card_id: runner.state().objects[&metamorph].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast the real 0/0 Metamorph");
+    assert!(matches!(runner.state().waiting_for,
+        WaitingFor::PhyrexianPayment { player: P0, spell_object, .. }
+            if spell_object == metamorph));
+    runner
+        .act(GameAction::SubmitPhyrexianChoices {
+            choices: vec![ShardChoice::PayMana],
+        })
+        .expect("pay blue for the printed Phyrexian shard");
+    let (initial_offers, initial_targets, _) = finish_saw_metamorph(&mut runner, vat, false);
+    assert_eq!(
+        (initial_offers, initial_targets),
+        (1, 0),
+        "decline the normally cast copy"
+    );
+    assert_eq!(runner.state().objects[&metamorph].zone, Zone::Battlefield);
+    assert_eq!(
+        (
+            runner.state().objects[&metamorph].power,
+            runner.state().objects[&metamorph].toughness
+        ),
+        (Some(1), Some(1)),
+        "Anthem keeps the uncopied 0/0 alive"
+    );
+    cast_hallowed(&mut runner, moonlight);
+    let journal_start = {
+        let committed = runner.cast(saw).target_object(metamorph).commit();
+        assert!(!committed.state().stack.is_empty(), "Saw committed");
+        committed.state().resolved_rules_journal.entries().len()
+    };
+    let (offers, targets, events) = finish_saw_metamorph(&mut runner, vat, copy_vat);
+    assert_eq!(offers, 2, "both Saw tokens must offer their own copy");
+    assert_eq!(targets, if copy_vat { 2 } else { 0 });
+    assert_eq!(runner.state().objects[&metamorph].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&saw].zone, Zone::Graveyard);
+    let births: Vec<_> = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| match entry.command.as_ref() {
+            Some(ResolvedRulesCommand::TokenCreation(birth)) => Some(birth),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(births.len(), 2, "two and only two token births");
+    let created: Vec<_> = events
+        .iter()
+        .filter_map(|event| {
+            if let GameEvent::TokenCreated { object_id, .. } = event {
+                Some(*object_id)
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(created.len(), 2, "both token births are publicly emitted");
+    if !copy_vat {
+        assert_eq!(
+            created_tokens_named(&events, "Phyrexian Metamorph").len(),
+            2
+        );
+    }
+    for birth in births {
+        assert!(created.contains(&birth.object.object_id));
+        if copy_vat {
+            assert_eq!(
+                birth.entry_zone.unwrap_or(Zone::Battlefield),
+                Zone::Battlefield
+            );
+            let token = &runner.state().objects[&birth.object.object_id];
+            assert_eq!(token.name, "Mimic Vat", "the selected copy entered");
+            assert_eq!(
+                zone_moves_of(&events, birth.object.object_id),
+                vec![(None, Zone::Battlefield)],
+                "one entry and no exile"
+            );
+            assert_eq!(token.zone, Zone::Battlefield);
+            assert!(token.card_types.core_types.contains(&CoreType::Artifact));
+            assert!(
+                !token.card_types.core_types.contains(&CoreType::Creature),
+                "Vat stays noncreature"
+            );
+        } else {
+            assert_eq!(birth.entry_zone, Some(Zone::Exile));
+            assert_eq!(
+                zone_moves_of(&events, birth.object.object_id),
+                vec![(None, Zone::Exile)],
+                "declined token is born only in exile"
+            );
+        }
+    }
+}
+
+#[test]
+fn saw_metamorph_tokens_can_each_copy_a_noncreature_under_moonlight() {
+    saw_metamorph_entry_choices(true);
+}
+
+#[test]
+fn saw_metamorph_tokens_each_explicitly_decline_before_moonlight_exile() {
+    saw_metamorph_entry_choices(false);
+}
+
+/// CR 702.82a + CR 614.13 + CR 616.1f: selected Devour finishes, including
+/// sacrificing other creatures, before Moonlight can replace the remaining entry.
+fn feldon_mycoloth_entry_order(devour_first: bool, sacrifice_bears: bool) {
+    let mut scenario = base_scenario();
+    scenario.with_mana_pool(
+        P0,
+        [
+            ManaType::White,
+            ManaType::Colorless,
+            ManaType::Red,
+            ManaType::Red,
+            ManaType::Red,
+        ]
+        .into_iter()
+        .map(|kind| ManaUnit::new(kind, ObjectId(0), false, vec![]))
+        .collect(),
+    );
+    let feldon = scenario
+        .add_creature_from_oracle(P0, "Feldon of the Third Path", 2, 3, FELDON)
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Artificer"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red, ManaCostShard::Red],
+        })
+        .id();
+    // Grizzly Bears has no Oracle rules text.
+    let bears = scenario
+        .add_creature(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        })
+        .id();
+    let mycoloth = scenario
+        .add_creature_to_graveyard(P0, "Mycoloth", 4, 4)
+        .with_subtypes(vec!["Fungus"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+        })
+        .from_oracle_text_with_keywords(&["Devour"], MYCOLOTH)
+        .id();
+    let moonlight = scenario
+        .add_spell_to_hand_from_oracle(P0, "Hallowed Moonlight", true, HALLOWED_MOONLIGHT)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White],
+        })
+        .id();
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().objects[&mycoloth]
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Devour { n: 2, .. })),
+        "the full Oracle fixture synthesizes real Devour 2"
+    );
+    cast_hallowed(&mut runner, moonlight);
+    let journal_start = runner.state().resolved_rules_journal.entries().len();
+    let mut events = runner
+        .act(GameAction::ActivateAbility {
+            source_id: feldon,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Feldon")
+        .events;
+    let mut bound_target = false;
+    let mut targeted = false;
+    let mut ordered = false;
+    let mut moonlight_replacement_source = None;
+    let mut selected_sacrifices = false;
+    for _ in 0..64 {
+        if let Some(entry) = runner
+            .state()
+            .stack
+            .iter()
+            .find(|entry| entry.source_id == feldon)
+        {
+            match &entry.kind {
+                StackEntryKind::ActivatedAbility { source_id, ability } => {
+                    assert_eq!(*source_id, feldon);
+                    assert_eq!(
+                        ability.targets,
+                        vec![TargetRef::Object(mycoloth)],
+                        "Feldon's committed activation targets the actual graveyard Mycoloth"
+                    );
+                    bound_target = true;
+                }
+                other => panic!("Feldon's stack entry is not its activation: {other:?}"),
+            }
+        }
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
+                GameAction::PassPriority
+            }
+            WaitingFor::TargetSelection {
+                player,
+                target_slots,
+                selection,
+                ..
+            } => {
+                assert_eq!(player, P0);
+                assert!(!targeted);
+                assert!(target_slots[selection.current_slot]
+                    .legal_targets
+                    .contains(&TargetRef::Object(mycoloth)));
+                targeted = true;
+                GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(mycoloth)),
+                }
+            }
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                assert_eq!(player, P0);
+                assert!(!ordered, "one ordering decision for this entrant");
+                let devour = candidates
+                    .iter()
+                    .position(|candidate| candidate.description.contains("Devour 2"))
+                    .expect("ordering must offer Mycoloth's own Devour");
+                let moon = candidates
+                    .iter()
+                    .position(|candidate| candidate.description.contains("exile"))
+                    .expect("ordering must also offer Moonlight");
+                assert_ne!(devour, moon);
+                moonlight_replacement_source = Some(candidates[moon].source_id);
+                ordered = true;
+                GameAction::ChooseReplacement {
+                    index: if devour_first { devour } else { moon },
+                }
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                assert_eq!(player, P0);
+                assert!(ordered && devour_first && !selected_sacrifices);
+                assert!(!events.iter().any(|event| matches!(event,
+                    GameEvent::ReplacementApplied { source_id, .. } if Some(*source_id) == moonlight_replacement_source)));
+                assert!(!events
+                    .iter()
+                    .any(|event| matches!(event, GameEvent::TokenCreated { .. })));
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(player, P0);
+                assert!(ordered && devour_first && !selected_sacrifices);
+                assert!(cards.contains(&bears), "Devour offers the resident Bears");
+                assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+                assert!(
+                    !events.iter().any(|event| matches!(event,
+                    GameEvent::ReplacementApplied { source_id, .. } if Some(*source_id) == moonlight_replacement_source)),
+                    "Moonlight must not apply before the sacrifice choice settles"
+                );
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+                    "no token may be born before Devour settles"
+                );
+                selected_sacrifices = true;
+                GameAction::SelectCards {
+                    cards: if sacrifice_bears { vec![bears] } else { vec![] },
+                }
+            }
+            other => panic!("unexpected Devour entry prompt: {other:?}"),
+        };
+        events.extend(
+            runner
+                .act(action)
+                .expect("public Devour entry answer accepted")
+                .events,
+        );
+    }
+    assert!(
+        bound_target && ordered,
+        "the targeted activation must reach Devour/Moonlight ordering"
+    );
+    assert_eq!(
+        selected_sacrifices, devour_first,
+        "Moonlight-first offers no Devour"
+    );
+    assert_entry_resolution_complete(runner.state());
+    let moon_index = events
+        .iter()
+        .position(|event| {
+            matches!(event,
+        GameEvent::ReplacementApplied { source_id, .. } if Some(*source_id) == moonlight_replacement_source)
+        })
+        .expect("Moonlight really applies after entry work");
+    let sacrifice_index = events.iter().position(|event| {
+        matches!(event,
+        GameEvent::PermanentSacrificed { object_id, player_id }
+            if *object_id == bears && *player_id == P0)
+    });
+    if devour_first && sacrifice_bears {
+        assert!(
+            sacrifice_index.expect("Bears was actually sacrificed") < moon_index,
+            "the sacrifice occurs before Moonlight, not merely before birth"
+        );
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    } else {
+        assert!(sacrifice_index.is_none(), "Bears was not sacrificed");
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+    }
+    let created = created_tokens_named(&events, "Mycoloth");
+    assert_eq!(created.len(), 1);
+    assert_eq!(
+        zone_moves_of(&events, created[0]),
+        vec![(None, Zone::Exile)]
+    );
+    let births: Vec<_> = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| match entry.command.as_ref() {
+            Some(ResolvedRulesCommand::TokenCreation(birth)) => Some(birth),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        births.len(),
+        1,
+        "exactly one birth, with no battlefield birth"
+    );
+    assert_eq!(births[0].object.object_id, created[0]);
+    assert_eq!(births[0].entry_zone, Some(Zone::Exile));
+    assert!(
+        runner.state().objects[&feldon].tapped,
+        "Feldon's tap cost was paid"
+    );
+    assert_eq!(runner.state().objects[&mycoloth].zone, Zone::Graveyard);
+}
+
+#[test]
+fn mycoloth_devour_sacrifices_before_moonlight_redirects_its_feldon_copy() {
+    feldon_mycoloth_entry_order(true, true);
+}
+
+#[test]
+fn mycoloth_moonlight_first_skips_devour_and_preserves_bears() {
+    feldon_mycoloth_entry_order(false, false);
+}
+
+#[test]
+fn mycoloth_empty_devour_settles_before_moonlight_redirects_its_feldon_copy() {
+    feldon_mycoloth_entry_order(true, false);
+}
+
+/// CR 702.82a + CR 616.1f: Devour counters belong only to the entrant that earned
+/// them. They must not change the routing or counters of Saw's remaining copy.
+#[test]
+fn saw_mycoloth_devour_counters_do_not_leak_into_the_next_moonlight_entry() {
+    let mut scenario = base_scenario();
+    // A battlefield Mycoloth with no counters is legal: its original Devour was declined.
+    let original = scenario
+        .add_creature(P0, "Mycoloth", 4, 4)
+        .with_subtypes(vec!["Fungus"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+        })
+        .from_oracle_text_with_keywords(&["Devour"], MYCOLOTH)
+        .id();
+    // Grizzly Bears has no Oracle rules text.
+    let bears = scenario
+        .add_creature(P0, "Grizzly Bears", 2, 2)
+        .with_subtypes(vec!["Bear"])
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        })
+        .id();
+    let moonlight = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
+    let saw = add_instant(&mut scenario, P0, "Saw in Half", SAW_IN_HALF);
+    let mut runner = scenario.build();
+    assert!(runner.state().objects[&original].counters.is_empty());
+    assert!(
+        runner.state().objects[&original]
+            .keywords
+            .iter()
+            .any(|keyword| matches!(keyword, Keyword::Devour { n: 2, .. })),
+        "the donor really carries Devour 2"
+    );
+    cast_hallowed(&mut runner, moonlight);
+    let pre_state = {
+        let committed = runner.cast(saw).target_object(original).commit();
+        assert!(!committed.state().stack.is_empty(), "Saw committed");
+        committed.state().clone()
+    };
+    let journal_start = pre_state.resolved_rules_journal.entries().len();
+    let mut events = Vec::new();
+    let mut ordered = 0;
+    let mut first_entrant = None;
+    let mut moonlight_source = None;
+    let mut selected_sacrifices = false;
+    for _ in 0..64 {
+        let action = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                assert_eq!(player, P0);
+                let devour = candidates
+                    .iter()
+                    .position(|candidate| candidate.description.contains("Devour 2"))
+                    .expect("each Mycoloth independently offers its own Devour");
+                let moon = candidates
+                    .iter()
+                    .position(|candidate| candidate.description.contains("exile"))
+                    .expect("each Mycoloth independently offers Moonlight");
+                assert_ne!(devour, moon);
+                ordered += 1;
+                assert!(ordered <= 2, "only two entrants require ordering");
+                if ordered == 1 {
+                    first_entrant = Some(candidates[devour].source_id);
+                    moonlight_source = Some(candidates[moon].source_id);
+                    assert!(!selected_sacrifices);
+                    GameAction::ChooseReplacement { index: devour }
+                } else {
+                    assert!(
+                        selected_sacrifices,
+                        "first Devour finished before the next entrant"
+                    );
+                    assert_ne!(
+                        Some(candidates[devour].source_id),
+                        first_entrant,
+                        "the second offer belongs to a different entrant"
+                    );
+                    assert_eq!(Some(candidates[moon].source_id), moonlight_source);
+                    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+                    GameAction::ChooseReplacement { index: moon }
+                }
+            }
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                assert_eq!(player, P0);
+                assert_eq!(ordered, 1);
+                assert!(!selected_sacrifices);
+                GameAction::DecideOptionalEffect { accept: true }
+            }
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(player, P0);
+                assert_eq!(ordered, 1, "only the first entrant chooses Devour");
+                assert!(!selected_sacrifices);
+                assert!(
+                    cards.contains(&bears),
+                    "first Devour offers the resident Bears"
+                );
+                assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
+                assert!(
+                    !events.iter().any(|event| matches!(event,
+                    GameEvent::ReplacementApplied { source_id, .. }
+                        if Some(*source_id) == moonlight_source)),
+                    "Moonlight has not applied before the first sacrifice settles"
+                );
+                assert!(
+                    !events
+                        .iter()
+                        .any(|event| matches!(event, GameEvent::TokenCreated { .. })),
+                    "neither token is born before the first sacrifice settles"
+                );
+                selected_sacrifices = true;
+                GameAction::SelectCards { cards: vec![bears] }
+            }
+            other => panic!("unexpected Saw/Mycoloth entry prompt: {other:?}"),
+        };
+        events.extend(
+            runner
+                .act(action)
+                .expect("public Saw entry answer accepted")
+                .events,
+        );
+    }
+    assert_eq!(
+        ordered, 2,
+        "both Saw tokens independently consult entry replacements"
+    );
+    assert!(selected_sacrifices);
+    assert_entry_resolution_complete(runner.state());
+    assert_eq!(runner.state().objects[&original].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&saw].zone, Zone::Graveyard);
+    let sacrifice = events
+        .iter()
+        .position(|event| {
+            matches!(event,
+        GameEvent::PermanentSacrificed { object_id, player_id }
+            if *object_id == bears && *player_id == P0)
+        })
+        .expect("Bears was actually sacrificed");
+    let moon_applications: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            matches!(event, GameEvent::ReplacementApplied { source_id, .. }
+            if Some(*source_id) == moonlight_source)
+            .then_some(index)
+        })
+        .collect();
+    assert_eq!(
+        moon_applications.len(),
+        2,
+        "Moonlight redirects both independent entries"
+    );
+    assert!(moon_applications.iter().all(|index| sacrifice < *index));
+    let created = created_tokens_named(&events, "Mycoloth");
+    assert_eq!(created.len(), 2, "both tokens are created");
+    assert!(battlefield_tokens_named(runner.state(), "Mycoloth").is_empty());
+    let births: Vec<_> = runner
+        .state()
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(journal_start)
+        .filter_map(|entry| match entry.command.as_ref() {
+            Some(ResolvedRulesCommand::TokenCreation(birth)) => Some(birth),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(births.len(), 2, "two and only two births");
+    for birth in births {
+        assert!(created.contains(&birth.object.object_id));
+        assert_eq!(
+            birth.entry_zone,
+            Some(Zone::Exile),
+            "each token is born in exile"
+        );
+        assert_eq!(
+            zone_moves_of(&events, birth.object.object_id),
+            vec![(None, Zone::Exile)],
+            "neither token has a battlefield birth"
+        );
+        let mut replay = pre_state.clone();
+        engine::game::effects::token::apply_resolved_token_creation(&mut replay, birth)
+            .expect("the redirected birth replays");
+        let replayed = &replay.objects[&birth.object.object_id];
+        assert!(
+            replayed.counters.is_empty(),
+            "neither exile birth inherits entry counters"
+        );
+        assert_eq!(
+            (replayed.power, replayed.toughness),
+            (Some(2), Some(2)),
+            "Saw's copy exception is preserved independently for each token"
+        );
+    }
 }

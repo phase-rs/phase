@@ -2496,9 +2496,13 @@ fn change_zone_applier(
 fn moved_matcher(event: &ProposedEvent, source: ObjectId, _state: &GameState) -> bool {
     match event {
         ProposedEvent::ZoneChange { .. } => true,
-        ProposedEvent::TokenEntry { entry_ref, .. } => {
-            source != ObjectId(0) && *entry_ref == source
-        }
+        // CR 614.6: after a redirect, the battlefield entry no longer happens,
+        // so the entrant's remaining as-enters replacements do not apply.
+        ProposedEvent::TokenEntry {
+            entry_ref,
+            redirected_to: None,
+            ..
+        } => source != ObjectId(0) && *entry_ref == source,
         _ => false,
     }
 }
@@ -7231,13 +7235,10 @@ fn replacement_condition_quantity_ctx(
     }
 }
 
-/// CR 614.12 + CR 616.1c: whether `def` is an entry replacement other than a copy (a redirect,
-/// enters tapped or untapped, entry counters) and `event` is a `CreateToken` copy batch whose
-/// entrants each carry their own as-enters copy and enter through a liminal `TokenEntry` (the
-/// single authority for that is `token_copy::copy_batch_enters_through_liminal_entry`). Such a
-/// replacement is decided against the entrant once its own copy has settled, so the batch-level
-/// consult — which has no entrant yet — leaves it to the entrant. A copy replacement
-/// (Mystic Reflection's "enter as copies") stays batch-wide.
+/// CR 614.12 + CR 616.1c: non-copy entry replacements belong to each entrant when
+/// the copy batch enters through a liminal `TokenEntry`. That entrant owns its entry
+/// choices, including any own copy that must settle first. Creation replacements
+/// and batch-wide "enter as copies" replacements remain on the creation event.
 fn entry_effects_deferred_to_entrant(def: &ReplacementDefinition, event: &ProposedEvent) -> bool {
     let ProposedEvent::CreateToken {
         copy: Some(copy),
@@ -7249,7 +7250,6 @@ fn entry_effects_deferred_to_entrant(def: &ReplacementDefinition, event: &Propos
     };
     def.event == ReplacementEvent::ChangeZone
         && !def.execute.as_deref().is_some_and(ability_becomes_copy)
-        && copy_entrant_has_own_entry_copy(&copy.values)
         && crate::game::effects::token_copy::copy_batch_enters_through_liminal_entry(
             &copy.values,
             &copy.additional_modifications,
@@ -14672,16 +14672,23 @@ fn replay_pending_replacement(
     result
 }
 
-/// CR 616.1c + CR 614.12: whether `proposed` is a liminal token entry whose own
-/// as-enters copy replacement has already applied and whose copy work is still
-/// pending (the post-replacement continuation the copy rides).
-fn token_entry_awaits_own_copy_settlement(state: &GameState, proposed: &ProposedEvent) -> bool {
+/// CR 614.12 + CR 616.1f: selected own-entry work must finish before discovering
+/// the next replacement. Bind the ready continuation to this exact entrant and an
+/// applied own replacement, not merely to the presence of an unrelated ready drain.
+pub(crate) fn token_entry_awaits_own_entry_settlement(
+    state: &GameState,
+    proposed: &ProposedEvent,
+) -> bool {
     let ProposedEvent::TokenEntry { entry_ref, .. } = proposed else {
         return false;
     };
-    if !state.has_post_replacement_drain() {
+    let Some(drain) = state
+        .active_post_replacement_drains()
+        .and_then(|drains| drains.resident())
+        .filter(|drain| drain.source == Some(*entry_ref) && drain.ready_continuation().is_some())
+    else {
         return false;
-    }
+    };
     state.liminal_entries.get(entry_ref).is_some_and(|entry| {
         entry
             .object
@@ -14690,11 +14697,33 @@ fn token_entry_awaits_own_copy_settlement(state: &GameState, proposed: &Proposed
             .iter_all()
             .enumerate()
             .any(|(index, def)| {
-                def.execute.as_deref().is_some_and(ability_becomes_copy)
-                    && proposed.already_applied(&ReplacementId {
-                        source: *entry_ref,
-                        index,
-                    })
+                let rid = ReplacementId {
+                    source: *entry_ref,
+                    index,
+                };
+                if !proposed.already_applied(&rid)
+                    || !drain
+                        .applied
+                        .contains(&AppliedReplacementKey::for_event(proposed, rid))
+                {
+                    return false;
+                }
+                match drain.ready_continuation() {
+                    Some(PostReplacementContinuation::Template(work)) => {
+                        [def.execute.as_deref(), replacement_mode_decline(&def.mode)]
+                            .into_iter()
+                            .flatten()
+                            .any(|ability| {
+                                ability == work.as_ref()
+                                    || EventModifiers::first_non_modifier_ability(Some(ability))
+                                        == Some(work.as_ref())
+                            })
+                    }
+                    Some(PostReplacementContinuation::Resolved(work)) => {
+                        state.replacement_rider(def) == Some(work.as_ref())
+                    }
+                    None => false,
+                }
             })
     })
 }
@@ -14730,12 +14759,10 @@ fn pipeline_loop(
             break;
         }
 
-        // CR 616.1c + CR 614.12: a liminal token entrant's own as-enters copy was just
-        // applied and its copy work (the target choice) is still owed. Every other
-        // entry replacement is discovered against the entrant AFTER that copy has
-        // settled, so the pipeline stops here; the settlement authority
-        // (`engine_replacement::settle_token_entry_after_copy`) re-enters it.
-        if token_entry_awaits_own_copy_settlement(state, &proposed) {
+        // CR 614.12 + CR 616.1f: finish the selected entrant's own replacement
+        // before rediscovery. Copy work retains its special settlement authority;
+        // ordinary work rediscoveries converge through the shared entry finisher.
+        if token_entry_awaits_own_entry_settlement(state, &proposed) {
             break;
         }
 

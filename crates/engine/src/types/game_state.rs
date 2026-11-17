@@ -37815,6 +37815,24 @@ impl GameState {
         else {
             return false;
         };
+        // CR 702.82a: counters earned by this entrant's own replacement belong to
+        // its entry event, not the pristine batch payload used by later entrants.
+        if let Some(PendingLiminalEntryResume::Token {
+            source_id,
+            event:
+                crate::types::proposed_event::ProposedEvent::TokenEntry {
+                    entry_ref,
+                    enter_with_counters,
+                    ..
+                },
+            ..
+        }) = self.pending_liminal_entry_resume.as_mut()
+        {
+            if *source_id == id && *entry_ref == id {
+                enter_with_counters.push((counter_type, count));
+                return true;
+            }
+        }
         // The commit folds this list into the entry's counter pass in order, so
         // appending is what puts these counters after any the creating effect
         // already specified — CR 702.104a's "an ADDITIONAL N +1/+1 counters".
