@@ -1935,6 +1935,8 @@ const SCULPTING_STEEL: &str =
     "You may have this artifact enter as a copy of any artifact on the battlefield.";
 const TRISKELION: &str = "This creature enters with three +1/+1 counters on it.\nRemove a +1/+1 counter from this creature: It deals 1 damage to any target.";
 const ROOT_MAZE: &str = "Artifacts and lands enter tapped.";
+/// Verbatim Oracle text of Saw in Half (Scryfall).
+const SAW_IN_HALF: &str = "Destroy target creature. If that creature dies this way, its controller creates two tokens that are copies of that creature, except their power is half that creature's power and their toughness is half that creature's toughness. Round up each time.";
 const ARCHELOS: &str = "As long as Archelos is tapped, other permanents enter tapped.\nAs long as Archelos is untapped, other permanents enter untapped.";
 
 /// CR 616.1c + CR 614.12 + CR 616.1f: Extravagant Replication copies Sculpting Steel; the token's
@@ -2161,11 +2163,11 @@ fn grumgullys_batch_counter_does_not_bypass_the_metamorph_copy_choice() {
     );
 }
 
-/// CR 616.1f + CR 707.2: the copy the player selected is the copy applied. P1 controls the only
-/// Triskelion, which P0 chooses as the model for Extravagant Replication's Sculpting Steel copy.
-/// P1 then concedes during the ordering prompt the rediscovery raised, which removes the model.
-/// The token is still Triskelion, with its three +1/+1 counters, rather than a re-read of a
-/// model that is gone.
+/// CR 616.1f + CR 707.2 + CR 707.2b: the selected copiable values survive the
+/// rediscovery prompt. P1 casts Sculpting Steel as Triskelion; P0's Replication
+/// copies a separate, plain Steel and chooses P1's copied Steel by ID. CR 800.4a:
+/// P1 then concedes, removing that model and its layer-one copy effect. Re-reading
+/// its printed Steel values must not replace the Triskelion values already chosen.
 #[test]
 fn a_model_that_leaves_during_the_rediscovery_prompt_does_not_change_the_selected_copy() {
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -2175,72 +2177,486 @@ fn a_model_that_leaves_during_the_rediscovery_prompt_does_not_change_the_selecte
     }
     let steel = scenario
         .add_artifact_from_oracle(P0, "Sculpting Steel", SCULPTING_STEEL)
+        .with_mana_cost(ManaCost::generic(3))
         .id();
-    scenario
-        .add_creature_from_oracle(P1, "Triskelion", 1, 1, TRISKELION)
+    let triskelion = scenario
+        .add_creature_from_oracle(P0, "Triskelion", 1, 1, TRISKELION)
         .as_artifact_creature()
-        .with_subtypes(vec!["Construct"]);
+        .with_subtypes(vec!["Construct"])
+        .with_mana_cost(ManaCost::generic(6))
+        .id();
+    let model = scenario
+        .add_artifact_to_hand_from_oracle(P1, "Sculpting Steel", SCULPTING_STEEL)
+        .with_mana_cost(ManaCost::generic(3))
+        .id();
+    for _ in 0..3 {
+        scenario.add_basic_land(P1, engine::types::mana::ManaColor::Blue);
+    }
+    let root_maze = scenario
+        .add_enchantment_from_oracle(P0, "Root Maze", ROOT_MAZE)
+        .id();
+    let archelos = scenario
+        .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS)
+        .as_legendary()
+        .with_subtypes(vec!["Turtle", "Shaman"])
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "Extravagant Replication", EXTRAVAGANT_REPLICATION);
+    let mut runner = scenario.build();
+
+    // Establish the model's copy through a real cast on its controller's turn.
+    for _ in 0..80 {
+        if runner.state().active_player == P1
+            && runner.state().phase == Phase::PreCombatMain
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1)
+        {
+            break;
+        }
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::DeclareAttackers { .. } => runner.act(GameAction::DeclareAttackers {
+                attacks: Vec::new(),
+                bands: Vec::new(),
+            }),
+            ref other => panic!("unexpected prompt before P1's cast: {other:?}"),
+        }
+        .expect("advance to P1's main phase");
+    }
+    assert_eq!(runner.state().active_player, P1);
+    assert_eq!(runner.state().phase, Phase::PreCombatMain);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player } if player == P1
+    ));
+    runner.cast(model).replacement_choice(0).resolve();
+    match &runner.state().waiting_for {
+        WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            valid_targets,
+            ..
+        } => {
+            assert_eq!(*player, P1);
+            assert_eq!(
+                *source_id, model,
+                "the cast Steel makes its own copy choice"
+            );
+            assert!(valid_targets.contains(&triskelion));
+        }
+        other => panic!("expected P1's cast Steel copy choice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(triskelion)),
+        })
+        .expect("P1's Steel copies the printed Triskelion");
+    for _ in 0..20 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::ReplacementChoice { player, kind, .. } => {
+                assert_eq!(player, P1);
+                assert_eq!(kind, ReplacementChoiceKind::Order);
+                runner.act(GameAction::ChooseReplacement { index: 0 })
+            }
+            other => panic!("unexpected prompt finishing P1's Steel: {other:?}"),
+        }
+        .expect("finish P1's cast Steel");
+    }
+    assert_settled(runner.state(), "P1's cast Steel");
+    let copied_model = &runner.state().objects[&model];
+    assert_eq!(copied_model.owner, P1);
+    assert_eq!(copied_model.zone, Zone::Battlefield);
+    assert_eq!(copied_model.base_name, "Sculpting Steel");
+    assert_eq!(copied_model.name, "Triskelion");
+    assert!(copied_model
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    assert_eq!(
+        copied_model
+            .counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1),
+        Some(&3),
+        "the model's cast copy acquired Triskelion's entry counters"
+    );
+    let model_copy = copied_model
+        .layer1_copy_effect
+        .expect("the cast model has an installed layer-one copy effect");
+    assert!(runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            effect.id == model_copy.continuous_effect_id
+            && effect.source_id == model
+            && effect.modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::CopyValues { values, .. } if values.name == "Triskelion"
+            ))
+        }));
+    assert_eq!(runner.state().objects[&steel].name, "Sculpting Steel");
+    assert!(runner.state().objects[&steel].layer1_copy_effect.is_none());
+
+    aim_replication_trigger(&mut runner, steel);
+    for _ in 0..10 {
+        if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            break;
+        }
+        assert!(
+            !runner.state().stack.is_empty(),
+            "Replication must not finish before the copy choice"
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("resolve Replication");
+    }
+    let token_id = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player,
+            kind,
+            candidates,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*kind, ReplacementChoiceKind::OptionalBranch);
+            assert_eq!(candidates.len(), 2);
+            let token_id = candidates[0].source_id;
+            assert!(candidates
+                .iter()
+                .all(|candidate| candidate.source_id == token_id));
+            assert!(candidates[0].description.contains("enter as a copy"));
+            token_id
+        }
+        other => panic!("expected token Steel's own optional copy replacement, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("accept the token Steel's own copy replacement");
+    match &runner.state().waiting_for {
+        WaitingFor::CopyTargetChoice {
+            player,
+            source_id,
+            valid_targets,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*source_id, token_id);
+            assert!(
+                valid_targets.contains(&model),
+                "P1's copied Steel is a legal model"
+            );
+            assert!(
+                valid_targets.contains(&triskelion),
+                "the same-named printed Triskelion is a distinct option"
+            );
+            assert_ne!(model, triskelion);
+        }
+        other => panic!("expected the token's copy-model choice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(model)),
+        })
+        .expect("choose P1's copied Steel by ID, not the printed Triskelion");
+    let ordering = match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player,
+            kind,
+            candidates,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*kind, ReplacementChoiceKind::Order);
+            assert_eq!(
+                candidates.len(),
+                2,
+                "only Root Maze and untapped Archelos order entry"
+            );
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == root_maze));
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.source_id == archelos));
+            candidates.clone()
+        }
+        other => panic!("expected mandatory post-copy entry ordering, got {other:?}"),
+    };
+    assert!(!runner.state().objects[&archelos].tapped);
+    let settlement = runner.state().liminal_entries[&token_id]
+        .copy_settlement
+        .as_ref()
+        .expect("the post-copy ordering prompt holds the chosen copy");
+    assert_eq!(settlement.target_id, model);
+    assert_eq!(settlement.copy_values.name, "Triskelion");
+    assert!(
+        !runner.state().battlefield.contains(&token_id),
+        "entry is still suspended"
+    );
+
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("the chosen model's owner concedes during rediscovery ordering");
+    // Negative-control witness: a live re-read now sees a plain, noncreature Steel,
+    // not Triskelion. An ordinary printed Triskelion model would not discriminate.
+    let departed_model = &runner.state().objects[&model];
+    assert!(!runner.state().battlefield.contains(&model));
+    assert_eq!(departed_model.zone, Zone::Exile);
+    assert_eq!(departed_model.name, "Sculpting Steel");
+    assert!(!departed_model
+        .card_types
+        .core_types
+        .contains(&CoreType::Creature));
+    assert!(departed_model.layer1_copy_effect.is_none());
+    assert!(
+        !runner
+            .state()
+            .transient_continuous_effects
+            .iter()
+            .any(|effect| { effect.id == model_copy.continuous_effect_id }),
+        "the model's former Triskelion copy effect was removed"
+    );
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player,
+            kind,
+            candidates,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*kind, ReplacementChoiceKind::Order);
+            assert_eq!(
+                *candidates, ordering,
+                "concession preserves the held ordering prompt"
+            );
+        }
+        other => panic!("concession abandoned the held ordering: {other:?}"),
+    }
+    let root_maze_first = ordering
+        .iter()
+        .position(|candidate| candidate.source_id == root_maze)
+        .expect("Root Maze is an ordering option");
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: root_maze_first,
+        })
+        .expect("finish entry with Archelos applied last");
+    assert_settled(runner.state(), "copy entry after its chosen model leaves");
+    assert_eq!(
+        battlefield_tokens_named(runner.state(), "Triskelion"),
+        vec![token_id]
+    );
+    let token = &runner.state().objects[&token_id];
+    assert_eq!(
+        token.name, "Triskelion",
+        "captured values, not the departed model's printed Steel"
+    );
+    assert!(token.is_token);
+    assert_eq!(token.controller, P0);
+    assert!(token.card_types.core_types.contains(&CoreType::Artifact));
+    assert!(token.card_types.core_types.contains(&CoreType::Creature));
+    assert!(token
+        .card_types
+        .subtypes
+        .iter()
+        .any(|subtype| subtype == "Construct"));
+    assert_eq!(
+        token
+            .counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1),
+        Some(&3),
+        "the selected Triskelion's own enters-with counters survive"
+    );
+    assert!(
+        !token.tapped,
+        "Root Maze first and untapped Archelos last means untapped"
+    );
+}
+
+/// Verbatim Oracle text of Superior Spider-Man (Scryfall).
+const SUPERIOR_SPIDER_MAN: &str =
+    "Mind Swap — You may have Superior Spider-Man enter as a copy of \
+any creature card in a graveyard, except his name is Superior Spider-Man and he's a 4/4 Spider \
+Human Hero in addition to his other types. When you do, exile that card.";
+
+/// CR 603.12 + CR 608.2c: Feldon of the Third Path copies Superior Spider-Man from the graveyard
+/// (the token is an artifact); the token's own copy replacement is accepted and Hill Giant chosen.
+/// Root Maze (artifacts enter tapped) and untapped Archelos then compete, so the rediscovery
+/// raises an ordering prompt, and the chosen copy completes only after it is answered. Mind
+/// Swap's "when you do, exile that card" rider must still reach the Hill Giant the player chose.
+#[test]
+fn a_resumed_copy_keeps_its_riders_selected_card_referent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island", "Island", "Island", "Island", "Island"]);
+    scenario.with_library_top(P1, &["Island", "Island", "Island", "Island", "Island"]);
+    scenario.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let feldon = scenario
+        .add_creature_from_oracle(P0, "Feldon of the Third Path", 2, 3, FELDON)
+        .as_legendary()
+        .id();
     scenario.add_enchantment_from_oracle(P0, "Root Maze", ROOT_MAZE);
     scenario
-        .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 2, ARCHELOS)
-        .as_legendary();
-    scenario
-        .add_enchantment_from_oracle(P0, "Extravagant Replication", EXTRAVAGANT_REPLICATION)
-        .with_mana_cost(ManaCost::generic(5));
+        .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 4, ARCHELOS)
+        .as_legendary()
+        .with_subtypes(vec!["Turtle", "Shaman"]);
+    let spider = {
+        let mut card = scenario.add_creature_to_graveyard(P0, "Superior Spider-Man", 4, 4);
+        card.from_oracle_text(SUPERIOR_SPIDER_MAN)
+            .as_legendary()
+            .with_subtypes(vec!["Spider", "Human", "Hero"]);
+        card.id()
+    };
+    let giant = scenario
+        .add_creature_to_graveyard(P0, "Hill Giant", 3, 3)
+        .id();
     let mut runner = scenario.build();
-    aim_replication_trigger(&mut runner, steel);
-    let mut conceded = false;
+    let mut events = runner
+        .activate(feldon, 0)
+        .target_object(spider)
+        .resolve()
+        .events()
+        .to_vec();
+    let mut prompts = Vec::new();
     for _ in 0..40 {
         let result = match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
             WaitingFor::ReplacementChoice { candidates, .. } => {
+                prompts.push("ReplacementChoice".to_string());
                 let accept = candidates
                     .iter()
                     .position(|c| c.description.contains("enter as a copy"));
-                if accept.is_none() && !conceded {
-                    // The post-copy ordering prompt: the model's owner leaves first.
-                    runner
-                        .act(GameAction::Concede { player_id: P1 })
-                        .expect("P1 concedes");
-                    conceded = true;
-                    continue;
+                if accept.is_none() {
+                    assert_eq!(
+                        prompts.iter().filter(|p| *p == "CopyTargetChoice").count(),
+                        1
+                    );
+                    assert!(candidates.len() >= 2, "entry replacements compete");
+                    prompts.push("Ordering".to_string());
                 }
                 runner.act(GameAction::ChooseReplacement {
                     index: accept.unwrap_or(0),
                 })
             }
             WaitingFor::CopyTargetChoice { valid_targets, .. } => {
-                let triskelion = *valid_targets
-                    .iter()
-                    .find(|id| runner.state().objects[id].name == "Triskelion")
-                    .expect("Triskelion is a legal copy model");
+                prompts.push("CopyTargetChoice".to_string());
+                assert!(
+                    valid_targets.contains(&giant),
+                    "Hill Giant is a legal model"
+                );
                 runner.act(GameAction::ChooseTarget {
-                    target: Some(TargetRef::Object(triskelion)),
+                    target: Some(TargetRef::Object(giant)),
                 })
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                prompts.push("OptionalEffectChoice".to_string());
+                runner.act(GameAction::DecideOptionalEffect { accept: true })
             }
             WaitingFor::ChooseLegend { candidates, .. } => {
                 let keep = *candidates.iter().max().expect("legend candidates");
                 runner.act(GameAction::ChooseLegend { keep })
             }
-            other => panic!("unexpected prompt {other:?}"),
+            other => panic!("unexpected prompt {other:?} after {prompts:?}"),
         };
-        result.expect("the prompt answer is accepted");
+        events.extend(result.expect("the prompt answer is accepted").events);
     }
     assert!(
-        conceded,
-        "the model's owner conceded during the rediscovery prompt"
+        prompts.iter().any(|p| p == "CopyTargetChoice") && prompts.iter().any(|p| p == "Ordering"),
+        "the copy was chosen and the rediscovery then asked an ordering question: {prompts:?}"
     );
-    let tokens = battlefield_tokens_named(runner.state(), "Triskelion");
-    assert_eq!(tokens.len(), 1, "the selected Triskelion copy entered");
     assert_eq!(
-        runner.state().objects[&tokens[0]]
-            .counters
-            .get(&engine::types::counter::CounterType::Plus1Plus1)
-            .copied(),
-        Some(3),
-        "with its own enters-with counters"
+        runner.state().objects[&giant].zone,
+        Zone::Exile,
+        "the rider exiled the card the copy was made from: {prompts:?}"
     );
+    assert_eq!(
+        zone_moves_of(&events, giant),
+        vec![(Some(Zone::Graveyard), Zone::Exile)],
+        "the selected card is exiled exactly once"
+    );
+    let tokens = battlefield_tokens_named(runner.state(), "Superior Spider-Man");
+    assert_eq!(tokens.len(), 1, "the chosen copy completed entry");
+    assert_settled(runner.state(), "resumed copy with rider");
+}
+
+/// CR 707.9b + CR 614.6: Saw in Half's halved power and toughness are part of each copy's
+/// copiable values, so under Hallowed Moonlight the two Thalia copies are created in exile as 2/1s
+/// (half of 3/2, rounded up) — in the journaled birth and its replay — with no battlefield entry.
+#[test]
+fn moonlight_redirected_saw_in_half_copies_are_born_halved() {
+    let mut scenario = base_scenario();
+    let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
+    let saw = add_instant(&mut scenario, P0, "Saw in Half", SAW_IN_HALF);
+    let thalia = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Thalia, Heretic Cathar",
+            3,
+            2,
+            "First strike\nCreatures and nonbasic lands your opponents control enter tapped.",
+        )
+        .as_legendary()
+        .with_subtypes(vec!["Human", "Soldier"])
+        .id();
+    let mut runner = scenario.build();
+    cast_hallowed(&mut runner, hallowed);
+    let committed = runner.cast(saw).target_object(thalia).commit();
+    let pre_state = committed.state().clone();
+    let window = pre_state.resolved_rules_journal.entries().len();
+    let outcome = committed.resolve();
+    let state = outcome.state().clone();
+    assert_settled(&state, "redirected Saw in Half copies");
+    let created = created_tokens_named(outcome.events(), "Thalia, Heretic Cathar");
+    assert_eq!(created.len(), 2, "two copies are created");
+    let births: Vec<_> = state
+        .resolved_rules_journal
+        .entries()
+        .iter()
+        .skip(window)
+        .filter_map(|entry| match entry.command.as_ref() {
+            Some(ResolvedRulesCommand::TokenCreation(birth))
+                if created.contains(&birth.object.object_id) =>
+            {
+                Some(birth.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(births.len(), 2, "both births are journaled");
+    for birth in &births {
+        assert_eq!(birth.entry_zone, Some(Zone::Exile), "born in exile");
+        assert_eq!(
+            zone_moves_of(outcome.events(), birth.object.object_id),
+            vec![(None, Zone::Exile)],
+            "created in exile and never entered"
+        );
+        let recorded = state
+            .created_tokens_this_turn
+            .iter()
+            .find(|record| record.object_id == birth.object.object_id)
+            .expect("the live birth has a creation snapshot");
+        assert_eq!(
+            (recorded.power, recorded.toughness),
+            (Some(2), Some(1)),
+            "the live creation snapshot is the halved 2/1"
+        );
+        let mut replay = pre_state.clone();
+        engine::game::effects::token::apply_resolved_token_creation(&mut replay, birth)
+            .expect("the redirected birth replays");
+        let replayed = &replay.objects[&birth.object.object_id];
+        assert_eq!(
+            (replayed.power, replayed.toughness),
+            (Some(2), Some(1)),
+            "the replayed birth is the halved 2/1"
+        );
+        assert!(replayed.counters.is_empty(), "no entry counters are placed");
+    }
 }
 
 /// CR 614.5: a replacement affects an event once. Feldon of the Third Path copies a printed

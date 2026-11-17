@@ -1009,10 +1009,8 @@ pub(crate) fn finalize_copied_token(
 /// token ceases to exist at the next state-based action check (CR 111.7,
 /// CR 704.5d).
 ///
-/// Copy exceptions that cannot be stamped before entry (entry counters, dynamic
-/// power or toughness) describe the permanent on the battlefield, so the token
-/// created in `zone` is built from the copied values and the stampable
-/// exceptions only, and its CR 733 birth record says so.
+/// Donor-dependent power/toughness exceptions are settled into fixed values for the birth
+/// (CR 707.9b); entry counters describe the permanent on the battlefield and are not part of it.
 #[allow(clippy::too_many_arguments)]
 fn apply_redirected_copy_batch(
     state: &mut GameState,
@@ -1026,10 +1024,26 @@ fn apply_redirected_copy_batch(
 ) -> CopyTokenApplyStatus {
     let mut created_ids = initial_created_ids;
     created_ids.reserve(final_count as usize);
+    let mut copy = copy;
+    // CR 707.9b: a donor-dependent power/toughness exception (Saw in Half: "half that creature's
+    // power") is part of the copy's copiable values, so it is settled against the donor now (live,
+    // else last-known per CR 608.2h) into the fixed value the birth is journaled and replayed
+    // with. An entry counter describes the permanent on the battlefield, which this token never
+    // reaches (CR 614.6), so it is not part of the birth.
+    let donor_object = copy.donor.map_or(copy.source_id, |donor| donor.object_id);
+    copy.additional_modifications
+        .retain_mut(|modification| match modification {
+            ContinuousModification::SetPowerDynamic { .. }
+            | ContinuousModification::SetToughnessDynamic { .. } => {
+                *modification =
+                    resolve_copy_token_modification(state, modification, token_owner, donor_object);
+                true
+            }
+            ContinuousModification::AddCounterOnEnter { .. } => false,
+            _ => true,
+        });
     let name = copy.values.name.clone();
-    let body_modifications = if copy.additional_modifications.is_empty()
-        || !copy_token_modifications_are_liminal_immediate(&copy.additional_modifications)
-    {
+    let body_modifications = if copy.additional_modifications.is_empty() {
         ResolvedCopyBodyModifications::NoExceptions
     } else {
         ResolvedCopyBodyModifications::Folded {
@@ -2356,6 +2370,29 @@ pub(crate) fn apply_remaining_token_modifications_after_counter_pause(
     true
 }
 
+/// CR 707.9b + CR 608.2h: settle a characteristic exception through the quantity
+/// authority used by ordinary copy-token creation. In particular, donor P/T reads
+/// use the live battlefield object, otherwise its last-known P/T, rather than the
+/// donor's unmodified copiable values or the new graveyard card's base P/T.
+fn resolve_copy_token_modification(
+    state: &GameState,
+    modification: &ContinuousModification,
+    controller: PlayerId,
+    quantity_source: ObjectId,
+) -> ContinuousModification {
+    match modification {
+        ContinuousModification::SetPowerDynamic { value } => ContinuousModification::SetPower {
+            value: resolve_quantity(state, value, controller, quantity_source),
+        },
+        ContinuousModification::SetToughnessDynamic { value } => {
+            ContinuousModification::SetToughness {
+                value: resolve_quantity(state, value, controller, quantity_source),
+            }
+        }
+        other => other.clone(),
+    }
+}
+
 /// CR 707.2 + CR 707.9: Apply non-keyword `, except <body>` modifications to
 /// a synthesized token. Tokens are created with copiable values baked in, so
 /// each modification mutates BOTH the layered view (`card_types`,
@@ -2622,38 +2659,25 @@ fn apply_token_modifications(
             // CR 707.9b: "except its base power and toughness are each equal
             // to half [X]" (Saw in Half). Dynamic quantity resolved at
             // creation time and stamped as base P/T.
-            ContinuousModification::SetPowerDynamic { value } => {
+            ContinuousModification::SetPowerDynamic { .. }
+            | ContinuousModification::SetToughnessDynamic { .. } => {
                 let controller = state
                     .objects
                     .get(&token_id)
                     .map(|o| o.controller)
                     .unwrap_or(crate::types::player::PlayerId(0));
-                // CR 608.2h + CR 707.9b: `Source`-scoped donor phrases ("that
-                // creature's power") read the donor (live, else LKI); donor-less
-                // routes keep today's token-id read.
+                // CR 608.2h + CR 707.9b: donor phrases read the donor; donor-less
+                // routes keep the token-id read. Redirected births settle through
+                // the same authority before their fixed exceptions are journaled.
                 let source_id = finalization.donor.map(|d| d.object_id).unwrap_or(token_id);
-                let val = resolve_quantity(state, value, controller, source_id);
+                let resolved =
+                    resolve_copy_token_modification(state, modification, controller, source_id);
                 if let Some(token) = state.objects.get_mut(&token_id) {
-                    token.base_power = Some(val);
-                    token.power = Some(val);
-                    token.layer_base_power = Some(val);
-                }
-            }
-            ContinuousModification::SetToughnessDynamic { value } => {
-                let controller = state
-                    .objects
-                    .get(&token_id)
-                    .map(|o| o.controller)
-                    .unwrap_or(crate::types::player::PlayerId(0));
-                // CR 608.2h + CR 707.9b: `Source`-scoped donor phrases ("that
-                // creature's toughness") read the donor (live, else LKI); donor-less
-                // routes keep today's token-id read.
-                let source_id = finalization.donor.map(|d| d.object_id).unwrap_or(token_id);
-                let val = resolve_quantity(state, value, controller, source_id);
-                if let Some(token) = state.objects.get_mut(&token_id) {
-                    token.base_toughness = Some(val);
-                    token.toughness = Some(val);
-                    token.layer_base_toughness = Some(val);
+                    apply_immediate_copy_token_modifications_to_object(
+                        token,
+                        std::slice::from_ref(&resolved),
+                        &[],
+                    );
                 }
             }
             // CR 707.9b + CR 306.5b/c: Starting-loyalty exceptions are already

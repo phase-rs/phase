@@ -3521,8 +3521,8 @@ fn complete_token_entry_after_copy(
     // exceptions (CR 707.9b).
     match (&captured, reread_model) {
         (Some((values, display, incarnation)), false) => {
-            // CR 616.1f + CR 707.2: the copy applied is the one selected, from its captured
-            // copiable values; the rider chain is not re-run on this resumed path.
+            // CR 616.1f + CR 707.2: apply the selected copy's captured copiable values,
+            // then hand its rider the same parent context as ordinary chain descent.
             let (duration, additional_modifications) = match &ability.effect {
                 Effect::BecomeCopy {
                     duration,
@@ -3554,9 +3554,9 @@ fn complete_token_entry_after_copy(
             );
             // CR 603.12 + CR 608.2c: the copy effect's rider chain (Superior Spider-Man's
             // "when you do, exile that card") still runs after the captured copy is installed.
-            if let Some(riders) = ability.sub_ability.as_deref() {
-                let _ = effects::resolve_ability_chain(state, riders, events, 0);
-            }
+            // The rider inherits the selected card through the parent-aware hand-off, as the
+            // chain walker would have bound it.
+            let _ = effects::resolve_rider_with_parent_context(state, ability, events);
         }
         _ => {
             let _ = effects::resolve_ability_chain(state, ability, events, 0);

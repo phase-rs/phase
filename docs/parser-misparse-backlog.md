@@ -34,6 +34,12 @@ The owner/phasing repairs in PR #10635 retain distinct binding authorities:
 
 The full-Oracle controls establish these clauses, not complete support for every ability on those cards. Etrata's conditional game-loss clause remains a separate parser gap under [#10728](https://github.com/phase-rs/phase/issues/10728); Forge of Heroes' conditional dual-counter tail remains unsupported under [#8112](https://github.com/phase-rs/phase/issues/8112). Fblthp, Impossibly Lost is a gendered source-reference parsing control, not a claim that its trigger condition is supported.
 
+Mistcaller/Hallowed Moonlight entry-copy regressions additionally pin the selected copy across
+replacement-ordering pauses: Superior Spider-Man retains its selected graveyard card for the
+exile rider, and a Sculpting Steel token retains its chosen Triskelion values when the model's
+owner concedes. Redirected Saw in Half copies retain their halved power/toughness in both the
+creation snapshot and replay, without battlefield-entry counters (CR 608.2c, CR 707.9b, CR 614.6).
+
 ## Ranked root causes
 
 | # | Root cause | # cards | Fix hint (where it likely lives) |
