@@ -1859,6 +1859,10 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::HasMaxSpeed,
             alt((tag("you have max speed"), tag("have max speed"))),
         ),
+        // CR 122.1f + CR 109.5: "player is poisoned" — parse the subject scope
+        // and the "is poisoned" predicate. Mirrors the monarch identity subject
+        // pattern: subject × predicate, not enumerated phrases.
+        parse_player_poisoned_condition,
         map(
             (opt(tag("you ")), parse_dont, tag(" have max speed")),
             |_| StaticCondition::Not {
@@ -1948,6 +1952,38 @@ fn parse_speed_threshold_condition(input: &str) -> OracleResult<'_, StaticCondit
             })?,
         },
     ))
+}
+
+/// CR 122.1f + CR 109.5: "player is poisoned" — parse the subject scope and
+/// the "is poisoned" predicate. The subject axis decomposes into:
+/// - "you are"/"you're" -> Controller
+/// - "an opponent is" -> Opponent (existential: at least one opponent)
+/// - "that player is"/"that opponent is" -> ScopedPlayer (anaphor)
+/// - "defending player is" -> DefendingPlayer (CR 508.5)
+///
+/// The predicate is always "is poisoned" (or "are poisoned" for "you").
+/// Mirrors `parse_monarch_identity_subject` pattern.
+fn parse_player_poisoned_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, player) = alt((
+        value(
+            PlayerScope::Controller,
+            alt((recognize((parse_you_are, tag(" "))), tag("you "))),
+        ),
+        value(
+            PlayerScope::Opponent {
+                aggregate: AggregateFunction::Max,
+            },
+            tag("an opponent "),
+        ),
+        value(
+            PlayerScope::ScopedPlayer,
+            alt((tag("that player "), tag("that opponent "))),
+        ),
+        value(PlayerScope::DefendingPlayer, tag("defending player ")),
+    ))
+    .parse(input)?;
+    let (rest, _) = alt((tag("are poisoned"), tag("is poisoned"))).parse(rest)?;
+    Ok((rest, StaticCondition::PlayerIsPoisoned { player }))
 }
 
 fn parse_opponent_poison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {

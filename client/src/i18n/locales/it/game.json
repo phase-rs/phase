@@ -1812,6 +1812,10 @@
       "title": "Ordina le copie",
       "subtitle": "Scegli la magia la cui copia va successivamente in pila"
     },
+    "memberOrder": {
+      "title": "Ordina le carte",
+      "subtitle": "Scegli quale carta viene gestita dopo"
+    },
     "collectEvidence": {
       "title": "Raccogli prove",
       "subtitle": "Esilia carte dal tuo cimitero con valore di mana totale {{minimum}} o superiore"

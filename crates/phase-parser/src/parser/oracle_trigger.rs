@@ -7762,6 +7762,12 @@ pub fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Tri
         StaticCondition::IsMonarch { player } => Some(TriggerCondition::IsMonarch {
             player: player.clone(),
         }),
+        // CR 122.1f + CR 109.5 + CR 603.4: "player is poisoned" bridges
+        // directly, carrying its subject scope (Controller, Opponent,
+        // ScopedPlayer, DefendingPlayer). Mirrors IsMonarch axis.
+        StaticCondition::PlayerIsPoisoned { player } => Some(TriggerCondition::IsPoisoned {
+            player: player.clone(),
+        }),
         // CR 726.3: Initiative status bridges directly.
         StaticCondition::IsInitiative => Some(TriggerCondition::IsInitiative),
         // CR 725.1: "there is no monarch" bridges directly.
@@ -9460,7 +9466,25 @@ fn extract_if_condition_with_card_name(
         |c| c,
     ) {
         InterveningExtraction::Hoisted(stripped, condition) => {
-            return IfExtraction::hoisted(stripped, *condition);
+            // CR 508.5 + CR 122.1f + CR 603.4: for attack triggers, the
+            // shared grammar may produce PlayerIsPoisoned with scopes other than
+            // DefendingPlayer (Controller, Opponent, ScopedPlayer). Only the
+            // defending player is meaningful for an attack intervening-if, so
+            // reject other scopes to keep Chained Throatseeker's static attack
+            // restriction an honest Unrecognized gap.
+            let should_accept = if let Some(_scope) = attack_scope {
+                match condition.as_ref() {
+                    TriggerCondition::IsPoisoned { player } => {
+                        *player == PlayerScope::DefendingPlayer
+                    }
+                    _ => true,
+                }
+            } else {
+                true
+            };
+            if should_accept {
+                return IfExtraction::hoisted(stripped, *condition);
+            }
         }
         InterveningExtraction::RefusedLeadingGuard => {
             return IfExtraction::refused(text);
@@ -21648,8 +21672,8 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     // CR 603.2 + CR 603.10 + CR 603.10d: "When[ever] you lose control of ~" /
     // "When[ever] you gain control of ~[ from another player]". Maps to
     // ChangesController, which fires on the `ControllerChanged` event published by
-    // the control-changing instructions (not by control the layer pass assigns or
-    // retires, #9903).
+    // the control-changing instructions and by a full layer evaluation's
+    // controller diff for control it derives without one.
     // valid_card = SelfRef gates the trigger to
     // changes on this specific object; the `side` names which endpoint of the
     // change is "you" (CR 603.3a: the trigger's controller). "From another player"
