@@ -25365,12 +25365,18 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
 
         let mut crew_face = make_face();
-        crew_face.oracle_text = Some("You may pay {0} rather than pay crew costs.".to_string());
+        // Heart of Kiran's printed line.
+        crew_face.oracle_text = Some("You may remove a loyalty counter from a planeswalker you control rather than pay Heart of Kiran's crew cost.".to_string());
         crew_face.static_abilities.push(StaticDefinition::new(
             StaticMode::AlternativeKeywordCost {
                 keyword: KeywordKind::Crew,
-                cost: AbilityCost::Mana {
-                    cost: ManaCost::generic(0),
+                cost: AbilityCost::RemoveCounter {
+                    count: 1,
+                    counter_type: CounterMatch::OfType(CounterType::Loyalty),
+                    target: Some(TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+                    )),
+                    selection: Default::default(),
                 },
                 frequency: None,
             },

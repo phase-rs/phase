@@ -46,6 +46,7 @@ mod alchemists_gift_pump_modal_keyword_choice;
 mod all_creatures_chosen_type_static_9566;
 mod all_player_library_wheel;
 mod alternative_cost_defiler_offers;
+mod alternative_cycling_cost_keeps_discard;
 mod amass_the_components;
 mod ambitious_augmenter;
 mod ambuscade_one_sided_fight_anaphoric;

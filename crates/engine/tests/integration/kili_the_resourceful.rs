@@ -87,7 +87,7 @@ fn kili_alternative_equip_cost_is_story_gated_and_first_per_turn() {
     advance_to_postcombat(&mut runner);
     assert!(
         runner.state().enduring_story.contains(&P0),
-        "Kíli and two Equipment artifacts should establish an enduring story after state checks"
+        "Kíli and three Equipment artifacts should establish an enduring story after state checks"
     );
 
     let result = activate_equip(&mut runner, first_equipment);
@@ -257,4 +257,93 @@ fn opponent_kili_does_not_offer_the_alternative_equip_cost() {
         "the Equipment attaches after paying the ordinary {{2}}"
     );
     assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+const FORGE_ANEW: &str = "When this enchantment enters, return target Equipment card from your graveyard to the battlefield.\nDuring your turn, you may activate equip abilities any time you could cast an instant.\nYou may pay {0} rather than pay the equip cost of the first equip ability you activate during each of your turns.";
+
+const LEONIN_SHIKARI: &str = "You may activate equip abilities any time you could cast an instant.";
+
+/// Forge Anew + Leonin Shikari + Vulshok Morningstar for P0. Shikari is P0's only
+/// creature, so it is the sole legal equip target. Shikari's grant lets P0 equip at
+/// instant speed, so P0 can equip during the opponent's turn
+/// (`opponents_turn == true`), which is where Forge Anew's "each of your turns"
+/// gate must keep the {0} branch away.
+fn forge_anew_scenario(
+    opponents_turn: bool,
+) -> (engine::game::scenario::GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Forge Anew", FORGE_ANEW);
+    let shikari = scenario
+        .add_creature_from_oracle(P0, "Leonin Shikari", 1, 1, LEONIN_SHIKARI)
+        .with_subtypes(vec!["Cat", "Soldier"])
+        .id();
+    let equipment = scenario
+        .add_artifact_from_oracle(P0, "Vulshok Morningstar", VULSHOK_MORNINGSTAR)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let mut runner = scenario.build();
+    if opponents_turn {
+        let state = runner.state_mut();
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    (runner, shikari, equipment)
+}
+
+/// CR 118.9 + CR 702.6a: Forge Anew's {0} Equip alternative is limited to the first
+/// equip ability activated "during each of your turns". Leonin Shikari lets P0
+/// equip during the opponent's turn, where no {0} branch may be offered.
+#[test]
+fn forge_anew_zero_equip_is_not_offered_during_the_opponents_turn() {
+    let (mut runner, shikari, equipment) = forge_anew_scenario(true);
+    assert_eq!(runner.state().active_player, P1);
+    add_generic_mana(&mut runner, 2);
+
+    let result = activate_equip(&mut runner, equipment);
+    assert!(
+        !matches!(
+            result.waiting_for,
+            WaitingFor::ActivationCostOneOfChoice { .. }
+        ),
+        "Forge Anew's {{0}} applies only during your own turn"
+    );
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().objects[&shikari]
+            .attachments
+            .contains(&equipment),
+        "reach guard: Shikari made the instant-speed equip legal and it paid the ordinary {{2}}"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// The same fixture on P0's own turn: the {0} branch is offered (and is the only
+/// affordable one with an empty pool) and paying it equips the creature.
+#[test]
+fn forge_anew_zero_equip_is_offered_during_your_own_turn() {
+    let (mut runner, shikari, equipment) = forge_anew_scenario(false);
+    assert_eq!(runner.state().active_player, P0);
+
+    let result = activate_equip(&mut runner, equipment);
+    let zero_branch = match result.waiting_for {
+        WaitingFor::ActivationCostOneOfChoice { ref costs, .. } => costs
+            .iter()
+            .position(
+                |cost| matches!(cost, AbilityCost::Mana { cost } if cost == &ManaCost::generic(0)),
+            )
+            .expect("Forge Anew should offer the {0} Equip branch on your turn"),
+        other => panic!("expected the alternative cost choice, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseActivationCostBranch { index: zero_branch })
+        .expect("choosing the {0} branch should be accepted");
+    runner.advance_until_stack_empty();
+    assert!(
+        runner.state().objects[&shikari]
+            .attachments
+            .contains(&equipment),
+        "the Equipment attaches after paying {{0}}"
+    );
 }

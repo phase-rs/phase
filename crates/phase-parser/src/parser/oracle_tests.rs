@@ -9942,21 +9942,33 @@ fn forge_anew_alternative_equip_cost_is_gated_to_your_turn() {
 }
 
 // Strict failure: an unmodeled trailing clause must not be silently dropped.
+// No printed card has a trailing clause on this line (the nearest printed card is
+// Bruenor Battlehammer: "You may pay {0} rather than pay the equip cost of the first
+// equip ability you activate each turn."); the tail is a synthetic hostile input.
 #[test]
 fn alternative_keyword_cost_with_unmodeled_tail_is_not_parsed() {
-    let r = parse(
-        "You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn if you control a Dwarf.",
-        "Test Card",
-        &[],
-        &["Creature"],
-        &[],
+    let text = "You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn if you control a Dwarf.";
+    // Reach guard: the line enters the alternative-keyword-cost route, so the absence
+    // below is the strict-failure result and not an upstream short-circuit.
+    assert!(
+        crate::parser::oracle_classifier::is_alternative_keyword_cost_pattern(&text.to_lowercase()),
+        "the line must reach the alternative keyword cost route"
     );
+    let r = parse(text, "Test Card", &[], &["Creature"], &[]);
     assert!(
         !r.statics
             .iter()
             .any(|s| matches!(s.mode, StaticMode::AlternativeKeywordCost { .. })),
         "statics: {:?}",
         r.statics
+    );
+    // Positive: the unmodeled "if you control a Dwarf" tail is not dropped. The line falls
+    // out of the static route into a conditional ability that keeps the tail as its
+    // condition, rather than a bare alternative-cost static that would ignore it.
+    assert!(
+        r.abilities.iter().any(|a| a.condition.is_some()),
+        "the trailing clause must survive as a condition: {:?}",
+        r.abilities
     );
 }
 

@@ -115,3 +115,106 @@ fn alternative_cycling_cost_still_discards_and_is_first_per_turn() {
         "the second cycle pays its ordinary {{R}} cycling cost"
     );
 }
+
+const NEW_PERSPECTIVES: &str = "When this enchantment enters, draw three cards.\nAs long as you have seven or more cards in hand, you may pay {0} rather than pay cycling costs.";
+
+/// Two Forgotten Caves in hand under New Perspectives, padded with `fillers`
+/// generic cards. The hand size at activation is `2 + fillers`.
+fn new_perspectives_scenario(
+    fillers: usize,
+) -> (engine::game::scenario::GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "New Perspectives", NEW_PERSPECTIVES);
+    let first_cave = scenario
+        .add_land_to_hand(P0, "Forgotten Cave")
+        .from_oracle_text(FORGOTTEN_CAVE)
+        .id();
+    let second_cave = scenario
+        .add_land_to_hand(P0, "Forgotten Cave")
+        .from_oracle_text(FORGOTTEN_CAVE)
+        .id();
+    for _ in 0..fillers {
+        scenario.add_card_to_hand(P0, "Filler Card");
+    }
+    scenario.with_library_top(P0, &["First Draw", "Second Draw"]);
+    (scenario.build(), first_cave, second_cave)
+}
+
+/// Picks the {0} branch of a cycling cost choice and runs it to completion.
+fn cycle_through_zero_branch(runner: &mut engine::game::scenario::GameRunner, card: ObjectId) {
+    let result = activate_cycling(runner, card).expect("cycling should be offered");
+    let zero_branch = match result.waiting_for {
+        WaitingFor::ActivationCostOneOfChoice { ref costs, .. } => costs
+            .iter()
+            .position(
+                |cost| matches!(cost, AbilityCost::Mana { cost } if cost == &ManaCost::generic(0)),
+            )
+            .expect("the {0} cycling branch should be offered"),
+        other => panic!("expected the alternative cost choice, got {other:?}"),
+    };
+    runner
+        .act(GameAction::ChooseActivationCostBranch { index: zero_branch })
+        .expect("choosing the {0} branch should be accepted");
+    runner.advance_until_stack_empty();
+}
+
+/// CR 702.29a + CR 118.9: with seven or more cards in hand, New Perspectives lets
+/// every card cycled (not just the first each turn) use {0}, and each is still
+/// discarded.
+#[test]
+fn new_perspectives_offers_zero_cycling_to_every_cycle_with_seven_cards() {
+    let (mut runner, first_cave, second_cave) = new_perspectives_scenario(5);
+    assert_eq!(runner.state().players[0].hand.len(), 7);
+
+    cycle_through_zero_branch(&mut runner, first_cave);
+    assert_eq!(runner.state().objects[&first_cave].zone, Zone::Graveyard);
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        7,
+        "the cycled card is replaced by the drawn card, so the gate still holds"
+    );
+
+    cycle_through_zero_branch(&mut runner, second_cave);
+    assert_eq!(
+        runner.state().objects[&second_cave].zone,
+        Zone::Graveyard,
+        "the second cycle also used {{0}} and still discarded the card"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// The grant is gated on "seven or more cards in hand": with six, no alternative
+/// branch is offered and the ordinary {R} cycling cost is paid. Same fixture as the
+/// seven-card test above, one filler fewer.
+#[test]
+fn new_perspectives_offers_nothing_below_seven_cards() {
+    let (mut runner, first_cave, _second_cave) = new_perspectives_scenario(4);
+    assert_eq!(runner.state().players[0].hand.len(), 6);
+    runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+        ManaType::Red,
+        ObjectId(0),
+        false,
+        vec![],
+    ));
+
+    let result = activate_cycling(&mut runner, first_cave).expect("ordinary cycling is legal");
+    assert!(
+        !matches!(
+            result.waiting_for,
+            WaitingFor::ActivationCostOneOfChoice { .. }
+        ),
+        "no {{0}} branch below seven cards in hand"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&first_cave].zone,
+        Zone::Graveyard,
+        "reach guard: the cycle completed through the ordinary cost"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "the ordinary {{R}} cycling cost was paid"
+    );
+}
