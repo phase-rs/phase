@@ -1782,6 +1782,7 @@ impl GameRunner {
                 )))
             }
         };
+        let holding_team = super::topology::team_id(&self.state, holder);
         let mut seats = vec![holder];
         seats.extend(super::players::teammates(&self.state, holder));
         // CR 805.5b: a recorded pass is idempotent — re-applying one errors,
@@ -1798,6 +1799,19 @@ impl GameRunner {
             events.extend(
                 super::engine::apply(&mut self.state, submitter, GameAction::PassPriority)?.events,
             );
+            // CR 805.5b + CR 805.8: a submitter outside the team (a whole-team
+            // controller) can complete the team's pass early — stop once the
+            // window leaves the holding team instead of submitting stale
+            // passes into the next team's window and losing these events to
+            // the `?` above.
+            let still_holding = matches!(
+                &self.state.waiting_for,
+                WaitingFor::Priority { player }
+                    if super::topology::team_id(&self.state, *player) == holding_team
+            );
+            if !still_holding {
+                break;
+            }
         }
         Ok(events)
     }

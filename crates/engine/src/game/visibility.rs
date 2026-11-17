@@ -8970,7 +8970,7 @@ mod tests {
             entries: vec![StackResolutionEntryFence::capture(&entry)],
             cursor: 0,
             representatives: std::collections::BTreeSet::from([PlayerId(0)]),
-            verified_pass_representatives: std::collections::BTreeSet::new(),
+            verified_pass_owners: std::collections::BTreeSet::new(),
             budget: StackResolutionBudget::from_legacy_max_resolutions(3),
             policy: StackResolutionPolicy::Committed,
             auto_pass_overlay: StackResolutionAutoPassOverlay {

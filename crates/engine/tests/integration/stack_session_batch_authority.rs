@@ -177,10 +177,7 @@ fn verified_ai_cohort_resolves_the_fenced_run_in_one_boundary() {
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
     );
     assert_eq!(cohort.representatives, all_seats());
-    assert_eq!(
-        cohort.verified_pass_representatives,
-        BTreeSet::from([P0, P1, P2])
-    );
+    assert_eq!(cohort.verified_pass_owners, BTreeSet::from([P0, P1, P2]));
     assert_eq!((cohort.cursor, cohort.entries.len()), (0, SCUTE_COUNT));
     assert_eq!(priority_holder(state), P3);
 
@@ -219,10 +216,7 @@ fn verified_ai_cohort_collapses_on_an_automatic_close() {
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
     );
     assert_eq!(cohort.representatives, all_seats());
-    assert_eq!(
-        cohort.verified_pass_representatives,
-        BTreeSet::from([P0, P2, P3])
-    );
+    assert_eq!(cohort.verified_pass_owners, BTreeSet::from([P0, P2, P3]));
     assert_eq!((cohort.cursor, cohort.entries.len()), (1, SCUTE_COUNT));
     assert_eq!(priority_holder(state), P1);
     perf_counters::reset();
@@ -267,7 +261,7 @@ fn verified_ai_cohort_stays_inside_its_fenced_prefix() {
         entries,
         cursor: 0,
         representatives: all_seats(),
-        verified_pass_representatives: BTreeSet::from([P0, P1, P2]),
+        verified_pass_owners: BTreeSet::from([P0, P1, P2]),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -354,10 +348,7 @@ fn unverified_human_participant_keeps_one_entry_per_pass() {
         cohort.policy,
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
     );
-    assert_eq!(
-        cohort.verified_pass_representatives,
-        BTreeSet::from([P1, P2, P3])
-    );
+    assert_eq!(cohort.verified_pass_owners, BTreeSet::from([P1, P2, P3]));
 
     let mut human_passes = 0;
     while !state.stack.is_empty() {
@@ -536,10 +527,7 @@ fn standing_pass_collapses_the_human_owners_run() {
     verified_ai_pass(state, P1);
     // Reach guard: the installer verified only itself, so the run is intact.
     assert_eq!(state.stack.len(), SCUTE_COUNT);
-    assert_eq!(
-        session(state).verified_pass_representatives,
-        BTreeSet::from([P1])
-    );
+    assert_eq!(session(state).verified_pass_owners, BTreeSet::from([P1]));
     let (later_human_dispatches, later_ai_dispatches) = drive_with_human(state, P0, 40);
 
     assert_eq!(
@@ -581,7 +569,7 @@ fn snapshot_topology_one_human_pass_consumes_the_owned_run() {
         entries,
         cursor: 0,
         representatives: all_seats(),
-        verified_pass_representatives: BTreeSet::from([P1, P2, P3]),
+        verified_pass_owners: BTreeSet::from([P1, P2, P3]),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::RecheckNoMeaningfulPriorityAction,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -594,7 +582,7 @@ fn snapshot_topology_one_human_pass_consumes_the_owned_run() {
     state.waiting_for = WaitingFor::Priority { player: P0 };
     // Reach guards: the snapshot's session fields.
     assert_eq!(
-        session(state).verified_pass_representatives,
+        session(state).verified_pass_owners,
         BTreeSet::from([P1, P2, P3])
     );
     assert_eq!(priority_holder(state), P0);
@@ -647,7 +635,7 @@ fn opponent_run_after_two_ai_passes(yielded: usize) -> ScuteBoard {
     // Reach guard: no entry resolved before P3's pass.
     assert_eq!(state.stack.len(), SCUTE_COUNT);
     assert_eq!(
-        session(state).verified_pass_representatives,
+        session(state).verified_pass_owners,
         BTreeSet::from([P1, P2])
     );
     perf_counters::reset();
@@ -688,10 +676,7 @@ fn unyielded_opponent_run_pauses_the_human() {
         cohort.policy,
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
     );
-    assert_eq!(
-        cohort.verified_pass_representatives,
-        BTreeSet::from([P1, P2, P3])
-    );
+    assert_eq!(cohort.verified_pass_owners, BTreeSet::from([P1, P2, P3]));
     assert_eq!(cohort.cursor, 0);
 }
 

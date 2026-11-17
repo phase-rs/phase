@@ -619,11 +619,13 @@ fn restored_stack_resolution_session_is_coherent(
             .budget
             .max_resolutions()
             .is_some_and(|maximum| session.cursor >= maximum as usize)
-        || !session
-            .verified_pass_representatives
-            .is_subset(&session.representatives)
+        || !session.verified_pass_owners.iter().all(|owner| {
+            session
+                .representatives
+                .contains(&topology::priority_pass_representative(state, *owner))
+        })
         || (session.policy != StackResolutionPolicy::RecheckNoMeaningfulPriorityAction
-            && !session.verified_pass_representatives.is_empty())
+            && !session.verified_pass_owners.is_empty())
     {
         return false;
     }

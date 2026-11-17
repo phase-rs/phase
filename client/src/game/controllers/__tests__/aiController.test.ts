@@ -132,6 +132,54 @@ describe("AI proposal controller", () => {
     controller.dispose();
   });
 
+  it("drives an AI teammate while priority is parked on the local representative (CR 805.5a)", async () => {
+    const issued = proposal(PASS);
+    const getAiActionProposal = vi.fn(async () => issued);
+    dispatchAiActionProposal.mockResolvedValue({ status: "applied" });
+    const parked = { type: "Priority", data: { player: 0 } } as WaitingFor;
+    const state = buildGameState({
+      waiting_for: parked,
+      priority_player: 0,
+      stack: [],
+      derived: { priority_decision_owners: [0, 1] },
+    });
+    storeState.gameState = state;
+    storeState.waitingFor = parked;
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    // Revert-probe target: without the derived-owners branch the parked
+    // local holder idles the controller and no proposal is requested.
+    expect(getAiActionProposal).toHaveBeenCalledWith("Medium", 1);
+    expect(dispatchAiActionProposal).toHaveBeenCalledTimes(1);
+    controller.dispose();
+  });
+
+  it("leaves a parked window alone when no decision owner is a remote seat (control)", async () => {
+    const getAiActionProposal = vi.fn(async () => proposal(PASS));
+    const parked = { type: "Priority", data: { player: 0 } } as WaitingFor;
+    const state = buildGameState({
+      waiting_for: parked,
+      priority_player: 0,
+      stack: [],
+      derived: { priority_decision_owners: [0] },
+    });
+    storeState.gameState = state;
+    storeState.waitingFor = parked;
+    storeState.adapter = { getAiActionProposal };
+
+    const controller = createAIController({ seats: [{ playerId: 1, difficulty: "Medium" }] });
+    controller.start();
+    await runOnce();
+
+    expect(getAiActionProposal).not.toHaveBeenCalled();
+    expect(dispatchAiActionProposal).not.toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it("retries after a synchronous proposal lookup error instead of stranding the controller pending", async () => {
     const getAiActionProposal = vi.fn(() => {
       throw new Error("synchronous adapter failure");

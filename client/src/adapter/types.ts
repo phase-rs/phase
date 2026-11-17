@@ -4664,6 +4664,15 @@ export interface UnlessDrawCostView {
 
 export interface DerivedViews {
   unique_authorized_submitter?: PlayerId;
+  /**
+   * CR 805.5a: living seats entitled to answer the live priority window that
+   * have not passed it yet — the parked representative plus unpassed
+   * teammates on a shared-team window, otherwise the single holder. Absent
+   * on non-priority windows and on wire paths without derived views, where
+   * consumers fall back to `priority_player`. Mirrors
+   * `engine::game::derived_views::DerivedViews::priority_decision_owners`.
+   */
+  priority_decision_owners?: PlayerId[];
   /** Engine-owned Scry prompt identity for this viewer, independent of opportunities. */
   scry_prompt_id?: InteractionId;
   /** Opaque engine-issued identity of this viewer's prompt, excluding display-only data. */

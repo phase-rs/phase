@@ -2412,7 +2412,7 @@ fn install_recheck_session(state: &mut GameState, verified: &[PlayerId]) {
         .stack_resolution_session
         .as_mut()
         .expect("the session was just installed")
-        .verified_pass_representatives
+        .verified_pass_owners
         .extend(verified.iter().copied());
 }
 
@@ -2901,7 +2901,7 @@ fn authorized_limit_does_not_look_past_an_activated_ability() {
             .stack_resolution_session
             .as_mut()
             .expect("the session was just installed")
-            .verified_pass_representatives
+            .verified_pass_owners
             .extend([PlayerId(0), PlayerId(1)]);
         assert_eq!(
             stack_resolution_session_authorized_limit(&inert_above),

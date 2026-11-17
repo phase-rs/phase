@@ -1116,8 +1116,15 @@ fn ai_session_for(state: &GameState) -> Arc<AiSession> {
 
 /// Resolve the seat whose live prompt owns an AI decision. The requested seat
 /// is retained for simultaneous prompts where it is still entitled to act.
+///
+/// CR 805.5a: on a shared-team priority window every living teammate is
+/// entitled — the window parks on the representative, but any member may
+/// act — so entitlement is the engine's decision owners, not the narrow
+/// acting players (which name only the parked holder). Retaining a
+/// non-representative teammate here is what lets an explicitly requested P1
+/// keep its own proposal instead of being rebound to P0.
 fn ai_semantic_owner(state: &GameState, requested_ai: PlayerId) -> PlayerId {
-    if state.waiting_for.acting_players().contains(&requested_ai) {
+    if engine::game::turn_control::decision_owners(state).contains(&requested_ai) {
         requested_ai
     } else {
         state
@@ -8938,15 +8945,7 @@ pub fn get_ai_action_proposal_from_scores(
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
         let requested_ai = PlayerId(player_id);
-        let semantic_owner = if state.waiting_for.acting_players().contains(&requested_ai) {
-            requested_ai
-        } else {
-            state
-                .waiting_for
-                .acting_player()
-                .or_else(|| state.waiting_for.acting_players().first().copied())
-                .unwrap_or(requested_ai)
-        };
+        let semantic_owner = ai_semantic_owner(state, requested_ai);
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let admissible_scores: Vec<(GameAction, f64)> = scored
             .into_iter()
@@ -8990,15 +8989,7 @@ pub fn get_ai_action_proposal_from_scores_with_diagnostics(
     with_state_mut(|state| {
         engine::game::layers::flush_layers(state);
         let requested_ai = PlayerId(player_id);
-        let semantic_owner = if state.waiting_for.acting_players().contains(&requested_ai) {
-            requested_ai
-        } else {
-            state
-                .waiting_for
-                .acting_player()
-                .or_else(|| state.waiting_for.acting_players().first().copied())
-                .unwrap_or(requested_ai)
-        };
+        let semantic_owner = ai_semantic_owner(state, requested_ai);
         let contract = AiDecisionContract::issue(state, semantic_owner);
         let admissible_scores: Vec<(GameAction, f64)> = scored
             .into_iter()
@@ -14783,5 +14774,171 @@ mod hosted_takeback_tests {
             installed().waiting_for,
             WaitingFor::BetweenGamesSideboard { player: P0, .. }
         ));
+    }
+}
+
+/// CR 805.5a browser AI: an explicitly requested teammate keeps its own
+/// proposal while the window parks on its representative, and the full
+/// mint/submit path drives that teammate's land play, action, and pass.
+#[cfg(test)]
+mod teammate_browser_ai_tests {
+    use super::*;
+    use engine::game::scenario::{GameScenario, P0, P1};
+    use engine::types::ability::TargetRef;
+    use engine::types::format::FormatConfig;
+    use engine::types::game_state::CastPaymentMode;
+    use engine::types::identifiers::ObjectId;
+    use engine::types::mana::{ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    const P2: PlayerId = PlayerId(2);
+
+    /// An explicitly requested P1 is retained on a P0-parked team window
+    /// (the reported failure rebound it to P0); an opponent still falls
+    /// back to the parked holder.
+    #[test]
+    fn ai_semantic_owner_retains_a_teammate_on_a_parked_team_window() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        assert_eq!(ai_semantic_owner(&state, P1), P1);
+        assert_eq!(ai_semantic_owner(&state, P0), P0);
+        assert_eq!(ai_semantic_owner(&state, P2), P0);
+    }
+
+    fn installed() -> GameState {
+        with_installed_state(GameState::clone).expect("a game is installed")
+    }
+
+    fn owners_of(state: &GameState) -> Vec<PlayerId> {
+        engine::game::derived_views::derive_views(state, None).priority_decision_owners
+    }
+
+    /// Mint a token for `owner`'s `action` through the production registry
+    /// and submit it as the contract's authorized actor, returning the
+    /// submission the browser would receive.
+    fn submit_own(owner: PlayerId, action: GameAction) -> AiProposalSubmission {
+        let contract = AiDecisionContract::issue(&installed(), owner);
+        let actor = contract.authorized_actor;
+        let token = issue_ai_proposal_token(contract).expect("a proposal token");
+        submit_ai_action_proposal_inner(&token, actor, action)
+    }
+
+    /// The browser path drives P1's own land play, action, and pass while
+    /// priority stays parked on P0: owner resolution, the derived scheduler
+    /// list, and every submit stay on the teammate's own decision slot.
+    #[test]
+    fn browser_path_drives_teammate_land_action_and_pass_on_a_parked_window() {
+        clear_game_state();
+        let mut sc = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+        sc.at_phase(Phase::PreCombatMain);
+        let forest = sc.add_land_to_hand(P1, "Forest").id();
+        let bolt = sc.add_bolt_to_hand(P1);
+        sc.with_mana_pool(
+            P1,
+            vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+        );
+        let victim = sc.add_creature(P2, "Target", 0, 8).id();
+        let mut runner = sc.build();
+        runner.state_mut().active_player = P0;
+        runner.state_mut().priority_player = P0;
+        runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+        GAME_STATE.with(|cell| cell.set(Some(runner.state().clone())));
+
+        assert_eq!(owners_of(&installed()), vec![P0, P1]);
+        assert_eq!(ai_semantic_owner(&installed(), P1), P1);
+
+        // P1's own land play.
+        let card_id = installed().objects[&forest].card_id;
+        assert!(
+            matches!(
+                submit_own(
+                    P1,
+                    GameAction::PlayLand {
+                        object_id: forest,
+                        card_id,
+                    }
+                ),
+                AiProposalSubmission::Applied { .. }
+            ),
+            "teammate land play must apply through the proposal path"
+        );
+        assert_eq!(installed().objects[&forest].zone, Zone::Battlefield);
+
+        // P1's own action: Bolt the opposing creature.
+        let card_id = installed().objects[&bolt].card_id;
+        assert!(
+            matches!(
+                submit_own(
+                    P1,
+                    GameAction::CastSpell {
+                        object_id: bolt,
+                        card_id,
+                        targets: vec![],
+                        payment_mode: CastPaymentMode::Auto,
+                    }
+                ),
+                AiProposalSubmission::Applied { .. }
+            ),
+            "teammate cast must apply through the proposal path"
+        );
+        assert!(
+            matches!(
+                installed().waiting_for,
+                WaitingFor::TargetSelection { player, .. } if player == P1
+            ),
+            "teammate cast must park on P1 targeting, got {:?}",
+            installed().waiting_for
+        );
+        let targeting = submit_own(
+            P1,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(victim)),
+            },
+        );
+        assert!(
+            matches!(targeting, AiProposalSubmission::Applied { .. }),
+            "teammate targeting must apply through the proposal path, got {targeting:?}"
+        );
+        assert!(
+            installed().stack.iter().any(|entry| entry.controller == P1),
+            "teammate spell must reach the stack under P1 control"
+        );
+
+        // P1's own pass over the stack it made.
+        assert!(
+            matches!(
+                submit_own(P1, GameAction::PassPriority),
+                AiProposalSubmission::Applied { .. }
+            ),
+            "teammate pass must apply through the proposal path"
+        );
+        // The verified stack-pass path installs its rechecking session and
+        // records the semantic owner — never the parked representative.
+        let session = installed()
+            .stack_resolution_session
+            .clone()
+            .expect("the verified pass installs a rechecking session");
+        assert!(session.verified_pass_owners.contains(&P1));
+        assert!(!session.verified_pass_owners.contains(&P0));
+        assert!(installed().priority_passes.contains(&P1));
+        assert!(
+            !installed().priority_passes.contains(&P0),
+            "P1's pass must not pass for P0"
+        );
+
+        // The window never left the representative, and the scheduler list
+        // now names only the still-unpassed P0.
+        assert!(
+            matches!(
+                installed().waiting_for,
+                WaitingFor::Priority { player } if player == P0
+            ),
+            "priority must stay parked on P0, got {:?}",
+            installed().waiting_for
+        );
+        assert_eq!(owners_of(&installed()), vec![P0]);
     }
 }

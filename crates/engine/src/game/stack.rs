@@ -10581,7 +10581,7 @@ mod tests {
                     .collect(),
                 cursor: 0,
                 representatives: BTreeSet::from([PlayerId(0)]),
-                verified_pass_representatives: BTreeSet::new(),
+                verified_pass_owners: BTreeSet::new(),
                 budget: StackResolutionBudget::Unlimited,
                 policy: StackResolutionPolicy::Committed,
                 auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -11323,7 +11323,7 @@ mod tests {
                 let session = state.stack_resolution_session.as_mut().unwrap();
                 session.policy = StackResolutionPolicy::RecheckNoMeaningfulPriorityAction;
                 session.representatives = BTreeSet::from([PlayerId(0), PlayerId(1)]);
-                session.verified_pass_representatives = BTreeSet::from([PlayerId(0), PlayerId(1)]);
+                session.verified_pass_owners = BTreeSet::from([PlayerId(0), PlayerId(1)]);
             }
 
             let mut events = Vec::new();

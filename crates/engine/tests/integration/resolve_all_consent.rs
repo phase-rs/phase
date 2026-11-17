@@ -992,7 +992,7 @@ fn begin_resolve_all_refuses_to_replace_an_existing_resolution_session() {
         entries: vec![fence],
         cursor: 0,
         representatives: BTreeSet::from([P0, P1]),
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget: StackResolutionBudget::Unlimited,
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -1770,7 +1770,7 @@ fn restored_session_state_with_top_controller(
         entries,
         cursor: 0,
         representatives: representatives.clone(),
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget: StackResolutionBudget::from_legacy_max_resolutions(max_resolutions),
         policy: StackResolutionPolicy::Committed,
         auto_pass_overlay: StackResolutionAutoPassOverlay {
@@ -1871,7 +1871,7 @@ fn restored_rechecking_session_waits_for_a_fresh_ai_contract() {
             .as_mut()
             .expect("fixture has a session");
         session.policy = StackResolutionPolicy::RecheckNoMeaningfulPriorityAction;
-        session.verified_pass_representatives.insert(P0);
+        session.verified_pass_owners.insert(P0);
     }
     let stack_len = state.stack.len();
     for mode in state.auto_pass.values_mut() {
@@ -1917,7 +1917,7 @@ fn restored_rechecking_session_waits_for_a_fresh_ai_contract() {
         .stack_resolution_session
         .as_ref()
         .expect("the paused session is retained")
-        .verified_pass_representatives
+        .verified_pass_owners
         .contains(&P0));
 
     let contract = AiDecisionContract::issue(&state, P1);
@@ -2035,7 +2035,7 @@ fn restored_session_rejects_a_cached_nonrepresentative_without_resolving() {
         .stack_resolution_session
         .as_mut()
         .expect("fixture has a session")
-        .verified_pass_representatives
+        .verified_pass_owners
         .insert(P1);
     state
         .stack_resolution_session

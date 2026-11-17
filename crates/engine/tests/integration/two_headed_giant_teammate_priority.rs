@@ -8,6 +8,7 @@ use engine::game::casting::can_foretell_card;
 use engine::game::combat::{AttackerInfo, CombatState};
 use engine::game::engine as game_engine;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{Effect, ResolvedAbility};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -466,5 +467,177 @@ fn pass_holding_team_skips_passed_members_and_keeps_events() {
     assert!(
         events.is_empty(),
         "no passes are owed, so no events may be produced, got {events:?}"
+    );
+}
+
+/// CR 805.8: a whole-team controller's pass completes the team's pass — the
+/// helper stops once the window leaves the team instead of submitting stale
+/// passes into the next window, and keeps the events it collected.
+#[test]
+fn pass_holding_team_stops_when_a_controller_pass_leaves_the_team() {
+    let sc = team_turn_board();
+    let mut runner = sc.build();
+    // P2 controls the active team's decisions (CR 723): both members' passes
+    // submit as P2, and P2's first pass records the whole team. Sync
+    // re-derives the authorized submitter onto `priority_player`, as a
+    // live controlled turn carries it.
+    runner.state_mut().active_player = P0;
+    runner.state_mut().turn_decision_controller = Some(P2);
+    engine::game::public_state::sync_waiting_for(
+        runner.state_mut(),
+        &WaitingFor::Priority { player: P0 },
+    );
+
+    let events = runner
+        .pass_holding_team()
+        .expect("a controller-mapped window must complete");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, GameEvent::PriorityPassed { .. })),
+        "the completing pass events must be kept, got {events:?}"
+    );
+    assert!(runner.state().priority_passes.contains(&P0));
+    assert!(runner.state().priority_passes.contains(&P1));
+    // The window advanced to the opposing team WITHOUT passing either head:
+    // the helper stopped instead of submitting stale passes there.
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "the team pass must advance to P2, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        !runner.state().priority_passes.contains(&P2),
+        "P2 must not be passed by the helper's stale submission"
+    );
+    assert!(
+        !runner.state().priority_passes.contains(&P3),
+        "P3 must not be passed by the helper's stale submission"
+    );
+}
+
+/// CR 805.5b: an AI teammate's verified pass authorizes only that teammate.
+/// P1's verified pass over an opposing spell must leave the human
+/// representative P0 unpassed on the parked window and still able to
+/// respond — the session records the semantic owner, never the
+/// representative. Regression: recording the representative let P1's pass
+/// authorize P0's automatic pass, so P0 never got to answer the Bolt.
+#[test]
+fn ai_teammate_verified_pass_leaves_representative_unpassed_and_able_to_respond() {
+    let db = crate::support::shared_card_db().expect("integration card fixture must load");
+    let mut sc = team_turn_board();
+    let counterspell = sc.add_real_card(P0, "Counterspell", Zone::Hand, db);
+    sc.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+        ],
+    );
+    let bolt = sc.add_bolt_to_hand(P2);
+    sc.with_mana_pool(
+        P2,
+        vec![ManaUnit::new(ManaType::Red, ObjectId(0), false, vec![])],
+    );
+    let victim = sc.add_creature(P0, "Target", 0, 8).id();
+    let mut runner = sc.build();
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+
+    // Hand priority to the opposing team so P2 can cast; the cast returns
+    // priority to the active team's representative with the Bolt on the stack.
+    runner
+        .pass_holding_team()
+        .expect("active team passes to P2");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P2
+        ),
+        "P2 must hold priority to cast, got {:?}",
+        runner.state().waiting_for
+    );
+    let _committed = runner.cast(bolt).target_object(victim).commit();
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.controller == P2),
+        "P2's Bolt must be on the stack"
+    );
+    // The cast leaves priority with the caster's team; pass it back so the
+    // window parks on P0 with the Bolt still on the stack.
+    runner
+        .pass_holding_team()
+        .expect("opposing team passes back");
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.controller == P2),
+        "the Bolt must survive the opposing team's passes"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "priority must return to the active representative, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // P1 (AI) takes the production verified-pass boundary.
+    let contract = ai_support::AiDecisionContract::issue(runner.state(), P1);
+    game_engine::apply_verified_ai_priority_pass(
+        runner.state_mut(),
+        P1,
+        &contract,
+        GameAction::PassPriority,
+    )
+    .expect("teammate verified pass must be accepted");
+
+    // The pass is P1's alone: P0 stays unpassed on the parked window, and the
+    // session records the semantic owner — never the representative.
+    assert!(runner.state().priority_passes.contains(&P1));
+    assert!(
+        !runner.state().priority_passes.contains(&P0),
+        "P1's verified pass must not pass for P0"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P0
+        ),
+        "the window must stay parked on P0, got {:?}",
+        runner.state().waiting_for
+    );
+    let session = runner
+        .state()
+        .stack_resolution_session
+        .as_ref()
+        .expect("the verified pass installs a rechecking session");
+    assert!(
+        session.verified_pass_owners.contains(&P1),
+        "the session must record P1's authorization"
+    );
+    assert!(
+        !session.verified_pass_owners.contains(&P0),
+        "the session must not record P0 as verified"
+    );
+
+    // P0 can still respond: Counterspell over the Bolt is offered to P0.
+    let (actions, _, _) = ai_support::legal_actions_for_viewer(runner.state(), P0);
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            GameAction::CastSpell { object_id, .. } if *object_id == counterspell
+        )),
+        "P0 must be offered Counterspell in response, got {actions:?}"
     );
 }

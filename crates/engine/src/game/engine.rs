@@ -1103,17 +1103,19 @@ pub fn apply_verified_ai_priority_pass(
     // CR 805.5a: the verified pass belongs to the window's team, which the
     // representative parks on — a teammate's pass continues the same window,
     // so the owner check admits every living team decision owner, not just
-    // the holder.
+    // the holder. CR 805.5b: the authorization is recorded against the
+    // semantic owner, never the parked representative — recording the
+    // representative would let one teammate's verified pass authorize
+    // another member's automatic pass. The representative below only checks
+    // that the window's team is covered by the fenced cohort.
     if !turn_control::decision_owners(state).contains(&contract.semantic_owner) {
         return Err(EngineError::ActionNotAllowed(
             "AI stack continuation requires the issued nonempty priority window".to_string(),
         ));
     }
-
+    let owner = contract.semantic_owner;
     let representative = super::topology::priority_pass_representative(state, player);
-    let inserted_verified_representative = if let Some(session) =
-        state.stack_resolution_session.as_ref()
-    {
+    let inserted_verified_owner = if let Some(session) = state.stack_resolution_session.as_ref() {
         let current_representatives = super::topology::canonical_priority_representatives(
             state,
             session.representatives.iter().copied(),
@@ -1137,8 +1139,8 @@ pub fn apply_verified_ai_priority_pass(
             .stack_resolution_session
             .as_mut()
             .expect("the validated active session remains installed")
-            .verified_pass_representatives
-            .insert(representative)
+            .verified_pass_owners
+            .insert(owner)
     } else {
         // The shared session is installed before the ordinary action boundary
         // so its explicit-pass seam applies the session's skipped-window authority
@@ -1165,8 +1167,8 @@ pub fn apply_verified_ai_priority_pass(
             .stack_resolution_session
             .as_mut()
             .expect("the newly installed session exists")
-            .verified_pass_representatives
-            .insert(representative);
+            .verified_pass_owners
+            .insert(owner);
         return match apply_interaction(state, authenticated_actor, contract.semantic_owner, action)
         {
             Ok(result) => Ok(result),
@@ -1181,11 +1183,9 @@ pub fn apply_verified_ai_priority_pass(
     match apply_interaction(state, authenticated_actor, contract.semantic_owner, action) {
         Ok(result) => Ok(result),
         Err(error) => {
-            if inserted_verified_representative {
+            if inserted_verified_owner {
                 if let Some(session) = state.stack_resolution_session.as_mut() {
-                    session
-                        .verified_pass_representatives
-                        .remove(&representative);
+                    session.verified_pass_owners.remove(&owner);
                 }
             }
             Err(error)
@@ -10074,23 +10074,33 @@ fn stack_resolution_session_participant_authorizes_pass(
         StackResolutionPolicy::Committed => !priority::holds_full_control(state, participant),
         // A verified AI pass authorizes later windows in this exact fenced
         // cohort; CR 117.3d + CR 732.2b: a representative's standing pass over
-        // this window's top authorizes this window.
+        // this window's top authorizes this window. CR 805.5b: passing for a
+        // shared team's seat decides for every living member, so every
+        // member authorizes its own window — its own standing pass or its
+        // own verified pass. One teammate's verified pass never authorizes
+        // another member's window. An individual seat is its own whole
+        // team, preserving the single-seat rule exactly.
         StackResolutionPolicy::RecheckNoMeaningfulPriorityAction => {
-            let standing_pass =
-                match priority::standing_priority_pass(state, participant, Some(window_top)) {
-                    // CR 117.1: Full Control is a standing refusal to give up any
-                    // window — the session's own representative's included.
-                    priority::StandingPriorityPass::Withheld => return false,
-                    priority::StandingPriorityPass::Granted => true,
-                    // CR 117.1d + CR 605.3a: an own object that can remove an
-                    // activatable mana source, or an own activated ability that
-                    // would waste an untap on its own source, is no standing
-                    // pass; only explicit consent skips it.
-                    priority::StandingPriorityPass::Held
-                    | priority::StandingPriorityPass::Undecided => false,
-                };
             session.representatives.contains(&participant)
-                && (standing_pass || session.verified_pass_representatives.contains(&participant))
+                && super::topology::team_members(state, participant)
+                    .into_iter()
+                    .all(|member| {
+                        match priority::standing_priority_pass(state, member, Some(window_top)) {
+                            // CR 117.1: Full Control is a standing refusal to give up any
+                            // window — the session's own verified pass included.
+                            priority::StandingPriorityPass::Withheld => false,
+                            priority::StandingPriorityPass::Granted => true,
+                            // CR 117.1d + CR 605.3a: an own object that can remove an
+                            // activatable mana source, or an own activated ability that
+                            // would waste an untap on its own source, is no standing
+                            // pass; only explicit consent or that member's own
+                            // verified pass skips it.
+                            priority::StandingPriorityPass::Held
+                            | priority::StandingPriorityPass::Undecided => {
+                                session.verified_pass_owners.contains(&member)
+                            }
+                        }
+                    })
         }
     }
 }
@@ -11034,7 +11044,7 @@ pub(crate) fn install_stack_resolution_session(
             .collect(),
         cursor: 0,
         representatives,
-        verified_pass_representatives: BTreeSet::new(),
+        verified_pass_owners: BTreeSet::new(),
         budget,
         policy,
         auto_pass_overlay: StackResolutionAutoPassOverlay { baseline },

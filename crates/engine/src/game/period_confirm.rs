@@ -5073,7 +5073,7 @@ mod tests {
             entries: Vec::new(),
             cursor: 0,
             representatives: [PlayerId(0)].into_iter().collect(),
-            verified_pass_representatives: BTreeSet::new(),
+            verified_pass_owners: BTreeSet::new(),
             budget: StackResolutionBudget::Unlimited,
             policy: StackResolutionPolicy::Committed,
             auto_pass_overlay: StackResolutionAutoPassOverlay {

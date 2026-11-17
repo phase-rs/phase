@@ -24901,13 +24901,20 @@ pub struct StackResolutionSession {
     #[serde(default)]
     pub cursor: usize,
     pub representatives: BTreeSet<PlayerId>,
-    /// AI representatives whose verified pass is a policy authorization for
+    /// AI semantic owners whose verified pass is a policy authorization for
     /// later priority windows in this exact fenced cohort. Absence is
-    /// conservative: that representative must receive an explicit decision
+    /// conservative: that owner must receive an explicit decision
     /// unless its standing pass covers the window
-    /// (`priority::standing_priority_pass`).
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub verified_pass_representatives: BTreeSet<PlayerId>,
+    /// (`priority::standing_priority_pass`). CR 805.5b: authorization is
+    /// per individual seat — one teammate's verified pass never authorizes
+    /// another member's window. The alias keeps pre-rename persisted
+    /// sessions (which stored representatives) deserializing.
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeSet::is_empty",
+        alias = "verified_pass_representatives"
+    )]
+    pub verified_pass_owners: BTreeSet<PlayerId>,
     #[serde(default)]
     pub budget: StackResolutionBudget,
     #[serde(default)]
@@ -60513,7 +60520,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 entries: vec![StackResolutionEntryFence::capture(&entry)],
                 cursor: 0,
                 representatives: [PlayerId(0)].into_iter().collect(),
-                verified_pass_representatives: BTreeSet::new(),
+                verified_pass_owners: BTreeSet::new(),
                 budget: StackResolutionBudget::Unlimited,
                 policy: StackResolutionPolicy::Committed,
                 auto_pass_overlay: StackResolutionAutoPassOverlay {
