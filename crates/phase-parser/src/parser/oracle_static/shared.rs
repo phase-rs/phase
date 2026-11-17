@@ -4363,18 +4363,11 @@ pub(crate) fn parse_affected_scoped_static_condition(
     }
 }
 
-/// Parse the trailing " unless [condition]" clause of a combat-restriction
-/// static. Delegates `Not`-wrapping (with the `UnlessPay` raw-passthrough
-/// exception) to the shared `parse_unless_condition` combinator so the static
-/// layer and the `parse_condition` "unless " dispatch share one polarity rule.
-///
-/// `affected` is the host static's affected set, threaded to
-/// `parse_affected_scoped_static_condition` so the gate's anaphoric "it" binds
-/// to the source only for a SelfRef static (CR 611.3a).
-/// Check if a static condition is `PlayerIsPoisoned { DefendingPlayer }`, which
-/// is not a valid condition for static attack restrictions (CR 508.5: the
-/// defending player is not defined until attackers are committed). Such
-/// conditions must remain `Unrecognized` to preserve an honest gap.
+/// Check if a static condition is `PlayerIsPoisoned { DefendingPlayer }`.
+/// Chained Throatseeker's printed "can't attack unless defending player is
+/// poisoned" is a valid attack restriction (CR 508.1c), but the engine does
+/// not yet evaluate a poison condition against each candidate defender during
+/// attack legality, so such a rider stays `Unrecognized` as an honest gap.
 fn is_defending_player_poisoned_for_attack_restriction(cond: &StaticCondition) -> bool {
     matches!(
         cond,
@@ -4385,6 +4378,14 @@ fn is_defending_player_poisoned_for_attack_restriction(cond: &StaticCondition) -
         || matches!(cond, StaticCondition::And { conditions } | StaticCondition::Or { conditions } if conditions.iter().any(is_defending_player_poisoned_for_attack_restriction))
 }
 
+/// Parse the trailing " unless [condition]" clause of a combat-restriction
+/// static. Delegates `Not`-wrapping (with the `UnlessPay` raw-passthrough
+/// exception) to the shared `parse_unless_condition` combinator so the static
+/// layer and the `parse_condition` "unless " dispatch share one polarity rule.
+///
+/// `affected` is the host static's affected set, threaded to
+/// `parse_affected_scoped_static_condition` so the gate's anaphoric "it" binds
+/// to the source only for a SelfRef static (CR 611.3a).
 pub(crate) fn parse_unless_static_condition(
     tp: &TextPair<'_>,
     affected: Option<&TargetFilter>,
@@ -4393,10 +4394,10 @@ pub(crate) fn parse_unless_static_condition(
     let original = unless_text.original.trim().trim_end_matches('.');
     let lower = original.to_lowercase();
     if let Ok((_, condition)) = nom_condition::parse_unless_condition(&lower) {
-        // CR 508.5 + CR 122.1f: "defending player is poisoned" is not a valid
-        // static attack restriction condition because the defending player is
-        // not known until attackers are declared. Defer to the Unrecognized path
-        // so the restriction remains an honest gap.
+        // CR 508.1c + CR 122.1f: "defending player is poisoned" is a valid attack
+        // restriction, but candidate-defender attack-legality evaluation does not
+        // support a poison condition yet. Keep the rider `Unrecognized` so the
+        // restriction remains an honest gap.
         if is_defending_player_poisoned_for_attack_restriction(&condition) {
             return Some(StaticCondition::Not {
                 condition: Box::new(StaticCondition::Unrecognized {
