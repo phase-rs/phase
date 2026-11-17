@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "Rilevatore di combo (sperimentale)",
-    "title": "Rileva i loop infiniti: termina automaticamente i loop obbligatori e mostra le risorse ∞ (disattivato per impostazione predefinita)",
+    "title": "Rileva i loop infiniti: termina automaticamente i loop obbligatori, offre scorciatoie per i loop controllati da un giocatore e mostra le risorse ∞ (disattivato per impostazione predefinita)",
     "off": "Disattivato",
     "interactive": "Interattivo"
   },
