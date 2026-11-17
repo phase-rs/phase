@@ -455,8 +455,7 @@ fn barn_board() -> BarnBoard {
             .attachments
             .push(incidental_equipment);
         engine::game::layers::mark_layers_full(state);
-        ()
-    };
+    }
     let (barn, departure_plane) = install_barn_planes(&mut runner);
     assert!(
         runner.state().planar_deck.contains(&departure_plane),
