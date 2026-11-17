@@ -911,7 +911,7 @@ fn cancelled_gorex_cast_pile_does_not_reach_the_next_cast() {
         })
         .expect("begin casting Gorex");
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("pay the optional exile cost");
     runner
         .act(GameAction::SelectCards { cards: vec![a] })

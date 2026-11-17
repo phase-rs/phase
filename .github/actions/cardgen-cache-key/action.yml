@@ -1,7 +1,7 @@
 name: Card-data cache key
 description: >
   Derive the content hash that keys the generated card-data caches
-  (`cardgen-` and `cardgen-gates-v1-`) from the MTGJSON input and the engine
+  (`cardgen-provenance-v1-` and `cardgen-gates-v2-`) from the MTGJSON input and the engine
   sources, without `hashFiles()`. Run after AtomicCards.json is in place.
 
 outputs:
@@ -24,7 +24,7 @@ runs:
       # and is a plain string to every later use.
       #
       # ci.yml (card-data-gate) and .github/actions/ai-card-data-cache SHARE the
-      # `cardgen-` cache entries, so both must take the key from this action.
+      # `cardgen-provenance-v1-` cache entries, so both must take the key from this action.
       # Change the input set only here.
       #
       # Inputs, matching what oracle-gen's output depends on:

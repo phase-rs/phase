@@ -4446,6 +4446,20 @@ impl ResolvedAbility {
         }
     }
 
+    /// CR 610.3a + CR 610.3b: every "until" event latched on this ability or any sub/else branch,
+    /// in first-latched order — the read mirror of [`Self::record_duration_event_recursive`].
+    pub(crate) fn latched_duration_events(&self) -> Vec<DurationEvent> {
+        let mut latched = self.context.duration_events.clone();
+        for (_, child) in self.child_links() {
+            for event in child.latched_duration_events() {
+                if !latched.contains(&event) {
+                    latched.push(event);
+                }
+            }
+        }
+        latched
+    }
+
     /// Clears the latched "until" events on this ability and every sub/else
     /// branch, mirroring [`Self::record_duration_event_recursive`].
     pub(crate) fn clear_duration_events_recursive(&mut self) {
@@ -4950,6 +4964,27 @@ impl ResolvedAbility {
         self.source_incarnation = kept;
         for (_, child) in self.child_links_mut() {
             child.clear_source_provenance_for_loop_recursive(carrier_source);
+        }
+    }
+
+    /// [`Self::clear_source_provenance_for_loop_recursive`] for a chain that
+    /// still needs one fact of a departed source: `carry` maps each node's own
+    /// source context (read before it is cleared) to the identity-free context
+    /// that node keeps instead of `None`.
+    pub(crate) fn clear_source_provenance_for_loop_carrying_source(
+        &mut self,
+        carrier_source: ObjectId,
+        carry: &impl Fn(&TriggerSourceContext) -> Option<TriggerSourceContext>,
+    ) {
+        let carried = self.trigger_source.as_ref().and_then(carry);
+        let kept = (self.source_id == carrier_source || self.source_id == ObjectId(0))
+            .then_some(self.source_incarnation)
+            .flatten();
+        self.clear_source_provenance();
+        self.source_incarnation = kept;
+        self.trigger_source = carried;
+        for (_, child) in self.child_links_mut() {
+            child.clear_source_provenance_for_loop_carrying_source(carrier_source, carry);
         }
     }
 

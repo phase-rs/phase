@@ -145,6 +145,145 @@ pub(crate) fn object_has_devour_replacement(state: &GameState, id: ObjectId) -> 
     })
 }
 
+/// CR 614.12 + CR 614.1c: whether `id`'s own as-enters replacement reads the
+/// battlefield population as it was before the entry — a self-scoped
+/// "enters with N counters" whose count is a dynamic quantity ("for each
+/// +1/+1 counter among other creatures you control"). Such an entrant must not
+/// count permanents entering in the same simultaneous event, so the mass-entry
+/// loops snapshot the pre-entry battlefield for it, exactly as for Devour.
+pub(crate) fn object_has_pre_entry_population_replacement(state: &GameState, id: ObjectId) -> bool {
+    state.objects.get(&id).is_some_and(|obj| {
+        obj.replacement_definitions.iter_all().any(|def| {
+            def.valid_card == Some(TargetFilter::SelfRef) && {
+                let mut current = def.execute.as_deref();
+                let mut dynamic = false;
+                while let Some(exec) = current {
+                    dynamic |= matches!(
+                        &*exec.effect,
+                        Effect::PutCounter { count, .. }
+                            if !matches!(count, crate::types::ability::QuantityExpr::Fixed { .. })
+                    );
+                    current = exec.sub_ability.as_deref();
+                }
+                dynamic
+            }
+        })
+    })
+}
+
+/// CR 707.5 + CR 614.12: whether `id` has its own as-enters copy replacement
+/// ("you may have this enter as a copy of any creature", Clone). The copiable
+/// values it takes on at entry can carry a replacement of the copied object's
+/// own (a copied Ascendant Acolyte's population count, a copied Devour), which
+/// the member's CURRENT definitions do not yet show.
+pub(crate) fn object_has_as_enters_copy_replacement(state: &GameState, id: ObjectId) -> bool {
+    state.objects.get(&id).is_some_and(|obj| {
+        obj.replacement_definitions.iter_all().any(|def| {
+            def.valid_card == Some(TargetFilter::SelfRef)
+                && super::replacement::EventModifiers::first_non_modifier_ability(
+                    def.execute.as_deref(),
+                )
+                .is_some_and(|real| matches!(&*real.effect, Effect::BecomeCopy { .. }))
+        })
+    })
+}
+
+/// CR 614.12a + CR 614.13a + CR 614.1c + CR 707.5: whether a co-entering member
+/// needs the pre-entry battlefield snapshot — a Devour sacrifice pool, a
+/// population-counting as-enters replacement, or an as-enters copy that may
+/// acquire either from the object it copies. Capturing for every copy-capable
+/// member (rather than every multi-member batch) keeps the snapshot, and the
+/// batch frame that carries it, off every entry that cannot need it.
+pub(crate) fn object_needs_pre_entry_battlefield(state: &GameState, id: ObjectId) -> bool {
+    object_has_devour_replacement(state, id)
+        || object_has_pre_entry_population_replacement(state, id)
+        || object_has_as_enters_copy_replacement(state, id)
+}
+
+/// CR 614.12 + CR 614.1c + CR 614.12a: single authority deciding whether a
+/// simultaneous multi-permanent entry needs the pre-entry battlefield snapshot,
+/// and capturing it. Returns the battlefield as it stands BEFORE the first member
+/// enters when any member needs it, so every co-entrant is excluded regardless of
+/// delivery order. An already-active snapshot (this or an outer entry's) is never
+/// re-captured, which keeps a resumed batch on its original snapshot.
+pub(crate) fn pre_entry_snapshot_for_entry(
+    state: &GameState,
+    members: impl IntoIterator<Item = ObjectId>,
+    destination: Zone,
+) -> Option<HashSet<ObjectId>> {
+    (destination == Zone::Battlefield
+        && state.active_pre_entry_battlefield_snapshot().is_none()
+        && members
+            .into_iter()
+            .any(|id| object_needs_pre_entry_battlefield(state, id)))
+    .then(|| state.battlefield.iter().copied().collect())
+}
+
+/// CR 614.12 + CR 614.1c: the permanents that entered in the active simultaneous
+/// entry — on the battlefield now, absent from its pre-entry `snapshot`. They have
+/// no continuous effect yet for an entrant's own entry replacements.
+pub(crate) fn pre_entry_co_entrants(
+    state: &GameState,
+    snapshot: &HashSet<ObjectId>,
+) -> Vec<ObjectId> {
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| !snapshot.contains(id))
+        .collect()
+}
+
+/// CR 614.12 + CR 614.1c + CR 613.1: the battlefield as the rules saw it before
+/// the active simultaneous entry, as a detached scratch state — what an
+/// entering permanent's own replacement counts ("for each +1/+1 counter among
+/// other creatures you control"). CR 614.12 checks the entrant against its own
+/// statics and "continuous effects that already exist"; a permanent entering in
+/// the same event has no static effect yet, so it must not change the
+/// characteristics (a noncreature artifact turned into a creature by a
+/// co-entering March of the Machines) of the permanents the replacement counts.
+///
+/// Built from `state` by taking every battlefield object outside `snapshot` off
+/// the battlefield and running the full layer pass, which recomputes the
+/// survivors' characteristics without those objects' statics. Co-entrants stay
+/// in `objects` (the replacement's own source reads through it) but are no
+/// longer on the battlefield, so no population read can see them. `None` when
+/// nothing entered since the snapshot: `state` already is the pre-entry view.
+/// Nothing reaches the live game: the input is `&GameState`.
+pub(crate) fn pre_entry_rules_view(
+    state: &GameState,
+    snapshot: &HashSet<ObjectId>,
+) -> Option<GameState> {
+    let co_entrants = pre_entry_co_entrants(state, snapshot);
+    if co_entrants.is_empty() {
+        return None;
+    }
+    let mut view = state.clone();
+    // allow-raw-zone: drops co-entrants from the battlefield list of a detached scratch state used only to recompute layers for the pre-entry population read; the live game is untouched and no zone change occurs (CR 614.12).
+    view.battlefield.retain(|id| snapshot.contains(id));
+    for id in co_entrants {
+        if let Some(obj) = view.objects.get_mut(&id) {
+            // allow-raw-zone: marks a co-entrant as not on the battlefield in a detached scratch state used only to recompute layers; no zone change occurs (CR 614.12).
+            obj.zone = Zone::Exile;
+        }
+    }
+    super::layers::mark_layers_full(&mut view);
+    super::layers::flush_layers(&mut view);
+    Some(view)
+}
+
+/// As [`pre_entry_snapshot_for_entry`], for the ChangeZone multi-entry loops:
+/// parks the snapshot in the loop's ChangeZone frame.
+pub(crate) fn capture_pre_entry_snapshot_for_entry(
+    state: &mut GameState,
+    members: impl IntoIterator<Item = ObjectId>,
+    destination: Zone,
+) {
+    if let Some(snapshot) = pre_entry_snapshot_for_entry(state, members, destination) {
+        state.push_devour_change_zone_snapshot(snapshot);
+    }
+}
+
 /// CR 701.50a + CR 614.5 + CR 616.1f: drain a deferred connive whose leading
 /// Draw link parked a replacement-ordering choice. Runs only when the dedicated
 /// stack-owned Connive re-entry is set (the connive applier's parked-draw
@@ -238,6 +377,22 @@ pub(super) fn handle_replacement_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let action_event_start = events.len();
+    // CR 616.1 + CR 510.2: the ordering choice of one of the parked batch's OWN
+    // damage events. The batch answers it and keeps the event inside the
+    // simultaneous batch (Phase C applies the survivor, the substitute runs
+    // inline); the generic dispatcher below would deal the damage on its own.
+    if super::combat_damage::parked_combat_damage_awaits_replacement_choice(state) {
+        validate_replacement_choice_index(state, index)?;
+        let waiting_for = super::combat_damage::resume_pending_combat_lifelink(
+            state,
+            action_event_start,
+            Some(index),
+            events,
+        )
+        .unwrap_or_else(|| state.waiting_for.clone());
+        state.waiting_for = waiting_for.clone();
+        return Ok(waiting_for);
+    }
     // A record stamped for rejection came from an action-ingress player-resource
     // change. Resume it inside an ingress window so every life, player-counter
     // and energy settlement the handler reaches (a substitute's drain,
@@ -261,6 +416,8 @@ pub(super) fn handle_replacement_choice(
     // CR 616.1f: a second ordering choice, or any nested prompt, leaves the record
     // parked for the next answer; only a settled round trip may close the batch.
     // Nothing is left behind on this path — the anchor is a local that dies here.
+    // CR 616.1g: this is also how a batch parked on its substitute's prompt
+    // (counters, mill) resumes — once that prompt's round trip has settled.
     let WaitingFor::Priority { player } = waiting_for else {
         state.waiting_for = waiting_for.clone();
         // CR 603.6a + CR 616.1f: this answer's battlefield entries leave with its
@@ -281,10 +438,13 @@ pub(super) fn handle_replacement_choice(
         },
     };
     state.waiting_for = waiting_for.clone();
-    Ok(
-        super::combat_damage::resume_pending_combat_lifelink(state, action_event_start, events)
-            .unwrap_or(waiting_for),
+    Ok(super::combat_damage::resume_pending_combat_lifelink(
+        state,
+        action_event_start,
+        None,
+        events,
     )
+    .unwrap_or(waiting_for))
 }
 
 /// What resuming a parked player-scope sacrifice batch produced.
@@ -356,11 +516,8 @@ pub(crate) fn resume_paused_player_scope_sacrifice(
     }
 }
 
-fn handle_replacement_choice_inner(
-    state: &mut GameState,
-    index: usize,
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
+/// CR 616.1: the answer must name one of the open prompt's options.
+fn validate_replacement_choice_index(state: &GameState, index: usize) -> Result<(), EngineError> {
     let Some(pending) = state.pending_replacement.as_ref() else {
         return Err(EngineError::InvalidAction(
             "replacement choice has no pending replacement".to_string(),
@@ -372,12 +529,22 @@ fn handle_replacement_choice_inner(
             "replacement choice index {index} is outside 0..{option_count}"
         )));
     }
+    Ok(())
+}
+
+fn handle_replacement_choice_inner(
+    state: &mut GameState,
+    index: usize,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    validate_replacement_choice_index(state, index)?;
     // CR 614.17c: a parked replacement (optional or a mandatory ordering
     // candidate) for a draw that can no longer happen cannot be applied. Settle
     // the event with no replacement: the draw is clamped and its payment
     // resumes without milling or returning the replacement's card.
-    let impossible_parked_draw =
-        super::replacement::proposed_draw_cannot_happen(state, &pending.proposed);
+    let impossible_parked_draw = state.pending_replacement.as_ref().is_some_and(|pending| {
+        super::replacement::proposed_draw_cannot_happen(state, &pending.proposed)
+    });
     let replacement_action_event_start = events.len();
     let parked_search_found_replacement = state
         .pending_replacement
@@ -423,15 +590,6 @@ fn handle_replacement_choice_inner(
                 })
         })
         .flatten();
-    // CR 701.24a: capture the parked library placement (W3) BEFORE
-    // `continue_replacement` consumes (`.take()`s) the pending record, so the
-    // ZoneChange resume arm below can thread it into the delivery `DeliveryCtx`
-    // instead of hardcoding `None` (which would let the tail auto-shuffle the
-    // requested position away). `None` for every non-library parked event.
-    let parked_library_placement = state
-        .pending_replacement
-        .as_ref()
-        .and_then(|pending| pending.library_placement.clone());
     let parked_exile_controller = state
         .pending_replacement
         .as_ref()
@@ -500,6 +658,19 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
+    // CR 730.3: the batch or ChangeZone owner that parked this member is the
+    // announcing owner of its resumed delivery, so a merged member's component
+    // batch links back to it.
+    let parked_member_owner = parked_zone_change_delivery.as_ref().and_then(|paused| {
+        state
+            .resolution_stack
+            .active_owner_parking(paused.member, &paused.expected_event)
+            .map(|group| crate::game::zone_pipeline::MemberDeliveryOwner {
+                group,
+                member: paused.member,
+                expected_event: Some(paused.expected_event.clone()),
+            })
+    });
     // CR 701.9a + CR 614.6: the paused frameless single-card discard this
     // replacement answer owns, if any (paused by a CR 616.1 choice or by a
     // single optional replacement's apply-or-decline choice).
@@ -602,7 +773,7 @@ fn handle_replacement_choice_inner(
                         unreachable!("arm pattern guarantees a ZoneChange payload");
                     };
                     let delivery_start = events.len();
-                    let delivery = crate::game::zone_pipeline::deliver(
+                    let delivery = crate::game::zone_pipeline::deliver_batch_member(
                         state,
                         approved,
                         crate::game::zone_pipeline::DeliveryCtx {
@@ -614,12 +785,8 @@ fn handle_replacement_choice_inner(
                             },
                             drain:
                                 crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                            // CR 701.24a: thread the parked W3 library placement so
-                            // a resumed Library-targeting redirect lands at the
-                            // requested index instead of the tail auto-shuffling it
-                            // away. `None` for every non-library parked event.
-                            library_placement: parked_library_placement.clone(),
                         },
+                        parked_member_owner,
                         events,
                     );
                     // CR 616.1 + CR 614.1c + CR 400.7: the resumed segment IS the
@@ -629,11 +796,10 @@ fn handle_replacement_choice_inner(
                     // same single-authority classifier as the synchronous path, or
                     // a tail park returns early and the batch owner later reaches
                     // `drain_pending_batch_deliveries` with `terminal_completion:
-                    // None` (issue #10431). A pre-move park (merge leave) pushes a
-                    // child batch frame that owns the pause; the member has not
-                    // moved, so its classification is `Remained`, the exact path
-                    // sees only the child, and the occurrence-level walk (gated on
-                    // `Moved`) records nothing for the parent.
+                    // None` (issue #10431). CR 730.3: when a merged member's
+                    // component batch parks, that child has taken its delivered
+                    // events and is the active frame, so neither capture reaches
+                    // the member's owner; the child's handback classifies it.
                     if let Some(paused) = parked_zone_change_delivery.as_ref() {
                         let completion =
                             crate::game::zone_pipeline::zone_move_completion_from_delivery(
@@ -1861,17 +2027,9 @@ fn handle_replacement_choice_inner(
             Ok(waiting_for)
         }
         super::replacement::ReplacementResult::NeedsChoice(player) => {
-            // CR 616.1 + CR 701.24a: a SECOND ordering choice on the same
-            // library-placement event re-parked a fresh `PendingReplacement`
-            // inside `pipeline_loop` with `library_placement: None`. Reapply the
-            // placement captured before `continue_replacement` consumed the prior
-            // record so the eventual delivery still honors the requested index
-            // instead of the tail auto-shuffling it away. `None` for every
-            // non-library parked event (no-op).
+            // The proposed event retains its canonical placement across parks.
+            // Preserve the other delivery context independently of that value.
             if let Some(pending) = state.pending_replacement.as_mut() {
-                if pending.library_placement.is_none() {
-                    pending.library_placement = parked_library_placement.clone();
-                }
                 if pending.exile_controller.is_none() {
                     pending.exile_controller = parked_exile_controller;
                 }
@@ -5251,16 +5409,18 @@ mod tests {
     use super::*;
     use crate::game::engine::apply_as_current;
     use crate::game::replacement::{self as replacement_mod, ReplacementResult};
+    use crate::game::zone_pipeline::{move_object, ZoneMoveRequest, ZoneMoveResult};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, ChooseOneOfKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        AbilityKind, ChooseOneOfKind, LibraryPosition, QuantityExpr, ReplacementDefinition,
+        ReplacementMode,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::{ProposedEvent, ReplacementId};
+    use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
 
     /// Helper: install an Optional replacement on a battlefield object so the
@@ -5296,6 +5456,206 @@ mod tests {
         let obj = state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Creature);
         id
+    }
+
+    #[test]
+    fn canonical_library_placement_away_and_back_public_resume_ignores_stale_mirror() {
+        // Infrastructure-only synthetic Moved definitions. Rest in Peace is the
+        // nearest printed redirect; no printed away/back replacement or Wheel
+        // grammar/reveal support is asserted by this disposition test.
+        fn redirect(from: Zone, to: Zone) -> ReplacementDefinition {
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .mode(ReplacementMode::Optional { decline: None })
+                .destination_zone(from)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        actor: crate::types::ability::LibraryInstructionActor::Controller,
+                        library_shuffle: Default::default(),
+                        origin: None,
+                        destination: to,
+                        target: TargetFilter::Any,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                ))
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Infrastructure away redirect".into(),
+            Zone::Battlefield,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Infrastructure return redirect".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&first)
+            .unwrap()
+            .replacement_definitions
+            .push(redirect(Zone::Library, Zone::Exile));
+        state
+            .objects
+            .get_mut(&second)
+            .unwrap()
+            .replacement_definitions
+            .push(redirect(Zone::Exile, Zone::Library));
+        let placed = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Infrastructure placed card".into(),
+            Zone::Graveyard,
+        );
+        for card in 4..7 {
+            create_object(
+                &mut state,
+                CardId(card),
+                PlayerId(0),
+                format!("Library sentinel {card}"),
+                Zone::Library,
+            );
+        }
+        let original_library = state.players[0].library.clone();
+        let mut events = Vec::new();
+        assert!(matches!(
+            move_object(
+                &mut state,
+                ZoneMoveRequest::effect(placed, Zone::Library, placed)
+                    .at_library_position(LibraryPosition::Top),
+                &mut events
+            ),
+            ZoneMoveResult::NeedsChoice(PlayerId(0))
+        ));
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        let pending = state.pending_replacement.as_ref().unwrap();
+        assert_eq!(
+            pending.candidates,
+            vec![ReplacementId {
+                source: first,
+                index: 0
+            }]
+        );
+        assert!(matches!(&pending.proposed, ProposedEvent::ZoneChange {
+            object_id, to: Zone::Library, library_placement: Some(placement), ..
+        } if *object_id == placed && **placement == LibraryPosition::Top));
+        assert_eq!(state.objects[&placed].zone, Zone::Graveyard);
+
+        state.priority_player = PlayerId(0);
+        events.extend(
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accept first redirect")
+                .events,
+        );
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+        let pending = state.pending_replacement.as_ref().unwrap();
+        assert_eq!(
+            pending.candidates,
+            vec![ReplacementId {
+                source: second,
+                index: 0
+            }]
+        );
+        assert!(matches!(&pending.proposed, ProposedEvent::ZoneChange {
+            object_id, to: Zone::Exile, library_placement: None, cause, applied, ..
+        } if *object_id == placed && *cause == Some(first)
+            && *applied == HashSet::from([AppliedReplacementKey::object(first, 0)])));
+        assert_eq!(state.objects[&placed].zone, Zone::Graveyard);
+        assert_eq!(state.players[0].library, original_library);
+
+        // Wire-schema supplement: preserve the real parked producer event but
+        // put a conflicting legacy mirror in its serialized record. Current
+        // explicit null is authoritative at decode and during public resume.
+        let mut wire = serde_json::to_value(&state).unwrap();
+        wire["pending_replacement"]["library_placement"] =
+            serde_json::to_value(LibraryPosition::Top).unwrap();
+        let proposal = wire["pending_replacement"]["proposed"]["ZoneChange"]
+            .as_object()
+            .expect("serialized current ZoneChange");
+        assert!(proposal.contains_key("library_placement"));
+        let null = &proposal["library_placement"];
+        assert!(null.is_null());
+        state = serde_json::from_value(wire).expect("decode current explicit-null proposal");
+        let pending = state.pending_replacement.as_ref().unwrap();
+        assert!(matches!(
+            &pending.proposed,
+            ProposedEvent::ZoneChange {
+                library_placement: None,
+                ..
+            }
+        ));
+        events.extend(
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 0 })
+                .expect("accept return redirect")
+                .events,
+        );
+
+        assert_eq!(state.objects[&placed].zone, Zone::Library);
+        assert_eq!(
+            state.players[0]
+                .library
+                .iter()
+                .filter(|id| **id == placed)
+                .count(),
+            1
+        );
+        // Positive tail discriminator: canonical None follows the existing
+        // placement-less Library delivery convention despite the stale Top.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        for source in [first, second] {
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(event,
+                        GameEvent::ReplacementApplied { source_id, .. } if *source_id == source
+                    ))
+                    .count(),
+                1
+            );
+        }
+        assert!(state.pending_replacement.is_none());
+        assert!(state.stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
     /// CR 400.7 + CR 616.1: A Connive event parked for replacement ordering
@@ -5340,7 +5700,6 @@ mod tests {
             depth: 0,
             is_optional: true,
             choice_player: Some(PlayerId(0)),
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -6021,7 +6380,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -6553,6 +6911,7 @@ mod tests {
         // Simulate the inner ZoneChange having been redirected to Exile by a
         // Moved replacement (as Rest in Peace would do).
         let event = ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id: victim,
             from: Zone::Battlefield,
             to: Zone::Exile,
@@ -8919,6 +9278,7 @@ mod tests {
         // pipeline surfaces the optional choice.
         let mut events = Vec::new();
         let proposed = ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id: callidus,
             from: Zone::Stack,
             to: Zone::Battlefield,
@@ -9134,6 +9494,7 @@ mod tests {
         // surfaces the optional "may enter as a copy" choice.
         let mut events = Vec::new();
         let proposed = ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id: copy_ench,
             from: Zone::Stack,
             to: Zone::Battlefield,
@@ -9265,6 +9626,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id: copy_ench,
             from: Zone::Stack,
             to: Zone::Battlefield,
@@ -9474,6 +9836,8 @@ mod tests {
                 controller: PlayerId(0),
                 // Test-only Treasure tail stages no donor; empty mods are stamp-proof.
                 donor: None,
+                // Single-faced fixture values: no other face to carry.
+                double_faced: None,
             }),
             enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
@@ -9736,6 +10100,7 @@ mod tests {
         // ── Drive the production Stack→Battlefield pipeline ─────────────────
         let mut events = Vec::new();
         let proposed = ProposedEvent::ZoneChange {
+            library_placement: None,
             object_id: denry,
             from: Zone::Stack,
             to: Zone::Battlefield,

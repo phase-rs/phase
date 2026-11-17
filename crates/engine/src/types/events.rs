@@ -984,6 +984,25 @@ pub enum ExertOrigin {
     AbilityCost,
 }
 
+/// CR 104.3: why a player lost the game.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum LossReason {
+    /// CR 704.5a / CR 704.6a / CR 904.13b: their life total (where life is shared, their team's) is 0 or less.
+    LifeTotal,
+    /// CR 704.5b: they attempted to draw from an empty library.
+    DrewFromEmptyLibrary,
+    /// CR 704.5c / CR 704.6b: poison counters at the threshold `players::poison_loss_measure` applies.
+    Poison,
+    /// CR 704.6c: 21 or more combat damage from one commander.
+    CommanderDamage,
+    /// CR 104.3a / CR 810.8b / CR 904.13b: they (or, where life is shared, their teammate) conceded.
+    Conceded,
+    /// CR 104.3e: an effect stated that they lose.
+    EffectStatedLoss,
+    /// CR 104.2b: an effect stated that an opponent of theirs wins.
+    OpponentWon,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum GameEvent {
@@ -1010,15 +1029,11 @@ pub enum GameEvent {
     PhaseChanged {
         phase: Phase,
     },
-    /// CR 805.4d: one phase occurrence FOR one player. Synthetic — produced
-    /// only by `occurrence_trigger_events` for an opponent-scoped phase
-    /// trigger on a shared team turn, so each eligible opponent gets their
-    /// own firing bound to themselves. Never emitted into the global event
-    /// batch. Admission gates MUST treat it exactly like `PhaseChanged`
-    /// (active-player-based); only per-firing BINDING reads `player_id`.
-    PhaseChangedForPlayer {
+    /// CR 603.2b + CR 805.4d: the beginning of `phase` as one appropriate player's step — the
+    /// context of a phase trigger's firing for that player. Never emitted into the event stream.
+    PhaseChangedFor {
         phase: Phase,
-        player_id: PlayerId,
+        player: PlayerId,
     },
     /// `player_id` is the player who now receives priority, not the passer.
     PriorityPassed {
@@ -1310,8 +1325,10 @@ pub enum GameEvent {
     BecameForetold {
         object_id: ObjectId,
     },
+    /// CR 104.3 + CR 704.3: a player left the game by losing, and every reason found for it; never empty.
     PlayerLost {
         player_id: PlayerId,
+        reasons: std::collections::BTreeSet<LossReason>,
     },
     MulliganStarted,
     CardsDrawn {
@@ -1753,6 +1770,12 @@ pub enum GameEvent {
     },
     DayNightChanged {
         new_state: String,
+        /// CR 731.1a: the designation the game lost. `None` when the game gained
+        /// its first designation (CR 731.1 + CR 702.145d + CR 702.145g).
+        /// `day_night::set_designation` emits nothing for an unchanged designation,
+        /// so `Some(_)` always represents a change from one designation to the other.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous: Option<crate::types::game_state::DayNight>,
     },
     TurnedFaceUp {
         object_id: ObjectId,

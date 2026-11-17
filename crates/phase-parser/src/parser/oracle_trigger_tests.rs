@@ -1512,7 +1512,7 @@ fn palantir_life_loss_uses_milled_chain_set_and_targeted_opponent() {
 
     let trigger = parsed.triggers.first().expect("Palantir end-step trigger");
     assert_eq!(trigger.mode, TriggerMode::Phase);
-    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+    assert_eq!(trigger.valid_target, None);
     let put = trigger.execute.as_deref().expect("counter effect");
     assert!(matches!(put.effect.as_ref(), Effect::PutCounter { .. }));
     let scry = put.sub_ability.as_deref().expect("scry continuation");
@@ -23027,7 +23027,7 @@ fn phase_trigger_that_player_sacrifices_uses_scoped_player_not_target_player() {
 
     assert_eq!(def.mode, TriggerMode::Phase);
     assert_eq!(def.phase, Some(Phase::Upkeep));
-    assert_eq!(def.valid_target, None);
+    assert_eq!(def.valid_target, Some(TargetFilter::Player));
     match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
         Some(Effect::Sacrifice { target, .. }) => match target {
             TargetFilter::Typed(filter) => {
@@ -23036,6 +23036,160 @@ fn phase_trigger_that_player_sacrifices_uses_scoped_player_not_target_player() {
             other => panic!("expected typed sacrifice filter, got {other:?}"),
         },
         other => panic!("expected Sacrifice effect, got {other:?}"),
+    }
+}
+
+/// CR 102.1 + CR 800.4j: a phase trigger's `valid_target` names whose step it is: "each
+/// player's" step is a player's, "each" step is unscoped whatever its effect targets.
+#[test]
+fn a_phase_triggers_scope_is_whose_step_not_its_effects_target() {
+    for (name, line, scope) in [
+        (
+            "Charging Cinderhorn",
+            "At the beginning of each player's end step, if no creatures attacked this turn, put a fury counter on this creature. Then this creature deals damage equal to the number of fury counters on it to that player.",
+            Some(TargetFilter::Player),
+        ),
+        (
+            "Fevered Visions",
+            "At the beginning of each player's end step, that player draws a card. If the player is your opponent and has four or more cards in hand, this enchantment deals 2 damage to that player.",
+            Some(TargetFilter::Player),
+        ),
+        (
+            "Wound Reflection",
+            "At the beginning of each end step, each opponent loses life equal to the life they lost this turn. (Damage causes loss of life.)",
+            None,
+        ),
+        (
+            "The Caretaker",
+            "At the beginning of each end step, if you faced a dilemma this turn, target opponent exiles cards from the top of their library until they exile a nonland card. You may cast that card without paying its mana cost. (You face a dilemma as you choose one or more modes for a spell or ability.)",
+            None,
+        ),
+    ] {
+        let def = parse_trigger_line(line, name);
+        assert_eq!(def.mode, TriggerMode::Phase, "{name}");
+        assert_eq!(def.phase, Some(Phase::End), "{name}");
+        assert_eq!(def.valid_target, scope, "{name}");
+    }
+}
+
+/// CR 102.1 + CR 102.3 + CR 303.4m + CR 805.4d: a phase trigger's turn-owner possessive decides
+/// whose step it is, as a turn constraint or a per-player scope; the collective "your opponents'"
+/// is a turn constraint without a per-player scope.
+#[test]
+fn a_phase_triggers_turn_owner_is_its_possessive() {
+    let other_player = Some(TargetFilter::PlayerMatching {
+        player: Box::new(PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::Controller),
+            relation: PlayerRelation::All,
+        }),
+    });
+    let opponents_turn = Some(TriggerConstraint::OnlyDuringOpponentsTurn);
+    let each_opponent = Some(TargetFilter::Opponent);
+    for (name, line, phase, constraint, scope) in [
+        (
+            "Lavaborn Muse",
+            "At the beginning of each opponent's upkeep, if that player has two or fewer cards in hand, this creature deals 3 damage to that player.",
+            Phase::Upkeep,
+            opponents_turn.clone(),
+            each_opponent.clone(),
+        ),
+        (
+            "Luminarch Ascension",
+            "At the beginning of each opponent's end step, if you didn't lose life this turn, you may put a quest counter on this enchantment. (Damage causes loss of life.)",
+            Phase::End,
+            opponents_turn.clone(),
+            each_opponent.clone(),
+        ),
+        (
+            "Bow to My Command",
+            "At the beginning of your opponents' end step, they may tap any number of untapped creatures they control with total power 8 or greater. If they do, abandon this scheme.",
+            Phase::End,
+            opponents_turn.clone(),
+            None,
+        ),
+        (
+            "Because I Have Willed It",
+            "At the beginning of your opponents' end step, if they cast four or more spells this turn, abandon this scheme.",
+            Phase::End,
+            opponents_turn.clone(),
+            None,
+        ),
+        (
+            "Sentinel of the Eternal Watch",
+            "At the beginning of combat on each opponent's turn, tap target creature that player controls.",
+            Phase::BeginCombat,
+            opponents_turn.clone(),
+            each_opponent.clone(),
+        ),
+        (
+            "Web of Inertia",
+            "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.",
+            Phase::BeginCombat,
+            opponents_turn.clone(),
+            each_opponent.clone(),
+        ),
+        (
+            "Fight or Flight",
+            "At the beginning of combat on each opponent's turn, separate all creatures that player controls into two piles. Only creatures in the pile of their choice can attack this turn.",
+            Phase::BeginCombat,
+            opponents_turn.clone(),
+            each_opponent.clone(),
+        ),
+        (
+            "Champions of Minas Tirith",
+            "At the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.",
+            Phase::BeginCombat,
+            opponents_turn.clone(),
+            each_opponent.clone(),
+        ),
+        (
+            "Overencumbered",
+            "At the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.",
+            Phase::BeginCombat,
+            None,
+            Some(TargetFilter::AttachedTo),
+        ),
+        (
+            "Tenuous Truce",
+            "At the beginning of enchanted opponent's end step, you and that player each draw a card.",
+            Phase::End,
+            None,
+            Some(TargetFilter::AttachedTo),
+        ),
+        (
+            "Well of Ideas",
+            "At the beginning of each other player's draw step, that player draws an additional card.",
+            Phase::Draw,
+            None,
+            other_player.clone(),
+        ),
+        (
+            "Miss Demeanor",
+            "At the beginning of each other player's upkeep, you may compliment that player on their game play. If you don't, sacrifice this creature.",
+            Phase::Upkeep,
+            None,
+            other_player.clone(),
+        ),
+        (
+            "Additive Evolution",
+            "At the beginning of combat on your turn, put a +1/+1 counter on target creature you control. It gains vigilance until end of turn.",
+            Phase::BeginCombat,
+            Some(TriggerConstraint::OnlyDuringYourTurn),
+            None,
+        ),
+        (
+            "Peace in Our Time",
+            "At the beginning of combat on each player's turn, that player may draw a card. If they do, they can't attack this turn and you put a peace counter on this enchantment.",
+            Phase::BeginCombat,
+            None,
+            Some(TargetFilter::Player),
+        ),
+    ] {
+        let def = parse_trigger_line(line, name);
+        assert_eq!(def.mode, TriggerMode::Phase, "{name}");
+        assert_eq!(def.phase, Some(phase), "{name}");
+        assert_eq!(def.constraint, constraint, "{name}");
+        assert_eq!(def.valid_target, scope, "{name}");
     }
 }
 
@@ -26560,6 +26714,8 @@ fn trigger_tymna_the_weaver_pays_and_draws_bound_x() {
                 source: None,
 
                 min_sources: 1,
+                // Tymna's grammar names opponents explicitly — keep `Opponent`.
+                relation: PlayerRelation::Opponent,
             },
         },
     };
@@ -40811,6 +40967,146 @@ fn count_qualified_blocks_preserves_article_qualified_shapes() {
         );
         assert_eq!(trigger.condition, None);
         assert_no_unimplemented(trigger.execute.as_deref().unwrap());
+    }
+}
+
+/// CR 608.2k + CR 608.2h: the counter-kind census of "it" in a trigger whose
+/// condition names the ability's own object reads that object — Blitzball
+/// Stadium's granted "Whenever this creature deals combat damage to a player,
+/// draw a card for each kind of counter on it", and a self dies trigger.
+#[test]
+fn kinds_census_pronoun_in_a_self_trigger_binds_the_abilitys_own_object() {
+    let census_count = QuantityExpr::Ref {
+        qty: QuantityRef::DistinctCounterKindsAmong {
+            filter: TargetFilter::SelfRef,
+        },
+    };
+    for text in [
+        "Whenever this creature deals combat damage to a player, draw a card for each kind of counter on it",
+        "When this creature dies, draw a card for each kind of counter on it.",
+    ] {
+        let trigger = parse_trigger_line(text, "Synthetic Census");
+        let execute = trigger.execute.as_deref().expect("trigger body");
+        assert_no_unimplemented(execute);
+        let Effect::Draw { count, .. } = execute.effect.as_ref() else {
+            panic!("{text:?}: expected a draw, got {:?}", execute.effect);
+        };
+        assert_eq!(*count, census_count, "{text:?}");
+    }
+}
+
+/// CR 608.2k + CR 603.2: a trigger on ANOTHER object ("a creature you
+/// control", "another creature you control", "equipped creature", a cast
+/// spell) names that object, which the census does not read — an explicit
+/// gap, never the listener's own kinds and never a bare one-card draw.
+#[test]
+fn kinds_census_pronoun_in_a_trigger_on_another_object_is_unimplemented() {
+    for text in [
+        "Whenever a creature you control deals combat damage to a player, draw a card for each kind of counter on it.",
+        "Whenever another creature you control dies, draw a card for each kind of counter on it.",
+        "Whenever equipped creature deals combat damage to a player, draw a card for each kind of counter on it.",
+        "Whenever you cast a creature spell, draw a card for each kind of counter on it.",
+    ] {
+        let trigger = parse_trigger_line(text, "Synthetic Census");
+        let execute = trigger.execute.as_deref().expect("trigger body");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::Unimplemented { name, .. } if name == "counter_kinds_pronoun_antecedent"
+            ),
+            "{text:?}: expected the antecedent gap, got {:?}",
+            execute.effect
+        );
+    }
+}
+
+/// CR 603.1 + CR 608.2k + CR 109.1: a trigger condition is `SourceOnly` when
+/// it names the ability's own object and no other object — a player
+/// participant or no second participant at all. A second object recorded in a
+/// typed slot or named only in the text, a condition qualifier, and a
+/// condition whose subject is not the source are all `NotSourceOnly`.
+#[test]
+fn trigger_condition_objects_is_source_only_only_without_a_second_object() {
+    let classify = |condition: &str| {
+        let (_, def) = parse_trigger_condition(condition, &mut ParseContext::default());
+        trigger_condition_objects(condition, &def)
+    };
+    for condition in [
+        "whenever ~ deals combat damage to a player",
+        "whenever ~ deals combat damage to an opponent",
+        "when ~ dies",
+        "whenever ~ attacks",
+        "whenever ~ attacks a player",
+        "whenever ~ blocks",
+        "whenever ~ becomes blocked",
+        "whenever ~ is dealt damage",
+        "when ~ enters",
+        "whenever ~ becomes tapped",
+        "whenever one or more counters are put on ~",
+    ] {
+        assert_eq!(
+            classify(condition),
+            TriggerConditionObjects::SourceOnly,
+            "{condition:?}"
+        );
+    }
+    for condition in [
+        // A second object in a typed event slot.
+        "whenever ~ blocks a creature",
+        "whenever ~ becomes blocked by a creature",
+        "whenever ~ becomes attached to a creature",
+        "whenever ~ deals combat damage to a player or planeswalker",
+        "whenever ~ becomes the target of a spell",
+        "whenever ~ becomes the target of an ability",
+        "whenever ~ attacks a planeswalker",
+        // A second object the event parser records in no slot.
+        "whenever ~ fights a creature",
+        "whenever ~ crews a vehicle",
+        "whenever ~ becomes blocked by two or more creatures",
+        "whenever ~ deals damage to a token",
+        "whenever ~ is dealt damage by a source an opponent controls",
+        // A condition qualifier is not proven object-free.
+        "whenever ~ attacks alone",
+        // The subject is not the source.
+        "whenever a creature you control deals combat damage to a player",
+        "whenever you cast a creature spell",
+    ] {
+        assert_eq!(
+            classify(condition),
+            TriggerConditionObjects::NotSourceOnly,
+            "{condition:?}"
+        );
+    }
+}
+
+/// CR 109.1: the object-noun detector reads a type or subtype head noun, or a
+/// non-type object noun, only as a whole word; players and other words are
+/// not objects.
+#[test]
+fn object_head_noun_matches_whole_object_nouns_only() {
+    for input in [
+        "creature",
+        "creatures you control",
+        "vehicle",
+        "spell",
+        "token",
+        "tokens",
+        "source an opponent controls",
+        "ability",
+        "object",
+    ] {
+        assert!(parse_object_head_noun(input).is_ok(), "{input:?}");
+    }
+    for input in [
+        "player",
+        "opponent",
+        "tokenize",
+        "sourced",
+        "combat damage",
+        "counters",
+        "dies",
+    ] {
+        assert!(parse_object_head_noun(input).is_err(), "{input:?}");
     }
 }
 

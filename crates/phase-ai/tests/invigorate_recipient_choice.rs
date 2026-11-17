@@ -74,7 +74,7 @@ fn state_at_recipient_prompt() -> (GameState, ObjectId) {
             }
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("accept the alternative cost");
             }
             WaitingFor::ChooseGiftRecipient {

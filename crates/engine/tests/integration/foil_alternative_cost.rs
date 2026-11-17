@@ -124,7 +124,7 @@ fn cast_with_alternative(b: &mut Board, picks: &[ObjectId]) -> Result<Vec<Vec<Ob
             WaitingFor::AlternativeCastChoice { .. } => GameAction::ChooseAlternativeCast {
                 choice: AlternativeCastDecision::Alternative,
             },
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { index: 0 },
             WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(b.opponent_spell)),
             },
@@ -241,11 +241,14 @@ fn foil_with_affordable_mana_offers_both_costs() {
     // The cast surfaces the optional-cost choice between the two-discard
     // alternative cost and the printed mana cost (CR 118.9b).
     let WaitingFor::OptionalCostChoice {
-        cost: AdditionalCost::Choice(alternative, printed),
+        cost: AdditionalCost::Choice(costs),
         ..
     } = &waiting
     else {
         panic!("expected the alternative/printed cost choice, got {waiting:?}");
+    };
+    let [alternative, printed] = costs.as_slice() else {
+        panic!("expected exactly the alternative and printed costs, got {costs:?}");
     };
     assert!(matches!(
         alternative,
