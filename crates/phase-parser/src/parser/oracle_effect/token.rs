@@ -4321,7 +4321,6 @@ mod tests {
     #[test]
     fn registry_named_token_with_suffixed_display_name_keeps_oracle_name() {
         use crate::types::keywords::Keyword;
-        use crate::types::mana::ManaColor;
 
         let text = "Create a Gingerbrute token.";
         let mut ctx = ParseContext {
