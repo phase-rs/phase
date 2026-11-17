@@ -1671,11 +1671,9 @@ fn casts_dreadful_apathy_with_opposing_creature() {
         )
         .with_subtypes(vec!["Aura"])
         .from_oracle_text_with_keywords(&["enchant"], "Enchant creature\nEnchanted creature can't attack or block.\n{2}{W}: Exile enchanted creature.")
+        // Printed cost {2}{W} — the four Plains above cover it.
         .with_mana_cost(ManaCost::Cost {
-            shards: vec![
-                engine::types::mana::ManaCostShard::White,
-                engine::types::mana::ManaCostShard::White,
-            ],
+            shards: vec![engine::types::mana::ManaCostShard::White],
             generic: 2,
         })
         .id();
@@ -1723,9 +1721,13 @@ fn casts_royal_assassin_without_tapped_opposing_creature() {
             1,
             "{T}: Destroy target tapped creature.",
         )
+        // Printed cost {1}{B}{B} — the four Swamps above cover it.
         .with_mana_cost(ManaCost::Cost {
-            shards: vec![engine::types::mana::ManaCostShard::Black],
-            generic: 0,
+            shards: vec![
+                engine::types::mana::ManaCostShard::Black,
+                engine::types::mana::ManaCostShard::Black,
+            ],
+            generic: 1,
         })
         .id();
 
