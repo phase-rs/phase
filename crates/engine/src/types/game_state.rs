@@ -25235,6 +25235,9 @@ pub struct TokenCopySettlement {
     /// The chosen copy's copiable values and display, for a birth that the copy redirects.
     pub copy_values: Box<CopiableValues>,
     pub copy_display: crate::game::game_object::DisplayIdentity,
+    /// The incarnation of the object the copy was chosen from (CR 400.7), the copy effect's
+    /// duration subject.
+    pub copy_incarnation: ObjectIncarnationRef,
     pub staged_name: String,
 }
 

@@ -3275,7 +3275,7 @@ enum SettleStep {
     /// The rediscovery completed with this event.
     Executed(ProposedEvent, Box<TokenCopySettlement>),
     /// An applied replacement prevented the entry.
-    Prevented(Box<TokenCopySettlement>),
+    Prevented,
     /// The rediscovery raised a prompt (`state.waiting_for`); the settlement is held on the
     /// entry and resumes through [`resume_token_copy_settlement`].
     Paused,
@@ -3334,6 +3334,7 @@ fn settle_token_entry_after_copy(
         original,
         copy_values: Box::new(copy.values.clone()),
         copy_display: copy.display.clone(),
+        copy_incarnation: copy.incarnation,
         staged_name: staged.name.clone(),
     });
     if let Some(entry) = state.liminal_entries.get_mut(&source_id) {
@@ -3345,7 +3346,7 @@ fn settle_token_entry_after_copy(
         super::replacement::ReplacementResult::Execute(event) => {
             SettleStep::Executed(event, settlement)
         }
-        super::replacement::ReplacementResult::Prevented => SettleStep::Prevented(settlement),
+        super::replacement::ReplacementResult::Prevented => SettleStep::Prevented,
         super::replacement::ReplacementResult::NeedsChoice(player) => {
             // The staged copy stays and the settlement is held on the entry: the answered prompt
             // resumes the selected copy's entry completion.
@@ -3411,6 +3412,7 @@ fn complete_token_entry_after_copy(
     ability: &ResolvedAbility,
     entry_counter_exceptions: &[crate::types::ability::ContinuousModification],
     step: SettleStep,
+    reread_model: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     // The entry's `name` / `source_id` ride the parked `pending_token_battlefield_entry` that
@@ -3457,12 +3459,22 @@ fn complete_token_entry_after_copy(
         })
         .into_iter()
         .collect();
+    // The values the player chose, retained so a copy completed after a prompt does not re-read a
+    // model that may have changed meanwhile (its owner conceding, for one).
+    let captured = match &step {
+        SettleStep::Executed(_, settlement) => Some((
+            settlement.copy_values.clone(),
+            settlement.copy_display.clone(),
+            settlement.copy_incarnation,
+        )),
+        _ => None,
+    };
     let outcome = match step {
         SettleStep::Unsettled(event) => TokenEntrySettlement::Enter(event),
         SettleStep::Executed(event, settlement) => {
             conclude_token_copy_settlement(state, source_id, &settlement, event)
         }
-        SettleStep::Prevented(_) => TokenEntrySettlement::Prevented,
+        SettleStep::Prevented => TokenEntrySettlement::Prevented,
         SettleStep::Paused => return Ok(state.waiting_for.clone()),
     };
     let resume_event = match outcome {
@@ -3507,7 +3519,44 @@ fn complete_token_entry_after_copy(
     // `BecomeCopy` here overwrites the token's copiable values with the
     // chosen source's values, then layers/consumes the folded copy
     // exceptions (CR 707.9b).
-    let _ = effects::resolve_ability_chain(state, ability, events, 0);
+    match (&captured, reread_model) {
+        (Some((values, display, incarnation)), false) => {
+            // CR 616.1f + CR 707.2: the copy applied is the one selected, from its captured
+            // copiable values; the rider chain is not re-run on this resumed path.
+            let (duration, additional_modifications) = match &ability.effect {
+                Effect::BecomeCopy {
+                    duration,
+                    additional_modifications,
+                    ..
+                } => (
+                    duration
+                        .clone()
+                        .or(ability.duration.clone())
+                        .unwrap_or(crate::types::ability::Duration::Permanent),
+                    additional_modifications.clone(),
+                ),
+                _ => (crate::types::ability::Duration::Permanent, Vec::new()),
+            };
+            let _ = effects::become_copy::apply_precomputed_copy_values(
+                state,
+                source_id,
+                effects::become_copy::PrecomputedCopyValues {
+                    source_id: ability.source_id,
+                    controller: ability.controller,
+                    duration_subject: *incarnation,
+                    duration,
+                    values: (**values).clone(),
+                    display: display.clone(),
+                    additional_modifications,
+                    effect_kind: crate::types::ability::EffectKind::from(&ability.effect),
+                },
+                events,
+            );
+        }
+        _ => {
+            let _ = effects::resolve_ability_chain(state, ability, events, 0);
+        }
+    }
     // CR 707.9f: type-gated exceptions apply only to an installed copy,
     // not to the uncopied entrant if installation failed.
     let copy_applied =
@@ -3577,6 +3626,7 @@ fn resume_token_copy_settlement(
         &ability,
         &held,
         SettleStep::Executed(event, settlement),
+        false,
         events,
     ))
 }
@@ -3886,6 +3936,7 @@ fn apply_copy_target_choice(
             &ability,
             &entry_counter_exceptions,
             step,
+            true,
             events,
         );
     }

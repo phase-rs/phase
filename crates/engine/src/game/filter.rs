@@ -6548,12 +6548,16 @@ pub(crate) fn matches_target_filter_on_projected_battlefield_entry(
     }
     match event {
         ProposedEvent::TokenEntry { entry_ref, .. } => {
-            if let Some(entry) = state.liminal_entries.get(entry_ref) {
-                if let Some(projection) = BattlefieldEntrantProjection::for_liminal_token(
-                    state,
-                    *entry_ref,
-                    &entry.created_ids,
-                ) {
+            if state.liminal_entries.contains_key(entry_ref) {
+                // CR 614.12 + CR 614.4: every token entering in the same event is absent from the
+                // board (Clone Legion ruling: the tokens enter at the same time), the resolution's
+                // earlier batches included — the same authority the entrant's own-replacement
+                // retention reads.
+                let co_entrants =
+                    crate::game::effects::token_copy::entering_token_co_entrants(state, *entry_ref);
+                if let Some(projection) =
+                    BattlefieldEntrantProjection::for_liminal_token(state, *entry_ref, &co_entrants)
+                {
                     return projection.matches(filter, ctx);
                 }
             }
@@ -6574,9 +6578,16 @@ pub(crate) fn matches_target_filter_on_projected_battlefield_entry(
                 }
                 None => build_battlefield_entry_token_object(*owner, spec, *enter_tapped),
             };
-            if let Some(projection) =
-                BattlefieldEntrantProjection::token_on_pre_entry_board(Cow::Borrowed(state), &obj)
-            {
+            // CR 614.12 + CR 614.4: the resolution's earlier batches enter in the same event.
+            let co_entrants = crate::game::effects::token_copy::copy_token_co_entrants(
+                state,
+                ObjectId(u64::MAX),
+                &[],
+            );
+            if let Some(projection) = BattlefieldEntrantProjection::token_on_pre_entry_board(
+                pre_entry_board(state, &co_entrants),
+                &obj,
+            ) {
                 return projection.matches(filter, ctx);
             }
         }

@@ -1464,9 +1464,19 @@ fn run_vat(moonlight: bool, answer: MetamorphAnswer) -> VatRun {
     run_vat_with(moonlight, false, answer)
 }
 
+/// Verbatim Oracle text of Grumgully, the Generous (Scryfall).
+const GRUMGULLY: &str =
+    "Each other non-Human creature you control enters with an additional +1/+1 counter on it.";
+
 /// [`run_vat`], optionally with March of the Machines on the battlefield (`march`): it makes
 /// every noncreature artifact, the Vat and so a copy of it, an artifact creature.
 fn run_vat_with(moonlight: bool, march: bool, answer: MetamorphAnswer) -> VatRun {
+    run_vat_full(moonlight, march, false, answer)
+}
+
+/// [`run_vat_with`], optionally with Grumgully, the Generous (`grumgully`): its entry counter
+/// rides the Metamorph token's batch.
+fn run_vat_full(moonlight: bool, march: bool, grumgully: bool, answer: MetamorphAnswer) -> VatRun {
     let mut scenario = base_scenario();
     scenario.with_mana_pool(
         P0,
@@ -1486,6 +1496,12 @@ fn run_vat_with(moonlight: bool, march: bool, answer: MetamorphAnswer) -> VatRun
     };
     if march {
         scenario.add_enchantment_from_oracle(P0, "March of the Machines", MARCH_OF_THE_MACHINES);
+    }
+    if grumgully {
+        scenario
+            .add_creature_from_oracle(P0, "Grumgully, the Generous", 3, 3, GRUMGULLY)
+            .as_legendary()
+            .with_subtypes(vec!["Elemental"]);
     }
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let metamorph = {
@@ -2011,7 +2027,7 @@ fn an_ordering_prompt_after_the_chosen_copy_keeps_the_copys_entry_counters() {
             let (runner, prompts) = replication_steel_becomes_triskelion(order, persist);
             assert!(
                 prompts.iter().any(|p| p == "CopyTargetChoice")
-                    && prompts.iter().filter(|p| p.starts_with("Order")).count() >= 2,
+                    && prompts.iter().filter(|p| p.starts_with("Order")).count() >= 1,
                 "the copy was chosen and the rediscovery then asked an ordering question: {prompts:?}"
             );
             let tokens = battlefield_tokens_named(runner.state(), "Triskelion");
@@ -2038,4 +2054,191 @@ fn an_ordering_prompt_after_the_chosen_copy_keeps_the_copys_entry_counters() {
             assert_settled(runner.state(), "resumed copy entry");
         }
     }
+}
+
+const EREBOS_BLEAK_HEARTED: &str = "Indestructible\nAs long as your devotion to black is less than five, Erebos isn't a creature.\nWhenever another creature you control dies, you may pay 2 life. If you do, draw a card.\n{1}{B}, Sacrifice another creature: Target creature gets -2/-1 until end of turn.";
+const CLONE_LEGION: &str =
+    "For each creature target player controls, create a token that's a copy of that creature.";
+
+/// CR 614.12 + CR 614.4 (Clone Legion ruling: the tokens all enter at the same time). P1 controls
+/// both Erebos gods (creatures at six devotion to black); P0 has four. Clone Legion makes a copy
+/// of each; Hallowed Moonlight resolves in response. Each God copy is a noncreature against P0's
+/// pre-entry devotion of four, so neither is exiled: the first copy's black symbol does not count
+/// toward the second's entry.
+#[test]
+fn clone_legion_god_copies_do_not_count_each_others_devotion_under_moonlight() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island", "Island", "Island", "Island", "Island"]);
+    scenario.with_library_top(P1, &["Island", "Island", "Island", "Island", "Island"]);
+    let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
+    let legion = add_sorcery(&mut scenario, P0, "Clone Legion", CLONE_LEGION);
+    let black = |n: usize| ManaCost::Cost {
+        shards: vec![ManaCostShard::Black; n],
+        generic: 0,
+    };
+    for _ in 0..2 {
+        scenario
+            .add_creature(P0, "Black Knight", 2, 2)
+            .with_mana_cost(black(2));
+    }
+    for _ in 0..2 {
+        scenario
+            .add_creature(P1, "Black Knight", 2, 2)
+            .with_mana_cost(black(2));
+    }
+    for (name, oracle) in [
+        ("Erebos, God of the Dead", EREBOS),
+        ("Erebos, Bleak-Hearted", EREBOS_BLEAK_HEARTED),
+    ] {
+        let mut card = scenario.add_creature_from_oracle(P1, name, 7, 5, oracle);
+        card.as_enchantment()
+            .as_creature()
+            .as_legendary()
+            .with_subtypes(vec!["God"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 3,
+            });
+    }
+    let mut runner = scenario.build();
+    runner.cast(legion).target_player(P1).commit();
+    let mut events = Vec::new();
+    let outcome = runner.cast(hallowed).resolve();
+    events.extend(outcome.events().iter().cloned());
+    for _ in 0..30 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                let result = runner.act(GameAction::PassPriority).expect("pass priority");
+                events.extend(result.events);
+            }
+            WaitingFor::ChooseLegend { candidates, .. } => {
+                let keep = *candidates.iter().max().expect("legend candidates");
+                let result = runner.act(GameAction::ChooseLegend { keep }).expect("keep");
+                events.extend(result.events);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    for name in ["Erebos, God of the Dead", "Erebos, Bleak-Hearted"] {
+        let created = created_tokens_named(&events, name);
+        assert_eq!(created.len(), 1, "{name} copy created once");
+        assert_eq!(
+            zone_moves_of(&events, created[0]),
+            vec![(None, Zone::Battlefield)],
+            "{name} copy enters the battlefield (a noncreature at pre-entry devotion four)"
+        );
+    }
+}
+
+/// CR 616.1c + CR 614.12: with Grumgully's batch entry counter on the Metamorph token's creation,
+/// the own copy is still offered before Hallowed Moonlight's redirect. Choosing Mimic Vat (a
+/// noncreature artifact, which Grumgully's creature counter does not reach) enters without a
+/// counter; declining still creates and exiles the creature token.
+#[test]
+fn grumgullys_batch_counter_does_not_bypass_the_metamorph_copy_choice() {
+    let vat = run_vat_full(true, false, true, MetamorphAnswer::CopyVat);
+    assert!(offered_copy(&vat), "the copy is offered: {:?}", vat.prompts);
+    let tokens = battlefield_tokens_named(vat.runner.state(), "Mimic Vat");
+    assert_eq!(tokens.len(), 1, "the noncreature Vat copy entered");
+    assert!(
+        vat.runner.state().objects[&tokens[0]].counters.is_empty(),
+        "Grumgully's counter does not reach a noncreature copy"
+    );
+    let declined = run_vat_full(true, false, true, MetamorphAnswer::Decline);
+    assert!(
+        offered_copy(&declined),
+        "the copy is offered: {:?}",
+        declined.prompts
+    );
+    let created = created_tokens_named(&declined.events, "Phyrexian Metamorph");
+    assert_eq!(created.len(), 1, "the creature token is created once");
+    assert_eq!(
+        zone_moves_of(&declined.events, created[0]),
+        vec![(None, Zone::Exile)],
+        "and created in exile"
+    );
+}
+
+/// CR 616.1f + CR 707.2: the copy the player selected is the copy applied. P1 controls the only
+/// Triskelion, which P0 chooses as the model for Extravagant Replication's Sculpting Steel copy.
+/// P1 then concedes during the ordering prompt the rediscovery raised, which removes the model.
+/// The token is still Triskelion, with its three +1/+1 counters, rather than a re-read of a
+/// model that is gone.
+#[test]
+fn a_model_that_leaves_during_the_rediscovery_prompt_does_not_change_the_selected_copy() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    for player in [P0, P1, PlayerId(2)] {
+        scenario.with_library_top(player, &["Island", "Island", "Island", "Island", "Island"]);
+    }
+    let steel = scenario
+        .add_artifact_from_oracle(P0, "Sculpting Steel", SCULPTING_STEEL)
+        .id();
+    scenario
+        .add_creature_from_oracle(P1, "Triskelion", 1, 1, TRISKELION)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Construct"]);
+    scenario.add_enchantment_from_oracle(P0, "Root Maze", ROOT_MAZE);
+    scenario
+        .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 2, ARCHELOS)
+        .as_legendary();
+    scenario
+        .add_enchantment_from_oracle(P0, "Extravagant Replication", EXTRAVAGANT_REPLICATION)
+        .with_mana_cost(ManaCost::generic(5));
+    let mut runner = scenario.build();
+    aim_replication_trigger(&mut runner, steel);
+    let mut conceded = false;
+    for _ in 0..40 {
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                let accept = candidates
+                    .iter()
+                    .position(|c| c.description.contains("enter as a copy"));
+                if accept.is_none() && !conceded {
+                    // The post-copy ordering prompt: the model's owner leaves first.
+                    runner
+                        .act(GameAction::Concede { player_id: P1 })
+                        .expect("P1 concedes");
+                    conceded = true;
+                    continue;
+                }
+                runner.act(GameAction::ChooseReplacement {
+                    index: accept.unwrap_or(0),
+                })
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                let triskelion = *valid_targets
+                    .iter()
+                    .find(|id| runner.state().objects[id].name == "Triskelion")
+                    .expect("Triskelion is a legal copy model");
+                runner.act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(triskelion)),
+                })
+            }
+            WaitingFor::ChooseLegend { candidates, .. } => {
+                let keep = *candidates.iter().max().expect("legend candidates");
+                runner.act(GameAction::ChooseLegend { keep })
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        };
+        result.expect("the prompt answer is accepted");
+    }
+    assert!(
+        conceded,
+        "the model's owner conceded during the rediscovery prompt"
+    );
+    let tokens = battlefield_tokens_named(runner.state(), "Triskelion");
+    assert_eq!(tokens.len(), 1, "the selected Triskelion copy entered");
+    assert_eq!(
+        runner.state().objects[&tokens[0]]
+            .counters
+            .get(&engine::types::counter::CounterType::Plus1Plus1)
+            .copied(),
+        Some(3),
+        "with its own enters-with counters"
+    );
 }

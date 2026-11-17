@@ -7213,37 +7213,26 @@ fn replacement_condition_quantity_ctx(
     }
 }
 
-/// CR 614.12 + CR 616.1c: whether `def` redirects an entry to another zone and the
-/// `CreateToken` batch `event` is a copy batch whose entrants each carry their own
-/// as-enters copy and enter through a liminal `TokenEntry` (the single authority
-/// for that is `token_copy::copy_batch_enters_through_liminal_entry`).
-fn entry_redirect_deferred_to_entrant(def: &ReplacementDefinition, event: &ProposedEvent) -> bool {
+/// CR 614.12 + CR 616.1c: whether `def` is an entry replacement other than a copy (a redirect,
+/// enters tapped or untapped, entry counters) and `event` is a `CreateToken` copy batch whose
+/// entrants each carry their own as-enters copy and enter through a liminal `TokenEntry` (the
+/// single authority for that is `token_copy::copy_batch_enters_through_liminal_entry`). Such a
+/// replacement is decided against the entrant once its own copy has settled, so the batch-level
+/// consult — which has no entrant yet — leaves it to the entrant. A copy replacement
+/// (Mystic Reflection's "enter as copies") stays batch-wide.
+fn entry_effects_deferred_to_entrant(def: &ReplacementDefinition, event: &ProposedEvent) -> bool {
     let ProposedEvent::CreateToken {
-        copy: Some(copy),
-        spec,
-        ..
+        copy: Some(copy), ..
     } = event
     else {
         return false;
     };
-    if def.event != ReplacementEvent::ChangeZone {
-        return false;
-    }
-    let redirects = std::iter::successors(def.execute.as_deref(), |ability| {
-        ability.sub_ability.as_deref()
-    })
-    .any(|ability| {
-        matches!(
-            &*ability.effect,
-            Effect::ChangeZone { destination, .. } if *destination != Zone::Battlefield
-        )
-    });
-    redirects
+    def.event == ReplacementEvent::ChangeZone
+        && !def.execute.as_deref().is_some_and(ability_becomes_copy)
         && copy_entrant_has_own_entry_copy(&copy.values)
         && crate::game::effects::token_copy::copy_batch_enters_through_liminal_entry(
             &copy.values,
             &copy.additional_modifications,
-            &spec.enter_with_counters,
         )
 }
 
@@ -7286,14 +7275,14 @@ fn replacement_valid_card_matches(
             return false;
         }
     }
-    // CR 614.12 + CR 616.1c: an entry REDIRECT (Hallowed Moonlight's "exile it
-    // instead") is decided against the entrant as it will exist once its own
-    // as-enters copy has settled. A copy batch whose tokens carry such a copy
+    // CR 614.12 + CR 616.1c: an entry replacement (Hallowed Moonlight's "exile it
+    // instead", Grumgully's counter) is decided against the entrant as it will exist once its
+    // own as-enters copy has settled. A copy batch whose tokens carry such a copy
     // (Phyrexian Metamorph) enters through per-entrant `TokenEntry` events, where
     // that copy is applied first, so the batch-level creation consult — which has
-    // no entrant yet — leaves the redirect to them. Batch-wide copy and counter
-    // replacements (Mystic Reflection, Grumgully) still apply at this consult.
-    if entry_redirect_deferred_to_entrant(repl_def, event) {
+    // no entrant yet — leaves it to them. A batch-wide copy replacement (Mystic Reflection)
+    // and the creation-layer replacements still apply at this consult.
+    if entry_effects_deferred_to_entrant(repl_def, event) {
         return false;
     }
     let ctx = &repl_def.valid_card_context(state, source_id, controller);
