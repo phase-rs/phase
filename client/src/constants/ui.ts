@@ -35,3 +35,10 @@ export const GAME_Z_LAYER = {
   nestedDialog: "z-[70]",
   debugPanel: "z-[9999]",
 } as const;
+
+/**
+ * A phone on its side: the short screens that index.css's compact styles
+ * target (`max-height: 500px`), in landscape. A short portrait window, such as
+ * a narrow desktop sliver, does not match. Read it with `useMediaQuery`.
+ */
+export const SHORT_LANDSCAPE_QUERY = "(max-height: 500px) and (orientation: landscape)";

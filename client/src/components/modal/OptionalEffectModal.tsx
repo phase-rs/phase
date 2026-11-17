@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameAction, GameState, WaitingFor } from "../../adapter/types.ts";
-import { useIsShortLandscape } from "../../hooks/useIsShortLandscape.ts";
+import { SHORT_LANDSCAPE_QUERY } from "../../constants/ui.ts";
+import { useMediaQuery } from "../../hooks/useMediaQuery.ts";
 import { ChoiceModal } from "./ChoiceModal.tsx";
 
 type OptionalEffectWaitingFor = Extract<
@@ -22,7 +23,7 @@ export function OptionalEffectModalContent({
   dispatch,
 }: OptionalEffectModalProps) {
   const { t } = useTranslation("game");
-  const isShortLandscape = useIsShortLandscape();
+  const isShortLandscape = useMediaQuery(SHORT_LANDSCAPE_QUERY);
   const [remember, setRemember] = useState(false);
   const [sameCard, setSameCard] = useState(false);
 

@@ -36,8 +36,10 @@ export interface ChoiceOption {
  *   preview sits in a left column; the options, side by side, sit above the
  *   footer in a right column. The dialog widens to hold both, and the prompt
  *   comes out far shorter than stacked. It needs a preview to fill the left
- *   column, and stacks without one. Its height budget assumes the standard
- *   rules-text band; a taller band (a Saga's) makes the card column taller.
+ *   column, and stacks without one. While the card's art loads, the left
+ *   column holds only the hint, so the layout does not jump when it arrives.
+ *   Its height budget assumes the standard rules-text band; a taller band (a
+ *   Saga's) makes the card column taller.
  */
 export type ChoiceModalLayout = "stacked" | "columns";
 

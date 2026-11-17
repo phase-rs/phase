@@ -85,6 +85,32 @@ describe("DialogShell", () => {
     ).toBeInTheDocument();
   });
 
+  // Issue #11006: under `viewport-fit=cover` a landscape phone's notch or
+  // camera cutout sits inside the left or right safe-area inset, and the
+  // optional-effect prompt's two-column dialog nears the screen's full width.
+  it("pads each side of the overlay by that side's safe-area inset or the gutter, whichever is larger", () => {
+    render(
+      <DialogShell title="Rhystic Study - Optional Effect" size="lg">
+        <div />
+      </DialogShell>,
+    );
+
+    const overlay = screen.getByRole("dialog", { name: "Rhystic Study - Optional Effect" })
+      .parentElement as HTMLElement;
+
+    // Reach guard: this is the fixed overlay the card sits in.
+    expect(overlay).toHaveClass("fixed", "inset-0");
+    expect(overlay).toHaveClass(
+      "pl-[max(env(safe-area-inset-left),0.5rem)]",
+      "pr-[max(env(safe-area-inset-right),0.5rem)]",
+      "lg:pl-[max(env(safe-area-inset-left),1rem)]",
+      "lg:pr-[max(env(safe-area-inset-right),1rem)]",
+    );
+    // A fixed side gutter would ignore the insets.
+    expect(overlay).not.toHaveClass("px-2");
+    expect(overlay).not.toHaveClass("lg:px-4");
+  });
+
   it("renders footer when provided", () => {
     render(
       <DialogShell title="t" footer={<button>Confirm</button>}>

@@ -7,7 +7,7 @@ import {
   opponentMayChoiceWaitingForFactory,
   optionalEffectChoiceWaitingForFactory,
 } from "../../../test/factories/gameStateFactory.ts";
-import { SHORT_LANDSCAPE_QUERY } from "../../../hooks/useIsShortLandscape.ts";
+import { SHORT_LANDSCAPE_QUERY } from "../../../constants/ui.ts";
 import { OptionalEffectModalContent } from "../OptionalEffectModal.tsx";
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
@@ -329,6 +329,9 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
     ["a portrait phone", 390, 844],
   ])("stays stacked on %s", (_screen, width, height) => {
     setScreen(width, height);
+    // Reach guard: happy-dom's media queries see this screen, not its default.
+    expect(window.matchMedia(`(width: ${width}px) and (height: ${height}px)`).matches).toBe(true);
+    expect(window.matchMedia(SHORT_LANDSCAPE_QUERY).matches).toBe(false);
 
     renderRhysticStudy();
 
@@ -346,12 +349,14 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
     expectStacked();
   });
 
-  it("follows the phone as it turns with the prompt open, keeping its buttons", () => {
+  it("follows the phone as it turns with the prompt open, keeping its nodes and focus", () => {
     setScreen(390, 844);
     renderRhysticStudy();
     expectStacked();
     const yes = screen.getByRole("button", { name: "Yes" });
+    const card = screen.getByRole("img", { name: "Rhystic Study" });
     const dialog = screen.getByRole("dialog", { name: "Rhystic Study - Optional Effect" });
+    yes.focus();
 
     setScreen(844, 390);
     act(() => {
@@ -360,9 +365,11 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
 
     expect(dialog).toHaveClass("max-w-3xl");
     expect(yes.parentElement).toHaveClass("grid-cols-2");
-    // One element tree serves both layouts, so the turn keeps the buttons
-    // (and any focus on them) instead of rebuilding them.
+    // One element tree serves both layouts, so the turn keeps the buttons,
+    // the card and the focus instead of rebuilding them.
     expect(screen.getByRole("button", { name: "Yes" })).toBe(yes);
+    expect(screen.getByRole("img", { name: "Rhystic Study" })).toBe(card);
+    expect(yes).toHaveFocus();
 
     setScreen(390, 844);
     act(() => {
@@ -371,5 +378,7 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
 
     expectStacked();
     expect(screen.getByRole("button", { name: "Yes" })).toBe(yes);
+    expect(screen.getByRole("img", { name: "Rhystic Study" })).toBe(card);
+    expect(yes).toHaveFocus();
   });
 });

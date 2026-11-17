@@ -2,13 +2,15 @@ import type { ComponentProps } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SHORT_LANDSCAPE_QUERY } from "../../../hooks/useIsShortLandscape.ts";
+import { SHORT_LANDSCAPE_QUERY } from "../../../constants/ui.ts";
 import { ChoiceModal } from "../ChoiceModal.tsx";
+
+const cardImage = vi.hoisted(() => ({ isLoading: false }));
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: vi.fn(() => ({
     src: null,
-    isLoading: false,
+    isLoading: cardImage.isLoading,
     isRotated: false,
     isFlip: false,
   })),
@@ -50,6 +52,7 @@ function renderChoice(props: Partial<ComponentProps<typeof ChoiceModal>> = {}) {
 afterEach(() => {
   cleanup();
   Object.assign(window, DEFAULT_SCREEN);
+  cardImage.isLoading = false;
 });
 
 describe("ChoiceModal layout", () => {
@@ -83,14 +86,7 @@ describe("ChoiceModal layout", () => {
     const columns = actionColumn.parentElement as HTMLElement;
     const cardColumn = columns.firstElementChild as HTMLElement;
 
-    const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveClass("max-w-3xl");
-    // A dialog this wide nears a landscape phone's full width, so the overlay
-    // keeps it clear of each side's safe-area inset (a notch or a camera cutout).
-    expect(dialog.parentElement).toHaveClass(
-      "pl-[max(env(safe-area-inset-left),0.5rem)]",
-      "pr-[max(env(safe-area-inset-right),0.5rem)]",
-    );
+    expect(screen.getByRole("dialog")).toHaveClass("max-w-3xl");
     expect(columns).toHaveClass("grid", "grid-cols-2");
     expect(Array.from(columns.children)).toEqual([cardColumn, actionColumn]);
     expect(cardColumn).toContainElement(screen.getByRole("img", { name: CARD_NAME }));
@@ -98,6 +94,21 @@ describe("ChoiceModal layout", () => {
     expect(screen.getByRole("button", { name: "No" }).parentElement).toBe(actionRow);
     expect(actionRow).toHaveClass("grid", "grid-cols-2");
     expect(actionColumn).toContainElement(screen.getByLabelText("Remember"));
+  });
+
+  it("keeps the columns while the card's art loads, so the prompt does not jump when it arrives", () => {
+    cardImage.isLoading = true;
+
+    renderChoice({ layout: "columns" });
+
+    const actionRow = screen.getByRole("button", { name: "Yes" }).parentElement as HTMLElement;
+    const columns = actionRow.parentElement?.parentElement as HTMLElement;
+
+    // Reach guard: the art is still loading, so the card column has no card yet.
+    expect(screen.queryByRole("img", { name: CARD_NAME })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toHaveClass("max-w-3xl");
+    expect(columns).toHaveClass("grid", "grid-cols-2");
+    expect(actionRow).toHaveClass("grid", "grid-cols-2");
   });
 
   it("offers the hold hint only when holding the card opens its preview", () => {
