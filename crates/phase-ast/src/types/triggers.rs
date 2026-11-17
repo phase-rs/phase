@@ -253,7 +253,7 @@ impl TriggerEventKey {
             | Self::Enlisted
             | Self::Foretold
             | Self::Fight
-            // CR 603.10: not among the 603.10a-f look-back events, so it sees the
+            // CR 603.10: not among the CR 603.10a-g look-back events, so it sees the
             // objects that exist immediately after the event.
             | Self::AbilityTriggered
             | Self::PhaseIn => false,

@@ -380,15 +380,39 @@ fn v1_firebending_push_is_observed_once_and_combat_damage_is_not() {
     }
     assert_eq!(quest_counters(runner.state(), ascension), 1);
 
-    // N2: Zuko's combat-damage trigger (P1 has no creature, so no block).
-    runner.advance_to_phase(Phase::CombatDamage);
-    let damage_trigger_on_stack = triggered_entries_of(runner.state(), zuko);
-    if damage_trigger_on_stack > 0 {
-        assert!(
-            observer_firings(runner.state(), ascension).is_empty(),
-            "a combat-damage trigger is not caused by attacking"
-        );
+    // N2: Zuko's combat-damage trigger (P1 has no creature, so no block). Advance past
+    // combat damage so the trigger resolves (`advance_to_phase` does not move combat
+    // forward from the declare-attackers priority in this scenario).
+    for _ in 0..12 {
+        let counters = runner.state().objects[&zuko]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0);
+        if counters > 0 {
+            break;
+        }
+        runner.pass_both_players();
+        order_identity(&mut runner);
     }
+    // Reach guard: Zuko dealt combat damage and its trigger resolved (its +1/+1 counter),
+    // so the negative below cannot pass merely because the trigger never fired.
+    assert_eq!(
+        runner.state().objects[&zuko]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "Zuko's combat-damage trigger must have fired and resolved"
+    );
+    // An observed firing would resolve into a second quest counter; the stack is empty
+    // by now, so the counter total (not the live firing list) is the discriminating check.
+    assert_eq!(
+        quest_counters(runner.state(), ascension),
+        1,
+        "a combat-damage trigger is not caused by attacking: still only the firebending firing"
+    );
 }
 
 /// V2: two triggers of one source (firebending and Azula's attack trigger)
@@ -843,6 +867,70 @@ fn v21_nested_face_down_cause_is_hidden_from_the_opponent() {
     );
 }
 
+/// V21d (CR 400.2 + CR 708.5): a prompt that copies the resolving trigger's event
+/// (here the unless-payment prompt of Proctor's "counter unless its controller pays")
+/// carries the observer's `AbilityTriggered` event, so its nested face-down cause is
+/// hidden from P0 like every other carrier.
+#[test]
+fn v21d_unless_payment_prompt_hides_the_face_down_cause() {
+    let (runner, proctor, _warden) = manifest_board();
+    let firing = observer_firings(runner.state(), proctor)
+        .first()
+        .cloned()
+        .expect("reach guard: Proctor observed Soul Warden's trigger");
+    let prompt_cause_names = |state: &GameState| -> Vec<String> {
+        match &state.waiting_for {
+            WaitingFor::UnlessPayment {
+                trigger_event: Some(GameEvent::AbilityTriggered { causes, .. }),
+                ..
+            } => causes
+                .iter()
+                .map(|cause| match cause {
+                    GameEvent::ZoneChanged { record, .. } => record.name.clone(),
+                    other => panic!("unexpected cause {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected the unless-payment prompt, got {other:?}"),
+        }
+    };
+    let mut state = runner.state().clone();
+    state.waiting_for = WaitingFor::UnlessPayment {
+        player: P0,
+        repeat: None,
+        cost: engine::types::ability::AbilityCost::Mana {
+            cost: engine::types::mana::ManaCost::generic(2),
+        },
+        pending_effect: Box::new(engine::types::ability::ResolvedAbility::new(
+            engine::types::ability::Effect::Draw {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            proctor,
+            P0,
+        )),
+        trigger_event: Some(firing),
+        effect_description: None,
+        remaining: Vec::new(),
+        affected_object: None,
+    };
+    // Reach guard: the authoritative prompt names the manifested card.
+    assert_eq!(
+        prompt_cause_names(&state),
+        vec!["Grizzly Bears".to_string()]
+    );
+    assert_eq!(
+        prompt_cause_names(&filter_state_for_viewer(&state, P1)),
+        vec!["Grizzly Bears".to_string()],
+        "the manifest's controller may look at it (CR 708.5)"
+    );
+    assert_eq!(
+        prompt_cause_names(&filter_state_for_viewer(&state, P0)),
+        vec![HIDDEN_CARD_NAME.to_string()],
+        "an opponent may not learn the face-down card through a prompt's trigger event"
+    );
+}
+
 /// V21a: the client event stream never carries `causes`, for any viewer.
 #[test]
 fn v21a_event_stream_carries_no_causes() {
@@ -1129,7 +1217,7 @@ fn n1_no_observer_keeps_todays_drop_and_prompts() {
 /// F3: three players; P1 concedes while ordering Soul Warden's and Suture
 /// Priest's triggers for P2's Llanowar Elves.
 #[test]
-#[ignore = "known limitation, follow-up #N: a trigger whose controller left the game before placement is not observed (CR 800.4d + CR 603.2)"]
+#[ignore = "known limitation (tracked in the PR description): a trigger whose controller left the game before placement is not observed (CR 800.4d + CR 603.2)"]
 fn f3_conceded_ordering_group_is_observed() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);
@@ -1179,7 +1267,7 @@ fn f3_conceded_ordering_group_is_observed() {
 /// F4: three players; P2's Fiend Hunter pauses for its target while P1's Soul
 /// Warden context waits in `deferred_triggers`; P1 concedes.
 #[test]
-#[ignore = "known limitation, follow-up #N: a trigger whose controller left the game before placement is not observed (CR 800.4d + CR 603.2)"]
+#[ignore = "known limitation (tracked in the PR description): a trigger whose controller left the game before placement is not observed (CR 800.4d + CR 603.2)"]
 fn f4_conceded_deferred_context_is_observed() {
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.at_phase(Phase::PreCombatMain);

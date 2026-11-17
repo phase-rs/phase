@@ -8805,13 +8805,10 @@ fn collect_pending_triggers_with_collection(
                     batched_for_window.insert((observer_id, matched.trig_idx));
                 }
                 registered_for_window.insert((observer_id, matched.trig_idx));
-                // CR 603.2: the cause record is the admitted cause-axis events of the
-                // group (empty for a counter-removal window, which is on neither axis).
-                let causes = cause_axis_events(state, matched.trigger_events.iter().cloned());
                 pending.push(PendingTriggerContext::batched(
                     matched.pending,
                     matched.trigger_events,
-                    causes,
+                    matched.causes,
                 ));
             }
         }
@@ -11596,7 +11593,7 @@ pub(crate) fn collect_unclaimed_delayed_trigger_contexts(
 /// left the game isn't put on the stack. Retires each such context as
 /// `Eliminated` and returns the rest in their order.
 ///
-/// KNOWN LIMITATION (CR 800.4d + CR 603.2), follow-up #N: a context retired here
+/// KNOWN LIMITATION (CR 800.4d + CR 603.2), tracked in the PR description: a context retired here
 /// triggered before its controller left the game. No `GameEvent::AbilityTriggered`
 /// is emitted for it, so Strict Proctor and Aboleth Spawn do not trigger for it.
 /// Firebender Ascension cannot be affected: the observed ability's controller is

@@ -1435,9 +1435,10 @@ pub enum GameEvent {
     /// CR 603.2 + CR 603.3d: a triggered ability triggered and reached
     /// placement. `stack_entry: None` = removed during placement (CR 603.3c,
     /// CR 603.3d). `controller` is the ability's controller (CR 603.3a).
-    /// `causes` is engine bookkeeping for the observer matcher and is never
-    /// sent to a client; it is never empty (an occurrence with no cause record
-    /// is not emitted).
+    /// `causes` is engine bookkeeping for the observer matcher. The event
+    /// stream never carries it (`filter_events_for_viewer`); state carriers do,
+    /// redacted per viewer (CR 400.2 + CR 708.5). It is never empty: an
+    /// occurrence with no cause record is not emitted.
     AbilityTriggered {
         stack_entry: Option<ObjectId>,
         source_id: ObjectId,
