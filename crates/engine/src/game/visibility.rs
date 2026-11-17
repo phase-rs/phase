@@ -4671,7 +4671,6 @@ fn redact_battlefield_entry_record(record: &mut crate::types::game_state::Battle
         colors,
         keywords,
         controller: _,
-        face_down,
     } = record;
     *name = HIDDEN_CARD_NAME.to_string();
     core_types.clear();
@@ -4679,7 +4678,6 @@ fn redact_battlefield_entry_record(record: &mut crate::types::game_state::Battle
     supertypes.clear();
     colors.clear();
     keywords.clear();
-    *face_down = false;
 }
 
 /// The damage ledger keeps who dealt how much to what; the hidden source's characteristics
@@ -5318,7 +5316,6 @@ mod tests {
                 colors: Vec::new(),
                 keywords: Vec::new(),
                 controller: owner,
-                face_down: false,
             });
         state
             .sacrificed_permanents_this_turn

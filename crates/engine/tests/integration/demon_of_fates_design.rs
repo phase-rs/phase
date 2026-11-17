@@ -61,10 +61,9 @@ fn demon_of_fates_design_offers_alt_cost_for_enchantment() {
     // The engine must surface an OptionalCostChoice with the PayLife alternative.
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => match cost {
-            AdditionalCost::Choice(costs) => {
-                assert_eq!(costs.len(), 2);
+            AdditionalCost::Choice(alt, _printed) => {
                 assert_eq!(
-                    costs[0],
+                    *alt,
                     AbilityCost::PayLife {
                         amount: QuantityExpr::Ref {
                             qty: QuantityRef::SelfManaValue,

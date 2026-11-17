@@ -149,28 +149,22 @@ fn selected_optional_life_branch(
             match cost {
                 AdditionalCost::Optional { cost, .. } => cost.clone(),
                 AdditionalCost::Kicker { .. }
-                | AdditionalCost::Choice(_)
+                | AdditionalCost::Choice(_, _)
                 | AdditionalCost::Required(_) => unreachable!("matched Optional above"),
             },
         )),
-        (AdditionalCost::Choice(costs), true) if costs.iter().any(|c| matches!(c, AbilityCost::PayLife { .. })) => {
-            let preferred = costs.iter().find(|c| matches!(c, AbilityCost::PayLife { .. })).unwrap();
-            Some((
-                OptionalAdditionalCostBranch::ChoicePreferred,
-                preferred.clone(),
-            ))
-        }
-        (AdditionalCost::Choice(costs), false) if costs.iter().any(|c| matches!(c, AbilityCost::PayLife { .. })) => {
-            let fallback = costs.iter().find(|c| matches!(c, AbilityCost::PayLife { .. })).unwrap();
-            Some((
-                OptionalAdditionalCostBranch::ChoiceFallback,
-                fallback.clone(),
-            ))
-        }
+        (AdditionalCost::Choice(preferred @ AbilityCost::PayLife { .. }, _), true) => Some((
+            OptionalAdditionalCostBranch::ChoicePreferred,
+            preferred.clone(),
+        )),
+        (AdditionalCost::Choice(_, fallback @ AbilityCost::PayLife { .. }), false) => Some((
+            OptionalAdditionalCostBranch::ChoiceFallback,
+            fallback.clone(),
+        )),
         (AdditionalCost::Optional { .. }, false)
         | (AdditionalCost::Optional { .. }, true)
-        | (AdditionalCost::Choice(_), true)
-        | (AdditionalCost::Choice(_), false)
+        | (AdditionalCost::Choice(_, _), true)
+        | (AdditionalCost::Choice(_, _), false)
         | (AdditionalCost::Kicker { .. }, true | false)
         | (AdditionalCost::Required(_), true | false) => None,
     }
@@ -188,7 +182,7 @@ fn optional_additional_cost_path(pending: &PendingCast) -> OptionalAdditionalCos
             repeatability: *repeatability,
         },
         Some(AdditionalCost::Kicker { .. })
-        | Some(AdditionalCost::Choice(_))
+        | Some(AdditionalCost::Choice(_, _))
         | Some(AdditionalCost::Required(_))
         | None => OptionalAdditionalCostPath::Direct,
     }
@@ -533,7 +527,7 @@ pub(crate) fn begin_optional_additional_cost_attempt(
                                 repeatability: AdditionalCostRepeatability::Once,
                                 ..
                             }
-                            | AdditionalCost::Choice(_)
+                            | AdditionalCost::Choice(_, _)
                             | AdditionalCost::Kicker { .. }
                             | AdditionalCost::Required(_) => {
                                 pending_after.additional_cost_queue
@@ -707,21 +701,21 @@ mod tests {
         )
         .is_none());
         assert!(matches!(
-            selected_optional_life_branch(&AdditionalCost::Choice(vec![life.clone(), mana.clone()]), true),
+            selected_optional_life_branch(&AdditionalCost::Choice(life, mana), true),
             Some((
                 OptionalAdditionalCostBranch::ChoicePreferred,
                 AbilityCost::PayLife { .. }
             ))
         ));
         assert!(selected_optional_life_branch(
-            &AdditionalCost::Choice(vec![
+            &AdditionalCost::Choice(
                 AbilityCost::Mana {
                     cost: ManaCost::zero(),
                 },
                 AbilityCost::Mana {
                     cost: ManaCost::zero(),
                 },
-            ]),
+            ),
             false,
         )
         .is_none());

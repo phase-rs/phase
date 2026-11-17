@@ -424,11 +424,6 @@ pub(crate) fn battlefield_entry_record_for(
         // for an attached token). See the field doc on `BattlefieldEntryRecord.keywords`.
         keywords: obj.keywords.clone(),
         controller: obj.controller,
-        // CR 708.2: snapshot the object's face-down status at entry time — morph,
-        // disguise, manifest, and cloak creatures enter face down. This enables
-        // data-driven ETB condition queries like "if a face-down creature entered
-        // the battlefield under your control this turn" (Tunnel Tipster).
-        face_down: obj.face_down,
     }
 }
 
@@ -550,11 +545,6 @@ pub(crate) fn battlefield_entry_matches_filter(
                 // (record.keywords) — "a creature with flying entered this turn".
                 // allow-raw-authority: entry-time snapshot lookup on BattlefieldEntryRecord.keywords; no live object to consult
                 FilterProp::WithKeyword { value } => record.keywords.contains(value),
-                // CR 708.2: face-down status at entry time — "a face-down creature
-                // entered this turn" (Tunnel Tipster). The entry snapshot captures
-                // whether the object was face down when it entered (morph, disguise,
-                // manifest, cloak), before any turn-face-up replacement applies.
-                FilterProp::FaceDown => record.face_down,
                 // CR 109.1: "another [type]" is a same-object identity check —
                 // excludes the ability's own source object (e.g. Flying Drone's
                 // "another creature with flying entered this turn"). Mirrors the
@@ -3051,7 +3041,6 @@ mod tests {
             colors: vec![],
             keywords: vec![],
             controller: PlayerId(0),
-            face_down: false,
         };
 
         assert!(
@@ -3324,7 +3313,6 @@ mod tests {
                 colors: vec![ManaColor::Green],
                 keywords: vec![],
                 controller: PlayerId(1),
-                face_down: false,
             });
         let mut filter = crate::types::ability::TypedFilter::creature();
         filter.controller = Some(ControllerRef::Opponent);
@@ -3394,7 +3382,6 @@ mod tests {
                             colors: vec![],
                             keywords: vec![],
                             controller: *controller,
-                            face_down: false,
                         });
                     next_id += 1;
                 }
@@ -5330,8 +5317,8 @@ mod tests {
     fn ledger_guard_agrees_with_matcher() {
         let player = PlayerId(0);
         let source_id = ObjectId(99);
-        // Positively satisfies all five answerable props: green, on the
-        // battlefield, flying, face_down, and not the ability source. Also legendary and
+        // Positively satisfies all four answerable props: green, on the
+        // battlefield, flying, and not the ability source. Also legendary and
         // nontoken/untapped-in-fact, none of which the SNAPSHOT can express.
         let record = BattlefieldEntryRecord {
             object_id: ObjectId(10),
@@ -5342,7 +5329,6 @@ mod tests {
             colors: vec![ManaColor::Green],
             keywords: vec![Keyword::Flying],
             controller: player,
-            face_down: false,
         };
         let typed = |properties: Vec<FilterProp>, controller: Option<ControllerRef>| {
             TargetFilter::Typed(crate::types::ability::TypedFilter {
@@ -5377,30 +5363,6 @@ mod tests {
             );
         }
 
-        // FaceDown — test with a face-down record.
-        let face_down_record = BattlefieldEntryRecord {
-            object_id: ObjectId(11),
-            name: "Face Down Creature".to_string(),
-            core_types: vec![CoreType::Creature],
-            subtypes: vec![],
-            supertypes: vec![],
-            colors: vec![],
-            keywords: vec![],
-            controller: player,
-            face_down: true,
-        };
-        let face_down_filter = typed(vec![FilterProp::FaceDown], None);
-        assert!(ledger_filter_is_evaluable(&face_down_filter));
-        assert!(
-            battlefield_entry_matches_filter(&face_down_record, &face_down_filter, player, &[], Some(source_id)),
-            "FaceDown must MATCH a face-down record"
-        );
-        // FaceDown should NOT match a face-up record.
-        assert!(
-            !battlefield_entry_matches_filter(&record, &face_down_filter, player, &[], Some(source_id)),
-            "FaceDown must NOT match a face-up record"
-        );
-
         // NOT ALLOWED — unanswerable from the entry snapshot, so the guard must
         // refuse. (The record IS legendary and nontoken, so the matcher's `false`
         // for those is the fail-closed arm, not a genuine mismatch.)
@@ -5408,6 +5370,7 @@ mod tests {
             FilterProp::NonToken,
             FilterProp::Token,
             FilterProp::Tapped,
+            FilterProp::FaceDown,
             FilterProp::HasSupertype {
                 value: Supertype::Legendary,
             },

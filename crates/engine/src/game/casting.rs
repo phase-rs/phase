@@ -21624,7 +21624,7 @@ fn can_cast_prepared_now_with_probe(
     // mana cost. Reuse the declaration-time authority so discard/life,
     // sacrifice/mana, and other choice shapes cannot reach target selection
     // and then fail during payment after the cast has been announced.
-    if let Some(AdditionalCost::Choice(costs)) = state
+    if let Some(AdditionalCost::Choice(preferred, fallback)) = state
         .objects
         .get(&prepared.object_id)
         .and_then(|o| o.additional_cost.as_ref())
@@ -21653,7 +21653,7 @@ fn can_cast_prepared_now_with_probe(
             )
             .unwrap_or(false)
         };
-        if !costs.iter().any(branch_is_offerable) {
+        if !branch_is_offerable(preferred) && !branch_is_offerable(fallback) {
             return false;
         }
     }

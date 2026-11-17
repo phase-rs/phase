@@ -5032,7 +5032,7 @@ pub(crate) fn deterministic_choice(
             }
             engine::types::ability::AdditionalCost::Optional { .. } => true,
             engine::types::ability::AdditionalCost::Kicker { .. } => true,
-            engine::types::ability::AdditionalCost::Choice(_) => true,
+            engine::types::ability::AdditionalCost::Choice(_, _) => true,
             engine::types::ability::AdditionalCost::Required(_) => true,
         };
         return Some(GameAction::DecideOptionalCost { pay });

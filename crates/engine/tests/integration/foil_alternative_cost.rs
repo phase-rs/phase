@@ -241,15 +241,12 @@ fn foil_with_affordable_mana_offers_both_costs() {
     // The cast surfaces the optional-cost choice between the two-discard
     // alternative cost and the printed mana cost (CR 118.9b).
     let WaitingFor::OptionalCostChoice {
-        cost: AdditionalCost::Choice(costs),
+        cost: AdditionalCost::Choice(alternative, printed),
         ..
     } = &waiting
     else {
         panic!("expected the alternative/printed cost choice, got {waiting:?}");
     };
-    assert_eq!(costs.len(), 2);
-    let alternative = &costs[0];
-    let printed = &costs[1];
     assert!(matches!(
         alternative,
         AbilityCost::Composite { costs } if costs.len() == 2

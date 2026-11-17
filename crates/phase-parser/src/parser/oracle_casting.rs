@@ -143,99 +143,24 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         if let Some((mana_cost, _)) = parse_mana_symbols(right_raw.trim()) {
             let cost_a = super::oracle_cost::parse_single_cost(left_lower.trim());
             if !matches!(cost_a, AbilityCost::Unimplemented { .. }) {
-                return Some(AdditionalCost::Choice(vec![
+                return Some(AdditionalCost::Choice(
                     cost_a,
                     AbilityCost::Mana { cost: mana_cost },
-                ]));
+                ));
             }
         }
     }
 
-    // General "X or Y or Z..." choice pattern using parse_single_cost for each fragment.
-    // Split on all " or " occurrences to support 3+ alternatives (e.g., Dusk Mangler:
-    // "sacrifice a creature, discard a card, or pay 4 life").
-    if body_lower.contains(" or ") {
-        // Find all " or " positions in the lowercased text
-        let mut or_positions = Vec::new();
-        let mut search_start = 0;
-        while let Some(pos) = body_lower[search_start..].find(" or ") {
-            let absolute_pos = search_start + pos;
-            or_positions.push(absolute_pos);
-            search_start = absolute_pos + " or ".len();
-        }
-
-        // Build fragments from the positions
-        let mut fragments_lower = Vec::new();
-        let mut fragments_raw = Vec::new();
-        let mut last_end = 0;
-        for &or_pos in &or_positions {
-            fragments_lower.push(&body_lower[last_end..or_pos]);
-            let raw_start = body_raw.len() - body_lower.len() + last_end;
-            let raw_end = body_raw.len() - body_lower.len() + or_pos;
-            fragments_raw.push(&body_raw[raw_start..raw_end]);
-            last_end = or_pos + " or ".len();
-        }
-        // Last fragment
-        fragments_lower.push(&body_lower[last_end..]);
-        let raw_start = body_raw.len() - body_lower.len() + last_end;
-        fragments_raw.push(&body_raw[raw_start..]);
-
-        // Further split fragments on cost-separating commas (e.g., "sacrifice a creature, discard a card")
-        // EXEMPTION 2 from sacrifice_filter_lost_a_restriction: a comma followed by a cost verb
-        // opens a new cost clause, not a filter modifier.
-        let cost_verbs = ["discard", "pay", "sacrifice", "exile", "reveal", "mill", "tap", "untap", "waterbend"];
-        let mut all_fragments_lower = Vec::new();
-        let mut all_fragments_raw = Vec::new();
-        for (fragment_lower, fragment_raw) in fragments_lower.into_iter().zip(fragments_raw) {
-            // Check if this fragment contains a cost-separating comma
-            let mut sub_fragments_lower = Vec::new();
-            let mut sub_fragments_raw = Vec::new();
-            let mut sub_last_end = 0;
-            let mut search_start = 0;
-            while let Some(comma_pos) = fragment_lower[search_start..].find(", ") {
-                let absolute_pos = search_start + comma_pos;
-                // Check if the text after the comma starts with a cost verb
-                let after_comma = &fragment_lower[absolute_pos + ", ".len()..];
-                let after_comma_trimmed = after_comma.trim_start();
-                let starts_with_cost_verb = cost_verbs.iter().any(|verb| after_comma_trimmed.starts_with(verb));
-                if starts_with_cost_verb {
-                    // This comma separates costs
-                    sub_fragments_lower.push(&fragment_lower[sub_last_end..absolute_pos]);
-                    let raw_start = fragment_raw.len() - fragment_lower.len() + sub_last_end;
-                    let raw_end = fragment_raw.len() - fragment_lower.len() + absolute_pos;
-                    sub_fragments_raw.push(&fragment_raw[raw_start..raw_end]);
-                    sub_last_end = absolute_pos + ", ".len();
-                }
-                search_start = absolute_pos + ", ".len();
-            }
-            if !sub_fragments_lower.is_empty() {
-                // Add the last sub-fragment
-                sub_fragments_lower.push(&fragment_lower[sub_last_end..]);
-                let raw_start = fragment_raw.len() - fragment_lower.len() + sub_last_end;
-                sub_fragments_raw.push(&fragment_raw[raw_start..]);
-                // Add all sub-fragments to the main list
-                all_fragments_lower.extend(sub_fragments_lower);
-                all_fragments_raw.extend(sub_fragments_raw);
-            } else {
-                // No cost-separating commas, keep the fragment as-is
-                all_fragments_lower.push(fragment_lower);
-                all_fragments_raw.push(fragment_raw);
-            }
-        }
-
-        // Parse each fragment
-        let mut costs = Vec::new();
-        let mut all_parsed = true;
-        for (_, fragment_raw) in all_fragments_lower.into_iter().zip(all_fragments_raw) {
-            let cost = super::oracle_cost::parse_single_cost(fragment_raw.trim());
-            if matches!(cost, AbilityCost::Unimplemented { .. }) {
-                all_parsed = false;
-                break;
-            }
-            costs.push(cost);
-        }
-        if all_parsed && costs.len() >= 2 {
-            return Some(AdditionalCost::Choice(costs));
+    // General "X or Y" choice pattern using parse_single_cost for each fragment.
+    if let Some((left, right)) = body_lower.split_once(" or ") {
+        let cost_a = super::oracle_cost::parse_single_cost(left.trim());
+        let cost_b = super::oracle_cost::parse_single_cost(right.trim());
+        // Both fragments must parse to known costs — Unimplemented means the split was wrong
+        // (e.g. "sacrifice an artifact or creature" splits incorrectly on " or ").
+        if !matches!(cost_a, AbilityCost::Unimplemented { .. })
+            && !matches!(cost_b, AbilityCost::Unimplemented { .. })
+        {
+            return Some(AdditionalCost::Choice(cost_a, cost_b));
         }
     }
 
@@ -1613,26 +1538,20 @@ Trample";
             "As an additional cost to cast this spell, behold an Elf or pay {2}. (To behold an Elf, choose an Elf you control or reveal an Elf card from your hand.)";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(costs)) => {
-                assert_eq!(costs.len(), 2);
-                match (&costs[0], &costs[1]) {
-                    (
-                        AbilityCost::Behold {
-                            count: 1,
-                            filter: TargetFilter::Typed(filter),
-                            action: BeholdCostAction::ChooseOrReveal,
-                            ..
-                        },
-                        AbilityCost::Mana { cost: mana_cost },
-                    ) => {
-                        assert!(filter
-                            .type_filters
-                            .iter()
-                            .any(|tf| matches!(tf, TypeFilter::Subtype(name) if name == "Elf")));
-                        assert_eq!(*mana_cost, ManaCost::generic(2));
-                    }
-                    _ => panic!("Expected Choice(Behold Elf, Mana {{2}}), got {costs:?}"),
-                }
+            Some(AdditionalCost::Choice(
+                AbilityCost::Behold {
+                    count: 1,
+                    filter: TargetFilter::Typed(filter),
+                    action: BeholdCostAction::ChooseOrReveal,
+                    ..
+                },
+                AbilityCost::Mana { cost },
+            )) => {
+                assert!(filter
+                    .type_filters
+                    .iter()
+                    .any(|tf| matches!(tf, TypeFilter::Subtype(name) if name == "Elf")));
+                assert_eq!(cost, ManaCost::generic(2));
             }
             other => panic!("Expected Choice(Behold Elf, Mana {{2}}), got {other:?}"),
         }
@@ -1751,7 +1670,7 @@ Trample";
             let result = parse_additional_cost_line(&lower, &raw);
             assert_eq!(
                 result,
-                Some(AdditionalCost::Choice(vec![
+                Some(AdditionalCost::Choice(
                     AbilityCost::Blight { count: blight },
                     AbilityCost::Mana {
                         cost: ManaCost::Cost {
@@ -1759,7 +1678,7 @@ Trample";
                             shards: vec![]
                         }
                     }
-                ])),
+                )),
                 "blight {blight} or pay {{{generic}}}"
             );
         }
@@ -1782,22 +1701,16 @@ Trample";
         let raw = "As an additional cost to cast this spell, discard a card or pay 3 life.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(costs)) => {
-                assert_eq!(costs.len(), 2);
-                match (&costs[0], &costs[1]) {
-                    (
-                        AbilityCost::Discard {
-                            count: QuantityExpr::Fixed { value: 1 },
-                            selection: CardSelectionMode::Chosen,
-                            ..
-                        },
-                        AbilityCost::PayLife {
-                            amount: QuantityExpr::Fixed { value: 3 },
-                        },
-                    ) => {}
-                    _ => panic!("Expected Choice(Discard, PayLife), got {costs:?}"),
-                }
-            }
+            Some(AdditionalCost::Choice(
+                AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    selection: CardSelectionMode::Chosen,
+                    ..
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                },
+            )) => {}
             other => panic!("Expected Choice(Discard, PayLife), got {:?}", other),
         }
     }
@@ -1861,13 +1774,7 @@ Trample";
         let raw = "As an additional cost to cast this spell, sacrifice a creature or pay {2}.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(costs)) => {
-                assert_eq!(costs.len(), 2);
-                match (&costs[0], &costs[1]) {
-                    (AbilityCost::Sacrifice(_), AbilityCost::Mana { .. }) => {}
-                    _ => panic!("Expected Choice(Sacrifice, Mana), got {costs:?}"),
-                }
-            }
+            Some(AdditionalCost::Choice(AbilityCost::Sacrifice(_), AbilityCost::Mana { .. })) => {}
             other => panic!("Expected Choice(Sacrifice, Mana), got {:?}", other),
         }
     }
@@ -2225,20 +2132,14 @@ Trample";
             "As an additional cost to cast this spell, reveal a Dragon card from your hand or pay {1}.";
         let result = parse_additional_cost_line(lower, raw);
         match result {
-            Some(AdditionalCost::Choice(costs)) => {
-                assert_eq!(costs.len(), 2);
-                match (&costs[0], &costs[1]) {
-                    (
-                        AbilityCost::Reveal {
-                            count: QuantityExpr::Fixed { value: 1 },
-                            filter: Some(_),
-                            shared_quality: _,
-                        },
-                        AbilityCost::Mana { .. },
-                    ) => {}
-                    _ => panic!("Expected Choice(Reveal, Mana), got {costs:?}"),
-                }
-            }
+            Some(AdditionalCost::Choice(
+                AbilityCost::Reveal {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: Some(_),
+                    shared_quality: _,
+                },
+                AbilityCost::Mana { .. },
+            )) => {}
             other => panic!("Expected Choice(Reveal, Mana), got {:?}", other),
         }
     }
@@ -3358,27 +3259,5 @@ Trample";
                 ],
             }))
         );
-    }
-
-    /// CR 601.2b + CR 601.2h: Dusk Mangler's three-way additional cost:
-    /// "sacrifice a creature, discard a card, or pay 4 life" — all three
-    /// options must be parsed as a single Choice with three costs.
-    #[test]
-    fn parse_additional_cost_dusk_mangler_three_way() {
-        let lower = "as an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.";
-        let raw = "As an additional cost to cast this spell, sacrifice a creature, discard a card, or pay 4 life.";
-        let result = parse_additional_cost_line(lower, raw);
-        match result {
-            Some(AdditionalCost::Choice(costs)) => {
-                assert_eq!(costs.len(), 3, "expected 3 choices, got {:?}", costs);
-                // First: sacrifice a creature
-                assert!(matches!(&costs[0], AbilityCost::Sacrifice(sac) if sac.requirement.fixed_count() == Some(1)));
-                // Second: discard a card
-                assert!(matches!(&costs[1], AbilityCost::Discard { count: QuantityExpr::Fixed { value: 1 }, .. }));
-                // Third: pay 4 life
-                assert!(matches!(&costs[2], AbilityCost::PayLife { amount: QuantityExpr::Fixed { value: 4 } }));
-            }
-            other => panic!("Expected Choice with 3 costs, got {other:?}"),
-        }
     }
 }
