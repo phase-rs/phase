@@ -6561,10 +6561,19 @@ pub(crate) fn matches_target_filter_on_projected_battlefield_entry(
         ProposedEvent::CreateToken {
             owner,
             spec,
+            copy,
             enter_tapped,
             ..
         } => {
-            let obj = build_battlefield_entry_token_object(*owner, spec, *enter_tapped);
+            // CR 707.2 + CR 614.12: a copy batch's entrant is its complete copy body — the
+            // copied statics and mana cost included — not the flattened characteristics of
+            // the replacement-matching spec.
+            let obj = match copy.as_deref() {
+                Some(copy) => {
+                    build_battlefield_entry_copy_object(state, *owner, copy, *enter_tapped)
+                }
+                None => build_battlefield_entry_token_object(*owner, spec, *enter_tapped),
+            };
             if let Some(projection) =
                 BattlefieldEntrantProjection::token_on_pre_entry_board(Cow::Borrowed(state), &obj)
             {
@@ -8297,6 +8306,42 @@ fn filter_inner_for_object(
 /// the filter is read for; unbound, nothing is.
 fn is_stamped_granter(obj: &GameObject, granting_object: Option<ObjectIncarnationRef>) -> bool {
     granting_object.is_some_and(|granter| ObjectIncarnationRef::from_object(obj) == granter)
+}
+
+/// CR 707.2 + CR 707.9b: the body of a copy-token batch's entrant, built by the single
+/// copy-body authority (`token::materialize_token_copy_body`), as the batch's entrants will
+/// exist before any continuous effect applies.
+fn build_battlefield_entry_copy_object(
+    state: &GameState,
+    owner: PlayerId,
+    copy: &crate::types::proposed_event::CopyTokenSpec,
+    enter_tapped: EtbTapState,
+) -> GameObject {
+    let mut obj = GameObject::new(
+        ObjectId(u64::MAX),
+        CardId(0),
+        owner,
+        copy.values.name.clone(),
+        Zone::Battlefield,
+    );
+    obj.controller = owner;
+    let modifications = if copy.additional_modifications.is_empty() {
+        crate::types::resolved_commands::ResolvedCopyBodyModifications::NoExceptions
+    } else {
+        crate::types::resolved_commands::ResolvedCopyBodyModifications::Folded {
+            modifications: copy.additional_modifications.clone(),
+            all_creature_types: state.all_creature_types.clone(),
+        }
+    };
+    crate::game::effects::token::materialize_token_copy_body(
+        &mut obj,
+        copy,
+        &modifications,
+        state.turn_number,
+        0,
+        enter_tapped.resolve(copy.tapped),
+    );
+    obj
 }
 
 /// Build a synthetic `GameObject` from a `TokenSpec` for filter evaluation

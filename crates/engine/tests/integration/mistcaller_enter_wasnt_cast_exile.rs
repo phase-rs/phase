@@ -40,7 +40,7 @@ use engine::types::game_state::{
     GameState, PersistedGameState, PersistedRestoreFinalization, ReplacementChoiceKind, WaitingFor,
 };
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::replacements::ReplacementEvent;
@@ -1703,7 +1703,17 @@ fn aim_replication_trigger(runner: &mut GameRunner, target: ObjectId) {
             other => panic!("unexpected {other:?} before the trigger"),
         }
     }
-    panic!("Extravagant Replication's trigger never reached the stack");
+    panic!(
+        "Extravagant Replication's trigger never reached the stack: turn {} {:?} bf {:?}",
+        runner.state().turn_number,
+        runner.state().phase,
+        runner
+            .state()
+            .battlefield
+            .iter()
+            .map(|i| runner.state().objects[i].name.clone())
+            .collect::<Vec<_>>()
+    );
 }
 
 /// F2. CR 614.12: under Opalescence the token copy of Opalescence (an Enchantment) is a
@@ -1711,23 +1721,35 @@ fn aim_replication_trigger(runner: &mut GameRunner, target: ObjectId) {
 /// response to Extravagant Replication's upkeep trigger — creates it in exile. The same
 /// copy without Hallowed Moonlight enters.
 fn replication_copies_opalescence(moonlight: bool) -> (GameRunner, Vec<GameEvent>) {
+    replication_run(moonlight, |scenario| {
+        let opalescence = {
+            let mut card = scenario.add_enchantment_from_oracle(P0, "Opalescence", OPALESCENCE);
+            card.with_mana_cost(ManaCost::generic(4));
+            card.id()
+        };
+        // Opalescence makes Extravagant Replication a creature with power and toughness equal
+        // to its mana value ({2}{U}{U}{U}), so it survives only with that cost.
+        scenario
+            .add_enchantment_from_oracle(P0, "Extravagant Replication", EXTRAVAGANT_REPLICATION)
+            .with_mana_cost(ManaCost::generic(5));
+        opalescence
+    })
+}
+
+/// Resolve Extravagant Replication's upkeep trigger on the permanent `setup` builds (and
+/// returns), with Hallowed Moonlight resolved in response when `moonlight`.
+fn replication_run(
+    moonlight: bool,
+    setup: impl FnOnce(&mut GameScenario) -> ObjectId,
+) -> (GameRunner, Vec<GameEvent>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Island", "Island", "Island", "Island", "Island"]);
     scenario.with_library_top(P1, &["Island", "Island", "Island", "Island", "Island"]);
     let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
-    let opalescence = {
-        let mut card = scenario.add_enchantment_from_oracle(P0, "Opalescence", OPALESCENCE);
-        card.with_mana_cost(ManaCost::generic(4));
-        card.id()
-    };
-    // Opalescence makes Extravagant Replication a creature with power and toughness equal
-    // to its mana value ({2}{U}{U}{U}), so it survives only with that cost.
-    scenario
-        .add_enchantment_from_oracle(P0, "Extravagant Replication", EXTRAVAGANT_REPLICATION)
-        .with_mana_cost(ManaCost::generic(5));
+    let target = setup(&mut scenario);
     let mut runner = scenario.build();
-    aim_replication_trigger(&mut runner, opalescence);
+    aim_replication_trigger(&mut runner, target);
     let mut events = Vec::new();
     if moonlight {
         let outcome = runner.cast(hallowed).resolve();
@@ -1738,6 +1760,14 @@ fn replication_copies_opalescence(moonlight: bool) -> (GameRunner, Vec<GameEvent
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => {
                 let result = runner.act(GameAction::PassPriority).expect("pass priority");
+                events.extend(result.events);
+            }
+            // CR 704.5j: the legendary copy that entered; keep it (the newest candidate).
+            WaitingFor::ChooseLegend { candidates, .. } => {
+                let keep = *candidates.iter().max().expect("legend candidates");
+                let result = runner
+                    .act(GameAction::ChooseLegend { keep })
+                    .expect("keep the copy");
                 events.extend(result.events);
             }
             other => panic!("unexpected {other:?} resolving the trigger"),
@@ -1797,4 +1827,71 @@ fn moonlight_reads_the_liminal_entrant_through_the_battlefield_projection() {
         1,
         "without March of the Machines the same copy enters"
     );
+}
+
+/// Verbatim Oracle text of Erebos, God of the Dead (Scryfall).
+const EREBOS: &str = "Indestructible\nAs long as your devotion to black is less than five, \
+Erebos isn't a creature. (Each {B} in the mana costs of permanents you control counts toward \
+your devotion to black.)\nYour opponents can't gain life.\n{1}{B}, Pay 2 life: Draw a card.";
+
+/// F1 (copied statics, CR 707.2 + CR 614.12). Extravagant Replication copies Erebos, God of
+/// the Dead with Hallowed Moonlight resolved in response. The copy's own static makes it a
+/// noncreature below five devotion to black, so it enters; at five devotion (Erebos, plus two
+/// Black Knights' {B}{B} each) it is a creature, so it is created in exile. The batch's
+/// flattened spec has no statics and reads as a creature in both games.
+fn replication_copies_erebos(black_knights: usize) -> (GameRunner, Vec<GameEvent>) {
+    replication_run(true, |scenario| {
+        let erebos = {
+            let mut card =
+                scenario.add_creature_from_oracle(P0, "Erebos, God of the Dead", 7, 5, EREBOS);
+            card.as_enchantment()
+                .as_creature()
+                .as_legendary()
+                .with_subtypes(vec!["God"])
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black],
+                    generic: 3,
+                });
+            card.id()
+        };
+        for _ in 0..black_knights {
+            scenario
+                .add_creature(P0, "Black Knight", 2, 2)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+                    generic: 0,
+                });
+        }
+        scenario
+            .add_enchantment_from_oracle(P0, "Extravagant Replication", EXTRAVAGANT_REPLICATION)
+            .with_mana_cost(ManaCost::generic(5));
+        erebos
+    })
+}
+
+#[test]
+fn moonlight_lets_a_low_devotion_erebos_copy_enter() {
+    let (runner, events) = replication_copies_erebos(0);
+    assert_eq!(
+        created_tokens_named(&events, "Erebos, God of the Dead").len(),
+        1
+    );
+    assert_eq!(
+        battlefield_tokens_named(runner.state(), "Erebos, God of the Dead").len(),
+        1,
+        "the copy is not a creature (its own static, devotion 1), so Moonlight leaves it"
+    );
+}
+
+#[test]
+fn moonlight_creates_a_high_devotion_erebos_copy_in_exile() {
+    let (runner, events) = replication_copies_erebos(2);
+    let created = created_tokens_named(&events, "Erebos, God of the Dead");
+    assert_eq!(created.len(), 1, "the copy is created once");
+    assert_eq!(
+        zone_moves_of(&events, created[0]),
+        vec![(None, Zone::Exile)],
+        "at five devotion the copy is a creature entering"
+    );
+    assert!(battlefield_tokens_named(runner.state(), "Erebos, God of the Dead").is_empty());
 }
