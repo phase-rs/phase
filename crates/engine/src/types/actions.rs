@@ -2070,8 +2070,9 @@ impl GameAction {
 
     /// Whether this is an actor-scoped UI preference action.
     ///
-    /// These mutations are legal in every `WaitingFor` state, do not change game
-    /// progression, and must not trigger auto-pass advancement at the engine
+    /// These mutations are legal in every `WaitingFor` state except an open
+    /// shortcut window (`preference_frozen`, hand order excepted), do not change
+    /// game progression, and must not trigger auto-pass advancement at the engine
     /// boundary. The authenticated actor is the only preference owner.
     pub fn is_actor_scoped_preference(&self) -> bool {
         matches!(

@@ -4239,7 +4239,7 @@ mod recorded_niv_table {
         );
     }
 
-    /// CR 732.2b: a debug edit inside the offer is no carrier, so a declaration refused before it is
+    /// CR 732.2a: a debug edit inside the offer is no carrier, so a declaration refused before it is
     /// answered after it as on a fresh offer with the same edit: detaching Curiosity, or turning
     /// P0's infinite mana back off.
     #[test]

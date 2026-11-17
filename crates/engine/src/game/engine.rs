@@ -2804,7 +2804,7 @@ fn finish_action_boundary_with_lifecycle(
     finalize_rules_state(state);
     super::un_actions::announce_pending_tells(state);
     super::un_actions::refresh_menu(state);
-    // CR 732.2b: a carrier writes only hand order (CR 402.3) or stores `same_position` compares.
+    // A carrier writes only hand order (CR 402.3) or stores `same_position` compares.
     if carries_answer_receipts {
         carry_answer_receipts(&boundary_snapshot, state);
     }
@@ -7614,8 +7614,8 @@ pub(crate) fn preference_frozen(waiting_for: &WaitingFor, action: &GameAction) -
         && shortcut_window_open(waiting_for)
 }
 
-/// CR 732.2b + CR 402.3: the window-admitted actions whose writes `same_position` compares, so a
-/// take's verdict survives one of them exactly when it leaves the position unchanged.
+/// CR 732.2a + CR 402.3: a take's verdict is read from the game state it was taken on, so it
+/// carries only across these window-admitted actions, whose writes `same_position` compares.
 fn carries_answer_receipts(action: &GameAction) -> bool {
     matches!(
         action,
