@@ -47,7 +47,7 @@ pub use crate::types::mana::ManaSourcePenalty;
 
 /// The producer's potential colors, independently of a unit's chosen type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SourceColorCapability {
+pub enum SourceColorCapability {
     OneOrFewer,
     TwoOrMore,
 }
