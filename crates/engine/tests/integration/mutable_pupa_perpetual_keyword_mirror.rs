@@ -206,8 +206,29 @@ const KATHRIL: &str = "When Kathril enters, put a flying counter on any creature
 // false gate). Reverting the `attach_repeat_process_keywords` marker OR the
 // `resolve_chain_body` disjunct collapses the chain at flying's false gate, and
 // both the trample and the +1/+1 assertions flip.
+//
+// Runs on its own explicitly sized stack because this is the deepest printed
+// chain the engine resolves: `Repeat this process for …` re-enters
+// `resolve_chain_body` once per keyword, so peak stack is a multiple of the
+// per-link frame rather than a single link's. Measured under libtest on x86_64
+// linux: the corpus without the CR 115.1 declared-player-slot carrier needs
+// 16,777,216 bytes and fails at 16,711,680 — i.e. EXACTLY the `[env]
+// RUST_MIN_STACK = 16 MiB` contract, with no headroom. Any struct growth that
+// lands in a chain frame tips it, and `RUST_MIN_STACK` is a request libtest
+// honors per spawned test thread, so a bigger request here is the honest fix.
+// 32 MiB keeps ~2x margin without touching the shipped-WASM stack contract the
+// `.cargo/config.toml` comment ties that 16 MiB to.
 #[test]
 fn kathril_reaches_matching_counter_and_tail_past_false_earlier_gates() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(kathril_reaches_matching_counter_and_tail_past_false_earlier_gates_body)
+        .expect("spawn the deep-chain test on its own stack")
+        .join()
+        .expect("the deep-chain test must not panic");
+}
+
+fn kathril_reaches_matching_counter_and_tail_past_false_earlier_gates_body() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     // A creature card with ONLY trample (explicitly NOT flying) in P0's graveyard.
