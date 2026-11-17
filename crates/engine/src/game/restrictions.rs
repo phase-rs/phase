@@ -2606,7 +2606,10 @@ pub(crate) fn target_dependent_flash_permission_feasible(
 /// active team — CR 805.5a: "A player may cast a spell, activate an ability,
 /// or take a special action when their team has priority") has priority.
 /// CR 805.4a + CR 805.5a: whether `player` may act on the active turn — the
-/// active player themselves, or any living teammate of the active player.
+/// active player themselves, or any living teammate when the active player's
+/// side takes shared team turns (the turn-structure predicate in
+/// `topology::side_takes_shared_turn`, so a future individual-turn team
+/// format stays correctly excluded).
 /// The single membership authority behind `is_sorcery_speed_window` and the
 /// teammate-aware special-action gates (foretell, ninjutsu-family offers,
 /// room unlocks): one spelling, so offer and enforcement cannot drift.
@@ -2615,7 +2618,8 @@ pub(crate) fn acts_on_active_turn(
     player: PlayerId,
 ) -> bool {
     state.active_player == player
-        || super::players::teammates(state, state.active_player).contains(&player)
+        || (super::topology::side_takes_shared_turn(state, state.active_player)
+            && super::topology::team_members(state, state.active_player).contains(&player))
 }
 
 pub(crate) fn is_sorcery_speed_window(

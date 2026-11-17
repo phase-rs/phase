@@ -21630,6 +21630,85 @@ mod priority_principal_tests {
         assert_eq!(state, before);
     }
 
+    /// CR 805.5a: the room preflight enumerates every living teammate's
+    /// locked doors on a shared-team window — not just the holder's — so a
+    /// teammate-only unlock reads Indeterminate (the holder-probed apply
+    /// fails closed on the controller check) rather than Actionless.
+    /// Controls: holder-only doors enumerate (pre-existing behavior); no
+    /// rooms announce nothing.
+    #[test]
+    fn priority_preflight_sees_teammate_room_doors_on_a_parked_team_window() {
+        fn parked_2hg_window() -> crate::types::game_state::GameState {
+            let mut state = crate::types::game_state::GameState::new(
+                crate::types::format::FormatConfig::two_headed_giant(),
+                4,
+                42,
+            );
+            state.turn_number = 2;
+            state.active_player = PlayerId(0);
+            state.phase = crate::types::phase::Phase::PreCombatMain;
+            state.priority_player = PlayerId(0);
+            state.waiting_for = crate::types::game_state::WaitingFor::Priority {
+                player: PlayerId(0),
+            };
+            state.stack.clear();
+            state
+        }
+
+        fn add_locked_room(state: &mut crate::types::game_state::GameState, controller: PlayerId) {
+            let id = crate::game::zones::create_object(
+                state,
+                crate::types::identifiers::CardId(state.next_object_id),
+                controller,
+                "Locked Room".to_string(),
+                crate::types::zones::Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).expect("room exists");
+            obj.card_types.subtypes.push("Room".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        // Teammate-only unlock: enumerated, and the window is NOT actionless.
+        let mut state = parked_2hg_window();
+        add_locked_room(&mut state, PlayerId(1));
+        let principal =
+            priority_principal_for_preflight(&state).expect("a live window has a principal");
+        assert!(
+            !crate::game::room::priority_unlock_room_door_announcements(&state, &principal)
+                .is_empty(),
+            "the teammate's locked doors must enumerate"
+        );
+        assert!(
+            matches!(
+                preflight_priority_window(&state),
+                PriorityPreflight::Indeterminate { .. }
+            ),
+            "a teammate-only unlock must block actionless progress, got {:?}",
+            preflight_priority_window(&state)
+        );
+
+        // Control: holder-only doors enumerate (pre-existing behavior).
+        let mut holder_only = parked_2hg_window();
+        add_locked_room(&mut holder_only, PlayerId(0));
+        let principal =
+            priority_principal_for_preflight(&holder_only).expect("a live window has a principal");
+        assert!(
+            !crate::game::room::priority_unlock_room_door_announcements(&holder_only, &principal)
+                .is_empty(),
+            "the holder's locked doors must enumerate"
+        );
+
+        // Control: no rooms announce nothing.
+        let bare = parked_2hg_window();
+        let principal =
+            priority_principal_for_preflight(&bare).expect("a live window has a principal");
+        assert!(
+            crate::game::room::priority_unlock_room_door_announcements(&bare, &principal)
+                .is_empty(),
+            "no rooms must announce no doors"
+        );
+    }
+
     #[test]
     fn priority_preflight_reports_stale_authority_without_inventing_a_family() {
         let controlled_seat = PlayerId(0);
