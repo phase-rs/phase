@@ -12371,15 +12371,25 @@ fn trigger_becomes_blocked_by_two_or_more_creatures_parses_threshold() {
     // CR 509.3e: "by two or more creatures" is now modeled as a blocker count
     // threshold. The parser captures the minimum blocker count and the optional
     // blocker filter (defaulting to all creatures).
-    use phase_ast::types::ability::BlockerCountThreshold;
+    // Seifer, Balamb Rival: "Whenever a creature attacking one of your opponents
+    // becomes blocked by two or more creatures, that attacking creature gains
+    // deathtouch until end of turn."
     let def = parse_trigger_line(
-        "Whenever Vicious Battlerager becomes blocked by two or more creatures, draw a card.",
-        "Vicious Battlerager",
+        "Whenever a creature attacking one of your opponents becomes blocked by two or more creatures, that attacking creature gains deathtouch until end of turn.",
+        "Seifer, Balamb Rival",
     );
 
     assert_eq!(def.mode, TriggerMode::BecomesBlocked);
-    assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
-    let blocker_count = def.blocker_count.expect("blocker_count must be set for threshold form");
+    // Subject is "a creature attacking one of your opponents" - a typed filter
+    // for creatures that are attacking an opponent.
+    assert!(matches!(
+        def.valid_card,
+        Some(TargetFilter::Typed(ref tf)) if tf.type_filters == vec![TypeFilter::Creature]
+            && tf.properties.iter().any(|p| matches!(p, FilterProp::Attacking { defender: Some(ControllerRef::Opponent) }))
+    ));
+    let blocker_count = def
+        .blocker_count
+        .expect("blocker_count must be set for threshold form");
     assert_eq!(blocker_count.minimum, 2);
     // Default blocker filter is None (all creatures)
     assert!(blocker_count.blocker.is_none());

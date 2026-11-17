@@ -15914,74 +15914,75 @@ fn parse_object_recipient_pt_gate(
 /// player-recipient leg. The guard rejects any alphanumeric continuation and the
 /// " or " disjunction, so such mixed recipients decline here and reach the player
 /// axis (which also declines them, leaving `valid_target = None` — the
-    /// "any recipient" behavior these cards require). Mirrors the word-boundary idiom
-    /// in [`parse_enters_tapped_state_rider`]. Strax, Sontaran Nurse + the
-    /// "deals [combat] damage to a [type]" class.
-    fn parse_object_recipient_filter(after_verb: &str) -> OracleResult<'_, TargetFilter> {
-        let (rest, ()) =
-            value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
-        let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
-        // CR 111.1: "token" is not a card type but an object property.
-        // Handle "to a token" / "to a tokens" as a TypedFilter with the Token property.
-        if let Ok((after_token, _)) =
-            alt((tag::<_, _, OracleError<'_>>("token"), tag("tokens"))).parse(rest) {
-            // Word-boundary guard: must be followed by end or non-alphanumeric.
-            if after_token.is_empty()
-                || after_token
-                    .chars()
-                    .next()
-                    .is_some_and(|c| !c.is_alphanumeric() && c != '_')
-            {
-                let mut tf = TypedFilter::default();
-                tf.properties.push(FilterProp::Token);
-                return Ok((after_token, TargetFilter::Typed(tf)));
-            }
-        }
-        // CR 509.1g + CR 120.3: optional state/combat-status adjective prefix on the
-        // damage recipient — "a blocking creature" (Kusari-Gama), "an attacking
-        // creature", "a tapped creature". `parse_type_phrase_nom` only handles
-        // type/color/supertype words, so without this the whole recipient failed to
-        // parse and the trigger fell back to `valid_target = None` (fires on ANY
-        // recipient, including a player). Consume the leading `FilterProp`s and merge
-        // them into the typed recipient so the trigger gates on the damaged object's
-        // combat state. Mirrors the prefix loop in `oracle_target::parse_type_phrase_folding`.
-        let (rest, prefix_props) = many0(terminated(parse_property_filter, space1)).parse(rest)?;
-        let (rest, mut filter) = parse_type_phrase_nom(rest)?;
-        // Phrase-terminator guard: accept only end-of-string or a non-alphanumeric
-        // terminator (comma, period, space-before-clause), and explicitly reject the
-        // " or <player-word>" disjunction. Declines "creature or player",
-        // "creature or opponent", and any longer type word the bare-prefix scan would
-        // otherwise truncate. The disjunction is detected with a `peek(tag("or "))`
-        // combinator (no string dispatch); the alphanumeric word-boundary check
-        // mirrors the file's established idiom in `parse_enters_tapped_state_rider`.
-        // Uses the file's `OracleError::new(rest, ErrorKind::Eof)` decline idiom.
-        let is_disjunction = peek(tag::<_, _, OracleError<'_>>("or "))
-            .parse(rest.trim_start())
-            .is_ok();
-        if is_disjunction
-            || rest
+/// "any recipient" behavior these cards require). Mirrors the word-boundary idiom
+/// in [`parse_enters_tapped_state_rider`]. Strax, Sontaran Nurse + the
+/// "deals [combat] damage to a [type]" class.
+fn parse_object_recipient_filter(after_verb: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, ()) =
+        value((), tag::<_, _, OracleError<'_>>("to ")).parse(after_verb.trim_start())?;
+    let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
+    // CR 111.1: "token" is not a card type but an object property.
+    // Handle "to a token" / "to a tokens" as a TypedFilter with the Token property.
+    if let Ok((after_token, _)) =
+        alt((tag::<_, _, OracleError<'_>>("token"), tag("tokens"))).parse(rest)
+    {
+        // Word-boundary guard: must be followed by end or non-alphanumeric.
+        if after_token.is_empty()
+            || after_token
                 .chars()
                 .next()
-                .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                .is_some_and(|c| !c.is_alphanumeric() && c != '_')
         {
-            return Err(nom::Err::Error(OracleError::new(
-                rest,
-                nom::error::ErrorKind::Eof,
-            )));
+            let mut tf = TypedFilter::default();
+            tf.properties.push(FilterProp::Token);
+            return Ok((after_token, TargetFilter::Typed(tf)));
         }
-        // CR 509.1g: merge the consumed combat-status prefixes onto the typed
-        // recipient so the trigger matcher gates on them.
-        if !prefix_props.is_empty() {
-            if let TargetFilter::Typed(ref mut tf) = filter {
-                for prop in prefix_props {
-                    if !tf.properties.contains(&prop) {
-                        tf.properties.push(prop);
-                    }
+    }
+    // CR 509.1g + CR 120.3: optional state/combat-status adjective prefix on the
+    // damage recipient — "a blocking creature" (Kusari-Gama), "an attacking
+    // creature", "a tapped creature". `parse_type_phrase_nom` only handles
+    // type/color/supertype words, so without this the whole recipient failed to
+    // parse and the trigger fell back to `valid_target = None` (fires on ANY
+    // recipient, including a player). Consume the leading `FilterProp`s and merge
+    // them into the typed recipient so the trigger gates on the damaged object's
+    // combat state. Mirrors the prefix loop in `oracle_target::parse_type_phrase_folding`.
+    let (rest, prefix_props) = many0(terminated(parse_property_filter, space1)).parse(rest)?;
+    let (rest, mut filter) = parse_type_phrase_nom(rest)?;
+    // Phrase-terminator guard: accept only end-of-string or a non-alphanumeric
+    // terminator (comma, period, space-before-clause), and explicitly reject the
+    // " or <player-word>" disjunction. Declines "creature or player",
+    // "creature or opponent", and any longer type word the bare-prefix scan would
+    // otherwise truncate. The disjunction is detected with a `peek(tag("or "))`
+    // combinator (no string dispatch); the alphanumeric word-boundary check
+    // mirrors the file's established idiom in `parse_enters_tapped_state_rider`.
+    // Uses the file's `OracleError::new(rest, ErrorKind::Eof)` decline idiom.
+    let is_disjunction = peek(tag::<_, _, OracleError<'_>>("or "))
+        .parse(rest.trim_start())
+        .is_ok();
+    if is_disjunction
+        || rest
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        return Err(nom::Err::Error(OracleError::new(
+            rest,
+            nom::error::ErrorKind::Eof,
+        )));
+    }
+    // CR 509.1g: merge the consumed combat-status prefixes onto the typed
+    // recipient so the trigger matcher gates on them.
+    if !prefix_props.is_empty() {
+        if let TargetFilter::Typed(ref mut tf) = filter {
+            for prop in prefix_props {
+                if !tf.properties.contains(&prop) {
+                    tf.properties.push(prop);
                 }
             }
         }
-        Ok((rest, filter))
     }
+    Ok((rest, filter))
+}
 
 /// CR 120.1 + CR 108.3: Recognize the relational damage recipient "to its owner"
 /// — the damaged player is the OWNER of the damaging object. On match, the caller
@@ -17656,145 +17657,16 @@ fn try_parse_event(
         .parse(input)
     }
     /// CR 120.1 + CR 120.3: Parse the passive-voice damage source qualifier
-    /// ("by a creature", "by a red instant or sorcery spell you control", etc.).
-    /// Returns the source `TargetFilter` and the remainder.
+    /// ("by a creature", "by a red source you control", etc.). Spell types
+    /// (instant/sorcery) and source disjunctions ("or by …") are not modeled;
+    /// such qualifiers are rejected honestly by the caller. Returns the source
+    /// `TargetFilter` and the remainder.
     fn parse_passive_damage_source(input: &str) -> OracleResult<'_, TargetFilter> {
         let (rest, _) = preceded(opt(space1), tag("by ")).parse(input)?;
         // Delegate to the shared source subject parser used by the active voice,
         // but without the trailing space requirement (the active voice requires
         // a space before "deals", here we're at the end of the clause).
-        parse_damage_source_subject_passive(rest)
-    }
-    /// CR 120.1 + CR 120.3: Parse the source subject for passive-voice damage
-    /// triggers ("by a creature", "by a red instant or sorcery spell you control").
-    /// Similar to `parse_damage_source_subject` but without the trailing space
-    /// before "deals" requirement.
-    fn parse_damage_source_subject_passive(input: &str) -> OracleResult<'_, TargetFilter> {
-        // CR 109.5: printed damage-source phrases either use an article
-        // ("a source") or the article-less determiner "another source" (Ghyrson).
-        // Parse "another" on the same axis as the article so it can feed the
-        // existing `FilterProp::Another` runtime evaluator.
-        let (rest, another) = alt((
-            value(
-                Some(FilterProp::Another),
-                tag::<_, _, OracleError<'_>>("another "),
-            ),
-            value(None, tag::<_, _, OracleError<'_>>("a ")),
-            value(None, tag::<_, _, OracleError<'_>>("an ")),
-        ))
-        .parse(input)?;
-
-        // Optional post-article "another " → FilterProp::Another. CR 109.5 governs object
-        // identity in references; "another" reads "an object distinct from the
-        // ability source" and is enforced by `FilterProp::Another` at the
-        // `game/filter.rs` runtime evaluator.
-        let (rest, post_article_another) = opt(value(
-            FilterProp::Another,
-            tag::<_, _, OracleError<'_>>("another "),
-        ))
-        .parse(rest)?;
-
-        // CR 702.112b: "renowned creature you control deals..." uses the renowned
-        // designation as an adjective on the damage source.
-        let (rest, renowned) = opt(value(
-            FilterProp::Renowned,
-            tag::<_, _, OracleError<'_>>("renowned "),
-        ))
-        .parse(rest)?;
-
-        // Optional color qualifier ("red source you control"). `parse_color` is the
-        // shared color-word combinator and has no internal word boundary; the
-        // mandatory `tag(" ")` after it is structural — without it `parse_color`
-        // would match the "red" prefix of "redirect" / "redacted" / etc. and
-        // misclassify the subject.
-        let (rest, color) = opt(terminated(nom_primitives::parse_color, tag(" "))).parse(rest)?;
-
-        // Head noun — "source" (any damage source, CR 120.3), a card type
-        // (CR 205), or a negated type prefix ("noncreature source"). The negated
-        // variant uses `TypeFilter::Non(Box::new(…))` so the runtime filter
-        // excludes that type.
-        let core_head = alt((
-            value(
-                Some(TypeFilter::Non(Box::new(TypeFilter::Creature))),
-                (
-                    tag::<_, _, OracleError<'_>>("noncreature source"),
-                    opt(tag("s")),
-                ),
-            ),
-            value(
-                None,
-                (tag::<_, _, OracleError<'_>>("source"), opt(tag("s"))),
-            ),
-            value(Some(TypeFilter::Creature), tag("creature")),
-            value(Some(TypeFilter::Artifact), tag("artifact")),
-            value(Some(TypeFilter::Enchantment), tag("enchantment")),
-            value(Some(TypeFilter::Planeswalker), tag("planeswalker")),
-            value(Some(TypeFilter::Battle), tag("battle")),
-            value(Some(TypeFilter::Land), tag("land")),
-        ))
-        .parse(rest);
-        // CR 205.3 + CR 603.2: When the damage source is named by a creature subtype
-        // ("a Salamander deals combat damage to a player" — The Sea Devils III)
-        // rather than a core type or "source", fall back to the shared subtype
-        // recognizer so the DamageDone trigger pattern is detected and "that player"
-        // binds to TriggeringPlayer. `parse_subtype` is the single subtype authority
-        // (oracle_util.rs); it returns the canonical name and consumed byte length.
-        let (rest, head_type) = match core_head {
-            Ok((rest, head_type)) => (rest, head_type),
-            Err(_) => match crate::parser::oracle_util::parse_subtype(rest) {
-                Some((subtype, consumed)) => (&rest[consumed..], Some(TypeFilter::Subtype(subtype))),
-                None => {
-                    return Err(nom::Err::Error(OracleError::new(
-                        rest,
-                        nom::error::ErrorKind::Alt,
-                    )))
-                }
-            },
-        };
-
-        // Optional controller scope. Absence → no controller restriction
-        // (matches any source — Phyrexian Obliterator class, deferred).
-        // CR 109.4: "a source you control" / "a source an opponent controls".
-        let (rest, controller) = opt(alt((
-            value(
-                ControllerRef::You,
-                tag::<_, _, OracleError<'_>>(" you control"),
-            ),
-            value(
-                ControllerRef::Opponent,
-                tag::<_, _, OracleError<'_>>(" an opponent controls"),
-            ),
-        )))
-        .parse(rest)?;
-
-        // Optional "with <property>" clause on the damage source — delegates to the
-        // shared `parse_with_property` inner-clause combinator so every "with X" the
-        // filter grammar supports (P/T constraints, keywords, etc.) attaches to the
-        // source. CR 208.1 + CR 613.4b: Ms. Marvel, Elastic Ally — "a creature you
-        // control with power greater than its base power deals combat damage…".
-        let (rest, with_prop) = opt(preceded(space1, parse_with_property)).parse(rest)?;
-
-        let mut typed = head_type.map_or_else(TypedFilter::default, TypedFilter::new);
-        if let Some(c) = controller {
-            typed = typed.controller(c);
-        }
-        let mut props = Vec::new();
-        if let Some(p) = another.or(post_article_another) {
-            props.push(p);
-        }
-        if let Some(p) = renowned {
-            props.push(p);
-        }
-        if let Some(col) = color {
-            props.push(FilterProp::HasColor { color: col });
-        }
-        if let Some(p) = with_prop {
-            props.push(p);
-        }
-        if !props.is_empty() {
-            typed.properties = props;
-        }
-        Ok((rest, TargetFilter::Typed(typed)))
+        parse_damage_source_subject_shared(rest, false, false)
     }
     /// CR 120.1 + CR 120.2a + CR 120.2b + CR 120.4b + CR 120.10 + CR 510 + CR 603.2:
     /// Passive-voice damage-received trigger event —
@@ -19084,47 +18956,53 @@ fn try_parse_source_deals_damage_trigger(lower: &str) -> Option<(TriggerMode, Tr
     Some((TriggerMode::DamageDone, def))
 }
 
-/// CR 109.4 + CR 120.1: Parse the source subject of a damage trigger up to (but
-/// not including) the trailing `"deals "` verb. Returns the matching
-/// `TargetFilter` and the remainder beginning at `"deals "`.
+/// CR 120.1 + CR 120.3: Shared damage source subject parser for both
+/// active-voice ("a creature deals damage") and passive-voice ("dealt damage by a creature")
+/// grammars. Parses article, "another", color, renowned, head noun, controller, and
+/// "with property" clauses. Returns the `TargetFilter` and the remainder.
 ///
-/// Composable axes:
-///   * article         — "a " | "an "
-///   * other-prefix    — optional "another "  → `FilterProp::Another`
-///   * color qualifier — optional ManaColor   → `FilterProp::HasColor`
-///   * head noun       — "source" | supported object type head nouns
-///   * controller      — optional " you control" → `ControllerRef::You`
-fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
-    // CR 303.4b + CR 301.5a: Aura/Equipment self-referential
-    // damage-source subjects are article-less determiners — "enchanted creature"
-    // (the creature an Aura is attached to, CR 303.4b) and "equipped creature"
-    // (the creature an Equipment is attached to, CR 301.5a). Both name THIS
-    // permanent's attached creature as the damage source, so they resolve to
-    // `TargetFilter::AttachedTo` — a precise reference to the attached creature,
-    // not `Typed(Equipped/EnchantedBy)` (which would match any equipped/enchanted
-    // creature on the battlefield). Recognized here — before the article-anchored
-    // parse below, which would reject them for lacking an article — so
-    // "enchanted/equipped creature deals damage to a player" is classified as a
-    // DamageDone trigger. Without this, the strict subject parse fails and the
-    // pattern falls through to `condition_introduces_target_player`, mis-binding a
-    // later "that player" anaphor to `TargetPlayer` (which surfaces a phantom
-    // companion Player target slot at runtime) instead of the damaged
-    // `TriggeringPlayer` (Sigil of Sleep, the Sword cycle, Hammer of Ruin, …).
-    // Each branch consumes the trailing space so the caller can chain into
-    // `tag("deals ")`, mirroring the article path's own trailing-space consume.
-    if let Ok((rest, filter)) = alt((
-        value(
-            TargetFilter::AttachedTo,
-            tag::<_, _, OracleError<'_>>("enchanted creature "),
-        ),
-        value(
-            TargetFilter::AttachedTo,
-            tag::<_, _, OracleError<'_>>("equipped creature "),
-        ),
-    ))
-    .parse(input)
-    {
-        return Ok((rest, filter));
+/// Parameters:
+/// - `require_trailing_space`: if true, require a space before the next verb
+///   (active voice needs this before "deals"; passive voice does not).
+/// - `allow_attached_creature`: if true, recognize "enchanted creature " and
+///   "equipped creature " as `TargetFilter::AttachedTo` (active voice only).
+fn parse_damage_source_subject_shared(
+    input: &str,
+    require_trailing_space: bool,
+    allow_attached_creature: bool,
+) -> OracleResult<'_, TargetFilter> {
+    if allow_attached_creature {
+        // CR 303.4b + CR 301.5a: Aura/Equipment self-referential
+        // damage-source subjects are article-less determiners — "enchanted creature"
+        // (the creature an Aura is attached to, CR 303.4b) and "equipped creature"
+        // (the creature an Equipment is attached to, CR 301.5a). Both name THIS
+        // permanent's attached creature as the damage source, so they resolve to
+        // `TargetFilter::AttachedTo` — a precise reference to the attached creature,
+        // not `Typed(Equipped/EnchantedBy)` (which would match any equipped/enchanted
+        // creature on the battlefield). Recognized here — before the article-anchored
+        // parse below, which would reject them for lacking an article — so
+        // "enchanted/equipped creature deals damage to a player" is classified as a
+        // DamageDone trigger. Without this, the strict subject parse fails and the
+        // pattern falls through to `condition_introduces_target_player`, mis-binding a
+        // later "that player" anaphor to `TargetPlayer` (which surfaces a phantom
+        // companion Player target slot at runtime) instead of the damaged
+        // `TriggeringPlayer` (Sigil of Sleep, the Sword cycle, Hammer of Ruin, …).
+        // Each branch consumes the trailing space so the caller can chain into
+        // `tag("deals ")`, mirroring the article path's own trailing-space consume.
+        if let Ok((rest, filter)) = alt((
+            value(
+                TargetFilter::AttachedTo,
+                tag::<_, _, OracleError<'_>>("enchanted creature "),
+            ),
+            value(
+                TargetFilter::AttachedTo,
+                tag::<_, _, OracleError<'_>>("equipped creature "),
+            ),
+        ))
+        .parse(input)
+        {
+            return Ok((rest, filter));
+        }
     }
 
     // CR 109.4: printed damage-source phrases either use an article
@@ -19166,9 +19044,10 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // misclassify the subject.
     let (rest, color) = opt(terminated(nom_primitives::parse_color, tag(" "))).parse(rest)?;
 
-    // CR 109.4: Head noun — "source" (any), a card type, or a negated type
-    // prefix ("noncreature source"). The negated variant uses
-    // `TypeFilter::Non(Box::new(…))` so the runtime filter excludes that type.
+    // Head noun — "source" (any damage source, CR 120.3), a card type
+    // (CR 205), or a negated type prefix ("noncreature source"). The negated
+    // variant uses `TypeFilter::Non(Box::new(…))` so the runtime filter
+    // excludes that type.
     let core_head = alt((
         value(
             Some(TypeFilter::Non(Box::new(TypeFilter::Creature))),
@@ -19230,9 +19109,13 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
     // control with power greater than its base power deals combat damage…".
     let (rest, with_prop) = opt(preceded(space1, parse_with_property)).parse(rest)?;
 
-    // Require trailing space before the "deals" verb so we don't match
-    // "sourceless" / "sourced".
-    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest)?;
+    let mut rest = rest;
+    if require_trailing_space {
+        // Require trailing space before the "deals" verb so we don't match
+        // "sourceless" / "sourced".
+        let (new_rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest)?;
+        rest = new_rest;
+    }
 
     let mut typed = head_type.map_or_else(TypedFilter::default, TypedFilter::new);
     if let Some(c) = controller {
@@ -19255,6 +19138,22 @@ fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
         typed.properties = props;
     }
     Ok((rest, TargetFilter::Typed(typed)))
+}
+
+/// CR 109.4 + CR 120.1: Parse the source subject of a damage trigger up to (but
+/// not including) the trailing `"deals "` verb. Returns the matching
+/// `TargetFilter` and the remainder beginning at `"deals "`.
+///
+/// Composable axes:
+///   * article         — "a " | "an "
+///   * other-prefix    — optional "another "  → `FilterProp::Another`
+///   * color qualifier — optional ManaColor   → `FilterProp::HasColor`
+///   * head noun       — "source" | supported object type head nouns
+///   * controller      — optional " you control" → `ControllerRef::You`
+fn parse_damage_source_subject(input: &str) -> OracleResult<'_, TargetFilter> {
+    // Delegate to the shared parser with active-voice options:
+    // require trailing space before "deals", allow "enchanted/equipped creature".
+    parse_damage_source_subject_shared(input, true, true)
 }
 
 /// CR 120.2a + CR 120.2b: Parse the damage-kind adjective (`"combat "` / `"noncombat "`).
