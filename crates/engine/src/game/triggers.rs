@@ -2847,6 +2847,7 @@ pub(crate) fn look_back_control_change_listener_exists(state: &GameState) -> boo
                 Cond::AtNextPhase { .. }
                 | Cond::AtNextPhaseForPlayer { .. }
                 | Cond::AtBeginningOfAddedPhase { .. }
+                | Cond::AtBeginningOfGrantedTurn { .. }
                 | Cond::WhenLeavesPlay { .. }
                 | Cond::WhenLeavesPlayFiltered { .. }
                 | Cond::WhenDies { .. }
@@ -18386,6 +18387,8 @@ fn false_gate_consumes_one_shot(condition: &DelayedTriggerCondition) -> bool {
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         // CR 603.7b: a bound added phase begins once.
         | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        // CR 603.7b: a bound granted turn's step begins once.
+        | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
         // A concrete `ObjectId`: the same single-occurrence argument as a
         // bound-single-object filter, already resolved to one object.
         | DelayedTriggerCondition::WhenLeavesPlay { .. } => true,
@@ -19350,6 +19353,20 @@ fn delayed_trigger_event_with_index(
         DelayedTriggerCondition::AtBeginningOfAddedPhase { phase, entry } => {
             let entry = (*entry)?;
             if state.extra_phase_resume.last().map(|unit| unit.entry) != Some(entry) {
+                return None;
+            }
+            events
+                .iter()
+                .enumerate()
+                .find(|(_, e)| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
+                .map(|(idx, event)| (idx, event.clone()))
+        }
+        // CR 603.7a + CR 500.7: the bound granted turn reaches its step `phase`.
+        // Only that turn qualifies: another turn of the same player, natural or
+        // extra, is not "that turn". An unbound anaphor never fires.
+        DelayedTriggerCondition::AtBeginningOfGrantedTurn { phase, turn } => {
+            let turn = (*turn)?;
+            if state.current_extra_turn != Some(turn) {
                 return None;
             }
             events
