@@ -2841,7 +2841,12 @@ mod tests {
                 .flat_map(|entry| &entry.segments)
                 .filter_map(|segment| match segment {
                     LogSegment::PlayerName { name, player_id } => Some((*player_id, name.as_str())),
-                    _ => None,
+                    LogSegment::Text(_)
+                    | LogSegment::CardName { .. }
+                    | LogSegment::Number(_)
+                    | LogSegment::Mana(_)
+                    | LogSegment::Zone(_)
+                    | LogSegment::Keyword(_) => None,
                 })
                 .collect();
             assert_eq!(
