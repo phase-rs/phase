@@ -1,6 +1,6 @@
 use crate::game::filter;
 use crate::game::layers::evaluate_condition;
-use crate::game::quantity::resolve_quantity_with_targets;
+use crate::game::quantity::{resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient};
 use crate::types::ability::{
     quantity_expr_uses_recipient, ContinuousModification, ControllerRef, Duration, Effect,
     EffectError, EffectKind, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
@@ -1244,6 +1244,12 @@ fn snapshot_transient_modifications(
     ability: &ResolvedAbility,
     modifications: &[ContinuousModification],
 ) -> Vec<ContinuousModification> {
+    let single_target = ability.targets.iter().find_map(|t| match t {
+        TargetRef::Object(id) => Some(*id),
+        TargetRef::Player(_) => None,
+    });
+    let has_single_target = single_target.is_some() && ability.targets.len() == 1;
+
     modifications
         .iter()
         .map(|modification| match modification {
@@ -1273,6 +1279,38 @@ fn snapshot_transient_modifications(
             {
                 ContinuousModification::SetToughness {
                     value: resolve_quantity_with_targets(state, value, ability),
+                }
+            }
+            ContinuousModification::AddDynamicPower { value }
+                if quantity_expr_uses_recipient(value) && has_single_target =>
+            {
+                let recipient = single_target.unwrap();
+                ContinuousModification::AddPower {
+                    value: resolve_quantity_with_targets_and_recipient(state, value, ability, recipient),
+                }
+            }
+            ContinuousModification::AddDynamicToughness { value }
+                if quantity_expr_uses_recipient(value) && has_single_target =>
+            {
+                let recipient = single_target.unwrap();
+                ContinuousModification::AddToughness {
+                    value: resolve_quantity_with_targets_and_recipient(state, value, ability, recipient),
+                }
+            }
+            ContinuousModification::SetPowerDynamic { value }
+                if quantity_expr_uses_recipient(value) && has_single_target =>
+            {
+                let recipient = single_target.unwrap();
+                ContinuousModification::SetPower {
+                    value: resolve_quantity_with_targets_and_recipient(state, value, ability, recipient),
+                }
+            }
+            ContinuousModification::SetToughnessDynamic { value }
+                if quantity_expr_uses_recipient(value) && has_single_target =>
+            {
+                let recipient = single_target.unwrap();
+                ContinuousModification::SetToughness {
+                    value: resolve_quantity_with_targets_and_recipient(state, value, ability, recipient),
                 }
             }
             // CR 613.1f + CR 608.2c: the reanimator-Aura's granted Enchant restriction

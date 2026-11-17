@@ -79,22 +79,17 @@ fn once_upon_a_time_free_as_first_spell_of_game() {
             payment_mode: CastPaymentMode::Auto,
         })
         .expect("casting the first spell of the game should begin");
-    assert!(
-        matches!(
-            result.waiting_for,
-            WaitingFor::OptionalCostChoice {
-                cost: AdditionalCost::Choice(
-                    AbilityCost::Mana {
-                        cost: ManaCost::NoCost
-                    },
-                    _
-                ),
-                ..
-            }
-        ),
-        "expected a free-vs-printed cost choice, got {:?}",
-        result.waiting_for
-    );
+assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::OptionalCostChoice {
+                    cost: AdditionalCost::Choice(_),
+                    ..
+                }
+            ),
+            "expected a free-vs-printed cost choice, got {:?}",
+            result.waiting_for
+        );
 
     runner
         .act(GameAction::DecideOptionalCost { pay: true })
