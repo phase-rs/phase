@@ -380,17 +380,13 @@ pub fn catalog_token_mana_cost(rules_text: &str) -> Option<ManaCost> {
         let Some(marker_at) = line.find(MARKER) else {
             continue;
         };
-        let rest = &line[marker_at + MARKER.len()..];
-        let Some(close_at) = rest.find(')') else {
+        let rest = line[marker_at + MARKER.len()..].trim_end();
+        // The reminder ends the line as `{COST}.)`: the period sits inside
+        // the closing paren, so require the two-character terminator. A
+        // parenthetical that continues past `)` is not the cost declaration.
+        let Some(cost_text) = rest.strip_suffix(".)") else {
             continue;
         };
-        let (cost_text, tail) = rest.split_at(close_at);
-        // `tail` starts at the closing paren: the reminder must end the line
-        // as `{COST}.)`, so a parenthetical that continues past `)` is not
-        // the cost declaration.
-        if tail[1..].trim_end() != "." {
-            continue;
-        }
         let cost_text = cost_text.trim();
         // Costs are brace-delimited (`{1}`, `{1}{G}`); a braceless middle
         // (`banana`) is malformed, not a zero cost.
