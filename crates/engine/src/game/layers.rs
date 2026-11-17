@@ -2217,6 +2217,12 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::HasBoon { player } => {
             matches!(player, PlayerScope::RecipientController)
         }
+        // CR 122.1f: the poison predicate's subject binds to the recipient's
+        // controller under "that creature's controller is poisoned" — the
+        // same recipient-anchored rule as the monarch arm above.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            matches!(player, PlayerScope::RecipientController)
+        }
         // CR 105.2 + CR 611.3a: "Enchanted creature gets +3/+3 unless IT shares a
         // color…" — the color check is on the recipient (the enchanted creature),
         // not the Aura source, so it must route through the recipient-eval path.
@@ -2325,6 +2331,9 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2491,6 +2500,9 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2628,6 +2640,9 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -3231,6 +3246,15 @@ fn evaluate_condition_inner(
             designation_player(state, player, controller, source_id, context)
                 .is_some_and(|player| eval_has_boon(state, player))
         }
+        // CR 122.1f + CR 810.10a: "player is poisoned" reads the scoped
+        // player's poison total; in Two-Headed Giant a player is poisoned
+        // through their team's shared total, matching every other poison read.
+        // The subject resolves through the same authority as the monarch
+        // identity, so an unanswerable subject reads false (fail closed).
+        StaticCondition::PlayerIsPoisoned { player } => {
+            designation_player(state, player, controller, source_id, context)
+                .is_some_and(|player| crate::game::players::team_poison_total(state, player) >= 1)
+        }
         // CR 726.3: True when the controller has the initiative.
         StaticCondition::IsInitiative => eval_is_initiative(state, controller),
         // CR 725.1: True when no player holds the monarch designation.
@@ -3780,6 +3804,21 @@ fn evaluate_all_layers(state: &mut GameState, retirement_owner: StateDurationRet
         .into_iter()
         .filter_map(|id| state.objects.get(&id).map(|o| (id, o.controller)))
         .collect();
+    // CR 603.10d: the immediately-before authority of every control change this
+    // pass derives is the board as it stands now, the last settled one. It is
+    // captured only when a control-change trigger could read it (CR 603.10: a
+    // gain-side one reads the observation its watchers are latched on);
+    // otherwise a derived change carries `Unrecorded` evidence, which nothing
+    // would read.
+    let control_capture = (!prev_controllers.is_empty()
+        && (super::triggers::look_back_control_change_listener_exists(state)
+            || super::triggers::gain_control_change_listener_exists(state)))
+    .then(|| {
+        super::effects::gain_control::capture_control_change_instruction(
+            state,
+            prev_controllers.iter().map(|(id, _)| *id),
+        )
+    });
 
     // CR 611.2b + CR 613.1: derive before ending durations. Every repeat
     // removes at least one stored effect, so convergence is monotone. Keep the
@@ -3790,7 +3829,13 @@ fn evaluate_all_layers(state: &mut GameState, retirement_owner: StateDurationRet
             break bf_ids;
         }
     };
-    finish_layer_evaluation(state, bf_ids, prev_controllers, retirement_owner);
+    finish_layer_evaluation(
+        state,
+        bf_ids,
+        prev_controllers,
+        control_capture,
+        retirement_owner,
+    );
 }
 
 fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
@@ -4309,6 +4354,7 @@ fn finish_layer_evaluation(
     state: &mut GameState,
     bf_ids: Vec<ObjectId>,
     prev_controllers: Vec<(ObjectId, PlayerId)>,
+    control_capture: Option<Arc<crate::types::events::ControlChangeInstructionCapture>>,
     retirement_owner: StateDurationRetirementOwner,
 ) {
     // CR 613.11: Rule-changing continuous effects are applied after object
@@ -4330,14 +4376,17 @@ fn finish_layer_evaluation(
     // the sole responsibility of `turns::start_next_turn` for the active
     // player's permanents.
     let mut controller_changed: Vec<ObjectId> = Vec::new();
+    let mut derived_changes: Vec<(ObjectId, PlayerId, PlayerId)> = Vec::new();
     for (id, prev) in prev_controllers {
         if let Some(obj) = state.objects.get_mut(&id) {
             if obj.controller != prev {
                 obj.summoning_sick = true;
                 controller_changed.push(id);
+                derived_changes.push((id, prev, obj.controller));
             }
         }
     }
+    queue_derived_control_changes(state, &derived_changes, control_capture.as_deref());
 
     // CR 506.4 + CR 613.1b: the same settled delta removes each changed
     // permanent from combat. Any removed role (attacking or blocking) can change
@@ -4432,6 +4481,97 @@ fn finish_layer_evaluation(
     // (Clean / EnteredObjects / Full).
     crate::game::effects::attach::refresh_protection_start_attachment_snapshots(state);
     state.layers_dirty = LayersDirty::Clean;
+}
+
+/// CR 613.1b + CR 603.2: queue every control change this full pass derived
+/// (`derived`: object, controller before the pass, controller after it) for
+/// publication as a `ControllerChanged`, unless an instruction already
+/// published it ahead of this pass (`GameState::announced_control_changes`),
+/// in which case its announcement is consumed instead. The ledger is cleared
+/// afterwards: an announcement this pass did not realize was overridden.
+///
+/// CR 603.10d: each queued change records the observation of its subject on
+/// the board before this pass (`capture`), so a look-back trigger reads that
+/// board. Without a capture, or once the subject is a new object (CR 400.7),
+/// the event carries `Unrecorded` evidence.
+///
+/// CR 603.10 + CR 113.7a: the observation also latches the gain-side watchers
+/// on the board this pass settled, immediately after the change. The change is
+/// published at a later drain, after which its watcher (the changed permanent
+/// itself, for "when you gain control of ~") may already have left; its
+/// trigger is collected from this latch, not from that later board. CR 603.2d:
+/// the trigger-doubling statics on that same board are latched with them, so
+/// the trigger is counted as of the event too.
+fn queue_derived_control_changes(
+    state: &mut GameState,
+    derived: &[(ObjectId, PlayerId, PlayerId)],
+    capture: Option<&crate::types::events::ControlChangeInstructionCapture>,
+) {
+    let mut gain_latch = None;
+    for &(object_id, old_controller, new_controller) in derived {
+        let Some(subject) = state
+            .objects
+            .get(&object_id)
+            .map(ObjectIncarnationRef::from_object)
+        else {
+            continue;
+        };
+        if let Some(position) = state
+            .announced_control_changes
+            .iter()
+            .position(|announced| *announced == (subject, new_controller))
+        {
+            state.announced_control_changes.swap_remove(position);
+            continue;
+        }
+        let evidence = match capture
+            .and_then(|capture| capture.observation_for(object_id))
+            .filter(|observation| observation.subject.identity == subject)
+        {
+            Some(mut observation) => {
+                let (watchers, doublers) = gain_latch.get_or_insert_with(|| {
+                    (
+                        Arc::new(super::triggers::latch_control_change_watchers(
+                            state,
+                            crate::types::triggers::ControlChangeSide::Gains,
+                        )),
+                        Arc::new(super::triggers::active_trigger_doublers(state)),
+                    )
+                });
+                observation.gain_watchers = Some(Arc::clone(watchers));
+                observation.gain_doublers = Arc::clone(doublers);
+                state.record_control_change_observation(observation)
+            }
+            None => crate::types::events::ControlChangeEvidence::Unrecorded,
+        };
+        state
+            .layer_control_changes
+            .push(crate::types::events::QueuedControlChange {
+                subject,
+                event: crate::types::events::GameEvent::ControllerChanged {
+                    object_id,
+                    old_controller,
+                    new_controller,
+                    evidence,
+                },
+            });
+    }
+    state.announced_control_changes.clear();
+}
+
+/// CR 603.2 + CR 613.1b: settle the board, then publish every control change a
+/// full layer evaluation derived and no instruction published, into `events`,
+/// in the order they were derived. Returns how many events it appended; the
+/// caller collects their triggers.
+pub(crate) fn publish_layer_control_changes(
+    state: &mut GameState,
+    events: &mut Vec<crate::types::events::GameEvent>,
+) -> usize {
+    flush_layers(state);
+    let queued = state.layer_control_changes.take();
+    let published = queued.len();
+    events.extend(queued.into_iter().map(|queued| queued.event));
+    published
 }
 
 /// CR 506.4 + CR 733: retire the incoming attacked relations of each exact
@@ -4762,6 +4902,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -5158,6 +5299,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         QuantityRef::HandSize { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -5564,6 +5706,9 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -11458,33 +11603,19 @@ fn grant_keyword_instance(
     effect: &ActiveContinuousEffect,
     keyword_output_index: usize,
 ) {
-    // Three-way grant policy:
-    // CR 702.164b: summing keywords (Toxic) accumulate even when an
-    // identical instance is already present (granted Toxic 1 on
-    // printed Toxic 1 -> total 2).
-    // CR 613.7: single-authoritative-value keywords (Crew/Saddle/Enchant,
-    // see `overrides_same_kind_on_grant`) replace any earlier same-kind
-    // instance so a "first match" reader never sees a stale value.
-    // All other parameterized keywords keep deduping identical instances
-    // per CR 702.16g (Protection A+B are separate abilities;
-    // Ward/Annihilator each apply independently). `evaluate_layers` resets
+    // Shared grant policy (`Keyword::grant_policy`): Toxic-style keywords
+    // accumulate, Crew/Saddle/Enchant replace earlier same-variant entries, and
+    // every other keyword keeps distinct values while dropping an exact
+    // duplicate. The battlefield keeps the earlier duplicate so first-match
+    // readers of `obj.keywords` are unchanged. `evaluate_layers` resets
     // `obj.keywords = obj.base_keywords.clone()` each pass, so this never
     // accumulates unbounded across re-evaluations.
-    if resolved_keyword.instances_must_coexist() {
-        obj.keywords.push(resolved_keyword.clone());
-    } else if resolved_keyword.overrides_same_kind_on_grant() {
-        // CR 613.7: this grant is a single-authoritative-value keyword — the
-        // most recently applied instance (this one, since modifications are
-        // applied in ascending timestamp order, see `order_by_timestamp`)
-        // replaces any earlier same-discriminant instance (printed or a prior
-        // grant) rather than coexisting with it. Grant replacement remains
-        // variant-scoped; generic removal uses its own family-aware relation.
-        obj.keywords
-            .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(&resolved_keyword));
-        obj.keywords.push(resolved_keyword.clone());
-    } else if !obj.keywords.contains(&resolved_keyword) {
-        obj.keywords.push(resolved_keyword.clone());
-    }
+    super::keywords::grant_keyword_instance_into(
+        &mut obj.keywords,
+        resolved_keyword.clone(),
+        |keyword| keyword,
+        super::keywords::RedundantGrant::KeepEarlier,
+    );
     for (companion_index, trigger) in KeywordTriggerInstaller::triggers_for(&resolved_keyword)
         .into_iter()
         .enumerate()
@@ -30474,7 +30605,12 @@ mod tests {
         let before_elimination = granted_trigger_ref(&state, recipient);
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         flush_layers(&mut state);
 
         assert!(
@@ -32977,6 +33113,10 @@ mod tests {
         assert!(!quantity_ref_reads_life(&QuantityRef::StartingLifeTotal {
             player: PlayerScope::Controller,
         }));
+        // Starting deck size is a latched constant like StartingLifeTotal.
+        assert!(!quantity_ref_reads_life(&QuantityRef::StartingDeckSize {
+            player: PlayerScope::Controller,
+        }));
         // A non-life player scalar.
         assert!(!quantity_ref_reads_life(&QuantityRef::HandSize {
             player: PlayerScope::Controller
@@ -33022,6 +33162,7 @@ mod tests {
                 kind: DamageKindFilter::Any,
                 source: Some(Box::new(life_filter.clone())),
                 min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             }
         ));
         // CR 120.1: the damage-recipient scope routes through the same player
@@ -34324,6 +34465,64 @@ mod state_duration_retirement_recording_tests {
     use crate::types::identifiers::{CardId, ObjectIncarnationRef};
     use crate::types::phase::Phase;
     use crate::types::resolved_commands::{ResolvedContinuousEffectEdit, ResolvedRulesCommand};
+
+    /// R1 (CR 603.10d + CR 613.1b): a control change a full pass derives with no
+    /// instruction waits in `layer_control_changes` with its observation, and
+    /// the release authority keeps that observation while the queue names it.
+    #[test]
+    fn queued_layer_control_change_keeps_its_observation_across_release() {
+        use crate::game::scenario::P1;
+        use crate::types::events::{ControlChangeEvidence, GameEvent};
+        const KHARN: &str = "Berzerker \u{2014} Kh\u{e2}rn the Betrayer attacks or blocks \
+            each combat if able.\nSigil of Corruption \u{2014} When you lose control of \
+            Kh\u{e2}rn the Betrayer, draw two cards.\nThe Betrayer \u{2014} If damage would \
+            be dealt to Kh\u{e2}rn the Betrayer, prevent that damage and an opponent of your \
+            choice gains control of it.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let kharn = scenario
+            .add_creature_from_oracle(P0, "Kh\u{e2}rn the Betrayer", 5, 1, KHARN)
+            .as_legendary()
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.add_transient_continuous_effect(
+            kharn,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: kharn },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        mark_layers_full(state);
+        flush_layers(state);
+        assert_eq!(
+            state.objects[&kharn].controller, P1,
+            "REACH: the pass derived it"
+        );
+        let [queued] = state.layer_control_changes.as_slice() else {
+            panic!(
+                "exactly one queued change: {:?}",
+                state.layer_control_changes
+            );
+        };
+        let GameEvent::ControllerChanged {
+            object_id,
+            evidence: ControlChangeEvidence::Observed(id),
+            ..
+        } = queued.event
+        else {
+            panic!("an observed control change: {:?}", queued.event);
+        };
+        assert_eq!(object_id, kharn);
+        assert!(state.control_change_observations.get(&id).is_some());
+
+        state.release_unreferenced_control_change_observations();
+        assert!(
+            state.control_change_observations.get(&id).is_some(),
+            "the queued event keeps its observation"
+        );
+    }
 
     /// CR 611.2b + CR 702.26f: both state-duration families — a `ForAsLongAs`
     /// condition and a host-bound reading — journal their exact retirement at

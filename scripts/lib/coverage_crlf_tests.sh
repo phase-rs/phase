@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fixture seams for the coverage-regression check's numeric boundary (issue #10549).
+# Fixture seams for the coverage-regression check's numeric and corpus-identity reads (issue #10549).
 #
 # Native Windows jq terminates every line with CRLF, so a count read from it carries a CR into
 # arithmetic and `[[ "$count" -gt "$base_count" ]]` reports "invalid arithmetic operator" instead of
@@ -35,15 +35,37 @@ REAL_JQ="$(type -P jq 2>/dev/null)" || {
 
 # --- fixtures ---------------------------------------------------------------------------------
 # Minimal but valid: the fields the gate reads before the diagnostics block, plus two diagnostic
-# categories so both the `-gt` and the `-lt` arms have a subject.
-cat > "$TMP/base.json" <<'EOF'
-{"total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":68,"ignored_remainder":1}}
+# categories so both the `-gt` and the `-lt` arms have a subject. Every fixture carries the same
+# corpus identity, so the gate's corpus fence passes and the comparison below it is reached.
+CORPUS_A="$(printf 'a%.0s' {1..64})"
+CORPUS_B="$(printf 'b%.0s' {1..64})"
+cat > "$TMP/base.json" <<EOF
+{"source_corpus_hash":"$CORPUS_A","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":68,"ignored_remainder":1}}
 EOF
-cat > "$TMP/worse.json" <<'EOF'
-{"total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":70,"ignored_remainder":1}}
+cat > "$TMP/worse.json" <<EOF
+{"source_corpus_hash":"$CORPUS_A","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":70,"ignored_remainder":1}}
 EOF
-cat > "$TMP/better.json" <<'EOF'
-{"total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":66,"ignored_remainder":1}}
+cat > "$TMP/better.json" <<EOF
+{"source_corpus_hash":"$CORPUS_A","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":66,"ignored_remainder":1}}
+EOF
+# Corpus-fence subjects: a different corpus (warn and skip, exit 0) and a malformed identity
+# (fail closed, exit 2).
+cat > "$TMP/other_corpus.json" <<EOF
+{"source_corpus_hash":"$CORPUS_B","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":70,"ignored_remainder":1}}
+EOF
+cat > "$TMP/malformed_corpus.json" <<EOF
+{"source_corpus_hash":"AAA","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":70,"ignored_remainder":1}}
+EOF
+# A valid hash followed by a JSON-escaped CR or LF is malformed, not a transport line ending: the
+# CR strip and command substitution's newline trim must not turn it into a valid identity.
+cat > "$TMP/trailing_cr_current.json" <<EOF
+{"source_corpus_hash":"$CORPUS_A\r","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":70,"ignored_remainder":1}}
+EOF
+cat > "$TMP/trailing_lf_current.json" <<EOF
+{"source_corpus_hash":"$CORPUS_A\n","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":70,"ignored_remainder":1}}
+EOF
+cat > "$TMP/trailing_cr_base.json" <<EOF
+{"source_corpus_hash":"$CORPUS_B\r","total_cards":10,"supported_cards":5,"cards":[],"diagnostics":{"swallowed_clause":68,"ignored_remainder":1}}
 EOF
 
 # --- stubs ------------------------------------------------------------------------------------
@@ -56,10 +78,14 @@ cat > "$TMP/crlf/jq" <<EOF
 set -o pipefail
 "$REAL_JQ" "\$@" | awk '{printf "%s\\r\\n", \$0}'
 EOF
-# A jq that answers with prose where a count is required: the gate must refuse, not guess.
-cat > "$TMP/text/jq" <<'EOF'
+# A jq that answers with prose where a count is required: the gate must refuse, not guess. The
+# corpus-identity read passes through, so the refusal under test is the count boundary's.
+cat > "$TMP/text/jq" <<EOF
 #!/usr/bin/env bash
-printf 'n/a\r\n'
+case "\$*" in
+    *source_corpus_hash*) exec "$REAL_JQ" "\$@" ;;
+    *) printf 'n/a\\r\\n' ;;
+esac
 EOF
 mkdir -p "$TMP/mid_total" "$TMP/mid_curr_total" "$TMP/mid_diag"
 cat > "$TMP/mid_total/jq" <<EOF
@@ -223,6 +249,31 @@ else
     bad "an embedded CR count must be refused, got exit $RC"
     printf '%s\n' "$OUT" | sed 's/^/     /'
 fi
+
+# --- row 8: the corpus-identity read decides the same under CRLF --------------------------------
+# A CR left on the identity turns a valid 64-hex hash into a malformed one, so a CRLF jq would fail
+# closed where the plain jq compares (rows 1-2) or warns and skips (here). A malformed identity,
+# including a valid hash followed by a decoded CR or LF, is refused under both, in either file.
+for row in \
+    base:other_corpus:0:CORPUS_MISMATCH \
+    base:malformed_corpus:2:CORPUS_IDENTITY_MALFORMED \
+    base:trailing_cr_current:2:CORPUS_IDENTITY_MALFORMED \
+    base:trailing_lf_current:2:CORPUS_IDENTITY_MALFORMED \
+    trailing_cr_base:worse:2:CORPUS_IDENTITY_MALFORMED; do
+    IFS=: read -r baseline current want_rc want_marker <<<"$row"
+    label="corpus $baseline vs $current"
+    run - "$TMP/$baseline.json" "$TMP/$current.json"
+    if [ "$RC" -eq "$want_rc" ] && printf '%s' "$OUT" | grep -qF "$want_marker"; then
+        ok "$label: a plain jq reports $want_marker (exit $RC)"
+    else
+        bad "$label: expected $want_marker and exit $want_rc, got exit $RC"
+        printf '%s\n' "$OUT" | sed 's/^/     /'
+    fi
+    plain_out="$OUT"
+    plain_rc="$RC"
+    run "$TMP/crlf" "$TMP/$baseline.json" "$TMP/$current.json"
+    expect_same "$label under CRLF" "$plain_out" "$plain_rc"
+done
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

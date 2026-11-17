@@ -78,8 +78,12 @@ async function drainGameplayPreferenceSync(): Promise<void> {
         adapter,
         gameSessionGeneration: generation,
         gameState,
+        viewerInteraction,
       } = useGameStore.getState();
       if (!adapter || !gameState) continue;
+      // The engine refuses preference changes while a shortcut offer is open; the commit that
+      // closes it re-runs this sync.
+      if (viewerInteraction?.waitingForKind.preferencesFrozen) continue;
 
       const stops = usePreferencesStore.getState().phaseStops;
       const mode = effectivePriorityPassingMode();

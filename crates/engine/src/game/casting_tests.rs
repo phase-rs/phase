@@ -3813,7 +3813,12 @@ fn attacked_you_last_turn_condition_is_existential_over_players() {
 
     // A departed player remains a valid attacker until their skipped next-turn
     // boundary expires the record in `start_next_turn`.
-    crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut Vec::new());
+    crate::game::elimination::eliminate_player(
+        &mut state,
+        PlayerId(2),
+        crate::types::events::LossReason::Conceded,
+        &mut Vec::new(),
+    );
     assert!(evaluate_condition_for_test(&state, &cond, you, src));
 
     // Opponents attacked each other but not you ⇒ false (the defender must be you).
@@ -19628,7 +19633,12 @@ fn assist_offer_excludes_a_phased_out_helper_and_still_offers_the_rest() {
         state.players[1].is_phased_out(),
         "P1 must read as phased out"
     );
-    crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut setup_events);
+    crate::game::elimination::eliminate_player(
+        &mut state,
+        PlayerId(2),
+        crate::types::events::LossReason::Conceded,
+        &mut setup_events,
+    );
     assert!(state.players[2].is_eliminated, "P2 must read as eliminated");
 
     let obj_id = make_assist_spell(&mut state);
@@ -38033,7 +38043,7 @@ mod remove_counter_cost {
                 GameEvent::CounterRemoved {
                     object_id,
                     counter_type: CounterType::Plus1Plus1,
-                    count: 2,
+                    count: 2, ..
                 } if *object_id == source
             )),
             "CounterRemoved event for 2 P1P1 should be emitted, got {events:?}"
@@ -38119,6 +38129,7 @@ mod remove_counter_cost {
                     object_id,
                     counter_type: CounterType::Plus1Plus1,
                     count,
+                    ..
                 } if *object_id == source => Some(*count),
                 _ => None,
             })

@@ -398,7 +398,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::CardCopyCreated { .. }
         | GameEvent::ObjectConjured { .. } => LogImportance::Essential,
         GameEvent::PhaseChanged { .. }
-        | GameEvent::PhaseChangedForPlayer { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::AbilityActivated { .. }
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::KeywordAbilityActivated { .. }
@@ -609,7 +609,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
-        | GameEvent::PhaseChangedForPlayer { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::Mutated { .. }
         | GameEvent::Augmented { .. }
@@ -960,7 +960,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
-        | GameEvent::PhaseChangedForPlayer { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. } => LogCategory::Turn,
 
         GameEvent::SpellCast { .. }
@@ -1148,12 +1148,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
         ],
 
-        GameEvent::PhaseChanged { phase } => {
-            vec![text(phase_label(*phase))]
-        }
-        // CR 805.4d: a fanned occurrence logs its phase like the production
-        // event; the bound player is firing context, not log content.
-        GameEvent::PhaseChangedForPlayer { phase, .. } => {
+        GameEvent::PhaseChanged { phase } | GameEvent::PhaseChangedFor { phase, .. } => {
             vec![text(phase_label(*phase))]
         }
 
@@ -1760,6 +1755,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id,
             counter_type,
             count,
+            ..
         } => vec![
             exact_u32_segment(*count),
             text(" "),
@@ -1956,7 +1952,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![player_seg(state, *player_id), text(" commits a crime")]
         }
 
-        GameEvent::PlayerLost { player_id } => {
+        GameEvent::PlayerLost { player_id, .. } => {
             vec![player_seg(state, *player_id), text(" loses the game")]
         }
 
@@ -3377,6 +3373,9 @@ mod tests {
             GameEvent::GameOver { winner: None },
             GameEvent::PlayerLost {
                 player_id: PlayerId(0),
+                reasons: std::collections::BTreeSet::from([
+                    crate::types::events::LossReason::LifeTotal,
+                ]),
             },
             GameEvent::PlayerEliminated {
                 player_id: PlayerId(0),
@@ -4267,6 +4266,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count,
+            instruction_lead: None,
         };
         let segments = format_segments(&removed(1 << 31), &state);
         assert_eq!(segments[0], LogSegment::Text("2147483648".into()));
@@ -4322,6 +4322,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count: 3,
+            instruction_lead: None,
         };
         let segments = format_segments(&three, &state);
         assert_eq!(segments[0], LogSegment::Number(3));
@@ -4330,6 +4331,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count: 1,
+            instruction_lead: None,
         };
         assert_eq!(
             format_segments(&one, &state)[3],

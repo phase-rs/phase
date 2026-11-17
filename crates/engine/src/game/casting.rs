@@ -63,6 +63,7 @@ use super::ability_utils::{
     unresolved_x_target_construction_error, TargetSlotBuildOutcome,
 };
 use super::casting_costs::{self, check_additional_cost_or_pay};
+use super::engine::{apply_for_seat_with_mode, PublicFinalizeMode};
 use super::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use super::functioning_abilities::{active_static_definitions, static_kind_present};
 use super::game_object::{GameObject, PreparedState, PrototypeFormState};
@@ -2006,12 +2007,15 @@ fn prowl_damage_ledger_satisfied(state: &GameState, player: PlayerId, object_id:
 /// (`handle_foretell`) and the effect-driven "becomes foretold" grant
 /// (`effects::grant_permission`).
 pub(crate) fn foretell_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
-    crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
-        .into_iter()
-        .find_map(|keyword| match keyword {
-            Keyword::Foretell(cost) => Some(cost),
-            _ => None,
-        })
+    crate::game::off_zone_characteristics::effective_off_zone_keyword(
+        state,
+        object_id,
+        KeywordKind::Foretell,
+    )
+    .and_then(|keyword| match keyword {
+        Keyword::Foretell(cost) => Some(cost),
+        _ => None,
+    })
 }
 
 /// CR 702.143a-b: A player may foretell a card from hand any time they have
@@ -6697,6 +6701,9 @@ fn holder_bound_condition_is_modeled(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 109.5 + CR 122.1f: a player-state predicate; like the monarch
+        // arm it is not holder-bound by this permission path.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -24419,7 +24426,17 @@ fn exact_mana_ability_successors(
         }
         None => return Vec::new(),
     };
-    if super::engine::apply_for_simulation(&mut state, player, action).is_err() {
+    // The witness clone opens its own action boundary; a spell carrier still on it belongs
+    // to the outer action that called this witness.
+    state.in_flight_spell_trigger_carrier = None;
+    if apply_for_seat_with_mode(
+        &mut state,
+        player,
+        action,
+        PublicFinalizeMode::DeferredDisplay,
+    )
+    .is_err()
+    {
         return Vec::new();
     }
     settle_exact_mana_ability_prompts(state, player, 3)
@@ -24480,9 +24497,14 @@ fn settle_exact_mana_ability_prompts(
         .into_iter()
         .filter_map(|action| {
             let mut next = state.clone();
-            super::engine::apply_for_simulation(&mut next, player, action)
-                .ok()
-                .map(|_| settle_exact_mana_ability_prompts(next, player, remaining_steps - 1))
+            apply_for_seat_with_mode(
+                &mut next,
+                player,
+                action,
+                PublicFinalizeMode::DeferredDisplay,
+            )
+            .ok()
+            .map(|_| settle_exact_mana_ability_prompts(next, player, remaining_steps - 1))
         })
         .flatten()
         .collect()
@@ -33687,6 +33709,7 @@ fn quantity_ref_reads_target_object(qty: &QuantityRef, read: TargetRead) -> bool
         QuantityRef::HandSize { player }
         | QuantityRef::LifeTotal { player }
         | QuantityRef::StartingLifeTotal { player }
+        | QuantityRef::StartingDeckSize { player }
         | QuantityRef::GraveyardSize { player }
         | QuantityRef::LifeLostThisTurn { player }
         | QuantityRef::PartySize { player }

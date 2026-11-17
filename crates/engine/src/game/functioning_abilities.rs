@@ -16,7 +16,9 @@
 //! # Zone scope asymmetry
 //!
 //! - **Statics**: the full CR 113.6 zone-of-function gate lives in the shared
-//!   `static_functions_in_zone` predicate, which is a three-way split: a
+//!   `static_functions_in_zone` predicate, which first applies CR 113.6g's
+//!   stack exception for self-referential `CantBeCountered`/`CantBeCopied` and
+//!   is otherwise a three-way split: a
 //!   characteristic-defining ability (`characteristic_defining`) functions in
 //!   all zones unconditionally per CR 604.3, independent of `active_zones`;
 //!   otherwise a non-empty `active_zones` restricts a static to exactly the
@@ -24,9 +26,7 @@
 //!   empty `active_zones` defaults to battlefield-only. Command-zone objects
 //!   use the emblem-or-opt-in gate for the latter two cases. Six
 //!   gathers delegate to it — `active_static_definitions` (which also layers
-//!   CR 113.6g's stack exception for self-referential
-//!   `CantBeCountered`/`CantBeCopied` on top, plus the CR 604.1 / CR 613.1
-//!   condition gate), `game_functioning_statics`, `battlefield_functioning_statics`,
+//!   the CR 604.1 / CR 613.1 condition gate on top), `game_functioning_statics`, `battlefield_functioning_statics`,
 //!   `layers::active_combat_assignment_rule_effects_from_static_definitions`,
 //!   `combat::compute_combat_tax`, and (as of issue #8158)
 //!   `layers::active_continuous_effects_from_static_definitions`'s
@@ -247,10 +247,9 @@ pub fn is_self_referential_prohibition(def: &StaticDefinition) -> bool {
     ) && matches!(def.affected.as_ref(), None | Some(TargetFilter::SelfRef))
 }
 
-/// CR 113.6 + CR 113.6b + CR 114.3 / CR 114.4: Single-authority zone-of-
-/// function gate for a static definition, EXCLUDING the CR 113.6g
-/// self-referential `CantBeCountered`/`CantBeCopied` exception (the caller
-/// applies that first). This is a three-way split, not two:
+/// CR 113.6 + CR 113.6b + CR 113.6g + CR 114.3 / CR 114.4: Single-authority zone-of-
+/// function gate for a static definition. After the CR 113.6g self-referential
+/// `CantBeCountered`/`CantBeCopied` exception, this is a three-way split, not two:
 ///
 /// 1. **CDA** (`def.characteristic_defining`) — CR 604.3: "Characteristic-
 ///    defining abilities function in all zones." This is unconditional and
@@ -274,6 +273,13 @@ pub fn is_self_referential_prohibition(def: &StaticDefinition) -> bool {
 /// `PreFilteredBaseStatic` path remains the documented exception because its
 /// caller already pre-filtered by zone (see the module doc above).
 pub(crate) fn static_functions_in_zone(obj: &GameObject, def: &StaticDefinition) -> bool {
+    // CR 113.6g: an object's ability that states it can't be countered or copied functions on
+    // the stack, in place of the battlefield default below; one that grants that to other
+    // objects (Allosaurus Shepherd's "Green spells you control can't be countered") takes the
+    // default.
+    if def.active_zones.is_empty() && is_self_referential_prohibition(def) {
+        return obj.zone == Zone::Stack;
+    }
     // CR 709.5 + CR 709.5c: on the battlefield a locked Room half doesn't
     // have its rules text — a door-stamped static functions only while its
     // half is unlocked (single authority: `room::door_text_functions`).
@@ -385,8 +391,8 @@ enum PolarityDeferral {
 /// Both public entry points below are this function; there is no second gate
 /// stack.
 ///
-/// The polarity deferral sits AFTER the CR 113.6g branch and
-/// `static_functions_in_zone`, immediately BEFORE the condition evaluation.
+/// The polarity deferral sits AFTER `static_functions_in_zone`, immediately
+/// BEFORE the condition evaluation.
 /// POSITION IS LOAD-BEARING: hoisting it to the top of this function returns
 /// `Permission => Some(true)` before the zone gate is ever consulted and would
 /// offer a creature whose own permission names `active_zones = [Command]`.
@@ -399,20 +405,7 @@ fn static_def_applies(
     context: ConditionContext,
     deferral: PolarityDeferral,
 ) -> bool {
-    // CR 113.6g: An object's ability that states IT can't be countered
-    // or can't be copied functions on the stack — a self-referential
-    // exception to the CR 113.6 zone-of-function default below. A
-    // permanent's ability that instead GRANTS un-counterability /
-    // un-copyability to OTHER objects via a `TargetFilter` (Allosaurus
-    // Shepherd's "Green spells you control can't be countered") is not
-    // self-referential and must fall through to the ordinary default,
-    // so it keeps functioning from the battlefield like any other
-    // static. Fixes #1033.
-    if def.active_zones.is_empty() && is_self_referential_prohibition(def) {
-        if obj.zone != Zone::Stack {
-            return false;
-        }
-    } else if !static_functions_in_zone(obj, def) {
+    if !static_functions_in_zone(obj, def) {
         return false;
     }
     // CR 506.2 + CR 508.1c + CR 508.5 + CR 702.3b: the INTRINSIC half of the one
@@ -579,11 +572,6 @@ pub fn game_active_statics(
 /// (Eminence), and a battlefield object contributes only statics whose
 /// `active_zones` admit the battlefield (empty defaults to battlefield-only).
 /// Phased-out objects contribute nothing per CR 702.26b.
-///
-/// The CR 113.6g self-referential `CantBeCountered`/`CantBeCopied` stack
-/// exception is not applied here (that is `active_static_definitions`'
-/// responsibility): this iterator only ever scans the battlefield and command
-/// zone, never the stack, so the exception cannot apply to any object it sees.
 pub fn game_functioning_statics(
     state: &GameState,
 ) -> impl Iterator<Item = (&GameObject, &StaticDefinition)> {
@@ -600,8 +588,8 @@ pub fn game_functioning_statics(
 /// [`game_functioning_statics`] is this function flat-mapped over
 /// `battlefield ∪ command_zone`, so a caller that has already resolved WHICH
 /// object to ask cannot end up applying a different gate stack than the sweep
-/// did. Does NOT apply the CR 113.6g stack exception or the CR 604.1 condition
-/// filter — those are [`active_static_definitions`]' additions.
+/// did. Does NOT apply the CR 604.1 condition filter — that is
+/// [`active_static_definitions`]' addition.
 pub(crate) fn object_functioning_statics(
     obj: &GameObject,
 ) -> impl Iterator<Item = &StaticDefinition> {

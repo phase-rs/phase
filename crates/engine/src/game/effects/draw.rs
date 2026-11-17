@@ -1304,16 +1304,18 @@ fn enqueue_miracle_offer_for_first_draw(
     }
     // CR 702.94a: Static ability functions from hand — check the drawn object's
     // effective keywords (printed + continuous grants like Molecule Man's hand
-    // miracle). `effective_off_zone_keywords` is the object-scoped authority for
-    // non-battlefield zones; if layers remove miracle before draw resolution the
-    // offer simply never queues.
-    let miracle_cost =
-        crate::game::off_zone_characteristics::effective_off_zone_keywords(state, object_id)
-            .into_iter()
-            .find_map(|k| match k {
-                crate::types::keywords::Keyword::Miracle(cost) => Some(cost),
-                _ => None,
-            });
+    // miracle). `effective_off_zone_keyword` is the object-scoped single-instance
+    // authority for non-battlefield zones; if layers remove miracle before draw
+    // resolution the offer simply never queues.
+    let miracle_cost = crate::game::off_zone_characteristics::effective_off_zone_keyword(
+        state,
+        object_id,
+        crate::types::keywords::KeywordKind::Miracle,
+    )
+    .and_then(|k| match k {
+        crate::types::keywords::Keyword::Miracle(cost) => Some(cost),
+        _ => None,
+    });
     let Some(cost) = miracle_cost else {
         return;
     };
