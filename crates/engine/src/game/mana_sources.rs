@@ -3926,8 +3926,9 @@ fn land_mana_options(
 }
 
 /// CR 106.3 + CR 106.12a + CR 608.2d: each firing echo chooses one of the
-/// base ability's actual types. Keep alternatives in separate source rows and
-/// carry the exact trigger selection to immediate resolution, as for Auras.
+/// base ability's actual types. As in the aggregate bonus preview, deduplicate
+/// reachable output multisets after each firing, before materializing rows.
+/// Each retained row carries an executable first witness for every occurrence.
 fn with_taps_for_mana_echo_options(
     state: &GameState,
     controller: PlayerId,
@@ -3968,32 +3969,115 @@ fn with_taps_for_mana_echo_options(
             if types.is_empty() {
                 return vec![option];
             }
-            let mut rows = vec![option];
+            // CR 106.3 + CR 106.6 + CR 107.4h: interchangeable outputs must
+            // share every live payment property, not merely their mana type.
+            // Source identities remain in the witness, including restrictions
+            // that resolve relative to a particular producing source.
+            let mut classes: Vec<Vec<LiveManaOutputUnit>> = Vec::new();
+            let mut rows = vec![(Vec::<(usize, usize)>::new(), option)];
+            #[cfg(any(test, feature = "test-support"))]
+            let mut work = (0, 0);
             for definition in &echoes {
-                rows = rows
-                    .into_iter()
-                    .flat_map(|row| {
-                        types
+                let choices: Vec<_> = types
+                    .iter()
+                    .map(|&mana_type| {
+                        let output = live_taps_for_mana_output(
+                            state,
+                            definition,
+                            &ProductionOverride::SingleColor(mana_type),
+                        );
+                        let ordinal = classes
                             .iter()
-                            .map(|mana_type| {
-                                let mut selected = row.clone();
-                                selected
-                                    .atomic_combination
-                                    .get_or_insert_with(|| vec![row.mana_type])
-                                    .push(*mana_type);
-                                selected.taps_for_mana_overrides.push((
-                                    definition.clone(),
-                                    ProductionOverride::SingleColor(*mana_type),
-                                ));
-                                selected
-                            })
-                            .collect::<Vec<_>>()
+                            .position(|class| *class == output)
+                            .unwrap_or_else(|| {
+                                classes.push(output);
+                                classes.len() - 1
+                            });
+                        (mana_type, ordinal)
                     })
                     .collect();
+                let mut seen = std::collections::HashSet::new();
+                let mut next = Vec::new();
+                for (counts, row) in rows {
+                    for &(mana_type, ordinal) in &choices {
+                        #[cfg(any(test, feature = "test-support"))]
+                        record_echo_option_work(&mut work, EchoOptionWork::Alternative);
+                        let mut counts = counts.clone();
+                        match counts.binary_search_by_key(&ordinal, |&(class, _)| class) {
+                            Ok(index) => counts[index].1 += 1,
+                            Err(index) => counts.insert(index, (ordinal, 1)),
+                        }
+                        if !seen.insert(counts.clone()) {
+                            continue;
+                        }
+                        #[cfg(any(test, feature = "test-support"))]
+                        record_echo_option_work(&mut work, EchoOptionWork::Materialization);
+                        let mut selected = row.clone();
+                        selected
+                            .atomic_combination
+                            .get_or_insert_with(|| vec![row.mana_type])
+                            .push(mana_type);
+                        selected.taps_for_mana_overrides.push((
+                            definition.clone(),
+                            ProductionOverride::SingleColor(mana_type),
+                        ));
+                        next.push((counts, selected));
+                    }
+                }
+                // `seen` is membership-only: preserve deterministic first
+                // witness order, rather than a hash-table iteration preference.
+                rows = next;
             }
-            rows
+            rows.into_iter().map(|(_, row)| row).collect()
         })
         .collect()
+}
+
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static ECHO_OPTION_WORK: std::cell::Cell<Option<((usize, usize), (usize, usize))>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Observe actual alternative visits and row materializations per source
+/// expansion, failing before an obsolete Cartesian product can grow large.
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_echo_option_work_limit<T>(
+    limits: (usize, usize),
+    action: impl FnOnce() -> T,
+) -> (T, (usize, usize)) {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            ECHO_OPTION_WORK.set(None);
+        }
+    }
+    assert!(ECHO_OPTION_WORK.replace(Some((limits, (0, 0)))).is_none());
+    let _reset = Reset;
+    let result = action();
+    let (_, maxima) = ECHO_OPTION_WORK.get().expect("active echo work observer");
+    (result, maxima)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+enum EchoOptionWork {
+    Alternative,
+    Materialization,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn record_echo_option_work(work: &mut (usize, usize), event: EchoOptionWork) {
+    match event {
+        EchoOptionWork::Alternative => work.0 += 1,
+        EchoOptionWork::Materialization => work.1 += 1,
+    }
+    if let Some((limits, maxima)) = ECHO_OPTION_WORK.get() {
+        assert!(
+            work.0 <= limits.0 && work.1 <= limits.1,
+            "actual echo option expansion exceeded bound: {work:?} > {limits:?}"
+        );
+        ECHO_OPTION_WORK.set(Some((limits, (maxima.0.max(work.0), maxima.1.max(work.1)))));
+    }
 }
 
 /// CR 605.1a + CR 605.3a: Predicate for "this is an activated mana ability
@@ -4982,6 +5066,30 @@ mod tests {
         QuantityExpr, SacrificeCost,
     };
     use crate::types::identifiers::CardId;
+
+    /// CR 106.12a + CR 608.2d: fail at the actual expansion site before an
+    /// obsolete ordered-choice product can allocate millions of source rows.
+    #[test]
+    fn echo_option_expansion_bounds_equivalent_firings_before_row_clones() {
+        use crate::game::scenario::{GameScenario, P0};
+        let mut scenario = GameScenario::new();
+        for _ in 0..24 {
+            scenario.add_enchantment_from_oracle(P0, "Mirari's Wake",
+                "Creatures you control get +1/+1.\nWhenever you tap a land for mana, add one mana of any type that land produced.");
+        }
+        let chamber = scenario.add_land_from_oracle(P0, "Simic Growth Chamber",
+            "This land enters tapped.\nWhen this land enters, return a land you control to its owner's hand.\n{T}: Add {G}{U}.").id();
+        let mut runner = scenario.build();
+        runner.state_mut().objects.get_mut(&chamber).unwrap().tapped = false;
+        let (rows, work) = with_echo_option_work_limit((600, 324), || {
+            activatable_land_mana_options(runner.state(), chamber, P0)
+        });
+        assert_eq!(rows.len(), 25);
+        assert!(rows
+            .iter()
+            .all(|row| row.taps_for_mana_overrides.len() == 24));
+        assert_eq!(work, (600, 324), "the observer must visit the real sites");
+    }
 
     /// CR 106.1 + CR 601.2g: Twenty identical Nyx Lotus profiles (G3/U1)
     /// against ten {U} shards reach each (object, residual) subproblem by many

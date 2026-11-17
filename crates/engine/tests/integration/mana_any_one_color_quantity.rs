@@ -1133,6 +1133,101 @@ fn board() -> GameScenario {
     scenario
 }
 
+/// CR 106.12a + CR 605.4a + CR 608.2d: equivalent echo permutations share
+/// a bounded output row, but the retained mixed row must still execute every
+/// exact producer choice. The legal 24-Wake board is reachable with four
+/// originals, Opalescence, kicked Rite of Replication and both token doublers.
+#[test]
+fn echo_option_expansion_is_bounded_before_materializing_selected_witnesses() {
+    use engine::game::mana_sources::with_echo_option_work_limit;
+    use engine::types::game_state::ProductionOverride;
+    const WAKE: &str = "Creatures you control get +1/+1.\nWhenever you tap a land for mana, add one mana of any type that land produced.";
+    let mut s = board();
+    let echoes: Vec<_> = (0..24)
+        .map(|_| {
+            s.add_enchantment_from_oracle(P0, "Mirari's Wake", WAKE)
+                .id()
+        })
+        .collect();
+    let chamber = s
+        .add_land_from_oracle(P0, "Simic Growth Chamber", CHAMBER)
+        .id();
+    let mut r = s.build();
+    r.state_mut().objects.get_mut(&chamber).unwrap().tapped = false;
+
+    // Count the actual visits/clones, including reducer revalidation. Limits
+    // apply to each expansion, so repeated consumers cannot hide a wide layer.
+    let (_, work) = with_echo_option_work_limit((600, 324), || {
+        let rows = activatable_land_mana_options(r.state(), chamber, P0);
+        assert_eq!(rows.len(), 25, "24 equivalent GU firings have 25 outcomes");
+        assert_eq!(
+            rows,
+            activatable_land_mana_options(r.state(), chamber, P0),
+            "first-witness order must be deterministic"
+        );
+        let selected = rows
+            .into_iter()
+            .find(|row| {
+                row.taps_for_mana_overrides
+                    .iter()
+                    .filter(|(_, choice)| {
+                        *choice == ProductionOverride::SingleColor(ManaType::Blue)
+                    })
+                    .count()
+                    == 12
+            })
+            .expect("an interior mixed assignment must survive aggregation");
+        assert_eq!(selected.taps_for_mana_overrides.len(), 24);
+        let witness = selected.taps_for_mana_overrides.clone();
+        let selection = selected.semantic_selection(r.state()).unwrap();
+        let result = r
+            .act(GameAction::TapLandForMana { selection })
+            .expect("the bounded row must be executable through public revalidation");
+        assert_eq!(
+            production_count(&result.events, chamber, ManaType::Green),
+            1
+        );
+        assert_eq!(production_count(&result.events, chamber, ManaType::Blue), 1);
+        for echo in &echoes {
+            let matching: Vec<_> = witness
+                .iter()
+                .filter(|(definition, _)| definition.source.object_id == *echo)
+                .collect();
+            assert_eq!(matching.len(), 1, "each occurrence retains its own witness");
+            let ProductionOverride::SingleColor(color) = &matching[0].1 else {
+                panic!("an echo selects exactly one actual type");
+            };
+            assert_eq!(production_count(&result.events, *echo, *color), 1);
+            assert_eq!(
+                production_count(
+                    &result.events,
+                    *echo,
+                    if *color == ManaType::Blue {
+                        ManaType::Green
+                    } else {
+                        ManaType::Blue
+                    }
+                ),
+                0
+            );
+        }
+        assert_complete(&r, 26);
+        assert_eq!(
+            r.state().players[0].mana_pool.count_color(ManaType::Blue),
+            13
+        );
+        assert_eq!(
+            r.state().players[0].mana_pool.count_color(ManaType::Green),
+            13
+        );
+    });
+    assert_eq!(
+        work,
+        (600, 324),
+        "the observer must reach the real expansion sites"
+    );
+}
+
 fn spell(s: &mut GameScenario, name: &str, instant: bool, text: &str, cost: &str) -> ObjectId {
     s.add_spell_to_hand_from_oracle(P0, name, instant, text)
         .with_mana_cost(parse_mtgjson_mana_cost(cost))
