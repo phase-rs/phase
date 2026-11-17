@@ -1647,8 +1647,9 @@ fn casts_sewerdreg_with_battlefield_activated_ability_and_duplicate_in_hand() {
 // are still castable when those abilities currently have no legal targets.
 // The AI must not read the permanent's future abilities as the spell's effects.
 //
-// CR 113.6: Activated abilities function only on the battlefield.
-// CR 601.2c / CR 303.4a: Casting a spell commits only to its spell abilities.
+// CR 113.6: A permanent's abilities usually function only while it is on the
+// battlefield, so its activated abilities are not effects of casting it.
+// CR 601.2c + CR 303.4a: An Aura spell chooses the target defined by its enchant ability.
 
 #[test]
 fn casts_dreadful_apathy_with_opposing_creature() {

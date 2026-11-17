@@ -948,7 +948,8 @@ impl GameScenario {
         let obj = self.state.objects.get_mut(&id).unwrap();
         obj.card_types.core_types.push(CoreType::Enchantment);
         obj.base_card_types = obj.card_types.clone();
-        // CR 303.1: enchantments have no power/toughness unless they are also creatures.
+        // CR 208.3: a noncreature object not on the battlefield has power or
+        // toughness only if it has a power and toughness printed on it.
 
         let mut builder = CardBuilder {
             state: &mut self.state,
