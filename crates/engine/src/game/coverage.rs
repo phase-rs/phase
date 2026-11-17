@@ -11,7 +11,7 @@ use crate::game::token_presets::{
 use crate::game::triggers::{build_trigger_registry, trigger_registry};
 use crate::parser::oracle::{
     is_commander_permission_sentence, is_deck_construction_copy_limit_sentence,
-    is_draft_matters_sentence, parse_strive_cost_line,
+    is_deck_construction_size_sentence, is_draft_matters_sentence, parse_strive_cost_line,
 };
 use crate::parser::oracle_casting::parse_casting_restriction_line;
 use crate::parser::oracle_effect::gap_diagnosis::diagnose_clause_gap;
@@ -48,7 +48,7 @@ use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
-use crate::types::triggers::{ControlChangeSide, TriggerMode};
+use crate::types::triggers::TriggerMode;
 use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
 use nom::bytes::complete::tag;
@@ -1662,6 +1662,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         }
         QuantityRef::LifeAboveStarting => "life above starting".into(),
         QuantityRef::StartingLifeTotal { .. } => "starting life total".into(),
+        // CR 103.2a: the latched submitted-starting-deck count (Whtz, the
+        // Bibliophile's activation discount).
+        QuantityRef::StartingDeckSize { .. } => "starting deck size".into(),
         QuantityRef::TriggeringDiscoverValue => "the triggering discover's value".into(),
         QuantityRef::TriggeringScryLookCount => {
             "the number of cards looked at while scrying this way".into()
@@ -2324,13 +2327,22 @@ fn fmt_player_filter(pf: &PlayerFilter) -> String {
             kind,
             source,
             min_sources,
+            relation,
         } => {
             let kind_text = match kind {
                 DamageKindFilter::CombatOnly => "combat damage",
                 DamageKindFilter::NoncombatOnly => "noncombat damage",
                 DamageKindFilter::Any => "damage",
             };
-            let mut rendered = format!("each opponent who was dealt {kind_text}");
+            // The candidate population selects: "each opponent who …" is not
+            // "each player who …". `Opponent` renders exactly as before so
+            // existing cards keep byte-identical signatures.
+            let who = match relation {
+                PlayerRelation::Controller => "you",
+                PlayerRelation::Opponent => "each opponent",
+                PlayerRelation::All => "each player",
+            };
+            let mut rendered = format!("{who} who was dealt {kind_text}");
             if let Some(source) = source.as_deref() {
                 rendered.push_str(&format!(" from {}", fmt_target(source)));
             }
@@ -5194,6 +5206,12 @@ fn fmt_trigger_condition(
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         TC::IsMonarch { .. } => "that player is monarch".into(),
+        // CR 122.1f + CR 508.5: keep the defending-player wording distinct so a
+        // gap string names the player the trigger actually tests.
+        TC::IsPoisoned {
+            player: PlayerScope::DefendingPlayer,
+        } => "defending player is poisoned".into(),
+        TC::IsPoisoned { .. } => "that player is poisoned".into(),
         TC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -5460,6 +5478,11 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         SC::IsMonarch { .. } => "that player is monarch".into(),
+        // CR 122.1f: keep the subject wording parallel to `TC::IsPoisoned`.
+        SC::PlayerIsPoisoned {
+            player: PlayerScope::Controller,
+        } => "is poisoned".into(),
+        SC::PlayerIsPoisoned { .. } => "that player is poisoned".into(),
         SC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -8675,29 +8698,7 @@ fn trigger_mode_is_supported(
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
 ) -> bool {
     !matches!(mode, TriggerMode::Unknown(_))
-        && !trigger_mode_has_unpublished_event_source(mode)
         && (trigger_registry.contains_key(mode) || matches!(mode, TriggerMode::StateCondition))
-}
-
-/// CR 603.2 + CR 613.1b: a trigger mode whose matcher is registered but whose
-/// triggering event is not published for every way the game can produce it, so
-/// the printed ability would silently miss real occurrences. `Gains` of a
-/// `ChangesController` trigger fires on `GameEvent::ControllerChanged`, which
-/// spell/effect control changes publish but control the layer pass assigns or
-/// retires does not (CR 613.1b: Confiscate's "You control enchanted permanent",
-/// Control Magic, a lapsed `ForAsLongAs` duration): `layers.rs` only assigns
-/// `obj.controller` and diffs the settled controllers. Tracked upstream as
-/// phase-rs/phase#9903; lift this when static/layer control changes publish
-/// `ControllerChanged`. The `Loses` side is not charged here. The runtime
-/// matcher stays registered so the effect-driven control changes still fire it.
-fn trigger_mode_has_unpublished_event_source(mode: &TriggerMode) -> bool {
-    match mode {
-        TriggerMode::ChangesController { side } => match side {
-            ControlChangeSide::Gains => true,
-            ControlChangeSide::Loses => false,
-        },
-        _ => false,
-    }
 }
 
 /// CR 603.7 + CR 603.8: a delayed trigger fires only through an event matcher
@@ -8709,9 +8710,7 @@ fn delayed_trigger_mode_is_supported(
     mode: &TriggerMode,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
 ) -> bool {
-    !matches!(mode, TriggerMode::Unknown(_))
-        && !trigger_mode_has_unpublished_event_source(mode)
-        && trigger_registry.contains_key(mode)
+    !matches!(mode, TriggerMode::Unknown(_)) && trigger_registry.contains_key(mode)
 }
 
 /// CR 603.7: the trigger definitions a delayed trigger this effect creates is
@@ -9034,7 +9033,7 @@ fn check_silent_drops(
         return;
     };
 
-    let lines = effective_oracle_lines(oracle_text);
+    let lines = effective_oracle_lines_for_card(oracle_text, card_name);
     let (dropped, _) = dropped_oracle_lines(&lines, card_name, parse_details);
 
     if dropped > 0 {
@@ -9513,7 +9512,7 @@ pub fn audit_silent_drops(summary: &CoverageSummary) -> Vec<SilentDropResult> {
             _ => continue,
         };
 
-        let lines = effective_oracle_lines(oracle_text);
+        let lines = effective_oracle_lines_for_card(oracle_text, &card.card_name);
         let (dropped, uncovered) =
             dropped_oracle_lines(&lines, &card.card_name, &card.parse_details);
 
@@ -9535,7 +9534,20 @@ pub fn audit_silent_drops(summary: &CoverageSummary) -> Vec<SilentDropResult> {
 /// The printed Oracle lines a card's parse tree is expected to represent, with
 /// reminder text stripped, modal bullets folded into their header, and lines the
 /// parser consumes as typed card-face metadata excluded.
+///
+/// Card-name-blind entry point for unit probes: the Class B size sentence
+/// (Covert Blue Mage, whose subject check pins the marker to the named
+/// commander) never matches under the empty name, so production callers must
+/// use [`effective_oracle_lines_for_card`].
+// exercised by this module's unit tests
+#[cfg_attr(not(test), allow(dead_code))]
 fn effective_oracle_lines(oracle_text: &str) -> Vec<String> {
+    effective_oracle_lines_for_card(oracle_text, "")
+}
+
+/// Card-name-aware [`effective_oracle_lines`]: the Class A/B maximum-size
+/// sentences are deck-construction metadata, not abilities.
+fn effective_oracle_lines_for_card(oracle_text: &str, card_name: &str) -> Vec<String> {
     let lines: Vec<&str> = oracle_text
         .split('\n')
         .map(|l| l.trim())
@@ -9558,6 +9570,18 @@ fn effective_oracle_lines(oracle_text: &str) -> Vec<String> {
             continue;
         }
         if is_deck_construction_copy_limit_sentence(stripped) {
+            continue;
+        }
+
+        // CR 903.5a: deck-construction maximum-size sentences ("A deck with
+        // this commander has no maximum deck size."; "if <this> is your
+        // commander, your starting deck can contain any number of cards
+        // beyond the maximum deck size.") are consumed as the typed
+        // `deck_size_override` face marker (see
+        // `compute_no_maximum_deck_size_from_text`, read by
+        // `effective_deck_size_rule`), not as a resolvable ability — they
+        // legitimately produce no `ParsedElement`.
+        if is_deck_construction_size_sentence(stripped, card_name) {
             continue;
         }
 
@@ -10034,7 +10058,6 @@ fn is_card_supported(
     for trig in &face.triggers {
         if matches!(&trig.mode, TriggerMode::Unknown(_))
             || !trigger_registry.contains_key(&trig.mode)
-            || trigger_mode_has_unpublished_event_source(&trig.mode)
         {
             return false;
         }
@@ -11148,6 +11171,7 @@ fn extract_trigger_condition_features(
         | TriggerCondition::CastSpellThisTurn { .. }
         | TriggerCondition::HasMaxSpeed
         | TriggerCondition::IsMonarch { .. }
+        | TriggerCondition::IsPoisoned { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
@@ -11440,6 +11464,8 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::GraveyardSize { .. } => ("GraveyardSize", Handled),
         QuantityRef::LifeAboveStarting => ("LifeAboveStarting", Handled),
         QuantityRef::StartingLifeTotal { .. } => ("StartingLifeTotal", Handled),
+        // CR 103.2a: latched at deck load; resolved by the quantity engine.
+        QuantityRef::StartingDeckSize { .. } => ("StartingDeckSize", Handled),
         QuantityRef::TriggeringDiscoverValue => ("TriggeringDiscoverValue", Handled),
         QuantityRef::TriggeringScryLookCount => ("TriggeringScryLookCount", Handled),
         QuantityRef::TriggeringScryBottomCount => ("TriggeringScryBottomCount", Handled),
@@ -11965,6 +11991,15 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
             player: PlayerScope::Controller | PlayerScope::RecipientController,
         } => ("IsMonarch", Handled),
         StaticCondition::IsMonarch { .. } => ("IsMonarch", Unhandled),
+        // CR 122.1f: same subject rule as the monarch arm above — the layer
+        // evaluator binds the source ("you") and recipient ("that creature's
+        // controller") subjects, and rejects any other scope at the entry
+        // gate. The unbound arm keeps a DISTINCT key so mixed scopes on one
+        // card resolve by restriction rather than HashMap insertion order.
+        StaticCondition::PlayerIsPoisoned {
+            player: PlayerScope::Controller | PlayerScope::RecipientController,
+        } => ("PlayerIsPoisoned", Handled),
+        StaticCondition::PlayerIsPoisoned { .. } => ("PlayerIsPoisonedUnboundScope", Unhandled),
         // Digital-only Alchemy (no CR entry): same scope rule as the monarch
         // arm above — the layer evaluator binds both subjects. The unbound
         // arm keeps a DISTINCT key: same-key insert would let sibling order
@@ -12879,6 +12914,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // legitimately produce no `ParsedElement`. Skip them so they are not
         // falsely reported as `SilentDrop`.
         if is_deck_construction_copy_limit_sentence(stripped) {
+            continue;
+        }
+
+        // CR 903.5a: deck-construction maximum-size sentences (Whtz, the
+        // Bibliophile; Covert Blue Mage class) are consumed as the typed
+        // `deck_size_override` face marker, not as a resolvable ability —
+        // they legitimately produce no `SemanticFinding`.
+        if is_deck_construction_size_sentence(stripped, &face.name) {
             continue;
         }
 
@@ -16524,6 +16567,7 @@ mod tests {
                 kind,
                 source: source.map(Box::new),
                 min_sources,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             }
         }
 
@@ -18533,6 +18577,7 @@ mod tests {
             back_face: None,
             rules_text: None,
             unparsed_rules_text_lines: Vec::new(),
+            merged_extras: None,
         }
     }
 
@@ -19393,6 +19438,7 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -22920,6 +22966,19 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         );
     }
 
+    /// CR 103.2a: the latched starting-deck count is a handled quantity
+    /// feature, beside the starting-life snapshot.
+    #[test]
+    fn starting_deck_size_quantity_feature_is_marked_handled() {
+        assert_eq!(
+            quantity_ref_feature(&QuantityRef::StartingDeckSize {
+                player: PlayerScope::Controller,
+            }),
+            ("StartingDeckSize", FeatureSupport::Handled),
+            "starting deck sizes latch at load and resolve through the quantity engine"
+        );
+    }
+
     #[test]
     fn target_zone_card_count_quantity_feature_is_marked_handled() {
         let (name, support) = quantity_ref_feature(&QuantityRef::TargetZoneCardCount {
@@ -25467,6 +25526,150 @@ have been revealed, Aggressive Detective deals 2 damage to each opponent.";
         }
     }
 
+    const WHTZ_VERBATIM: &str = "Rulebreaker — A deck with this commander has no maximum deck size.\n{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you had 200 or more cards in your starting deck.";
+    const COVERT_VERBATIM: &str = "If The Covert Blue Mage is your commander, your starting deck can contain any number of cards beyond the maximum deck size. (For example, your deck can be 120 cards.)\nWhen The Covert Blue Mage enters, create a colorless Equipment artifact token named Covert Sunglasses. It has \"Equipped creature can't be blocked\" and equip {2}{W/U}.";
+
+    /// A face built from verbatim Oracle the way the export carries it —
+    /// the V8/V15 harness for the no-maximum-deck-size class.
+    fn verbatim_commander_face(name: &str, oracle: &str, keywords: &[&str]) -> CardFace {
+        let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+        let parsed = crate::parser::parse_oracle_text(
+            oracle,
+            name,
+            &keywords,
+            &["Legendary".to_string(), "Creature".to_string()],
+            &["Homunculus".to_string()],
+        );
+        let mut face = make_face();
+        face.name = name.to_string();
+        face.oracle_text = Some(oracle.to_string());
+        face.abilities = parsed.abilities;
+        face.triggers = parsed.triggers;
+        face.static_abilities = parsed.statics;
+        face.replacements = parsed.replacements;
+        face.parse_warnings = parsed.parse_warnings;
+        face.keywords = parsed.extracted_keywords;
+        face.deck_size_override = crate::database::synthesis::compute_no_maximum_deck_size(&face);
+        face
+    }
+
+    /// V8: the full Whtz verbatim text parses with zero `Unimplemented`,
+    /// leaves no silent drop, raises no audit finding, and reports supported.
+    /// Either coverage skip reverted surfaces `SilentDrop:1_of_2` — the size
+    /// line is one of two effective lines (it + the activated ability), so a
+    /// missed skip is a loud 1-of-2, never a quiet pass. Hostile: the
+    /// line-1-only face (size sentence alone) stays supported — a lone
+    /// metadata line is not a dropped ability.
+    #[test]
+    fn whtz_verbatim_parses_clean_and_reports_supported() {
+        let face =
+            verbatim_commander_face("Whtz, the Bibliophile", WHTZ_VERBATIM, &["Rulebreaker"]);
+
+        assert!(
+            !card_face_has_unimplemented_parts(&face),
+            "Whtz must parse with zero Unimplemented: {:?}",
+            face.parse_warnings
+        );
+
+        let details = build_parse_details_for_face(&face);
+        let mut missing = Vec::new();
+        check_silent_drops(&face.oracle_text, &face.name, &details, &mut missing);
+        assert!(
+            missing.is_empty(),
+            "Whtz must leave no silent drop: {missing:?}"
+        );
+        assert!(
+            audit_card_lines(WHTZ_VERBATIM, &face).is_empty(),
+            "Whtz must raise no audit finding"
+        );
+
+        let coverage = card_face_coverage(&face);
+        assert!(
+            coverage.is_supported(),
+            "Whtz, the Bibliophile must report supported: {:?}",
+            coverage.gaps
+        );
+    }
+
+    /// V15: the Class B face consumes its size sentence as metadata —
+    /// effective lines exclude it, the audit stays clean, and the face
+    /// reports supported. Hostile: the reminder line ("For example, your
+    /// deck can be 120 cards.") is reminder text, so it must not produce a
+    /// second ParsedItem. Reach-guards pin the real token payload (the
+    /// ETB creates the named Covert Sunglasses Equipment granting
+    /// can't-be-blocked): a regression to `Unimplemented` would flip
+    /// `is_supported` AND these guards, so the test cannot pass on a
+    /// silently dropped token.
+    #[test]
+    fn covert_blue_mage_size_sentence_consumes_cleanly() {
+        let face = verbatim_commander_face("The Covert Blue Mage", COVERT_VERBATIM, &[]);
+        assert_eq!(
+            face.deck_size_override,
+            Some(crate::types::format::DeckSizeOverride::NoMaximum),
+            "the Covert face must carry the typed marker"
+        );
+
+        let lines = effective_oracle_lines_for_card(COVERT_VERBATIM, "The Covert Blue Mage");
+        assert!(
+            !lines.iter().any(|line| line.contains("maximum deck size")),
+            "the size sentence must not count as a runtime line: {lines:?}"
+        );
+        assert!(
+            audit_card_lines(COVERT_VERBATIM, &face).is_empty(),
+            "Covert must raise no audit finding"
+        );
+        assert!(
+            !card_face_has_unimplemented_parts(&face),
+            "Covert must parse with zero Unimplemented: {:?}",
+            face.parse_warnings
+        );
+
+        // Reach-guard: the ETB trigger creates the named Equipment token.
+        let token_effect = face
+            .triggers
+            .iter()
+            .filter(|trigger| trigger.mode == TriggerMode::ChangesZone)
+            .filter_map(|trigger| trigger.execute.as_deref())
+            .find_map(|ability| match &*ability.effect {
+                Effect::Token { name, .. } if name == "Covert Sunglasses" => Some(&*ability.effect),
+                _ => None,
+            })
+            .expect("the Covert ETB must create the Covert Sunglasses token");
+        // Reach-guard: the token grants can't-be-blocked to the equipped
+        // creature (the printed "It has ..." grant is modelled, not dropped).
+        let grants_cant_be_blocked = match token_effect {
+            Effect::Token {
+                static_abilities, ..
+            } => static_abilities.iter().any(|static_ability| {
+                static_ability.modifications.iter().any(|modification| {
+                    matches!(
+                        modification,
+                        ContinuousModification::GrantStaticAbility { definition, .. }
+                        if matches!(
+                            definition.as_ref(),
+                            StaticDefinition {
+                                mode: StaticMode::CantBeBlocked,
+                                ..
+                            }
+                        )
+                    )
+                })
+            }),
+            _ => false,
+        };
+        assert!(
+            grants_cant_be_blocked,
+            "the Sunglasses token must grant can't-be-blocked to the equipped creature"
+        );
+
+        let coverage = card_face_coverage(&face);
+        assert!(
+            coverage.is_supported(),
+            "The Covert Blue Mage must report supported: {:?}",
+            coverage.gaps
+        );
+    }
+
     #[test]
     fn defiler_cost_reduction_static_does_not_count_as_silent_drop() {
         let mut face = make_face();
@@ -27321,47 +27524,7 @@ mod attacked_referent_coverage_tests {
 #[cfg(test)]
 mod unpublished_event_source_tests {
     use super::*;
-
-    /// CR 603.2 + CR 613.1b: the gain side of `ChangesController` has a
-    /// registered matcher but no emitter for layer-2 control changes (#9903), so
-    /// the support authority must report it unsupported while the registered
-    /// `Loses` side and unrelated modes stay supported — for both the printed
-    /// and the delayed variant.
-    #[test]
-    fn gain_side_control_trigger_is_unsupported_until_layer_changes_publish_events() {
-        let registry = trigger_registry();
-        let gains = TriggerMode::ChangesController {
-            side: ControlChangeSide::Gains,
-        };
-        let loses = TriggerMode::ChangesController {
-            side: ControlChangeSide::Loses,
-        };
-
-        // Reach guard: the registry carries every key, so the `false` below is
-        // owed to the unpublished-event-source predicate, not a missing entry.
-        assert!(
-            registry.contains_key(&gains),
-            "Gains matcher stays registered"
-        );
-        assert!(registry.contains_key(&loses));
-        assert!(registry.contains_key(&TriggerMode::ChangesZone));
-        assert!(trigger_mode_has_unpublished_event_source(&gains));
-        assert!(!trigger_mode_has_unpublished_event_source(&loses));
-
-        assert!(!trigger_mode_is_supported(&gains, registry));
-        assert!(!delayed_trigger_mode_is_supported(&gains, registry));
-
-        for supported in [&loses, &TriggerMode::ChangesZone] {
-            assert!(
-                trigger_mode_is_supported(supported, registry),
-                "{supported:?}"
-            );
-            assert!(
-                delayed_trigger_mode_is_supported(supported, registry),
-                "{supported:?}"
-            );
-        }
-    }
+    use crate::types::triggers::ControlChangeSide;
 
     /// Parse a card through the production MTGJSON-to-face path
     /// (`build_oracle_face`), the same construction the parser tests use.
@@ -27407,15 +27570,12 @@ mod unpublished_event_source_tests {
             .any(|trig| trig.mode == TriggerMode::ChangesController { side })
     }
 
-    /// CR 603.2 + CR 613.1b: `is_card_supported` (the gate for
-    /// `audit_resolver_features` and `audit_semantic`) decides trigger support
-    /// inline rather than through `trigger_mode_is_supported`, so it needs the
-    /// unpublished-event-source check itself. Real parsed faces: Risky Move
-    /// (gain-side control trigger) is excluded from every support authority
-    /// and from both audits, while Duplicity (lose-side control trigger,
-    /// otherwise supported) stays in.
+    /// CR 603.2 + CR 613.1b: every control change a full layer evaluation
+    /// derives now publishes `ControllerChanged`, so a gain-side control trigger
+    /// is supported by every support authority and both audits (Risky Move),
+    /// like the lose side (Duplicity).
     #[test]
-    fn gain_side_control_trigger_face_is_excluded_from_every_support_authority() {
+    fn gain_side_control_trigger_face_is_supported_by_every_support_authority() {
         let risky = parsed_face(
             "Risky Move",
             "Enchantment",
@@ -27430,8 +27590,7 @@ mod unpublished_event_source_tests {
         );
 
         // Reach guards: each face parsed the control-change trigger it is the
-        // fixture for, and the control face is otherwise fully supported, so the
-        // verdicts below turn on the unpublished-event-source predicate alone.
+        // fixture for.
         assert!(
             has_control_trigger(&risky, ControlChangeSide::Gains),
             "Risky Move must parse a Gains ChangesController trigger: {:#?}",
@@ -27442,34 +27601,18 @@ mod unpublished_event_source_tests {
             "control face must parse a Loses ChangesController trigger: {:#?}",
             control.triggers
         );
-        assert!(
-            !has_control_trigger(&control, ControlChangeSide::Gains),
-            "control face must not carry a Gains trigger"
-        );
-        assert_eq!(
-            card_face_gaps(&control),
-            Vec::<String>::new(),
-            "control face must be fully supported"
-        );
 
         let trigger_registry = build_trigger_registry();
         let static_registry = build_static_registry();
-        assert!(
-            !is_card_supported(&risky, &trigger_registry, &static_registry),
-            "a face with a gain-side control trigger must not count as supported"
-        );
-        assert!(is_card_supported(
-            &control,
-            &trigger_registry,
-            &static_registry
-        ));
-        assert_eq!(
-            card_face_gaps(&risky),
-            vec!["Trigger:ChangesController { side: Gains }".to_string()]
-        );
+        for face in [&risky, &control] {
+            assert_eq!(card_face_gaps(face), Vec::<String>::new(), "{}", face.name);
+            assert!(
+                is_card_supported(face, &trigger_registry, &static_registry),
+                "{}",
+                face.name
+            );
+        }
 
-        // The public audits consume `is_card_supported`: of the two faces only
-        // the control one is audited.
         let mut export = serde_json::Map::new();
         for face in [&risky, &control] {
             export.insert(
@@ -27480,8 +27623,8 @@ mod unpublished_event_source_tests {
         let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
             .expect("test export should deserialize");
         assert_eq!(db.card_count(), 2, "both faces reach the audits");
-        assert_eq!(audit_resolver_features(&db).total_supported_audited, 1);
-        assert_eq!(audit_semantic(&db).total_supported_audited, 1);
+        assert_eq!(audit_resolver_features(&db).total_supported_audited, 2);
+        assert_eq!(audit_semantic(&db).total_supported_audited, 2);
     }
 
     /// CR 601.2c / CR 608.2d: a `TargetFilter::Player` or declared-target player

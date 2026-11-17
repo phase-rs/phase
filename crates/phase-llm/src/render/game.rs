@@ -22,6 +22,7 @@ use engine::types::zones::Zone;
 
 use super::action::describe_tagged;
 use super::history::{push_history, HistoryBudget, TurnCycle};
+use super::keyword::keyword_text;
 use super::text::{clamp_text, mana_cost_text, one_line, type_line_text};
 
 /// How much of the position to render. Driven by difficulty so a low-difficulty
@@ -264,6 +265,15 @@ fn push_battlefield(
         out.push_str("(empty)\n");
         return;
     }
+    // CR 613.1 + CR 613.4c: an object's power and toughness are what the
+    // layers settle, its counters and every continuous effect applied, and the
+    // lines state those. CR 120.3e + CR 120.6: damage is marked on a creature
+    // and checked against its toughness rather than lowering it, so a line
+    // states it beside the toughness.
+    out.push_str(
+        "Power/toughness shown includes counters and continuous effects; \
+         damage marked is listed separately.\n",
+    );
     for (controller, ids) in by_controller {
         out.push_str(&format!("{}:\n", seat_label(PlayerId(controller), viewer)));
         let lines = ids
@@ -394,7 +404,7 @@ fn push_available_mana(out: &mut String, state: &GameState, viewer: PlayerId) {
 }
 
 /// `{W}{U}{C}` for a run of mana types, in the order given.
-fn mana_symbols(types: impl Iterator<Item = ManaType>) -> String {
+pub(crate) fn mana_symbols(types: impl Iterator<Item = ManaType>) -> String {
     types
         .map(|mana| match mana {
             ManaType::White => "{W}",
@@ -531,11 +541,7 @@ fn permanent_facts(
         .iter()
         .filter_map(|attached| object_name(state, *attached))
         .collect();
-    let keywords: Vec<String> = object
-        .keywords
-        .iter()
-        .map(|keyword| format!("{keyword:?}"))
-        .collect();
+    let keywords: Vec<String> = object.keywords.iter().map(keyword_text).collect();
     [
         (!type_line.is_empty()).then_some(type_line),
         object
@@ -709,24 +715,28 @@ fn card_line(
     line
 }
 
+/// A permanent's counters by the names cards give them: `1 +1/+1 counter, 8
+/// charge counters`.
+///
+/// Counted by name, since CR 122.1 makes counters with the same name
+/// interchangeable: two kinds the engine keeps apart but cards name alike (a
+/// `+1/+1` counter and a power-toughness counter of `+1/+1`) are one count.
 fn counter_text(object: &GameObject) -> String {
-    if object.counters.is_empty() {
-        return String::new();
-    }
     // `BTreeMap` for a deterministic order: `counters` is a `HashMap`, and an
     // unordered render would make the decision fingerprint unstable.
-    let ordered: BTreeMap<String, u32> = object
-        .counters
-        .iter()
-        .filter(|(_, count)| **count > 0)
-        .map(|(kind, count)| (format!("{kind:?}"), *count))
-        .collect();
-    if ordered.is_empty() {
-        return String::new();
+    let mut by_name: BTreeMap<String, u32> = BTreeMap::new();
+    for (kind, count) in &object.counters {
+        if *count > 0 {
+            // A generic counter's name is card data and may carry a line break.
+            *by_name.entry(one_line(&kind.display_phrase())).or_default() += *count;
+        }
     }
-    ordered
+    by_name
         .into_iter()
-        .map(|(kind, count)| format!("{count} {kind} counter(s)"))
+        .map(|(name, count)| {
+            let noun = if count == 1 { "counter" } else { "counters" };
+            format!("{count} {name} {noun}")
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -1092,6 +1102,203 @@ mod tests {
             label(PlayerId(1)),
             "Akroma, Angel of Fury (controlled by You)"
         );
+    }
+
+    /// Issue #10997: battlefield lines printed keywords as Rust debug text
+    /// (`Cycling(Mana(Cost { shards: [], generic: 3 }))`, `DoubleStrike`).
+    #[test]
+    fn battlefield_keywords_read_as_cards_print_them() {
+        use engine::types::ability::{ControllerRef, TargetFilter, TypedFilter};
+        use engine::types::keywords::{CyclingCost, Keyword, WardCost};
+        use engine::types::mana::{ManaCost, ManaCostShard};
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let mut permanent = |name: &str, keywords: Vec<Keyword>| {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().keywords = keywords;
+        };
+        // Macetail Hystrodon: "First strike, haste" and "Cycling {3}".
+        permanent(
+            "Macetail Hystrodon",
+            vec![
+                Keyword::FirstStrike,
+                Keyword::Haste,
+                Keyword::Cycling(CyclingCost::Mana(ManaCost::generic(3))),
+            ],
+        );
+        // Aboleth Spawn: "Flash" and "Ward {2}".
+        permanent(
+            "Aboleth Spawn",
+            vec![
+                Keyword::Flash,
+                Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+            ],
+        );
+        permanent("Arashin Foremost", vec![Keyword::DoubleStrike]);
+        // Brink of Disaster: "Enchant creature or land".
+        permanent(
+            "Brink of Disaster",
+            vec![Keyword::Enchant(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    TargetFilter::Typed(TypedFilter::land()),
+                ],
+            })],
+        );
+        // Aspect of Lamprey: "Enchant creature you control", which its rules
+        // text states; the keyword alone must not read "Enchant creature".
+        permanent(
+            "Aspect of Lamprey",
+            vec![Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ))],
+        );
+        // Steel Seraph: a prototype {1}{W}{W} 3/3 with flying.
+        permanent(
+            "Steel Seraph",
+            vec![
+                Keyword::Prototype {
+                    cost: ManaCost::Cost {
+                        shards: vec![ManaCostShard::White, ManaCostShard::White],
+                        generic: 1,
+                    },
+                    power: Some(3),
+                    toughness: Some(3),
+                },
+                Keyword::Flying,
+            ],
+        );
+        // Thought Lash's cumulative upkeep cost is "Exile the top card of your
+        // library." Detritivore has suspend X, at a cost of {X}{3}{R}. Both
+        // keywords as the card data encodes them; neither can print whole.
+        let keyword = |json: serde_json::Value| serde_json::from_value::<Keyword>(json).unwrap();
+        permanent(
+            "Thought Lash",
+            vec![keyword(serde_json::json!({
+                "CumulativeUpkeep": {
+                    "type": "Exile",
+                    "count": 1,
+                    "zone": "Library",
+                    "filter": null,
+                },
+            }))],
+        );
+        permanent(
+            "Detritivore",
+            vec![keyword(serde_json::json!({
+                "Suspend": {
+                    "count": 0,
+                    "cost": { "type": "Cost", "shards": [], "generic": 0 },
+                },
+            }))],
+        );
+
+        let board = rendered(&state, PlayerId(0));
+        for line in [
+            "- Macetail Hystrodon | untapped | First strike, Haste, Cycling {3}\n",
+            "- Aboleth Spawn | untapped | Flash, Ward {2}\n",
+            "- Arashin Foremost | untapped | Double strike\n",
+            "- Brink of Disaster | untapped | Enchant creature or land\n",
+            "- Aspect of Lamprey | untapped | Enchant\n",
+            "- Steel Seraph | untapped | Prototype {1}{W}{W} — 3/3, Flying\n",
+            "- Thought Lash | untapped | Cumulative upkeep\n",
+            "- Detritivore | untapped | Suspend\n",
+        ] {
+            assert!(board.contains(line), "missing {line:?} in\n{board}");
+        }
+        for debug_text in ["Cost {", "{ count", "Some("] {
+            assert!(!board.contains(debug_text), "{debug_text:?} in\n{board}");
+        }
+    }
+
+    /// Issue #10997: counters printed as `1 Plus1Plus1 counter(s)` and
+    /// `8 Generic("charge") counter(s)`.
+    #[test]
+    fn counters_read_by_the_names_cards_give_them() {
+        use engine::types::counter::CounterType;
+
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        let mut permanent = |name: &str, counters: Vec<(CounterType, u32)>| {
+            let id = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .counters
+                .extend(counters);
+        };
+        permanent("Grizzly Bears", vec![(CounterType::Plus1Plus1, 1)]);
+        // Aether Vial: "At the beginning of your upkeep, you may put a charge
+        // counter on this artifact."
+        permanent(
+            "Aether Vial",
+            vec![(CounterType::Generic("charge".to_string()), 8)],
+        );
+        // CR 122.1: counters with the same name are interchangeable, so two
+        // kinds the engine keeps apart that both read "+1/+1" are one count.
+        permanent(
+            "Steel Overseer",
+            vec![
+                (CounterType::Plus1Plus1, 2),
+                (
+                    CounterType::PowerToughness {
+                        power: 1,
+                        toughness: 1,
+                    },
+                    1,
+                ),
+            ],
+        );
+
+        let board = rendered(&state, PlayerId(0));
+        for line in [
+            "- Grizzly Bears | untapped | 1 +1/+1 counter\n",
+            "- Aether Vial | untapped | 8 charge counters\n",
+            "- Steel Overseer | untapped | 3 +1/+1 counters\n",
+        ] {
+            assert!(board.contains(line), "missing {line:?} in\n{board}");
+        }
+    }
+
+    /// Issue #10997: a seat could not tell whether a creature's power and
+    /// toughness already include its counters and an anthem, so the
+    /// battlefield says it once, for every seat's permanents.
+    #[test]
+    fn the_battlefield_says_once_what_power_and_toughness_include() {
+        let note = "Power/toughness shown includes counters and continuous effects; \
+                    damage marked is listed separately.\n";
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        for controller in [PlayerId(0), PlayerId(1)] {
+            create_object(
+                &mut state,
+                CardId(1),
+                controller,
+                "Grizzly Bears".to_string(),
+                Zone::Battlefield,
+            );
+        }
+        let board = rendered(&state, PlayerId(0));
+        assert_eq!(board.matches(note).count(), 1, "{board}");
+        assert!(
+            board.contains(&format!("--- BATTLEFIELD ---\n{note}")),
+            "{board}"
+        );
+        // An empty battlefield has no power or toughness to explain.
+        let empty = rendered(&GameState::new(FormatConfig::standard(), 2, 3), PlayerId(0));
+        assert!(empty.contains("--- BATTLEFIELD ---\n(empty)\n"), "{empty}");
+        assert!(!empty.contains("Power/toughness"), "{empty}");
     }
 
     #[test]

@@ -123,7 +123,7 @@ type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type LearnChoice = Extract<WaitingFor, { type: "LearnChoice" }>;
 type BeholdChoice = Extract<WaitingFor, { type: "BeholdChoice" }>;
 type EmpowerJaceChoice = Extract<WaitingFor, { type: "EmpowerJaceChoice" }>;
-type SpellCopyOrderChoice = Extract<WaitingFor, { type: "SpellCopyOrderChoice" }>;
+type MemberOrderChoice = Extract<WaitingFor, { type: "MemberOrderChoice" }>;
 
 function selectionInteractionId(
   interaction: ViewerInteraction | null,
@@ -299,9 +299,9 @@ export function CardChoiceModal() {
     case "EmpowerJaceChoice":
       if (!canActForWaitingState) return null;
       return <EmpowerJaceChoiceModal data={waitingFor.data} />;
-    case "SpellCopyOrderChoice":
+    case "MemberOrderChoice":
       if (!canActForWaitingState) return null;
-      return <SpellCopyOrderChoiceModal data={waitingFor.data} />;
+      return <MemberOrderChoiceModal data={waitingFor.data} />;
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       if (getBoardChoiceView(waitingFor, objects)) return null;
@@ -1219,16 +1219,22 @@ function EmpowerJaceChoiceModal({ data }: { data: EmpowerJaceChoice["data"] }) {
   );
 }
 
-// CR 405.3 + CR 707.10: the controller of a batch of spell copies picks the
-// spell whose copy goes on the stack next. Display-only: the engine supplies
-// `choices` and enforces legality; clicking a spell dispatches a single-object
+// CR 608.2f + CR 405.3: the controller of an ordered member loop picks which
+// member is processed next — a spell copy, or a per-member instruction whose
+// iterations pause for a payment. Display-only: the engine supplies `choices`
+// and enforces legality; clicking a member dispatches a single-object
 // SelectCards.
-function SpellCopyOrderChoiceModal({ data }: { data: SpellCopyOrderChoice["data"] }) {
+function MemberOrderChoiceModal({ data }: { data: MemberOrderChoice["data"] }) {
   const { t } = useTranslation("game");
+  const copyBatch = data.purpose === "SpellCopies";
   return (
     <SingleObjectPickModal
-      title={t("cardChoice.spellCopyOrder.title")}
-      subtitle={t("cardChoice.spellCopyOrder.subtitle")}
+      title={t(
+        copyBatch ? "cardChoice.spellCopyOrder.title" : "cardChoice.memberOrder.title",
+      )}
+      subtitle={t(
+        copyBatch ? "cardChoice.spellCopyOrder.subtitle" : "cardChoice.memberOrder.subtitle",
+      )}
       choices={data.choices}
     />
   );

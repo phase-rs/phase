@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "Detector de combos (experimental)",
-    "title": "Detectar loops infinitos: encerrar loops obrigatórios automaticamente e mostrar recursos ∞ (desativado por padrão)",
+    "title": "Detectar loops infinitos: encerrar loops obrigatórios automaticamente, oferecer atalhos para loops que um jogador controla e mostrar recursos ∞ (desativado por padrão)",
     "off": "Desligado",
     "interactive": "Interativo"
   },

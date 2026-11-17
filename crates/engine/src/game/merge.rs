@@ -429,7 +429,7 @@ pub(crate) fn install_merge_layer_effect(
 ///
 /// CR 730.3d (replacement propagation): this raw primitive is retained only
 /// for callers that intentionally bypass the zone pipeline. Normal gameplay
-/// instead enters [`move_merged_permanent_for_parent`], which seeds each component
+/// instead enters [`move_merged_permanent_on_leave`], which seeds each component
 /// with the merged event's applied set and lets the shared batch pipeline consult
 /// only still-applicable component replacements. That preserves the rule's
 /// direction that applying a replacement to the merged object applies it to all
@@ -534,30 +534,6 @@ pub fn split_merged_permanent_on_leave(
     // `reset_for_battlefield_exit` during the subsequent `move_to_zone`.
 }
 
-/// Test-only standalone entry; production delivery supplies its parent link to
-/// [`move_merged_permanent_for_parent`].
-#[cfg(test)]
-pub(crate) fn move_merged_permanent_on_leave(
-    state: &mut GameState,
-    merged_id: ObjectId,
-    dest: Zone,
-    library_placement: Option<&LibraryPosition>,
-    applied: &HashSet<AppliedReplacementKey>,
-    events: &mut Vec<GameEvent>,
-) -> BatchMoveResult {
-    move_merged_permanent_for_parent(
-        state,
-        merged_id,
-        dest,
-        library_placement,
-        LibraryShuffleMode::PerObject,
-        applied,
-        None,
-        None,
-        events,
-    )
-}
-
 /// CR 730.3d: "If multiple replacement effects could be applied to the event
 /// of a merged permanent leaving the battlefield or being put into the new
 /// zone, applying one of those replacement effects to the object applies it to
@@ -584,7 +560,32 @@ pub(crate) fn move_merged_permanent_on_leave(
 /// once. Under an ordinary placement the components arrive at that position
 /// as one group, which their owner arranges (CR 730.3a + CR 401.4) through
 /// the staged batch.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
+pub(crate) fn move_merged_permanent_on_leave(
+    state: &mut GameState,
+    merged_id: ObjectId,
+    dest: Zone,
+    library_placement: Option<&LibraryPosition>,
+    library_shuffle: LibraryShuffleMode,
+    applied: &HashSet<AppliedReplacementKey>,
+    performed_by: Option<crate::types::player::PlayerId>,
+    events: &mut Vec<GameEvent>,
+) -> BatchMoveResult {
+    move_merged_permanent_for_parent(
+        state,
+        merged_id,
+        dest,
+        library_placement,
+        library_shuffle,
+        applied,
+        performed_by,
+        None,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // main's placement pair plus the announcing owner link.
 pub(crate) fn move_merged_permanent_for_parent(
     state: &mut GameState,
     merged_id: ObjectId,

@@ -6147,7 +6147,7 @@ fn cult_of_the_waxing_moon_trigger_is_not_put_on_the_stack_for_a_player_who_lost
     let lost: Vec<PlayerId> = events
         .iter()
         .filter_map(|event| match event {
-            engine::types::events::GameEvent::PlayerLost { player_id } => Some(*player_id),
+            engine::types::events::GameEvent::PlayerLost { player_id, .. } => Some(*player_id),
             _ => None,
         })
         .collect();
@@ -7589,7 +7589,7 @@ fn untap_held_trigger_is_pruned_when_its_controller_loses() {
         if life == 0 {
             assert!(events
                 .iter()
-                .any(|e| matches!(e, GameEvent::PlayerLost { player_id: P1 })));
+                .any(|e| matches!(e, GameEvent::PlayerLost { player_id: P1, .. })));
             assert!(runner.state().players[1].is_eliminated);
             assert!(!runner.state().stack.iter().any(|e| e.source_id == imp));
             assert!(runner.state().deferred_triggers.is_empty());
@@ -8611,7 +8611,7 @@ fn upkeep_state_based_loss_queues_no_step_triggers() {
     });
     let lost = events
         .iter()
-        .any(|e| matches!(e, GameEvent::PlayerLost { player_id: P1 }));
+        .any(|e| matches!(e, GameEvent::PlayerLost { player_id: P1, .. }));
     assert!(lost, "reach: P1 lost after the Angel phased out");
     assert!(runner.state().objects[&angel].is_phased_out());
     assert!(matches!(
@@ -10286,7 +10286,8 @@ fn assert_departed_seat_refused(runner: &GameRunner, departed: PlayerId) {
     .is_err());
 }
 
-/// CR 800.4j: both survivors pass, completing the departed player's turn.
+/// CR 800.4j: the departed player's turn continues to its completion, so the survivors pass
+/// priority through each of its remaining steps until the next turn begins.
 fn survivors_pass_to_the_next_turn(
     runner: &mut GameRunner,
     first: PlayerId,
@@ -10301,6 +10302,20 @@ fn survivors_pass_to_the_next_turn(
     );
     engine::game::engine::apply(runner.state_mut(), second, GameAction::PassPriority)
         .expect("second survivor passes");
+    for _ in 0..64 {
+        if runner.state().active_player == next_active {
+            break;
+        }
+        let WaitingFor::Priority { player } = runner.state().waiting_for else {
+            panic!(
+                "only survivors' priority remains in the departed turn; got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert!(player == first || player == second);
+        engine::game::engine::apply(runner.state_mut(), player, GameAction::PassPriority)
+            .expect("a survivor passes");
+    }
     assert_eq!(runner.state().active_player, next_active);
     assert_eq!(
         runner.state().waiting_for,
@@ -10314,7 +10329,9 @@ fn assert_player_lost_once(events: &[GameEvent], player: PlayerId) {
     assert_eq!(
         events
             .iter()
-            .filter(|e| matches!(e, GameEvent::PlayerLost { player_id } if *player_id == player))
+            .filter(
+                |e| matches!(e, GameEvent::PlayerLost { player_id, .. } if *player_id == player)
+            )
             .count(),
         1
     );

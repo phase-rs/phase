@@ -1519,24 +1519,21 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
-    let batch_member_owner = parked_zone_change_delivery.as_ref().and_then(|paused| {
+    // CR 730.3: the batch or ChangeZone owner that parked this member is the
+    // announcing owner of its resumed delivery, so a merged member's component
+    // batch links back to it.
+    let parked_member_owner = parked_zone_change_delivery.as_ref().and_then(|paused| {
         state
-            .active_batch_delivery()
-            .filter(|batch| {
-                batch.paused_current.as_ref().is_some_and(|boundary| {
-                    boundary.captures(paused.member, &paused.expected_event)
-                })
+            .resolution_stack
+            .active_owner_parking(paused.member, &paused.expected_event)
+            .map(|group| crate::game::zone_pipeline::MemberDeliveryOwner {
+                group,
+                member: paused.member,
+                expected_event: Some(paused.expected_event.clone()),
+                population_devour_snapshot: None,
+                approved_post_replacement: None,
+                inherited_arrangements: Vec::new(),
             })
-            .map(
-                |batch| crate::game::zone_pipeline::BatchMemberDeliveryOwner {
-                    group: batch.logical_zone_change_group.logical_group_id,
-                    member: paused.member,
-                    expected_event: Some(paused.expected_event.clone()),
-                    population_devour_snapshot: None,
-                    approved_post_replacement: None,
-                    inherited_arrangements: Vec::new(),
-                },
-            )
     });
     // CR 101.4 + CR 616.1: a staged member's consultation result is retained by
     // the same owner that parked it — never delivered here. The shared helper
@@ -1713,7 +1710,7 @@ fn handle_replacement_choice_inner(
                             drain:
                                 crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
                         },
-                        batch_member_owner,
+                        parked_member_owner,
                         events,
                     );
                     // CR 616.1 + CR 614.1c + CR 400.7: the resumed segment IS the
@@ -1723,11 +1720,10 @@ fn handle_replacement_choice_inner(
                     // same single-authority classifier as the synchronous path, or
                     // a tail park returns early and the batch owner later reaches
                     // `drain_pending_batch_deliveries` with `terminal_completion:
-                    // None` (issue #10431). A pre-move park (merge leave) pushes a
-                    // child batch frame that owns the pause; the member has not
-                    // moved, so its classification is `Remained`, the exact path
-                    // sees only the child, and the occurrence-level walk (gated on
-                    // `Moved`) records nothing for the parent.
+                    // None` (issue #10431). CR 730.3: when a merged member's
+                    // component batch parks, that child has taken its delivered
+                    // events and is the active frame, so neither capture reaches
+                    // the member's owner; the child's handback classifies it.
                     if let Some(paused) = parked_zone_change_delivery.as_ref() {
                         let completion =
                             crate::game::zone_pipeline::zone_move_completion_from_delivery(
@@ -5991,17 +5987,16 @@ mod tests {
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::zone_pipeline::{move_object, ZoneMoveRequest, ZoneMoveResult};
     use crate::game::zones::create_object;
-    use crate::types::ability::LibraryPosition;
     use crate::types::ability::{
-        AbilityKind, ChooseOneOfKind, QuantityExpr, ReplacementDefinition, ReplacementMode,
+        AbilityKind, ChooseOneOfKind, LibraryPosition, QuantityExpr, ReplacementDefinition,
+        ReplacementMode,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
-    use crate::types::proposed_event::AppliedReplacementKey;
-    use crate::types::proposed_event::{ProposedEvent, ReplacementId};
+    use crate::types::proposed_event::{AppliedReplacementKey, ProposedEvent, ReplacementId};
     use crate::types::replacements::ReplacementEvent;
 
     /// Helper: install an Optional replacement on a battlefield object so the
@@ -6221,8 +6216,8 @@ mod tests {
             }]
         );
         assert!(matches!(&pending.proposed, ProposedEvent::ZoneChange {
-            object_id, to: Zone::Library, library_placement: Some(LibraryPosition::Top), ..
-        } if *object_id == placed));
+            object_id, to: Zone::Library, library_placement: Some(placement), ..
+        } if *object_id == placed && **placement == LibraryPosition::Top));
         assert_eq!(state.objects[&placed].zone, Zone::Graveyard);
 
         state.priority_player = PlayerId(0);
@@ -6267,7 +6262,6 @@ mod tests {
         assert!(null.is_null());
         state = serde_json::from_value(wire).expect("decode current explicit-null proposal");
         let pending = state.pending_replacement.as_ref().unwrap();
-        assert_eq!(pending.library_placement, Some(LibraryPosition::Top));
         assert!(matches!(
             &pending.proposed,
             ProposedEvent::ZoneChange {
@@ -6363,7 +6357,6 @@ mod tests {
             depth: 0,
             is_optional: true,
             choice_player: Some(PlayerId(0)),
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -7044,7 +7037,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,

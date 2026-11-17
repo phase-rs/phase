@@ -49,6 +49,7 @@ fn keyed_optional_effect_exposes_and_resolves_remember_choices() {
     );
     ability.optional = true;
     state.push_optional_effect_frame(engine::types::OptionalEffectFrame {
+        parked_poll: None,
         ability: Box::new(ability),
         trigger_event: None,
         trigger_events: Vec::new(),

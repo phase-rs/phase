@@ -126,9 +126,7 @@ pub struct BackFaceData {
     /// diagnostics on the object while displaying the back face's rules text: a
     /// front-clean card looked clean after transforming into a back face the parser
     /// could not fully read, and a front-dirty one kept a diagnostic that no longer
-    /// described anything. `ai_support::shortcut_efficacy` reads the object field as
-    /// evidence that the printed rules text is fully modelled, so the stale answer
-    /// was load-bearing in both directions.
+    /// described anything.
     ///
     /// `serde(default)` keeps every persisted dump loadable — an older
     /// `BackFaceData` simply carries no diagnostics — and `skip_serializing_if`

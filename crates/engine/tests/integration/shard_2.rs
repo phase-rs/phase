@@ -5,6 +5,8 @@
 //! hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
 //! registered in exactly one shard root.
 
+#![recursion_limit = "512"]
+
 pub mod support;
 
 mod a_killer_among_us;
@@ -82,6 +84,7 @@ mod armored_kincaller_or_condition;
 mod ashaya_nontoken_lands;
 mod ashes_of_the_fallen_owner_scope_5864;
 mod ashling_delayed_sacrifice_unless_pay;
+mod ashnods_cylix_exile_the_rest;
 mod aspect_of_wolf_per_axis_xy;
 mod atarkas_command_sequential_mode_after_decline;
 mod athreos_god_of_passage_targeted_opponent_unless_pay;
@@ -174,6 +177,7 @@ mod cait_sith_fortune_teller;
 mod calamity_of_the_titans_reveal_cost;
 mod call_damage_control_modal_return;
 mod call_forth_tempest_and_rootha;
+mod call_to_the_kindred;
 mod canker_abomination_enters_with_counters;
 mod cant_draw_blocks_draw_replacement;
 mod captain_america_first_tap_msh_wave2;
@@ -196,6 +200,7 @@ mod celestial_kirin_cast_spell_mana_value;
 mod celestial_reunion_behold_choose_type;
 mod cellar_door_bottom_card;
 mod cemetery_prowler_shared_card_types;
+mod census_exile_instead_replacement_class;
 mod census_release_batch_1;
 mod chain_of_smog_copy;
 mod chain_root_target_suspension;
@@ -243,6 +248,7 @@ mod combat_hit_bookkeeping_follows_delivery;
 mod combat_target_support;
 mod combined_creature_coverage_honesty;
 mod combustible_gearhulk;
+mod combustion_technique_exile_instead;
 mod come_back_wrong_finality_counter;
 mod comet_stellar_pup;
 mod comeuppance;

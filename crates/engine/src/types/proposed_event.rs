@@ -533,8 +533,11 @@ pub enum ProposedEvent {
         to: Zone,
         /// Final placement carried by this proposal. Explicit null is authoritative;
         /// only save migration may import a missing field from a legacy carrier.
+        /// Boxed: `LibraryPosition` is 96 B and only library moves carry one, so
+        /// inline it would widen every `ProposedEvent` held by `GameState`
+        /// (`game_state_size.rs`).
         #[serde(default)]
-        library_placement: Option<LibraryPosition>,
+        library_placement: Option<Box<LibraryPosition>>,
         cause: Option<ObjectId>,
         /// CR 303.4f: When an Aura enters the battlefield by a non-spell
         /// effect and the effect does not specify what it enchants, the
@@ -1901,7 +1904,7 @@ mod tests {
                 serde_json::to_value(&position).unwrap();
             let decoded: ProposedEvent = serde_json::from_value(positioned.clone()).unwrap();
             assert!(
-                matches!(&decoded, ProposedEvent::ZoneChange { library_placement: Some(actual), .. } if actual == &position)
+                matches!(&decoded, ProposedEvent::ZoneChange { library_placement: Some(actual), .. } if **actual == position)
             );
             assert_eq!(serde_json::to_value(decoded).unwrap(), positioned);
         }

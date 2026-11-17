@@ -9828,8 +9828,7 @@ fn find_applicable_replacements_on_entry_board(
         // begin. Decided only at its first step, so a combat in progress can't be
         // skipped. Skips with the same duration are interchangeable, so one of them
         // stands for all and CR 616.1 has no choice to offer between them. CR 800.4j:
-        // a turn without an active player has no one to choose among these, and it
-        // runs out through `turns::skip_eliminated_active_turn`.
+        // a turn without an active player has no one whose combat phase is skipped.
         if *phase == crate::types::phase::Phase::BeginCombat
             && super::players::is_alive(state, *player_id)
         {
@@ -13535,7 +13534,6 @@ fn park_entry_controller_choice(
         depth,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -13712,7 +13710,6 @@ fn park_as_enters_named_choice(
         depth,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -14043,7 +14040,6 @@ fn park_as_enters_pay_choice(
         depth,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -14636,8 +14632,16 @@ fn replay_pending_replacement(
     if optional {
         state.replacement_auto_choice_tail = None;
     }
+    // CR 616.1: the every-order replay asks each order instead of applying a saved one.
+    if !optional && crate::game::triggers::saved_orders_bypassed() {
+        state.replacement_auto_choice_tail = None;
+        return ReplacementResult::NeedsChoice(player);
+    }
     let had_tail = state.replacement_auto_choice_tail.is_some();
     let key = replacement_auto_choice_key(state);
+    let point = key.as_ref().and_then(|key| {
+        crate::types::game_state::replacement_option_point(key.kind, key.candidates.len())
+    });
     let index = if let Some(tail) = state.replacement_auto_choice_tail.take() {
         match key.as_ref() {
             Some(key)
@@ -14707,11 +14711,12 @@ fn replay_pending_replacement(
     };
     // CR 616.1e + CR 616.1: a replayed answer is still the affected player's choice —
     // whether to apply an optional effect, or which effect applies next.
-    state.record_loop_decision(if optional {
-        crate::game::play_trace::AnswerOptionality::Optional
+    if optional {
+        state
+            .record_remembered_answer(player, crate::game::play_trace::AnswerOptionality::Optional);
     } else {
-        crate::game::play_trace::AnswerOptionality::Mandatory
-    });
+        state.record_point_answer(crate::game::play_trace::AnswerOptionality::Mandatory, point);
+    }
     let result = continue_replacement_impl(state, index, events);
     if !matches!(result, ReplacementResult::Execute(_)) {
         state.replacement_auto_choice_tail = None;
@@ -14833,9 +14838,6 @@ fn pipeline_loop(
                     depth,
                     is_optional: true,
                     choice_player: Some(affected),
-                    // CR 701.24a: set by the W3 library-placement arm after parking
-                    // (the pipeline doesn't know the caller's placement here).
-                    library_placement: None,
                     exile_controller: None,
                     exile_duration: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -14913,8 +14915,6 @@ fn pipeline_loop(
                 depth,
                 is_optional: false,
                 choice_player: None,
-                // CR 701.24a: set by the W3 library-placement arm after parking.
-                library_placement: None,
                 exile_controller: None,
                 exile_duration: None,
                 exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -15712,7 +15712,6 @@ fn continue_replacement_impl(
         let remaining_may_cost = pending.may_cost_remaining.clone();
         let reparked_candidates = pending.candidates.clone();
         let reparked_depth = pending.depth;
-        let reparked_library_placement = pending.library_placement.clone();
         let reparked_sacrifice_provenance = pending.sacrifice_provenance;
         let reparked_choice_player = pending.choice_player;
         // CR 614.12a + CR 616.1: preserve the unanswered delivery boundary
@@ -15858,7 +15857,6 @@ fn continue_replacement_impl(
                     depth: reparked_depth,
                     is_optional: true,
                     choice_player: reparked_choice_player,
-                    library_placement: reparked_library_placement,
                     exile_controller: None,
                     exile_duration: None,
                     exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -16617,7 +16615,6 @@ mod tests {
             depth: 0,
             is_optional: true,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -16784,7 +16781,7 @@ mod tests {
                 1,
                 "accepted shield consumption must record one command"
             );
-            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, count: 1 } if *id == object_id)).count(), 1, "one accepted edit emits one removal event");
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, count: 1, .. } if *id == object_id)).count(), 1, "one accepted edit emits one removal event");
             if !destroy {
                 let removed_at = events.iter().position(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, .. } if *id == object_id)).unwrap();
                 let prevented_at = events
@@ -16874,7 +16871,7 @@ mod tests {
             1,
             "the post-batch shield consumption records one accepted removal"
         );
-        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Shield, count: 1 } if *object_id == shielded)).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Shield, count: 1, .. } if *object_id == shielded)).count(), 1);
     }
 
     /// V14 — `ability_tree_copies_tokens` walks the substitution's OWN tree and
@@ -19828,7 +19825,6 @@ mod tests {
             depth: 0,
             is_optional: true,
             choice_player: Some(PlayerId(0)),
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -19894,7 +19890,6 @@ mod tests {
                 depth: 0,
                 is_optional: true,
                 choice_player: Some(PlayerId(0)),
-                library_placement: None,
                 exile_controller: None,
                 exile_duration: None,
                 exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -19981,7 +19976,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -22533,7 +22527,7 @@ mod tests {
             library_placement, ..
         } = &mut proposed
         {
-            *library_placement = Some(crate::types::ability::LibraryPosition::Top);
+            *library_placement = Some(Box::new(crate::types::ability::LibraryPosition::Top));
         }
         let ReplacementResult::Execute(ProposedEvent::ZoneChange {
             from,
@@ -24469,7 +24463,7 @@ mod tests {
                 library_placement, ..
             } = &mut proposed
             {
-                *library_placement = Some(LibraryPosition::Top);
+                *library_placement = Some(Box::new(LibraryPosition::Top));
             }
             let mut events = Vec::new();
             let ReplacementResult::Execute(ProposedEvent::ZoneChange {
@@ -24513,7 +24507,7 @@ mod tests {
             library_placement, ..
         } = &mut proposed
         {
-            *library_placement = Some(LibraryPosition::Bottom);
+            *library_placement = Some(Box::new(LibraryPosition::Bottom));
         }
         // Synthetic non-Library placement isolates preservation by the modifier;
         // terminal delivery independently ignores placement outside Library.
@@ -24527,7 +24521,7 @@ mod tests {
         else {
             panic!("tap modifier must execute");
         };
-        assert_eq!(library_placement, Some(LibraryPosition::Bottom));
+        assert_eq!(library_placement, Some(Box::new(LibraryPosition::Bottom)));
         assert!(enter_tapped.resolve(false));
         assert!(applied.contains(&AppliedReplacementKey::object(source, 0)));
 
@@ -24542,7 +24536,7 @@ mod tests {
             library_placement, ..
         } = &mut proposed
         {
-            *library_placement = Some(LibraryPosition::Top);
+            *library_placement = Some(Box::new(LibraryPosition::Top));
         }
         assert_eq!(
             replace_event(&mut state, proposed, &mut events),
@@ -24558,7 +24552,7 @@ mod tests {
             panic!("decline must complete consultation");
         };
         assert_eq!(to, Zone::Library);
-        assert_eq!(library_placement, Some(LibraryPosition::Top));
+        assert_eq!(library_placement, Some(Box::new(LibraryPosition::Top)));
         assert_eq!(
             applied,
             HashSet::from([AppliedReplacementKey::object(source, 0)])
@@ -24581,7 +24575,7 @@ mod tests {
                 library_placement, ..
             } = &mut proposed
             {
-                *library_placement = Some(LibraryPosition::Top);
+                *library_placement = Some(Box::new(LibraryPosition::Top));
             }
             let mut events = Vec::new();
             assert_eq!(
@@ -24604,7 +24598,7 @@ mod tests {
             };
             assert_eq!(object_id, commander);
             assert_eq!(to, expected_zone);
-            assert_eq!(library_placement, expected_placement);
+            assert_eq!(library_placement, expected_placement.map(Box::new));
             assert_eq!(
                 applied,
                 HashSet::from([AppliedReplacementKey::object(
@@ -25660,7 +25654,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,

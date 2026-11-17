@@ -5,6 +5,8 @@
 //! also hold modules from this range. `no_top_level_test_binaries` enforces that each file here is
 //! registered in exactly one shard root.
 
+#![recursion_limit = "512"]
+
 pub mod support;
 
 mod reflexive_body_token_referent;
@@ -29,6 +31,7 @@ mod restricted_mana_mv_or_x;
 mod restricted_mana_not_from_zone;
 mod restricted_mana_x_cost_only;
 mod retarget_prompt_softlock;
+mod reveal_hand_trailing_conjunct;
 mod reveal_this_way_single_execution;
 mod reveal_until_routed_damage_count;
 mod reveal_until_simultaneous_kept_delivery;
@@ -68,6 +71,7 @@ mod s07_this_way_conditions;
 mod sacrifice_all_cost;
 mod sacrifice_cost_context_identity;
 mod sacrifice_cost_selection_validation;
+mod sacrifice_subject_declared_player;
 mod sacrificial_mana_choice;
 mod saddle_become_effect;
 mod saddle_state_model;
@@ -113,6 +117,7 @@ mod self_name_of_short_name_rules_words;
 mod sensei_golden_tail_5950;
 mod sentinel_sliver_vigilance_grant;
 mod sephiroth_super_nova_transform_emblem_4359;
+mod septic_rats_defending_player_poisoned;
 mod serpent_society_ward_poison_cost;
 mod serras_emissary_chosen_card_type_protection;
 mod she_hulk_wallbreaker_becomes_blocked_4599;
@@ -124,7 +129,6 @@ mod shielding_plax_bramble_elemental;
 mod shiko_reflexive_copy_draw_1370;
 mod shilgengar_return_each_to_battlefield;
 mod shinryu_chosen_player_loses_game_9768;
-mod shorten_efficacy;
 mod shuffle_that_pile_manifest;
 mod shuffle_them_into_libraries;
 mod shuri_wakandan_inventor_copy_recipient;
@@ -420,6 +424,7 @@ mod where_x_totality_guard;
 mod whisperwood_elemental_face_up_grant;
 mod white_suns_twilight;
 mod who_villainous_choice_scoped_player;
+mod whtz_bibliophile;
 mod wickerfolk_indomitable_composite_gerund_cost;
 mod wilhelt_decayed_intervening_if_5937;
 mod will_cycle_delivery;
@@ -452,6 +457,7 @@ mod you_have_been_caught_stealing_any_damage;
 mod yuna_grand_summoner;
 mod yunas_whistle;
 mod zero_life_mid_cast_payment;
+mod zero_moved_this_way_count;
 mod zhulodok_double_cascade;
 mod zimone_all_questioning;
 mod zone_change_reflexive_this_way;

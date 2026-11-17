@@ -50,7 +50,7 @@ pub use crate::types::mana::ManaSourcePenalty;
 /// This is a read-only projection, not a `ManaUnit`: no pool identity, source
 /// bookkeeping, or spend grants exist until the activation resolves.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LiveManaOutputUnit {
+pub struct LiveManaOutputUnit {
     pub mana_type: ManaType,
     pub restrictions: Vec<ManaRestriction>,
 }
@@ -789,6 +789,60 @@ pub(crate) fn live_mana_output_for_option(
         ));
     }
     output
+}
+
+/// How a mana action's own reducer revalidates its frozen selection.
+type SelectionResolver =
+    fn(&GameState, PlayerId, &ManaSourceSelection) -> Result<ManaSourceOption, EngineError>;
+
+/// CR 106.3 + CR 605.3a: The exact mana a mana action would produce if taken
+/// now, read without mutating game state.
+///
+/// The two public mana actions carry deliberately different selection forms,
+/// so each is resolved through the authority its own reducer uses:
+///
+/// - `TapLandForMana` is minted by `activatable_mana_actions_for_player` from
+///   `ManaSourceOption::semantic_selection`, one *concrete* row per producible
+///   color, and is executed by `handle_tap_land_for_mana` via
+///   `live_land_mana_option_for_selection`.
+/// - `ActivateManaSource` is minted from `activatable_mana_source_selections`,
+///   whose `manual_selection_for_option` intentionally collapses a flexible
+///   source to `Colorless` + `DeferredColorChoice` so the ordinary mana-choice
+///   resolver asks for the color, and is executed by
+///   `activate_mana_source_selection` via `live_mana_source_option_for_selection`.
+///
+/// Resolving one through the other's authority can never match a flexible
+/// source, which silently produced an unlabelled action (issue #6944: City of
+/// Brass), so each action stays paired with its own reducer's resolver.
+///
+/// `None` for any other action; for a stale or no-longer-legal selection,
+/// matching the reducer's own refusal to activate it; and for a deferred color
+/// choice, whose output the post-cost mana-choice resolver decides (CR 106.1a +
+/// CR 106.1b: no type is selected yet).
+pub fn produced_mana_for_action(
+    state: &GameState,
+    action: &GameAction,
+) -> Option<Vec<LiveManaOutputUnit>> {
+    let (selection, resolve) = match action {
+        GameAction::TapLandForMana { selection } => (
+            selection,
+            live_land_mana_option_for_selection as SelectionResolver,
+        ),
+        GameAction::ActivateManaSource { selection } => (
+            selection,
+            live_mana_source_option_for_selection as SelectionResolver,
+        ),
+        _ => return None,
+    };
+    let player = state.objects.get(&selection.source.object_id)?.controller;
+    let option = resolve(state, player, selection).ok()?;
+    if matches!(
+        selection.output,
+        ManaSourceOutput::DeferredColorChoice { .. }
+    ) {
+        return None;
+    }
+    Some(live_mana_output_for_option(state, player, &option))
 }
 
 fn live_base_mana_output(

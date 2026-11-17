@@ -1524,7 +1524,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
@@ -4637,22 +4637,23 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
-            WaitingFor::SpellCopyOrderChoice {
+            WaitingFor::MemberOrderChoice {
                 player, choices, ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            // CR 405.3 + CR 707.10: the chosen spell supplies the batch's next
-            // copy, above the copies already on the stack.
-            let [spell] = chosen.as_slice() else {
+            // CR 608.2f + CR 405.3: the chosen member supplies the loop's next
+            // iteration — the next copy for a spell-copy batch, or the next
+            // per-member instruction.
+            let [member] = chosen.as_slice() else {
                 return Err(EngineError::InvalidAction(format!(
-                    "Choose exactly one spell to copy next, got {}",
+                    "Choose exactly one member to process next, got {}",
                     chosen.len()
                 )));
             };
-            if !choices.contains(spell) || !effects::order_next_spell_copy(state, *spell) {
+            if !choices.contains(member) || !effects::order_next_member(state, *member) {
                 return Err(EngineError::InvalidAction(
-                    "That spell has no copy left to make".to_string(),
+                    "That member has no iteration left to run".to_string(),
                 ));
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
@@ -8174,10 +8175,17 @@ pub(super) fn handle_resolution_choice(
                                 ctx.face_down_in_exile,
                             );
                         let delivery_start = events.len();
+                        let stack_depth_before_zone_move =
+                            state.resolution_stack.capture_child_boundary();
+                        let owner = effects::change_zone::change_zone_member_owner(
+                            logical_zone_change_group.logical_group_id,
+                            anticipated_pause.as_ref(),
+                        );
                         match effects::change_zone::process_one_zone_move_with_terminal(
                             state,
                             &ctx,
                             member,
+                            owner,
                             logical_zone_change_group.announced_members(),
                             events,
                         ) {
@@ -8287,24 +8295,20 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                let paused_current =
+                                    crate::game::zone_pipeline::parked_member_boundary(
+                                        state,
+                                        logical_zone_change_group.logical_group_id,
+                                        anticipated_pause,
+                                        &events[delivery_start..],
+                                    )
+                                    .expect("zone-change pause must retain its exact boundary");
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         library_reorder: None,
                                         pending_return_result_producer,
                                         logical_zone_change_group,
-                                        paused_current: Some(
-                                            state
-                                                .pending_zone_change_delivery_from_replacement()
-                                                .or_else(|| {
-                                                    anticipated_pause.map(|mut boundary| {
-                                                        boundary.append_delivery_events(
-                                                            &events[delivery_start..],
-                                                        );
-                                                        boundary
-                                                    })
-                                                })
-                                                .expect("zone-change pause must retain its exact boundary"),
-                                        ),
+                                        paused_current: Some(paused_current),
                                         remaining: legacy_members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -8339,6 +8343,7 @@ pub(super) fn handle_resolution_choice(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    stack_depth_before_zone_move,
                                 );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
@@ -8714,10 +8719,17 @@ pub(super) fn handle_resolution_choice(
                                 ctx.face_down_in_exile,
                             );
                         let delivery_start = events.len();
+                        let stack_depth_before_zone_move =
+                            state.resolution_stack.capture_child_boundary();
+                        let owner = effects::change_zone::change_zone_member_owner(
+                            logical_zone_change_group.logical_group_id,
+                            anticipated_pause.as_ref(),
+                        );
                         match effects::change_zone::process_one_zone_move_with_terminal(
                             state,
                             &ctx,
                             member,
+                            owner,
                             logical_zone_change_group.announced_members(),
                             events,
                         ) {
@@ -8786,24 +8798,20 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused cost-payment zone move retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                let paused_current =
+                                    crate::game::zone_pipeline::parked_member_boundary(
+                                        state,
+                                        logical_zone_change_group.logical_group_id,
+                                        anticipated_pause,
+                                        &events[delivery_start..],
+                                    )
+                                    .expect("zone-change pause must retain its exact boundary");
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         library_reorder: None,
                                         pending_return_result_producer: None,
                                         logical_zone_change_group,
-                                        paused_current: Some(
-                                            state
-                                                .pending_zone_change_delivery_from_replacement()
-                                                .or_else(|| {
-                                                    anticipated_pause.map(|mut boundary| {
-                                                        boundary.append_delivery_events(
-                                                            &events[delivery_start..],
-                                                        );
-                                                        boundary
-                                                    })
-                                                })
-                                                .expect("zone-change pause must retain its exact boundary"),
-                                        ),
+                                        paused_current: Some(paused_current),
                                         remaining: members[i + 1..].to_vec(),
                                         source_id: ctx.source_id,
                                         controller: ctx.controller,
@@ -8823,6 +8831,7 @@ pub(super) fn handle_resolution_choice(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    stack_depth_before_zone_move,
                                 );
                                 state.waiting_for =
                                     super::replacement::replacement_choice_waiting_for(
@@ -16511,7 +16520,7 @@ mod tests {
         const TEST_MOD: &str = "#[cfg(test)]\nmod tests {";
         // Enrolment floor. Not a list — a non-vacuity guard, so a broken walk or a renamed marker
         // reds instead of passing on an empty population. Raise it when a file joins.
-        const ENROLLED_FLOOR: usize = 8;
+        const ENROLLED_FLOOR: usize = 7;
 
         // `CR 732.2a` has no colon; `std::vec` no digit; `field:1` and `{"Life":1}` have a name or
         // a quote before the colon. A bare back-reference is recognized only after whitespace, a
@@ -16677,6 +16686,7 @@ mod tests {
                 &mut state,
                 vec![request],
                 Some(reorder),
+                None,
                 None,
                 &mut events,
             );

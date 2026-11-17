@@ -827,7 +827,7 @@ fn etrata_three_player_shuffles_into_owner_library() {
     if let Some(loss) = events.iter().position(|event| {
         matches!(
             event,
-            GameEvent::PlayerLost { player_id } | GameEvent::PlayerEliminated { player_id }
+            GameEvent::PlayerLost { player_id, .. } | GameEvent::PlayerEliminated { player_id }
                 if *player_id == P1
         )
     }) {

@@ -1071,6 +1071,26 @@ impl CostPaidObjectSnapshot {
         }
     }
 
+    /// CR 608.2h + CR 400.7: Bind the object a zone-change record describes as
+    /// it last existed in the zone it left: its characteristics are the record's
+    /// last known information, and it is pinned to the incarnation that left
+    /// (the record's source identity), so it never names the new object the
+    /// move created, nor a later one at the same storage id.
+    ///
+    /// Returns a snapshot pinned to [`LEGACY_INCARNATION`] when the record
+    /// carries no source identity, which no live object can match.
+    pub fn from_departure_record(record: &crate::types::game_state::ZoneChangeRecord) -> Self {
+        Self {
+            object_id: record.object_id,
+            lki: crate::game::effects::lki_snapshot_from_zone_change_record(record),
+            incarnation: record
+                .trigger_source_context()
+                .map_or(crate::types::identifiers::LEGACY_INCARNATION, |context| {
+                    context.identity.reference.incarnation
+                }),
+        }
+    }
+
     /// CR 400.7: True when this snapshot still names the live object it was
     /// bound to. False when the referent left and returned (a new object at the
     /// same storage id), when it is gone entirely, or when the record is a
@@ -3674,6 +3694,11 @@ pub struct ResolvedAbility {
     /// [`SiblingCondition`]. See [`SiblingCondition`].
     #[serde(default, skip_serializing_if = "SiblingCondition::is_default")]
     pub sibling_condition: SiblingCondition,
+    /// CR 608.2c: Copied through from the originating `AbilityDefinition`.
+    /// `ListSlot` makes this node continue the instruction its preceding
+    /// sibling began (`zones::within_instruction`). See [`InstructionJoin`].
+    #[serde(default, skip_serializing_if = "InstructionJoin::is_own")]
+    pub instruction_join: InstructionJoin,
     /// CR 700.2b + CR 603.3c: Modal choice for a reflexive modal trigger whose modes
     /// are gated behind an optional cost (Caesar). Carried from the def so
     /// `try_materialize_reflexive_trigger` can hand it to the PendingTrigger and
@@ -3848,6 +3873,7 @@ impl PartialEq for ResolvedAbility {
             target_reads: a_target_reads,
             entry_onset: a_entry_onset,
             sibling_condition: a_sibling_condition,
+            instruction_join: a_instruction_join,
             modal: a_modal,
             mode_abilities: a_mode_abilities,
             parent_target_missing_reason: a_parent_target_missing_reason,
@@ -3929,6 +3955,7 @@ impl PartialEq for ResolvedAbility {
             target_reads: b_target_reads,
             entry_onset: b_entry_onset,
             sibling_condition: b_sibling_condition,
+            instruction_join: b_instruction_join,
             modal: b_modal,
             mode_abilities: b_mode_abilities,
             parent_target_missing_reason: b_parent_target_missing_reason,
@@ -4010,6 +4037,7 @@ impl PartialEq for ResolvedAbility {
             && a_target_reads == b_target_reads
             && a_entry_onset == b_entry_onset
             && a_sibling_condition == b_sibling_condition
+            && a_instruction_join == b_instruction_join
             && a_modal == b_modal
             && a_mode_abilities == b_mode_abilities
             && a_parent_target_missing_reason == b_parent_target_missing_reason
@@ -4535,6 +4563,7 @@ impl ResolvedAbility {
             target_reads: TargetReadOrigin::OwnAnnouncement,
             entry_onset: ContinuousEffectOnset::WhenFollowed,
             sibling_condition: SiblingCondition::Dependent,
+            instruction_join: InstructionJoin::Own,
             source_incarnation: None,
             announced_source_incarnation: None,
             trigger_source: None,

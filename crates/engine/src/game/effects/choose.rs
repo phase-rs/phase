@@ -2020,7 +2020,12 @@ mod tests {
             "P1 must read as phased out after the production call"
         );
 
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(
             state.players[2].is_eliminated,
             "P2 must read as eliminated after the production call"
@@ -2475,7 +2480,7 @@ mod tests {
             iterated_counter_kinds: vec![],
             next_iteration: 1,
             total_iterations: 2,
-            copy_order_fixed: None,
+            order_fixed: None,
         };
         let held = |holder: Option<PlayerChoiceHolder<'_>>| match holder {
             Some(PlayerChoiceHolder::Continuation(chain)) => {
