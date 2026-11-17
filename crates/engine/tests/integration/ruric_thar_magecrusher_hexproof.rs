@@ -3957,13 +3957,13 @@ fn b7_6_earlier_players_gain_precedes_a_later_players_poison() {
     assert_eq!(runner.state().players[2].poison_counters, 3);
 }
 
-/// B7-13 - CR 732.2a: P0 active; a Bear and a Healer's Hawk hit P1 (no
-/// choice), Ruric (infect) hits P2 under the pair, P0 holds Leyline + Boon.
-/// P1's legs apply first (P1 loses 3), then P0's gain is staged ahead of
-/// P2's leg and pauses: the batch already moved a life total, so the
-/// loop-detection ring seeded after the declaration is gone at the prompt.
+/// B7-13 - CR 101.4 + CR 616.1: P0 active; a Bear and a Healer's Hawk hit P1
+/// (no choice), Ruric (infect) hits P2 under the pair, P0 holds Leyline +
+/// Boon. P1's legs apply first (P1 loses 3), then P0's gain is staged ahead of
+/// P2's leg and pauses: the gain is not applied at the prompt, and the batch
+/// still completes after the answers.
 #[test]
-fn b7_13_early_gain_pause_invalidates_the_loop_ring() {
+fn b7_13_early_gain_pause_completes_the_batch() {
     let mut scenario = three_player_scenario();
     let p2 = PlayerId(2);
     let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
@@ -3980,22 +3980,6 @@ fn b7_13_early_gain_pause_invalidates_the_loop_ring() {
             (ruric, AttackTarget::Player(p2)),
         ])
         .expect("attack");
-    let snapshot = runner.state().clone();
-    runner
-        .state_mut()
-        .loop_detect_ring
-        .push_back(std::sync::Arc::new(
-            engine::types::game_state::LoopDetectSample {
-                normalized: snapshot.clone(),
-                live: snapshot,
-                tally: Default::default(),
-                trace_at: None,
-            },
-        ));
-    assert!(
-        !runner.state().loop_detect_ring.is_empty(),
-        "reach-guard: seeded"
-    );
     for _ in 0..30 {
         match runner.state().waiting_for.clone() {
             WaitingFor::Priority { .. } => {
@@ -4013,10 +3997,6 @@ fn b7_13_early_gain_pause_invalidates_the_loop_ring() {
         runner.state().players[0].life,
         20,
         "the gain is not applied yet"
-    );
-    assert!(
-        runner.state().loop_detect_ring.is_empty(),
-        "CR 732.2a: the ring is invalidated at the early-gain pause"
     );
     // The batch still completes: gain 1 -> 2 -> 3, P2 poison 3.
     for _ in 0..8 {

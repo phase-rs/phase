@@ -2336,21 +2336,16 @@ fn complete_combat_phase_c_remnant(
             record.staged_gains.append(&mut accums.staged_gains);
             RemnantOutcome::Complete
         }
-        PhaseCRunOutcome::PausedOnGain { index } => {
-            // CR 732.2a: as `drain_combat_lifelink`'s pause path, against the
-            // same pre-batch snapshot (the guard only ever clears).
-            state.invalidate_loop_ring_on_unobserved_life_move(&record.lives_before);
-            RemnantOutcome::Repaused {
-                remnant: PendingCombatPhaseCRemnant {
-                    remaining: remaining[index..].to_vec(),
-                    lifelink_by_source: accums.lifelink_by_source,
-                    combat_damage_to_players: accums.combat_damage_to_players,
-                    source_incarnations: accums.source_incarnations,
-                    staged_gains: accums.staged_gains,
-                },
-                on_gain: true,
-            }
-        }
+        PhaseCRunOutcome::PausedOnGain { index } => RemnantOutcome::Repaused {
+            remnant: PendingCombatPhaseCRemnant {
+                remaining: remaining[index..].to_vec(),
+                lifelink_by_source: accums.lifelink_by_source,
+                combat_damage_to_players: accums.combat_damage_to_players,
+                source_incarnations: accums.source_incarnations,
+                staged_gains: accums.staged_gains,
+            },
+            on_gain: true,
+        },
         PhaseCRunOutcome::PausedOnReplacement { index } => RemnantOutcome::Repaused {
             remnant: PendingCombatPhaseCRemnant {
                 remaining: remaining[index + 1..].to_vec(),
@@ -2431,13 +2426,6 @@ pub(crate) fn apply_combat_damage(
     sub_step: CombatDamageSubStep,
 ) -> CombatDamageBatch {
     let mut events = Vec::new();
-    // CR 510.2 + CR 732.2a: the pre-batch life totals, so the loop-detection ring can be
-    // invalidated on the DAMAGE EVENT rather than on a `WaitingFor` window that an
-    // unblocked attacker never opens. Snapshotted per batch, not hoisted: first-strike
-    // and regular damage are two separate CR 510.2 events (`:131` / `:188`) and a
-    // double-strike attacker must be caught at the first, not only the second. See
-    // `GameState::invalidate_loop_ring_on_unobserved_life_move`.
-    let lives_before: Vec<i32> = state.players.iter().map(|p| p.life).collect();
 
     // --- Phase A: Collect proposed damage events (CR 510.2) ---
     // Gated assignments (0-damage, protection, prohibition) contribute nothing
@@ -2513,7 +2501,6 @@ pub(crate) fn apply_combat_damage(
         batch_events: events,
         damage_to_players: Vec::new(),
         prevention_tally: Vec::new(),
-        lives_before,
         sub_step,
         replacement: None,
         phase_c_remnant: None,
@@ -2686,14 +2673,7 @@ fn apply_combat_damage_survivors(
     let park = match run_phase_c_legs(state, &mut legs, &mut accums, &mut record.batch_events) {
         PhaseCRunOutcome::Complete => None,
         PhaseCRunOutcome::PausedOnReplacement { index } => Some((index + 1, false)),
-        PhaseCRunOutcome::PausedOnGain { index } => {
-            // CR 732.2a: an earlier leg can already have moved a life total
-            // before the staged gain paused; invalidate now, as
-            // `drain_combat_lifelink`'s pause path does, against the same
-            // pre-batch snapshot.
-            state.invalidate_loop_ring_on_unobserved_life_move(&record.lives_before);
-            Some((index, true))
-        }
+        PhaseCRunOutcome::PausedOnGain { index } => Some((index, true)),
     };
     if let Some((park_from, on_gain)) = park {
         // CR 510.2 + CR 616.1: a leg's result (or a gain staged ahead of a
@@ -2727,8 +2707,8 @@ fn apply_combat_damage_survivors(
     );
 
     // CR 616.1 + CR 702.15e: each surviving source's lifelink gain is its own
-    // event. The whole tail — gains, the per-player aggregate, Phase D's
-    // prevention riders, and the CR 732.2a ring guard — lives in the drain, in
+    // event. The whole tail — gains, the per-player aggregate, and Phase D's
+    // prevention riders — lives in the drain, in
     // the order it has always been emitted, so a CR 616.1 pause can suspend it
     // without reordering it.
     record.remaining = planned_gain_queue(state, accums.lifelink_by_source);
@@ -2738,12 +2718,12 @@ fn apply_combat_damage_survivors(
     drain_combat_lifelink(state, record)
 }
 
-/// CR 616.1 + CR 702.15e + CR 615.5 + CR 732.2a + CR 101.4: finish one
+/// CR 616.1 + CR 702.15e + CR 615.5 + CR 101.4: finish one
 /// simultaneous combat-damage batch — stage each remaining lifelink source's
 /// life gain as its own event, then settle every staged gain of the batch
 /// together (CR 101.4: once all choices are made, the actions happen
 /// simultaneously), emit the per-player damage aggregate, fire Phase D's
-/// prevention riders, and close the CR 732.2a window.
+/// prevention riders.
 ///
 /// The gain is staged through `effects::life::stage_life_gain`, the sibling of
 /// the replacement-routed life-change authority. When two or more
@@ -2769,12 +2749,6 @@ fn drain_combat_lifelink(
             record.awaiting_staged_gain = true;
             let waiting_for = state.waiting_for.clone();
             let events = record.batch_events.clone();
-            // CR 732.2a: the batch has already moved life (CR 120.3a damage;
-            // earlier gains are staged and not yet written). Invalidate now as well as at
-            // completion, against the SAME pre-batch snapshot, so the ring is
-            // not stale for the duration of an arbitrarily long player pause.
-            // The guard only ever CLEARS, so the paired calls are idempotent.
-            state.invalidate_loop_ring_on_unobserved_life_move(&record.lives_before);
             state.pending_combat_lifelink = Some(Box::new(record));
             return CombatDamageBatch::Paused {
                 events,
@@ -2813,20 +2787,6 @@ fn drain_combat_lifelink(
     // the last gain, so no rider continuation can ever run while a CR 616.1
     // prompt is open, and after nothing else can stamp `last_effect_count`.
     fire_combat_prevention_riders(state, &record.prevention_tally, &mut record.batch_events);
-    // CR 510.2 + CR 732.2a: the simultaneous batch is the EVENT the loop-ring life
-    // prohibition keys on, and this is the last statement that can move life in it.
-    // The batch moves life in three places and only a call here sees all three:
-    // Phase C's `apply_damage_after_replacement` (CR 120.3a), the per-source
-    // lifelink gains above, and a prevention rider's `runtime_execute` (CR 615.5).
-    // `lives_before` is the PRE-BATCH snapshot carried in the record. On a resume
-    // this window arithmetically spans the paused source's own gain, which
-    // settles in the loop above after the drain is re-entered — but that
-    // span has no observable consequence: `apply()` has already cleared
-    // `loop_detect_ring` on the answering `ChooseReplacement`, which sits in
-    // neither its action exemption list nor `WaitingFor::is_forced_cascade_window`.
-    // MEASURED, not inferred. The load-bearing call is the PAUSE-path one above,
-    // reached under the exempt `PassPriority`.
-    state.invalidate_loop_ring_on_unobserved_life_move(&record.lives_before);
     CombatDamageBatch::Complete(record.batch_events)
 }
 
@@ -3156,7 +3116,6 @@ mod tests {
             batch_events: Vec::new(),
             damage_to_players: Vec::new(),
             prevention_tally: Vec::new(),
-            lives_before: vec![20, 20],
             sub_step: CombatDamageSubStep::Regular,
             replacement: None,
             phase_c_remnant: remnant.then(|| PendingCombatPhaseCRemnant {
