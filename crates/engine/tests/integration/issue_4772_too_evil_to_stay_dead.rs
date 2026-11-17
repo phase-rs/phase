@@ -91,7 +91,7 @@ fn drive_cast_declining_teamwork(runner: &mut GameRunner, target: ObjectId) {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: false })
+                    .act(GameAction::DecideOptionalCost { index: 1 })
                     .expect("declining teamwork must be accepted");
             }
             WaitingFor::TargetSelection { .. } => {
@@ -115,7 +115,7 @@ fn drive_cast_paying_teamwork(runner: &mut GameRunner, tapper: ObjectId, target:
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("paying teamwork must be accepted");
             }
             WaitingFor::PayCost {
@@ -325,7 +325,7 @@ fn too_evil_no_teamwork_narrow_filter_excludes_high_mv() {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: false })
+                    .act(GameAction::DecideOptionalCost { index: 1 })
                     .expect("declining teamwork must be accepted");
             }
             WaitingFor::TargetSelection {
@@ -406,7 +406,7 @@ fn too_evil_paying_teamwork_broad_filter_includes_high_mv() {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("paying teamwork must be accepted");
             }
             WaitingFor::PayCost {

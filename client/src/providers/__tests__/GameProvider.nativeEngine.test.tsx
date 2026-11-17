@@ -4,6 +4,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import type { PhaseSocketTransport } from "../../services/openPhaseSocket";
 import { gameStateFactory } from "../../test/factories/gameStateFactory";
+import { detectAndParseDeck } from "../../services/deckParser";
+import type { ArtChainEntry, CardArtOverride } from "../../stores/preferencesStore";
+import type { PrintingEntry } from "../../services/scryfall";
+import type { SubmissionDeck } from "../../services/deckSubmission";
+import type * as Scryfall from "../../services/scryfall";
+import type { DraftMatchLaunch } from "../../network/draftProtocol";
+
+const artIo = vi.hoisted(() => ({ face: vi.fn(), printings: vi.fn(), bounds: vi.fn(), activeDeck: vi.fn() }));
+vi.mock("../../services/scryfall", async (original) => ({
+  ...await original<typeof Scryfall>(),
+  getCardPrintings: artIo.printings,
+}));
 
 type NativeAdapterEvent =
   | { type: "reconnectFailed" }
@@ -16,7 +28,11 @@ type NativeAdapterEvent =
   // Non-terminal: the server refused a fire-and-forget request. Listed here
   // alongside the two terminal events precisely because `handleNativeEvent`
   // must treat it differently from both.
-  | { type: "requestRejected"; reason: string };
+  | { type: "requestRejected"; reason: string }
+  // Terminal events from the native engine (mirrors WsAdapterEvent)
+  | { type: "terminalDelivery"; delivery: { key: { game_code: string; generation: number }; terminalRevision: number; deliveryId: string; credential: string; display: { winner: number | null; reason: string }; finalView?: unknown } }
+  | { type: "gameOver"; winner: number | null; reason: string }
+  | { type: "terminalUnavailable"; message: string };
 
 const {
   NativeEngineVersionMismatchError,
@@ -52,6 +68,8 @@ const {
   const nativeAdapterInitialize = vi.fn<() => Promise<void>>();
   const fetchAvatarArtUrl = vi.fn<() => Promise<string | null>>();
   const preferences = {
+    artChain: [] as ArtChainEntry[],
+    artOverrides: {} as Record<string, CardArtOverride>,
     aiArchetypeFilter: "Any",
     aiBracketFilter: [] as CommanderBracket[],
     aiCoverageFloor: 0,
@@ -69,12 +87,17 @@ const {
     private listener: ((event: NativeAdapterEvent) => void) | null = null;
     readonly nativeAiOptions:
       | {
-          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[] } }>;
+          aiSeats: Array<{
+            difficulty: string;
+            deck: { main_deck: string[]; bracket_tier?: string | null; combo_declaration?: unknown };
+          }>;
           formatConfig?: { starting_life: number };
         }
       | undefined;
     readonly nativePregameOptions: NativePregameReconnect | undefined;
     dispose = vi.fn();
+    tryReconnect = vi.fn(() => true);
+    readonly deck: unknown;
     onEvent = vi.fn((listener: (event: NativeAdapterEvent) => void) => {
       this.listener = listener;
       return () => {
@@ -92,12 +115,16 @@ const {
       _displayName?: string,
       options?: {
         nativeAi?: {
-          aiSeats: Array<{ difficulty: string; deck: { main_deck: string[] } }>;
+          aiSeats: Array<{
+            difficulty: string;
+            deck: { main_deck: string[]; bracket_tier?: string | null; combo_declaration?: unknown };
+          }>;
           formatConfig?: { starting_life: number };
         };
         nativePregame?: NativePregameReconnect;
       },
     ) {
+      this.deck = _deck;
       this.nativeAiOptions = options?.nativeAi;
       this.nativePregameOptions = options?.nativePregame;
       nativeAdapters.push(this);
@@ -129,6 +156,8 @@ const {
     cardDbLoaded = true;
     initialize = vi.fn(async () => {});
     resetGameState = vi.fn();
+    getCardFaceData = artIo.face;
+    checkDeckPrintingsBounds = artIo.bounds;
   }
   const wasmAdapters: InstanceType<typeof WasmAdapter>[] = [];
   const getSharedAdapter = vi.fn(() => {
@@ -141,6 +170,7 @@ const {
     adapter: null as unknown,
     gameId: null as string | null,
     gameState: null,
+    waitingFor: null as unknown,
     initGame: vi.fn(async (gameId: string, adapter: { initialize: () => Promise<void> }, ..._payload: unknown[]) => {
       gameStoreState.gameId = gameId;
       gameStoreState.adapter = adapter;
@@ -179,7 +209,7 @@ const {
     showToast: vi.fn(),
   };
   const multiplayerGetState = vi.fn(() => multiplayerState);
-  const multiplayerDraftGetState = vi.fn(() => ({ matchPairing: null }));
+  const multiplayerDraftGetState = vi.fn<() => { matchPairing: DraftMatchLaunch | null }>(() => ({ matchPairing: null }));
 
   return {
     NativeEngineVersionMismatchError,
@@ -221,7 +251,7 @@ vi.mock("../../adapter/wasm-adapter", () => ({
 }));
 
 vi.mock("../../services/nativeEngine", () => ({
-  canAttemptNativeEngine: () => true,
+  canAttemptNativeEngine: (enabled: boolean) => enabled,
   ensureNativeEngine,
   nativeEngineKeyForCurrentOrigin: () => ({ release: { version: "0.0.0-test" } }),
 }));
@@ -254,39 +284,19 @@ vi.mock("../../constants/storage", async (importOriginal) => ({
   ...await importOriginal<typeof import("../../constants/storage")>(),
   ACTIVE_DECK_KEY: "active-deck",
   isRandomDeckSelection: () => false,
-  loadActiveDeck: () => ({ main: ["Island"], sideboard: [] }),
+  loadActiveDeck: () => artIo.activeDeck(),
   loadSavedDeckBracket: () => null,
 }));
 
-vi.mock("../../services/aiDeckCatalog", () => ({
+vi.mock("../../services/aiDeckCatalog", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/aiDeckCatalog")>(),
   buildLegalAiDeckCatalog: vi.fn(async () => ({
-    candidates: [{ id: "ai-deck", deck: { main: ["Mountain"], sideboard: [] }, bracket: null }],
+    candidates: [{ id: "ai-deck", deck: { main: [{ count: 1, name: "Mountain" }], sideboard: [] }, bracket: null }],
   })),
 }));
 
 vi.mock("../../services/randomDeckSelection", () => ({
   pickRandomDeckCandidate: (candidates: unknown[]) => candidates[0],
-}));
-
-vi.mock("../../services/deckParser", () => ({
-  expandParsedDeck: (deck: {
-    main: Array<string | { count: number; name: string }>;
-    sideboard: Array<string | { count: number; name: string }>;
-  }) => ({
-    main_deck: deck.main.map((entry) => (typeof entry === "string" ? entry : entry.name)),
-    sideboard: deck.sideboard.map((entry) => (typeof entry === "string" ? entry : entry.name)),
-    commander: [],
-    planar_deck: [],
-    scheme_deck: [],
-    signature_spell: [],
-    companion: [],
-    sticker_sheets: [],
-  }),
-}));
-
-vi.mock("../../data/formatRegistry", async (importOriginal) => ({
-  ...await importOriginal<typeof import("../../data/formatRegistry")>(),
-  formatSuppliesDeck: () => false,
 }));
 
 vi.mock("../../stores/preferencesStore", () => {
@@ -349,6 +359,12 @@ vi.mock("../../services/quickDraftPersistence", () => ({
   inspectActiveQuickDraftLifecycle,
 }));
 
+// Routing tests resume a live seat. The terminal recovery a resume runs first
+// is exercised end to end in GameProvider.nativeTerminalRecovery.test.tsx.
+vi.mock("../../services/fullTerminalRecovery", () => ({
+  recoverFullTerminal: vi.fn(async () => "reconnect"),
+}));
+
 vi.mock("../../services/serverDetection", () => ({
   detectServerUrl: vi.fn(async () => "ws://test-server"),
 }));
@@ -366,6 +382,30 @@ import { processRemoteUpdate } from "../../game/dispatch";
 
 const UNAVAILABLE = "This draft run is unavailable. End Run to draft again.";
 
+const ART_CATALOG: PrintingEntry[] = ["aaa", "bbb", "ccc"].map((set, index) => ({
+  id: set, set, set_name: set, collector_number: `00${index + 1}`, released_at: `200${index}-01-01`,
+  border_color: "black", frame_effects: [], full_art: false, faces: [],
+}));
+function artPin(set: string): CardArtOverride {
+  return { scryfallId: set, setCode: set, collectorNumber: "ignored" };
+}
+function artRow(name: string, set: string, count = 1) {
+  return { section: "main_deck", name, count, printing: {
+    set_code: set, collector_number: `00${["aaa", "bbb", "ccc"].indexOf(set) + 1}`,
+  } };
+}
+type ArtPayload = { player: SubmissionDeck; opponent: SubmissionDeck; ai_decks: SubmissionDeck[]; ai_difficulties?: string[] };
+function submittedLocal(call = 0): ArtPayload {
+  return gameStoreState.initGame.mock.calls[call][2] as ArtPayload;
+}
+function holdArt() {
+  // This checkout targets ES2021, before Promise.withResolvers.
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  artIo.printings.mockImplementation(async () => { await pending; return ART_CATALOG; });
+  return release;
+}
+
 function aiCandidate(id: string, main: string[], bracket: CommanderBracket | null): AiDeckCandidate {
   return {
     id,
@@ -375,6 +415,8 @@ function aiCandidate(id: string, main: string[], bracket: CommanderBracket | nul
     coveragePct: 100,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
+    comboDeclaration: { kind: "undeclared" },
   };
 }
 
@@ -387,6 +429,7 @@ const COMMANDER_FORMAT_CONFIG: FormatConfig = {
   singleton: true,
   command_zone: true,
   commander_damage_threshold: 21,
+  poison_counter_threshold: 10,
   range_of_influence: null,
   team_based: false,
   sideboard_policy: { type: "Forbidden" },
@@ -395,9 +438,14 @@ const COMMANDER_FORMAT_CONFIG: FormatConfig = {
   allow_debug_actions: false,
 };
 
-function publishedPayload(playerDeck = ["Player"], opponentDeck = ["Opponent"], pool?: string[] | null) {
+function publishedPayload(
+  playerDeck = ["Player"], opponentDeck = ["Opponent"], pool?: string[] | null, companion?: string[],
+) {
   return {
-    player: { main_deck: playerDeck, sideboard: [], commander: [] },
+    player: {
+      main_deck: playerDeck, sideboard: [], commander: [],
+      ...(companion === undefined ? {} : { companion }),
+    },
     opponent: { main_deck: opponentDeck, sideboard: [], commander: [] },
     ai_decks: [],
     ...(pool === undefined ? {} : { booster_pack_pool: pool }),
@@ -406,12 +454,13 @@ function publishedPayload(playerDeck = ["Player"], opponentDeck = ["Opponent"], 
 
 function seedSoloRun(draftId: string, gameId: string, options: {
   playerDeck?: string[]; opponentDeck?: string[]; pool?: string[] | null;
-  setCode?: string; phase?: string; currentGameId?: string;
+  setCode?: string; phase?: string; currentGameId?: string; companion?: string;
 } = {}) {
   const playerDeck = options.playerDeck ?? ["Player"];
   const opponentDeck = options.opponentDeck ?? ["Opponent"];
   const run = {
     format: "run", results: [], usedBotSeats: [1], playerDeck, opponentDeck,
+    ...(options.companion === undefined ? {} : { companion: options.companion }),
     ...(options.pool === undefined ? {} : { booster_pack_pool: options.pool }),
     activeMatch: { draftId, gameId, format: "run", resultCountAtLaunch: 0, botSeat: 1, opponentDeck },
   };
@@ -426,11 +475,19 @@ function seedSoloRun(draftId: string, gameId: string, options: {
 describe("GameProvider native AI routing", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    preferences.artChain = [];
+    preferences.artOverrides = {};
+    preferences.nativeEngineEnabled = true;
+    artIo.face.mockReset().mockImplementation(async (name: string) => ({ scryfall_oracle_id: name }));
+    artIo.printings.mockReset().mockResolvedValue(ART_CATALOG);
+    artIo.bounds.mockReset().mockResolvedValue(undefined);
+    artIo.activeDeck.mockReset().mockReturnValue(detectAndParseDeck("1 Island"));
     clearGameStrict.mockResolvedValue(undefined);
     loadGameStrict.mockReset();
     loadGameStrict.mockResolvedValue(null);
     vi.mocked(loadGame).mockReset();
     vi.mocked(loadGame).mockResolvedValue(null);
+    gameStoreState.resumeGame.mockReset();
     sessionStorage.clear();
     loadDraftRun.mockReset();
     loadDraftRun.mockResolvedValue(null);
@@ -446,6 +503,7 @@ describe("GameProvider native AI routing", () => {
     loadActiveGame.mockReturnValue(null);
     gameStoreState.resumeNativeSolo.mockClear();
     gameStoreState.initGame.mockClear();
+    gameStoreState.waitingFor = null;
     nativeAdapters.splice(0);
     wasmAdapters.splice(0);
     multiplayerDraftGetState.mockReset();
@@ -473,6 +531,207 @@ describe("GameProvider native AI routing", () => {
     gameStoreState.adapter = null;
     gameStoreState.gameId = null;
     gameStoreState.gameState = null;
+  });
+
+  it.each(["local", "native", "fallback"] as const)("V4 %s binds imported player and configured AI once", async (route) => {
+    preferences.nativeEngineEnabled = route !== "local";
+    artIo.activeDeck.mockReturnValue(detectAndParseDeck("2 Island (AAA) 001"));
+    const candidate = { ...aiCandidate("ai-deck", ["Mountain"], 3), deck: detectAndParseDeck("1 Mountain (BBB) 002") };
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({ candidates: [candidate], allCandidates: [candidate] });
+    preferences.aiSeats = [{ difficulty: "Hard", deckId: "ai-deck" }, { difficulty: "Easy", deckId: "ai-deck" }];
+    preferences.artOverrides = { Mountain: artPin("ccc") };
+    const release = holdArt();
+    if (route === "fallback") nativeAdapterInitialize.mockImplementationOnce(async () => {
+      preferences.artOverrides = { Island: artPin("bbb"), Mountain: artPin("bbb") };
+      throw new Error("native unavailable after preparation");
+    });
+    render(<GameProvider gameId="art-batch" mode="ai" playerCount={3}><div /></GameProvider>);
+    await waitFor(() => expect(artIo.printings).toHaveBeenCalledTimes(3));
+    preferences.artOverrides = { Island: artPin("bbb"), Mountain: artPin("bbb") };
+    await act(async () => { release(); });
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledTimes(route === "fallback" ? 2 : 1));
+    const payload = route === "local" ? submittedLocal() : {
+      player: nativeAdapters[0].deck as SubmissionDeck,
+      opponent: nativeAdapters[0].nativeAiOptions!.aiSeats[0].deck as SubmissionDeck,
+      ai_decks: [nativeAdapters[0].nativeAiOptions!.aiSeats[1].deck as SubmissionDeck],
+    };
+    expect(payload.player.printings).toEqual([artRow("Island", "aaa", 2)]);
+    expect(payload.opponent.printings).toEqual([artRow("Mountain", "ccc")]);
+    expect(payload.ai_decks[0].printings).toEqual([artRow("Mountain", "ccc")]);
+    expect(payload.opponent).toMatchObject({ bracket_tier: "upgraded" });
+    if (route === "local") expect(submittedLocal().ai_difficulties).toEqual(["Hard", "Easy"]);
+    else expect(nativeAdapters[0].nativeAiOptions!.aiSeats.map((seat) => seat.difficulty)).toEqual(["Hard", "Easy"]);
+    if (route === "fallback") {
+      expect(submittedLocal(1).player).toBe(payload.player);
+      expect(submittedLocal(1).opponent).toBe(payload.opponent);
+      expect(submittedLocal(1).ai_decks[0]).toBe(payload.ai_decks[0]);
+      expect(buildLegalAiDeckCatalog).toHaveBeenCalledOnce();
+      expect(artIo.printings).toHaveBeenCalledTimes(3);
+    }
+  });
+
+  it("V4 WS fresh join binds its import before held preferences change", async () => {
+    artIo.activeDeck.mockReturnValue(detectAndParseDeck("2 Island (AAA) 001"));
+    const release = holdArt();
+    render(<GameProvider gameId="ws-art" mode="online" joinCode="ABC"><div /></GameProvider>);
+    await waitFor(() => expect(artIo.printings).toHaveBeenCalledOnce());
+    preferences.artOverrides = { Island: artPin("bbb") };
+    await act(async () => { release(); });
+    await waitFor(() => expect(nativeAdapters).toHaveLength(1));
+    expect((nativeAdapters[0].deck as SubmissionDeck).printings).toEqual([artRow("Island", "aaa", 2)]);
+  });
+
+  it("F3 WS keeps names, printing and bracket from one active deck", async () => {
+    artIo.activeDeck.mockReturnValue(detectAndParseDeck("2 Island (AAA) 001"));
+    localStorage.setItem("phase-deck:A", JSON.stringify({ bracket: 2 }));
+    localStorage.setItem("phase-deck:B", JSON.stringify({ bracket: 4 }));
+    localStorage.setItem("phase-active-deck", "A");
+    const release = holdArt();
+    const first = render(<GameProvider gameId="ws-bracket-A" mode="online" joinCode="ABC"><div /></GameProvider>);
+    await waitFor(() => expect(artIo.printings).toHaveBeenCalledOnce());
+    artIo.activeDeck.mockReturnValue(detectAndParseDeck("1 Mountain (BBB) 002"));
+    localStorage.setItem("phase-active-deck", "B");
+    await act(async () => { release(); });
+    await waitFor(() => expect(nativeAdapters).toHaveLength(1));
+    expect(nativeAdapters[0].deck).toMatchObject({
+      main_deck: ["Island", "Island"], bracket_tier: "core", printings: [artRow("Island", "aaa", 2)],
+    });
+    first.unmount();
+    render(<GameProvider gameId="ws-bracket-B" mode="online" joinCode="ABC"><div /></GameProvider>);
+    await waitFor(() => expect(nativeAdapters).toHaveLength(2));
+    expect(nativeAdapters[1].deck).toMatchObject({
+      main_deck: ["Mountain"], bracket_tier: "optimized", printings: [artRow("Mountain", "bbb")],
+    });
+    localStorage.removeItem("phase-active-deck");
+    localStorage.removeItem("phase-deck:A");
+    localStorage.removeItem("phase-deck:B");
+  });
+
+  it.each(["supplied", "spectator"] as const)("V4 WS %s carries no owner selection", async (route) => {
+    artIo.activeDeck.mockReturnValue(detectAndParseDeck("2 Island (AAA) 001"));
+    render(<GameProvider gameId="ws-empty" mode={route === "spectator" ? "spectate" : "online"} joinCode="ABC"
+      formatConfig={route === "supplied" ? { ...COMMANDER_FORMAT_CONFIG, format: "Dandan" } : undefined}><div /></GameProvider>);
+    await waitFor(() => expect(nativeAdapters).toHaveLength(1));
+    expect(nativeAdapters[0].deck).toMatchObject({ main_deck: [], sideboard: [] });
+    expect(artIo.face).not.toHaveBeenCalled();
+  });
+
+  it.each(["ordinary", "failed-restore", "native", "WS", "quick-session", "exact-stage"] as const)(
+    "V4b %s preparation has a live handover and an unmount fence", async (family) => {
+      preferences.nativeEngineEnabled = family === "native";
+      preferences.artChain = [{ type: "oldest" }];
+      const mount = () => {
+        if (family === "failed-restore") {
+          vi.mocked(loadGame).mockResolvedValueOnce({ players: [{}, {}] } as never);
+          gameStoreState.resumeGame.mockRejectedValueOnce(new Error("incompatible save"));
+        }
+        if (family === "quick-session" || family === "exact-stage") {
+          seedSoloRun("run", "art-fence");
+          if (family === "quick-session") sessionStorage.setItem("phase:draft-deck:art-fence", JSON.stringify(publishedPayload()));
+        }
+        return render(<GameProvider gameId="art-fence" mode={family === "WS" ? "online" : "ai"}
+          joinCode={family === "WS" ? "ABC" : undefined}
+          source={family === "quick-session" || family === "exact-stage" ? "draft" : undefined}
+          draftId={family === "quick-session" || family === "exact-stage" ? "run" : undefined}><div /></GameProvider>);
+      };
+      for (const cancel of [false, true]) {
+        gameStoreState.initGame.mockClear();
+        nativeAdapters.splice(0);
+        artIo.printings.mockClear();
+        let release = holdArt();
+        if (family === "native") {
+          artIo.printings.mockResolvedValue(ART_CATALOG);
+          ensureNativeEngine.mockClear();
+          ensureNativeEngine.mockImplementationOnce(() => new Promise((resolve) => {
+            release = () => resolve({ port: 9375 });
+          }));
+        }
+        const mounted = mount();
+        await waitFor(() => expect(family === "native" ? ensureNativeEngine : artIo.printings).toHaveBeenCalled());
+        if (cancel) mounted.unmount();
+        await act(async () => { release(); });
+        if (cancel) {
+          expect(gameStoreState.initGame).not.toHaveBeenCalled();
+          expect(nativeAdapters).toHaveLength(0);
+        } else {
+          await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+          mounted.unmount();
+        }
+        gameStoreState.adapter = null;
+        gameStoreState.gameId = null;
+      }
+    },
+  );
+
+  it.each(["quick-session", "exact-stage", "Commander"] as const)(
+    "V5 %s decorates only consumed memory and retries with a fresh snapshot", async (family) => {
+      preferences.artChain = [{ type: "oldest" }];
+      const payload = { ...publishedPayload(), ai_decks: family === "Commander" ? Array.from({ length: 5 }, () => ({ main_deck: ["Extra"], sideboard: [], commander: [] })) : [],
+        ...(family === "Commander" ? { draft_set_codes: ["TST"], booster_pack_pool: ["Cube", "Cube"] } : {}) };
+      const raw = JSON.stringify(payload);
+      const run = seedSoloRun("run", "art-handoff");
+      const runBefore = JSON.stringify(run);
+      multiplayerDraftGetState.mockReturnValue({ matchPairing: {
+        type: "Bot", matchId: "art-handoff", round: 1, localSeat: 0, botSeat: 1, botName: "Opponent",
+        deckPayload: structuredClone(payload), matchConfig: { match_type: "Bo1" },
+        binding: { podId: "pod", matchId: "art-handoff", round: 1, sessionKey: "session",
+          lease: "lease", nonce: "nonce", revision: 1, matchAuthoritySeat: 0 },
+      } });
+      const pairingBefore = JSON.stringify(multiplayerDraftGetState());
+      const key = "phase:draft-deck:art-handoff";
+      if (family !== "exact-stage") sessionStorage.setItem(key, raw);
+      preferences.artChain = [{ type: "set", setCode: "bbb", label: "B" }];
+      const release = holdArt();
+      gameStoreState.initGame.mockRejectedValueOnce(new Error("retry handoff"));
+      const mount = () => render(<GameProvider gameId="art-handoff" mode="ai"
+        source={family === "Commander" ? "multiplayer" : "draft"}
+        draftId={family === "Commander" ? undefined : "run"} playerCount={family === "Commander" ? 7 : 2}><div /></GameProvider>);
+      const first = mount();
+      await waitFor(() => expect(artIo.printings).toHaveBeenCalled());
+      preferences.artChain = [{ type: "set", setCode: "ccc", label: "C" }];
+      await act(async () => { release(); });
+      await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+      expect(submittedLocal().player.printings).toEqual([artRow("Player", "bbb")]);
+      expect(submittedLocal().opponent.printings).toEqual([artRow("Opponent", "bbb")]);
+      for (const deck of submittedLocal().ai_decks) expect(deck.printings).toEqual([artRow("Extra", "bbb")]);
+      expect(submittedLocal().ai_decks).toHaveLength(family === "Commander" ? 5 : 0);
+      expect(sessionStorage.getItem(key)).toBe(family === "exact-stage" ? null : raw);
+      expect(JSON.stringify(run)).toBe(runBefore);
+      expect(JSON.stringify(multiplayerDraftGetState())).toBe(pairingBefore);
+      first.unmount();
+      gameStoreState.adapter = null;
+      gameStoreState.gameId = null;
+      mount();
+      await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledTimes(2));
+      expect(submittedLocal(1).player.printings).toEqual([artRow("Player", "ccc")]);
+      expect(submittedLocal(1).opponent.printings).toEqual([artRow("Opponent", "ccc")]);
+      for (const deck of submittedLocal(1).ai_decks) expect(deck.printings).toEqual([artRow("Extra", "ccc")]);
+      if (family === "Commander") expect(submittedLocal(1)).toMatchObject({ draft_set_codes: ["TST"], booster_pack_pool: ["Cube", "Cube"] });
+      expect(gameStoreState.initGame.mock.calls[1][7]).toBe(family === "Commander" ? "best-effort" : "strict");
+    },
+  );
+
+  it("V5 rejects invalid publication before art, restores without selection, and admits its valid sibling", async () => {
+    preferences.artChain = [{ type: "oldest" }];
+    seedSoloRun("run", "art-authority");
+    const key = "phase:draft-deck:art-authority";
+    sessionStorage.setItem(key, JSON.stringify({ ...publishedPayload(), printings: [] }));
+    const onNoDeck = vi.fn();
+    const mount = () => render(<GameProvider gameId="art-authority" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    const invalid = mount();
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(artIo.face).not.toHaveBeenCalled();
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+    invalid.unmount();
+    loadGameStrict.mockResolvedValueOnce({ players: [{}, {}] } as never);
+    const restored = mount();
+    await waitFor(() => expect(gameStoreState.resumeGame).toHaveBeenCalledOnce());
+    expect(artIo.face).not.toHaveBeenCalled();
+    restored.unmount();
+    sessionStorage.setItem(key, JSON.stringify(publishedPayload()));
+    mount();
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(submittedLocal().player.printings).toEqual([artRow("Player", "aaa")]);
   });
 
   it.each([
@@ -878,6 +1137,49 @@ describe("GameProvider native AI routing", () => {
     expect(gameStoreState.initGame).not.toHaveBeenCalled();
     expect(sessionStorage.getItem(key)).toBe(raw);
   });
+
+  // CR 702.139a: the Quick Draft publisher always writes the seat's companion
+  // key (empty when none); the exact-run consumer must accept it, check it
+  // against the stored run, and carry it through reconstruction.
+  it.each([
+    ["no companion", undefined],
+    ["a companion", "Gyruda, Doom of Depths"],
+  ])("launches the real published Quick Draft payload with %s", async (_label, companion) => {
+    const run = seedSoloRun("run", "game", { companion });
+    const { matchPayload } = await import("../../stores/draftStore");
+    sessionStorage.setItem("phase:draft-deck:game", JSON.stringify(matchPayload(run as never)));
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+    expect(onNoDeck).not.toHaveBeenCalled();
+    expect((gameStoreState.initGame.mock.calls[0][2] as { player: { companion?: string[] } }).player.companion)
+      .toEqual(companion ? [companion] : []);
+  });
+
+  it.each([
+    ["a missing key for a stored companion", ["Gyruda, Doom of Depths"], undefined, "Gyruda, Doom of Depths"],
+    ["a different companion", ["Gyruda, Doom of Depths"], ["Lurrus of the Dream-Den"], undefined],
+    ["a companion the run never designated", ["Gyruda, Doom of Depths"], ["Gyruda, Doom of Depths"], undefined],
+  ] as const)("rejects a published payload with %s", async (_label, _stored, published, stored) => {
+    seedSoloRun("run", "game", { companion: stored });
+    sessionStorage.setItem(
+      "phase:draft-deck:game",
+      JSON.stringify(publishedPayload(["Player"], ["Opponent"], undefined, published as string[] | undefined)),
+    );
+    const onNoDeck = vi.fn();
+    render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run" onNoDeck={onNoDeck}><div /></GameProvider>);
+    await waitFor(() => expect(onNoDeck).toHaveBeenCalledWith(UNAVAILABLE));
+    expect(gameStoreState.initGame).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "Gyruda, Doom of Depths"])(
+    "carries the stored companion (%s) through reconstruction when the handoff key is absent", async (companion) => {
+      seedSoloRun("run", "game", { companion });
+      render(<GameProvider gameId="game" mode="ai" source="draft" draftId="run"><div /></GameProvider>);
+      await waitFor(() => expect(gameStoreState.initGame).toHaveBeenCalledOnce());
+      expect((gameStoreState.initGame.mock.calls[0][2] as { player: { companion?: string[] } }).player.companion)
+        .toEqual(companion ? [companion] : []);
+    });
 
   it("accepts a published null booster source on an ordinary run", async () => {
     seedSoloRun("run", "game", { pool: null });
@@ -1605,6 +1907,55 @@ describe("GameProvider native AI routing", () => {
     expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["B2-Card"]);
   });
 
+  it.each([
+    ["an untagged deck the pool filtered on its estimate", null, null],
+    ["a declared deck", 4, "optimized"],
+  ] as const)("sends %s to the engine as its declaration only", async (_label, declaredBracket, sentTier) => {
+    preferences.aiSeats = [{ difficulty: "Medium", deckId: "Random" }];
+    // `bracket` is the value the pool filters on; for an untagged deck it is the estimate.
+    const pick = { ...aiCandidate("saved:Pick", ["Pick-Card"], 3), declaredBracket };
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({ candidates: [pick], allCandidates: [pick] });
+
+    render(
+      <GameProvider gameId={`declared-tier-${sentTier}`} mode="ai" formatConfig={COMMANDER_FORMAT_CONFIG}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+    });
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.main_deck).toEqual(["Pick-Card"]);
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats[0]?.deck.bracket_tier).toBe(sentTier);
+  });
+
+  it("sends each AI seat its own combo answer on the native path", async () => {
+    const early = { kind: "intended", window: "early_game" } as const;
+    preferences.aiSeats = [
+      { difficulty: "Medium", deckId: "saved:Early" },
+      { difficulty: "Medium", deckId: "saved:Plain" },
+    ];
+    const picks = [
+      { ...aiCandidate("saved:Early", ["Early-Card"], null), comboDeclaration: early },
+      aiCandidate("saved:Plain", ["Plain-Card"], null),
+    ];
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({ candidates: picks, allCandidates: picks });
+
+    render(
+      <GameProvider gameId="native-combo-answers" mode="ai" playerCount={3} formatConfig={COMMANDER_FORMAT_CONFIG}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+    });
+    expect(nativeAdapters[0]!.nativeAiOptions?.aiSeats.map((seat) => seat.deck.combo_declaration)).toEqual([
+      early,
+      { kind: "undeclared" },
+    ]);
+  });
+
   it("starts each AI seat from the game's seat snapshot instead of single-player preferences", async () => {
     // Host Game's all-AI start writes this snapshot before navigating.
     preferences.aiSeats = [
@@ -1821,6 +2172,7 @@ describe("GameProvider native AI routing", () => {
       singleton: true,
       command_zone: true,
       commander_damage_threshold: 21,
+      poison_counter_threshold: 10,
       range_of_influence: null,
       team_based: false,
       sideboard_policy: { type: "Forbidden" },
@@ -2042,6 +2394,99 @@ describe("GameProvider native AI routing", () => {
 
   it("disposes a native game and surfaces bridge errors as terminal", async () => {
     await expectNativeTerminalEvent({ type: "error", message: "WebSocket connection failed" });
+  });
+
+  it("forwards terminalDelivery, updates waitingFor to GameOver, and disposes the controller", async () => {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-terminal-delivery" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    const delivery = {
+      key: { game_code: "GAME01", generation: 1 },
+      terminalRevision: 5,
+      deliveryId: "del-1",
+      credential: "cred-1",
+      display: { winner: 0, reason: "Victory" },
+    };
+    const event = { type: "terminalDelivery" as const, delivery };
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    const latestController = controllers[controllers.length - 1]?.value;
+
+    act(() => {
+      nativeAdapter.emit(event);
+    });
+
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+    expect(gameStoreState.waitingFor).toEqual({
+      type: "GameOver",
+      data: { winner: 0 },
+    });
+    expect(latestController?.dispose).toHaveBeenCalled();
+    expect(nativeAdapter.dispose).not.toHaveBeenCalled();
+  });
+
+  it("forwards gameOver, updates waitingFor to GameOver, and disposes the controller", async () => {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-game-over" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    const event = { type: "gameOver" as const, winner: 1, reason: "opponentConceded" };
+    const controllers = vi.mocked(createGameLoopController).mock.results;
+    const latestController = controllers[controllers.length - 1]?.value;
+
+    act(() => {
+      nativeAdapter.emit(event);
+    });
+
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+    expect(gameStoreState.waitingFor).toEqual({
+      type: "GameOver",
+      data: { winner: 1 },
+    });
+    expect(latestController?.dispose).toHaveBeenCalled();
+    expect(nativeAdapter.dispose).not.toHaveBeenCalled();
+  });
+
+  it("forwards terminalUnavailable without disposing the native session", async () => {
+    const onWsEvent = vi.fn();
+    render(
+      <GameProvider gameId="native-terminal-unavailable" mode="ai" onWsEvent={onWsEvent}>
+        <div />
+      </GameProvider>,
+    );
+
+    await waitFor(() => {
+      expect(gameStoreState.setGameMode).toHaveBeenCalledWith("native-ai");
+      expect(nativeAdapters).toHaveLength(1);
+    });
+
+    const nativeAdapter = nativeAdapters[0]!;
+    const event = { type: "terminalUnavailable" as const, message: "Storage error" };
+
+    act(() => {
+      nativeAdapter.emit(event);
+    });
+
+    expect(onWsEvent).toHaveBeenCalledWith(event);
+    expect(nativeAdapter.dispose).not.toHaveBeenCalled();
   });
 
   it("keeps a native setup failure off the terminal connection surface", async () => {

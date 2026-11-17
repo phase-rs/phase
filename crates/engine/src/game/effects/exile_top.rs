@@ -31,7 +31,7 @@ pub fn resolve(
             player.clone(),
             position,
             *face_down,
-            *actor,
+            actor.clone(),
         ),
         _ => return Err(EffectError::MissingParam("ExileTop count".to_string())),
     };
@@ -57,6 +57,18 @@ pub fn resolve(
             ability.original_controller.unwrap_or(ability.controller)
         }
         LibraryInstructionActor::LibraryPlayer => target_player,
+        // CR 608.2c + CR 115.1: a named subject other than the library's owner
+        // ("Target opponent looks at the top card of your library, then exiles
+        // it face down") performs the exile. A subject that no longer names a
+        // player (an illegal target) exiles nothing (CR 608.2b).
+        LibraryInstructionActor::Player { player } => {
+            let Some(subject) = super::resolve_player_for_context_ref(state, ability, &player)
+            else {
+                state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ExileTop);
+                return Ok(());
+            };
+            subject
+        }
     };
 
     // CR 701.17b: A player can't mill/exile more cards than are in their library;
@@ -115,8 +127,10 @@ pub fn resolve(
         // surface an ordering choice mid-loop; park the prompt (mirrors
         // `exile_from_top_until`'s NeedsChoice arm) and return rather than
         // continuing to mutate/classify the remaining cards past a parked prompt.
-        let mut request =
-            ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id).performed_by(actor);
+        let mut request = ZoneMoveRequest::effect(object_id, Zone::Exile, ability.source_id)
+            .actors(crate::game::zone_pipeline::MoveActors::performer_and_owner(
+                actor,
+            ));
         if track_exiled_by_source {
             request = request.track_exiled_by_source();
         }
@@ -702,6 +716,8 @@ mod tests {
         let recall_inner = crate::types::ability::AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                library_shuffle: Default::default(),
                 origin: Some(Zone::Exile),
                 destination: Zone::Hand,
                 target: TargetFilter::TrackedSet {

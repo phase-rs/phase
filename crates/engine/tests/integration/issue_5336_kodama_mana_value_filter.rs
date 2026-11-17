@@ -93,6 +93,16 @@ fn seed_forest_on_library_top(runner: &mut engine::game::scenario::GameRunner) -
     id
 }
 
+/// CR 608.2d: Kodama's put is offered only when the hand holds a permanent card
+/// with equal or lesser mana value, so the tests that read the offer as proof of
+/// the trigger give the hand a mana value 0 permanent card, which qualifies for a
+/// Forest (mana value 0).
+fn add_zero_mana_value_hand_card(scenario: &mut GameScenario) {
+    scenario
+        .add_creature_to_hand(P0, "Free Creature", 1, 1)
+        .with_mana_cost(ManaCost::generic(0));
+}
+
 /// CR 603.6a: a Forest entering from the library must trigger Kodama when
 /// `process_triggers` runs on the emitted `ZoneChanged` event.
 #[test]
@@ -105,6 +115,7 @@ fn kodama_triggers_on_forest_etb_from_library() {
     scenario
         .add_creature_from_oracle(P0, "Kodama of the East Tree", 6, 4, KODAMA_ORACLE)
         .id();
+    add_zero_mana_value_hand_card(&mut scenario);
 
     let mut runner = scenario.build();
     let forest = seed_forest_on_library_top(&mut runner);
@@ -135,6 +146,7 @@ fn kodama_triggers_when_entering_permanent_has_foreign_ability_provenance() {
         .add_creature_from_oracle(P0, "Kodama of the East Tree", 6, 4, KODAMA_ORACLE)
         .id();
     let foreign_placer = scenario.add_creature(P0, "Nature's Lore", 0, 0).id();
+    add_zero_mana_value_hand_card(&mut scenario);
 
     let mut runner = scenario.build();
     let forest = seed_forest_on_library_top(&mut runner);
@@ -168,6 +180,7 @@ fn kodama_triggers_on_forest_etb_with_resolving_stack_entry_stashed() {
     let kodama = scenario
         .add_creature_from_oracle(P0, "Kodama of the East Tree", 6, 4, KODAMA_ORACLE)
         .id();
+    add_zero_mana_value_hand_card(&mut scenario);
 
     let mut runner = scenario.build();
     let forest = seed_forest_on_library_top(&mut runner);
@@ -348,14 +361,16 @@ fn kodama_natures_lore_forest_limits_hand_to_zero_mana_value() {
     );
 }
 
-/// CR 609.3: declining Kodama's optional ability with no eligible hand cards must
-/// resolve cleanly (no stall on an empty EffectZoneChoice).
+/// CR 118.12 + CR 608.2d: when Two Drop (mana value 2) enters with only Five
+/// Drop (mana value 5) in hand, no permanent card has equal or lesser mana
+/// value, so Kodama's "you may put" is impossible: it is not offered, and the
+/// trigger resolves as its no-op.
 #[test]
-fn kodama_decline_with_no_eligible_hand_cards_resolves_cleanly() {
+fn kodama_with_no_eligible_hand_card_is_not_offered() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    scenario
+    let kodama = scenario
         .add_creature_from_oracle(P0, "Kodama of the East Tree", 6, 4, KODAMA_ORACLE)
         .id();
 
@@ -363,7 +378,7 @@ fn kodama_decline_with_no_eligible_hand_cards_resolves_cleanly() {
         .add_creature_to_hand(P0, "Two Drop", 2, 2)
         .with_mana_cost(ManaCost::generic(2))
         .id();
-    scenario
+    let too_big = scenario
         .add_creature_to_hand(P0, "Five Drop", 5, 5)
         .with_mana_cost(ManaCost::generic(5))
         .id();
@@ -372,17 +387,50 @@ fn kodama_decline_with_no_eligible_hand_cards_resolves_cleanly() {
     runner.state_mut().players[P0.0 as usize].mana_pool =
         engine::types::mana::ManaPool::from_units(floating_generic(2));
     cast_from_hand(&mut runner, trigger_creature);
-
-    assert!(advance_to_optional_choice(&mut runner));
-    resolve_optional_and_stack(&mut runner, false);
-
-    assert!(
-        runner.state().stack.is_empty(),
-        "stack must settle after declining Kodama with no eligible picks"
-    );
+    for _ in 0..2 {
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority resolves the creature spell");
+    }
     assert_eq!(
         runner.state().objects[&trigger_creature].zone,
         Zone::Battlefield,
-        "the triggering creature must remain on the battlefield"
+        "reach: the creature spell resolved"
     );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.source_id)
+            .collect::<Vec<_>>(),
+        vec![kodama],
+        "reach: Kodama's trigger is on the stack"
+    );
+
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "the put is never offered; got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::PassPriority)
+            .expect("passing priority must succeed");
+    }
+
+    assert!(runner.state().stack.is_empty(), "the trigger resolved");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "settled with no prompt; got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().objects[&trigger_creature].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(runner.state().objects[&too_big].zone, Zone::Hand);
 }

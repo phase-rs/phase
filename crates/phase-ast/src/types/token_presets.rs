@@ -13,9 +13,16 @@
 
 use std::sync::LazyLock;
 
+use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::{char, multispace0, space0};
+use nom::combinator::{all_consuming, recognize};
+use nom::sequence::{preceded, terminated};
+use nom::Parser;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::types::card::TokenImageRef;
+use crate::types::mana::{parse_mtgjson_mana_cost, ManaCost};
+use crate::types::text_grammar::OracleResult;
 use crate::types::token_spec::TokenCharacteristics;
 
 /// CR 111.10: Stable identifier for predefined-ability artifact tokens. Each
@@ -86,6 +93,13 @@ pub enum TokenCategory {
     /// CR 301.1: Plain artifact token that isn't Equipment, Vehicle, or a
     /// predefined-ability subtype (Book artifacts, custom curiosities, etc.).
     Artifact,
+    /// Turtle Team-Up (casual co-op product): any token with the Boss core
+    /// type. Overlay-only — the tokens-gen converter classifies MTGJSON set
+    /// tokens, which never carry this casual-product type.
+    Boss,
+    /// Turtle Team-Up: any token with the Event core type. Overlay-only, as
+    /// above.
+    Event,
 }
 
 /// How completely this preset's body represents its source data.
@@ -298,28 +312,52 @@ pub fn known_token_body_by_name(name: &str) -> Option<&'static TokenCharacterist
 /// Source-scoped variant for Oracle parsing: when a display name is ambiguous,
 /// prefer the preset linked to the card currently being parsed. Fall back to a
 /// global match only if every matching body is identical.
+///
+/// CR 111.4: The catalog names some named tokens with a trailing " Token"
+/// (`"Gingerbrute Token"`, `"Spirit Sorcerer Token"`) while Oracle text names
+/// the bare descriptor (`create a Gingerbrute token`). After the exact-name
+/// passes miss, retry both passes with a `"<name> Token"`-suffixed candidate
+/// key so the bare descriptor still resolves through this single authority —
+/// both parser call sites (`token.rs` fill + registry identity) share it.
 pub fn known_token_body_by_name_for_source(
     name: &str,
     source_name: Option<&str>,
 ) -> Option<&'static TokenCharacteristics> {
     let name = name.trim();
     if let Some(source_name) = source_name.map(str::trim).filter(|name| !name.is_empty()) {
-        let mut source_matches = known_token_presets().iter().filter(|preset| {
-            preset.body.display_name.eq_ignore_ascii_case(name)
-                && preset
-                    .source_card_names
-                    .iter()
-                    .any(|candidate| candidate.eq_ignore_ascii_case(source_name))
-        });
-        if let Some(first) = source_matches.next() {
-            let first_body = &first.body;
-            return source_matches
-                .all(|preset| &preset.body == first_body)
-                .then_some(first_body);
+        if let Some(body) = source_scoped_body_by_name(name, source_name) {
+            return Some(body);
+        }
+        let suffixed = format!("{name} Token");
+        if let Some(body) = source_scoped_body_by_name(&suffixed, source_name) {
+            return Some(body);
         }
     }
 
-    unique_token_body_by_name(name)
+    unique_token_body_by_name(name).or_else(|| {
+        let suffixed = format!("{name} Token");
+        unique_token_body_by_name(&suffixed)
+    })
+}
+
+fn source_scoped_body_by_name(
+    name: &str,
+    source_name: &str,
+) -> Option<&'static TokenCharacteristics> {
+    let mut source_matches = known_token_presets().iter().filter(|preset| {
+        preset.body.display_name.eq_ignore_ascii_case(name)
+            && preset
+                .source_card_names
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(source_name))
+    });
+    if let Some(first) = source_matches.next() {
+        let first_body = &first.body;
+        return source_matches
+            .all(|preset| &preset.body == first_body)
+            .then_some(first_body);
+    }
+    None
 }
 
 fn unique_token_body_by_name(name: &str) -> Option<&'static TokenCharacteristics> {
@@ -331,6 +369,42 @@ fn unique_token_body_by_name(name: &str) -> Option<&'static TokenCharacteristics
     matches
         .all(|preset| &preset.body == first_body)
         .then_some(first_body)
+}
+
+/// CR 111.11 + CR 202.3: A named token created as a copy of a card carries
+/// that card's mana cost (e.g. Gingerbrute's `{1}`). The committed catalog
+/// embeds the cost only inside the preset's free-form `rules_text` reminder,
+/// machine-shaped as `(This token's mana cost is {COST}.)` at a line end.
+/// Extract the brace-delimited cost through the single `parse_mtgjson_mana_cost`
+/// authority so new cost shapes stay in one place. Returns `None` when no
+/// well-formed reminder is present (predefined tokens carry none — CR 202.3a:
+/// no mana cost means MV 0) or when the declared cost is malformed; callers
+/// keep the zero-cost default then. Total and pure.
+pub fn catalog_token_mana_cost(rules_text: &str) -> Option<ManaCost> {
+    rules_text.lines().find_map(reminder_cost_on_line)
+}
+
+/// Recognize one cost-reminder line as a nom combinator: skip to the marker,
+/// take the brace-delimited cost body, and require the `.)` terminator — the
+/// period sits inside the closing paren — followed by nothing but trailing
+/// whitespace. A braceless middle or a parenthetical that continues past `)`
+/// fails the line, as does a missing marker.
+fn reminder_cost_on_line(line: &str) -> Option<ManaCost> {
+    parse_reminder_cost_text(line)
+        .map(|(_, cost_text)| parse_mtgjson_mana_cost(cost_text))
+        .ok()
+}
+
+fn parse_reminder_cost_text(line: &str) -> OracleResult<'_, &str> {
+    const MARKER: &str = "(This token's mana cost is ";
+    preceded(
+        (take_until(MARKER), tag(MARKER), space0),
+        all_consuming(terminated(
+            recognize((char('{'), take_until(".)"))),
+            (tag(".)"), multispace0),
+        )),
+    )
+    .parse(line)
 }
 
 #[cfg(test)]
@@ -500,5 +574,173 @@ scryfall_oracle_id = "11111111-1111-1111-1111-111111111111"
         // keep the unknown-key check itself under test.
         parse_overlay(include_str!("../../data/known-tokens.overlay.toml"))
             .expect("the committed overlay passes the same check");
+    }
+
+    /// CR 111.4: a bare Oracle-text descriptor (`create a Gingerbrute token`)
+    /// resolves to the catalog's `" Token"`-suffixed display name through the
+    /// source-scoped pass when the source card is linked.
+    #[test]
+    fn bare_descriptor_resolves_suffixed_display_name_for_its_source() {
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+
+        let body =
+            known_token_body_by_name_for_source("Gingerbrute", Some("Ginger, Queen of Sweets"))
+                .expect("Gingerbrute must resolve for its source card");
+        assert_eq!(body.display_name, "Gingerbrute Token");
+        assert_eq!(body.power, Some(1));
+        assert_eq!(body.toughness, Some(1));
+        assert!(body.core_types.contains(&CoreType::Artifact));
+        assert!(body.core_types.contains(&CoreType::Creature));
+        assert!(body.subtypes.iter().any(|subtype| subtype == "Food"));
+        assert!(body.subtypes.iter().any(|subtype| subtype == "Golem"));
+        assert!(body.keywords.contains(&Keyword::Haste)); // allow-raw-authority: test asserting static catalog data, no game object
+    }
+
+    /// CR 111.4: the same bare descriptor resolves without a source when the
+    /// suffixed key is globally unique.
+    #[test]
+    fn bare_descriptor_resolves_suffixed_display_name_globally() {
+        let body = known_token_body_by_name_for_source("Gingerbrute", None)
+            .expect("Gingerbrute Token is the only body under that name");
+        assert_eq!(body.display_name, "Gingerbrute Token");
+    }
+
+    /// The suffix retry must not manufacture ambiguity: a bare subtype shared
+    /// by many distinct bodies still resolves to nothing.
+    #[test]
+    fn ambiguous_bare_descriptor_still_resolves_to_nothing() {
+        assert!(
+            known_token_body_by_name_for_source("Golem", Some("Ginger, Queen of Sweets")).is_none(),
+            "Golem names many distinct bodies — the suffix retry must not pick one"
+        );
+        assert!(
+            known_token_body_by_name_for_source("Golem", None).is_none(),
+            "Golem names many distinct bodies — the suffix retry must not pick one"
+        );
+    }
+
+    /// Exact hits are unchanged: the registry control still resolves by its
+    /// unsuffixed display name.
+    #[test]
+    fn exact_display_name_hits_are_unchanged() {
+        let body = known_token_body_by_name_for_source("Heartwood", Some("Soul Tether"))
+            .expect("Heartwood must keep resolving exactly");
+        assert_eq!(body.display_name, "Heartwood");
+    }
+
+    /// CR 111.11 + CR 202.3 (F2): every catalog row whose embedded `rules_text`
+    /// declares `(This token's mana cost is {COST}.)` extracts that exact cost
+    /// through the `parse_mtgjson_mana_cost` authority.
+    #[test]
+    fn catalog_token_mana_cost_hits_all_reminder_rows_with_exact_costs() {
+        use crate::types::mana::ManaCostShard;
+
+        const MARKER: &str = "(This token's mana cost is ";
+        let reminded: Vec<&TokenPreset> = known_token_presets()
+            .iter()
+            .filter(|preset| {
+                preset
+                    .rules_text
+                    .as_deref()
+                    .is_some_and(|text| text.contains(MARKER))
+            })
+            .collect();
+        // Reach-guard: the measured corpus — 27 reminder rows — so a vacuous
+        // empty loop cannot pass.
+        assert_eq!(
+            reminded.len(),
+            27,
+            "the catalog must carry exactly the 27 measured cost-reminder rows"
+        );
+        for preset in &reminded {
+            let text = preset.rules_text.as_deref().unwrap_or("");
+            assert!(
+                catalog_token_mana_cost(text).is_some(),
+                "row `{}` declares a cost reminder but extracts None",
+                preset.id
+            );
+        }
+
+        // Spot exact costs. Printings of one token share the reminder, so all
+        // same-named reminded rows must agree.
+        let cost_of = |display: &str| -> ManaCost {
+            let mut costs = reminded
+                .iter()
+                .filter(|preset| preset.body.display_name == display)
+                .map(|preset| {
+                    catalog_token_mana_cost(preset.rules_text.as_deref().unwrap_or(""))
+                        .unwrap_or_else(|| panic!("reminded row `{}` must extract Some", preset.id))
+                });
+            let first = costs
+                .next()
+                .unwrap_or_else(|| panic!("reach guard: a reminded `{display}` row exists"));
+            assert!(
+                costs.all(|cost| cost == first),
+                "all `{display}` printings must agree on the extracted cost"
+            );
+            first
+        };
+        // CR 202.3: MV derivation control — the {1} reminder is MV 1.
+        assert_eq!(cost_of("Gingerbrute Token"), ManaCost::generic(1));
+        assert_eq!(
+            cost_of("Tarmogoyf"),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 1,
+            }
+        );
+        assert_eq!(
+            cost_of("Osgood, Operation Double"),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+                generic: 2,
+            }
+        );
+        // Mid-line reminder: the cost parenthetical follows other rules text
+        // on the same line.
+        assert_eq!(
+            cost_of("Steelburr Champion"),
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 2,
+            }
+        );
+    }
+
+    /// CR 202.3a (F2 hostile): rows without a cost reminder — predefined
+    /// tokens and malformed reminders — extract no cost, so callers keep the
+    /// zero-cost default.
+    #[test]
+    fn catalog_token_mana_cost_is_none_without_a_reminder() {
+        const MARKER: &str = "(This token's mana cost is ";
+        for display in ["Treasure", "Food", "Pest", "Heartwood", "Ajani's Pridemate"] {
+            let preset = known_token_presets()
+                .iter()
+                .find(|preset| preset.body.display_name == display)
+                .unwrap_or_else(|| panic!("reach guard: a `{display}` preset exists"));
+            let text = preset.rules_text.as_deref().unwrap_or("");
+            assert!(
+                !text.contains(MARKER),
+                "reach guard: `{display}` carries no reminder, got {text:?}"
+            );
+            assert_eq!(
+                catalog_token_mana_cost(text),
+                None,
+                "`{display}` must extract no cost"
+            );
+        }
+        // Malformed reminders never fabricate a cost.
+        assert_eq!(
+            catalog_token_mana_cost("(This token's mana cost is banana.)"),
+            None,
+            "a braceless middle is malformed, not a zero cost"
+        );
+        assert_eq!(
+            catalog_token_mana_cost("(This token's mana cost is {1}.) and then some"),
+            None,
+            "a reminder that does not end the line is not the cost declaration"
+        );
+        assert_eq!(catalog_token_mana_cost(""), None);
     }
 }

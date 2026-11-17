@@ -5,13 +5,15 @@
 # Exit status: 0 clean; 1 a migrated seam or a new diff line calls a legacy
 # parser; 1 the added-line helper's own test suite
 # (scripts/lib/added_lines_tests.py) failed, no verdict; 2 the added-line helper
-# could not read the diff, no verdict.
+# could not read the diff, or the base ref does not resolve to a commit, no
+# verdict.
 
 set -euo pipefail
 # shellcheck source=scripts/lib/added-lines.sh
 . "$(dirname "$0")/lib/added-lines.sh"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
+added_lines_require_base "$BASE"
 SCOPE=(crates/engine/src/parser crates/phase-parser/src/parser)
 SCOPE_EXCLUDES=(
     ':(exclude)crates/engine/src/parser/oracle_quantity.rs'

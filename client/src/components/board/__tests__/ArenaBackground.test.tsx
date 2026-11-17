@@ -46,4 +46,28 @@ describe("Arena background lifecycle", () => {
     unmount();
     expect(scene.dispose).toHaveBeenCalledTimes(2);
   });
+
+  it("keeps the painting when the scene fails to start, without rejecting unhandled", async () => {
+    // Throw after the module loads to exercise rejection from scene startup.
+    scene.create.mockImplementation(() => {
+      throw new Error("Scene startup failed");
+    });
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown) => rejections.push(reason);
+    process.on("unhandledRejection", onRejection);
+    try {
+      const { container } = render(<ArenaBackground />);
+      // Reach-guard: the scene really was attempted, so an empty `rejections`
+      // below cannot pass because the effect bailed out before importing.
+      await waitFor(() => expect(scene.create).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(rejections).toEqual([]);
+      expect(container.querySelector("img")?.getAttribute("src")).toContain("ocean-temple-topdown.webp");
+    } finally {
+      process.off("unhandledRejection", onRejection);
+      scene.create.mockReset();
+    }
+  });
 });

@@ -12,12 +12,16 @@
 //! two slots regardless of X, leaving the player to pick two targets and then
 //! deadlock at `DistributeAmong` (1 damage, two targets, each needs ≥1).
 
-use super::rules::{GameRunner, GameScenario, Phase, WaitingFor, P0, P1};
+use super::rules::{
+    advance_until_stack_empty_and_collect_events, assert_damage_dealt, assert_no_damage_to,
+    GameRunner, GameScenario, Phase, WaitingFor, P0, P1,
+};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, DistributionUnit};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::zones::Zone;
 
 const SHATTERSKULL_ORACLE: &str = "Shatterskull Smashing deals X damage divided as you choose among up to two target creatures and/or planeswalkers. If X is 6 or more, Shatterskull Smashing deals twice X damage divided as you choose among them instead.";
 
@@ -36,7 +40,7 @@ fn shatterskull_x1_offers_single_target_slot_no_softlock() {
     scenario.at_phase(Phase::PreCombatMain);
 
     let goblin = scenario.add_creature(P1, "Goblin A", 1, 1).id();
-    let _ogre = scenario.add_creature(P1, "Ogre B", 3, 3).id();
+    let ogre = scenario.add_creature(P1, "Ogre B", 3, 3).id();
 
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Shatterskull Smashing", false, SHATTERSKULL_ORACLE)
@@ -75,10 +79,10 @@ fn shatterskull_x1_offers_single_target_slot_no_softlock() {
     // Choosing the one allowed target then resolves to a single DistributeAmong
     // (or auto-resolves) without deadlock.
     drive_single_target(&mut runner, goblin);
-    let _ = _ogre;
 
     // The pipeline must reach a DistributeAmong over exactly one target, or have
     // already auto-distributed — never a two-target deadlock.
+    let mut events = Vec::new();
     if let WaitingFor::DistributeAmong {
         targets,
         total,
@@ -89,32 +93,131 @@ fn shatterskull_x1_offers_single_target_slot_no_softlock() {
         assert_eq!(total, 1, "damage pool equals X=1");
         assert_eq!(unit, DistributionUnit::Damage);
         assert_eq!(targets.len(), 1, "exactly one target to divide among");
-        runner
-            .act(GameAction::DistributeAmong {
-                distribution: targets.iter().map(|t| (t.clone(), 1)).collect(),
-            })
-            .expect("single-target distribution must be legal");
+        events.extend(
+            runner
+                .act(GameAction::DistributeAmong {
+                    distribution: targets.iter().map(|t| (t.clone(), 1)).collect(),
+                })
+                .expect("single-target distribution must be legal")
+                .events,
+        );
     }
 
-    runner.advance_until_stack_empty();
+    events.extend(advance_until_stack_empty_and_collect_events(&mut runner));
 
-    // 1 damage landed on the single chosen creature.
-    let dmg = runner
-        .state()
-        .objects
-        .get(&goblin)
-        .map(|o| o.damage_marked)
-        .unwrap_or(0);
-    assert_eq!(
-        dmg, 1,
-        "all X=1 damage assigned to the single chosen target"
-    );
+    assert_damage_dealt(&events, spell, TargetRef::Object(goblin), 1, false);
+    assert_eq!(runner.state().objects[&goblin].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&ogre].zone, Zone::Battlefield);
+    assert_no_damage_to(&events, TargetRef::Object(ogre));
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
     assert!(
         !matches!(
             runner.state().waiting_for,
             WaitingFor::DistributeAmong { .. }
         ),
         "must not be stuck waiting on an impossible distribution"
+    );
+}
+
+/// R2-F1 runtime non-regression (CR 601.2d vs CR 608.2d): with X = 6 the
+/// "instead" branch replaces the division with a `ParentTarget`-recipient node
+/// that still carries `distribute: Damage`. That node divides among ANNOUNCED
+/// targets — it must never be re-divided as a CR 608.2d resolution-time choice.
+/// Two targets, so a resolution-time pause could not hide behind a
+/// single-candidate auto-apply.
+#[test]
+fn shatterskull_x6_instead_division_is_not_rechosen_at_resolution() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let wall_a = scenario.add_creature(P1, "Wall A", 0, 20).id();
+    let wall_b = scenario.add_creature(P1, "Wall B", 0, 20).id();
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shatterskull Smashing", false, SHATTERSKULL_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red, ManaCostShard::Red],
+            generic: 0,
+        })
+        .id();
+    let card_id = CardId(spell.0);
+
+    // {X}{R}{R} at X = 6 → eight red mana.
+    scenario.with_mana_pool(P0, red_pool(8));
+
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast announcement should succeed");
+    drive_choose_x(&mut runner, 6);
+
+    // CR 601.2c + CR 601.2d: announce both targets, then the cast-time division.
+    let mut pending_targets = vec![wall_a, wall_b].into_iter();
+    for step in 0.. {
+        assert!(step < 6, "cast announcement must terminate");
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                let target = pending_targets
+                    .next()
+                    .expect("at most two target slots are offered");
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("ChooseTarget should succeed");
+            }
+            WaitingFor::DistributeAmong { .. } => {
+                runner
+                    .act(GameAction::DistributeAmong {
+                        distribution: vec![
+                            (TargetRef::Object(wall_a), 3),
+                            (TargetRef::Object(wall_b), 3),
+                        ],
+                    })
+                    .expect("the announced division is legal");
+            }
+            _ => break,
+        }
+    }
+    assert!(
+        pending_targets.next().is_none(),
+        "reach guard: both walls were announced as targets"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the spell is on the stack"
+    );
+
+    for step in 0.. {
+        assert!(step < 8, "resolution must terminate");
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::DistributeAmong { .. }
+            ),
+            "an announced division must never be re-chosen at resolution (step {step})"
+        );
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("PassPriority should succeed");
+    }
+
+    let damage_of = |id: ObjectId| runner.state().objects[&id].damage_marked;
+    assert!(
+        damage_of(wall_a) + damage_of(wall_b) > 6,
+        "reach guard: the X >= 6 swap fired (combined damage {} + {})",
+        damage_of(wall_a),
+        damage_of(wall_b)
     );
 }
 

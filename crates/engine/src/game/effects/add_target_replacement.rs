@@ -409,6 +409,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::LifeLostThisTurn { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::Speed { .. }
@@ -460,6 +461,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::TargetZoneCardCount { .. }
         | QuantityRef::Devotion { .. }
         | QuantityRef::CardsExiledBySource
+        | QuantityRef::DeployedBossCount
         | QuantityRef::ExiledCardPower { .. }
         | QuantityRef::BasicLandTypeCount { .. }
         | QuantityRef::TrackedSetSize
@@ -471,6 +473,7 @@ fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber
@@ -574,6 +577,11 @@ fn replacement_targets(
     ability: &ResolvedAbility,
     target: &TargetFilter,
 ) -> Vec<TargetRef> {
+    // CR 608.2b: a bound ParentTarget, including authoritative emptiness,
+    // precedes event and attached-host fallback.
+    if matches!(target, TargetFilter::ParentTarget) {
+        return crate::game::targeting::resolved_targets(ability, target, state);
+    }
     if matches!(target, TargetFilter::Any) {
         if let Some(context) = &ability.context.forwarded_result_context {
             // CR 608.2c + CR 400.7: a forward-result reanimation rider binds to
@@ -710,17 +718,17 @@ pub fn resolve(
                     // precedent, and this is the only additive-runtime base push in
                     // the tree, so the exception is documented here.
                     //
-                    // Everything that is NOT one of these three classes now goes
+                    // Everything that is NOT one of these base-resident classes goes
                     // through `GameObject::install_resolution_replacement` instead
                     // (CR 611.2a) — the typed-provenance authority that survives the
                     // CR 613.1 reset via the carried set rather than via a base copy.
-                    // The trio deliberately stays OUTSIDE it: a def that is both
+                    // These gated classes deliberately stay OUTSIDE it: a def that is both
                     // base-resident and `Resolution`-stamped would be reseeded from
                     // base AND carried from live, i.e. applied twice.
-                    // A turn-bound die-exile rider must also survive a layer
-                    // reset: a damaged creature can gain/lose characteristics
-                    // or enter combat before it dies. Cleanup prunes this
-                    // narrowly scoped base copy at end of turn.
+                    // CR 614.1a + CR 614.3 + CR 611.2a + CR 514.2: a turn-bound
+                    // die-exile rider is a resolution-created replacement with an
+                    // explicit cleanup deadline, so it uses the carried live store
+                    // and remains attached through every characteristic rebaseline.
                     // A host-lifetime rider (CR 702.84a "if it would leave the
                     // battlefield, exile it instead", stamped
                     // `UntilHostLeavesPlay`) is the same class: it must survive
@@ -738,25 +746,20 @@ pub fn resolve(
                     // base+live replacement defs, CR 708.2a) would end the lock
                     // early — an under-prune, strictly safer than a revival; rare
                     // corner, out of scope.
-                    let durable_die_exile =
-                        crate::game::printed_cards::is_runtime_target_die_exile_replacement(
-                            &replacement,
-                        );
                     let host_lifetime =
                         crate::game::printed_cards::is_runtime_host_lifetime_replacement(
                             &replacement,
                         );
-                    let install_to_base = durable_die_exile
-                        || host_lifetime
+                    let install_to_base = host_lifetime
                         || matches!(
                             replacement.condition,
                             Some(ReplacementCondition::ControllerControlsSource { .. })
                         );
                     if let Some(obj) = state.objects.get_mut(&obj_id) {
                         if install_to_base {
-                            // CR 611.2b / CR 702.84a: the three hand-audited durable
-                            // classes stay BASE-resident and are reseeded into live
-                            // by every CR 613.1 pass. They must NOT be stamped
+                            // CR 611.2b / CR 702.84a: the hand-audited source/control
+                            // gated classes stay BASE-resident and are reseeded into
+                            // live by every CR 613.1 pass. They must NOT be stamped
                             // `Resolution`: that would place them in base AND in the
                             // carried set, and apply them twice.
                             std::sync::Arc::make_mut(&mut obj.base_replacement_definitions)
@@ -1186,6 +1189,8 @@ mod tests {
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    library_shuffle: Default::default(),
                     origin: Some(Zone::Battlefield),
                     destination: Zone::Exile,
                     target: TargetFilter::SelfRef,

@@ -200,9 +200,15 @@ pub(crate) fn target_selection_requires_reducer_validation(state: &GameState) ->
 /// decline the only target-enabling kicker and receive a targetless cast.
 /// CR 601.2h: an unfinished mana payment cannot be finalized, so its pass
 /// candidate must likewise be simulated before it enters the contract.
+/// CR 732.2b: a shortcut responder may shorten only at a place the reducer admits.
 fn decision_contract_requires_reducer_validation(state: &GameState) -> bool {
     target_selection_requires_reducer_validation(state)
-        || matches!(&state.waiting_for, WaitingFor::ManaPayment { .. })
+        || matches!(
+            &state.waiting_for,
+            WaitingFor::ManaPayment { .. }
+                | WaitingFor::RespondToShortcut { .. }
+                | WaitingFor::RespondToPrecastCopyShortcut { .. }
+        )
         || matches!(
             &state.waiting_for,
             WaitingFor::OptionalCostChoice {

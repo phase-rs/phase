@@ -83,7 +83,11 @@ fn paladin_class_level_three_bonus_is_latched_at_resolution() {
     assert!(targeted, "reach guard: the level-3 trigger must target");
     // Level 2 anthem (+1/+1) plus level 3 (+2/+2 for two other attackers).
     let power_after_trigger = runner.state().objects[&a].power;
-    assert_eq!(power_after_trigger, Some(5), "2 base +1 anthem +2 other attackers");
+    assert_eq!(
+        power_after_trigger,
+        Some(5),
+        "2 base +1 anthem +2 other attackers"
+    );
 
     runner.cast(murder).target_object(b).resolve();
     runner.advance_until_stack_empty();

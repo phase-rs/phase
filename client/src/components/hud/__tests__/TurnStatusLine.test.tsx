@@ -15,6 +15,7 @@ import { usePriorityAttentionStore } from "../../../stores/priorityAttentionStor
 import {
   buildGameState,
   buildStackEntry,
+  targetSelectionWaitingForFactory,
 } from "../../../test/factories/gameStateFactory.ts";
 import { TurnStatusLine } from "../TurnStatusLine.tsx";
 
@@ -126,6 +127,35 @@ describe("TurnStatusLine", () => {
     expect(region).not.toHaveClass("priority-attention-glow-escalated");
   });
 
+  it("outlines the local player's own decision, pulsing only while the Glow preference is on", () => {
+    setup({ seat: 0, waitingFor: { type: "Priority", data: { player: 0 } } });
+    render(<TurnStatusLine />);
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent("Your priority");
+    // The border holds for the whole decision, independent of the attention cue.
+    expect(region).toHaveClass("priority-turn-border", "priority-turn-border-pulse");
+
+    act(() => usePreferencesStore.getState().setPriorityAlertVisual(false));
+    expect(region).toHaveClass("priority-turn-border");
+    expect(region).not.toHaveClass("priority-turn-border-pulse");
+
+    act(() => usePreferencesStore.getState().setPriorityAlertVisual(true));
+    act(() => usePriorityAttentionStore.getState().publish({ cue: "reminded", chimeCount: 1 }));
+    expect(region).toHaveClass(
+      "priority-turn-border",
+      "priority-turn-border-pulse",
+      "priority-attention-glow",
+    );
+  });
+
+  it("outlines a non-priority decision of the local player too", () => {
+    setup({ seat: 0, waitingFor: targetSelectionWaitingForFactory.forPlayer(0).build() });
+    render(<TurnStatusLine />);
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent("Your priority");
+    expect(region).toHaveClass("priority-turn-border");
+  });
+
   it.each([
     { player: 1, spectate: false },
     { player: 0, spectate: true },
@@ -133,7 +163,11 @@ describe("TurnStatusLine", () => {
     setup({ seat: 0, waitingFor: { type: "Priority", data: { player } }, spectate });
     usePriorityAttentionStore.getState().publish({ cue: "reminded", chimeCount: 1 });
     render(<TurnStatusLine />);
-    expect(screen.getByRole("status")).not.toHaveClass("priority-attention-glow");
-    expect(screen.getByRole("status")).not.toHaveClass("priority-attention-glow-escalated");
+    const region = screen.getByRole("status");
+    expect(region).toHaveTextContent(/Waiting for/);
+    expect(region).not.toHaveClass("priority-attention-glow");
+    expect(region).not.toHaveClass("priority-attention-glow-escalated");
+    expect(region).not.toHaveClass("priority-turn-border");
+    expect(region).not.toHaveClass("priority-turn-border-pulse");
   });
 });
