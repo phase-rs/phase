@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameEvent, SubmitResult } from "../../adapter/types";
-import { DICE_ROLL_LANDING_TIMEOUT_MS } from "../../animation/types";
+import { DICE_RESULT_HOLD_MS, DICE_ROLL_LANDING_TIMEOUT_MS } from "../../animation/types";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
@@ -258,13 +258,14 @@ describe("flashInGameRolls", () => {
   });
 
   it("plays queued rolls serially: dice → coin → idle", () => {
-    // No overlay is mounted to report a landing, so each roll closes at the
-    // landing backstop.
+    // No overlay is mounted to report a landing, so each roll falls back to its
+    // static result at the landing timeout, then counts down.
+    const rollMs = DICE_ROLL_LANDING_TIMEOUT_MS + DICE_RESULT_HOLD_MS;
     flashInGameRolls([die(0, 20, 12), coin(0, true)]);
     expect(useUiStore.getState().diceRoll?.kind).toBe("die");
-    vi.advanceTimersByTime(DICE_ROLL_LANDING_TIMEOUT_MS);
+    vi.advanceTimersByTime(rollMs);
     expect(useUiStore.getState().diceRoll).toMatchObject({ kind: "coin" });
-    vi.advanceTimersByTime(DICE_ROLL_LANDING_TIMEOUT_MS);
+    vi.advanceTimersByTime(rollMs);
     expect(useUiStore.getState().diceRoll).toBeNull();
   });
 

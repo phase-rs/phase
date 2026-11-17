@@ -185,16 +185,24 @@ export const TURN_BANNER_DURATION_MS = 1500;
 
 /** Base time an ability roll's result stays on screen after its dice or coin
  *  land, before the animation speed multiplier. The overlay's close countdown
- *  starts at the landing (uiStore `settleDiceRoll`), so however long the 3D
- *  chunk and WebGL take to start, the result keeps its full beat. */
+ *  starts at the landing (uiStore `settleDiceRoll`), so a result that lands
+ *  within `DICE_ROLL_LANDING_TIMEOUT_MS` keeps its full beat however long the
+ *  3D chunk and WebGL took to start. */
 export const DICE_RESULT_HOLD_MS = 1200;
 
 /** Floor for that beat at fast animation speeds, so the result stays readable
  *  however fast the tumble plays. Instant speed (0) skips the overlay instead. */
 export const DICE_RESULT_MIN_HOLD_MS = 800;
 
-/** Wall-clock backstop for an ability roll whose landing is never reported (a
- *  renderer that stalls, or a hidden tab that pauses animation frames). It is
- *  not speed-scaled: it must outlast the slowest landing, a 3.2s tumble at the
- *  slowest speed, plus the 3D chunk's load and WebGL start-up. */
+/** Base minimum time an ability roll stays on screen from when it shows,
+ *  before the animation speed multiplier: about one tumble plus the result's
+ *  beat. A result that shows at once (the static face under reduced motion or
+ *  without WebGL) gets the time an animated roll takes. */
+export const DICE_ROLL_MIN_DURATION_MS = 2400;
+
+/** Wall-clock wait for an ability roll's landing report, after which its
+ *  result shows as the static face and counts down from there (a 3D chunk that
+ *  never arrives, or a renderer that stops drawing). It is not speed-scaled: it
+ *  must outlast the slowest landing, a 3.2s tumble at the slowest speed, plus
+ *  the 3D chunk's load and WebGL start-up. */
 export const DICE_ROLL_LANDING_TIMEOUT_MS = 8000;

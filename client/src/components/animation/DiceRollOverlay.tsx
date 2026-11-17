@@ -69,8 +69,9 @@ function hasWebGL(): boolean {
  * Full-screen dice-roll / coin-flip moment. Gated on `uiStore.diceRoll` (set by
  * `flashDiceRoll`), it animates the engine's already-known result in real 3D.
  * Mirrors the TurnBanner pattern: `fixed inset-0`, AnimatePresence,
- * pointer-events-none. Falls back to a static result under reduced-motion or
- * when WebGL is unavailable — the roll is cosmetic, so degrading is safe.
+ * pointer-events-none. Falls back to a static result under reduced-motion, when
+ * WebGL is unavailable, or when an ability roll never reports its landing
+ * (`uiStore.diceRollStalled`). The roll is cosmetic, so degrading is safe.
  *
  * Sits at `z-[55]` — above the `z-50` board overlays (turn banner, mulligan) so
  * the roll is never occluded mid-animation. The starting-player contest is also
@@ -80,9 +81,13 @@ function hasWebGL(): boolean {
  */
 export function DiceRollOverlay() {
   const diceRoll = useUiStore((s) => s.diceRoll);
+  const diceRollStalled = useUiStore((s) => s.diceRollStalled);
   const skipDiceRoll = useUiStore((s) => s.skipDiceRoll);
   const shouldReduceMotion = useReducedMotion();
   const { t } = useTranslation();
+  // A roll whose landing never arrived shows its static result, as one whose
+  // renderer threw does (the boundary's fallback).
+  const animate = !shouldReduceMotion && hasWebGL() && !diceRollStalled;
 
   // Tap-to-skip via keyboard: Escape dismisses the current roll (advancing to
   // the next queued one, or clearing the overlay). Bound only while a roll is
@@ -141,15 +146,14 @@ export function DiceRollOverlay() {
             className="absolute inset-0 cursor-pointer bg-[radial-gradient(circle_at_center,rgba(2,6,23,0.55),rgba(2,6,23,0.86)_70%)] backdrop-blur-[2px] pointer-events-auto"
           />
           {/* Keyed by payload identity so each roll the FIFO advances to gets a
-              fresh component instance (resets settle state, re-runs the 3D mount). */}
+              fresh component instance (resets settle state, re-runs the 3D mount),
+              and by `animate` so a roll that falls back to its static face
+              remounts already landed. */}
           <DiceRollBoundary
-            key={diceRollKey(diceRoll)}
+            key={`${diceRollKey(diceRoll)}:${animate ? "animated" : "static"}`}
             fallback={<DiceRollContent payload={diceRoll} animate={false} />}
           >
-            <DiceRollContent
-              payload={diceRoll}
-              animate={!shouldReduceMotion && hasWebGL()}
-            />
+            <DiceRollContent payload={diceRoll} animate={animate} />
           </DiceRollBoundary>
           <motion.span
             className="pointer-events-none absolute bottom-8 text-xs font-medium uppercase tracking-[0.2em] text-slate-400/70"

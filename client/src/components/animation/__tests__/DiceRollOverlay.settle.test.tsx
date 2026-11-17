@@ -20,7 +20,11 @@ vi.mock("../dice3d/loaders", () => ({
 }));
 
 import { DiceRollOverlay } from "../DiceRollOverlay";
-import { DICE_RESULT_HOLD_MS, DICE_RESULT_MIN_HOLD_MS } from "../../../animation/types";
+import {
+  DICE_RESULT_HOLD_MS,
+  DICE_RESULT_MIN_HOLD_MS,
+  DICE_ROLL_LANDING_TIMEOUT_MS,
+} from "../../../animation/types";
 import { usePreferencesStore } from "../../../stores/preferencesStore";
 import { useUiStore } from "../../../stores/uiStore";
 import type { DiceRollPayload } from "../../../stores/uiStore";
@@ -152,6 +156,25 @@ describe("DiceRollOverlay reveals a roll's result when it lands", () => {
     await advance(DICE_RESULT_MIN_HOLD_MS - 1);
     expect(useUiStore.getState().diceRoll).toBe(coin);
     expect(screen.getByText(/you lost the flip/i)).toBeInTheDocument();
+    await advance(1);
+    expect(useUiStore.getState().diceRoll).toBeNull();
+  });
+
+  it("shows the coin's static result when it never lands, then counts down", async () => {
+    render(<DiceRollOverlay />);
+    const coin = lostCoinFlip();
+    await showRoll(coin);
+
+    // The renderer never reports a landing (a chunk that never arrives).
+    await advance(DICE_ROLL_LANDING_TIMEOUT_MS - 1);
+    expect(screen.queryByText(/lost the flip/i)).toBeNull();
+    await advance(1);
+    expect(screen.getByText("Tails")).toBeInTheDocument();
+    expect(screen.getByText(/you lost the flip/i)).toBeInTheDocument();
+    expect(screen.getByTestId("die-emphasis")).toBeInTheDocument();
+
+    await advance(DICE_RESULT_HOLD_MS - 1);
+    expect(useUiStore.getState().diceRoll).toBe(coin);
     await advance(1);
     expect(useUiStore.getState().diceRoll).toBeNull();
   });
