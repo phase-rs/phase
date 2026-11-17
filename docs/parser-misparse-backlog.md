@@ -3,8 +3,8 @@
 Consolidated from 50 per-batch clustering passes over the whole card database. Synonymous per-batch clusters were merged into canonical root causes, their card lists unioned and deduped, and ranked by total card appearances (largest first).
 
 - **Canonical root causes:** 29
-- **Distinct cards implicated:** 4483
-- **Total card appearances across root causes:** 4516 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
+- **Distinct cards implicated:** 4480
+- **Total card appearances across root causes:** 4513 (a card may appear under more than one root cause when it exhibits multiple distinct misparses)
 
 > **Staleness warning.** This list is pruned one card at a time and has not been
 > regenerated from current parser state. A measurement at `bd1f78ed0` (#8907)
@@ -48,14 +48,14 @@ The full-Oracle controls establish these clauses, not complete support for every
 | # | Root cause | # cards | Fix hint (where it likely lives) |
 |---|------------|--------:|----------------------------------|
 | 1 | Relative-clause / filter restriction on target dropped | 719 | oracle_target.rs / game/filter.rs — extend TargetFilter property extraction for trailing relative clauses |
-| 2 | Dropped intervening-if / gating condition (condition: null) | 568 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
+| 2 | Dropped intervening-if / gating condition (condition: null) | 567 | oracle_nom/condition.rs parse_inner_condition — trigger/static parsers must delegate condition extraction here |
 | 3 | Anaphor bound to wrong referent | 399 | oracle_quantity.rs context-ref resolution + game/ability_utils.rs forward_result wiring |
-| 4 | Conjoined / chained second effect clause dropped | 378 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
+| 4 | Conjoined / chained second effect clause dropped | 377 | oracle.rs effect-chain composition — split on 'and'/'then'/sentence boundaries and build sub_ability chain |
 | 5 | Dropped 'for each' / dynamic count collapsed to Fixed | 323 | oracle_quantity.rs parse_for_each_clause / parse_quantity_ref — thread ForEach/ObjectCount into the effect count field |
 | 6 | Disjunctive (or-list) collapsed to first branch | 224 | oracle_nom/filter.rs + oracle_target.rs — build TargetFilter::Or across all alt() branches |
 | 7 | Wrong / dropped zone parameters on zone-change effect | 207 | game/zones.rs + oracle parser zone routing — derive correct origin/destination/owner from Oracle |
 | 8 | Additional / alternative casting cost dropped | 207 | oracle_cost.rs — parse additional/alternative cost clauses into Spell.cost / AdditionalCost |
-| 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 177 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
+| 9 | Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed) | 176 | oracle parser ControllerRef binding — resolve scoped/defending/iterated player refs instead of defaulting to You |
 | 10 | Trigger event/mode unrecognized → Unknown | 162 | oracle_trigger.rs — add typed TriggerMode variants for the unrecognized event classes |
 | 11 | Replacement / prevention / 'instead' effect mis-modeled | 151 | add-replacement-effect: route 'would … instead' into replacements[]; preserve damage_source/target filters |
 | 12 | Modal 'choose one/N' parsed as independent abilities | 132 | oracle.rs modal dispatch — detect 'Choose one —' header, wrap modes in Effect::ChooseOneOf |
@@ -811,7 +811,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 2. Dropped intervening-if / gating condition (condition: null)  (568 cards)
+### 2. Dropped intervening-if / gating condition (condition: null)  (567 cards)
 
 **Signature.** Trigger/static/replacement/spell condition left null though Oracle has an 'if/while/as long as/unless' game-state gate; the effect resolves unconditionally (CR 603.4 / 608.2c).
 
@@ -1056,7 +1056,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Hobgoblin Captain
 - Holistic Wisdom
 - Hotheaded Giant
-- Hour of Glory
 - Hour of Revelation
 - Howlpack Piper
 - Hulkling, Burgeoning Bruiser
@@ -1800,7 +1799,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 4. Conjoined / chained second effect clause dropped  (378 cards)
+### 4. Conjoined / chained second effect clause dropped  (377 cards)
 
 **Signature.** A multi-clause effect ('X and Y' / 'then Z') emits only the first conjunct; sub_ability is null and the trailing imperative/effect chain is omitted.
 
@@ -2036,7 +2035,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Predators' Hour
 - Quest Compleated Beast
 - Questing Cosplayer
-- Rag Man
 - Rakdos, Lord of Riots
 - Rampaging Geoderm
 - Rankle, Pitiless Trickster
@@ -3196,7 +3194,7 @@ The full-Oracle controls establish these clauses, not complete support for every
 
 </details>
 
-### 9. Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed)  (177 cards)
+### 9. Wrong player/controller scope (You where Opponent/Scoped/Target/Defending needed)  (176 cards)
 
 **Signature.** Effect recipient / filter controller / chooser uses You/Controller where Opponent/TargetPlayer/ScopedPlayer/DefendingPlayer is required, or per-player fan-out is dropped.
 
@@ -3294,7 +3292,6 @@ The full-Oracle controls establish these clauses, not complete support for every
 - Kogla, the Titan Ape
 - Kraven the Hunter
 - Leadership Vacuum
-- Legion's End
 - Lembas
 - Liliana's Indignation
 - Liliana's Triumph
