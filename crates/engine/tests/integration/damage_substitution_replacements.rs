@@ -19,13 +19,15 @@
 //! - A spell's later instruction runs once, behind its remaining recipients, whichever
 //!   replacement answer reaches it.
 
+use std::collections::BTreeSet;
+
 use engine::game::combat::AttackTarget;
 use engine::game::effects::attach::attach_to;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, EffectKind, ResolvedAbility, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, LossReason};
 use engine::types::game_state::{
     CastPaymentMode, CastingVariant, ReplacementCandidateSummary, WaitingFor,
 };
@@ -408,6 +410,19 @@ fn resolved(events: &[GameEvent], kind: EffectKind) -> bool {
     events.iter().any(
         |event| matches!(event, GameEvent::EffectResolved { kind: found, .. } if *found == kind),
     )
+}
+
+/// CR 104.3e + CR 104.2b: each player who lost, with the reasons recorded, in player order.
+fn player_losses(events: &[GameEvent]) -> Vec<(PlayerId, BTreeSet<LossReason>)> {
+    let mut losses: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerLost { player_id, reasons } => Some((*player_id, reasons.clone())),
+            _ => None,
+        })
+        .collect();
+    losses.sort();
+    losses
 }
 
 /// The events that show the order of a resolution: one label per damage dealt, card drawn,
@@ -1446,6 +1461,11 @@ fn a_lifelink_win_settles_with_the_batchs_damage() {
             .iter()
             .any(|e| matches!(e, GameEvent::DamageDealt { .. })));
         assert!(completions(&events, EffectKind::EachDealsDamageEqualToPower, spell).is_empty());
+        // CR 104.2b: P0's win makes its opponent lose.
+        assert_eq!(
+            player_losses(&events),
+            vec![(P1, BTreeSet::from([LossReason::OpponentWon]))]
+        );
     }
 }
 
@@ -1509,6 +1529,11 @@ fn a_player_who_wins_and_loses_in_one_batch_loses() {
     assert!(!events
         .iter()
         .any(|e| matches!(e, GameEvent::PlayerEliminated { player_id } if *player_id == P1)));
+    // CR 104.3e + CR 104.3f: P0 loses to the effect, and its win counts for nothing.
+    assert_eq!(
+        player_losses(&events),
+        vec![(P0, BTreeSet::from([LossReason::EffectStatedLoss]))]
+    );
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::GameOver { winner: Some(P1) }
@@ -1621,6 +1646,14 @@ fn a_two_headed_giant_team_that_wins_and_loses_in_one_batch_loses() {
             "{winner:?}'s team wins"
         );
     }
+    // CR 104.3e + CR 810.8a: the team loses to the effect, each head for that reason.
+    assert_eq!(
+        player_losses(&events),
+        vec![
+            (P0, BTreeSet::from([LossReason::EffectStatedLoss])),
+            (P1, BTreeSet::from([LossReason::EffectStatedLoss])),
+        ]
+    );
     assert!(matches!(
         runner.state().waiting_for,
         WaitingFor::GameOver { winner: Some(_) }
@@ -1697,6 +1730,15 @@ fn two_lich_losses_in_one_batch_are_a_draw() {
             })
             .collect();
         assert_eq!(game_overs, vec![None], "{case:?}");
+        // CR 104.3e + CR 104.4a: both lose to the effect at once.
+        assert_eq!(
+            player_losses(&events),
+            vec![
+                (P0, BTreeSet::from([LossReason::EffectStatedLoss])),
+                (P1, BTreeSet::from([LossReason::EffectStatedLoss])),
+            ],
+            "{case:?}"
+        );
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::GameOver { winner: None }
@@ -3396,7 +3438,10 @@ fn cast_temper_at_one(runner: &mut GameRunner, temper: ObjectId, target: ObjectI
 }
 
 /// A rider resident from one recipient isn't lost to the next recipient's substitution (Temper
-/// and Pyroclasm; CR 615.5). In combat the batch's drain takes the same path.
+/// and Pyroclasm; CR 615.5). In combat, Test of Faith on P1's Phytohydra blocking a 4/4: the two
+/// are ordered by P1 (CR 616.1). Test of Faith first prevents 3 and puts 3 counters, and
+/// Phytohydra replaces the last 1 with 1 more: 4. Phytohydra first replaces all 4 with 4
+/// counters and leaves the shield unused. Phytohydra is dealt no damage, and no rider is left.
 #[test]
 fn a_resident_rider_from_another_recipient_is_not_lost() {
     let mut scenario = scenario();
@@ -3414,17 +3459,32 @@ fn a_resident_rider_from_another_recipient_is_not_lost() {
     assert_eq!(damage(&runner, hydra), 0);
     assert_at_rest(&runner);
 
-    let mut scenario = self::scenario();
-    let hydra = phytohydra(&mut scenario, P1);
-    let attacker = scenario.add_creature(P0, "Ogre", 4, 4).id();
-    let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
-    let mut runner = scenario.build();
-    cast(&mut runner, faith, vec![object_target(hydra)]);
-    run_combat(&mut runner, vec![attacker], vec![(hydra, attacker)]);
+    for faith_first in [true, false] {
+        let mut scenario = self::scenario();
+        let hydra = phytohydra(&mut scenario, P1);
+        let attacker = scenario.add_creature(P0, "Ogre", 4, 4).id();
+        let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+        let mut runner = scenario.build();
+        cast(&mut runner, faith, vec![object_target(hydra)]);
+        let mut events = combat_events(&mut runner, vec![attacker], vec![(hydra, attacker)]);
+        assert_prompt_is_replacement_choice(&runner);
+        if faith_first {
+            choose_shield(&mut runner, &mut events);
+        } else {
+            choose_source(&mut runner, &mut events, hydra);
+        }
 
-    assert_eq!(plus_counters(&runner, hydra), 4);
-    assert_eq!(damage(&runner, hydra), 0);
-    assert!(!runner.state().has_post_replacement_drain());
+        assert!(
+            !matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "one order prompt"
+        );
+        assert_eq!(plus_counters(&runner, hydra), 4);
+        assert_eq!(damage(&runner, hydra), 0);
+        assert!(!runner.state().has_post_replacement_drain());
+    }
 }
 
 /// Force Bubble: "The effect does not prevent damage, it replaces it so the damage is neither
@@ -3743,208 +3803,359 @@ fn lifelink_has_nothing_to_gain_from_replaced_damage() {
     }
 }
 
-/// Force Bubble under Furnace of Rath in combat: the engine takes the order's first candidate
-/// (CR 510.2, CR 616.1; a strict failure, not its controller's pick), under ordinary and
-/// unpreventable damage alike.
-#[test]
-fn combat_order_park_keeps_force_bubbles_damage() {
-    let mut scenario = scenario();
-    let bubble = force_bubble(&mut scenario, P1);
-    furnace(&mut scenario);
-    let attacker = scenario.add_creature(P0, "Bear", 1, 1).id();
-    let mut runner = scenario.build();
-    run_combat(&mut runner, vec![attacker], vec![]);
-
-    assert_eq!(life(&runner, P1), 20);
-    let on_bubble = counters(&runner, bubble, &depletion());
-    assert!([1, 2].contains(&on_bubble), "got {on_bubble}");
-
-    // A 3/3 after Stomp: Bubble first is 3, Furnace first is 6 and it is sacrificed.
-    let mut scenario = self::scenario();
-    let bubble = force_bubble(&mut scenario, P1);
-    furnace(&mut scenario);
-    let attacker = scenario.add_creature(P0, "Ogre", 3, 3).id();
-    let spell = stomp(&mut scenario);
-    let mut runner = scenario.build();
-    cast(&mut runner, spell, vec![player_target(P0)]);
-    run_combat(&mut runner, vec![attacker], vec![]);
-
-    assert_eq!(life(&runner, P1), 20);
-    assert!(
-        zone(&runner, bubble) == Zone::Graveyard || counters(&runner, bubble, &depletion()) == 3,
-        "Force Bubble: {:?}",
-        runner.state().objects[&bubble].counters
-    );
+/// Combat up to its first prompt (`combat_events`), then every `ReplacementChoice` answered with
+/// the first source of `prefer` that it offers. Returns the events and each prompt's chooser and
+/// candidate sources.
+#[track_caller]
+fn combat_answering(
+    runner: &mut GameRunner,
+    attackers: Vec<ObjectId>,
+    blocks: Vec<(ObjectId, ObjectId)>,
+    prefer: &[ObjectId],
+) -> (Vec<GameEvent>, Vec<(PlayerId, Vec<ObjectId>)>) {
+    let mut events = combat_events(runner, attackers, blocks);
+    let mut prompts = Vec::new();
+    while let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    {
+        let sources: Vec<ObjectId> = candidates.iter().map(|c| c.source_id).collect();
+        let pick = prefer
+            .iter()
+            .copied()
+            .find(|source| sources.contains(source))
+            .unwrap_or_else(|| panic!("an unexpected replacement prompt: {sources:?}"));
+        prompts.push((*player, sources));
+        choose_source(runner, &mut events, pick);
+    }
+    (events, prompts)
 }
 
+/// The candidate sources of one prompt, as a set.
+fn source_set(sources: &[ObjectId]) -> std::collections::BTreeSet<ObjectId> {
+    sources.iter().copied().collect()
+}
+
+/// Force Bubble ("If damage would be dealt to you, put that many depletion counters on this
+/// enchantment instead. When there are four or more depletion counters on this enchantment,
+/// sacrifice it.") under P0's Furnace of Rath in combat: P1, the player dealt damage, orders them
+/// (CR 616.1), and the combat batch asks (CR 510.2 rules out priority, not the choice). An
+/// unblocked 1/1: Force Bubble first puts 1 counter, Furnace first 2. A 3/3 after Stomp: Force
+/// Bubble first puts 3 and stays, Furnace first puts 6 and it is sacrificed — a substitution is not
+/// a prevention, so "can't be prevented" changes nothing (CR 615.12, CR 614.1a). P1 takes no
+/// damage either way.
+#[test]
+fn combat_order_park_keeps_force_bubbles_damage() {
+    for bubble_first in [true, false] {
+        let mut scenario = scenario();
+        let bubble = force_bubble(&mut scenario, P1);
+        let furnace = furnace(&mut scenario);
+        let attacker = scenario.add_creature(P0, "Bear", 1, 1).id();
+        let mut runner = scenario.build();
+        let first = if bubble_first { bubble } else { furnace };
+        let (_, prompts) = combat_answering(&mut runner, vec![attacker], vec![], &[first]);
+
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0].0, P1);
+        assert_eq!(source_set(&prompts[0].1), source_set(&[bubble, furnace]));
+        assert_eq!(life(&runner, P1), 20);
+        assert_eq!(
+            counters(&runner, bubble, &depletion()),
+            if bubble_first { 1 } else { 2 }
+        );
+
+        let mut scenario = self::scenario();
+        let bubble = force_bubble(&mut scenario, P1);
+        let furnace = self::furnace(&mut scenario);
+        let attacker = scenario.add_creature(P0, "Ogre", 3, 3).id();
+        let spell = stomp(&mut scenario);
+        let mut runner = scenario.build();
+        cast(&mut runner, spell, vec![player_target(P0)]);
+        let first = if bubble_first { bubble } else { furnace };
+        let (_, prompts) = combat_answering(&mut runner, vec![attacker], vec![], &[first]);
+
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(life(&runner, P1), 20);
+        if bubble_first {
+            assert_eq!(zone(&runner, bubble), Zone::Battlefield);
+            assert_eq!(counters(&runner, bubble, &depletion()), 3);
+        } else {
+            assert_eq!(zone(&runner, bubble), Zone::Graveyard);
+        }
+    }
+}
+
+/// Phytohydra ("If damage would be dealt to this creature, put that many +1/+1 counters on it
+/// instead.") blocking a 3/3 under Furnace of Rath: its controller orders them (CR 616.1; ruling
+/// S9). Phytohydra first puts 3 counters, Furnace first 6. It is dealt no damage.
 #[test]
 fn combat_order_park_keeps_phytohydras_damage() {
-    let mut scenario = scenario();
-    let hydra = phytohydra(&mut scenario, P1);
-    furnace(&mut scenario);
-    let attacker = scenario.add_creature(P0, "Ogre", 3, 3).id();
-    let mut runner = scenario.build();
-    run_combat(&mut runner, vec![attacker], vec![(hydra, attacker)]);
+    for hydra_first in [true, false] {
+        let mut scenario = scenario();
+        let hydra = phytohydra(&mut scenario, P1);
+        let furnace = furnace(&mut scenario);
+        let attacker = scenario.add_creature(P0, "Ogre", 3, 3).id();
+        let mut runner = scenario.build();
+        let first = if hydra_first { hydra } else { furnace };
+        let (_, prompts) = combat_answering(
+            &mut runner,
+            vec![attacker],
+            vec![(hydra, attacker)],
+            &[first],
+        );
 
-    let on_hydra = plus_counters(&runner, hydra);
-    assert!([3, 6].contains(&on_hydra), "got {on_hydra}");
-    assert_eq!(damage(&runner, hydra), 0);
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0].0, P1);
+        assert_eq!(
+            plus_counters(&runner, hydra),
+            if hydra_first { 3 } else { 6 }
+        );
+        assert_eq!(damage(&runner, hydra), 0);
+    }
 }
 
 /// Polukranos, Unchained: "prevent that damage and remove that many +1/+1 counters from it."
-/// Furnace of Rath first removes 4, Polukranos first removes 2.
+/// Blocking a 2/2 under Furnace of Rath, its controller orders them (CR 616.1): Furnace first
+/// prevents 4 and removes 4 (2 left), Polukranos first prevents 2 and removes 2 (4 left). The
+/// prevention is one event (CR 615.5).
 #[test]
 fn combat_order_park_runs_a_prevention_rider_before_the_batch_drain() {
-    let mut scenario = scenario();
-    let id = scenario
-        .add_creature_from_oracle(P1, "Polukranos, Unchained", 0, 0, POLUKRANOS)
-        .id();
-    scenario.with_counter(id, CounterType::Plus1Plus1, 6);
-    furnace(&mut scenario);
-    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
-    let mut runner = scenario.build();
-    let events = combat_events(&mut runner, vec![attacker], vec![(id, attacker)]);
+    for furnace_first in [true, false] {
+        let mut scenario = scenario();
+        let id = scenario
+            .add_creature_from_oracle(P1, "Polukranos, Unchained", 0, 0, POLUKRANOS)
+            .id();
+        scenario.with_counter(id, CounterType::Plus1Plus1, 6);
+        let furnace = furnace(&mut scenario);
+        let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+        let mut runner = scenario.build();
+        let first = if furnace_first { furnace } else { id };
+        let (events, prompts) =
+            combat_answering(&mut runner, vec![attacker], vec![(id, attacker)], &[first]);
 
-    let left = plus_counters(&runner, id);
-    assert!([4, 2].contains(&left), "got {left}");
-    assert_eq!(damage(&runner, id), 0);
-    assert_eq!(prevented(&events), 1);
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(
+            plus_counters(&runner, id),
+            if furnace_first { 2 } else { 4 }
+        );
+        assert_eq!(damage(&runner, id), 0);
+        assert_eq!(prevented(&events), 1);
+    }
 }
+
+/// The prompts Dapper Shieldmate's shield counter and Furnace of Rath raise in one combat leg, as
+/// measured: whether its controller is asked to order them (CR 616.1). Every order gives the same
+/// result, so the rows below hold for each answer.
+const SHIELDMATE_PROMPTS: usize = 1;
 
 /// Dapper Shieldmate: "If a permanent with a shield counter is dealt unpreventable damage, that
 /// damage will be dealt and a shield counter will still be removed." and "If a permanent that
 /// would be dealt damage has more than one shield counter on it, that damage is prevented and
-/// only one shield counter is removed." (CR 122.1c.)
+/// only one shield counter is removed." (CR 122.1c.) Under Furnace of Rath, every order its
+/// controller could answer leaves one shield counter, and the damage is prevented (or, under
+/// Stomp, dealt doubled: 4).
 #[test]
 fn combat_order_park_keeps_a_shield_counter_replacement() {
     for unpreventable in [false, true] {
-        let mut scenario = scenario();
-        let id = scenario
-            .add_creature_from_oracle(P1, "Dapper Shieldmate", 2, 6, SHIELDMATE)
-            .id();
-        scenario.with_counter(id, CounterType::Shield, 2);
-        furnace(&mut scenario);
-        let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
-        let spell = unpreventable.then(|| stomp(&mut scenario));
-        let mut runner = scenario.build();
-        if let Some(spell) = spell {
-            cast(&mut runner, spell, vec![player_target(P1)]);
-        }
-        run_combat(&mut runner, vec![attacker], vec![(id, attacker)]);
+        for furnace_first in [true, false] {
+            let mut scenario = scenario();
+            let id = scenario
+                .add_creature_from_oracle(P1, "Dapper Shieldmate", 2, 6, SHIELDMATE)
+                .id();
+            scenario.with_counter(id, CounterType::Shield, 2);
+            let furnace = furnace(&mut scenario);
+            let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+            let spell = unpreventable.then(|| stomp(&mut scenario));
+            let mut runner = scenario.build();
+            if let Some(spell) = spell {
+                cast(&mut runner, spell, vec![player_target(P1)]);
+            }
+            let first = if furnace_first { furnace } else { id };
+            let (_, prompts) =
+                combat_answering(&mut runner, vec![attacker], vec![(id, attacker)], &[first]);
 
-        assert_eq!(counters(&runner, id, &CounterType::Shield), 1);
-        assert_eq!(damage(&runner, id), if unpreventable { 4 } else { 0 });
+            assert_eq!(prompts.len(), SHIELDMATE_PROMPTS, "{prompts:?}");
+            assert_eq!(counters(&runner, id, &CounterType::Shield), 1);
+            assert_eq!(damage(&runner, id), if unpreventable { 4 } else { 0 });
+        }
     }
 }
 
 /// Torbran, Thane of Red Fell's ruling: "the player being dealt damage or the controller of the
-/// permanent being dealt damage chooses an order in which to apply those effects." (2+2)×2 or
-/// 2×2+2.
+/// permanent being dealt damage chooses an order in which to apply those effects." P1 is asked:
+/// Torbran first (2+2)×2 = 8, Furnace of Rath first 2×2+2 = 6.
 #[test]
 fn combat_order_park_keeps_a_damage_modifiers_damage() {
-    let mut scenario = scenario();
-    scenario.add_creature_from_oracle(P0, "Torbran, Thane of Red Fell", 2, 4, TORBRAN);
-    furnace(&mut scenario);
-    let attacker = scenario
-        .add_creature(P0, "Goblin", 2, 2)
-        .with_color(vec![ManaColor::Red])
-        .id();
-    let mut runner = scenario.build();
-    run_combat(&mut runner, vec![attacker], vec![]);
+    for torbran_first in [true, false] {
+        let mut scenario = scenario();
+        let torbran = scenario
+            .add_creature_from_oracle(P0, "Torbran, Thane of Red Fell", 2, 4, TORBRAN)
+            .id();
+        let furnace = furnace(&mut scenario);
+        let attacker = scenario
+            .add_creature(P0, "Goblin", 2, 2)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let mut runner = scenario.build();
+        let first = if torbran_first { torbran } else { furnace };
+        let (_, prompts) = combat_answering(&mut runner, vec![attacker], vec![], &[first]);
 
-    let lost = 20 - life(&runner, P1);
-    assert!([6, 8].contains(&lost), "got {lost}");
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        assert_eq!(prompts[0].0, P1);
+        assert_eq!(20 - life(&runner, P1), if torbran_first { 8 } else { 6 });
+    }
 }
 
 /// CR 616.1f: "Once the chosen effect has been applied, this process is repeated". Torbran,
-/// Furnace of Rath and Gratuitous Violence park again after the first answer: (2×2×2)+2,
-/// ((2×2)+2)×2 or ((2+2)×2)×2.
+/// Furnace of Rath and Gratuitous Violence are asked until the event settles: Torbran first
+/// ((2+2)×2)×2 = 16; one doubler, then Torbran, then the other ((2×2)+2)×2 = 12; both doublers
+/// first (2×2×2)+2 = 10. With P1's Force Bubble in Gratuitous Violence's place, Force Bubble first
+/// puts 2 counters on it; Torbran or Furnace first puts four or more, and it is sacrificed. P1
+/// takes no damage on that board.
 #[test]
 fn combat_order_parks_repeat_until_the_event_settles() {
-    let mut scenario = scenario();
-    scenario.add_creature_from_oracle(P0, "Torbran, Thane of Red Fell", 2, 4, TORBRAN);
-    furnace(&mut scenario);
-    scenario.add_enchantment_from_oracle(P0, "Gratuitous Violence", GRATUITOUS_VIOLENCE);
-    let attacker = scenario
-        .add_creature(P0, "Goblin", 2, 2)
-        .with_color(vec![ManaColor::Red])
-        .id();
-    let mut runner = scenario.build();
-    run_combat(&mut runner, vec![attacker], vec![]);
+    for (order, lost) in [
+        (["torbran", "furnace", "violence"], 16),
+        (["furnace", "torbran", "violence"], 12),
+        (["furnace", "violence", "torbran"], 10),
+    ] {
+        let mut scenario = scenario();
+        let torbran = scenario
+            .add_creature_from_oracle(P0, "Torbran, Thane of Red Fell", 2, 4, TORBRAN)
+            .id();
+        let furnace = furnace(&mut scenario);
+        let violence = scenario
+            .add_enchantment_from_oracle(P0, "Gratuitous Violence", GRATUITOUS_VIOLENCE)
+            .id();
+        let attacker = scenario
+            .add_creature(P0, "Goblin", 2, 2)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let mut runner = scenario.build();
+        let prefer: Vec<ObjectId> = order
+            .iter()
+            .map(|name| match *name {
+                "torbran" => torbran,
+                "furnace" => furnace,
+                _ => violence,
+            })
+            .collect();
+        let (_, prompts) = combat_answering(&mut runner, vec![attacker], vec![], &prefer);
 
-    let lost = 20 - life(&runner, P1);
-    assert!([10, 12, 16].contains(&lost), "got {lost}");
+        assert!(!prompts.is_empty(), "reach-guard: the order was asked");
+        assert!(prompts.iter().all(|(player, _)| *player == P1));
+        assert_eq!(20 - life(&runner, P1), lost, "{order:?}");
+    }
 
-    // Force Bubble in Gratuitous Violence's place: whichever comes first, it is reached.
-    let mut scenario = self::scenario();
-    scenario.add_creature_from_oracle(P0, "Torbran, Thane of Red Fell", 2, 4, TORBRAN);
-    furnace(&mut scenario);
-    let bubble = force_bubble(&mut scenario, P1);
-    let attacker = scenario
-        .add_creature(P0, "Goblin", 2, 2)
-        .with_color(vec![ManaColor::Red])
-        .id();
-    let mut runner = scenario.build();
-    run_combat(&mut runner, vec![attacker], vec![]);
+    for first_name in ["bubble", "torbran", "furnace"] {
+        let mut scenario = self::scenario();
+        let torbran = scenario
+            .add_creature_from_oracle(P0, "Torbran, Thane of Red Fell", 2, 4, TORBRAN)
+            .id();
+        let furnace = furnace(&mut scenario);
+        let bubble = force_bubble(&mut scenario, P1);
+        let attacker = scenario
+            .add_creature(P0, "Goblin", 2, 2)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let mut runner = scenario.build();
+        let prefer = match first_name {
+            "bubble" => vec![bubble],
+            "torbran" => vec![torbran, bubble],
+            _ => vec![furnace, bubble],
+        };
+        let (_, prompts) = combat_answering(&mut runner, vec![attacker], vec![], &prefer);
 
-    assert_eq!(life(&runner, P1), 20);
-    assert!(
-        zone(&runner, bubble) == Zone::Graveyard || counters(&runner, bubble, &depletion()) == 2,
-        "Force Bubble: {:?}",
-        runner.state().objects[&bubble].counters
-    );
+        assert!(!prompts.is_empty(), "reach-guard: the order was asked");
+        assert_eq!(life(&runner, P1), 20);
+        if first_name == "bubble" {
+            assert_eq!(counters(&runner, bubble, &depletion()), 2);
+        } else {
+            assert_eq!(zone(&runner, bubble), Zone::Graveyard, "{first_name} first");
+        }
+    }
 }
 
-/// Two 1/1 attackers, each blocked by its own Phytohydra, under Furnace of Rath. Each answered
-/// effect's rider drains in its own portion, ahead of the next portion's stamp.
+/// Two 1/1 attackers, each blocked by its own Phytohydra, under Furnace of Rath: one prompt per
+/// leg, each P1's (CR 616.1). Answering the first leg with its Phytohydra puts 1 counter on it;
+/// answering the second leg with Furnace of Rath puts 2 on the other. Each answered effect's
+/// substitution drains in its own leg (CR 616.1g). Then Phytohydra and Polukranos, Unchained
+/// ("prevent that damage and remove that many +1/+1 counters from it") blocking a 1/1 and a
+/// 2/2: Phytohydra for its leg and Furnace for Polukranos's gives 1 counter and 2 left on
+/// Polukranos; Furnace for Phytohydra's leg and Polukranos for its own gives 2 counters and 4
+/// left. No rider stays resident past its leg.
 #[test]
 fn combat_order_answer_drains_in_its_own_portion() {
     let mut scenario = scenario();
     let (first, second) = (phytohydra(&mut scenario, P1), phytohydra(&mut scenario, P1));
-    furnace(&mut scenario);
+    let furnace = furnace(&mut scenario);
     let (one, two) = (
         scenario.add_creature(P0, "Squire", 1, 1).id(),
         scenario.add_creature(P0, "Squire", 1, 1).id(),
     );
     let mut runner = scenario.build();
-    run_combat(
+    let (_, prompts) = combat_answering(
         &mut runner,
         vec![one, two],
         vec![(first, one), (second, two)],
+        &[first, furnace],
     );
 
-    assert!(plus_counters(&runner, first) >= 1);
-    assert!(plus_counters(&runner, second) >= 1);
+    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    assert!(prompts.iter().all(|(player, _)| *player == P1));
+    assert_eq!(plus_counters(&runner, first), 1);
+    assert_eq!(plus_counters(&runner, second), 2);
 
-    // Polukranos's rider has no substitution behind it to drain the first portion's rider, so
-    // a rider left resident past its own portion costs Polukranos its "remove that many +1/+1
-    // counters from it".
-    let mut scenario = self::scenario();
-    let hydra = phytohydra(&mut scenario, P1);
-    let polukranos = scenario
-        .add_creature_from_oracle(P1, "Polukranos, Unchained", 0, 0, POLUKRANOS)
-        .id();
-    scenario.with_counter(polukranos, CounterType::Plus1Plus1, 6);
-    furnace(&mut scenario);
-    let (one, two) = (
-        scenario.add_creature(P0, "Squire", 1, 1).id(),
-        scenario.add_creature(P0, "Bear", 2, 2).id(),
-    );
-    let mut runner = scenario.build();
-    run_combat(
-        &mut runner,
-        vec![one, two],
-        vec![(hydra, one), (polukranos, two)],
-    );
+    for hydra_answer_is_hydra in [true, false] {
+        let mut scenario = self::scenario();
+        let hydra = phytohydra(&mut scenario, P1);
+        let polukranos = scenario
+            .add_creature_from_oracle(P1, "Polukranos, Unchained", 0, 0, POLUKRANOS)
+            .id();
+        scenario.with_counter(polukranos, CounterType::Plus1Plus1, 6);
+        let furnace = self::furnace(&mut scenario);
+        let (one, two) = (
+            scenario.add_creature(P0, "Squire", 1, 1).id(),
+            scenario.add_creature(P0, "Bear", 2, 2).id(),
+        );
+        let mut runner = scenario.build();
+        // Each leg takes the first of `prefer` it offers: its own effect, or Furnace of Rath.
+        let prefer = if hydra_answer_is_hydra {
+            vec![hydra, furnace]
+        } else {
+            vec![polukranos, furnace]
+        };
+        let (_, prompts) = combat_answering(
+            &mut runner,
+            vec![one, two],
+            vec![(hydra, one), (polukranos, two)],
+            &prefer,
+        );
 
-    assert!(plus_counters(&runner, hydra) >= 1);
-    let left = plus_counters(&runner, polukranos);
-    assert!([4, 2].contains(&left), "got {left}");
-    assert!(!runner.state().has_post_replacement_drain());
+        assert_eq!(prompts.len(), 2, "{prompts:?}");
+        assert_eq!(
+            (
+                plus_counters(&runner, hydra),
+                plus_counters(&runner, polukranos)
+            ),
+            if hydra_answer_is_hydra {
+                (1, 2)
+            } else {
+                (2, 4)
+            }
+        );
+        assert!(!runner.state().has_post_replacement_drain());
+    }
 }
 
-/// Force Bubble: "Note that damage from multiple sources that happens at one time (such as combat
-/// damage) gives one choice, not one per source."
+/// Force Bubble: "You can't split the damage between them." Three unblocked 1/1s at P1, who
+/// controls two Force Bubbles: P1 is asked once per source, and answering the same Force Bubble
+/// each time puts all 3 counters on it.
+///
+/// strict-failure: the ruling says "damage from multiple sources that happens at one time (such
+/// as combat damage) gives one choice, not one per source", and the engine asks three times
+/// where the card gives one. Force Bubble reports unsupported for it
+/// (`ResolverFeature:structural:damage_substitution_choice_incomplete`).
 #[test]
 fn two_force_bubbles_take_all_of_a_combat_batch_on_one() {
     let mut scenario = scenario();
@@ -3960,14 +4171,17 @@ fn two_force_bubbles_take_all_of_a_combat_batch_on_one() {
         })
         .collect();
     let mut runner = scenario.build();
-    run_combat(&mut runner, attackers, vec![]);
+    let (_, prompts) = combat_answering(&mut runner, attackers, vec![], &[first]);
 
-    let mut on_bubbles = [
-        counters(&runner, first, &depletion()),
-        counters(&runner, second, &depletion()),
-    ];
-    on_bubbles.sort_unstable();
-    assert_eq!(on_bubbles, [0, 3]);
+    assert_eq!(prompts.len(), 3, "{prompts:?}");
+    assert!(prompts.iter().all(|(player, _)| *player == P1));
+    assert_eq!(
+        [
+            counters(&runner, first, &depletion()),
+            counters(&runner, second, &depletion())
+        ],
+        [3, 0]
+    );
     assert_eq!(life(&runner, P1), 20);
 }
 
@@ -4023,10 +4237,12 @@ fn a_repeated_answer_puts_a_noncombat_batch_on_one_force_bubble() {
     assert_at_rest(&runner);
 }
 
-/// Battletide Alchemist: "you may prevent X of that damage". A "may" is not an order, so combat
-/// gives it no automatic yes.
+/// Battletide Alchemist: "If a source would deal damage to a player, you may prevent X of that
+/// damage, where X is the number of Clerics you control." The "may" is P1's to answer, and the
+/// combat batch asks it (CR 616.1, CR 615.5): accepting prevents 1 of the Ogre's 3 (the
+/// Alchemist is the one Cleric) and P1 goes to 18; declining leaves all 3, and P1 goes to 17.
 #[test]
-fn a_parked_may_gets_no_automatic_yes_in_combat() {
+fn a_parked_may_is_asked_in_combat() {
     // Reach: the same board offers the "may" in a noncombat event.
     let mut scenario = scenario();
     scenario
@@ -4042,26 +4258,45 @@ fn a_parked_may_gets_no_automatic_yes_in_combat() {
         .as_ref()
         .is_some_and(|pending| pending.is_optional));
 
-    let mut scenario = self::scenario();
-    scenario
-        .add_creature_from_oracle(P1, "Battletide Alchemist", 3, 4, ALCHEMIST)
-        .with_subtypes(vec!["Kithkin", "Cleric"]);
-    let attacker = scenario.add_creature(P0, "Ogre", 3, 3).id();
-    let mut runner = scenario.build();
-    let events = combat_events(&mut runner, vec![attacker], vec![]);
+    for accept in [true, false] {
+        let mut scenario = self::scenario();
+        scenario
+            .add_creature_from_oracle(P1, "Battletide Alchemist", 3, 4, ALCHEMIST)
+            .with_subtypes(vec!["Kithkin", "Cleric"]);
+        let attacker = scenario.add_creature(P0, "Ogre", 3, 3).id();
+        let mut runner = scenario.build();
+        let mut events = combat_events(&mut runner, vec![attacker], vec![]);
 
-    assert!(matches!(
-        runner.state().phase,
-        Phase::EndCombat | Phase::PostCombatMain
-    ));
-    assert!(runner.state().pending_replacement.is_none());
-    assert_eq!(prevented(&events), 0);
-    // strict-failure: the card has P1, the Alchemist's controller, choose: prevent 1 of the Ogre's
-    // 3 (X is 1, the Alchemist itself is the one Cleric) and take 2, or take all 3. Combat can't ask
-    // yet (Command Zone #140), and the source's damage is skipped: P1 takes none. This is not a
-    // reading of the card, and the card reports unsupported for it
-    // (`ResolverFeature:structural:damage_replacement_choice_unasked_in_combat`).
-    assert_eq!(life(&runner, P1), 20);
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected the Alchemist's may, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P1);
+        assert!(runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| pending.is_optional));
+        // CR 616.1: the Alchemist's own candidate accepts the "may"; "Decline" declines it.
+        let index = candidates
+            .iter()
+            .position(|candidate| (candidate.description == "Decline") != accept)
+            .unwrap_or_else(|| panic!("the may offers both answers: {candidates:?}"));
+        answer(
+            &mut runner,
+            GameAction::ChooseReplacement { index },
+            &mut events,
+        );
+
+        assert_eq!(life(&runner, P1), if accept { 18 } else { 17 });
+        assert_eq!(prevented(&events), usize::from(accept));
+        assert!(runner.state().pending_replacement.is_none());
+    }
 }
 
 /// CR 701.14a + CR 615.5: the reverse hit's prevention rider finishes before Fight.
@@ -4742,4 +4977,195 @@ fn deferred_damage_source_keeps_lifelink_exactly_once() {
     assert_eq!(life(&runner, P1), 21);
     assert_completes_once_after_its_damage(&events, EffectKind::EachSourceDealsDamage, charm);
     assert_at_rest(&runner);
+}
+
+const FATEFUL_SHOWDOWN: &str = "Fateful Showdown deals damage to any target equal to the number of cards in your hand. Discard all the cards in your hand, then draw that many cards.";
+const PRIZEFIGHT: &str = "Target creature you control fights target creature you don't control. (Each deals damage equal to its power to the other.)\nCreate a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+
+/// The damage events dealt to `recipient`, in order.
+fn dealt_to(events: &[GameEvent], recipient: ObjectId) -> Vec<u32> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamageDealt {
+                target: TargetRef::Object(id),
+                amount,
+                ..
+            } if *id == recipient => Some(*amount),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 615.5 + CR 608.2c: a prevention rider's amount belongs to the rider alone. Fateful
+/// Showdown ("deals damage to any target equal to the number of cards in your hand. Discard all
+/// the cards in your hand, then draw that many cards.") with five cards in hand at P1's 3/3
+/// under Test of Faith ("For each 1 damage prevented this way, put a +1/+1 counter on that
+/// creature."): 3 of the 5 damage is prevented and its counters are put on the 3/3, which is
+/// dealt 2. The spell's next instructions follow: P0 discards five and draws "that many", the
+/// five discarded, never the rider's 3. With P1's Hardened Scales and Doubling Season the rider
+/// pauses on its counter orders, and the spell's tail waits behind them, still drawing five.
+#[test]
+fn a_riders_amount_does_not_reach_the_spells_tail() {
+    for paused in [false, true] {
+        let mut scenario = self::scenario();
+        let creature = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+        let season = paused.then(|| {
+            scenario.add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES);
+            scenario
+                .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+                .id()
+        });
+        let faith = instant(&mut scenario, "Test of Faith", TEST_OF_FAITH);
+        let showdown = instant(&mut scenario, "Fateful Showdown", FATEFUL_SHOWDOWN);
+        for index in 0..5 {
+            scenario.add_card_to_hand(P0, &format!("Held {index}"));
+        }
+        scenario.with_library_top(
+            P0,
+            &[
+                "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight",
+            ],
+        );
+        let mut runner = scenario.build();
+        cast(&mut runner, faith, vec![object_target(creature)]);
+        let graveyard_before = player(&runner, P0).graveyard.len();
+        let mut events = cast(&mut runner, showdown, vec![object_target(creature)]);
+        let mut orders = 0;
+        while matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ) {
+            orders += 1;
+            choose_source(
+                &mut runner,
+                &mut events,
+                season.expect("only the paused variant asks"),
+            );
+        }
+        assert_eq!(
+            orders > 0,
+            paused,
+            "the rider pauses only under the counter replacements"
+        );
+
+        // Reach-guard: the prevention applied and its rider put counters on the 3/3.
+        let counter_events: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                matches!(event, GameEvent::CounterAdded { object_id, .. } if *object_id == creature)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            !counter_events.is_empty(),
+            "Test of Faith's counters were put"
+        );
+        assert_eq!(damage(&runner, creature), 2);
+
+        let drawn: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| {
+                matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == P0)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            drawn.len(),
+            5,
+            "P0 draws the five discarded, not the rider's 3"
+        );
+        // The five discarded, then Fateful Showdown itself (Test of Faith was already there).
+        assert_eq!(player(&runner, P0).graveyard.len(), graveyard_before + 6);
+        if paused {
+            let last_counter = *counter_events.last().expect("counters were put");
+            assert!(
+                drawn.iter().all(|&index| index > last_counter),
+                "the spell's tail follows the rider's paused counters"
+            );
+        }
+        assert_at_rest(&runner);
+        assert!(runner.state().pending_replacement.is_none());
+    }
+}
+
+/// CR 701.14a + CR 608.2c + CR 616.1: a fight's tail is placed once. Prizefight ("Target
+/// creature you control fights target creature you don't control. … Create a Treasure token.")
+/// between P0's red 5/5 and P1's 2/2, under P0's Torbran, Thane of Red Fell ("it deals that much
+/// damage plus 2 instead") and Furnace of Rath ("it deals double that damage … instead"). The
+/// two directions are one batch. The 5/5's 5 to the 2/2 meets both, and P1, the controller of
+/// the creature dealt damage, orders them: Torbran first (5+2)×2 = 14, Furnace first 5×2+2 = 12.
+/// The 2/2's 2 to the 5/5 meets only Furnace: 4. Then the next instruction runs once: P0
+/// creates exactly one Treasure (CR 111.10a).
+#[test]
+fn a_paused_fights_tail_runs_once() {
+    for torbran_first in [true, false] {
+        let mut scenario = self::scenario();
+        let torbran = scenario
+            .add_creature_from_oracle(P0, "Torbran, Thane of Red Fell", 2, 4, TORBRAN)
+            .id();
+        let furnace = furnace(&mut scenario);
+        let ours = scenario
+            .add_creature(P0, "Red Brute", 5, 5)
+            .with_color(vec![ManaColor::Red])
+            .id();
+        let theirs = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let prizefight = instant(&mut scenario, "Prizefight", PRIZEFIGHT);
+        let mut runner = scenario.build();
+        let treasures = |runner: &GameRunner| {
+            runner
+                .state()
+                .battlefield
+                .iter()
+                .filter(|&&id| {
+                    let object = &runner.state().objects[&id];
+                    object.controller == P0
+                        && object.card_types.subtypes.iter().any(|t| t == "Treasure")
+                })
+                .count()
+        };
+        let mut events = cast(
+            &mut runner,
+            prizefight,
+            vec![object_target(ours), object_target(theirs)],
+        );
+
+        // Reach-guard: the fight parked on P1's order of Torbran and Furnace of Rath.
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "expected ReplacementChoice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P1);
+        let mut offered: Vec<ObjectId> = candidates.iter().map(|c| c.source_id).collect();
+        offered.sort();
+        let mut expected = vec![torbran, furnace];
+        expected.sort();
+        assert_eq!(offered, expected);
+        assert_eq!(treasures(&runner), 0, "the tail waits for the fight");
+
+        choose_source(
+            &mut runner,
+            &mut events,
+            if torbran_first { torbran } else { furnace },
+        );
+
+        assert_eq!(treasures(&runner), 1, "the fight's tail ran exactly once");
+        assert_eq!(
+            dealt_to(&events, theirs),
+            vec![if torbran_first { 14 } else { 12 }]
+        );
+        assert_eq!(dealt_to(&events, ours), vec![4]);
+        assert_eq!(zone(&runner, theirs), Zone::Graveyard);
+        assert_completes_once_after_its_damage(&events, EffectKind::Fight, prizefight);
+        assert_at_rest(&runner);
+        assert!(runner.state().pending_replacement.is_none());
+        assert!(runner.state().pending_combat_lifelink.is_none());
+    }
 }

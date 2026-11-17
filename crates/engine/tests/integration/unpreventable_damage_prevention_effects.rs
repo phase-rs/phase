@@ -2274,10 +2274,43 @@ pub(super) fn creature_with_keywords(
 }
 
 /// Hardened Scales and Doubling Season under `owner`: one +1/+1 counter event meets both, an
-/// order its controller chooses (CR 616.1).
-pub(super) fn scales_and_season(scenario: &mut GameScenario, owner: PlayerId) {
-    scenario.add_enchantment_from_oracle(owner, "Hardened Scales", HARDENED_SCALES);
-    scenario.add_enchantment_from_oracle(owner, "Doubling Season", DOUBLING_SEASON);
+/// order its controller chooses (CR 616.1). Returns (Hardened Scales, Doubling Season).
+pub(super) fn scales_and_season(
+    scenario: &mut GameScenario,
+    owner: PlayerId,
+) -> (ObjectId, ObjectId) {
+    let scales = scenario
+        .add_enchantment_from_oracle(owner, "Hardened Scales", HARDENED_SCALES)
+        .id();
+    let season = scenario
+        .add_enchantment_from_oracle(owner, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    (scales, season)
+}
+
+/// A [`fight_answering`] answer: each `ReplacementChoice` takes the first source of `prefer`
+/// that it offers. Any other prompt is not expected, so it fails the test.
+pub(super) fn preferring(prefer: Vec<ObjectId>) -> impl FnMut(&GameState) -> GameAction {
+    move |state| match &state.waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => {
+            let index = prefer
+                .iter()
+                .find_map(|&source| candidates.iter().position(|c| c.source_id == source))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "an unexpected replacement prompt: {:?}",
+                        candidates.iter().map(|c| c.source_id).collect::<Vec<_>>()
+                    )
+                });
+            GameAction::ChooseReplacement { index }
+        }
+        other => panic!("an unexpected prompt: {other:?}"),
+    }
+}
+
+/// The candidate sources of one prompt, as a set.
+pub(super) fn offered(prompt: &[ObjectId]) -> std::collections::BTreeSet<ObjectId> {
+    prompt.iter().copied().collect()
 }
 
 /// Rhox Faithmender and Leyline of Hope under P0: a lifelink gain meets both (CR 616.1).
@@ -2310,6 +2343,29 @@ pub(super) fn fight(
     attackers: &[ObjectId],
     blocks: &[(ObjectId, ObjectId)],
     prefer: Option<ObjectId>,
+) -> Combat {
+    fight_answering(runner, attackers, blocks, |state| {
+        match &state.waiting_for {
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                let sources: Vec<ObjectId> = candidates.iter().map(|c| c.source_id).collect();
+                let index = prefer
+                    .and_then(|preferred| sources.iter().position(|&s| s == preferred))
+                    .unwrap_or_else(|| panic!("an unexpected replacement prompt: {sources:?}"));
+                GameAction::ChooseReplacement { index }
+            }
+            other => panic!("combat stopped at {other:?}"),
+        }
+    })
+}
+
+/// [`fight`], with every `ReplacementChoice` and `EffectZoneChoice` (or other prompt) the combat
+/// raises answered by `answer`. Each `ReplacementChoice`'s candidate sources are still recorded
+/// in `prompts`.
+pub(super) fn fight_answering(
+    runner: &mut GameRunner,
+    attackers: &[ObjectId],
+    blocks: &[(ObjectId, ObjectId)],
+    mut answer: impl FnMut(&GameState) -> GameAction,
 ) -> Combat {
     let mut combat = Combat {
         events: Vec::new(),
@@ -2376,14 +2432,13 @@ pub(super) fn fight(
                 }
             }
             WaitingFor::ReplacementChoice { candidates, .. } => {
-                let sources: Vec<ObjectId> = candidates.iter().map(|c| c.source_id).collect();
-                let index = prefer
-                    .and_then(|preferred| sources.iter().position(|&s| s == preferred))
-                    .unwrap_or_else(|| panic!("an unexpected replacement prompt: {sources:?}"));
-                combat.prompts.push(sources);
-                GameAction::ChooseReplacement { index }
+                combat
+                    .prompts
+                    .push(candidates.iter().map(|c| c.source_id).collect());
+                answer(state)
             }
-            other => panic!("combat stopped at {other:?}"),
+            // Any other prompt the combat raises (a zone choice, a named choice) is `answer`'s.
+            _ => answer(state),
         };
         combat
             .events
@@ -2466,39 +2521,41 @@ fn swans_of_bryn_argoll(scenario: &mut GameScenario) -> ObjectId {
     )
 }
 
-/// CR 616.1 at the per-portion drain, on a substitution's rider. Phytohydra: "If damage would be
+/// CR 616.1g at the per-leg drain, on a substitution's action. Phytohydra: "If damage would be
 /// dealt to this creature, put that many +1/+1 counters on it instead." Blocking a 2/2 under its
-/// controller's Hardened Scales and Doubling Season, its 2 counters meet both: 5 (Doubling Season
-/// first) or 6 (Hardened Scales first), its controller's choice. Nothing outlives the batch, and
-/// the state-based actions after it run (Lightning Bolt kills a 3/3).
+/// controller's Hardened Scales and Doubling Season, its 2 counters meet both, and the combat
+/// batch asks P1 the order (CR 616.1): Hardened Scales first (2+1)×2 = 6, Doubling Season first
+/// 2×2+1 = 5. Without Hardened Scales it gets 2 and nothing is asked. Nothing outlives the batch,
+/// and the state-based actions after it run (Lightning Bolt kills a 3/3).
 #[test]
-fn phytohydras_counter_order_is_settled_inside_the_batch() {
-    for scales in [true, false] {
+fn phytohydras_counter_order_is_asked_inside_the_batch() {
+    for (with_scales, scales_first, expected) in
+        [(true, true, 6), (true, false, 5), (false, true, 2)]
+    {
         let mut scenario = rider_board();
         let hydra = scenario
             .add_creature_from_oracle(P1, "Phytohydra", 1, 1, PHYTOHYDRA)
             .id();
-        if scales {
-            scales_and_season(&mut scenario, P1);
-        }
+        let counter_sources = with_scales.then(|| scales_and_season(&mut scenario, P1));
         let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
         let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
         let bolt = spell(&mut scenario, "Lightning Bolt", BOLT, true);
         let mut runner = scenario.build();
+        let prefer = counter_sources
+            .map(|(scales, season)| vec![if scales_first { scales } else { season }])
+            .unwrap_or_default();
 
-        let combat = fight(&mut runner, &[bears], &[(hydra, bears)], None);
+        let combat = fight_answering(&mut runner, &[bears], &[(hydra, bears)], preferring(prefer));
 
         assert_batch_settled(&runner);
-        assert!(combat.prompts.is_empty());
-        let counters = plus_counters(&runner, hydra);
-        if scales {
-            // strict-failure: the order is P1's to choose (CR 616.1), and combat can't ask it yet
-            // (Command Zone #140); the engine takes the first candidate, not P1's pick.
-            assert!([5, 6].contains(&counters), "got {counters} counters");
-        } else {
-            // Reach guard: the 2 damage became 2 counters.
-            assert_eq!(counters, 2);
+        match counter_sources {
+            Some((scales, season)) => {
+                assert_eq!(combat.prompts.len(), 1, "prompts: {:?}", combat.prompts);
+                assert_eq!(offered(&combat.prompts[0]), offered(&[scales, season]));
+            }
+            None => assert!(combat.prompts.is_empty()),
         }
+        assert_eq!(plus_counters(&runner, hydra), expected);
         assert_eq!(runner.state().objects[&hydra].damage_marked, 0);
         assert_eq!(runner.state().objects[&bears].damage_marked, 1);
 
@@ -2644,13 +2701,45 @@ fn channel_harms_may_is_settled_after_the_batch() {
     }
 }
 
+/// Answers Abundance ("If you would draw a card, you may instead choose land or nonland and
+/// reveal cards from the top of your library until you reveal a card of the chosen kind. Put that
+/// card into your hand …"): accept it and choose nonland, or decline it and draw.
+fn answering_abundance(accept: bool) -> impl FnMut(&GameState) -> GameAction {
+    move |state| match &state.waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => {
+            let wanted = if accept { "Accept" } else { "Decline" };
+            let index = candidates
+                .iter()
+                .position(|c| c.description == wanted)
+                .unwrap_or_else(|| panic!("Abundance's {wanted} is offered: {candidates:?}"));
+            GameAction::ChooseReplacement { index }
+        }
+        WaitingFor::NamedChoice { .. } => GameAction::ChooseOption {
+            choice: "Nonland".to_string(),
+        },
+        WaitingFor::RevealUntilBottomOrder { cards, .. } => GameAction::SelectCards {
+            cards: cards.clone(),
+        },
+        other => panic!("an unexpected prompt: {other:?}"),
+    }
+}
+
+fn cards_drawn(events: &[GameEvent], player: PlayerId) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == player))
+        .count()
+}
+
 /// Both drains pause in one batch. Swans of Bryn Argoll blocks one of P0's Grizzly Bears: "The
 /// source's controller draws cards equal to the damage prevented this way", each draw meeting
-/// P0's Abundance. P0's Channel Harm, cast at the Hill Giant blocking the other Bears, prevents
-/// the blockers' damage and asks its "may" after the batch.
+/// P0's Abundance, whose "may" the combat batch asks P0 (CR 616.1): two draws, two prompts.
+/// Declining both draws 2 cards; accepting both and choosing nonland puts the two nonland cards
+/// revealed into P0's hand instead, with no draw. P0's Channel Harm, cast at the Hill Giant
+/// blocking the other Bears, prevents the blockers' damage and asks its "may" after the batch.
 #[test]
-fn a_may_park_and_a_riders_own_prompt_settle_in_one_batch() {
-    for abundance in [true, false] {
+fn a_may_park_and_a_riders_own_prompt_asks_abundance_and_settles_channel_harm() {
+    for (abundance, accept) in [(true, false), (true, true), (false, false)] {
         let mut scenario = rider_board();
         let first = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
         let second = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
@@ -2666,22 +2755,25 @@ fn a_may_park_and_a_riders_own_prompt_settle_in_one_batch() {
         cast(&mut runner, channel_harm, vec![TargetRef::Object(giant)]);
         let hand_before = hand_size(&runner, P0);
 
-        let combat = fight(
+        let combat = fight_answering(
             &mut runner,
             &[first, second],
             &[(giant, first), (swans, second)],
-            None,
+            answering_abundance(accept),
         );
 
-        // strict-failure: CR 510.2 + CR 616.1: Abundance's "you may instead" on each draw and
-        // Channel Harm's "you may" are P0's to answer, and combat can't ask them yet (Command
-        // Zone #140). The engine declines each Abundance "may", which keeps the draw, and clears
-        // Channel Harm's unasked; neither is P0's answer. CR 121.2: the Swans' 2 is two draws, so 2
-        // cards.
         assert_batch_settled(&runner);
-        assert!(combat.prompts.is_empty());
+        assert_eq!(combat.prompts.len(), if abundance { 2 } else { 0 });
         assert_eq!(prevented(&combat.events), 2);
+        // CR 121.2: the Swans' 2 is two draws, so 2 cards either way.
         assert_eq!(hand_size(&runner, P0) - hand_before, 2);
+        assert_eq!(
+            cards_drawn(&combat.events, P0),
+            if abundance && accept { 0 } else { 2 }
+        );
+        // strict-failure: CR 510.2 + CR 616.1: Channel Harm's "you may have Channel Harm deal
+        // that much damage" is P0's to answer, and the aggregate drain can't ask it yet (Command
+        // Zone #140); it is cleared unasked, so the Giant takes only the Bears' 2.
         assert_eq!(runner.state().objects[&giant].damage_marked, 2);
         for bears in [first, second] {
             assert_eq!(runner.state().objects[&bears].zone, Zone::Battlefield);
@@ -2694,11 +2786,13 @@ fn a_may_park_and_a_riders_own_prompt_settle_in_one_batch() {
     }
 }
 
-/// A "may" park at the per-portion drain. Swans of Bryn Argoll blocks P0's Grizzly Bears; the
-/// Swans' draws meet P0's Abundance ("If you would draw a card, you may instead …").
+/// A "may" at the per-leg drain. Swans of Bryn Argoll blocks P0's Grizzly Bears; the Swans' two
+/// draws each meet P0's Abundance ("If you would draw a card, you may instead …"), and the combat
+/// batch asks each (CR 616.1). Declining both draws 2 cards; accepting both and choosing nonland
+/// puts 2 nonland cards into P0's hand with no draw. Without Abundance, 2 draws and no prompt.
 #[test]
-fn swans_of_bryn_argolls_draws_are_kept_under_abundance() {
-    for abundance in [true, false] {
+fn swans_of_bryn_argolls_draws_ask_abundance() {
+    for (abundance, accept) in [(true, false), (true, true), (false, false)] {
         let mut scenario = rider_board();
         let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
         let swans = swans_of_bryn_argoll(&mut scenario);
@@ -2710,15 +2804,21 @@ fn swans_of_bryn_argolls_draws_are_kept_under_abundance() {
         let mut runner = scenario.build();
         let hand_before = hand_size(&runner, P0);
 
-        let combat = fight(&mut runner, &[bears], &[(swans, bears)], None);
+        let combat = fight_answering(
+            &mut runner,
+            &[bears],
+            &[(swans, bears)],
+            answering_abundance(accept),
+        );
 
-        // strict-failure: CR 510.2 + CR 616.1: Abundance's "may" on each draw is P0's to answer,
-        // and combat can't ask it yet (Command Zone #140); each is declined, which keeps the
-        // draw. CR 121.2: "draws cards equal to the damage prevented" is 2 draws, so 2 cards.
         assert_batch_settled(&runner);
-        assert!(combat.prompts.is_empty());
+        assert_eq!(combat.prompts.len(), if abundance { 2 } else { 0 });
         assert_eq!(prevented(&combat.events), 1);
         assert_eq!(hand_size(&runner, P0) - hand_before, 2);
+        assert_eq!(
+            cards_drawn(&combat.events, P0),
+            if abundance && accept { 0 } else { 2 }
+        );
         assert_eq!(runner.state().objects[&swans].damage_marked, 0);
         assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
 
@@ -2727,11 +2827,14 @@ fn swans_of_bryn_argolls_draws_are_kept_under_abundance() {
     }
 }
 
-/// The "may" park in each combat damage step (CR 510.4, CR 702.4b): Boros Swiftblade (double
-/// strike) blocked by Swans of Bryn Argoll draws one card in each step, then dies to the Swans.
+/// The "may" in each combat damage step (CR 510.4, CR 702.4b): Boros Swiftblade (double strike)
+/// blocked by Swans of Bryn Argoll has its 1 prevented in each step, so P0 draws one card in each
+/// and is asked Abundance's "may" once per step. Declining draws a card in each step; accepting
+/// and choosing nonland puts a nonland card into P0's hand in each, with no draw. The Swans kill
+/// the Swiftblade.
 #[test]
-fn double_strike_keeps_the_swans_draw_in_each_damage_step() {
-    for abundance in [true, false] {
+fn double_strike_asks_abundance_for_the_swans_draw_in_each_damage_step() {
+    for (abundance, accept) in [(true, false), (true, true), (false, false)] {
         let mut scenario = rider_board();
         let blade = creature_with_keywords(
             &mut scenario,
@@ -2750,14 +2853,21 @@ fn double_strike_keeps_the_swans_draw_in_each_damage_step() {
         let mut runner = scenario.build();
         let hand_before = hand_size(&runner, P0);
 
-        let combat = fight(&mut runner, &[blade], &[(swans, blade)], None);
+        let combat = fight_answering(
+            &mut runner,
+            &[blade],
+            &[(swans, blade)],
+            answering_abundance(accept),
+        );
 
-        // strict-failure: Abundance's "may" on each draw is declined (CR 510.2 + CR 616.1,
-        // Command Zone #140).
         assert_batch_settled(&runner);
-        assert!(combat.prompts.is_empty());
+        assert_eq!(combat.prompts.len(), if abundance { 2 } else { 0 });
         assert_eq!(prevented(&combat.events), 2);
         assert_eq!(hand_size(&runner, P0) - hand_before, 2);
+        assert_eq!(
+            cards_drawn(&combat.events, P0),
+            if abundance && accept { 0 } else { 2 }
+        );
         assert_eq!(runner.state().objects[&swans].damage_marked, 0);
         assert_eq!(runner.state().objects[&blade].zone, Zone::Graveyard);
 
@@ -2836,30 +2946,58 @@ fn new_way_forwards_draws_are_kept_under_abundance() {
 
 /// Nefarious Lich: "If damage would be dealt to you, exile that many cards from your graveyard
 /// instead. If you can't, you lose the game." An unblocked 3/3 with 4 cards in its controller's
-/// graveyard: the exile is the rider's own choice of 3.
+/// graveyard: the exile is the substitution's own choice of 3 (CR 608.2d, CR 614.6), and the
+/// combat batch asks it. The 3 P1 picks are exiled, P1 doesn't lose, and takes no damage.
 #[test]
-fn nefarious_lichs_exile_choice_is_cleared_inside_the_batch() {
+fn nefarious_lichs_exile_choice_is_asked_inside_the_batch() {
     let mut scenario = rider_board();
-    for index in 0..4 {
-        scenario.add_creature_to_graveyard(P1, &format!("Graveyard Filler {index}"), 1, 1);
-    }
+    let fillers: Vec<ObjectId> = (0..4)
+        .map(|index| {
+            scenario
+                .add_creature_to_graveyard(P1, &format!("Graveyard Filler {index}"), 1, 1)
+                .id()
+        })
+        .collect();
     scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
     let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
     let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
     let bolt = spell(&mut scenario, "Lightning Bolt", BOLT, true);
     let mut runner = scenario.build();
+    let picked = vec![fillers[3], fillers[0], fillers[2]];
+    let mut asked = Vec::new();
 
-    let combat = fight(&mut runner, &[giant], &[], None);
+    let combat = fight_answering(&mut runner, &[giant], &[], |state| {
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                ..
+            } => {
+                asked.push((*player, *count, cards.len()));
+                GameAction::SelectCards {
+                    cards: picked.clone(),
+                }
+            }
+            other => panic!("an unexpected prompt: {other:?}"),
+        }
+    });
 
-    // strict-failure: the card has P1 exile 3 of its 4 graveyard cards, its choice, and not lose.
-    // CR 510.2: combat can't ask that choice yet (Command Zone #140), so it is cleared: nothing is
-    // exiled, and nobody loses.
     assert_batch_settled(&runner);
     assert!(combat.prompts.is_empty());
+    assert_eq!(asked, vec![(P1, 3, 4)]);
     assert!(!runner.state().players[1].is_eliminated);
     // Reach guard: the substitution applied, so no damage reached P1.
     assert_eq!(life(&runner, P1), 20);
-    assert_eq!(runner.state().players[1].graveyard.len(), 4);
+    for &card in &picked {
+        assert_eq!(runner.state().objects[&card].zone, Zone::Exile);
+    }
+    assert_eq!(
+        runner.state().objects[&fillers[1]].zone,
+        Zone::Graveyard,
+        "the card P1 kept"
+    );
+    assert_eq!(runner.state().players[1].graveyard.len(), 1);
 
     bolt_at(&mut runner, bolt, courser);
     assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
@@ -2888,51 +3026,66 @@ fn nefarious_lich_ends_the_game_inside_the_batch() {
 }
 
 /// Nothing happens after the game ends (CR 104.1: "A game ends immediately when a player wins").
-/// Nefarious Lich ends it at the first portion of the batch: P0's unblocked Hill Giant deals its 3
-/// to P1, whose graveyard is empty. The later portions are never dealt: Outfitted Jouster wearing
-/// Steelclaw Lance and Brawler's Plate, blocked, would prevent and sacrifice; Ironscale Hydra under
-/// P0's Hardened Scales and Doubling Season, blocked, would prevent and gain a counter.
+/// Nefarious Lich ends it at P0's unblocked Hill Giant's portion, which deals its 3 to P1, whose
+/// graveyard is empty. The batch's replacement choices follow APNAP order of the affected player
+/// (CR 101.4), so each rider-bearing portion below affects P1 and follows the Hill Giant's in
+/// assignment order; it is never dealt: P1's Outfitted Jouster wearing Steelclaw Lance and
+/// Brawler's Plate, blocking, would prevent and sacrifice; P1's Ironscale Hydra under P1's
+/// Hardened Scales and Doubling Season, blocking, would prevent and gain a counter. The blocked
+/// attacker is dealt nothing either. P1's permanents leave the game with P1 (CR 800.4a), so the
+/// Equipment's zone shows only that it was never sacrificed.
 #[test]
 fn nothing_happens_in_the_batch_after_the_game_ends() {
     // The Jouster's board.
     let mut scenario = rider_board();
     scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
     let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let jouster = scenario
-        .add_creature_from_oracle(P0, "Outfitted Jouster", 2, 2, JOUSTER)
+        .add_creature_from_oracle(P1, "Outfitted Jouster", 2, 2, JOUSTER)
         .id();
-    let lance = equipment_of(&mut scenario, P0, "Steelclaw Lance", STEELCLAW_LANCE);
-    let plate = equipment_of(&mut scenario, P0, "Brawler's Plate", BRAWLERS_PLATE);
-    let blocker = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let lance = equipment_of(&mut scenario, P1, "Steelclaw Lance", STEELCLAW_LANCE);
+    let plate = equipment_of(&mut scenario, P1, "Brawler's Plate", BRAWLERS_PLATE);
     let mut runner = scenario.build();
     attach_to(runner.state_mut(), lance, jouster);
     attach_to(runner.state_mut(), plate, jouster);
 
-    let combat = fight(&mut runner, &[giant, jouster], &[(blocker, jouster)], None);
+    let combat = fight(&mut runner, &[giant, bears], &[(jouster, bears)], None);
 
     assert_p1_lost_inside_the_batch(&runner, &combat.events);
     assert_nothing_after_the_game_ended(&runner, &combat.events);
+    assert!(combat.prompts.is_empty());
     assert_eq!(prevented(&combat.events), 0);
+    // Nothing was sacrificed: the Equipment left the game with its owner (CR 800.4a), never by
+    // the Jouster's rider.
+    assert!(!combat.events.iter().any(|e| matches!(
+        e,
+        GameEvent::EffectResolved {
+            kind: EffectKind::Sacrifice,
+            ..
+        }
+    )));
     for equipment in [lance, plate] {
-        assert_eq!(runner.state().objects[&equipment].zone, Zone::Battlefield);
+        assert_ne!(runner.state().objects[&equipment].zone, Zone::Graveyard);
     }
-    assert_eq!(runner.state().objects[&blocker].damage_marked, 0);
+    assert_eq!(runner.state().objects[&bears].damage_marked, 0);
 
     // The Hydra's board.
     let mut scenario = rider_board();
     scenario.add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH);
     let giant = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let courser = scenario.add_creature(P0, "Centaur Courser", 3, 3).id();
     let hydra = scenario
-        .add_creature_from_oracle(P0, "Ironscale Hydra", 5, 5, IRONSCALE_HYDRA)
+        .add_creature_from_oracle(P1, "Ironscale Hydra", 5, 5, IRONSCALE_HYDRA)
         .id();
-    scales_and_season(&mut scenario, P0);
-    let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+    scales_and_season(&mut scenario, P1);
     let mut runner = scenario.build();
 
-    let combat = fight(&mut runner, &[giant, hydra], &[(courser, hydra)], None);
+    let combat = fight(&mut runner, &[giant, courser], &[(hydra, courser)], None);
 
     assert_p1_lost_inside_the_batch(&runner, &combat.events);
     assert_nothing_after_the_game_ended(&runner, &combat.events);
+    assert!(combat.prompts.is_empty());
     assert_eq!(prevented(&combat.events), 0);
     assert_eq!(plus_counters(&runner, hydra), 0);
     assert_eq!(runner.state().objects[&courser].damage_marked, 0);
@@ -3195,6 +3348,21 @@ fn nothing_happens_after_a_noncombat_portion_ends_the_game() {
         state.waiting_for
     );
     assert!(state.players[0].is_eliminated);
+    // CR 104.3e: P0 loses because the effect says so.
+    let losses: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerLost { player_id, reasons } => Some((*player_id, reasons.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        losses,
+        vec![(
+            P0,
+            std::collections::BTreeSet::from([engine::types::events::LossReason::EffectStatedLoss])
+        )]
+    );
     assert_nothing_after_the_game_ended(&runner, &events);
     assert!(damage_dealt_to_player(&events, P1).is_empty());
     assert_eq!(life(&runner, P1), 20);
@@ -3219,9 +3387,17 @@ fn damage_dealt_to_player(events: &[GameEvent], player: PlayerId) -> Vec<u32> {
 /// Ironscale Hydra, blocked by P2's Centaur Courser, prevents its damage and gains its counter.
 /// A second Grizzly Bears attacking P1 after the Hill Giant has no recipient left (CR 800.4a,
 /// CR 800.4e): P1 isn't dealt its 2, so P0's Exquisite Blood ("Whenever an opponent loses life,
-/// you gain that much life.") sees only P2's loss.
+/// you gain that much life.") sees only P2's loss. The Hydra's counter meets P0's Hardened Scales
+/// and Doubling Season, an order P0 is asked (CR 616.1): Hardened Scales first 4, Doubling Season
+/// first 3.
 #[test]
 fn a_player_who_loses_inside_the_batch_leaves_and_the_batch_goes_on() {
+    for scales_first in [true, false] {
+        a_player_who_loses_inside_the_batch_leaves_with(scales_first);
+    }
+}
+
+fn a_player_who_loses_inside_the_batch_leaves_with(scales_first: bool) {
     let p2 = PlayerId(2);
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
@@ -3238,9 +3414,11 @@ fn a_player_who_loses_inside_the_batch_leaves_and_the_batch_goes_on() {
         .add_creature_from_oracle(P0, "Ironscale Hydra", 5, 5, IRONSCALE_HYDRA)
         .id();
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
-    scales_and_season(&mut scenario, P0);
+    let (scales, season) = scales_and_season(&mut scenario, P0);
     let courser = scenario.add_creature(p2, "Centaur Courser", 3, 3).id();
     let mut runner = scenario.build();
+    let first = if scales_first { scales } else { season };
+    let mut prompts = Vec::new();
 
     let attacks = [
         (giant, AttackTarget::Player(P1)),
@@ -3248,7 +3426,20 @@ fn a_player_who_loses_inside_the_batch_leaves_and_the_batch_goes_on() {
         (hydra, AttackTarget::Player(p2)),
         (bears, AttackTarget::Player(p2)),
     ];
-    let events = combat_at(&mut runner, &attacks, p2, &[(courser, hydra)]);
+    let events = combat_at(&mut runner, &attacks, p2, &[(courser, hydra)], |state| {
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &state.waiting_for
+        else {
+            unreachable!("combat_at answers only a ReplacementChoice here");
+        };
+        prompts.push(*player);
+        let index = candidates
+            .iter()
+            .position(|c| c.source_id == first)
+            .expect("the counter order offers both");
+        GameAction::ChooseReplacement { index }
+    });
 
     let state = runner.state();
     assert!(state.players[1].is_eliminated);
@@ -3261,11 +3452,11 @@ fn a_player_who_loses_inside_the_batch_leaves_and_the_batch_goes_on() {
     assert_eq!(state.players[1].life, 20);
     assert_eq!(state.players[0].life, 22);
     assert_eq!(prevented(&events), 1);
-    // strict-failure: CR 616.1: the counter's order (Doubling Season first: 3; Hardened Scales
-    // first: 4) is P0's to choose, and combat can't ask it yet (Command Zone #140); the engine takes
-    // the first candidate, not P0's pick.
-    let counters = plus_counters(&runner, hydra);
-    assert!([3, 4].contains(&counters), "got {counters} counters");
+    assert_eq!(prompts, vec![P0]);
+    assert_eq!(
+        plus_counters(&runner, hydra),
+        if scales_first { 4 } else { 3 }
+    );
     assert_eq!(state.objects[&courser].zone, Zone::Graveyard);
     assert!(state.pending_replacement.is_none());
     assert!(state.resolution_stack.is_empty());
@@ -3273,12 +3464,13 @@ fn a_player_who_loses_inside_the_batch_leaves_and_the_batch_goes_on() {
 }
 
 /// Drive one combat with per-attacker targets: `defender` blocks with `blocks`, every other
-/// defending player blocks nothing.
+/// defending player blocks nothing. A replacement prompt is answered by `answer`.
 fn combat_at(
     runner: &mut GameRunner,
     attacks: &[(ObjectId, AttackTarget)],
     defender: PlayerId,
     blocks: &[(ObjectId, ObjectId)],
+    mut answer: impl FnMut(&GameState) -> GameAction,
 ) -> Vec<GameEvent> {
     let mut events = Vec::new();
     let mut attacked = false;
@@ -3311,6 +3503,7 @@ fn combat_at(
                     Vec::new()
                 },
             },
+            WaitingFor::ReplacementChoice { .. } => answer(state),
             other => panic!("combat stopped at {other:?}"),
         };
         events.extend(runner.act(action).expect("combat action").events);
@@ -3319,9 +3512,13 @@ fn combat_at(
 }
 
 /// Dralnu, Lich Lord: "If damage would be dealt to Dralnu, sacrifice that many permanents
-/// instead." Blocking a 2/2 with four other permanents under its controller.
+/// instead." Blocking a 2/2 with four other permanents under its controller: the 2 damage is
+/// replaced by sacrificing 2 permanents, its controller's choice (CR 608.2d, CR 701.21a; Dralnu
+/// is one of the permanents it may pick, ruling S11), asked inside the combat batch. P1 picks two
+/// Grizzly Bears, exactly those two are sacrificed, Dralnu is dealt no damage, and its 3 kills
+/// P0's Grizzly Bears.
 #[test]
-fn dralnus_sacrifice_choice_is_cleared_inside_the_batch() {
+fn dralnus_sacrifice_choice_is_asked_inside_the_batch() {
     let mut scenario = rider_board();
     let dralnu = scenario
         .add_creature_from_oracle(P1, "Dralnu, Lich Lord", 3, 3, DRALNU_LICH_LORD)
@@ -3333,31 +3530,61 @@ fn dralnus_sacrifice_choice_is_cleared_inside_the_batch() {
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let bolt = spell(&mut scenario, "Lightning Bolt", BOLT, true);
     let mut runner = scenario.build();
+    let picked = vec![others[0], others[2]];
+    let mut asked = Vec::new();
 
-    let combat = fight(&mut runner, &[bears], &[(dralnu, bears)], None);
+    let combat = fight_answering(
+        &mut runner,
+        &[bears],
+        &[(dralnu, bears)],
+        |state| match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                ..
+            } => {
+                asked.push((*player, *count, cards.contains(&dralnu)));
+                GameAction::SelectCards {
+                    cards: picked.clone(),
+                }
+            }
+            other => panic!("an unexpected prompt: {other:?}"),
+        },
+    );
 
-    // strict-failure: the card has P1 sacrifice 2 permanents of its choice; combat can't ask yet
-    // (CR 510.2, Command Zone #140), and nothing is sacrificed (an engine limit, not derived). The
-    // card reports unsupported for it.
     assert_batch_settled(&runner);
     assert!(combat.prompts.is_empty());
+    assert_eq!(asked, vec![(P1, 2, true)]);
     // Reach guard: the substitution applied and Dralnu dealt its damage.
     assert_eq!(runner.state().objects[&dralnu].damage_marked, 0);
+    assert_eq!(runner.state().objects[&dralnu].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
-    for other in others {
-        assert_eq!(runner.state().objects[&other].zone, Zone::Battlefield);
+    for &other in &picked {
+        assert_eq!(runner.state().objects[&other].zone, Zone::Graveyard);
     }
+    assert_eq!(runner.state().objects[&others[1]].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&courser].zone, Zone::Battlefield);
 
     bolt_at(&mut runner, bolt, courser);
     assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
 }
 
-/// Outfitted Jouster attacking, blocked by one or two 2/2s: one Equipment attached is sacrificed
-/// with no prompt; with two, the sacrifice is its controller's pick (CR 608.2d, CR 701.21a).
+/// Outfitted Jouster attacking, blocked by one or two 2/2s. CR 615.13 + CR 608.2d: one
+/// prevention, one trigger, one Equipment of P0's choice; the double block is
+/// `outfitted_jouster_double_blocked_sacrifices_one_equipment`. With one Equipment attached, the
+/// Steelclaw Lance is sacrificed with no prompt, whether one or two creatures block. With two
+/// attached and one blocker, P0 is offered exactly the two and the one picked is sacrificed; the
+/// other stays attached (CR 701.21a).
 #[test]
 fn outfitted_jousters_sacrifice_in_combat() {
-    for equipped in [1usize, 2] {
-        for blockers in [1usize, 2] {
+    for (equipped, blockers) in [(1usize, 1usize), (1, 2), (2, 1)] {
+        let picks: Vec<Option<usize>> = if equipped == 2 {
+            vec![Some(0), Some(1)]
+        } else {
+            vec![None]
+        };
+        for pick in picks {
             let mut scenario = rider_board();
             let jouster = scenario
                 .add_creature_from_oracle(P0, "Outfitted Jouster", 2, 2, JOUSTER)
@@ -3387,34 +3614,247 @@ fn outfitted_jousters_sacrifice_in_combat() {
             }
             let blocks: Vec<(ObjectId, ObjectId)> =
                 blocking.iter().map(|&b| (b, jouster)).collect();
+            let chosen = pick.map(|index| attached[index]);
+            let mut offers = Vec::new();
 
-            let combat = fight(&mut runner, &[jouster], &blocks, None);
+            let combat = fight_answering(&mut runner, &[jouster], &blocks, |state| {
+                match &state.waiting_for {
+                    WaitingFor::EffectZoneChoice {
+                        player,
+                        cards,
+                        count,
+                        ..
+                    } => {
+                        let mut offer = cards.clone();
+                        offer.sort();
+                        offers.push((*player, *count, offer));
+                        GameAction::SelectCards {
+                            cards: vec![chosen.expect("a pick is asked only with two attached")],
+                        }
+                    }
+                    other => panic!("an unexpected prompt: {other:?}"),
+                }
+            });
 
+            let row = format!("{equipped} equipped, {blockers} blocking, pick {pick:?}");
             assert_batch_settled(&runner);
-            assert!(combat.prompts.is_empty());
-            assert_eq!(prevented(&combat.events), 1);
-            assert_eq!(runner.state().objects[&jouster].damage_marked, 0);
+            assert!(combat.prompts.is_empty(), "{row}");
+            assert_eq!(prevented(&combat.events), 1, "{row}");
+            assert_eq!(runner.state().objects[&jouster].damage_marked, 0, "{row}");
             for &b in &blocking {
-                assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard);
+                assert_eq!(runner.state().objects[&b].zone, Zone::Graveyard, "{row}");
             }
-            let expected = if equipped == 1 {
-                Zone::Graveyard
-            } else {
-                // strict-failure: the card has P0 pick one of the two to sacrifice; combat can't
-                // ask yet (CR 510.2, Command Zone #140), and none is sacrificed (an engine limit,
-                // not derived).
-                Zone::Battlefield
-            };
-            for &equipment in &attached {
-                assert_eq!(
-                    runner.state().objects[&equipment].zone,
-                    expected,
-                    "{equipped} equipped, {blockers} blocking"
-                );
+            match chosen {
+                None => {
+                    assert!(offers.is_empty(), "{row}");
+                    assert_eq!(
+                        runner.state().objects[&attached[0]].zone,
+                        Zone::Graveyard,
+                        "{row}"
+                    );
+                }
+                Some(sacrificed) => {
+                    let mut both = attached.clone();
+                    both.sort();
+                    assert_eq!(offers, vec![(P0, 1, both)], "{row}");
+                    for &equipment in &attached {
+                        let object = &runner.state().objects[&equipment];
+                        if equipment == sacrificed {
+                            assert_eq!(object.zone, Zone::Graveyard, "{row}");
+                        } else {
+                            assert_eq!(object.zone, Zone::Battlefield, "{row}");
+                            assert_eq!(
+                                object.attached_to,
+                                Some(AttachTarget::Object(jouster)),
+                                "{row}"
+                            );
+                        }
+                    }
+                }
             }
 
             bolt_at(&mut runner, bolt, courser);
             assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
         }
+    }
+}
+
+/// Outfitted Jouster: "If damage would be dealt to Outfitted Jouster while it's equipped, prevent
+/// that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted
+/// Jouster." Wearing Steelclaw Lance and Brawler's Plate, it attacks and two Grizzly Bears block
+/// it. Derived reading:
+/// 1. The two Bears' damage to the Jouster is dealt simultaneously (CR 510.2); the Jouster is
+///    equipped, so the one prevention effect prevents both events.
+/// 2. "When damage is prevented this way" triggers each time a prevention effect is applied to
+///    one or more simultaneous damage events (CR 615.13): once here, not once per Bear
+///    (CR 603.2c).
+/// 3. The trigger does nothing when it triggers (CR 603.2); it goes on the stack before the
+///    active player gets priority in the combat damage step (CR 603.3, CR 510.3a).
+/// 4. As it resolves, P0 chooses which attached Equipment to sacrifice (CR 608.2d) and sacrifices
+///    that one (CR 701.21a); the other stays attached.
+///
+/// A verified red witness, not run by default: the engine runs the rider once per damage event,
+/// inside the batch.
+#[test]
+#[ignore = "CR 615.13: one prevention applied to simultaneous combat damage triggers once; the engine runs Outfitted Jouster's rider once per damage event (known gap: one rider per simultaneous batch for recipient-phrased prevention effects)"]
+fn outfitted_jouster_double_blocked_sacrifices_one_equipment() {
+    for pick in [0usize, 1] {
+        let mut scenario = rider_board();
+        let jouster = scenario
+            .add_creature_from_oracle(P0, "Outfitted Jouster", 2, 2, JOUSTER)
+            .id();
+        let attached = [
+            equipment_of(&mut scenario, P0, "Steelclaw Lance", STEELCLAW_LANCE),
+            equipment_of(&mut scenario, P0, "Brawler's Plate", BRAWLERS_PLATE),
+        ];
+        let blocking = [
+            scenario.add_creature(P1, "Grizzly Bears", 2, 2).id(),
+            scenario.add_creature(P1, "Grizzly Bears", 2, 2).id(),
+        ];
+        let mut runner = scenario.build();
+        for &equipment in &attached {
+            attach_to(runner.state_mut(), equipment, jouster);
+        }
+
+        // Combat until the first priority in the combat damage step, or the first other prompt.
+        let mut events = Vec::new();
+        let (mut attacked, mut blocked) = (false, false);
+        for _ in 0..200 {
+            let state = runner.state();
+            if state.phase == Phase::CombatDamage
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            let action = match &state.waiting_for {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::DeclareAttackers { .. } if !attacked => {
+                    attacked = true;
+                    GameAction::DeclareAttackers {
+                        attacks: vec![(jouster, AttackTarget::Player(P1))],
+                        bands: vec![],
+                    }
+                }
+                WaitingFor::DeclareBlockers { .. } if !blocked => {
+                    blocked = true;
+                    GameAction::DeclareBlockers {
+                        assignments: blocking.iter().map(|&b| (b, jouster)).collect(),
+                    }
+                }
+                WaitingFor::AssignCombatDamage {
+                    blockers,
+                    total_damage,
+                    ..
+                } => {
+                    // CR 510.1c: lethal damage to each blocker, the rest to the last one.
+                    let mut remaining = *total_damage;
+                    let mut assignments: Vec<(ObjectId, u32)> = blockers
+                        .iter()
+                        .map(|slot| {
+                            let assign = remaining.min(slot.lethal_minimum);
+                            remaining -= assign;
+                            (slot.blocker_id, assign)
+                        })
+                        .collect();
+                    if let Some(last) = assignments.last_mut() {
+                        last.1 += remaining;
+                    }
+                    GameAction::AssignCombatDamage {
+                        mode: CombatDamageAssignmentMode::Normal,
+                        assignments,
+                        trample_damage: 0,
+                        controller_damage: 0,
+                    }
+                }
+                _ => break,
+            };
+            events.extend(runner.act(action).expect("combat action").events);
+        }
+
+        let state = runner.state();
+        // 1. No choice is asked while the damage is dealt.
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "the sacrifice was asked inside the combat damage batch"
+        );
+        // 2. One trigger, the Jouster's, on the stack at P0's priority in the damage step.
+        assert_eq!(state.phase, Phase::CombatDamage);
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.stack[0].source_id, jouster);
+        // 3. Both Equipment are still attached.
+        for &equipment in &attached {
+            assert_eq!(state.objects[&equipment].zone, Zone::Battlefield);
+            assert_eq!(
+                state.objects[&equipment].attached_to,
+                Some(AttachTarget::Object(jouster))
+            );
+        }
+        // 4. Reach-guard: the prevention applied.
+        assert_eq!(state.objects[&jouster].damage_marked, 0);
+        for &b in &blocking {
+            assert_eq!(state.objects[&b].zone, Zone::Graveyard);
+        }
+        assert_eq!(prevented(&events), 1);
+
+        // The trigger resolves: P0 picks one of the two.
+        for _ in 0..8 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            events.extend(
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass priority")
+                    .events,
+            );
+        }
+        let WaitingFor::EffectZoneChoice {
+            player,
+            cards,
+            count,
+            ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "expected the sacrifice choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!((player, count), (P0, 1));
+        let mut offered = cards.clone();
+        offered.sort();
+        let mut both = attached.to_vec();
+        both.sort();
+        assert_eq!(offered, both);
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![attached[pick]],
+            })
+            .expect("pick the Equipment");
+        for _ in 0..8 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                || runner.state().stack.is_empty()
+            {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+
+        let state = runner.state();
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::EffectZoneChoice { .. }
+        ));
+        assert_eq!(state.objects[&attached[pick]].zone, Zone::Graveyard);
+        let kept = attached[1 - pick];
+        assert_eq!(state.objects[&kept].zone, Zone::Battlefield);
+        assert_eq!(
+            state.objects[&kept].attached_to,
+            Some(AttachTarget::Object(jouster))
+        );
+        assert!(state.stack.is_empty());
+        assert!(state.pending_replacement.is_none());
+        assert!(state.resolution_stack.is_empty());
     }
 }

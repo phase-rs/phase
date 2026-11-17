@@ -32,7 +32,7 @@ use engine::types::zones::Zone;
 use super::rules::run_combat;
 use super::unpreventable_damage_prevention_effects::{
     assert_batch_settled, bolt_at, creature_with_keywords, faithmender_and_leyline, fight,
-    rider_board, scales_and_season,
+    fight_answering, offered, preferring, rider_board, scales_and_season,
 };
 
 /// Ironscale Hydra — verbatim Oracle text (MTGJSON AtomicCards).
@@ -465,148 +465,39 @@ fn prevented(events: &[GameEvent]) -> usize {
         .count()
 }
 
-/// CR 616.1 + CR 510.2: the Hydra's one counter meets its controller's Hardened Scales and
-/// Doubling Season, an order that controller chooses: 3 (Doubling Season first) or 4 (Hardened
-/// Scales first). Combat can't ask it yet (Command Zone #140), so the engine takes the first
-/// candidate inside the batch, not the controller's pick (a strict failure). Nothing is left parked, so the state-based actions run: the
-/// blocking Centaur Courser dies to its 5 damage (CR 704.3, CR 704.5g), and so does a Grizzly
-/// Bears to Lightning Bolt afterwards.
+/// CR 616.1 + CR 616.1g: the Hydra's one counter meets its controller's Hardened Scales and
+/// Doubling Season, an order that controller chooses (Hardened Scales' ruling: "you choose the
+/// order to apply those effects"), asked inside the combat damage batch: Hardened Scales first
+/// (1+1)×2 = 4, Doubling Season first 1×2+1 = 3. Nothing is left parked, so the state-based
+/// actions run: the blocking Centaur Courser dies to its 5 damage (CR 704.3, CR 704.5g), and so
+/// does a Grizzly Bears to Lightning Bolt afterwards.
 #[test]
-fn ironscale_counter_order_is_settled_inside_the_batch() {
-    let mut scenario = rider_board();
-    let hydra = ironscale(&mut scenario, P0);
-    scales_and_season(&mut scenario, P0);
-    let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
-    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
-    let bolt = lightning_bolt(&mut scenario);
-    let mut runner = scenario.build();
-
-    let combat = fight(&mut runner, &[hydra], &[(courser, hydra)], None);
-
-    assert_batch_settled(&runner);
-    assert!(combat.prompts.is_empty());
-    assert_eq!(prevented(&combat.events), 1);
-    assert_eq!(runner.state().objects[&hydra].damage_marked, 0);
-    let counters = plus1_counters(&runner, hydra);
-    assert!([3, 4].contains(&counters), "got {counters} counters");
-    assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
-
-    bolt_at(&mut runner, bolt, bears);
-    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
-}
-
-/// Two Hydras, each blocked by a Centaur Courser: two rider parks in one batch, each settled with
-/// its own Hydra's counters.
-#[test]
-fn two_ironscale_hydras_each_settle_their_own_counter_order() {
-    let mut scenario = rider_board();
-    let hydras = [ironscale(&mut scenario, P0), ironscale(&mut scenario, P0)];
-    scales_and_season(&mut scenario, P0);
-    let coursers = [
-        scenario.add_creature(P1, "Centaur Courser", 3, 3).id(),
-        scenario.add_creature(P1, "Centaur Courser", 3, 3).id(),
-    ];
-    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
-    let bolt = lightning_bolt(&mut scenario);
-    let mut runner = scenario.build();
-
-    let combat = fight(
-        &mut runner,
-        &hydras,
-        &[(coursers[0], hydras[0]), (coursers[1], hydras[1])],
-        None,
-    );
-
-    assert_batch_settled(&runner);
-    assert!(combat.prompts.is_empty());
-    assert_eq!(prevented(&combat.events), 2);
-    for (hydra, courser) in hydras.into_iter().zip(coursers) {
-        let counters = plus1_counters(&runner, hydra);
-        assert!([3, 4].contains(&counters), "got {counters} counters");
-        assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
-    }
-
-    bolt_at(&mut runner, bolt, bears);
-    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
-}
-
-/// Furnace of Rath: "If a source would deal damage to a permanent or player, it deals double that
-/// damage to that permanent or player instead." The Courser's damage to the Hydra meets both the
-/// Hydra's shield and Furnace of Rath (the damage event's own order), and then the rider's counter
-/// meets Hardened Scales and Doubling Season (the rider's order). Both are settled in the batch.
-#[test]
-fn a_damage_order_then_a_rider_order_in_one_portion() {
-    let mut scenario = rider_board();
-    let hydra = ironscale(&mut scenario, P0);
-    scales_and_season(&mut scenario, P0);
-    scenario.add_enchantment_from_oracle(P0, "Furnace of Rath", FURNACE_OF_RATH);
-    let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
-    let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
-    let bolt = lightning_bolt(&mut scenario);
-    let mut runner = scenario.build();
-
-    let combat = fight(&mut runner, &[hydra], &[(courser, hydra)], None);
-
-    assert_batch_settled(&runner);
-    assert!(combat.prompts.is_empty());
-    assert_eq!(prevented(&combat.events), 1);
-    assert_eq!(runner.state().objects[&hydra].damage_marked, 0);
-    let counters = plus1_counters(&runner, hydra);
-    assert!([3, 4].contains(&counters), "got {counters} counters");
-    assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
-
-    let events = bolt_at(&mut runner, bolt, bears);
-    // Reach guard: Furnace of Rath is live, so Lightning Bolt deals 6.
-    let dealt: Vec<u32> = events
-        .iter()
-        .filter_map(|e| match e {
-            GameEvent::DamageDealt {
-                target: TargetRef::Object(target),
-                amount,
-                ..
-            } if *target == bears => Some(*amount),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(dealt, vec![6]);
-    assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
-}
-
-/// CR 616.1f: with three or four counter effects, one answer leaves the rest still to order, and
-/// each is answered in turn. One counter under Hardened Scales (plus one) and Doubling Season
-/// (twice), in every order the controller could choose:
-/// - two Hardened Scales and one Doubling Season: 4, 5 or 6;
-/// - one Hardened Scales and two Doubling Seasons: 5, 6 or 8;
-/// - two of each: 6, 7, 8, 9, 10 or 12.
-#[test]
-fn a_rider_order_of_three_or_four_effects_is_settled_in_one_legal_order() {
-    for (scales, seasons, legal) in [
-        (2, 1, &[4, 5, 6][..]),
-        (1, 2, &[5, 6, 8][..]),
-        (2, 2, &[6, 7, 8, 9, 10, 12][..]),
-    ] {
+fn ironscale_counter_order_is_asked_inside_the_batch() {
+    for scales_first in [true, false] {
         let mut scenario = rider_board();
         let hydra = ironscale(&mut scenario, P0);
-        for _ in 0..scales {
-            scenario.add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES);
-        }
-        for _ in 0..seasons {
-            scenario.add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON);
-        }
+        let (scales, season) = scales_and_season(&mut scenario, P0);
         let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
         let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
         let bolt = lightning_bolt(&mut scenario);
         let mut runner = scenario.build();
+        let first = if scales_first { scales } else { season };
 
-        let combat = fight(&mut runner, &[hydra], &[(courser, hydra)], None);
+        let combat = fight_answering(
+            &mut runner,
+            &[hydra],
+            &[(courser, hydra)],
+            preferring(vec![first]),
+        );
 
         assert_batch_settled(&runner);
-        assert!(combat.prompts.is_empty());
+        assert_eq!(combat.prompts.len(), 1, "prompts: {:?}", combat.prompts);
+        assert_eq!(offered(&combat.prompts[0]), offered(&[scales, season]));
         assert_eq!(prevented(&combat.events), 1);
-        let counters = plus1_counters(&runner, hydra);
-        assert!(
-            legal.contains(&counters),
-            "{scales} Hardened Scales, {seasons} Doubling Season: got {counters} counters"
+        assert_eq!(runner.state().objects[&hydra].damage_marked, 0);
+        assert_eq!(
+            plus1_counters(&runner, hydra),
+            if scales_first { 4 } else { 3 }
         );
         assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
 
@@ -615,18 +506,187 @@ fn a_rider_order_of_three_or_four_effects_is_settled_in_one_legal_order() {
     }
 }
 
-/// The settled batch lets the game go on: the turn passes Cleanup, and in the next turn's
-/// precombat main phase P0's Lightning Bolt kills a 2/2.
+/// Two Hydras, each blocked by a Centaur Courser: each Hydra's counter is its own event, so its
+/// controller orders each (CR 616.1, CR 101.4): two prompts. All Hardened Scales first gives each
+/// Hydra 4; all Doubling Season first gives each 3.
 #[test]
-fn a_settled_rider_order_lets_the_next_turn_come() {
+fn two_ironscale_hydras_each_ask_their_own_counter_order() {
+    for scales_first in [true, false] {
+        let mut scenario = rider_board();
+        let hydras = [ironscale(&mut scenario, P0), ironscale(&mut scenario, P0)];
+        let (scales, season) = scales_and_season(&mut scenario, P0);
+        let coursers = [
+            scenario.add_creature(P1, "Centaur Courser", 3, 3).id(),
+            scenario.add_creature(P1, "Centaur Courser", 3, 3).id(),
+        ];
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let bolt = lightning_bolt(&mut scenario);
+        let mut runner = scenario.build();
+        let first = if scales_first { scales } else { season };
+
+        let combat = fight_answering(
+            &mut runner,
+            &hydras,
+            &[(coursers[0], hydras[0]), (coursers[1], hydras[1])],
+            preferring(vec![first]),
+        );
+
+        assert_batch_settled(&runner);
+        assert_eq!(combat.prompts.len(), 2, "prompts: {:?}", combat.prompts);
+        assert_eq!(prevented(&combat.events), 2);
+        for (hydra, courser) in hydras.into_iter().zip(coursers) {
+            assert_eq!(
+                plus1_counters(&runner, hydra),
+                if scales_first { 4 } else { 3 }
+            );
+            assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
+        }
+
+        bolt_at(&mut runner, bolt, bears);
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    }
+}
+
+/// Furnace of Rath: "If a source would deal damage to a permanent or player, it deals double that
+/// damage to that permanent or player instead." The Courser's damage to the Hydra meets both the
+/// Hydra's shield and Furnace of Rath (the damage event's own order), and then the rider's counter
+/// meets Hardened Scales and Doubling Season (the rider's order). P0 is asked both in turn
+/// (CR 616.1, CR 616.1g). Either damage order prevents the damage and puts one counter; the rider
+/// order gives 4 (Hardened Scales first) or 3 (Doubling Season first).
+#[test]
+fn a_damage_order_then_a_rider_order_in_one_portion() {
+    for scales_first in [true, false] {
+        let mut scenario = rider_board();
+        let hydra = ironscale(&mut scenario, P0);
+        let (scales, season) = scales_and_season(&mut scenario, P0);
+        let furnace = scenario
+            .add_enchantment_from_oracle(P0, "Furnace of Rath", FURNACE_OF_RATH)
+            .id();
+        let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let bolt = lightning_bolt(&mut scenario);
+        let mut runner = scenario.build();
+        let first = if scales_first { scales } else { season };
+
+        let combat = fight_answering(
+            &mut runner,
+            &[hydra],
+            &[(courser, hydra)],
+            preferring(vec![hydra, first]),
+        );
+
+        assert_batch_settled(&runner);
+        assert_eq!(combat.prompts.len(), 2, "prompts: {:?}", combat.prompts);
+        assert_eq!(offered(&combat.prompts[0]), offered(&[hydra, furnace]));
+        assert_eq!(offered(&combat.prompts[1]), offered(&[scales, season]));
+        assert_eq!(prevented(&combat.events), 1);
+        assert_eq!(runner.state().objects[&hydra].damage_marked, 0);
+        assert_eq!(
+            plus1_counters(&runner, hydra),
+            if scales_first { 4 } else { 3 }
+        );
+        assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
+
+        let events = bolt_at(&mut runner, bolt, bears);
+        // Reach guard: Furnace of Rath is live, so Lightning Bolt deals 6.
+        let dealt: Vec<u32> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamageDealt {
+                    target: TargetRef::Object(target),
+                    amount,
+                    ..
+                } if *target == bears => Some(*amount),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dealt, vec![6]);
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    }
+}
+
+/// CR 616.1f: with three or four counter effects, one answer leaves the rest still to order, and
+/// each is asked in turn. One counter under Hardened Scales (plus one) and Doubling Season
+/// (twice). Answering a Hardened Scales while one is offered gives (1+1+1)×2 = 6 for two Scales
+/// and one Season, (1+1)×2×2 = 8 for one Scales and two Seasons, and (1+1+1)×2×2 = 12 for two of
+/// each. Answering a Doubling Season while one is offered gives 1×2+1+1 = 4, 1×2×2+1 = 5 and
+/// 1×2×2+1+1 = 6.
+#[test]
+fn a_rider_order_of_three_or_four_effects_is_asked_in_one_legal_order() {
+    for (scales_count, seasons_count, scales_first, expected) in [
+        (2, 1, true, 6),
+        (1, 2, true, 8),
+        (2, 2, true, 12),
+        (2, 1, false, 4),
+        (1, 2, false, 5),
+        (2, 2, false, 6),
+    ] {
+        let mut scenario = rider_board();
+        let hydra = ironscale(&mut scenario, P0);
+        let scales: Vec<ObjectId> = (0..scales_count)
+            .map(|_| {
+                scenario
+                    .add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES)
+                    .id()
+            })
+            .collect();
+        let seasons: Vec<ObjectId> = (0..seasons_count)
+            .map(|_| {
+                scenario
+                    .add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON)
+                    .id()
+            })
+            .collect();
+        let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let bolt = lightning_bolt(&mut scenario);
+        let mut runner = scenario.build();
+        let prefer = if scales_first {
+            [scales.as_slice(), seasons.as_slice()].concat()
+        } else {
+            [seasons.as_slice(), scales.as_slice()].concat()
+        };
+
+        let combat = fight_answering(
+            &mut runner,
+            &[hydra],
+            &[(courser, hydra)],
+            preferring(prefer),
+        );
+
+        assert_batch_settled(&runner);
+        assert!(
+            !combat.prompts.is_empty(),
+            "reach-guard: the order was asked"
+        );
+        assert_eq!(prevented(&combat.events), 1);
+        assert_eq!(
+            plus1_counters(&runner, hydra),
+            expected,
+            "{scales_count} Hardened Scales, {seasons_count} Doubling Season, \
+             Hardened Scales first: {scales_first}"
+        );
+        assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
+
+        bolt_at(&mut runner, bolt, bears);
+        assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
+    }
+}
+
+/// CR 704.3: the answered batch lets the game go on: P0 answers Hardened Scales first (4
+/// counters), the turn passes Cleanup, and in the next turn's precombat main phase P0's Lightning
+/// Bolt kills a 2/2.
+#[test]
+fn an_answered_rider_order_lets_the_next_turn_come() {
     let mut scenario = rider_board();
     let hydra = ironscale(&mut scenario, P0);
-    scales_and_season(&mut scenario, P0);
+    let (scales, _) = scales_and_season(&mut scenario, P0);
     let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
     let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
     let bolt = lightning_bolt(&mut scenario);
     let mut runner = scenario.build();
-    fight(&mut runner, &[hydra], &[(courser, hydra)], None);
+    let combat = fight(&mut runner, &[hydra], &[(courser, hydra)], Some(scales));
+    assert_eq!(combat.prompts.len(), 1, "reach-guard: the order was asked");
     let turn = runner.state().turn_number;
 
     let mut reached = false;
@@ -653,18 +713,20 @@ fn a_settled_rider_order_lets_the_next_turn_come() {
     assert!(reached, "the next turn never came");
     assert!(runner.state().pending_replacement.is_none());
     assert!(runner.state().resolution_stack.is_empty());
-    let counters = plus1_counters(&runner, hydra);
-    assert!([3, 4].contains(&counters), "got {counters} counters");
+    assert_eq!(plus1_counters(&runner, hydra), 4);
     bolt_at(&mut runner, bolt, bears);
     assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
 }
 
 /// CR 510.4 + CR 702.4b: Boros Swiftblade (double strike) blocked by the Hydra deals combat damage
-/// in both steps, so the rider's order is settled in each: 3 or 4 counters per step, 6 to 8 in
-/// all. In the regular step the Hydra kills the Swiftblade.
+/// in both steps, so the rider's order is asked in each: answering Hardened Scales first both
+/// times gives 4 + 4 = 8, Doubling Season first both times 3 + 3 = 6. Without Hardened Scales
+/// nothing is asked and the Hydra gets 2. In the regular step the Hydra kills the Swiftblade.
 #[test]
-fn double_strike_settles_a_rider_order_in_each_damage_step() {
-    for scales in [true, false] {
+fn double_strike_asks_a_rider_order_in_each_damage_step() {
+    for (with_scales, scales_first, expected) in
+        [(true, true, 8), (true, false, 6), (false, true, 2)]
+    {
         let mut scenario = rider_board();
         let blade = creature_with_keywords(
             &mut scenario,
@@ -675,27 +737,25 @@ fn double_strike_settles_a_rider_order_in_each_damage_step() {
             BOROS_SWIFTBLADE,
         );
         let hydra = ironscale(&mut scenario, P1);
-        if scales {
-            scales_and_season(&mut scenario, P1);
-        }
+        let prefer = if with_scales {
+            let (scales, season) = scales_and_season(&mut scenario, P1);
+            vec![if scales_first { scales } else { season }]
+        } else {
+            Vec::new()
+        };
         let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
         let bolt = lightning_bolt(&mut scenario);
         let mut runner = scenario.build();
 
-        let combat = fight(&mut runner, &[blade], &[(hydra, blade)], None);
+        let combat = fight_answering(&mut runner, &[blade], &[(hydra, blade)], preferring(prefer));
 
         assert_batch_settled(&runner);
-        assert!(combat.prompts.is_empty());
+        assert_eq!(combat.prompts.len(), if with_scales { 2 } else { 0 });
         // Reach guard: the Swiftblade's damage was prevented in both steps.
         assert_eq!(prevented(&combat.events), 2);
         assert_eq!(runner.state().objects[&hydra].damage_marked, 0);
         assert_eq!(runner.state().objects[&blade].zone, Zone::Graveyard);
-        let counters = plus1_counters(&runner, hydra);
-        if scales {
-            assert!([6, 7, 8].contains(&counters), "got {counters} counters");
-        } else {
-            assert_eq!(counters, 2);
-        }
+        assert_eq!(plus1_counters(&runner, hydra), expected);
 
         bolt_at(&mut runner, bolt, courser);
         assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
@@ -704,11 +764,14 @@ fn double_strike_settles_a_rider_order_in_each_damage_step() {
 
 /// CR 702.7b + CR 702.15b: Fiendslayer Paladin (first strike, lifelink) gains life in the first
 /// combat damage step under P0's Rhox Faithmender and Leyline of Hope, a prompt P0 answers Rhox
-/// Faithmender first (2 doubled, plus 1). The regular step then settles the Hydra's rider order,
-/// so that prompt is the only one, and the Hydra kills P0's Grizzly Bears.
+/// Faithmender first (2 doubled, plus 1). The regular step then asks P1 the Hydra's rider order
+/// (CR 616.1): Hardened Scales first 4, Doubling Season first 3. Without Hardened Scales only the
+/// lifelink prompt is asked and the Hydra gets 1. The Hydra kills P0's Grizzly Bears.
 #[test]
 fn a_first_strike_lifelink_answer_then_a_regular_step_rider_order() {
-    for scales in [true, false] {
+    for (with_scales, scales_first, expected) in
+        [(true, true, 4), (true, false, 3), (false, true, 1)]
+    {
         let mut scenario = rider_board();
         let paladin = creature_with_keywords(
             &mut scenario,
@@ -722,34 +785,39 @@ fn a_first_strike_lifelink_answer_then_a_regular_step_rider_order() {
         let rhox = faithmender_and_leyline(&mut scenario);
         let p1_bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
         let hydra = ironscale(&mut scenario, P1);
-        if scales {
-            scales_and_season(&mut scenario, P1);
+        let mut prefer = vec![rhox];
+        let counter_sources = with_scales.then(|| scales_and_season(&mut scenario, P1));
+        if let Some((scales, season)) = counter_sources {
+            prefer.push(if scales_first { scales } else { season });
         }
         let courser = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
         let bolt = lightning_bolt(&mut scenario);
         let mut runner = scenario.build();
         let life_before = life_of(&runner, P0);
 
-        let combat = fight(
+        let combat = fight_answering(
             &mut runner,
             &[paladin, bears],
             &[(p1_bears, paladin), (hydra, bears)],
-            Some(rhox),
+            preferring(prefer),
         );
 
         assert_batch_settled(&runner);
-        assert_eq!(combat.prompts.len(), 1, "prompts: {:?}", combat.prompts);
+        assert_eq!(
+            combat.prompts.len(),
+            if with_scales { 2 } else { 1 },
+            "prompts: {:?}",
+            combat.prompts
+        );
         assert!(combat.prompts[0].contains(&rhox));
+        if let Some((scales, season)) = counter_sources {
+            assert_eq!(offered(&combat.prompts[1]), offered(&[scales, season]));
+        }
         assert_eq!(life_of(&runner, P0) - life_before, 5);
         assert_eq!(runner.state().objects[&p1_bears].zone, Zone::Graveyard);
         assert_eq!(prevented(&combat.events), 1);
         assert_eq!(runner.state().objects[&bears].zone, Zone::Graveyard);
-        let counters = plus1_counters(&runner, hydra);
-        if scales {
-            assert!([3, 4].contains(&counters), "got {counters} counters");
-        } else {
-            assert_eq!(counters, 1);
-        }
+        assert_eq!(plus1_counters(&runner, hydra), expected);
 
         bolt_at(&mut runner, bolt, courser);
         assert_eq!(runner.state().objects[&courser].zone, Zone::Graveyard);
