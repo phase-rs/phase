@@ -1324,17 +1324,23 @@ impl<'a> PlannerServices<'a> {
             state.waiting_for,
             engine::types::game_state::WaitingFor::Priority { .. }
         );
-        // DecideOptionalCost { pay: false } is always legal — declining an optional
-        // cost cannot fail since it just proceeds with the base cost.
-        let is_optional_cost = matches!(
+        // DecideOptionalCost { index: 1 } declines an Optional or Kicker cost,
+        // which is always legal because it just proceeds with the base cost.
+        // A Choice's index 1 is a real alternative and may be unpayable, so it
+        // goes through simulation like every other answer.
+        let is_skip_decision = matches!(
             state.waiting_for,
-            engine::types::game_state::WaitingFor::OptionalCostChoice { .. }
+            engine::types::game_state::WaitingFor::OptionalCostChoice {
+                cost: engine::types::ability::AdditionalCost::Optional { .. }
+                    | engine::types::ability::AdditionalCost::Kicker { .. },
+                ..
+            }
         );
         match &candidate.action {
             engine::types::actions::GameAction::PassPriority if pass_always_valid => true,
             engine::types::actions::GameAction::ChooseTarget { .. } => true,
-            engine::types::actions::GameAction::DecideOptionalCost { pay: false }
-                if is_optional_cost =>
+            engine::types::actions::GameAction::DecideOptionalCost { index: 1 }
+                if is_skip_decision =>
             {
                 true
             }
@@ -3728,7 +3734,7 @@ pub(crate) mod tests {
             runner.state().waiting_for
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("paying the behold cost must be accepted");
         let state = runner.state().clone();
         match &state.waiting_for {
@@ -6566,6 +6572,7 @@ pub(crate) mod tests {
         trigger_ability.trigger_source = record(powers[1]).trigger_source_context;
 
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0))),
             trigger_event: Some(optional_event),
             trigger_events: Vec::new(),

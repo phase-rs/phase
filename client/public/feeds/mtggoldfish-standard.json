@@ -5,7 +5,7 @@
   "icon": "G",
   "format": "standard",
   "version": 1,
-  "updated": "2026-11-15T00:00:00Z",
+  "updated": "2026-11-16T00:00:00Z",
   "source": "https://www.mtggoldfish.com/metagame/standard",
   "decks": [
     {
@@ -818,8 +818,8 @@
           "name": "Deserted Beach"
         },
         {
-          "count": 2,
-          "name": "Erode"
+          "count": 1,
+          "name": "Restless Anchorage"
         },
         {
           "count": 2,
@@ -850,20 +850,24 @@
           "name": "Island"
         },
         {
-          "count": 1,
-          "name": "Mathemagics"
+          "count": 3,
+          "name": "Day of Judgment"
         },
         {
-          "count": 4,
+          "count": 2,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 1,
+          "name": "Multiversal Passage"
+        },
+        {
+          "count": 3,
           "name": "No More Lies"
         },
         {
           "count": 4,
           "name": "Countersculpt"
-        },
-        {
-          "count": 2,
-          "name": "Day of Judgment"
         },
         {
           "count": 2,
@@ -878,54 +882,70 @@
           "name": "The Theorist, Jace Beleren"
         },
         {
-          "count": 3,
+          "count": 2,
           "name": "Plains"
         },
         {
-          "count": 1,
-          "name": "Rest in Peace"
+          "count": 2,
+          "name": "Pinnacle Starcage"
         },
         {
           "count": 1,
-          "name": "Theorist's Proxy"
+          "name": "Captain Marvel, Earth's Protector"
         },
         {
-          "count": 4,
+          "count": 3,
           "name": "Petrified Hamlet"
         }
       ],
       "sideboard": [
         {
           "count": 1,
-          "name": "Ultima"
-        },
-        {
-          "count": 2,
-          "name": "King T'Challa"
-        },
-        {
-          "count": 4,
-          "name": "Doorkeeper Thrull"
-        },
-        {
-          "count": 1,
-          "name": "Rest in Peace"
-        },
-        {
-          "count": 1,
           "name": "Flashfreeze"
         },
         {
-          "count": 2,
-          "name": "Cavern of Souls"
+          "count": 1,
+          "name": "Wan Shi Tong, Librarian"
+        },
+        {
+          "count": 1,
+          "name": "Annul"
         },
         {
           "count": 2,
+          "name": "Spell Snare"
+        },
+        {
+          "count": 1,
+          "name": "Sphinx of False Conclusions"
+        },
+        {
+          "count": 1,
+          "name": "Cavern of Souls"
+        },
+        {
+          "count": 1,
           "name": "Emeritus of Ideation"
         },
         {
           "count": 2,
+          "name": "Rest in Peace"
+        },
+        {
+          "count": 1,
           "name": "Captain Marvel, Earth's Protector"
+        },
+        {
+          "count": 2,
+          "name": "Doorkeeper Thrull"
+        },
+        {
+          "count": 1,
+          "name": "Voice of Victory"
+        },
+        {
+          "count": 1,
+          "name": "Erode"
         }
       ]
     },

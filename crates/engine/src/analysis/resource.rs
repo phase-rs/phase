@@ -7868,7 +7868,7 @@ fn additional_cost_references_growing_class(a: &crate::types::ability::Additiona
     match a {
         AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => reads(cost),
         AdditionalCost::Kicker { costs, .. } => costs.iter().any(reads),
-        AdditionalCost::Choice(a, b) => reads(a) || reads(b),
+        AdditionalCost::Choice(costs) => costs.iter().any(reads),
     }
 }
 
@@ -8987,6 +8987,7 @@ fn project_out_player_consumables(p: &mut Player) {
         noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
+        starting_deck_size: _,
     } = p;
     // CR 119: life is monotone in a drain/lifegain loop.
     *life = 0;
@@ -9590,6 +9591,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
+        starting_deck_size: _,
     } = p;
     vec![
         *poison_counters as i64,
@@ -9652,6 +9654,7 @@ fn projected_player_maps(
         noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
+        starting_deck_size: _,
     } = p;
     vec![player_counters]
 }
@@ -20747,7 +20750,7 @@ mod tests {
         attacker: ObjectId,
         exert_permission: TriggerDefinitionRef,
     ) -> Vec<(&'static str, crate::types::game_state::WaitingFor, bool)> {
-        use crate::types::game_state::WaitingFor;
+        use crate::types::game_state::{UntapStepProgress, WaitingFor};
         vec![
             (
                 "Priority{active} — CR 704.3 SBA point; NOT exempt, and the positive control",
@@ -20912,6 +20915,7 @@ mod tests {
                     // battlefield, not a card in hand.
                     candidates: on_board.to_vec(),
                     chosen_not_to_untap: Vec::new(),
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
                 true,
             ),
@@ -20926,6 +20930,7 @@ mod tests {
                     // empty one, so "this window enumerates no cast" would be a
                     // degenerate zero rather than a measured one.
                     max: 1,
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
                 true,
             ),
@@ -34313,6 +34318,7 @@ mod tests {
                 kind: crate::types::ability::DamageKindFilter::Any,
                 source: Some(Box::new(TargetFilter::SourceController)),
                 min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             },
         };
         assert_eq!(
