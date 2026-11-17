@@ -18,7 +18,7 @@ use crate::types::ability::{
 use crate::types::game_state::{GameState, StackEntry, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{CounterCause, CounterPlacement, ProposedEvent};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -1011,6 +1011,7 @@ fn proposed_events(
                         actor: bound.controller,
                         object_id: *id,
                         counter_type: counter_type.clone(),
+                        cause: CounterCause::Other,
                     },
                     count: 1,
                     applied: Default::default(),

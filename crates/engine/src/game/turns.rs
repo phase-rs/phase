@@ -18,7 +18,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterCause, ProposedEvent};
 use crate::types::statics::{HandSizeModification, StaticMode, StaticModeKind};
 
 use super::combat;
@@ -3964,6 +3964,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
                     object_id,
                     counter_type: CounterType::Lore,
                     count: 1,
+                    cause: CounterCause::Other,
                 })
                 .collect();
             super::effects::counters::stash_pending_counter_additions(

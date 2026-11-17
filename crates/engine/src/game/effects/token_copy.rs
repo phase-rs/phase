@@ -23,7 +23,8 @@ use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopiedDoubleFaces, CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+    CopiedDoubleFaces, CopyTokenSpec, CounterCause, EtbTapState, ProposedEvent,
+    TokenCharacteristics,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -1864,6 +1865,7 @@ fn finish_non_liminal_copy_token_entry(
                         object_id: token_id,
                         counter_type: counter_type.clone(),
                         count: *count,
+                        cause: CounterCause::Other,
                     }
                 })
                 .collect();

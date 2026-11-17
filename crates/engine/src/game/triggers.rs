@@ -50339,6 +50339,7 @@ pub mod tests {
                 actor: PlayerId(0),
                 object_id,
                 counter_type: CounterType::Plus1Plus1,
+                cause: crate::types::proposed_event::CounterCause::Other,
             },
             count: 1,
             applied: HashSet::new(),

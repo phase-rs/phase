@@ -9,7 +9,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::{Player, PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::ProposedEvent;
+use crate::types::proposed_event::{CounterCause, ProposedEvent};
 use crate::types::resolution::PendingProliferateActions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -375,6 +375,7 @@ fn proliferate_addition_plan(
                         object_id: *obj_id,
                         counter_type: ct,
                         count: 1,
+                        cause: CounterCause::Other,
                     });
                 }
             }
@@ -394,6 +395,7 @@ fn proliferate_addition_plan(
                                 player_id: *pid,
                                 counter_kind: kind,
                                 count: 1,
+                                cause: CounterCause::Other,
                             });
                         }
                         PlayerCounterSource::Energy => {
@@ -401,6 +403,7 @@ fn proliferate_addition_plan(
                                 actor,
                                 player_id: *pid,
                                 count: 1,
+                                cause: CounterCause::Other,
                             });
                         }
                     }
@@ -422,6 +425,7 @@ fn apply_counter_addition_plan_item(
             object_id,
             counter_type,
             count,
+            ..
         } => super::counters::add_counter_with_replacement(
             state,
             actor,
@@ -435,6 +439,7 @@ fn apply_counter_addition_plan_item(
             player_id,
             counter_kind,
             count,
+            ..
         } => {
             super::player_counter::add_player_counter_with_replacement(
                 state,
@@ -449,6 +454,7 @@ fn apply_counter_addition_plan_item(
             actor,
             player_id,
             count,
+            ..
         } => super::energy::add_energy_with_replacement(state, actor, player_id, count, events),
     }
 }

@@ -69,7 +69,8 @@ use super::object_map::ObjectMap;
 use super::phase::{Phase, PhaseStop, TurnDirection, TurnSegment};
 use super::player::{Player, PlayerCounterKind, PlayerId};
 use super::proposed_event::{
-    AppliedReplacementKey, CopyTokenSpec, ProposedEvent, ReplacementId, TokenBatch, TokenSpec,
+    AppliedReplacementKey, CopyTokenSpec, CounterCause, ProposedEvent, ReplacementId, TokenBatch,
+    TokenSpec,
 };
 use super::replacements::ReplacementEvent;
 #[cfg(debug_assertions)]
@@ -7964,6 +7965,9 @@ pub struct PendingCounterMove {
     pub counter_type: CounterType,
     pub remove_count: u32,
     pub add_count: u32,
+    /// CR 614.16 provenance of the initiating placement; inert until gate.
+    #[serde(default)]
+    pub cause: CounterCause,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -9763,17 +9767,26 @@ pub enum PendingCounterAddition {
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
     Player {
         actor: PlayerId,
         player_id: PlayerId,
         counter_kind: PlayerCounterKind,
         count: u32,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
     Energy {
         actor: PlayerId,
         player_id: PlayerId,
         count: u32,
+        /// CR 614.16 provenance; inert until the eligibility gate lands.
+        #[serde(default)]
+        cause: CounterCause,
     },
 }
 
@@ -69598,5 +69611,83 @@ mod spell_cast_reversal_equality {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pending_counter_cause_backcompat_tests {
+    use super::*;
+    use crate::types::counter::CounterType;
+
+    /// P1-1 (pending tail): every `cause` on `PendingCounterAddition` ×3 and
+    /// `PendingCounterMove` defaults to fail-closed `Other`, and a pre-cause
+    /// save (no `cause` key) loads with `Other`.
+    #[test]
+    fn pending_counter_cause_default_and_backcompat() {
+        let additions = [
+            PendingCounterAddition::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(1),
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+                cause: CounterCause::Other,
+            },
+            PendingCounterAddition::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                counter_kind: PlayerCounterKind::Poison,
+                count: 1,
+                cause: CounterCause::Other,
+            },
+            PendingCounterAddition::Energy {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                count: 1,
+                cause: CounterCause::Other,
+            },
+        ];
+        for addition in additions {
+            let mut wire = serde_json::to_value(&addition).unwrap();
+            let entry = wire.as_object_mut().expect("addition is an object");
+            let variant = entry.keys().next().cloned().expect("one variant");
+            let payload = entry.get_mut(&variant).expect("variant payload");
+            // Reach-guard: a fresh save actually carries the new field.
+            assert_eq!(payload["cause"], serde_json::json!("Other"));
+            payload
+                .as_object_mut()
+                .expect("variant payload is an object")
+                .remove("cause");
+            let legacy: PendingCounterAddition =
+                serde_json::from_value(wire).expect("legacy addition loads");
+            assert!(matches!(
+                legacy,
+                PendingCounterAddition::Object {
+                    cause: CounterCause::Other,
+                    ..
+                } | PendingCounterAddition::Player {
+                    cause: CounterCause::Other,
+                    ..
+                } | PendingCounterAddition::Energy {
+                    cause: CounterCause::Other,
+                    ..
+                }
+            ));
+        }
+        let queued = PendingCounterMove {
+            actor: PlayerId(0),
+            source_id: ObjectId(1),
+            destination_id: ObjectId(2),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 1,
+            add_count: 1,
+            cause: CounterCause::Other,
+        };
+        let mut wire = serde_json::to_value(&queued).unwrap();
+        assert_eq!(wire["cause"], serde_json::json!("Other"));
+        wire.as_object_mut()
+            .expect("move is an object")
+            .remove("cause");
+        let legacy: PendingCounterMove = serde_json::from_value(wire).expect("legacy move loads");
+        assert_eq!(legacy.cause, CounterCause::Other);
     }
 }

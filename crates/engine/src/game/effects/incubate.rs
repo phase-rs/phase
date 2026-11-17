@@ -349,6 +349,7 @@ mod tests {
                     actor,
                     object_id,
                     counter_type,
+                    ..
                 },
             count,
             ..

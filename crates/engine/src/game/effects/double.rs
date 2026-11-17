@@ -7,6 +7,7 @@ use crate::types::events::{GameEvent, ManaTapState};
 use crate::types::game_state::{GameState, PendingCounterAddition, PendingEffectResolved};
 use crate::types::mana::{ManaColor, ManaType, ManaUnit};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::CounterCause;
 
 /// CR 701.10d-f: Double counters on a permanent, a player's life total, or mana pool.
 /// Dispatches on `DoubleTarget` variant.
@@ -101,6 +102,7 @@ fn resolve_double_counters(
                 object_id: obj_id,
                 counter_type: ct,
                 count: current_count,
+                cause: CounterCause::Other,
             });
         }
     }
@@ -112,6 +114,7 @@ fn resolve_double_counters(
             object_id,
             counter_type,
             count,
+            ..
         } = addition
         else {
             continue;

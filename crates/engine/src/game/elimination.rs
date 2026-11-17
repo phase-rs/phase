@@ -2833,7 +2833,9 @@ mod tests {
     };
     use crate::types::mana::ManaCost;
     use crate::types::match_config::MatchType;
-    use crate::types::proposed_event::{CounterPlacement, DrawEventStage, ProposedEvent};
+    use crate::types::proposed_event::{
+        CounterCause, CounterPlacement, DrawEventStage, ProposedEvent,
+    };
     use crate::types::replacements::ReplacementEvent;
 
     fn setup_two_player() -> GameState {
@@ -4895,6 +4897,7 @@ mod tests {
                     actor: PlayerId(2),
                     object_id: o,
                     counter_type: CounterType::Plus1Plus1,
+                    cause: CounterCause::Other,
                 },
                 count: 1,
                 applied: HashSet::new(),

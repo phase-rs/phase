@@ -9,7 +9,7 @@ use crate::types::game_state::{
     GameState, PendingCounterAddition, PendingEffectResolved, UnrepresentablePolicy,
 };
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{CounterCause, CounterPlacement, ProposedEvent};
 use crate::types::resolved_commands::ResolvedPlayerEdit;
 
 /// Adds energy through the replacement pipeline under the compatibility
@@ -78,7 +78,11 @@ fn add_energy_core(
     // gaining energy passes through the counter-placement pipeline before the
     // dedicated player energy field is mutated.
     let proposed = ProposedEvent::AddCounter {
-        placement: CounterPlacement::Energy { actor, player_id },
+        placement: CounterPlacement::Energy {
+            actor,
+            player_id,
+            cause: CounterCause::Other,
+        },
         count: amount,
         applied: HashSet::new(),
     };

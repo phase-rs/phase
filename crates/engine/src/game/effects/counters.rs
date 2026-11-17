@@ -23,7 +23,9 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{CounterMoveStage, CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{
+    CounterCause, CounterMoveStage, CounterPlacement, ProposedEvent,
+};
 use crate::types::resolution::{ChildStackDepth, FrameGate, ResolutionFrame};
 use crate::types::resolved_commands::{
     ResolvedObjectCounterCommand, ResolvedObjectCounterEdit,
@@ -172,6 +174,7 @@ pub fn preview_counter_addition(
             actor,
             object_id: target.object_id,
             counter_type,
+            cause: CounterCause::Other,
         },
         count,
         applied: HashSet::new(),
@@ -244,6 +247,7 @@ pub fn add_counter_with_replacement(
             actor,
             object_id,
             counter_type,
+            cause: CounterCause::Other,
         },
         count,
         applied: HashSet::new(),
@@ -257,6 +261,7 @@ pub fn add_counter_with_replacement(
                         actor,
                         object_id,
                         counter_type,
+                        ..
                     },
                 count,
                 ..
@@ -474,6 +479,7 @@ fn object_counter_addition(
         object_id,
         counter_type,
         count,
+        cause: CounterCause::Other,
     }
 }
 
@@ -487,6 +493,7 @@ fn apply_object_counter_addition(
         object_id,
         counter_type,
         count,
+        ..
     } = addition
     else {
         return true;
@@ -716,12 +723,14 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                 object_id,
                 counter_type,
                 count,
+                ..
             } => add_counter_with_replacement(state, actor, object_id, counter_type, count, events),
             PendingCounterAddition::Player {
                 actor,
                 player_id,
                 counter_kind,
                 count,
+                ..
             } => {
                 super::player_counter::add_player_counter_with_replacement(
                     state,
@@ -736,6 +745,7 @@ pub(crate) fn drain_pending_counter_additions(state: &mut GameState, events: &mu
                 actor,
                 player_id,
                 count,
+                ..
             } => super::energy::add_energy_with_replacement(state, actor, player_id, count, events),
         };
         if !completed {
@@ -1847,6 +1857,7 @@ pub(crate) fn apply_move_counter_after_replacement(
         remove_count,
         add_count,
         stage,
+        cause,
         applied: _,
     } = event
     else {
@@ -1860,6 +1871,7 @@ pub(crate) fn apply_move_counter_after_replacement(
         counter_type,
         remove_count,
         add_count,
+        cause,
     };
 
     match stage {
@@ -1875,6 +1887,7 @@ pub(crate) fn apply_move_counter_after_replacement(
                 remove_count: counter_move.remove_count,
                 add_count: counter_move.add_count,
                 stage: CounterMoveStage::Add,
+                cause: counter_move.cause,
                 applied: HashSet::new(),
             };
             match replacement::replace_event(state, proposed, events) {
@@ -1914,6 +1927,7 @@ pub(crate) fn move_counter_with_replacement(
             counter_type,
             remove_count: count,
             add_count: count,
+            cause: CounterCause::Other,
         },
         events,
     )
@@ -1946,6 +1960,7 @@ fn move_counter_with_replacement_entry(
         remove_count: counter_move.remove_count,
         add_count: counter_move.add_count,
         stage: CounterMoveStage::Remove,
+        cause: counter_move.cause,
         applied: HashSet::new(),
     };
     match replacement::replace_event(state, proposed, events) {
@@ -3205,6 +3220,7 @@ pub(crate) fn validate_and_queue_counter_move_distribution(
             counter_type: selection.counter_type.clone(),
             remove_count: selection.count,
             add_count: selection.count,
+            cause: CounterCause::Other,
         });
     }
 
@@ -3536,6 +3552,7 @@ pub(crate) fn move_counters_optional_is_infeasible(
                     counter_type,
                     remove_count: count,
                     add_count: count,
+                    cause: CounterCause::Other,
                 },
             )
         })
@@ -6107,6 +6124,7 @@ mod tests {
                 object_id: ObjectId(10),
                 counter_type: CounterType::Plus1Plus1,
                 count: 1,
+                cause: CounterCause::Other,
             }],
             completion: Some(PendingEffectResolved::with_post_actions_without_effect(
                 EffectKind::Token,
@@ -7230,6 +7248,7 @@ mod tests {
                     counter_type: CounterType::Plus1Plus1,
                     remove_count: 1,
                     add_count: 1,
+                    cause: CounterCause::Other,
                 },
                 PendingCounterMove {
                     actor: PlayerId(0),
@@ -7238,6 +7257,7 @@ mod tests {
                     counter_type: CounterType::Plus1Plus1,
                     remove_count: 1,
                     add_count: 1,
+                    cause: CounterCause::Other,
                 },
             ],
             effect_kind: EffectKind::MoveCounters,

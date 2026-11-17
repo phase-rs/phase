@@ -20,7 +20,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    AppliedReplacementKey, CounterPlacement, DrawEventStage, ProposedEvent,
+    AppliedReplacementKey, CounterCause, CounterPlacement, DrawEventStage, ProposedEvent,
 };
 use crate::types::replacements::ReplacementEvent;
 use crate::types::resolution::ChildStackDepth;
@@ -996,6 +996,7 @@ fn handle_replacement_choice_inner(
                         actor,
                         object_id,
                         counter_type,
+                        ..
                     } => effects::counters::apply_counter_addition(
                         state,
                         actor,
@@ -5245,6 +5246,7 @@ pub(super) fn apply_etb_counters(
                         object_id,
                         counter_type: counter_type.clone(),
                         count: *count,
+                        cause: CounterCause::Other,
                     }
                 })
                 .collect();
@@ -5888,6 +5890,7 @@ mod tests {
                 actor: PlayerId(0),
                 object_id: target,
                 counter_type: CounterType::Plus1Plus1,
+                cause: CounterCause::Other,
             },
             count: 2,
             applied: std::collections::HashSet::new(),

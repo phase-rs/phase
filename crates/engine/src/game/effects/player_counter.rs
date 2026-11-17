@@ -8,7 +8,7 @@ use crate::types::game_state::{
     GameState, PendingCounterAddition, PendingEffectResolved, UnrepresentablePolicy,
 };
 use crate::types::player::{PlayerCounterKind, PlayerId};
-use crate::types::proposed_event::{CounterPlacement, ProposedEvent};
+use crate::types::proposed_event::{CounterCause, CounterPlacement, ProposedEvent};
 use crate::types::resolved_commands::ResolvedPlayerEdit;
 
 /// The replacement-aware outcome of attempting to add player counters.
@@ -106,6 +106,7 @@ fn add_player_counter_core(
             actor,
             player_id,
             counter_kind,
+            cause: CounterCause::Other,
         },
         count,
         applied: HashSet::new(),
@@ -223,6 +224,7 @@ pub fn preview_player_counter_addition(
             actor,
             player_id,
             counter_kind,
+            cause: CounterCause::Other,
         },
         count,
         applied: HashSet::new(),
@@ -381,6 +383,7 @@ pub fn resolve(
             player_id: *player_id,
             counter_kind: *counter_kind,
             count: amount,
+            cause: CounterCause::Other,
         })
         .collect();
     let completion = PendingEffectResolved::new(EffectKind::GivePlayerCounter, ability.source_id);
@@ -390,6 +393,7 @@ pub fn resolve(
             player_id,
             counter_kind,
             count,
+            ..
         } = addition
         else {
             continue;

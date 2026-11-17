@@ -38,8 +38,8 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopiedFaceUp, CopyTokenSpec, EntryChoices, ProposedEvent, TokenAttackRequest, TokenHostRequest,
-    TokenSpec,
+    CopiedFaceUp, CopyTokenSpec, CounterCause, EntryChoices, ProposedEvent, TokenAttackRequest,
+    TokenHostRequest, TokenSpec,
 };
 use crate::types::resolution::{ChildStackDepth, ResolutionFrame};
 use crate::types::resolved_commands::{
@@ -1753,6 +1753,7 @@ fn apply_create_token_batch(
                             object_id: obj_id,
                             counter_type: counter_type.clone(),
                             count: *count,
+                            cause: CounterCause::Other,
                         }
                     })
                     .collect();
@@ -2888,6 +2889,7 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
                             object_id: entry_ref,
                             counter_type: counter_type.clone(),
                             count: *count,
+                            cause: CounterCause::Other,
                         })
                         .collect();
                     let mut post_actions = vec![finalization];
@@ -2968,6 +2970,7 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
                     object_id: entry_ref,
                     counter_type: counter_type.clone(),
                     count: *count,
+                    cause: CounterCause::Other,
                 })
                 .collect();
             let mut post_actions = vec![finalization];

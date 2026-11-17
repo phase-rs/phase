@@ -15,6 +15,7 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::CounterCause;
 
 /// CR 707.2 / CR 613.1a: Become a copy of target permanent via a layer-1 copy effect.
 pub fn resolve(
@@ -264,6 +265,7 @@ pub(crate) fn apply_precomputed_copy_values(
             object_id: recipient_id,
             counter_type,
             count,
+            cause: CounterCause::Other,
         })
         .collect();
         for (index, addition) in additions.iter().cloned().enumerate() {
@@ -272,6 +274,7 @@ pub(crate) fn apply_precomputed_copy_values(
                 object_id,
                 counter_type,
                 count,
+                ..
             } = addition
             else {
                 continue;
