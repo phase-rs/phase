@@ -79,12 +79,19 @@ pub fn render_board(
     push_known_other_hands(&mut out, state, viewer);
     push_graveyards(&mut out, state, viewer);
     push_exile(&mut out, state, viewer);
-    push_history(&mut out, history, TurnCycle::of(state), options.history);
+    push_history(
+        &mut out,
+        history,
+        viewer,
+        TurnCycle::of(state),
+        options.history,
+    );
     out
 }
 
 /// `You` for the seat the prompt belongs to, `Player N` otherwise. One
-/// authority so the same seat never reads two ways in one prompt.
+/// authority so the same seat never reads two ways in one prompt. The option
+/// labels and the history name seats through it too.
 pub(crate) fn seat_label(player: PlayerId, viewer: PlayerId) -> String {
     if player == viewer {
         "You".to_string()
