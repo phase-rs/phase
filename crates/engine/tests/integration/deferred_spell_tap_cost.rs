@@ -753,18 +753,22 @@ struct DruidBoard {
     pyromatics: ObjectId,
     victim: ObjectId,
     goblins: Vec<ObjectId>,
-    druid: ObjectId,
+    druids: Vec<ObjectId>,
 }
 
-fn druid_board(mountains: usize) -> DruidBoard {
+/// One Mountain and `druids` mature Zhur-Taa Druids beside Pyromatics, Wort
+/// and two Goblins; P0's pool is empty.
+fn druid_board(druids: usize) -> DruidBoard {
     let (mut scenario, victim, _, goblins) = table(false, 2);
-    let druid = scenario
-        .add_creature_from_oracle(P0, "Zhur-Taa Druid", 1, 1, ZHUR_TAA_DRUID)
-        .with_color(RED_GREEN.to_vec())
-        .id();
-    for _ in 0..mountains {
-        scenario.add_basic_land(P0, ManaColor::Red);
-    }
+    let druids = (0..druids)
+        .map(|_| {
+            scenario
+                .add_creature_from_oracle(P0, "Zhur-Taa Druid", 1, 1, ZHUR_TAA_DRUID)
+                .with_color(RED_GREEN.to_vec())
+                .id()
+        })
+        .collect();
+    scenario.add_basic_land(P0, ManaColor::Red);
     let pyromatics = red_spell(
         &mut scenario,
         "Pyromatics",
@@ -778,7 +782,7 @@ fn druid_board(mountains: usize) -> DruidBoard {
         pyromatics,
         victim,
         goblins,
-        druid,
+        druids,
     }
 }
 
@@ -799,7 +803,7 @@ fn mana_is_activated_before_held_creatures_are_tapped() {
     script.selections = vec![board.goblins.clone()];
     let run = cast(&mut board.runner, board.pyromatics, &script, &board.goblins);
 
-    let druid_mana = tapped_for_mana(&run, board.druid).expect("reach: the Druid paid mana");
+    let druid_mana = tapped_for_mana(&run, board.druids[0]).expect("reach: the Druid paid mana");
     for goblin in &board.goblins {
         assert!(
             druid_mana < first_tap(&run, *goblin),
@@ -809,19 +813,25 @@ fn mana_is_activated_before_held_creatures_are_tapped() {
     }
 }
 
-/// CR 601.2h: a Druid held for conspire is not tapped for that spell's mana.
+/// CR 601.2h: a Druid held for conspire is not tapped for that spell's mana;
+/// the Auto payer takes the {G} from the unheld Druid instead.
 #[test]
 fn creature_held_for_conspire_is_not_tapped_for_mana() {
     let mut board = druid_board(2);
-    let held = vec![board.druid, board.goblins[0]];
+    let (held_druid, free_druid) = (board.druids[0], board.druids[1]);
+    let held = vec![held_druid, board.goblins[0]];
     let mut script = Script::new(board.victim);
     script.pay_once = vec![AdditionalCostOrigin::Other];
     script.selections = vec![held.clone()];
     let run = cast(&mut board.runner, board.pyromatics, &script, &held);
 
     assert_eq!(run.tapped_at_targets, Some(vec![false, false]));
-    assert_eq!(tapped_for_mana(&run, board.druid), None);
-    assert_eq!(taps(&run, board.druid), 1, "tapped once, for conspire");
+    assert_eq!(tapped_for_mana(&run, held_druid), None);
+    assert!(
+        tapped_for_mana(&run, free_druid).is_some(),
+        "reach: the unheld Druid paid mana"
+    );
+    assert_eq!(taps(&run, held_druid), 1, "tapped once, for conspire");
 }
 
 // ---------------------------------------------------------------------------
