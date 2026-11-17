@@ -2025,6 +2025,353 @@ mod tests {
         );
     }
 
+    /// Brightling, verbatim Oracle text: four activated abilities, the last a
+    /// choice of two made as it resolves.
+    const BRIGHTLING: &str = "{W}: This creature gains vigilance until end of turn.\n\
+         {W}: This creature gains lifelink until end of turn.\n\
+         {W}: Return this creature to its owner's hand.\n\
+         {1}: This creature gets +1/-1 or -1/+1 until end of turn.";
+
+    /// Brightling on Player 0's battlefield with a Plains to pay for any one
+    /// of its abilities, at Player 0's priority, and the index of its last
+    /// ability, found by its effect rather than by its place.
+    fn brightling() -> (engine::game::scenario::GameRunner, ObjectId, usize) {
+        use engine::game::scenario::GameScenario;
+        use engine::types::ability::Effect;
+        use engine::types::mana::ManaColor;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(PlayerId(0), ManaColor::White);
+        let brightling = scenario
+            .add_creature_from_oracle(PlayerId(0), "Brightling", 3, 3, BRIGHTLING)
+            .id();
+        let runner = scenario.build();
+        let disjunction = runner.state().objects[&brightling]
+            .abilities
+            .iter()
+            .position(|ability| matches!(&*ability.effect, Effect::ChooseOneOf { .. }))
+            .expect("reach guard: Brightling's last ability is a choice of two");
+        (runner, brightling, disjunction)
+    }
+
+    /// Issue #10996: an activated ability was offered by its index on its
+    /// source (`Activate Ability (Ability Index: 1, ...)`), and the model
+    /// guessed which ability an index was. Each of Brightling's four
+    /// abilities, as the engine offers them, now quotes the ability it
+    /// activates, with Brightling's name where its text names itself.
+    #[test]
+    fn activated_ability_options_quote_the_ability_they_activate() {
+        let (runner, brightling, disjunction) = brightling();
+        let state = runner.state();
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let activations: Vec<(usize, usize)> = contract
+            .candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(position, candidate)| match candidate.action {
+                GameAction::ActivateAbility {
+                    source_id,
+                    ability_index,
+                    ..
+                } if source_id == brightling => Some((position, ability_index)),
+                _ => None,
+            })
+            .collect();
+        // Reach guard: the engine offers all four, the Plains paying for any.
+        assert_eq!(activations.len(), 4, "{:?}", contract.candidates);
+
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let options = &request.prompt.frame.options;
+        let activation_options: Vec<&String> = activations
+            .iter()
+            .map(|(position, _)| &options[*position])
+            .collect();
+        for printed in [
+            "{W}: Brightling gains vigilance until end of turn.",
+            "{W}: Brightling gains lifelink until end of turn.",
+            "{W}: Return Brightling to its owner's hand.",
+            "{1}: Brightling gets +1/-1 or -1/+1 until end of turn.",
+        ] {
+            let quoting = activation_options
+                .iter()
+                .filter(|option| option.contains(&format!("(Ability Index: \"{printed}\", ")))
+                .count();
+            assert_eq!(quoting, 1, "{printed} in {activation_options:?}");
+        }
+
+        // Each option quotes the ability at its own index: the choice of two,
+        // found by its effect, is the one its option names.
+        let (position, _) = activations
+            .iter()
+            .find(|(_, ability_index)| *ability_index == disjunction)
+            .expect("the engine offers the choice of two");
+        assert_eq!(
+            options[*position],
+            "Brightling — Activate Ability (Ability Index: \"{1}: Brightling gets +1/-1 or \
+             -1/+1 until end of turn.\", Source ID: Brightling (controlled by You))"
+        );
+    }
+
+    /// CR 608.2d: Brightling's "{1}: This creature gets +1/-1 or -1/+1 until
+    /// end of turn." asks as it resolves which of the two it gets, and the
+    /// engine offers the two by index (`Choose Branch (Index: 0)`). Each option
+    /// now quotes the engine's description of its branch.
+    #[test]
+    fn branch_options_quote_the_branch_they_choose() {
+        let (mut runner, brightling, disjunction) = brightling();
+        let activation = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(
+                    action,
+                    GameAction::ActivateAbility { source_id, ability_index, .. }
+                        if *source_id == brightling && *ability_index == disjunction
+                )
+            })
+            .expect("the engine offers the choice of two");
+        runner
+            .act(activation)
+            .expect("activating Brightling's choice of two");
+        // Both players pass, and the ability resolves to its choice.
+        for _ in 0..8 {
+            if !matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. }
+            ) {
+                break;
+            }
+            runner
+                .act(GameAction::PassPriority)
+                .expect("passing priority");
+        }
+        let state = runner.state();
+        let WaitingFor::ChooseOneOfBranch {
+            branch_descriptions,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!(
+                "reach guard: the ability asks which of the two, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(branch_descriptions.len(), 2, "{branch_descriptions:?}");
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        assert_eq!(
+            contract
+                .candidates
+                .iter()
+                .map(|candidate| candidate.action.clone())
+                .collect::<Vec<_>>(),
+            [
+                GameAction::ChooseBranch { index: 0 },
+                GameAction::ChooseBranch { index: 1 },
+            ]
+        );
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let options = &request.prompt.frame.options;
+        for (index, option) in options.iter().enumerate() {
+            let described = branch_descriptions[index].replace('~', "Brightling");
+            assert_eq!(option, &format!("Choose Branch (Index: \"{described}\")"));
+        }
+        // The two read apart by the modification each one makes.
+        let [first, second] = options.as_slice() else {
+            panic!("two branches: {options:?}");
+        };
+        assert!(
+            first.contains("+1/-1") != second.contains("+1/-1")
+                && first.contains("-1/+1") != second.contains("-1/+1"),
+            "{options:?}"
+        );
+    }
+
+    /// Abzan Charm, verbatim Oracle text.
+    const ABZAN_CHARM: &str = "Choose one —\n\
+         • Exile target creature with power 3 or greater.\n\
+         • You draw two cards and you lose 2 life.\n\
+         • Distribute two +1/+1 counters among one or two target creatures.";
+
+    /// Issue #10996: a modal spell's modes were offered by index
+    /// (`Select Modes (Indices: 0)`). Casting Abzan Charm, each mode option the
+    /// engine offers now quotes the mode it chooses.
+    #[test]
+    fn mode_options_quote_the_mode_they_choose() {
+        use engine::game::scenario::GameScenario;
+        use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for color in [ManaColor::White, ManaColor::Black, ManaColor::Green] {
+            scenario.add_basic_land(PlayerId(0), color);
+        }
+        // A creature with power 3 or greater, so every mode has a target.
+        scenario.add_creature(PlayerId(1), "Serra Angel", 4, 4);
+        let charm = {
+            let mut builder = scenario.add_spell_to_hand_from_oracle(
+                PlayerId(0),
+                "Abzan Charm",
+                true,
+                ABZAN_CHARM,
+            );
+            builder.with_mana_cost(ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::White,
+                    ManaCostShard::Black,
+                    ManaCostShard::Green,
+                ],
+                generic: 0,
+            });
+            builder.id()
+        };
+        let mut runner = scenario.build();
+        let cast = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == charm)
+            })
+            .expect("three lands pay for Abzan Charm");
+        runner.act(cast).expect("casting Abzan Charm");
+        let state = runner.state();
+        // Reach guard: CR 601.2b, the mode is chosen as the spell is cast.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::ModeChoice { .. }),
+            "{:?}",
+            state.waiting_for
+        );
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let printed = [
+            "Exile target creature with power 3 or greater.",
+            "You draw two cards and you lose 2 life.",
+            "Distribute two +1/+1 counters among one or two target creatures.",
+        ];
+        let mut modes = Vec::new();
+        for (candidate, option) in contract
+            .candidates
+            .iter()
+            .zip(&request.prompt.frame.options)
+        {
+            let GameAction::SelectModes { indices } = &candidate.action else {
+                continue;
+            };
+            let [index] = indices.as_slice() else {
+                panic!("Abzan Charm chooses one mode: {indices:?}");
+            };
+            assert_eq!(
+                option,
+                &format!("Select Modes (Indices: \"{}\")", printed[*index])
+            );
+            modes.push(*index);
+        }
+        // Reach guard: every mode has a legal target, so all three are offered.
+        modes.sort_unstable();
+        assert_eq!(modes, [0, 1, 2], "{:?}", request.prompt.frame.options);
+    }
+
+    /// Steppe Lynx and Grazing Gladehart, verbatim Oracle text.
+    const STEPPE_LYNX: &str =
+        "Landfall — Whenever a land you control enters, this creature gets +2/+2 until end of turn.";
+    const GRAZING_GLADEHART: &str =
+        "Landfall — Whenever a land you control enters, you may gain 2 life.";
+
+    /// Issue #10996: the order of two triggers was offered as indices
+    /// (`Order Triggers (Order: 0, 1)`), and nothing said which trigger an
+    /// index was or which way round the order ran. Playing a land with Steppe
+    /// Lynx and Grazing Gladehart out, each option the engine offers now names
+    /// both triggers by source and text, from the one that resolves first:
+    /// the one the order places last (CR 405.2 + CR 405.5).
+    #[test]
+    fn trigger_order_options_name_the_triggers_in_the_order_they_resolve() {
+        use engine::game::scenario::GameScenario;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let lynx = scenario
+            .add_creature_from_oracle(PlayerId(0), "Steppe Lynx", 0, 1, STEPPE_LYNX)
+            .id();
+        scenario.add_creature_from_oracle(
+            PlayerId(0),
+            "Grazing Gladehart",
+            2,
+            2,
+            GRAZING_GLADEHART,
+        );
+        let forest = scenario.add_land_to_hand(PlayerId(0), "Forest").id();
+        let mut runner = scenario.build();
+        let play = AiDecisionContract::issue(runner.state(), PlayerId(0))
+            .candidates
+            .into_iter()
+            .map(|candidate| candidate.action)
+            .find(|action| {
+                matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == forest)
+            })
+            .expect("the Forest can be played");
+        runner.act(play).expect("playing the Forest");
+        let state = runner.state();
+        let WaitingFor::OrderTriggers { triggers, .. } = &state.waiting_for else {
+            panic!(
+                "reach guard: both landfall triggers wait to be ordered, got {:?}",
+                state.waiting_for
+            );
+        };
+        assert_eq!(triggers.len(), 2, "{triggers:?}");
+        // Each trigger as the option should name it, read from the engine's
+        // summary, Steppe Lynx's own name for its self-reference.
+        let named = |index: usize| {
+            let trigger = &triggers[index];
+            let text = trigger.description.replace('~', &trigger.source_name);
+            format!("{} (\"{text}\")", trigger.source_name)
+        };
+        let lynx_index = triggers
+            .iter()
+            .position(|trigger| trigger.source_id == lynx)
+            .expect("Steppe Lynx's trigger is one of the two");
+        assert!(
+            named(lynx_index).contains("Steppe Lynx gets +2/+2 until end of turn"),
+            "{}",
+            named(lynx_index)
+        );
+
+        let contract = AiDecisionContract::issue(state, PlayerId(0));
+        let request =
+            build_game_decision_prompt(state, &contract, AiDifficulty::Medium, None, &[]).unwrap();
+        let mut orders = Vec::new();
+        for (candidate, option) in contract
+            .candidates
+            .iter()
+            .zip(&request.prompt.frame.options)
+        {
+            let GameAction::OrderTriggers { order } = &candidate.action else {
+                continue;
+            };
+            let [placed_first, placed_last] = order.as_slice() else {
+                panic!("two triggers: {order:?}");
+            };
+            assert_eq!(
+                option,
+                &format!(
+                    "Order Triggers (Order: {} resolves first, then {})",
+                    named(*placed_last),
+                    named(*placed_first)
+                )
+            );
+            orders.push(order.clone());
+        }
+        // Reach guard: both orders are offered.
+        orders.sort();
+        assert_eq!(orders, [vec![0, 1], vec![1, 0]]);
+    }
+
     /// CR 723.4 + CR 723.5: while Player 0 controls Player 1's turn
     /// (Mindslaver), Player 1's decisions are put to Player 0, who sees what
     /// Player 1 sees. The board is still Player 1's, and so are the words the
