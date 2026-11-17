@@ -444,6 +444,7 @@ fn barracks_tokens(use_barracks: bool) -> Vec<TokenFacts> {
     s.at_phase(Phase::PreCombatMain);
     let b = s
         .add_land_from_oracle(P0, "Barracks of the Thousand", BARRACKS)
+        .as_artifact_land()
         .id();
     s.add_basic_land(P0, ManaColor::White);
     let c = s
@@ -482,8 +483,8 @@ fn barracks_tokens(use_barracks: bool) -> Vec<TokenFacts> {
 fn cast_using_mana_produced_by_this_permanent() {
     assert_eq!(
         barracks_tokens(true),
-        vec![(vec![ManaColor::White], true, Some(2), Some(2))],
-        "paid with Barracks mana: one white artifact creature token, 2/2 (the cast creature and itself)"
+        vec![(vec![ManaColor::White], true, Some(3), Some(3))],
+        "paid with Barracks mana: one white artifact creature token, 3/3 (Barracks itself, a Legendary Artifact Land, the cast creature and the token; CR 205.2b), so a creatures-only count (2/2) fails"
     );
     assert!(
         barracks_tokens(false).is_empty(),
@@ -818,6 +819,7 @@ fn su_chi_death_trigger_uses_the_stack() {
     s.at_phase(Phase::PreCombatMain);
     let su = s
         .add_creature_from_oracle(P0, "Su-Chi Cave Guard", 8, 8, SU_CHI_CAVE_GUARD)
+        .as_artifact_creature()
         .id();
     let spell = s
         .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
@@ -880,6 +882,7 @@ fn vision_and_scarlet_witch_cast_trigger_uses_the_stack() {
             3,
             "Flying\nWhenever you cast a spell, add {R} and put a +1/+1 counter on The Vision and Scarlet Witch.",
         )
+        .as_artifact_creature()
         .id();
     // A textless filler creature spell: the cast trigger needs only a spell, not a printed one.
     let spell = s.add_creature_to_hand(P0, "Cast Creature", 1, 1).id();
