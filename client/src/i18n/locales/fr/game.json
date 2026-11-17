@@ -1812,6 +1812,10 @@
       "title": "Ordonner les copies",
       "subtitle": "Choisissez le sort dont la copie va ensuite sur la pile"
     },
+    "memberOrder": {
+      "title": "Ordonnez les cartes",
+      "subtitle": "Choisissez la carte traitée ensuite"
+    },
     "collectEvidence": {
       "title": "Collecter des preuves",
       "subtitle": "Exilez des cartes de votre cimetière dont la valeur de mana totale est {{minimum}} ou plus"

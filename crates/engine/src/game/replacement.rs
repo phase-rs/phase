@@ -16366,7 +16366,7 @@ mod tests {
                 1,
                 "accepted shield consumption must record one command"
             );
-            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, count: 1 } if *id == object_id)).count(), 1, "one accepted edit emits one removal event");
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, count: 1, .. } if *id == object_id)).count(), 1, "one accepted edit emits one removal event");
             if !destroy {
                 let removed_at = events.iter().position(|event| matches!(event, GameEvent::CounterRemoved { object_id: id, counter_type: CounterType::Shield, .. } if *id == object_id)).unwrap();
                 let prevented_at = events
@@ -16456,7 +16456,7 @@ mod tests {
             1,
             "the post-batch shield consumption records one accepted removal"
         );
-        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Shield, count: 1 } if *object_id == shielded)).count(), 1);
+        assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::CounterRemoved { object_id, counter_type: CounterType::Shield, count: 1, .. } if *object_id == shielded)).count(), 1);
     }
 
     /// V14 — `ability_tree_copies_tokens` walks the substitution's OWN tree and

@@ -1544,11 +1544,21 @@ fn finish_enter_phase(state: &mut GameState, next: Phase, events: &mut Vec<GameE
     state.priority_player = turn_control::turn_decision_maker(state);
     priority::clear_priority_passes(state);
     state.players_attacked_this_step.clear();
-    // CR 400.7: LKI persists within a step but is invalidated on step transition.
+    // Engine policy (not a CR rule): step-scoped LKI tables are cleared on step
+    // transition; the incarnation-keyed tables keep what a pending copy can
+    // still read (below).
+    //
+    // CR 608.2h + CR 707.2 + CR 603.7e: a copy effect that reads its own departed
+    // source in a later step (Esoteric Duplicator's delayed copy of "that artifact")
+    // uses the source's last known copiable values and its departure snapshot's
+    // token image, so the step clear keeps exactly the incarnations a pending
+    // carrier can still read as its own copy source (the collector loop
+    // normalisation uses), read before either table is pruned; every other
+    // entry is history.
+    let readable = state.readable_own_copy_sources();
     state.lki_cache.clear();
     state.lki_copiable_values.clear();
-    state.lki_by_incarnation.clear();
-    state.lki_copiable_values_by_incarnation.clear();
+    state.retain_own_copy_source_lki(&readable);
     state.clear_departed_stack_records();
     // CR 607.2b + CR 113.7a: linked-exile LKI is likewise step-scoped — it only
     // needs to outlive the resolution of the ability whose source just left.
@@ -3302,6 +3312,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 613.1b: recompute layer-2 control now the effect is gone, then emit the
     // loss event for every object whose controller actually reverted.
+    // CR 603.2c: the occurrences this cleanup publishes, as positions in the
+    // action's event buffer.
+    let reversion_start = events.len();
     if let Some(boundary) = control_revert_boundary {
         // CR 514.2: the members' pre-revert evidence was fixed above, before
         // the prune; read it now, then publish against the reverted board.
@@ -3312,9 +3325,6 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             })
             .collect();
         super::layers::flush_layers(state);
-        // CR 603.2c: the occurrences this reversion publishes, as positions in
-        // the action's event buffer.
-        let reversion_start = events.len();
         let mut seen_reverting = HashSet::new();
         for (object_id, member) in control_reverting.into_iter().zip(members) {
             if !seen_reverting.insert(object_id) {
@@ -3332,7 +3342,14 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
                 new_controller,
             );
         }
-
+    }
+    // CR 514.2 + CR 613.1b + CR 603.2: the control changes the layer pass
+    // derived and no instruction published — a "for as long as" control
+    // duration that lapsed because the reversion returned its source (Rubinia
+    // Soulsinger), or one derived earlier in the turn — are published with the
+    // reversion, so CR 514.3a settles their abilities in this cleanup step.
+    super::layers::publish_layer_control_changes(state, events);
+    if events.len() > reversion_start {
         // CR 603.2 + CR 603.10d + CR 603.7: the reversion triggers its
         // abilities as it happens. The printed lose-side abilities come from the
         // watchers its boundary latched before the prune above. The printed
@@ -5894,6 +5911,10 @@ card into your hand at the beginning of your next end step.";
         );
         crate::game::layers::flush_layers(state);
         assert_eq!(state.objects[&kharn].controller, P0);
+        // The steal itself was published (and its own trigger handled) by the
+        // instruction this direct install stands in for; only the reversion
+        // is under test.
+        state.layer_control_changes.clear();
         let starting_turn = state.turn_number;
 
         let mut events = Vec::new();
@@ -12767,7 +12788,7 @@ card into your hand at the beginning of your next end step.";
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1 }
+                GameEvent::CounterRemoved { object_id, counter_type: CounterType::Stun, count: 1, .. }
                     if *object_id == obj_id
             )),
             "CounterRemoved event should be emitted"
