@@ -1910,3 +1910,132 @@ fn moonlight_creates_a_high_devotion_erebos_copy_in_exile() {
     );
     assert!(battlefield_tokens_named(runner.state(), "Erebos, God of the Dead").is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// A prompt raised by the post-copy rediscovery keeps the chosen copy's entry completion.
+// ---------------------------------------------------------------------------
+
+const SCULPTING_STEEL: &str =
+    "You may have this artifact enter as a copy of any artifact on the battlefield.";
+const TRISKELION: &str = "This creature enters with three +1/+1 counters on it.\nRemove a +1/+1 counter from this creature: It deals 1 damage to any target.";
+const ROOT_MAZE: &str = "Artifacts and lands enter tapped.";
+const ARCHELOS: &str = "As long as Archelos is tapped, other permanents enter tapped.\nAs long as Archelos is untapped, other permanents enter untapped.";
+
+/// CR 616.1c + CR 614.12 + CR 616.1f: Extravagant Replication copies Sculpting Steel; the token's
+/// own copy replacement is accepted and Triskelion chosen. Root Maze (artifacts enter tapped)
+/// and untapped Archelos (other permanents enter untapped) then compete for the copy's entry, so
+/// the rediscovery raises an ordering prompt. Answering it with `order` resumes the chosen copy's
+/// entry completion: the token is Triskelion with its three +1/+1 counters, and it enters tapped
+/// when Root Maze is applied last... — whichever applies last decides the tapped state.
+/// Returns the Triskelion token and its tapped state, and the prompts seen.
+fn replication_steel_becomes_triskelion(order: usize, persist: bool) -> (GameRunner, Vec<String>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island", "Island", "Island", "Island", "Island"]);
+    scenario.with_library_top(P1, &["Island", "Island", "Island", "Island", "Island"]);
+    let steel = scenario
+        .add_artifact_from_oracle(P0, "Sculpting Steel", SCULPTING_STEEL)
+        .id();
+    scenario
+        .add_creature_from_oracle(P0, "Triskelion", 1, 1, TRISKELION)
+        .as_artifact_creature()
+        .with_subtypes(vec!["Construct"]);
+    scenario.add_enchantment_from_oracle(P0, "Root Maze", ROOT_MAZE);
+    scenario
+        .add_creature_from_oracle(P0, "Archelos, Lagoon Mystic", 2, 2, ARCHELOS)
+        .as_legendary();
+    scenario
+        .add_enchantment_from_oracle(P0, "Extravagant Replication", EXTRAVAGANT_REPLICATION)
+        .with_mana_cost(ManaCost::generic(5));
+    let mut runner = scenario.build();
+    aim_replication_trigger(&mut runner, steel);
+    let mut prompts = Vec::new();
+    for _ in 0..40 {
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::ReplacementChoice {
+                candidates, kind, ..
+            } => {
+                prompts.push(format!("{kind:?}"));
+                // Save and reopen on the prompt the post-copy rediscovery raised: the held
+                // settlement must survive the round trip.
+                if persist && prompts.iter().any(|p| p == "CopyTargetChoice") {
+                    let json =
+                        serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+                            .expect("state serializes");
+                    let restored = serde_json::from_str::<PersistedGameState>(&json)
+                        .expect("persisted state decodes")
+                        .prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated)
+                        .expect("persisted state is admissible")
+                        .finalize_after_rehydration(|_| Ok(()))
+                        .expect("restored state is publishable");
+                    runner = GameRunner::from_state(restored);
+                }
+                let accept = candidates
+                    .iter()
+                    .position(|c| c.description.contains("enter as a copy"));
+                let index = accept.unwrap_or(order.min(candidates.len() - 1));
+                runner.act(GameAction::ChooseReplacement { index })
+            }
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                prompts.push("CopyTargetChoice".to_string());
+                let triskelion = *valid_targets
+                    .iter()
+                    .find(|id| runner.state().objects[id].name == "Triskelion")
+                    .expect("Triskelion is a legal copy model");
+                runner.act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(triskelion)),
+                })
+            }
+            WaitingFor::ChooseLegend { candidates, .. } => {
+                let keep = *candidates.iter().max().expect("legend candidates");
+                runner.act(GameAction::ChooseLegend { keep })
+            }
+            other => panic!("unexpected prompt {other:?} after {prompts:?}"),
+        };
+        result.unwrap_or_else(|e| {
+            panic!(
+                "answer rejected: {e:?}; prompts {prompts:?}; waiting {:?}",
+                runner.state().waiting_for
+            )
+        });
+    }
+    (runner, prompts)
+}
+
+#[test]
+fn an_ordering_prompt_after_the_chosen_copy_keeps_the_copys_entry_counters() {
+    for persist in [false, true] {
+        for order in [0, 1] {
+            let (runner, prompts) = replication_steel_becomes_triskelion(order, persist);
+            assert!(
+                prompts.iter().any(|p| p == "CopyTargetChoice")
+                    && prompts.iter().filter(|p| p.starts_with("Order")).count() >= 2,
+                "the copy was chosen and the rediscovery then asked an ordering question: {prompts:?}"
+            );
+            let tokens = battlefield_tokens_named(runner.state(), "Triskelion");
+            assert_eq!(
+                tokens.len(),
+                1,
+                "order {order}: the Triskelion copy entered: {prompts:?}"
+            );
+            let token = &runner.state().objects[&tokens[0]];
+            assert_eq!(
+                token
+                    .counters
+                    .get(&engine::types::counter::CounterType::Plus1Plus1)
+                    .copied(),
+                Some(3),
+                "order {order}, persist {persist}: the copy's own enters-with counters survive"
+            );
+            // The ordering answer decides the tapped state: the replacement applied last wins.
+            assert_eq!(
+                token.tapped,
+                order == 0,
+                "order {order}: Root Maze last means tapped"
+            );
+            assert_settled(runner.state(), "resumed copy entry");
+        }
+    }
+}

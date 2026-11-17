@@ -8774,6 +8774,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             crate::types::game_state::LiminalEntry {
+                copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(
                         crate::game::game_object::GameObject::new(

@@ -9929,6 +9929,7 @@ mod tests {
         source_id: ObjectId,
     ) -> crate::types::game_state::LiminalEntry {
         crate::types::game_state::LiminalEntry {
+            copy_settlement: None,
             object,
             name: "Unhosted Aura".to_string(),
             source_id,
@@ -10197,6 +10198,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(token),
                 ),

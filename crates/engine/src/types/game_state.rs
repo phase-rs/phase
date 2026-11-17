@@ -25217,6 +25217,27 @@ impl<'de> Deserialize<'de> for LiminalEntrant {
     }
 }
 
+/// CR 616.1c + CR 614.12: a liminal token entrant's own as-enters copy that has been chosen and
+/// placed on the entrant while the remaining entry replacements are rediscovered against it. Held
+/// on the entry across a prompt that rediscovery raises, so the answer resumes the selected
+/// copy's entry completion (copy chain, acquired entry counters, birth record) instead of
+/// abandoning it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenCopySettlement {
+    pub target_id: ObjectId,
+    /// The resolved copy effect (with the token's copy exceptions folded in) applied after the
+    /// entry commits.
+    pub ability: ResolvedAbility,
+    /// The one-shot entry-counter exceptions held out of `ability`.
+    pub held_exceptions: Vec<ContinuousModification>,
+    /// The entrant as it was before the chosen copy was placed on it.
+    pub original: LiminalEntrant,
+    /// The chosen copy's copiable values and display, for a birth that the copy redirects.
+    pub copy_values: Box<CopiableValues>,
+    pub copy_display: crate::game::game_object::DisplayIdentity,
+    pub staged_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiminalEntry {
     pub object: LiminalEntrant,
@@ -25248,6 +25269,9 @@ pub struct LiminalEntry {
         serialize_with = "crate::types::deterministic_serde::hash_set"
     )]
     pub replacement_applied: HashSet<AppliedReplacementKey>,
+    /// CR 616.1c: see [`TokenCopySettlement`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_settlement: Option<Box<TokenCopySettlement>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44962,6 +44986,7 @@ mod tests {
         let projection = TokenProjection::materialize(state.objects[&object_id].clone());
         check(
             |attack_destination| LiminalEntry {
+                copy_settlement: None,
                 object: LiminalEntrant::Token(projection.clone()),
                 name: "Goblin".to_string(),
                 source_id: object_id,

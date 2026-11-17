@@ -1261,6 +1261,7 @@ fn route_debug_token_to_battlefield(
     state.liminal_entries.insert(
         object_id,
         LiminalEntry {
+            copy_settlement: None,
             object: crate::types::game_state::LiminalEntrant::Token(
                 crate::types::game_state::TokenProjection::materialize(token),
             ),

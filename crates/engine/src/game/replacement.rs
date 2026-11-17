@@ -9030,6 +9030,7 @@ fn stage_transformed_entry_projection(
     state.liminal_entries.insert(
         entrant,
         LiminalEntry {
+            copy_settlement: None,
             object: crate::types::game_state::LiminalEntrant::Card(projected),
             name,
             source_id: entrant,
@@ -17807,6 +17808,7 @@ mod tests {
         state.liminal_entries.insert(
             entry_ref,
             LiminalEntry {
+                copy_settlement: None,
                 object: crate::types::game_state::LiminalEntrant::Token(
                     crate::types::game_state::TokenProjection::materialize(liminal),
                 ),
