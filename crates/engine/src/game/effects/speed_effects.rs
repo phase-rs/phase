@@ -2,7 +2,6 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{decrease_speed, increase_speed, set_speed};
 use crate::types::ability::{
     Effect, EffectError, PlayerFilter, PlayerRelation, ResolvedAbility, SpeedDelta, TargetFilter,
-    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -58,25 +57,15 @@ pub(crate) fn players_for_filter(
         // no live speed-effect recipient meaning.
         PlayerFilter::OpponentOfTriggeringPlayerNotAttacked => Vec::new(),
         // CR 120.1 + CR 510.1 + CR 120.9 + CR 608.2i + CR 120.2a/120.2b: Each
-        // opponent who was dealt damage of the given kind this turn, optionally
-        // restricted to a matching source.
-        PlayerFilter::OpponentDealtDamage {
-            kind,
-            source,
-            min_sources,
-        } => state
+        // player in `relation` who was dealt damage of the given kind this
+        // turn, optionally restricted to a matching source.
+        PlayerFilter::OpponentDealtDamage { .. } => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .filter(|player| {
                 crate::game::quantity::opponent_dealt_damage_matches(
-                    state,
-                    player.id,
-                    controller,
-                    *kind,
-                    source,
-                    *min_sources,
-                    source_id,
+                    state, player.id, controller, filter, source_id,
                 )
             })
             .map(|player| player.id)
@@ -420,17 +409,11 @@ fn parent_object_target_owner_anchor(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Option<PlayerId> {
-    crate::game::ability_utils::parent_target_owner(ability, state).or_else(|| {
-        crate::game::targeting::resolve_event_context_target(
-            state,
-            &TargetFilter::ParentTargetOwner,
-            ability.source_id,
-        )
-        .and_then(|target| match target {
-            TargetRef::Player(player) => Some(player),
-            TargetRef::Object(object_id) => state.objects.get(&object_id).map(|obj| obj.owner),
-        })
-    })
+    crate::game::targeting::resolve_effect_player_ref(
+        state,
+        ability,
+        &TargetFilter::ParentTargetOwner,
+    )
 }
 
 fn players_except_required_owner_anchor(
@@ -852,7 +835,7 @@ mod tests {
             exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
             relation: PlayerRelation::All,
         };
-        let ability = ResolvedAbility::new(
+        let mut ability = ResolvedAbility::new(
             Effect::StartYourEngines {
                 player_scope: PlayerFilter::Controller,
             },
@@ -868,6 +851,18 @@ mod tests {
             vec![PlayerId(1), PlayerId(2)],
             "owner P0 is excluded; controller P1 and third player P2 remain"
         );
+        for origin in [
+            crate::types::ability::TargetReadOrigin::OwnAnnouncement,
+            crate::types::ability::TargetReadOrigin::ParentAnnouncement,
+        ] {
+            ability.parent_target_missing_reason = Some(
+                crate::types::ability::ParentTargetMissingReason::IllegalAnnouncement { origin },
+            );
+            assert!(
+                players_for_filter(&state, &filter, &ability).is_empty(),
+                "an unavailable owner anchor cannot be replaced by the zone-change event"
+            );
+        }
     }
 
     /// CR 108.3 + CR 608.2c: `AllExcept { ParentObjectTargetOwner }` is an

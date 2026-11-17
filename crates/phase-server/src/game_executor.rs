@@ -810,7 +810,7 @@ mod tests {
                     main_deck: vec!["Network Test Land".to_string(); 60],
                     ..Default::default()
                 };
-                let deck = crate::resolve_deck(&app.db, &names).unwrap();
+                let deck = crate::resolve_deck(&app.db, &app.combos, &names).unwrap();
                 let choice = Some(DeckChoice::DeckList(Box::new(names)));
                 let mut manager = app.sessions.lock().await;
                 let (code, _) = manager
@@ -829,6 +829,7 @@ mod tests {
                     .join_with_reservation(deck, choice, "human".to_string(), None)
                     .unwrap();
                 session.start_game(&app.db).unwrap();
+                crate::socket_test_hooks::elect_contest_winner_to_play(session);
                 session.ai_seats.insert(PlayerId(0));
                 session.ai_configs.insert(
                     PlayerId(0),
@@ -947,7 +948,8 @@ mod tests {
             main_deck: vec!["Network Test Land".to_string(); 60],
             ..Default::default()
         };
-        let deck = crate::resolve_deck(&db, &names).unwrap();
+        let deck =
+            crate::resolve_deck(&db, &engine::database::ComboTable::default(), &names).unwrap();
         let directory = tempfile::tempdir().unwrap();
         let game_db = Arc::new(
             crate::persistence::GameDb::open(
@@ -980,6 +982,7 @@ mod tests {
                 )
                 .unwrap();
             session.start_game(&db).unwrap();
+            crate::socket_test_hooks::elect_contest_winner_to_play(session);
             for &player in roster {
                 session.ai_seats.insert(player);
                 session.ai_configs.insert(
@@ -1208,7 +1211,12 @@ mod tests {
                     .unwrap();
                 let snapshot = snapshots.swap_remove(index);
                 assert_eq!(snapshot.mutation_revision, revision);
-                let restored = GameSession::from_persisted(snapshot.persisted, &db).unwrap();
+                let restored = GameSession::from_persisted(
+                    snapshot.persisted,
+                    &db,
+                    &engine::database::ComboTable::default(),
+                )
+                .unwrap();
                 let WaitingFor::MulliganDecision { pending, .. } = restored.state.waiting_for
                 else {
                     panic!("the durable game did not retain the other human's pending decision");
@@ -1242,6 +1250,7 @@ mod tests {
                 (1..=count)
                     .map(|seq| GameLogEntry {
                         seq,
+                        game_number: 1,
                         turn: 1,
                         phase: Phase::PreCombatMain,
                         category: LogCategory::Game,

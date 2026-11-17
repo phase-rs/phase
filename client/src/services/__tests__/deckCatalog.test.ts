@@ -40,3 +40,30 @@ describe("sourceFormatToGameFormat", () => {
     expect(catalog[0]?.knownFormat).toBe("Oathbreaker");
   });
 });
+
+describe("buildDeckCatalog combo declaration", () => {
+  function saveWith(name: string, sidecar: unknown): void {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + name,
+      JSON.stringify({ main: [{ count: 1, name: "Forest" }], sideboard: [], combo_declaration: sidecar }),
+    );
+  }
+
+  it("reads each saved deck's own sidecar", async () => {
+    const early = { kind: "intended", window: "early_game" };
+    saveWith("Early", early);
+    saveWith("Plain", undefined);
+
+    const catalog = await buildDeckCatalog({ savedDeckNames: ["Early", "Plain"], includePrecons: false });
+
+    expect(catalog.map((candidate) => candidate.comboDeclaration)).toEqual([early, { kind: "undeclared" }]);
+  });
+
+  it("treats an unreadable sidecar as unanswered", async () => {
+    saveWith("Garbled", { kind: "maybe" });
+
+    const [candidate] = await buildDeckCatalog({ savedDeckNames: ["Garbled"], includePrecons: false });
+
+    expect(candidate?.comboDeclaration).toEqual({ kind: "undeclared" });
+  });
+});

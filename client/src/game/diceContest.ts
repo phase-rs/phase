@@ -1,4 +1,4 @@
-import type { GameEvent, PlayerId, TurnOrderSlotView } from "../adapter/types";
+import type { GameEvent } from "../adapter/types";
 import { useUiStore } from "../stores/uiStore";
 
 type CoinFlippedEvent = Extract<GameEvent, { type: "CoinFlipped" }>;
@@ -7,22 +7,16 @@ type StartingPlayerContestEvent = Extract<GameEvent, { type: "StartingPlayerCont
 /**
  * Fire the starting-player contest overlay from a game-start event batch.
  *
- * The engine emits one `StartingPlayerContest` event carrying the full roll-off
- * by round (round 0 = every seat; each later round = the previous round's
- * tied-max group that rerolled) plus the authoritative winner (CR 103.1). The
- * overlay renders it round-by-round so the winner is always the high roller of
- * the round shown — fixing the prior last-roll-per-player collapse, which could
- * surface an eliminated seat's higher earlier die as beating the winner's lower
- * reroll. `startingPlayer` is the engine's pick (never recomputed here); it
- * equals the event's `winner` by construction. No-ops when no contest ran
- * (explicit play/draw choice).
+ * CR 103.1: the d20 roll-off decides which player chooses who takes the first
+ * turn. The engine emits one `StartingPlayerContest` event carrying the full
+ * roll-off by round (round 0 = every seat; each later round = the previous
+ * round's tied-max group that rerolled) and its `winner`. The overlay renders
+ * it round-by-round so the winner is always the high roller of the round
+ * shown, and reports the winner straight from the event — never from the
+ * client's starting/active player, which need not be the roll winner. No-ops
+ * when no contest ran (explicit play/draw choice).
  */
-export function flashStartingPlayerContest(
-  events: GameEvent[],
-  startingPlayer: PlayerId,
-  turnOrder: TurnOrderSlotView[] | undefined,
-  viewerTurnNumber?: number,
-): void {
+export function flashStartingPlayerContest(events: GameEvent[]): void {
   const contest = events.find(
     (e): e is StartingPlayerContestEvent => e.type === "StartingPlayerContest",
   );
@@ -38,9 +32,7 @@ export function flashStartingPlayerContest(
     rolls: rounds[rounds.length - 1] ?? [],
     rounds,
     context: "startingPlayer",
-    winner: startingPlayer,
-    turnOrder,
-    viewerTurnNumber,
+    winner: contest.data.winner,
   });
 }
 

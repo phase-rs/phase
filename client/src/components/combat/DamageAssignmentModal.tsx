@@ -22,7 +22,12 @@ function useObjectNamer() {
   return { getName, getStats };
 }
 
-/** One damage-division row: a labelled target with −/value/+ steppers. */
+/**
+ * One damage-division row: a labelled target with −/value/+ steppers and an
+ * "assign the rest here" shortcut. The shortcut is input arithmetic only
+ * (`row += remaining`); CR 702.19b legality stays with the engine validator
+ * and the modal's existing advisory gate.
+ */
 function StepperRow({
   children,
   value,
@@ -32,6 +37,9 @@ function StepperRow({
   onIncrement,
   decrementDisabled,
   incrementDisabled,
+  remaining,
+  onAssignRemaining,
+  assignRemainingLabel,
 }: {
   children: ReactNode;
   value: number;
@@ -41,7 +49,11 @@ function StepperRow({
   onIncrement: () => void;
   decrementDisabled: boolean;
   incrementDisabled: boolean;
+  remaining: number;
+  onAssignRemaining: () => void;
+  assignRemainingLabel: string;
 }) {
+  const { t } = useTranslation("game");
   return (
     <div
       className={`flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3${ringClassName ? ` ${ringClassName}` : ""}`}
@@ -64,6 +76,15 @@ function StepperRow({
           disabled={incrementDisabled}
         >
           +
+        </button>
+        <button
+          className={gameButtonClass({ tone: "neutral", size: "xs" })}
+          onClick={onAssignRemaining}
+          disabled={remaining <= 0}
+          aria-label={assignRemainingLabel}
+          title={assignRemainingLabel}
+        >
+          {t("combat.assignRemainingButton", { amount: remaining })}
         </button>
       </div>
     </div>
@@ -98,6 +119,10 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
   const loyaltyMet = !isOverPw || controllerDamage === 0 ||
     trampleDamage >= (data.pw_loyalty ?? 0);
   const isValid = total === data.total_damage && trampleLethalMet && loyaltyMet;
+  const trampleLabel = isOverPw
+    ? t("combat.planeswalkerLoyalty", { loyalty: data.pw_loyalty ?? 0 })
+    : t("combat.defendingPlayerTrample");
+  const controllerLabel = t("combat.pwControllerTrample");
 
   const setAmount = useCallback((index: number, value: number) => {
     setAmounts((prev) => {
@@ -133,6 +158,7 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
         {data.blockers.map((blocker, i) => {
           const isLethal = amounts[i] >= blocker.lethal_minimum;
           const stats = getStats(blocker.blocker_id);
+          const name = getName(blocker.blocker_id);
           return (
             <StepperRow
               key={blocker.blocker_id}
@@ -141,9 +167,12 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
               onIncrement={() => setAmount(i, amounts[i] + 1)}
               decrementDisabled={amounts[i] <= 0}
               incrementDisabled={remaining <= 0}
+              remaining={remaining}
+              onAssignRemaining={() => setAmount(i, amounts[i] + remaining)}
+              assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: name })}
             >
               <span className="text-sm font-medium text-gray-200">
-                {getName(blocker.blocker_id)}
+                {name}
               </span>
               {stats && (
                 <span className="rounded bg-gray-700/80 px-1.5 py-0.5 text-xs font-medium text-gray-400">
@@ -171,9 +200,12 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
             onIncrement={() => setTrampleDamage(trampleDamage + 1)}
             decrementDisabled={trampleDamage <= 0}
             incrementDisabled={remaining <= 0}
+            remaining={remaining}
+            onAssignRemaining={() => setTrampleDamage(trampleDamage + remaining)}
+            assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: trampleLabel })}
           >
             <span className="text-sm font-medium text-amber-300">
-              {isOverPw ? t("combat.planeswalkerLoyalty", { loyalty: data.pw_loyalty ?? 0 }) : t("combat.defendingPlayerTrample")}
+              {trampleLabel}
             </span>
           </StepperRow>
         )}
@@ -187,9 +219,12 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
             onIncrement={() => setControllerDamage(controllerDamage + 1)}
             decrementDisabled={controllerDamage <= 0}
             incrementDisabled={remaining <= 0}
+            remaining={remaining}
+            onAssignRemaining={() => setControllerDamage(controllerDamage + remaining)}
+            assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: controllerLabel })}
           >
             <span className="text-sm font-medium text-purple-300">
-              {t("combat.pwControllerTrample")}
+              {controllerLabel}
             </span>
           </StepperRow>
         )}
@@ -246,6 +281,7 @@ export function BlockerDamageAssignmentModal({ data }: { data: AssignBlockerDama
       <div className="mb-4 space-y-3">
         {data.attackers.map((attackerId, i) => {
           const stats = getStats(attackerId);
+          const name = getName(attackerId);
           return (
             <StepperRow
               key={attackerId}
@@ -254,9 +290,12 @@ export function BlockerDamageAssignmentModal({ data }: { data: AssignBlockerDama
               onIncrement={() => setAmount(i, amounts[i] + 1)}
               decrementDisabled={amounts[i] <= 0}
               incrementDisabled={remaining <= 0}
+              remaining={remaining}
+              onAssignRemaining={() => setAmount(i, amounts[i] + remaining)}
+              assignRemainingLabel={t("combat.assignRemainingTo", { count: remaining, target: name })}
             >
               <span className="text-sm font-medium text-gray-200">
-                {getName(attackerId)}
+                {name}
               </span>
               {stats && (
                 <span className="rounded bg-gray-700/80 px-1.5 py-0.5 text-xs font-medium text-gray-400">

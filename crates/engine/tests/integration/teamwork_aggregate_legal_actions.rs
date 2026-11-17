@@ -64,7 +64,7 @@ fn cast_and_reach_tap_paycost(runner: &mut GameRunner, spell: ObjectId) -> i32 {
         match runner.state().waiting_for.clone() {
             WaitingFor::OptionalCostChoice { .. } => {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .expect("opting to pay teamwork must be accepted");
             }
             WaitingFor::ManaPayment { .. } => {

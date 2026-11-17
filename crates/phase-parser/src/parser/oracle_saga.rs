@@ -14,7 +14,8 @@ use crate::types::replacements::ReplacementEvent;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::parse_effect_chain_with_provenance;
+use super::oracle_ir::history_provenance::Lowered;
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::strip_reminder_text;
@@ -128,7 +129,7 @@ fn is_chapter_body_continuation(line: &str) -> bool {
 /// Return shape of [`parse_saga_chapters`]: source-line-tagged chapter triggers,
 /// the `(line, ETB replacement)` pair, and the set of consumed line indices.
 type SagaChaptersParse = (
-    Vec<(usize, TriggerDefinition)>,
+    Vec<(usize, Lowered<TriggerDefinition>)>,
     (usize, ReplacementIr),
     HashSet<usize>,
 );
@@ -179,37 +180,46 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
             // parsing would mis-split the opener and leave the outcome clauses
             // Unimplemented. Try it first, mirroring the spell-line dispatch in
             // `oracle.rs`.
-            let mut execute =
-                match crate::parser::oracle_vote::parse_vote_block(effect_text, AbilityKind::Spell)
-                {
-                    Some(vote_def) => vote_def,
-                    // CR 700.2 + CR 700.2b: a chapter whose body is a modal
-                    // head followed by a bulleted option list ("Choose one —
-                    // • … • …", Life of Toshiro Umezawa I/II; "Choose one at
-                    // random —", Summon: Magus Sisters I/II/III) is a MODAL
-                    // triggered ability — a chapter ability is a triggered
-                    // ability (CR 714.2b), and its controller chooses the
-                    // mode(s) as it goes on the stack. The bullet lines were
-                    // space-joined into this body by the continuation branch
-                    // above, so the option list arrives inline; chain parsing
-                    // would execute every bullet sequentially instead of one
-                    // chosen mode. Try it before `parse_effect_chain`, mirroring
-                    // the vote dispatch directly above.
-                    //
-                    // CR 714.2 + CR 714.2b: the modes are a triggered ability's
-                    // body, so they parse in trigger context, as the trigger
-                    // modal path's modes do. The chapter head establishes no
-                    // self-reference host or event-object antecedent, so every
-                    // other context field stays at its default.
-                    None => crate::parser::oracle_modal::try_parse_inline_modal_ability(
-                        effect_text,
-                        &crate::parser::oracle_ir::context::ParseContext {
-                            in_trigger: true,
-                            ..Default::default()
-                        },
-                    )
-                    .unwrap_or_else(|| parse_effect_chain(effect_text, AbilityKind::Spell)),
-                };
+            let history;
+            let mut execute = match crate::parser::oracle_vote::parse_vote_block_with_provenance(
+                effect_text,
+                AbilityKind::Spell,
+            ) {
+                Some(lowered) => {
+                    history = lowered.history;
+                    lowered.value
+                }
+                // CR 700.2 + CR 700.2b: a chapter whose body is a modal
+                // head followed by a bulleted option list ("Choose one —
+                // • … • …", Life of Toshiro Umezawa I/II; "Choose one at
+                // random —", Summon: Magus Sisters I/II/III) is a MODAL
+                // triggered ability — a chapter ability is a triggered
+                // ability (CR 714.2b), and its controller chooses the
+                // mode(s) as it goes on the stack. The bullet lines were
+                // space-joined into this body by the continuation branch
+                // above, so the option list arrives inline; chain parsing
+                // would execute every bullet sequentially instead of one
+                // chosen mode. Try it before `parse_effect_chain`, mirroring
+                // the vote dispatch directly above.
+                //
+                // CR 714.2 + CR 714.2b: the modes are a triggered ability's
+                // body, so they parse in trigger context, as the trigger
+                // modal path's modes do. The chapter head establishes no
+                // self-reference host or event-object antecedent, so every
+                // other context field stays at its default.
+                None => {
+                    let lowered = crate::parser::oracle_modal::try_parse_inline_modal_ability_with_provenance(
+                    effect_text,
+                    &crate::parser::oracle_ir::context::ParseContext {
+                        in_trigger: true,
+                        ..Default::default()
+                    },
+                )
+                    .unwrap_or_else(|| parse_effect_chain_with_provenance(effect_text, AbilityKind::Spell));
+                    history = lowered.history;
+                    lowered.value
+                }
+            };
             // CR 611.2a + CR 714.2b: A chapter ability that grants an ability with no
             // explicit duration in its Oracle text creates a continuous effect that
             // lasts until the end of the game. The general-purpose `try_parse_gain_quoted_ability`
@@ -242,7 +252,13 @@ pub(crate) fn parse_saga_chapters(lines: &[&str], _card_name: &str) -> SagaChapt
             if optional {
                 trigger = trigger.optional();
             }
-            triggers.push((*line_idx, trigger));
+            triggers.push((
+                *line_idx,
+                Lowered {
+                    value: trigger,
+                    history,
+                },
+            ));
         }
     }
 
@@ -464,6 +480,26 @@ fn apply_duration_free_lifetime(effect: &mut Effect) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn multiline_reminder_view_keeps_chapter_indices_and_following_rules() {
+        let oracle = "(As this Saga enters and after your draw\nstep, add a lore counter. Sacrifice after III.)\nI — Draw two cards, then discard two cards.\nII — Return up to one target artifact, instant, or sorcery card from your graveyard to your hand.\nIII — Choose up to two target cards in graveyards. The owners of those cards shuffle them into their libraries.";
+        let view = super::super::oracle_util::mask_multiline_reminder_text(oracle);
+        let lines: Vec<_> = view.lines().collect();
+        let (chapters, _, consumed) = parse_saga_chapters(&lines, "Those Old Scientists");
+        assert_eq!(
+            chapters.iter().map(|(line, _)| *line).collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert_eq!(consumed, HashSet::from([2, 3, 4]));
+        let view = super::super::oracle_util::mask_multiline_reminder_text("(Nested (reminder)\ntext)\nI — Choose one —\n• Draw a card.\n• You gain 2 life.\nFlying");
+        let lines: Vec<_> = view.lines().collect();
+        let (chapters, _, consumed) = parse_saga_chapters(&lines, "Modal chapter fixture");
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].0, 2);
+        assert!(consumed.contains(&3) && consumed.contains(&4));
+        assert!(!consumed.contains(&5));
+    }
+
     /// u4-c2 test shim: map the source-line-tagged preprocessor return back to the
     /// bare-def shape the existing assertions read.
     fn saga_test_chapters(
@@ -476,7 +512,7 @@ mod tests {
     ) {
         let (triggers, (_, etb), consumed) = parse_saga_chapters(lines, name);
         (
-            triggers.into_iter().map(|(_, t)| t).collect(),
+            triggers.into_iter().map(|(_, t)| t.value).collect(),
             etb.definition,
             consumed,
         )
@@ -1381,10 +1417,11 @@ mod tests {
     /// A later clause that isn't a duration-free grant to the Saga keeps exactly
     /// what the effect-chain parser produced. The Kang Dynasty III's "can't be
     /// blocked this turn" stays end-of-turn. World War Hulk III's "it gains
-    /// trample" is the second conjunct of a leading "Until end of turn,", which the
-    /// parser leaves duration-less and the GenericEffect resolver's end-of-turn
-    /// fallback expires (effects/effect.rs), so promoting it would make the
-    /// trample outlast the turn.
+    /// trample" is the second conjunct of a leading "Until end of turn," — since
+    /// #7962 the sentence's window is stamped onto that conjunct explicitly on BOTH
+    /// carriers (`oracle_effect::assembly`), instead of the resolver's end-of-turn
+    /// fallback supplying it; promoting it would make the trample outlast the turn
+    /// either way, so this row pins the value the chapter actually carries.
     #[test]
     fn chapter_leaves_a_later_grant_to_another_object_as_parsed() {
         for (body, expected) in [
@@ -1394,7 +1431,7 @@ mod tests {
             ),
             (
                 "Choose target creature you control. Until end of turn, double its power and toughness and it gains trample.",
-                None,
+                Some(Duration::UntilEndOfTurn),
             ),
         ] {
             let line = format!("III \u{2014} {body}");
@@ -1528,11 +1565,10 @@ mod tests {
     /// clause. World War Hulk III's "… and it gains trample" continues a clause
     /// stating "Until end of turn" and is left as parsed (the end-of-turn
     /// fallback expires it); with no stated duration in the instruction it
-    /// continues, the same grant lasts until the end of the game. The parser
-    /// gives no such continuation a governing-duration-free shape today (a
-    /// dependent token grant carries `Permanent` from the effect-chain parser),
-    /// so the second case is built from Hulk's own chain with the leading
-    /// duration removed.
+    /// continues, the same grant lasts until the end of the game. A parsed
+    /// continuation under a stated window now carries that window on BOTH carriers
+    /// (#7962), so the second case is built from Hulk's own chain with the sentence
+    /// window removed from the governing clause AND from the grant.
     #[test]
     fn a_continuation_grant_to_other_objects_follows_its_governing_duration() {
         let lines = vec![
@@ -1561,19 +1597,29 @@ mod tests {
             "reach: a continuation"
         );
         assert!(
-            matches!(&*grant.effect, Effect::GenericEffect { duration: None, static_abilities, .. }
+            matches!(&*grant.effect, Effect::GenericEffect { duration: Some(Duration::UntilEndOfTurn), static_abilities, .. }
                 if static_abilities.iter().all(|def| def.affected.is_some()
                     && !matches!(def.affected, Some(TargetFilter::SelfRef)))),
-            "reach: a duration-free grant to another object, got {:?}",
+            "reach: a sentence-governed grant to another object, got {:?}",
             grant.effect
         );
 
         let mut ungoverned = parsed.clone();
-        ungoverned
+        let governing = ungoverned
             .sub_ability
             .as_deref_mut()
-            .expect("the doubling clause")
-            .duration = None;
+            .expect("the doubling clause");
+        governing.duration = None;
+        // #7962: the sentence's window also reaches the GRANT's own carrier AND its
+        // embedded effect field, so the "nothing states a duration" case this row
+        // builds must clear both — otherwise the chapter promotion correctly reads a
+        // state this row did not intend to build.
+        if let Some(grant) = governing.sub_ability.as_deref_mut() {
+            grant.duration = None;
+            if let Effect::GenericEffect { duration, .. } = grant.effect.as_mut() {
+                *duration = None;
+            }
+        }
         promote_grant_duration_for_chapter(&mut ungoverned);
         let grant = ungoverned
             .sub_ability

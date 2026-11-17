@@ -1,6 +1,8 @@
 pub mod augment;
 pub mod bracket_lists;
+pub mod card_data_provenance;
 pub mod card_db;
+pub mod combo_table;
 pub mod contraptions;
 pub mod embalm_eternalize;
 pub mod encore;
@@ -11,6 +13,7 @@ pub mod hideaway;
 pub mod legality;
 pub mod meld;
 pub mod mtgjson;
+pub mod name_copy_gate;
 pub mod oracle_loader;
 pub mod removed_cards;
 pub mod search;
@@ -33,8 +36,16 @@ mod meld_tests;
 #[cfg(test)]
 mod unearth_tests;
 
-pub use bracket_lists::{BracketLists, BracketSignals};
+pub use bracket_lists::{
+    BracketCardClass, BracketLists, BracketSignals, CuratedList, LoadedList, PolicySource,
+};
 pub use card_db::CardDatabase;
+pub use combo_table::{
+    combo_cardinality, detect_combos, ComboCardinality, ComboCoverage, ComboEntry,
+    ComboFilterCounts, ComboMatch, ComboOmission, ComboOutcome, ComboPiece, ComboPieceZone,
+    ComboProvenance, ComboRelevance, ComboResource, ComboSetup, ComboTable, ComboTableDoc,
+    ComboTableError, EarlyComboReading, SignalSource,
+};
 pub use search::{CardSearchQuery, CardSearchResult, CardSearchResults};
 
 /// Single authority for "is this card runnable by the engine right now?"

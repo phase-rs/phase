@@ -603,14 +603,18 @@ pub(crate) fn select_fifo(
         } else {
             Vec::new()
         };
-    if !head.pack.0.is_empty() {
+    // CR 905.1a / CR 903.13b: the remaining cards pass to the next seat in this round's direction.
+    let pack_passed = if head.pack.0.is_empty() {
+        None
+    } else {
         let recipient = session
             .pass_direction
             .next_seat(seat, session.config.pod_size);
         session.fifo_mut()?.seats[usize::from(recipient)]
             .queue
             .push_back(head);
-    }
+        Some(DraftDelta::PackPassed)
+    };
     let accepted = DraftDelta::SelectionAccepted {
         prompt_id,
         seat,
@@ -620,6 +624,7 @@ pub(crate) fn select_fifo(
         discarded_card_instance_ids: discarded,
     };
     let mut deltas = finish_pick(session, seat, picked)?;
+    deltas.extend(pack_passed);
     deltas.push(accepted);
     Ok(deltas)
 }

@@ -22,8 +22,11 @@ use super::oracle_cost::{
 use super::oracle_effect::imperative::{
     try_parse_die_result_line, try_parse_roll_die_with_modifier,
 };
-use super::oracle_effect::{capitalize, lower_ability_ir, parse_ability_ir_standalone};
+use super::oracle_effect::{
+    capitalize, lower_ability_ir, parse_ability_ir_standalone_with_spell_anaphor,
+};
 use super::oracle_ir::ast::parsed_clause;
+use super::oracle_ir::context::SpellAnaphorBinding;
 use super::oracle_ir::effect_chain::{AbilityIr, AbilityShellIr, DieResultBranchIr, EffectChainIr};
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::condition::parse_inner_condition;
@@ -255,6 +258,7 @@ pub(crate) fn parse_die_result_branches_ir(
     lines: &[&str],
     start_line: usize,
     kind: AbilityKind,
+    spell_anaphor_binding: SpellAnaphorBinding,
 ) -> (Vec<DieResultBranchIr>, usize) {
     let mut branches = Vec::new();
     let mut j = start_line;
@@ -266,10 +270,20 @@ pub(crate) fn parse_die_result_branches_ir(
         }
         if let Some((min, max, effect_text)) = try_parse_die_result_line(&table_line) {
             let effect_text = strip_die_table_flavor_label(effect_text);
+            // CR 608.2c + CR 608.2k: a trigger-owned results table is part of the
+            // triggered ability, so its rows carry the handed-down spell-anaphor
+            // binding. The LOWERING MODE stays `Standalone` (CR 706.3b + CR 608.2k)
+            // — `ChainLoweringMode` pins the die-row Standalone/WithContext
+            // asymmetry on purpose.
+            let row_ir = parse_ability_ir_standalone_with_spell_anaphor(
+                effect_text,
+                kind,
+                spell_anaphor_binding,
+            );
             branches.push(DieResultBranchIr {
                 min,
                 max,
-                effect: Box::new(parse_ability_ir_standalone(effect_text, kind)),
+                effect: Box::new(row_ir),
             });
             j += 1;
         } else {
@@ -298,7 +312,8 @@ pub(super) fn try_parse_die_roll_table(
     // the chain dispatch, which passes its own binding.
     let (sides, modifier) = try_parse_roll_die_with_modifier(&lower, None)?;
 
-    let (branches, next_line) = parse_die_result_branches_ir(lines, i + 1, kind);
+    let (branches, next_line) =
+        parse_die_result_branches_ir(lines, i + 1, kind, SpellAnaphorBinding::ParentTarget);
 
     let ir = AbilityIr {
         source_text: line.to_string(),
