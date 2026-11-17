@@ -19,13 +19,14 @@
 //! and the control below exists precisely to catch a regression back into that vacuum.
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::AbilityTag;
+use engine::types::ability::{AbilityTag, Effect, ResolvedAbility};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{StackEntryKind, WaitingFor};
+use engine::types::game_state::{PendingRepeatIteration, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 fn add_mana(runner: &mut engine::game::scenario::GameRunner, ty: ManaType, count: usize) {
@@ -653,11 +654,6 @@ fn announced_source_x_is_save_compatible() {
 /// subsequent `MemberOrderChoice` prompts are never emitted.
 #[test]
 fn pending_repeat_iteration_order_fixed_loads_old_copy_order_fixed_key() {
-    use engine::types::ability::{Effect, ResolvedAbility};
-    use engine::types::game_state::PendingRepeatIteration;
-    use engine::types::identifiers::ObjectId;
-    use engine::types::player::PlayerId;
-
     // Build a minimal PendingRepeatIteration with a live order_fixed value.
     let ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(0), PlayerId(0));
     let iter = PendingRepeatIteration {
