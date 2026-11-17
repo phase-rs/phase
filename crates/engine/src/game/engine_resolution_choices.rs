@@ -10419,34 +10419,23 @@ fn finish_effect_zone_put_at_library_position(
     events: &mut Vec<GameEvent>,
 ) {
     if state.active_ability_continuation().is_some() {
-        // CR 608.2c: "the rest" of a look-and-keep names the population the
-        // earlier instruction published minus the members this placement took
-        // from it. A follow-on "then exiles the rest" must therefore exile the
-        // cards that were NOT put back, not the one that was (Ashnod's Cylix:
-        // "puts one of them back on top of their library, then exiles the
-        // rest"). A placement whose members did not come from the chain's set
-        // (a targeted put-on-top) keeps naming the object it placed.
-        let chain_members: Vec<ObjectId> = state
-            .chain_tracked_set_id
-            .and_then(|id| state.tracked_object_sets.get(&id).cloned())
-            .unwrap_or_default();
-        let placed_from_chain_set =
-            !chain_members.is_empty() && chosen.iter().all(|id| chain_members.contains(id));
-        let tracked: Vec<ObjectId> =
-            if matches!(library_position, LibraryPosition::Bottom) || placed_from_chain_set {
-                chain_members
-                    .into_iter()
-                    .filter(|id| !chosen.contains(id))
-                    .filter(|id| {
-                        state
-                            .objects
-                            .get(id)
-                            .is_some_and(|object| object.zone == Zone::Library)
-                    })
-                    .collect()
-            } else {
-                chosen.clone()
-            };
+        let tracked = if matches!(library_position, LibraryPosition::Bottom) {
+            state
+                .chain_tracked_set_id
+                .and_then(|id| state.tracked_object_sets.get(&id).cloned())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|id| !chosen.contains(id))
+                .filter(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .is_some_and(|object| object.zone == Zone::Library)
+                })
+                .collect()
+        } else {
+            chosen.clone()
+        };
         // This seam's placement fixes its producer: it resolves as
         // `PutAtLibraryPosition`, which names no "<verb>ed this way" set and
         // carries no destination, so the table records no cause here.

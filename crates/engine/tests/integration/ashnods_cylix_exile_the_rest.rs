@@ -5,14 +5,12 @@
 //! of their library, puts one of them back on top of their library, then exiles
 //! the rest."
 //!
-//! CR 608.2c: the controller follows the instructions in the order written, so
-//! "the rest" is the looked-at population minus the card put back. The put-back
-//! step publishes that arrangement's population as the newest tracked set; a
-//! top placement that takes its members from the looked-at set must therefore
-//! publish the remainder, not the kept card.
+//! CR 608.2c + CR 701.20e: the instructions run in the order written, so "the
+//! rest" is the looked-at cards minus the card put back. The ability resolves
+//! as one look-and-keep: the kept card goes back on top and exactly the other
+//! looked-at cards are exiled; nothing below them moves.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::{EffectKind, LibraryPosition};
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
@@ -60,25 +58,43 @@ fn setup() -> Setup {
         ));
     }
     let outcome = runner.activate(cylix, 0).target_players(&[P0]).resolve();
-    // Reach guard: the ability reaches the put-back choice before the exile.
+    assert!(
+        runner.state().players[P0.0 as usize].mana_pool.is_empty(),
+        "the {{3}} activation cost was paid from the pool"
+    );
+    // Reach guard: the ability stops for the put-back choice before anything
+    // is exiled.
     match outcome.final_waiting_for() {
-        WaitingFor::EffectZoneChoice {
-            effect_kind,
-            library_position,
+        WaitingFor::DigChoice {
+            player,
+            library_owner,
             cards,
-            count,
+            keep_count,
+            up_to,
+            kept_destination,
+            rest_destination,
             ..
         } => {
-            assert_eq!(*effect_kind, EffectKind::PutAtLibraryPosition);
-            assert_eq!(*library_position, Some(LibraryPosition::Top));
-            assert_eq!(*count, 1, "puts ONE of them back on top");
+            assert_eq!(*player, P0);
+            assert_eq!(*library_owner, P0, "the target player's library");
+            assert_eq!(*keep_count, 1, "puts ONE of them back on top");
+            assert!(!*up_to, "putting one back is mandatory");
+            assert_eq!(*kept_destination, Some(Zone::Library));
+            assert_eq!(*rest_destination, Some(Zone::Exile));
             assert_eq!(
                 cards.as_slice(),
                 looked_at.as_slice(),
                 "the choice offers exactly the looked-at cards"
             );
         }
-        other => panic!("expected the put-back EffectZoneChoice, got {other:?}"),
+        other => panic!("expected the put-back DigChoice, got {other:?}"),
+    }
+    for card in looked_at.iter().chain([&deep_card]) {
+        assert_eq!(
+            runner.state().objects[card].zone,
+            Zone::Library,
+            "nothing moves before the choice"
+        );
     }
     Setup {
         runner,
@@ -136,8 +152,8 @@ fn assert_kept_card_routes_the_rest(keep: usize) {
     );
 }
 
-/// The original bug: "the rest" read the kept card's newly published set and
-/// exiled it, leaving the other two in the library.
+/// The reviewed bug: "the rest" named the kept card and exiled it, leaving the
+/// other two in the library.
 #[test]
 fn kept_top_card_stays_on_top_and_the_rest_is_exiled() {
     assert_kept_card_routes_the_rest(0);
