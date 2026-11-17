@@ -1258,7 +1258,7 @@ fn count_matching_trigger_event_subjects(
         GameEvent::GameStarted
         | GameEvent::TurnStarted { .. }
         | GameEvent::PhaseChanged { .. }
-        | GameEvent::PhaseChangedForPlayer { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::SpellCopied { .. }
         | GameEvent::XValueChosen { .. }
@@ -3423,20 +3423,36 @@ pub(super) fn match_phase(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    // CR 805.4d: a fanned occurrence admits exactly like the production event
-    // (active-player-based); its bound player is binding context, not an
-    // admission criterion.
-    let phase = match event {
-        GameEvent::PhaseChanged { phase } => phase,
-        GameEvent::PhaseChangedForPlayer { phase, .. } => phase,
-        _ => return false,
-    };
-    let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
-        phase == trigger_phase
+    if let GameEvent::PhaseChanged { phase } = event {
+        let phase_matches = if let Some(ref trigger_phase) = trigger.phase {
+            phase == trigger_phase
+        } else {
+            true
+        };
+        // CR 102.1 + CR 800.4j: a step scoped to a player's turn belongs to no player while the
+        // turn continues without an active player; an unscoped step ("each end step") still begins.
+        phase_matches
+            && phase_trigger_players(trigger, state, source_context)
+                .is_none_or(|players| !players.is_empty())
     } else {
-        true
-    };
-    phase_matches && valid_player_matches(trigger, state, state.active_player, source_context)
+        false
+    }
+}
+
+/// CR 603.2b + CR 805.4d: the turn players whose step a phase trigger with a per-player scope
+/// (its `valid_target`) observes; `None` for one without, such as "your opponents' end step".
+pub(crate) fn phase_trigger_players(
+    trigger: &TriggerDefinition,
+    state: &GameState,
+    source_context: &TriggerSourceContext,
+) -> Option<Vec<PlayerId>> {
+    trigger.valid_target.as_ref()?;
+    Some(
+        crate::game::players::turn_players(state)
+            .into_iter()
+            .filter(|&player| valid_player_matches(trigger, state, player, source_context))
+            .collect(),
+    )
 }
 
 // CR 603.4: Match when the trigger's source becomes the target of a spell or ability.
@@ -5713,7 +5729,7 @@ pub(super) fn match_loses_game(
     source_context: &TriggerSourceContext,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::PlayerLost { player_id } = event {
+    if let GameEvent::PlayerLost { player_id, .. } = event {
         valid_player_matches(trigger, state, *player_id, source_context)
     } else {
         false
@@ -18600,6 +18616,7 @@ mod tests {
 
         let other = GameEvent::PlayerLost {
             player_id: PlayerId(0),
+            reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::Conceded]),
         };
         assert!(
             !match_vote_resolved(
@@ -18748,6 +18765,7 @@ mod tests {
 
         let opp_lost = GameEvent::PlayerLost {
             player_id: PlayerId(1),
+            reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::Conceded]),
         };
         assert!(
             match_loses_game(
@@ -18761,6 +18779,7 @@ mod tests {
 
         let my_lost = GameEvent::PlayerLost {
             player_id: PlayerId(0),
+            reasons: std::collections::BTreeSet::from([crate::types::events::LossReason::Conceded]),
         };
         assert!(
             match_loses_game(

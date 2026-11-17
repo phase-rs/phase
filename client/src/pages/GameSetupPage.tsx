@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
 
-import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchType } from "../adapter/types";
+import type { FormatConfig, FormatGroup, GameFormat, MatchType } from "../adapter/types";
 import { U8_MAX } from "../adapter/types";
 import {
   formatMetadata,
@@ -110,7 +110,8 @@ export function GameSetupPage() {
   const bo3Disabled = playerCount !== 2 || ceiling !== "Bo3";
   // CR 732.2a: combo (infinite-loop) detector opt-in, chosen here at creation and
   // immutable once the game starts. Available at every player count.
-  const [loopDetection, setLoopDetection] = useState<LoopDetectionMode>({ type: "Off" });
+  const loopDetection = usePreferencesStore((s) => s.lastLoopDetection);
+  const setLoopDetection = usePreferencesStore((s) => s.setLastLoopDetection);
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   // We only ever read the active deck's compat (see `selectedCompat` below),
   // so MyDecks pushes up just that one entry instead of the entire map. Holding

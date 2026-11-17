@@ -1624,7 +1624,7 @@ fn planar_controller_concession_collects_the_handoff_planeswalk_once() {
     let arriving_id = deck_ids[0];
 
     let mut events = Vec::new();
-    crate::game::elimination::concede(&mut state, p0, &mut events);
+    let _ = crate::game::elimination::concede(&mut state, p0, &mut events);
 
     // Reach guard: the handoff planeswalked away from the departed player's plane.
     assert!(!state.command_zone.contains(&active_id));
