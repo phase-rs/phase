@@ -799,7 +799,7 @@ fn win_survives_a_draw_from_an_empty_library() {
     assert!(
         !events[game_over_at..]
             .iter()
-            .any(|event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0)),
+            .any(|event| matches!(event, GameEvent::PlayerLost { player_id, reasons: _ } if *player_id == P0)),
         "no PlayerLost for the winner may be emitted after the win"
     );
 }
@@ -871,7 +871,7 @@ fn restored_between_games_state_does_not_eliminate_the_winner() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0)),
+            .any(|event| matches!(event, GameEvent::PlayerLost { player_id, reasons: _ } if *player_id == P0)),
         "no PlayerLost for the winner may be emitted after the restore"
     );
     assert_eq!(runner.state().match_phase, MatchPhase::BetweenGames);

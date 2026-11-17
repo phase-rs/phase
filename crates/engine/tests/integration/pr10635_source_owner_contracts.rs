@@ -631,16 +631,15 @@ fn undying_return_of_a_merged_permanent_keeps_the_base_population() {
 // Full Oracle verified against https://api.scryfall.com/cards/named?exact=Tel-Jilad%20Stylus
 const TEL_JILAD_STYLUS: &str = "{T}: Put target permanent you own on the bottom of your library.";
 
-/// Base-behavior pin, not a rules claim (known gap, tracked in #10759). Tel-Jilad
-/// Stylus is an ordinary placement, not a terminal shuffle, so this branch does
-/// not change how a live merged permanent's cards are delivered: as at
-/// `main`, each physical card (CR 730.3) is delivered at the library's zone
-/// default, which shuffles the owner's library once per card, and no owner
-/// arrangement (CR 730.3a) is offered. Only the move component of a terminal
-/// shuffle carries its position to every component. The relative order of the
-/// cards is not asserted. This test passes unchanged at the merge base.
+/// CR 730.3 + CR 401.4: Tel-Jilad Stylus is an ordinary placement, not a
+/// terminal shuffle. Each physical card of a live merged permanent (CR 730.3)
+/// inherits the approved destination and position, so both go to the bottom of
+/// the library and nothing shuffles. No owner arrangement (CR 730.3a) is
+/// offered; the relative order of the two cards is not asserted. At `main`
+/// each card took the zone-default delivery and shuffled the library once
+/// (the known gap tracked in #10759).
 #[test]
-fn stylus_on_a_live_merged_permanent_keeps_the_base_component_delivery() {
+fn stylus_on_a_live_merged_permanent_puts_every_component_on_the_bottom() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Existing A", "Existing B"]);
@@ -682,8 +681,14 @@ fn stylus_on_a_live_merged_permanent_keeps_the_base_component_delivery() {
         .collect();
     assert_eq!(
         shuffled_players,
-        vec![P0, P0],
-        "each card takes the zone-default delivery, as at the merge base"
+        Vec::<engine::types::player::PlayerId>::new(),
+        "a positioned placement shuffles nothing"
+    );
+    let library = &state.players[P0.0 as usize].library;
+    let bottom: Vec<ObjectId> = library.iter().skip(2).copied().collect();
+    assert!(
+        bottom.contains(&host) && bottom.contains(&component),
+        "both cards are beneath the two that were already there: {library:?}"
     );
     assert!(state.stack.is_empty());
 }

@@ -194,11 +194,11 @@ impl DecisionTemplate {
 }
 
 /// CR 732.2a: WHICH CHOICE a [`DecisionSlot`] names, typed rather than numbered. One
-/// variant per choice point a producer constructs a slot for, and the set is closed by
-/// [`pin_answers_point`]'s exhaustive, wildcard-free ([`PinnedDecision`] x
-/// [`DecisionPointKind`]) product: this enum is that product's point half, so a variant
-/// added to either paired enum build-breaks there, where the decision about this enum is
-/// then taken explicitly.
+/// variant per choice point a CR 732.2a proposal can name; `ReplacementOrder` is minted only for
+/// a replacement order the record never made. The set is closed by the
+/// exhaustive, wildcard-free matches in `GameState::record_point_answer` and
+/// `period_confirm::decision_prompt`, so a new variant build-breaks there, where the
+/// decision about it is then taken explicitly.
 ///
 /// The four variants sharing the [`PinnedDecision::Targets`] pin are why the type exists:
 /// one object can be a mana ability's cost source AND a resolving trigger's source, so a
@@ -242,6 +242,8 @@ pub enum ChoicePoint {
     Mode,
     /// CR 732.6: the pay-or-decline choice an "[A] unless [B]" effect offers inside a loop.
     UnlessBreak,
+    /// CR 616.1: which applicable replacement or prevention effect the affected player applies next.
+    ReplacementOrder,
 }
 
 /// Identifies one free choice within a group, on three axes answering three different
@@ -264,9 +266,7 @@ impl DecisionSlot {
     ///
     /// `pub`, not `pub(crate)`: `crates/engine/tests/integration/` is a SEPARATE CRATE, and
     /// a `pub(crate)` constructor is unnameable there, so the integration rows would
-    /// hand-roll the very literal this constructor exists to delete (the shape
-    /// `object_decision_source`'s `pub(crate)` already forces on `may_source_key` in
-    /// `fantastic_four_bounded_loop.rs` and on `decision_source` in `natural_balance.rs`).
+    /// hand-roll the very literal this constructor exists to delete.
     /// Every field of this `pub` struct in this `pub` module is already `pub`, so this adds
     /// no reachability the type does not already have — it only removes the literal.
     pub fn first(source: DecisionSource, point: ChoicePoint) -> Self {
@@ -293,72 +293,14 @@ pub enum UnlessPaymentOption {
     Decline,
 }
 
-/// The observed answer to ONE published decision slot, from ONE seat, across the current
-/// loop-detection window. Journalled under the key `(DecisionSlot, PlayerId)`
-/// (`GameState::record_loop_answer`), so a seat can only ever answer for itself and the
-/// CHOICE POINT keeps the two slots one source can publish (CR 601.2c target, CR 603.5 "may")
-/// in two entries rather than collapsing them into one latched conflict.
-///
-/// CR 732.2a says a shortcut proposal describes "a sequence of game choices, for all
-/// players, that may be legally taken based on the current game state and the predictable
-/// results of the sequence of choices", and that this sequence "may be a non-repetitive
-/// series of choices, a loop that repeats a specified number of times, multiple loops, or
-/// nested loops, and may even cross multiple turns". A series whose answers DIFFER between
-/// iterations is therefore not, by itself, the conditional action the rule bars; what the
-/// rule actually bars is narrower — "It can't include conditional actions, where the
-/// outcome of a game event determines the next action a player takes."
-///
-/// This engine refuses on a differing answer anyway. That is an ENGINE-CAPABILITY LIMIT,
-/// DELIBERATELY MORE CONSERVATIVE THAN CR 732.2a REQUIRES — not a rule the CR states.
-/// [`DecisionTemplate`] pins exactly one `MayChoice` per published slot per cycle, so a
-/// non-uniform series has no representation here; it is the same "a choice a player could
-/// only make reactively is one they cannot pin" disposition [`predictability_gate`]'s
-/// CR 732.2a firewall doc already records. Failing to offer is the fail-closed direction:
-/// strictly fewer offers, never a wrong pin.
-// `Copy` is DROPPED here (and nowhere else): `LoopAnswerValue::Targets` carries a `Vec`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoopAnswer {
-    /// Every observed iteration answered this (slot, seat) pair identically.
-    Uniform(LoopAnswerValue),
-    /// Two observed iterations of the same (slot, seat) pair disagreed. Latched:
-    /// never returns to `Uniform`. See the type doc — the refusal this produces is this
-    /// engine's conservative policy, NOT a CR 732.2a mandate.
-    Conflicted,
-}
-
-/// The VALUE of one observed answer. Variants are distinct CR choice KINDS — the same axis
-/// [`PinnedDecision`] and [`DecisionPointKind`] already partition, and under the same
-/// CR 732.2a umbrella ("a sequence of game choices, for all players") that makes each of
-/// those ONE type rather than one type per rule section. It is therefore a PARTIAL
-/// observation-side projection of that kind space (2 of the 6 [`DecisionPointKind`]
-/// variants), TOTALIZED at the consumer's wildcard-free `(DecisionPointKind,
-/// LoopAnswerValue)` match — not an exhaustive peer of either.
-///
-/// Parameterizing [`LoopAnswer::Uniform`] rather than adding a `UniformTargets` sibling is
-/// deliberate: a `X`/`TargetX` sibling pair is CLAUDE.md's sibling-cluster smell, and it
-/// would put the KIND axis on the same enum level as the LATCH axis (`Uniform` vs
-/// `Conflicted`), which is the layer conflation CLAUDE.md's enum-design rule forbids.
-///
-/// DELIBERATELY DERIVES NO `Serialize`/`Deserialize`, exactly as [`LoopAnswer`] does: the
-/// `#[serde(skip)]` on `GameState::loop_answer_journal` is enforced AT COMPILE TIME by the
-/// absence of that derive, and adding one here would silently re-open persistence of a
-/// transient window. ([`TargetPin`] and [`MayChoiceOption`] do derive it; the bar lives on
-/// the two enums above them, which is where it was put.)
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoopAnswerValue {
-    /// CR 603.5: take the optional action, or decline it.
-    May(MayChoiceOption),
-    /// CR 608.2b + CR 601.2c: the announced targets for one slot, in announcement order.
-    Targets(Vec<TargetPin>),
-}
-
 /// One pinned decision. Variants are distinct CR choice KINDS (ordering / targeting /
 /// modal / optional-"may" / "[A] unless [B]" break), not a parameterization axis.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PinnedDecision {
-    /// CR 603.3b: place this slot's trigger at ordering position `pos`. Its slot is minted
-    /// at [`ChoicePoint::TriggerOrder`] and nowhere else, which is what keeps an ordering
-    /// pin outside a declaration's slot space: no PUBLISHED point carries `TriggerOrder`.
+    /// CR 603.3b: place this slot's trigger at ordering position `pos`, or, at
+    /// [`ChoicePoint::ReplacementOrder`], CR 616.1: apply this source's replacement effect at
+    /// place `pos`. No PUBLISHED point carries `TriggerOrder`, which keeps a trigger order
+    /// outside a declaration's slot space.
     Order { slot: DecisionSlot, pos: u8 },
     /// CR 608.2b: targets for a slot; each re-resolved to a live legal ObjectId per
     /// iteration.
@@ -404,6 +346,14 @@ pub enum PinnedDecision {
     },
 }
 
+/// CR 732.2a: whether an offer's producer measured a repetition threshold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RepetitionBound {
+    Measured,
+    #[default]
+    Unmeasured,
+}
+
 /// CR 732.2a: the READ-side decision schema an interactive loop-shortcut OFFER exposes so the
 /// frontend can render the open choices + collect pins. 1:1 read-side dual of the write-side
 /// `Vec<PinnedDecision>` (the FE picks from each point's legal set → a pin). Every field is
@@ -412,30 +362,23 @@ pub enum PinnedDecision {
 /// offer construction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShortcutDecisionSchema {
-    /// CR 732.1b: the proposed repeat mode. `UntilLethal` for a determinate CR 704.5a /
-    /// CR 704.5c drain; `Fixed(n)` seeds the frontend count picker for an optional loop, and is
-    /// the count [`ShortcutDecisionSchema::suggestion`] drives — the count roles are stated on
+    /// CR 732.1b: the proposed repeat mode. `Fixed(n)` seeds the frontend count picker for an
+    /// optional loop, and is the count [`ShortcutDecisionSchema::suggestion`] drives — the count roles are stated on
     /// [`ShortcutDecisionSchema::suggested_declaration`].
     pub iteration_count: IterationCount,
-    /// CR 732.2a: the repetition bound this offer's producer MEASURED — the CR 704 threshold
-    /// crossing, for a turn-cycle period the cleanup hand bound (CR 514.1), or the repetitions
-    /// the counting replay performed (CR 118.3) — a LEGALITY
-    /// CEILING, what SOME legal declaration may specify, never a count every declaration
-    /// reaches. `game::engine::bounded_offer_tail` takes the LARGER of two
-    /// declaration-relative cascades: the cascade's count under the offer's own published
-    /// declaration and the last one under the re-aimed witness. CR 732.2a's "may be legally
-    /// taken" quantifies existentially over declarations, so the maximum is the reduction that
-    /// answers it. `None` means the producer measured none: no axis of the period consumes any
-    /// living seat, so the board licenses no threshold rather than one that happens to be
-    /// large. It wears no implementation ceiling.
+    /// CR 732.2a: whether this offer's producer MEASURED a repetition threshold — the CR 704
+    /// threshold crossing, for a turn-cycle period the cleanup hand bound (CR 514.1), or the
+    /// repetitions the counting replay performed (CR 118.3). `Unmeasured` means no axis of the
+    /// period consumes any living seat, so the board licenses no threshold rather than one that
+    /// happens to be large.
     ///
     /// Read by [`ShortcutDecisionSchema::is_bounded`] — the one question it answers — and by
     /// nothing that publishes or enforces a count, which
     /// [`ShortcutDecisionSchema::deliverable_capacity`] below is the field for.
     #[serde(default)]
-    pub measured_repetition_bound: Option<u32>,
-    /// The highest count an accept may legally SPECIFY against this offer: the measured
-    /// threshold above, or `MAX_SHORTCUT_CYCLES` where none was measured, capped at
+    pub repetition_bound: RepetitionBound,
+    /// The highest count an accept may legally SPECIFY against this offer: the threshold the
+    /// producer measured, or `MAX_SHORTCUT_CYCLES` where none was measured, capped at
     /// `MAX_SHORTCUT_CYCLES` either way. A legality ceiling, not a delivery promise — the
     /// consumption seam re-derives its own bound on the board the drive runs against
     /// (`game::engine::shortcut_consumption_bound`) and may stop the drive short of this.
@@ -475,7 +418,7 @@ pub struct ShortcutDecisionSchema {
     ///   published, else the published declaration's own count.
     #[serde(default)]
     pub suggested_declaration: Option<DecisionTemplate>,
-    /// CR 603.3d + CR 601.2c: when the top stack entry at the offer is a published target slot's
+    /// CR 603.3d + CR 601.2c: when the top stack entry at the offer is a charged target slot's
     /// trigger, the seat it latched — the aim its first repetition resolves. A
     /// snapshot for `game::interaction`, which reads no `GameState`; the engine's own seams
     /// re-read it off the board they ask about (`game::engine::leading_announcement_aims`).
@@ -490,7 +433,7 @@ pub struct ShortcutDecisionSchema {
 /// answers — and is done by `types::game_state`'s migration chain before serde runs.
 ///
 /// DELIBERATELY NOT MIRRORED in `client/src/adapter/types.ts::ShortcutDecisionSchema`, neither
-/// this capacity nor the measured bound above it: the frontend never reads either, it reads
+/// this capacity nor the bound above it: the frontend never reads either, it reads
 /// the already-clamped ceiling the engine publishes as
 /// `InteractionShortcutCountSpec::Fixed { max }`. Mirroring them would hand the display layer
 /// two numbers it would have to reconcile — exactly the derive-in-the-frontend the layer rule
@@ -506,7 +449,7 @@ impl Default for ShortcutDecisionSchema {
     fn default() -> Self {
         Self {
             iteration_count: IterationCount::Fixed(0),
-            measured_repetition_bound: None,
+            repetition_bound: RepetitionBound::default(),
             deliverable_capacity: default_deliverable_capacity(),
             points: Vec::new(),
             convoke_tappable_count: 0,
@@ -531,13 +474,13 @@ impl ShortcutDecisionSchema {
     /// publishes the absence, so an unnarrowed offer is NOT bounded in this sense.
     ///
     /// The SINGLE AUTHORITY for that question, and the reason it is a method rather than an
-    /// inline test repeated at each caller: it is the only place `measured_repetition_bound` is
-    /// read as a VERDICT — the per-viewer projection in `game::visibility` copies the field
+    /// inline test repeated at each caller: it is the only reader of `repetition_bound` as a
+    /// VERDICT — the per-viewer projection in `game::visibility` copies the field
     /// through unredacted and asks nothing of it — and it crosses the crate boundary:
     /// `phase-ai`'s declare policy asks this question and never inspects the field. The question
     /// is about what was measured, never about the capacity, which every offer carries.
     pub fn is_bounded(&self) -> bool {
-        self.measured_repetition_bound.is_some()
+        self.repetition_bound == RepetitionBound::Measured
     }
 }
 
@@ -550,8 +493,8 @@ pub struct DecisionPoint {
 }
 
 /// Legal option set for one decision-point. EXHAUSTIVE, wildcard-free 1:1 read-side peer of
-/// the loop-declaration [`PinnedDecision`] variants (`Order` is CR 603.3b trigger-ordering,
-/// not a loop-declaration choice — it has no read-side peer). Externally tagged → FE-consumable
+/// the loop-declaration [`PinnedDecision`] variants (`Order`'s peer is a CR 616.1 replacement
+/// order; a CR 603.3b trigger order has none). Externally tagged → FE-consumable
 /// JSON (`{"ConvokeTaps":{"tappable":[..]}}`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DecisionPointKind {
@@ -580,6 +523,9 @@ pub enum DecisionPointKind {
     /// the FE renders it read-only, there is no per-iteration re-selection). Externally
     /// tagged → `{"ManaColor":{"color":"Blue"}}`.
     ManaColor { color: ManaColor },
+    /// CR 616.1: the place `pos` among `positions` replacement effects at which the affected
+    /// player applies this slot's effect.
+    Order { pos: u8, positions: u8 },
 }
 
 /// CR 115.2 + CR 601.2c: WHO one announcement names, stored in re-bindable form. The
@@ -710,8 +656,8 @@ pub enum TargetPin {
     /// spelling: [`AnnouncementSubject::Seat`] inside a [`Ranking`] inside
     /// [`TargetPin::Scheduled`], judged by `game::targeting::player_is_legal_target`. Both
     /// TARGET-class producers emit that spelling —
-    /// `game::engine::record_trigger_target_answer` (the engine's own CR 601.2c
-    /// announcement journal) and `game::interaction::materialize_loop_shortcut_response`
+    /// `game::engine::announced_target_pins` (the engine's own CR 601.2c
+    /// announcement) and `game::interaction::materialize_loop_shortcut_response`
     /// (the human ingress of the same point kind). The spelling IS the provenance, so the
     /// authority is selected by what the answer IS, never by who submitted it.
     Player(PlayerId),
@@ -743,11 +689,6 @@ pub enum ReplayMode {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IterationCount {
     Fixed(u32),
-    /// CR 704.5a + CR 732.1b: repeat until a player is at 0-or-less life — the driver
-    /// PR-7 Phase 3 adds for the interactive loop-shortcut of a determinate lethal drain.
-    /// The terminating condition is the SBA, not a caller-supplied count. (`UntilResource`
-    /// stays deferred to Phase 4/B5.)
-    UntilLethal,
     /// CR 104.4b + CR 732.4: repeat a loop whose in-loop actions are all mandatory with no
     /// ending point; once every player accepts, the game is a draw.
     WithoutEnd,
@@ -873,10 +814,10 @@ pub fn resolve(
 
 /// CR 732.2a + CR 608.2b: the declared answer THIS prompt occurrence takes, RESOLVED against this
 /// iteration's board. A declaration holds one answer per point and CR 732.2a applies it at every
-/// occurrence of the point's prompt. The two refusals are different questions and both become
-/// `Err(RecastAbort)` at every seam, never a default: `None` is "the template does not answer this
-/// prompt", `Err` is "the pin that answers it is illegal this iteration". Selecting and resolving
-/// in ONE call keeps a pin's CR 608.2b re-check on the beat that answers it.
+/// occurrence of the point's prompt. The two refusals are different questions: `None` is "the
+/// template does not answer this prompt", `Err` is "the pin that answers it is illegal this
+/// iteration". Selecting and resolving in ONE call keeps a pin's CR 608.2b re-check on the beat
+/// that answers it.
 ///
 /// The CHOICE POINT is supplied by the beat, never hard-coded by the seam.
 pub(crate) fn take_answer(
@@ -911,10 +852,10 @@ fn resolve_pin(
         // WHAT IS LOAD-BEARING AND STILL HOLDS: an `Order` element grants no capability at the
         // `DeclareShortcut` wire, and the ground is `validate_pins`, not a claim about who
         // reads the payload. `validate_pins` returns `PinValidation::NotALoopDecision` for ANY
-        // `Order` pin in a declared template (CR 603.3b), so an ordering payload is readable
+        // trigger-order pin in a declared template (CR 603.3b), so an ordering payload is readable
         // only on the engine-written record path and never from anything a player submits. No
         // PUBLISHED point carries `ChoicePoint::TriggerOrder` and `pinned_decisions_to_points`
-        // mints none, so the `Order` pin stays unaddressable by a declaration. The record
+        // mints none, so a trigger-order pin stays unaddressable by a declaration. The record
         // drive's identity-aware `OrderTriggers` arm DOES read an `Order` element's `pos` —
         // from the step's own record, which no player wrote.
         PinnedDecision::Order { slot, pos } => Ok(ConcreteDecision::Order {
@@ -1020,11 +961,9 @@ fn resolve_target(
         // variant alone. `TargetPin::Player` is the CHOICE class (this arm, existence only);
         // a CR 601.2c TARGET-class seat is `AnnouncementSubject::Seat` inside a `Ranking`
         // inside `TargetPin::Scheduled`, resolved by the arm below through
-        // `targeting::player_is_legal_target`. Along the `record_loop_answer` route,
-        // `game::engine::record_trigger_target_answer` did produce a TARGET-class
-        // `TargetPin::Player` from a `WaitingFor::TriggerTargetSelection` announcement. That
-        // producer, and the human ingress of the same point kind
-        // (`game::interaction::materialize_loop_shortcut_response`), now emit the ranked
+        // `targeting::player_is_legal_target`. The engine's announcement producer
+        // (`game::engine::announced_target_pins`) and the human ingress of the same point kind
+        // (`game::interaction::materialize_loop_shortcut_response`) emit the ranked
         // spelling. So no IN-PROCESS producer can reach this arm with a target any more, and
         // "not live today" is now an enforced property rather than a census result — pinned
         // by `tests/integration/loop_shortcut_seat_pin_census.rs`.
@@ -1049,16 +988,6 @@ fn resolve_target(
         // Same class as the wire-sourced `deliverable_capacity` defect
         // `reject_zero_bound_shortcut_offer` closes: a load-seam value the in-process producer
         // census cannot see.
-        //
-        // DAMAGE MODE if a wire producer does that: `CycleOutcome::Abort` rolls back only
-        // the crossing cycle, so cycles `0..k` stay committed under a pin no authority ever
-        // validated. Note what is NOT the damage mode, because the two are easy to conflate:
-        // a correctly-spelled ranked seat that becomes an illegal target mid-drive is
-        // handled BY CONSTRUCTION and is not a residual at all — `evaluate_schedule`
-        // resolves `head()` only and never slides to a later entry, so the drive aborts at
-        // the boundary (CR 115.7a: "if a target can't be changed to another legal target,
-        // the original target is unchanged, even if the original target is itself illegal by
-        // then"; CR 732.2a bars the conditional action sliding would be).
         TargetPin::Player(p) => crate::game::players::player_exists_for_choice(state, *p)
             .then_some(ConcreteTarget::Player(*p))
             .ok_or_else(illegal),
@@ -1315,8 +1244,8 @@ impl PinnedDecision {
     /// shortcut declaration answers. That ground is now carried by the POINT rather than by
     /// the absence of a slot: an `Order` pin's slot is minted at
     /// [`ChoicePoint::TriggerOrder`], and no PUBLISHED point carries `TriggerOrder`
-    /// (`bounded_cycle_pin_slots` mints only `AnnouncedTarget` and `MayGate`;
-    /// `pinned_decisions_to_points` mints no point for an `Order` pin at all). So the old
+    /// (`bounded_cycle_pin_slots_for_window` mints only `AnnouncedTarget` and `MayGate`;
+    /// `pinned_decisions_to_points` mints no point for a `TriggerOrder` pin). So the old
     /// collision — a synthesized `{source, index: 0}` letting one ordering pin cover a
     /// published targeting point — is unrepresentable, `TriggerOrder != AnnouncedTarget`
     /// being a type fact rather than a numbering convention.
@@ -1329,6 +1258,22 @@ impl PinnedDecision {
             | PinnedDecision::UnlessBreak { slot, .. }
             | PinnedDecision::ManaColor { slot, .. }
             | PinnedDecision::ConvokeTaps { slot } => slot,
+        }
+    }
+
+    /// CR 616.1: the source and place of a replacement-order pin; `None` for any other pin.
+    pub(crate) fn replacement_place(&self) -> Option<(&DecisionSource, u8)> {
+        match self {
+            PinnedDecision::Order { slot, pos } if slot.point == ChoicePoint::ReplacementOrder => {
+                Some((&slot.source, *pos))
+            }
+            PinnedDecision::Order { .. }
+            | PinnedDecision::Targets { .. }
+            | PinnedDecision::Mode { .. }
+            | PinnedDecision::MayChoice { .. }
+            | PinnedDecision::UnlessBreak { .. }
+            | PinnedDecision::ManaColor { .. }
+            | PinnedDecision::ConvokeTaps { .. } => None,
         }
     }
 
@@ -1369,11 +1314,11 @@ fn pin_answers_point(pin: &PinnedDecision, point: &DecisionPoint) -> bool {
         | (PinnedDecision::MayChoice { .. }, DecisionPointKind::MayChoice)
         | (PinnedDecision::UnlessBreak { .. }, DecisionPointKind::UnlessBreak)
         | (PinnedDecision::ManaColor { .. }, DecisionPointKind::ManaColor { .. })
-        | (PinnedDecision::ConvokeTaps { .. }, DecisionPointKind::ConvokeTaps { .. }) => true,
+        | (PinnedDecision::ConvokeTaps { .. }, DecisionPointKind::ConvokeTaps { .. })
+        | (PinnedDecision::Order { .. }, DecisionPointKind::Order { .. }) => true,
         // A right-slot pin of the wrong kind answers a different question than the point
-        // asks. An `Order` pin now reaches this match — its slot is total — and is refused
-        // by the slot test above, because no published point carries
-        // `ChoicePoint::TriggerOrder`; it is listed here so the product stays total.
+        // asks. A trigger-order pin is refused by the slot test above, because no published
+        // point carries `ChoicePoint::TriggerOrder`.
         (
             PinnedDecision::Order { .. }
             | PinnedDecision::Targets { .. }
@@ -1387,7 +1332,8 @@ fn pin_answers_point(pin: &PinnedDecision, point: &DecisionPoint) -> bool {
             | DecisionPointKind::MayChoice
             | DecisionPointKind::UnlessBreak
             | DecisionPointKind::ManaColor { .. }
-            | DecisionPointKind::ConvokeTaps { .. },
+            | DecisionPointKind::ConvokeTaps { .. }
+            | DecisionPointKind::Order { .. },
         ) => false,
     }
 }
@@ -1462,8 +1408,8 @@ pub(crate) fn resolve_target_ref(
 /// COVERS the drive is the CALLER's obligation, discharged by
 /// `game::engine::shortcut_validated_range`, which reads the range off the declared count
 /// rather than off the schedule's own length. EXHAUSTIVE over [`PinnedDecision`] with no
-/// wildcard: `Order` (CR 603.3b trigger-ordering) is not a loop-declaration point and is
-/// refused as `NotALoopDecision`;
+/// wildcard: a CR 616.1 replacement `Order` must name its exposed point's place; a CR 603.3b
+/// trigger `Order` is not a loop-declaration point and is refused as `NotALoopDecision`;
 /// `ConvokeTaps` must still address an exposed matching point even though its concrete taps are
 /// re-bound live by `select_convoke_taps`. Runs once at declare (the board is frozen through Accept); the drive's
 /// per-iteration [`resolve`] is the runtime CR 608.2b backstop.
@@ -1608,6 +1554,18 @@ pub fn validate_pins(
                     return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
                 }
             }
+            // CR 616.1: a replacement order addresses its exposed point at that point's place.
+            PinnedDecision::Order { slot, pos } if slot.point == ChoicePoint::ReplacementOrder => {
+                let point = schema
+                    .points
+                    .iter()
+                    .find(|point| point.slot == *slot)
+                    .ok_or_else(|| PinValidation::UnexposedSlot { slot: slot.clone() })?;
+                if !matches!(point.kind, DecisionPointKind::Order { pos: at, positions } if at == *pos && *pos < positions)
+                {
+                    return Err(PinValidation::IllegalPinValue { slot: slot.clone() });
+                }
+            }
             // CR 603.3b: a trigger-ordering pin is not a loop-declaration point, so it can
             // never be a legal answer here. Refused rather than ignored, which is what keeps
             // it out of `proposal.template`, where `resolve` would still resolve it.
@@ -1635,14 +1593,30 @@ pub(crate) fn recorded_answer<'a>(
 /// declaration may pin a slot only the way the period answered it. Targets compare by what they
 /// resolve to at every driven index, since a recorded pin names its object at a past incarnation
 /// (CR 400.7).
+///
+/// Under an every-repetition signature a `Targets` pin at one of its charged slots is the
+/// declaration's own aim, which CR 601.2c lets it choose each repetition (via CR 603.3d), so it
+/// is not compared.
 pub fn validate_recorded_answers(
     template: &DecisionTemplate,
     recorded: &[PinnedDecision],
     validated_range: IterationIndex,
+    per_cycle: Option<&crate::analysis::resource::PeriodSignature>,
     state: &GameState,
 ) -> Result<(), PinValidation> {
+    let charged = match per_cycle {
+        Some(crate::analysis::resource::PeriodSignature::EveryRepetition(periodic)) => {
+            periodic.victim_slot.as_slice()
+        }
+        Some(crate::analysis::resource::PeriodSignature::OneRepetition(_)) | None => &[],
+    };
     for pin in &template.decisions {
         let slot = pin.slot();
+        if matches!(pin, PinnedDecision::Targets { .. })
+            && charged.iter().any(|(aimed, _)| aimed == slot)
+        {
+            continue;
+        }
         let agrees = recorded_answer(recorded, slot).is_some_and(|answer| match (pin, answer) {
             (
                 PinnedDecision::Targets { targets, .. },
@@ -1719,9 +1693,8 @@ pub enum AimViolation {
 /// are not its own, which is not what CR 732.2a's "predictable results of the sequence of
 /// choices" quantifies over. The attributable reading subtracts those aims out and lets an
 /// unresolved term fall to the ADMITTING side. That is sound here and nowhere else in this
-/// chain: a wrongly admitted declaration is caught three times at the drive — CR 704.3's live
-/// sweep, [`crate::analysis::resource::PeriodicDelta::conforms_in`], and the departure verdict —
-/// while nothing at all catches a wrongly refused one, which simply loses CR 732.2a's licence
+/// chain: a wrongly admitted declaration is caught twice at the drive — CR 704.3's live sweep
+/// and the departure verdict — while nothing at all catches a wrongly refused one, which simply loses CR 732.2a's licence
 /// with no instrument that says so.
 ///
 /// A departure ON a repetition is admitted — that repetition's choice is made before CR 704.3's
@@ -1824,12 +1797,13 @@ pub fn aims_survive_the_crossings(
 /// backs, [`validate_recorded_answers`]' RECORDED half against `recorded`, which is `None` on
 /// every other offer.
 ///
-/// Three sites ask that question — `game::engine::handle_declare_shortcut` (the declare
-/// firewall), `game::interaction::materialize_loop_shortcut_response` (the human ingress) and
-/// `game::engine::build_bounded_declaration` (the engine's own publisher) — and a declaration
-/// PUBLISHED under one predicate but ACCEPTED under another is the divergence this exists to
-/// make unrepresentable: `declaration.is_some()` is read by `ai_support::candidates` as "the
-/// declare handler will take this", and only a shared predicate makes that true.
+/// Two sites ask that question, each only on an offer whose period carries no performances —
+/// `game::engine::handle_declare_shortcut` (the declare firewall) and
+/// `game::interaction::materialize_loop_shortcut_response` (the human ingress). The engine's
+/// publishers (`build_bounded_declaration`, and the suggestion filter in `bounded_offer_tail`)
+/// and the firewall's performed-offer arm (`performance_conforms`) ask its pin half,
+/// [`declaration_pins_conform`]; that shared pin predicate is what lets `ai_support::candidates`
+/// read `declaration.is_some()` as "the declare handler will take this".
 ///
 /// # The third question, and the layer it belongs to
 ///
@@ -1846,27 +1820,21 @@ pub fn aims_survive_the_crossings(
 /// while this walk takes `Attributable`, where a refusal rests on this declaration's own
 /// choices.
 ///
-/// # `validated_range` STAYS A PARAMETER, and that is a measurement, not a hedge
+/// # `validated_range` stays a parameter
 ///
-/// The call sites do NOT pass the same range, so folding one in would adopt one site's
-/// semantics for the other:
-///
-/// * the declare firewall and the human ingress each pass
-///   `game::engine::shortcut_validated_range(&count, template)` — the range the ACCEPTED COUNT
-///   will drive;
-/// * the bounded PUBLISHER passes the same helper over the SCHEMA's own `iteration_count` — its
-///   own SUGGESTION, which since the suggestion and the ceiling became separate fields is NOT
-///   the widest count a declarer may name (that is `deliverable_capacity`). Ranges nest —
-///   `0..n` re-checks are a superset of `0..m` for `m <= n` — so the publisher's narrower range
-///   is sound only because the handler re-validates at the count actually named, which it does.
-///   Two questions, one helper, two arguments.
+/// Both callers pass `game::engine::shortcut_validated_range(&count, template)`, the range the
+/// ACCEPTED COUNT will drive. [`declaration_pins_conform`], which this delegates to, is also
+/// called by the bounded publishers over the declaration's own count and the suggestion's count,
+/// neither of which is the widest count a declarer may name (that is `deliverable_capacity`).
+/// Ranges nest — `0..n` re-checks are a superset of `0..m` for `m <= n` — so a publisher's
+/// narrower range is sound only because the handler re-validates at the count actually named.
 ///
 /// # Returns `bool`, deliberately
 ///
-/// All three callers discard the failure KIND (they already spelled `.is_err() || .is_err()`)
+/// Both callers discard the failure KIND (they already spelled `.is_err() || .is_err()`)
 /// and their dispositions have nothing in common: manual-play handback via
-/// `reject_shortcut_declaration`, `InteractionReasonCode::ConstraintUnsatisfied`, and "publish
-/// no declaration". A union error type would have no reader. [`predictability_gate`] and
+/// `hand_back_shortcut` and `InteractionReasonCode::ConstraintUnsatisfied`. A union error type
+/// would have no reader. [`predictability_gate`] and
 /// [`validate_pins`] stay public and typed for the rows that assert on the specific violation.
 pub fn declaration_conforms(
     schema: &ShortcutDecisionSchema,
@@ -1880,12 +1848,32 @@ pub fn declaration_conforms(
     // this range: `validate_pins` has confined every `Targets` pin to the offer's published legal
     // set at every index the count reaches, which is what makes the walk's `Err` arm a statement
     // about non-targeting pins rather than a hole.
+    declaration_pins_conform(
+        schema,
+        template,
+        validated_range,
+        aim.per_cycle,
+        recorded,
+        state,
+    ) && aims_survive_the_crossings(&schema.points, template, validated_range, aim, state).is_ok()
+}
+
+/// CR 732.2a: [`declaration_conforms`] less its aim walk — coverage, pin legality and agreement
+/// with the recorded answers. On an offer whose period was performed, what a declaration reaches
+/// is performed rather than modelled, so its callers ask the performance instead of the walk.
+pub fn declaration_pins_conform(
+    schema: &ShortcutDecisionSchema,
+    template: &DecisionTemplate,
+    validated_range: IterationIndex,
+    per_cycle: Option<&crate::analysis::resource::PeriodSignature>,
+    recorded: Option<&[PinnedDecision]>,
+    state: &GameState,
+) -> bool {
     predictability_gate(template, &schema.points).is_ok()
         && validate_pins(schema, template, validated_range, state).is_ok()
         && recorded.is_none_or(|recorded| {
-            validate_recorded_answers(template, recorded, validated_range, state).is_ok()
+            validate_recorded_answers(template, recorded, validated_range, per_cycle, state).is_ok()
         })
-        && aims_survive_the_crossings(&schema.points, template, validated_range, aim, state).is_ok()
 }
 
 #[cfg(test)]
@@ -2064,12 +2052,12 @@ mod tests {
         let schema = ShortcutDecisionSchema {
             suggested_declaration: None,
             leading_aims: Vec::new(),
-            iteration_count: IterationCount::UntilLethal,
+            iteration_count: IterationCount::WithoutEnd,
             // BOTH published answers, each deliberately distinct from its own default: a
             // round-trip carrying a default would pass even if that field were dropped from
             // the wire. They are also distinct from EACH OTHER, so a wire that serialized one
             // under both keys cannot pass either.
-            measured_repetition_bound: Some(17),
+            repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
             deliverable_capacity: 23,
             points: vec![DecisionPoint {
                 slot: DecisionSlot {
@@ -2091,9 +2079,9 @@ mod tests {
         };
         let json = serde_json::to_value(&schema).expect("serialize");
         assert_eq!(
-            json["measured_repetition_bound"], 17,
-            "the measured CR 704 threshold must reach the wire as a key — a field that is \
-             never serialized would silently decode as UNMEASURED on every reload"
+            json["repetition_bound"], "Measured",
+            "the measured state must reach the wire as a key — a field that is never \
+             serialized would silently decode as UNMEASURED on every reload"
         );
         assert_eq!(
             json["deliverable_capacity"], 23,
@@ -2108,7 +2096,7 @@ mod tests {
                 suggested_declaration: None,
                 leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(0),
-                measured_repetition_bound: None,
+                repetition_bound: crate::analysis::decision_template::RepetitionBound::Unmeasured,
                 deliverable_capacity: crate::game::engine::MAX_SHORTCUT_CYCLES,
                 points: vec![],
                 convoke_tappable_count: 0,
@@ -2122,11 +2110,14 @@ mod tests {
         let fields = legacy
             .as_object_mut()
             .expect("schema serializes as an object");
-        fields.remove("measured_repetition_bound");
+        fields.remove("repetition_bound");
         fields.remove("deliverable_capacity");
         let decoded = serde_json::from_value::<ShortcutDecisionSchema>(legacy)
             .expect("a pre-split snapshot still deserializes");
-        assert_eq!(decoded.measured_repetition_bound, None);
+        assert_eq!(
+            decoded.repetition_bound,
+            crate::analysis::decision_template::RepetitionBound::Unmeasured
+        );
         assert!(!decoded.is_bounded());
         assert_eq!(
             decoded.deliverable_capacity,
@@ -3684,7 +3675,7 @@ mod tests {
             suggested_declaration: None,
             leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(1),
-            measured_repetition_bound: Some(1),
+            repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
             deliverable_capacity: 1,
             convoke_tappable_count: 0,
             points: vec![point],
@@ -3714,9 +3705,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_replacement_order_pin_must_name_its_points_place() {
+        let giant = all_copies(11);
+        let duo = all_copies(12);
+        let point = |source: &DecisionSource, pos: u8| DecisionPoint {
+            slot: DecisionSlot::first(source.clone(), ChoicePoint::ReplacementOrder),
+            kind: DecisionPointKind::Order { pos, positions: 2 },
+        };
+        let pin = |source: &DecisionSource, pos: u8| PinnedDecision::Order {
+            slot: DecisionSlot::first(source.clone(), ChoicePoint::ReplacementOrder),
+            pos,
+        };
+        let schema = ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
+            iteration_count: IterationCount::Fixed(1),
+            repetition_bound: crate::analysis::decision_template::RepetitionBound::Measured,
+            deliverable_capacity: 1,
+            convoke_tappable_count: 0,
+            points: vec![point(&giant, 0), point(&duo, 1)],
+        };
+        let declared = |decisions: Vec<PinnedDecision>| DecisionTemplate {
+            owner: PlayerId(0),
+            decisions,
+            replay: ReplayMode::Scheduled {
+                count: IterationCount::Fixed(1),
+            },
+            key: DecisionGroupKey::from_sources(
+                &[giant.clone(), duo.clone()],
+                DecisionKind::LoopChoice,
+            ),
+        };
+        let state = GameState::new_two_player(1);
+        let swapped = validate_pins(
+            &schema,
+            &declared(vec![pin(&giant, 1), pin(&duo, 0)]),
+            1,
+            &state,
+        );
+        assert!(matches!(
+            swapped,
+            Err(PinValidation::IllegalPinValue { .. })
+        ));
+        let matching = validate_pins(
+            &schema,
+            &declared(vec![pin(&giant, 0), pin(&duo, 1)]),
+            1,
+            &state,
+        );
+        assert!(matching.is_ok());
+    }
+
     /// **R9 leg 5 — repetition is ANSWERED under a declared identity, not refused.**
     ///
-    /// CR 732.2a: `bounded_cycle_pin_slots` publishes ONE point per slot, so a declaration
+    /// CR 732.2a: `bounded_cycle_pin_slots_for_window` publishes ONE point per slot, so a declaration
     /// holds one answer per point and that answer applies at EVERY occurrence of the point's
     /// prompt.
     #[test]
@@ -3805,7 +3848,13 @@ mod tests {
             key: tri_key(),
         };
         assert_eq!(
-            validate_recorded_answers(&declaring(MayChoiceOption::Take, 10), &recorded, 2, &state),
+            validate_recorded_answers(
+                &declaring(MayChoiceOption::Take, 10),
+                &recorded,
+                2,
+                None,
+                &state
+            ),
             Ok(())
         );
         assert_eq!(
@@ -3813,16 +3862,23 @@ mod tests {
                 &declaring(MayChoiceOption::Decline, 10),
                 &recorded,
                 2,
+                None,
                 &state
             ),
             Err(PinValidation::DivergesFromRecordedPeriod { slot: may.clone() })
         );
         assert_eq!(
-            validate_recorded_answers(&declaring(MayChoiceOption::Take, 11), &recorded, 2, &state),
+            validate_recorded_answers(
+                &declaring(MayChoiceOption::Take, 11),
+                &recorded,
+                2,
+                None,
+                &state
+            ),
             Err(PinValidation::DivergesFromRecordedPeriod { slot: aim.clone() })
         );
         assert_eq!(
-            validate_recorded_answers(&declaring(MayChoiceOption::Take, 10), &[], 2, &state),
+            validate_recorded_answers(&declaring(MayChoiceOption::Take, 10), &[], 2, None, &state),
             Err(PinValidation::DivergesFromRecordedPeriod { slot: may })
         );
     }
@@ -3887,7 +3943,7 @@ mod tests {
                 replay: ReplayMode::Static,
                 key: tri_key(),
             };
-            validate_recorded_answers(&template, recorded, 2, &state)
+            validate_recorded_answers(&template, recorded, 2, None, &state)
         };
         let diverges = |index| Err(PinValidation::DivergesFromRecordedPeriod { slot: slot(index) });
 
