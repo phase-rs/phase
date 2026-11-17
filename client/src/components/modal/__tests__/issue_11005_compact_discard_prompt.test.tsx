@@ -15,7 +15,8 @@ import { ChoiceOverlay, ConfirmButton } from "../ChoiceOverlay.tsx";
 // "Game Choice" eyebrow, the "Discard" title, the instruction, the
 // "Discard 0 of 3" counter and a full-width footer confirm. The cards were left
 // about 120px. On a short screen the prompt now has one header line, the
-// instruction with a compact confirm that shows the count, and no footer; the
+// instruction (after the reason, where the title names one: Ward, Connive, a
+// cost) with a compact confirm that shows the count, and no footer; the
 // counter is a screen-reader-only live region while the confirm shows the same
 // count, and "Keep instead" sits in the toolbar row, whose controls take a 44px
 // touch height. The discard prompt on a taller screen, and every other
@@ -89,7 +90,7 @@ describe("the discard prompt on a landscape phone", () => {
     showPrompt(handState().discardToHandSize({ player: 0, count: 3, cards: HAND_IDS }).build());
 
     const header = overlayHeader();
-    expect(screen.getByRole("heading")).toHaveTextContent("Choose 3 cards to discard");
+    expect(screen.getByRole("heading").textContent).toBe("Choose 3 cards to discard");
     expect(screen.queryByText("Game Choice")).toBeNull();
     expect(screen.queryByText("Discard")).toBeNull();
 
@@ -159,34 +160,82 @@ describe("the discard prompt on a landscape phone", () => {
     expect(screen.getByRole("status")).toHaveClass("sr-only");
   });
 
+  // Each case names the taller screen's title by a pattern, which must be gone.
   it.each([
     {
       prompt: "an exact discard",
       gameState: () => handState().discardChoice({ player: 0, count: 3, cards: HAND_IDS }).build(),
-      title: "Discard 3 cards",
-      instruction: "Choose 3 cards to discard",
+      tallTitle: /^Discard 3 cards$/,
+      title: "Choose 3 cards to discard",
     },
     {
       prompt: "an up-to discard",
       gameState: () => handState().discardChoice({ player: 0, count: 3, cards: HAND_IDS, up_to: true }).build(),
-      title: "Discard up to 3 cards",
-      instruction: "Choose up to 3 cards to discard",
+      tallTitle: /^Discard up to 3 cards$/,
+      title: "Choose up to 3 cards to discard",
     },
-    {
-      prompt: "a discard cost",
-      gameState: () => handState().payCost({ player: 0, choices: HAND_IDS, count: 1, min_count: 1 }).build(),
-      title: "Discard as additional cost",
-      instruction: "Choose 1 card to discard",
-    },
-  ])("gives $prompt the same single header line", ({ gameState, title, instruction }) => {
-    showPrompt(gameState());
+  ])("gives $prompt, whose title only repeats the instruction, the instruction alone", (prompt) => {
+    showPrompt(prompt.gameState());
 
     const header = overlayHeader();
-    expect(screen.getByRole("heading")).toHaveTextContent(instruction);
-    expect(screen.queryByText(title)).toBeNull();
+    expect(screen.getByRole("heading").textContent).toBe(prompt.title);
+    expect(screen.queryByText(prompt.tallTitle)).toBeNull();
     expect(screen.queryByText("Game Choice")).toBeNull();
     expect(within(header).getByRole("button", { name: /^Discard \(/ })).toHaveClass("min-h-11");
     expect(screen.getAllByRole("button", { name: /^Discard \(/ })).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      prompt: "a Ward discard",
+      gameState: () => handState().wardDiscardChoice({ player: 0, cards: HAND_IDS }).build(),
+      tallTitle: /Discard a card$/,
+      title: "Ward: Choose 1 card to discard",
+    },
+    {
+      prompt: "a Connive discard",
+      gameState: () => handState().conniveDiscard({ player: 0, cards: HAND_IDS, count: 2 }).build(),
+      tallTitle: /Discard 2 cards$/,
+      title: "Connive: Choose 2 cards to discard",
+    },
+    {
+      prompt: "a spell's discard cost",
+      gameState: () => handState().payCost({ player: 0, choices: HAND_IDS, count: 1, min_count: 1 }).build(),
+      tallTitle: /^Discard as additional cost$/,
+      title: "Additional cost: Choose 1 card to discard",
+    },
+    {
+      prompt: "a mana ability's discard cost",
+      gameState: () =>
+        handState()
+          .payCost({
+            player: 0,
+            choices: HAND_IDS,
+            count: 1,
+            min_count: 1,
+            resume: { type: "ManaAbility", ManaAbility: {} },
+          })
+          .build(),
+      tallTitle: /^Discard for mana ability$/,
+      title: "Mana ability: Choose 1 card to discard",
+    },
+  ])("keeps the reason $prompt's title names, before the instruction", (prompt) => {
+    showPrompt(prompt.gameState());
+
+    const header = overlayHeader();
+    expect(screen.getByRole("heading").textContent).toBe(prompt.title);
+    expect(screen.queryByText(prompt.tallTitle)).toBeNull();
+    expect(screen.queryByText("Game Choice")).toBeNull();
+    expect(within(header).getByRole("button", { name: /^Discard \(/ })).toHaveClass("min-h-11");
+    expect(screen.getAllByRole("button", { name: /^Discard \(/ })).toHaveLength(1);
+  });
+
+  it("keeps the reason in keep mode, before the keep instruction", () => {
+    showPrompt(handState().conniveDiscard({ player: 0, cards: HAND_IDS, count: 2 }).build());
+
+    fireEvent.click(screen.getByRole("button", { name: "Keep instead" }));
+
+    expect(screen.getByRole("heading").textContent).toMatch(/^Connive: Choose 3 cards to keep/);
   });
 
   it("moves a discard cost's Cancel into the header line", () => {
@@ -198,6 +247,18 @@ describe("the discard prompt on a landscape phone", () => {
 
     fireEvent.click(cancel);
     expect(dispatchMock).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
+  it("offers no Cancel for a mana ability's discard cost, as on a taller screen", () => {
+    showPrompt(
+      handState()
+        .payCost({ player: 0, choices: HAND_IDS, count: 1, resume: { type: "ManaAbility", ManaAbility: {} } })
+        .build(),
+    );
+
+    // Positive guard: the single header line is drawn, with its confirm.
+    expect(within(overlayHeader()).getByRole("button", { name: "Discard (0/1)" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 
   it("keeps the selection and the sort when the phone turns upright", () => {
@@ -242,6 +303,14 @@ describe("the discard prompt on a taller screen", () => {
       expect(row).not.toHaveClass(className);
     }
     expect(screen.getByRole("button", { name: "Keep instead" }).parentElement).not.toBe(row);
+  });
+
+  it("keeps a reason in its own title, over the plain instruction", () => {
+    showPrompt(handState().wardDiscardChoice({ player: 0, cards: HAND_IDS }).build());
+
+    expect(screen.getByRole("heading").textContent).toMatch(/^Ward .*Discard a card$/);
+    expect(within(overlayHeader()).getByText("Choose 1 card to discard")).toBeInTheDocument();
+    expect(screen.queryByText(/^Ward: /)).toBeNull();
   });
 });
 

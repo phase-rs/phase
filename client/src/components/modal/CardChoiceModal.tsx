@@ -403,6 +403,7 @@ export function CardChoiceModal() {
           title={t("cardChoice.discard.titleConnive", {
             count: waitingFor.data.count,
           })}
+          reason={t("cardChoice.discard.reason.connive")}
         />
       );
     case "DiscardChoice":
@@ -438,6 +439,7 @@ export function CardChoiceModal() {
           key={waitingFor.data.cards.join(",")}
           data={{ ...waitingFor.data, count: 1 }}
           title={t("cardChoice.discard.titleWard")}
+          reason={t("cardChoice.discard.reason.ward")}
         />
       );
     case "WardSacrificeChoice":
@@ -2551,6 +2553,11 @@ function PayCostDispatch({ data, promptKey }: { data: PayCost["data"]; promptKey
               ? t("cardChoice.discard.titleManaAbility")
               : t("cardChoice.discard.titleAdditionalCost")
           }
+          reason={
+            isManaAbility
+              ? t("cardChoice.discard.reason.manaAbility")
+              : t("cardChoice.discard.reason.additionalCost")
+          }
           canCancel={!isManaAbility}
         />
       );
@@ -2755,6 +2762,7 @@ function CollectEvidenceModal({
 function DiscardModal({
   data,
   title,
+  reason,
   canCancel = false,
 }: {
   data: { cards: ObjectId[]; count: number } & {
@@ -2762,6 +2770,12 @@ function DiscardModal({
     unless_filter?: TargetFilter;
   };
   title?: string;
+  /**
+   * Why the prompt asks for a discard (Ward, Connive, a cost), when its title
+   * says more than the instruction. A short screen drops the title and puts
+   * the reason before the instruction instead.
+   */
+  reason?: string;
   canCancel?: boolean;
 }) {
   const { t } = useTranslation("game");
@@ -2874,12 +2888,16 @@ function DiscardModal({
   // from the cards, and the standard layout's title, instruction, counter and
   // footer confirm each repeat the discard. One header line carries the
   // instruction and a confirm that shows the count, and "Keep instead" joins
-  // the toolbar row. The instruction stands in for every discard prompt's
-  // title, including a title that names a reason (Ward, Connive, a cost).
+  // the toolbar row. The instruction stands in for the title, keeping the
+  // reason a title names (Ward, Connive, a cost) in front of it.
   if (isCompactHeight) {
     return (
       <ChoiceOverlay
-        title={subtitle}
+        title={
+          reason
+            ? t("cardChoice.discard.instructionWithReason", { reason, instruction: subtitle })
+            : subtitle
+        }
         headerActions={
           <>
             {canCancel && (

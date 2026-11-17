@@ -593,6 +593,13 @@
       "titleSplit": "分配剩余的牌"
     },
     "discard": {
+      "instructionWithReason": "{{reason}}：{{instruction}}",
+      "reason": {
+        "additionalCost": "额外费用",
+        "connive": "筹谋",
+        "manaAbility": "法术力异能",
+        "ward": "守护"
+      },
       "subtitleExact_one": "选择{{count}}张牌弃掉",
       "subtitleExact_other": "选择{{count}}张牌弃掉",
       "subtitleKeep_one": "选择1张牌保留 —— 其余的弃掉",

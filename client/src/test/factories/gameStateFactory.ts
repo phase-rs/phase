@@ -34,6 +34,8 @@ type TriggerTargetSelectionWaitingFor = Extract<
 type HeroEventChoiceWaitingFor = Extract<WaitingFor, { type: "HeroEventChoice" }>;
 type DiscardToHandSizeWaitingFor = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
 type DiscardChoiceWaitingFor = Extract<WaitingFor, { type: "DiscardChoice" }>;
+type ConniveDiscardWaitingFor = Extract<WaitingFor, { type: "ConniveDiscard" }>;
+type WardDiscardChoiceWaitingFor = Extract<WaitingFor, { type: "WardDiscardChoice" }>;
 type PayCostWaitingFor = Extract<WaitingFor, { type: "PayCost" }>;
 type ChooseXValueWaitingFor = Extract<WaitingFor, { type: "ChooseXValue" }>;
 type PayAmountChoiceWaitingFor = Extract<WaitingFor, { type: "PayAmountChoice" }>;
@@ -413,6 +415,33 @@ export const discardChoiceWaitingForFactory =
       cards: [],
       source_id: 1,
       effect_kind: "Discard",
+    },
+  }));
+
+export class ConniveDiscardWaitingForFactory extends PlayerWaitingForFactory<ConniveDiscardWaitingFor> {}
+
+export const conniveDiscardWaitingForFactory =
+  ConniveDiscardWaitingForFactory.define((): ConniveDiscardWaitingFor => ({
+    type: "ConniveDiscard",
+    data: {
+      player: 0,
+      conniver_id: 1,
+      source_id: 1,
+      cards: [],
+      count: 1,
+    },
+  }));
+
+export class WardDiscardChoiceWaitingForFactory extends PlayerWaitingForFactory<WardDiscardChoiceWaitingFor> {}
+
+export const wardDiscardChoiceWaitingForFactory =
+  WardDiscardChoiceWaitingForFactory.define((): WardDiscardChoiceWaitingFor => ({
+    type: "WardDiscardChoice",
+    data: {
+      player: 0,
+      cards: [],
+      pending_effect: {},
+      remaining: 1,
     },
   }));
 
@@ -816,6 +845,14 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     return this.variant(discardChoiceWaitingForFactory.withData(data).build());
   }
 
+  conniveDiscard(data: Partial<ConniveDiscardWaitingFor["data"]> = {}) {
+    return this.variant(conniveDiscardWaitingForFactory.withData(data).build());
+  }
+
+  wardDiscardChoice(data: Partial<WardDiscardChoiceWaitingFor["data"]> = {}) {
+    return this.variant(wardDiscardChoiceWaitingForFactory.withData(data).build());
+  }
+
   payCost(data: Partial<PayCostWaitingFor["data"]> = {}) {
     return this.variant(payCostWaitingForFactory.withData(data).build());
   }
@@ -1119,6 +1156,14 @@ export class GameStateFactory extends Factory<GameState> {
 
   discardChoice(data: Partial<DiscardChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.discardChoice(data).build());
+  }
+
+  conniveDiscard(data: Partial<ConniveDiscardWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.conniveDiscard(data).build());
+  }
+
+  wardDiscardChoice(data: Partial<WardDiscardChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.wardDiscardChoice(data).build());
   }
 
   payCost(data: Partial<PayCostWaitingFor["data"]> = {}) {
