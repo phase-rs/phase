@@ -4782,6 +4782,7 @@ fn walk_ability(
         target_reads: _, // origin of `Target` reads; the reads are profiled on condition/effect
         entry_onset: _,  // CR 611.2e onset tag, no read or write
         sibling_condition: _, // replication marker, no read/write effect
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         replacement_applied: _,
         parent_target_missing_reason: _,
         activation_cost_reduction: _,
@@ -4931,6 +4932,7 @@ fn walk_definition(
         entry_onset: _,  // CR 611.2e onset tag, no read or write
         iteration_kind_binding: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker

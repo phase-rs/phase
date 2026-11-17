@@ -8674,6 +8674,10 @@ pub enum TargetFilter {
     /// `ScopedPlayer`'s sentinel role for "each player's library". It never survives into
     /// a finished `AbilityDefinition`: `lift_distributive_exile_top_scope` rewrites it to
     /// `Controller` and stamps `AbilityDefinition.player_scope = Some(PlayerFilter::Opponent)`.
+    ///
+    /// THIRD ROLE (CR 118.12a): as `UnlessPayModifier.payer` it is the "unless any opponent
+    /// pays ..." poll (Sword-Point Diplomacy) — each opponent in APNAP order, the first to
+    /// pay prevents the effect, mirroring `AllPlayers` for "any player pays".
     Opponent,
     SelfRef,
     /// CR 201.5a: The specific object that GRANTED the ability this filter lives
@@ -9071,10 +9075,10 @@ pub enum TargetFilter {
     /// enchant ability (defined per CR 303.4a), and CR 608.2c requires reading
     /// the whole sentence to bind each anaphor to its true referent at resolution.
     ///
-    /// Never persisted as a `ResolvedAbility` field: it is concretized eagerly,
-    /// in place, to `SpecificObject { id }` in the `forward_result` block of
-    /// `effects/mod.rs`, at the one point where the pre-rebind `source_id` and
-    /// the about-to-be-mutated sub-ability clone coexist.
+    /// A `GenericEffect` static's `affected` is concretized to `SpecificObject { id }`
+    /// in the `forward_result` block of `effects/mod.rs`; an `Attach` attachment
+    /// stays `OriginalSource` and resolves live against the trigger source's
+    /// incarnation (CR 400.7).
     ///
     /// Unlike the current ability's primary `SelfRef` or a moved-object
     /// `ParentTarget`, this pins the pre-rebind producer for legacy grants.
@@ -37295,6 +37299,11 @@ pub struct AbilityDefinition {
     /// false. See `SiblingCondition`. `Dependent` (default) preserves today's
     /// behavior; `ReplicatedOrBranch` marks per-item keyword-list replication.
     pub sibling_condition: SiblingCondition,
+    /// CR 608.2c: whether this node is its own instruction or a further target
+    /// slot of the instruction its preceding sibling began. See
+    /// [`InstructionJoin`]. `Own` (default) for every node a list splitter did
+    /// not produce.
+    pub instruction_join: InstructionJoin,
     /// CR 608.2c + CR 614.1a: see [`UnloweredGuard`]. Always `None` on a finished parse.
     pub unlowered_guard: Option<UnloweredGuard>,
     /// Typed intent for SearchLibrary clauses that exile the found card face down.
@@ -37688,6 +37697,8 @@ struct AbilityDefinitionRepr<'a> {
     iteration_kind_binding: &'a Option<IterationKindBinding>,
     #[serde(skip_serializing_if = "SiblingCondition::is_default")]
     sibling_condition: SiblingCondition,
+    #[serde(skip_serializing_if = "InstructionJoin::is_own")]
+    instruction_join: InstructionJoin,
     #[serde(skip_serializing_if = "Option::is_none")]
     unlowered_guard: &'a Option<UnloweredGuard>,
     #[serde(skip_serializing_if = "ExileConcealment::is_public")]
@@ -37750,6 +37761,7 @@ impl Serialize for AbilityDefinition {
             entry_onset,
             iteration_kind_binding,
             sibling_condition,
+            instruction_join,
             unlowered_guard,
             face_down_in_exile,
             granting_object,
@@ -37803,6 +37815,7 @@ impl Serialize for AbilityDefinition {
             entry_onset: *entry_onset,
             iteration_kind_binding,
             sibling_condition: *sibling_condition,
+            instruction_join: *instruction_join,
             unlowered_guard,
             face_down_in_exile: *face_down_in_exile,
             granting_object,
@@ -37936,6 +37949,8 @@ struct AbilityDefinitionDe {
     #[serde(default)]
     sibling_condition: SiblingCondition,
     #[serde(default)]
+    instruction_join: InstructionJoin,
+    #[serde(default)]
     unlowered_guard: Option<UnloweredGuard>,
     #[serde(default)]
     face_down_in_exile: ExileConcealment,
@@ -38002,6 +38017,7 @@ impl<'de> Deserialize<'de> for AbilityDefinition {
             entry_onset: de.entry_onset,
             iteration_kind_binding: de.iteration_kind_binding,
             sibling_condition: de.sibling_condition,
+            instruction_join: de.instruction_join,
             unlowered_guard: de.unlowered_guard,
             face_down_in_exile: de.face_down_in_exile,
             granting_object: de.granting_object,
@@ -38165,6 +38181,32 @@ impl SiblingCondition {
     /// `skip_serializing_if` predicate — the default needs no JSON byte.
     pub fn is_default(cond: &Self) -> bool {
         matches!(cond, Self::Dependent)
+    }
+}
+
+/// CR 608.2c: whether a chained node is its own instruction or one slot of the
+/// target list its previous sibling opened. "Destroy target artifact, target
+/// creature, target enchantment, and target land" (Decimate) is one instruction
+/// lowered as four chained `Destroy` nodes; every node after the first is a
+/// `ListSlot`. Minted only by the parser's list splitters
+/// (`multi_target_list::try_split_multi_target_list` and the verbless conjunct
+/// of `try_split_targeted_compound`), never by a "then" chain, which is a
+/// sequence of separate instructions. Orthogonal to `SubAbilityLink`, whose
+/// `ContinuationStep` covers both "," and "then" joins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum InstructionJoin {
+    /// The node is an instruction of its own.
+    #[default]
+    Own,
+    /// The node is a further target slot of the instruction its immediately
+    /// preceding sibling began (same verb, same sentence).
+    ListSlot,
+}
+
+impl InstructionJoin {
+    /// `skip_serializing_if` predicate — the default needs no JSON byte.
+    pub fn is_own(join: &Self) -> bool {
+        matches!(join, Self::Own)
     }
 }
 
@@ -38357,6 +38399,7 @@ impl AbilityDefinition {
             entry_onset: ContinuousEffectOnset::WhenFollowed,
             iteration_kind_binding: None,
             sibling_condition: SiblingCondition::Dependent,
+            instruction_join: InstructionJoin::Own,
             unlowered_guard: None,
             face_down_in_exile: ExileConcealment::Public,
             granting_object: None,
@@ -41513,6 +41556,9 @@ pub struct TriggerDefinition {
     pub damage_kind: DamageKindFilter,
     #[serde(default)]
     pub secondary: bool,
+    /// CR 805.4d: on a `TriggerMode::Phase` trigger, the per-player scope of its step ("each
+    /// player's", "each opponent's", an enchanted player's): per-player firing is decided by
+    /// the typed scope the parser records, never inferred from effect shape.
     #[serde(default)]
     pub valid_target: Option<TargetFilter>,
     /// CR 115.1: The player leaf of a becomes-target trigger's SUBJECT (e.g. the

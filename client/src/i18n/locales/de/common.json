@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "Combo-Detektor (experimentell)",
-    "title": "Unendliche Schleifen erkennen: Pflichtschleifen automatisch beenden und ∞-Ressourcen anzeigen (standardmäßig aus)",
+    "title": "Unendliche Schleifen erkennen: Pflichtschleifen automatisch beenden, Abkürzungen für Schleifen anbieten, die ein Spieler steuert, und ∞-Ressourcen anzeigen (standardmäßig aus)",
     "off": "Aus",
     "interactive": "Interaktiv"
   },
