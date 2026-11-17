@@ -45,8 +45,8 @@ use crate::types::format::ZoneScope;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, ContinuationXAnnouncement,
     CreatedTokenSeatsHandoff, DayNight, DiscardBatchCursor, GameState, LKISnapshot,
-    ManaAbilityResume, MayTriggerAutoChoiceKey, PendingContinuation, PendingCostMoveResume,
-    PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
+    ManaAbilityResume, MayTriggerAutoChoiceKey, MemberOrderPurpose, PendingContinuation,
+    PendingCostMoveResume, PendingDiscardBatchCompletion, PendingPlayerScopeSacrificeChoice,
     PendingPlayerScopeSacrificeCompletion, PendingPlayerScopeSacrificeFollowUp,
     PendingPlayerScopeTail, RepeatIterationChoice, RepeatIterationMovement, RepeatProcessRequest,
     RepeatUntilIterationWitness, RepeatUntilStopWitness, ResolutionOptionalPaymentOption,
@@ -3107,7 +3107,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             iterated_counter_kinds,
             next_iteration,
             total_iterations,
-            copy_order_fixed,
+            order_fixed,
         } = pending;
         // CR 608.2c + CR 608.2d (E1′): a per-object player choice — members
         // snapshotted and the repeated process the choice alone. The
@@ -3127,13 +3127,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
             if game_has_ended(state) {
                 return;
             }
-            if open_spell_copy_order_choice(
-                state,
-                &ability,
-                &tracked_members,
-                iteration,
-                copy_order_fixed,
-            ) {
+            if open_member_order_choice(state, &ability, &tracked_members, iteration, order_fixed) {
                 let boundary = state.resolution_stack.capture_child_boundary();
                 park_repeat_for_after_current_iteration(
                     state,
@@ -3143,7 +3137,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         iterated_counter_kinds: iterated_counter_kinds.clone(),
                         next_iteration: iteration,
                         total_iterations,
-                        copy_order_fixed,
+                        order_fixed,
                     },
                     boundary,
                 );
@@ -3222,7 +3216,7 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             iterated_counter_kinds: iterated_counter_kinds.clone(),
                             next_iteration: next,
                             total_iterations,
-                            copy_order_fixed,
+                            order_fixed,
                         },
                         stack_depth_before_iteration,
                     );
@@ -3301,46 +3295,73 @@ fn drain_active_repeat_for(state: &mut GameState, events: &mut Vec<GameEvent>) {
     }
 }
 
-/// CR 405.3 + CR 707.10: before `iteration` of a batch copy loop runs, let the
-/// copies' controller pick which spell supplies the next copy, while two or
-/// more spells still have copies to make. Returns whether it asked.
-fn open_spell_copy_order_choice(
+/// CR 608.2f + CR 405.3 + CR 707.10: before `iteration` of a member-driven loop
+/// runs, let the loop's controller pick which member is processed next, while
+/// two or more members remain. Covers a batch of spell copies (the chosen spell
+/// supplies the next copy) and an instruction loop that pauses for player input
+/// (Sword-Point Diplomacy's per-card unless payment, whose ruling states "You
+/// choose the order to perform this process for the cards"). Returns whether it
+/// asked.
+fn open_member_order_choice(
     state: &mut GameState,
     ability: &ResolvedAbility,
     tracked_members: &[crate::types::identifiers::ObjectId],
     iteration: usize,
-    copy_order_fixed: Option<usize>,
+    order_fixed: Option<usize>,
 ) -> bool {
-    match copy_order_fixed {
-        Some(fixed) if iteration >= fixed => {}
-        _ => return false,
+    let Some(fixed_through) = order_fixed else {
+        return false;
+    };
+    if iteration < fixed_through {
+        return false;
     }
     let mut choices: Vec<crate::types::identifiers::ObjectId> = Vec::new();
-    for &spell in tracked_members.get(iteration..).unwrap_or_default() {
-        if !choices.contains(&spell) {
-            choices.push(spell);
+    for &member in tracked_members.get(iteration..).unwrap_or_default() {
+        if !choices.contains(&member) {
+            choices.push(member);
         }
     }
     if choices.len() < 2 {
         return false;
     }
-    let mut bound = ability.clone();
-    rebind_member_driven_parent_target(&mut bound, choices[0]);
-    state.waiting_for = WaitingFor::SpellCopyOrderChoice {
-        player: copy_spell::resolve_copy_controller(state, &bound),
+    let purpose = member_order_purpose(ability);
+    let player = match purpose {
+        MemberOrderPurpose::SpellCopies => {
+            let mut bound = ability.clone();
+            rebind_member_driven_parent_target(&mut bound, choices[0]);
+            copy_spell::resolve_copy_controller(state, &bound)
+        }
+        // CR 608.2f: the controller of the spell or ability performing the
+        // repeated instruction chooses the order those instructions run in.
+        MemberOrderPurpose::InstructionLoop => ability.controller,
+    };
+    state.waiting_for = WaitingFor::MemberOrderChoice {
+        player,
         source_id: ability.source_id,
         choices,
+        purpose,
     };
     true
 }
 
-/// CR 405.3 + CR 707.10: the answer to `WaitingFor::SpellCopyOrderChoice` —
-/// move `spell`'s next copy to the front of the active batch loop's remaining
-/// copies and fix the order through it. Returns false when `spell` has no copy
-/// left to make there.
-pub(crate) fn order_next_spell_copy(
+/// CR 608.2f: the process a member-driven loop repeats is read from its head
+/// effect. A batch loop repeats `CopySpell` once per member; any other head is
+/// an instruction loop whose iterations pause for player input.
+fn member_order_purpose(ability: &ResolvedAbility) -> MemberOrderPurpose {
+    if matches!(ability.effect, Effect::CopySpell { .. }) {
+        MemberOrderPurpose::SpellCopies
+    } else {
+        MemberOrderPurpose::InstructionLoop
+    }
+}
+
+/// CR 608.2f + CR 405.3: the answer to `WaitingFor::MemberOrderChoice` — move
+/// the chosen member to the front of the active loop's remaining members and
+/// fix the order through it, so no later iteration re-asks about it. Returns
+/// false when `member` has no iteration left to run there.
+pub(crate) fn order_next_member(
     state: &mut GameState,
-    spell: crate::types::identifiers::ObjectId,
+    member: crate::types::identifiers::ObjectId,
 ) -> bool {
     let Some(frame) = state.active_repeat_for_mut() else {
         return false;
@@ -3349,13 +3370,13 @@ pub(crate) fn order_next_spell_copy(
     let Some(position) = frame
         .tracked_members
         .get(next..)
-        .and_then(|rest| rest.iter().position(|member| *member == spell))
+        .and_then(|rest| rest.iter().position(|candidate| *candidate == member))
         .map(|offset| next + offset)
     else {
         return false;
     };
     frame.tracked_members[next..=position].rotate_right(1);
-    frame.copy_order_fixed = Some(next + 1);
+    frame.order_fixed = Some(next + 1);
     true
 }
 
@@ -5749,7 +5770,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::BeholdChoice { .. }
             // CR 608.2c: riders run after the choice.
             | WaitingFor::EmpowerJaceChoice { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
     )
 }
 
@@ -19115,15 +19136,10 @@ fn pin_member_loop_tail_to_set(ability: &mut ResolvedAbility, set_id: TrackedSet
     if sub.sub_link != SubAbilityLink::SequentialSibling {
         return;
     }
-    let sentinel = TrackedSetId(0);
-    if let Effect::ChangeZoneAll {
-        target: TargetFilter::TrackedSet { id },
-        ..
-    } = &mut sub.effect
-    {
-        if *id == sentinel {
-            *id = set_id;
-        }
+    if let Effect::ChangeZoneAll { target, .. } = &mut sub.effect {
+        // Single authority for rewriting the tracked-set sentinel inside a
+        // filter (recursing And/Or/Not), shared with the delayed-trigger binder.
+        target.rebind_tracked_set_sentinel(set_id);
     }
 }
 
@@ -20445,7 +20461,7 @@ fn drive_repeat_for_outermost(
                         iterated_counter_kinds: Vec::new(),
                         next_iteration,
                         total_iterations: base_iterations,
-                        copy_order_fixed: None,
+                        order_fixed: None,
                     },
                     stack_depth_before_iteration,
                 );
@@ -27473,21 +27489,26 @@ fn resolve_chain_body(
                     // through resolve_ability_chain so its individual bound
                     // target reaches the payment gate before the effect resolves.
                     || ((member_driven || kind_driven) && effective.unless_pay.is_some()));
-            // CR 405.3 + CR 707.10: a batch of copies of several spells is
-            // ordered by its controller, one copy at a time.
-            let copy_order_fixed = per_member_copy_counts.then_some(0);
+            // CR 608.2f + CR 405.3 + CR 707.10: a loop whose iterations pause
+            // for player input is ordered by its controller, one member at a
+            // time — a batch of copies of several spells, and a per-member
+            // unless-payment instruction loop (Sword-Point Diplomacy's ruling:
+            // "You choose the order to perform this process for the cards").
+            let order_fixed = (per_member_copy_counts
+                || has_tracked_set_unless_member_loop(effective))
+            .then_some(0);
             while iteration < iterations {
                 // CR 104.1: a prior iteration ended the game; the counted loop
                 // must not resolve its effect again.
                 if game_has_ended(state) {
                     break;
                 }
-                if open_spell_copy_order_choice(
+                if open_member_order_choice(
                     state,
                     effective,
                     &iter_tracked_members,
                     iteration,
-                    copy_order_fixed,
+                    order_fixed,
                 ) {
                     let mut resume_ability = effective.clone();
                     resume_ability.repeat_for = None;
@@ -27502,7 +27523,7 @@ fn resolve_chain_body(
                             iterated_counter_kinds: iterated_counter_kinds.clone(),
                             next_iteration: iteration,
                             total_iterations: iterations,
-                            copy_order_fixed,
+                            order_fixed,
                         },
                         boundary,
                     );
@@ -27727,7 +27748,7 @@ fn resolve_chain_body(
                                 iterated_counter_kinds: iterated_counter_kinds.clone(),
                                 next_iteration,
                                 total_iterations: iterations,
-                                copy_order_fixed,
+                                order_fixed,
                             },
                             stack_depth_before_iteration,
                         );
@@ -53443,7 +53464,7 @@ mod tests {
             iterated_counter_kinds: vec![],
             next_iteration: 1,
             total_iterations: 2,
-            copy_order_fixed: None,
+            order_fixed: None,
         };
 
         // An owned repeat template on top.
@@ -53586,7 +53607,7 @@ mod tests {
             iterated_counter_kinds: vec![],
             next_iteration: 1,
             total_iterations: 3,
-            copy_order_fixed: None,
+            order_fixed: None,
         });
 
         let mut events = Vec::new();
@@ -70252,7 +70273,7 @@ mod entry_observation_settlement_tests {
             iterated_counter_kinds: Vec::new(),
             next_iteration: 1,
             total_iterations: 2,
-            copy_order_fixed: None,
+            order_fixed: None,
         };
         let mut state = GameState::new_two_player(3);
         state
@@ -72084,7 +72105,7 @@ mod resolution_progress_contract_tests {
             iterated_counter_kinds: vec![],
             next_iteration: 1,
             total_iterations: 3,
-            copy_order_fixed: None,
+            order_fixed: None,
         });
         let mut events = Vec::new();
         drain_active_repeat_for(&mut state, &mut events);

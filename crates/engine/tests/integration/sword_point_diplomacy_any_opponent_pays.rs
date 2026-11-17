@@ -3,13 +3,17 @@
 //!
 //! CR 118.12a: "[effect] unless [player] pays [cost]" — the named player may pay,
 //! and if they do the effect doesn't happen. CR 608.2c: "for each of those cards"
-//! runs the instruction once per revealed card. CR 101.4: with several opponents,
-//! each chooses in turn order and the first to pay prevents the effect.
+//! runs the instruction once per revealed card. CR 608.2f: the resolving
+//! controller chooses the relative order of those instructions, so the cards
+//! are ordered before any opponent is polled (the card's ruling: "You choose
+//! the order to perform this process for the cards"). CR 101.4: with several
+//! opponents, each chooses in turn order and the first to pay prevents the
+//! effect.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{MemberOrderPurpose, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -62,6 +66,34 @@ fn setup(player_count: u8) -> Setup {
     }
 }
 
+/// CR 608.2f: before any payment prompt, the controlling player orders the
+/// cards. Pick the first member of `picks` still offered, else the first
+/// offered member (the library order), until the payments begin.
+fn choose_processing_order(runner: &mut GameRunner, picks: &[ObjectId]) {
+    while let WaitingFor::MemberOrderChoice {
+        player,
+        choices,
+        purpose,
+        ..
+    } = runner.state().waiting_for.clone()
+    {
+        assert_eq!(player, P0, "the resolving controller orders the cards");
+        assert_eq!(
+            purpose,
+            MemberOrderPurpose::InstructionLoop,
+            "a per-card instruction loop, not a spell-copy batch"
+        );
+        let card = picks
+            .iter()
+            .copied()
+            .find(|id| choices.contains(id))
+            .unwrap_or(choices[0]);
+        runner
+            .act(GameAction::SelectCards { cards: vec![card] })
+            .expect("submit the next card to process");
+    }
+}
+
 fn prompted_card(runner: &GameRunner) -> (PlayerId, ObjectId) {
     match &runner.state().waiting_for {
         WaitingFor::UnlessPayment {
@@ -74,6 +106,21 @@ fn prompted_card(runner: &GameRunner) -> (PlayerId, ObjectId) {
         ),
         other => panic!("expected WaitingFor::UnlessPayment, got {other:?}"),
     }
+}
+
+/// CR 608.2f: a completed payment sequence must leave the stack empty and hand
+/// priority back — `advance_until_stack_empty` also stops at an unanswered
+/// prompt, so zone assertions alone would accept a stranded continuation.
+fn assert_resolution_finished(runner: &GameRunner) {
+    assert!(
+        runner.state().stack.is_empty(),
+        "resolution must finish with an empty stack"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must return priority, got {:?}",
+        runner.state().waiting_for
+    );
 }
 
 fn answer(runner: &mut GameRunner, pay: bool) {
@@ -99,6 +146,7 @@ fn opponent_declines_every_card_goes_to_hand() {
         deep_card,
     } = setup(2);
     for _ in 0..3 {
+        choose_processing_order(&mut runner, &[]);
         let (player, card) = prompted_card(&runner);
         assert_eq!(player, P1);
         assert!(
@@ -108,6 +156,7 @@ fn opponent_declines_every_card_goes_to_hand() {
         answer(&mut runner, false);
     }
     runner.advance_until_stack_empty();
+    assert_resolution_finished(&runner);
     assert!(zones(&runner, &revealed).iter().all(|z| *z == Zone::Hand));
     assert_eq!(runner.state().objects[&deep_card].zone, Zone::Library);
     assert_eq!(runner.life(P1), 20);
@@ -121,6 +170,7 @@ fn opponent_pays_every_card_is_exiled() {
         deep_card,
     } = setup(2);
     for _ in 0..3 {
+        choose_processing_order(&mut runner, &[]);
         let (player, card) = prompted_card(&runner);
         assert_eq!(player, P1);
         assert!(
@@ -130,6 +180,7 @@ fn opponent_pays_every_card_is_exiled() {
         answer(&mut runner, true);
     }
     runner.advance_until_stack_empty();
+    assert_resolution_finished(&runner);
     assert!(zones(&runner, &revealed).iter().all(|z| *z == Zone::Exile));
     assert_eq!(runner.state().objects[&deep_card].zone, Zone::Library);
     assert_eq!(runner.life(P1), 20 - 9);
@@ -146,6 +197,7 @@ fn payer_view_names_the_card_each_prompt_decides() {
     } = setup(2);
     let mut seen = Vec::new();
     for _ in 0..3 {
+        choose_processing_order(&mut runner, &[]);
         let (_, card) = prompted_card(&runner);
         let view = filter_state_for_viewer(runner.state(), P1);
         let WaitingFor::UnlessPayment {
@@ -160,6 +212,8 @@ fn payer_view_names_the_card_each_prompt_decides() {
         seen.push(card);
         answer(&mut runner, false);
     }
+    runner.advance_until_stack_empty();
+    assert_resolution_finished(&runner);
     seen.sort();
     let mut expected = revealed.clone();
     expected.sort();
@@ -179,21 +233,25 @@ fn mixed_answers_split_cards_between_hand_and_exile() {
         deep_card,
     } = setup(2);
     // First card: pay -> should be exiled
+    choose_processing_order(&mut runner, &[]);
     let (_, paid_card) = prompted_card(&runner);
     assert!(revealed.contains(&paid_card));
     answer(&mut runner, true);
     // Second card: decline -> should go to hand
+    choose_processing_order(&mut runner, &[]);
     let (_, declined_card1) = prompted_card(&runner);
     assert!(revealed.contains(&declined_card1));
     assert_ne!(declined_card1, paid_card);
     answer(&mut runner, false);
     // Third card: decline -> should go to hand
+    choose_processing_order(&mut runner, &[]);
     let (_, declined_card2) = prompted_card(&runner);
     assert!(revealed.contains(&declined_card2));
     assert_ne!(declined_card2, paid_card);
     assert_ne!(declined_card2, declined_card1);
     answer(&mut runner, false);
     runner.advance_until_stack_empty();
+    assert_resolution_finished(&runner);
     // Verify card identity: paid card exiled, declined cards in hand
     assert_eq!(runner.state().objects[&paid_card].zone, Zone::Exile);
     assert_eq!(runner.state().objects[&declined_card1].zone, Zone::Hand);
@@ -213,6 +271,7 @@ fn second_opponent_may_pay_after_first_declines() {
         deep_card,
     } = setup(3);
     // First card: P1 declines, then P2 is asked about the same card and pays.
+    choose_processing_order(&mut runner, &[]);
     let (player, paid_card) = prompted_card(&runner);
     assert_eq!(player, P1);
     assert!(revealed.contains(&paid_card));
@@ -226,6 +285,7 @@ fn second_opponent_may_pay_after_first_declines() {
     // Each remaining card: a fresh poll — P1 then P2, both decline.
     let mut kept = Vec::new();
     for _ in 0..2 {
+        choose_processing_order(&mut runner, &[]);
         let (player, card) = prompted_card(&runner);
         assert_eq!(
             player, P1,
@@ -242,6 +302,7 @@ fn second_opponent_may_pay_after_first_declines() {
         kept.push(card);
     }
     runner.advance_until_stack_empty();
+    assert_resolution_finished(&runner);
     assert_eq!(runner.state().objects[&paid_card].zone, Zone::Exile);
     for card in &kept {
         assert_eq!(runner.state().objects[card].zone, Zone::Hand);
@@ -249,4 +310,45 @@ fn second_opponent_may_pay_after_first_declines() {
     assert_eq!(runner.state().objects[&deep_card].zone, Zone::Library);
     assert_eq!(runner.life(P1), 20);
     assert_eq!(runner.life(P2), 17);
+}
+
+/// CR 608.2f: the controller chooses the order the per-card process runs in, and
+/// the payment prompts and movements follow that chosen order through every
+/// pause. Processing the bottom-most revealed card first is the reverse of the
+/// library order, so a library-order implementation cannot pass.
+#[test]
+fn controller_chooses_the_card_processing_order() {
+    let Setup {
+        mut runner,
+        revealed,
+        deep_card,
+    } = setup(2);
+    // `revealed` is deepest-first: revealed[0] is the last of the three in
+    // library order. Choose that one first, then revealed[1].
+    choose_processing_order(&mut runner, &[revealed[0], revealed[1]]);
+    let (player, first) = prompted_card(&runner);
+    assert_eq!(player, P1);
+    assert_eq!(first, revealed[0], "the chosen card is processed first");
+    assert_eq!(runner.life(P1), 20, "no payment before the order choice");
+    answer(&mut runner, true);
+
+    choose_processing_order(&mut runner, &[revealed[1]]);
+    let (player, second) = prompted_card(&runner);
+    assert_eq!(player, P1);
+    assert_eq!(second, revealed[1], "the next chosen card follows");
+    answer(&mut runner, false);
+
+    // The last member has no ordering choice left.
+    let (player, third) = prompted_card(&runner);
+    assert_eq!(player, P1);
+    assert_eq!(third, revealed[2], "the remaining card is processed last");
+    answer(&mut runner, false);
+
+    runner.advance_until_stack_empty();
+    assert_resolution_finished(&runner);
+    assert_eq!(runner.state().objects[&revealed[0]].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&revealed[1]].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&revealed[2]].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&deep_card].zone, Zone::Library);
+    assert_eq!(runner.life(P1), 17);
 }

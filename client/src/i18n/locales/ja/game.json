@@ -1853,6 +1853,10 @@
       "title": "コピーの順番",
       "subtitle": "次にコピーをスタックに置く呪文を選ぶ"
     },
+    "memberOrder": {
+      "title": "カードの順序",
+      "subtitle": "次に処理するカードを選んでください"
+    },
     "collectEvidence": {
       "title": "証拠収集",
       "subtitle": "あなたの墓地から、マナ総量の合計が{{minimum}}以上になるようにカードを追放"

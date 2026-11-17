@@ -1926,8 +1926,8 @@ pub fn fallback_action(
         WaitingFor::EmpowerJaceChoice { choices, .. } => choices
             .first()
             .map(|&id| GameAction::SelectCards { cards: vec![id] }),
-        // CR 405.3 + CR 707.10: any offered spell may supply the next copy.
-        WaitingFor::SpellCopyOrderChoice { choices, .. } => choices
+        // CR 608.2f + CR 405.3: any offered member may be processed next.
+        WaitingFor::MemberOrderChoice { choices, .. } => choices
             .first()
             .map(|&id| GameAction::SelectCards { cards: vec![id] }),
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice — keep the first

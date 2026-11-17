@@ -82,6 +82,7 @@ mod armored_kincaller_or_condition;
 mod ashaya_nontoken_lands;
 mod ashes_of_the_fallen_owner_scope_5864;
 mod ashling_delayed_sacrifice_unless_pay;
+mod ashnods_cylix_exile_the_rest;
 mod aspect_of_wolf_per_axis_xy;
 mod atarkas_command_sequential_mode_after_decline;
 mod athreos_god_of_passage_targeted_opponent_unless_pay;

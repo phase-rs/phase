@@ -4143,13 +4143,14 @@ pub struct PendingRepeatIteration {
     pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
     pub next_iteration: usize,
     pub total_iterations: usize,
-    /// CR 405.3 + CR 707.10: set on a loop that puts copies of several spells
-    /// on the stack as one batch. `Some(n)`: the controller has already fixed
-    /// the order of `tracked_members[..n]`, and picks the spell for iteration
-    /// `n` before it runs (`WaitingFor::SpellCopyOrderChoice`). `None` for
-    /// every other loop.
+    /// CR 608.2f + CR 405.3: set on a loop whose iterations pause for player
+    /// input, so its controller orders them — a batch of copies of several
+    /// spells (CR 707.10), or a per-member instruction loop that pauses on an
+    /// unless payment. `Some(n)`: the controller has already fixed the order of
+    /// `tracked_members[..n]`, and picks the member for iteration `n` before it
+    /// runs (`WaitingFor::MemberOrderChoice`). `None` for every other loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub copy_order_fixed: Option<usize>,
+    pub order_fixed: Option<usize>,
 }
 
 /// CR 705.2: The controller-relevant result of the most recent coin flip
@@ -19208,6 +19209,25 @@ impl CastOpponentChoicePurpose {
     }
 }
 
+/// CR 608.2f: what a [`WaitingFor::MemberOrderChoice`] prompt orders. A
+/// member-driven loop pauses for player input either because it puts a copy of
+/// each member spell on the stack, or because each member's instruction itself
+/// pauses (an unless payment). The prompt names the process so the choice can
+/// word itself without the client inferring it from the effect.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemberOrderPurpose {
+    /// CR 405.3 + CR 707.10: a batch of spell copies; the chosen spell supplies
+    /// the copy that goes on the stack next. Also the wire default, because a
+    /// frame saved before instruction loops joined this prompt could only have
+    /// ordered copies.
+    #[default]
+    SpellCopies,
+    /// CR 608.2f: one instruction repeated over a published population, whose
+    /// iterations pause for player input; the chosen member's instruction runs
+    /// next.
+    InstructionLoop,
+}
+
 // clippy::large_enum_variant: Intentional. `WaitingFor` is stored inline in
 // `GameState`; the stack budget that matters is the `GameState` ceiling in
 // `types/game_state_size.rs`, and this enum's inline size is already inside
@@ -20130,17 +20150,23 @@ pub enum WaitingFor {
         choices: Vec<ObjectId>,
         count: u32,
     },
-    /// CR 405.3 + CR 707.10: an effect that puts copies of several spells on
-    /// the stack at once ("copy each of those spells twice" — Finale of
-    /// Promise) lets their controller choose the copies' relative order. Asked
-    /// one copy at a time: `choices` are the distinct spells that still have a
-    /// copy to make, and the chosen spell's next copy goes on the stack next,
-    /// above the copies already made. Raised only while two or more spells
+    /// CR 608.2f + CR 405.3: a member-driven resolution loop whose iterations
+    /// pause for player input is performed in the order its controller chooses.
+    /// Asked one member at a time: `choices` are the members whose iteration has
+    /// not run yet, and the chosen member's iteration runs next. A batch of spell
+    /// copies (CR 707.10) picks which spell's copy goes on the stack next
+    /// (`SpellCopies`); an instruction loop that pauses per member (Sword-Point
+    /// Diplomacy's "for each of those cards, put that card into your hand unless
+    /// any opponent pays 3 life", CR 608.2f + CR 118.12a) picks which member is
+    /// handled next (`InstructionLoop`). Raised only while two or more members
     /// remain; the answer is a single-object `SelectCards`.
-    SpellCopyOrderChoice {
+    MemberOrderChoice {
         player: PlayerId,
         source_id: ObjectId,
         choices: Vec<ObjectId>,
+        /// What the ordered members are, for the prompt's wording.
+        #[serde(default)]
+        purpose: MemberOrderPurpose,
     },
     /// CR 701.55a: Player chooses one branch while facing a villainous choice,
     /// or another inline resolution-time "choose A or B" effect.
@@ -22814,7 +22840,7 @@ impl WaitingFor {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
-            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
+            WaitingFor::MemberOrderChoice { .. } => "MemberOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -22986,7 +23012,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { player, .. }
             | WaitingFor::BeholdChoice { player, .. }
             | WaitingFor::EmpowerJaceChoice { player, .. }
-            | WaitingFor::SpellCopyOrderChoice { player, .. }
+            | WaitingFor::MemberOrderChoice { player, .. }
             | WaitingFor::ChooseOneOfBranch { player, .. }
             | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }
@@ -23341,7 +23367,7 @@ impl WaitingFor {
             | WaitingFor::ReplacementChoice { .. }
             | WaitingFor::EntryControllerChoice { .. }
             | WaitingFor::OrderTriggers { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
             | WaitingFor::CopyTargetChoice { .. }
             | WaitingFor::ExploreChoice { .. }
             | WaitingFor::ReturnAsAuraTarget { .. }
@@ -23577,7 +23603,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
@@ -30255,7 +30281,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
-        | WaitingFor::SpellCopyOrderChoice { .. }
+        | WaitingFor::MemberOrderChoice { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
@@ -68282,7 +68308,7 @@ mod restored_exact_attack_authority_tests {
                     iterated_counter_kinds: vec![],
                     next_iteration: 0,
                     total_iterations: 1,
-                    copy_order_fixed: None,
+                    order_fixed: None,
                 }),
                 1 => ResolutionFrame::RepeatUntil(PendingRepeatUntil {
                     ability: node.clone(),

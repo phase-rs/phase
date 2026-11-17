@@ -1179,7 +1179,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::GameOver { .. }
         | WaitingFor::EntryControllerChoice { .. }
         | WaitingFor::OrderTriggers { .. }
-        | WaitingFor::SpellCopyOrderChoice { .. }
+        | WaitingFor::MemberOrderChoice { .. }
         | WaitingFor::CopyTargetChoice { .. }
         | WaitingFor::ReturnAsAuraTarget { .. }
         | WaitingFor::EquipTarget { .. }

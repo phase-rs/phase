@@ -1853,6 +1853,10 @@
       "title": "Order the copies",
       "subtitle": "Choose the spell whose copy goes on the stack next"
     },
+    "memberOrder": {
+      "title": "Order the cards",
+      "subtitle": "Choose which card is handled next"
+    },
     "collectEvidence": {
       "title": "Collect Evidence",
       "subtitle": "Exile cards from your graveyard with total mana value {{minimum}} or greater"
