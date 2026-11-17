@@ -691,6 +691,73 @@ pub(crate) fn apply_damage_to_target(
 /// life loss (CR 120.3a), excess damage (CR 120.10), damage record tracking, and
 /// lifelink (CR 702.15b / CR 120.3f).
 ///
+/// CR 120.10: Compute excess damage beyond lethal/loyalty/defense for one
+/// damage leg. If a permanent has multiple card types among creature,
+/// planeswalker, and battle, its excess damage is the greatest calculated
+/// amount among those types.
+///
+/// The planeswalker/battle axes measure against the loyalty/defense the
+/// permanent had BEFORE the damage was dealt, so callers pass the values
+/// captured before any loyalty/defense removal — never a live post-mutation
+/// read. Shared by the inline path (which captured them at the top of
+/// `apply_damage_after_replacement`) and the wither/infect post-counter core
+/// (which receives them as parameters, or from the pause stash on resume), so
+/// there is one calculation of excess, not a second copy that rereads live
+/// state.
+fn damage_excess_beyond_lethal(
+    state: &GameState,
+    target: &TargetRef,
+    actual_amount: u32,
+    has_deathtouch: bool,
+    loyalty_before: Option<u32>,
+    defense_before: Option<u32>,
+) -> u32 {
+    match target {
+        TargetRef::Object(obj_id) => state
+            .objects
+            .get(obj_id)
+            .map(|obj| {
+                let mut excess = 0;
+
+                if obj.card_types.core_types.contains(&CoreType::Creature) {
+                    if let Some(toughness) = obj.toughness {
+                        // damage_marked already includes actual_amount.
+                        let damage_before = obj.damage_marked.saturating_sub(actual_amount);
+                        let lethal = if has_deathtouch {
+                            // CR 702.2c: Any nonzero damage from deathtouch = lethal.
+                            if damage_before == 0 {
+                                1u32
+                            } else {
+                                0
+                            }
+                        } else {
+                            (toughness as u32).saturating_sub(damage_before)
+                        };
+                        excess = excess.max(actual_amount.saturating_sub(lethal));
+                    }
+                }
+
+                if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
+                    // CR 120.10: Excess for a planeswalker = damage beyond the
+                    // loyalty it had before the damage was dealt (passed in —
+                    // loyalty counters have since been removed).
+                    excess = excess.max(actual_amount.saturating_sub(loyalty_before.unwrap_or(0)));
+                }
+
+                if obj.card_types.core_types.contains(&CoreType::Battle) {
+                    // CR 120.10: Excess for a battle = damage beyond the defense it
+                    // had before the damage was dealt (passed in — defense
+                    // counters have since been removed).
+                    excess = excess.max(actual_amount.saturating_sub(defense_before.unwrap_or(0)));
+                }
+
+                excess
+            })
+            .unwrap_or(0),
+        TargetRef::Player(_) => 0,
+    }
+}
+
 /// Caller is responsible for emitting `EffectResolved`. This helper only emits
 /// `DamageDealt` (and downstream `LifeChanged` via the life helpers).
 pub(crate) fn apply_damage_after_replacement(
@@ -787,7 +854,9 @@ pub(crate) fn apply_damage_after_replacement(
                     events,
                 ) {
                     // CR 120.3d + CR 616.1: stash the post-counter remainder
-                    // (the target, amount, and context snapshot) so the resume
+                    // (the target, amount, context snapshot, and the CR 120.10
+                    // pre-damage loyalty/defense captured above — loyalty
+                    // removal already ran ahead of this arm) so the resume
                     // runs it exactly once. Combat-flagged for the batch
                     // remnant, which the combat resume consumes; the shared
                     // funnel drain skips combat stashes.
@@ -795,6 +864,8 @@ pub(crate) fn apply_damage_after_replacement(
                         ctx: DamageContextSnapshot::from(ctx),
                         target: (*t).clone(),
                         actual_amount,
+                        loyalty_before,
+                        defense_before,
                         is_combat,
                     }));
                     return DamageResult::NeedsChoice;
@@ -807,6 +878,8 @@ pub(crate) fn apply_damage_after_replacement(
                     ctx,
                     t,
                     actual_amount,
+                    loyalty_before,
+                    defense_before,
                     is_combat,
                     events,
                 ) {
@@ -929,52 +1002,17 @@ pub(crate) fn apply_damage_after_replacement(
         }
     }
 
-    // CR 120.10: Compute excess damage beyond lethal/loyalty/defense. If a
-    // permanent has multiple card types among creature, planeswalker, and battle,
-    // its excess damage is the greatest calculated amount among those types.
-    let excess = match &t {
-        TargetRef::Object(obj_id) => state
-            .objects
-            .get(obj_id)
-            .map(|obj| {
-                let mut excess = 0;
-
-                if obj.card_types.core_types.contains(&CoreType::Creature) {
-                    if let Some(toughness) = obj.toughness {
-                        // damage_marked already includes actual_amount.
-                        let damage_before = obj.damage_marked.saturating_sub(actual_amount);
-                        let lethal = if ctx.has_deathtouch {
-                            // CR 702.2c: Any nonzero damage from deathtouch = lethal.
-                            if damage_before == 0 {
-                                1u32
-                            } else {
-                                0
-                            }
-                        } else {
-                            (toughness as u32).saturating_sub(damage_before)
-                        };
-                        excess = excess.max(actual_amount.saturating_sub(lethal));
-                    }
-                }
-
-                if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
-                    // CR 120.10: Excess for a planeswalker = damage beyond the
-                    // loyalty it had before the damage was dealt (captured above,
-                    // since the loyalty counters have since been removed).
-                    excess = excess.max(actual_amount.saturating_sub(loyalty_before.unwrap_or(0)));
-                }
-
-                if obj.card_types.core_types.contains(&CoreType::Battle) {
-                    // CR 120.10: Excess for a battle = damage beyond the defense it
-                    // had before the damage was dealt (captured above).
-                    excess = excess.max(actual_amount.saturating_sub(defense_before.unwrap_or(0)));
-                }
-
-                excess
-            })
-            .unwrap_or(0),
-        TargetRef::Player(_) => 0,
-    };
+    // CR 120.10: single excess calculation (shared with the wither/infect
+    // post-counter core): the loyalty/defense axes measure against the values
+    // captured above, before any counter removal.
+    let excess = damage_excess_beyond_lethal(
+        state,
+        &t,
+        actual_amount,
+        ctx.has_deathtouch,
+        loyalty_before,
+        defense_before,
+    );
 
     // CR 120.4a: an excess-redirect rider modifies the damage event so that only
     // the lethal portion is dealt to the permanent and the excess is dealt to its
@@ -1345,39 +1383,39 @@ pub(crate) enum PostCounterFlow {
 
 /// CR 120.3d + CR 702.80a / CR 702.90c + CR 702.2b + CR 120.1 + CR 120.10 +
 /// CR 120.4a: everything a wither/infect-to-creature leg owes AFTER its
-/// `-1/-1` counter placement settles — the deathtouch flag, excess computed
-/// from post-counter state, the `DamageDealt` event + CR 120.1 record, and the
-/// redirect-leg passthrough. Shared by the inline success path, the
-/// non-combat funnel drain (which adds lifelink after), and the combat
-/// remnant resume (which runs the core ONLY — the F1 split — since the paused
-/// leg's lifelink share was already folded into `lifelink_by_source` at park
-/// time and drains via the lifelink tail; running the inline lifelink here
-/// would gain twice).
+/// `-1/-1` counter placement settles — the deathtouch flag, excess, the
+/// `DamageDealt` event + CR 120.1 record, and the redirect-leg passthrough.
+/// Shared by the inline success path, the non-combat funnel drain (which adds
+/// lifelink after), and the combat remnant resume (which runs the core ONLY —
+/// the F1 split — since the paused leg's lifelink share was already folded
+/// into `lifelink_by_source` at park time and drains via the lifelink tail;
+/// running the inline lifelink here would gain twice).
+///
+/// CR 120.10 captured-values contract: the planeswalker/battle excess axes
+/// measure against the loyalty/defense from BEFORE the damage was dealt. The
+/// inline call runs after loyalty/defense removal, and both resume paths run
+/// later still, so all three pass the pre-damage values in — never a live
+/// reread. (Counter placement itself does not touch loyalty/defense; the
+/// creature axis still reads post-counter state, exactly like the inline
+/// path.)
 pub(crate) fn wither_infect_post_counter_core(
     state: &mut GameState,
     ctx: &DamageContext,
     target: &TargetRef,
     actual_amount: u32,
+    loyalty_before: Option<u32>,
+    defense_before: Option<u32>,
     is_combat: bool,
     events: &mut Vec<GameEvent>,
 ) -> PostCounterFlow {
-    // CR 120.10: Excess damage to a planeswalker/battle is measured against its
-    // loyalty/defense *before* this damage was dealt. Counter placement does
-    // not touch loyalty/defense, so the live read here matches the never-paused
-    // path (which captured them before mutating).
-    let (is_creature, loyalty_before, defense_before) = match target {
+    // The creature axis needs only the live type flag here (types cannot
+    // change mid-leg: no priority window opens during a replacement answer).
+    let is_creature = match target {
         TargetRef::Object(obj_id) => state
             .objects
             .get(obj_id)
-            .map(|obj| {
-                (
-                    obj.card_types.core_types.contains(&CoreType::Creature),
-                    obj.loyalty,
-                    obj.defense,
-                )
-            })
-            .unwrap_or((false, None, None)),
-        TargetRef::Player(_) => (false, None, None),
+            .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature)),
+        TargetRef::Player(_) => false,
     };
 
     if let TargetRef::Object(obj_id) = target {
@@ -1391,52 +1429,16 @@ pub(crate) fn wither_infect_post_counter_core(
         }
     }
 
-    // CR 120.10: Compute excess damage beyond lethal/loyalty/defense. If a
-    // permanent has multiple card types among creature, planeswalker, and battle,
-    // its excess damage is the greatest calculated amount among those types.
-    let excess = match target {
-        TargetRef::Object(obj_id) => state
-            .objects
-            .get(obj_id)
-            .map(|obj| {
-                let mut excess = 0;
-
-                if obj.card_types.core_types.contains(&CoreType::Creature) {
-                    if let Some(toughness) = obj.toughness {
-                        // damage_marked already includes actual_amount.
-                        let damage_before = obj.damage_marked.saturating_sub(actual_amount);
-                        let lethal = if ctx.has_deathtouch {
-                            // CR 702.2c: Any nonzero damage from deathtouch = lethal.
-                            if damage_before == 0 {
-                                1u32
-                            } else {
-                                0
-                            }
-                        } else {
-                            (toughness as u32).saturating_sub(damage_before)
-                        };
-                        excess = excess.max(actual_amount.saturating_sub(lethal));
-                    }
-                }
-
-                if obj.card_types.core_types.contains(&CoreType::Planeswalker) {
-                    // CR 120.10: Excess for a planeswalker = damage beyond the
-                    // loyalty it had before the damage was dealt (captured above,
-                    // since the loyalty counters have since been removed).
-                    excess = excess.max(actual_amount.saturating_sub(loyalty_before.unwrap_or(0)));
-                }
-
-                if obj.card_types.core_types.contains(&CoreType::Battle) {
-                    // CR 120.10: Excess for a battle = damage beyond the defense it
-                    // had before the damage was dealt (captured above).
-                    excess = excess.max(actual_amount.saturating_sub(defense_before.unwrap_or(0)));
-                }
-
-                excess
-            })
-            .unwrap_or(0),
-        TargetRef::Player(_) => 0,
-    };
+    // CR 120.10: single excess calculation, shared with the inline path — the
+    // loyalty/defense axes use the passed pre-damage values, not live state.
+    let excess = damage_excess_beyond_lethal(
+        state,
+        target,
+        actual_amount,
+        ctx.has_deathtouch,
+        loyalty_before,
+        defense_before,
+    );
 
     // CR 120.4a: an excess-redirect rider modifies the damage event so that only
     // the lethal portion is dealt to the permanent and the excess is dealt to its
@@ -1587,11 +1589,15 @@ pub(crate) fn drain_pending_damage_post_counter(
         return DamagePostCounterDrainOutcome::Settled;
     };
     let ctx = DamageContext::from(stashed.ctx);
+    // CR 120.10: the resume passes the STASHED pre-damage values — never a
+    // live reread (loyalty/defense removal already ran before the park).
     match wither_infect_post_counter_core(
         state,
         &ctx,
         &stashed.target,
         stashed.actual_amount,
+        stashed.loyalty_before,
+        stashed.defense_before,
         stashed.is_combat,
         events,
     ) {
