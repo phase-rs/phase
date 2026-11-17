@@ -18181,9 +18181,12 @@ mod tests {
         assert_eq!(state.players[0].life, 20);
     }
 
-    /// CR 118.3 + CR 614.12a + CR 104.4b: an unpayable `MayCost` auto-declines without a
-    /// prompt, and that forced decline is not an answered optional decision — it neither
-    /// bumps the loop-decision tally nor records a remembered answer.
+    /// Hallowed Fountain — "({T}: Add {W} or {U}.)\nAs this land enters, you may pay 2 life.
+    /// If you don't, it enters tapped." With its controller at 1 life, paying 2 life is
+    /// impossible (CR 118.3 + CR 119.4), so the `MayCost` auto-declines without a prompt
+    /// (CR 614.12a) and the land enters tapped. That forced decline is not an answered
+    /// optional decision: it neither bumps the loop-decision tally nor records a remembered
+    /// answer, and no life is paid.
     #[test]
     fn unpayable_may_cost_auto_decline_records_no_remembered_answer() {
         // Reach guard: a payable cost prompts instead of auto-declining.
@@ -18202,12 +18205,13 @@ mod tests {
             ReplacementResult::NeedsChoice(PlayerId(0))
         ));
 
-        // 25 life exceeds the player's 20, so the payment is impossible (CR 119.4).
+        // At 1 life, paying 2 life is impossible (CR 118.3 + CR 119.4).
         let mut state = test_state_with_object(
             ObjectId(10),
             Zone::Hand,
-            vec![may_cost_tapped_replacement(25)],
+            vec![may_cost_tapped_replacement(2)],
         );
+        state.players[0].life = 1;
         let tally_before = state.loop_decision_tally;
         let result = replace_event(
             &mut state,
@@ -18219,7 +18223,7 @@ mod tests {
             panic!("expected the decline branch to execute without a prompt, got {result:?}");
         };
         assert!(enter_tapped.resolve(false), "the decline branch applies");
-        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[0].life, 1, "no life is paid");
         assert_eq!(
             state.loop_decision_tally, tally_before,
             "a forced decline is not an answered optional decision"
