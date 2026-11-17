@@ -482,6 +482,11 @@ pub(crate) fn effective_off_zone_keyword_contributions(
     keywords
 }
 
+/// The single instance of `kind` that a single-cost reader (flashback, escape,
+/// foretell, miracle, …) uses: the LAST entry of that kind, which is the latest
+/// applied surviving grant, or the printed instance when no grant of that kind
+/// applies. Choosing among several instances of the same keyword (CR 113.2c) is
+/// tracked by phase-rs/phase#10957; until then this keeps the latest instance.
 pub fn effective_off_zone_keyword(
     state: &GameState,
     object_id: ObjectId,
@@ -489,6 +494,7 @@ pub fn effective_off_zone_keyword(
 ) -> Option<Keyword> {
     effective_off_zone_keywords(state, object_id)
         .into_iter()
+        .rev()
         .find(|keyword| keyword.kind() == kind)
 }
 
@@ -1048,23 +1054,20 @@ fn upsert_keyword_contribution(
     keywords: &mut Vec<OffZoneKeywordContribution>,
     contribution: OffZoneKeywordContribution,
 ) {
-    // CR 702.164b: summing keywords (Toxic) accumulate — never overwrite; push so
-    // every instance is counted by the aggregate reader (effective_total_toxic_value).
-    // Gate on the INCOMING keyword's summing flag (not a kind comparison) so a
-    // granted off-zone Toxic pushes rather than clobbering an unrelated printed
-    // keyword that shares its (Unknown) kind. Non-summing keywords keep the
-    // upsert-by-kind dedup below unchanged.
-    if !contribution.keyword.instances_must_coexist() {
-        if let Some(existing) = keywords
-            .iter_mut()
-            .find(|existing| existing.keyword.kind() == contribution.keyword.kind())
-        {
-            *existing = contribution;
-            return;
-        }
-    }
-
-    keywords.push(contribution);
+    // CR 113.2c: an object off the battlefield may have several instances of the
+    // same keyword (Dregscape Sliver's unearth {2} and Sedris's unearth {2}{B} on
+    // one graveyard card); each functions independently, so a distinct same-kind
+    // grant must not overwrite an earlier one. The shared grant policy is the
+    // battlefield's (`Keyword::grant_policy`). An exact duplicate keeps the LATER
+    // contribution, appended last, so its producing effect is the latest one and
+    // the last entry of a kind is the latest applied surviving grant (see
+    // `effective_off_zone_keyword`).
+    super::keywords::grant_keyword_instance_into(
+        keywords,
+        contribution,
+        |entry| &entry.keyword,
+        super::keywords::RedundantGrant::KeepLater,
+    );
 }
 
 #[cfg(test)]
@@ -1140,13 +1143,14 @@ mod tests {
     }
 
     /// CR 702.164b (issue #955): `upsert_keyword` must PUSH summing keywords
-    /// (Toxic) so the off-zone aggregate reader counts every instance, while
-    /// keeping the upsert-by-kind dedup for all non-summing keywords. The gate
-    /// keys on the INCOMING keyword's summing flag, not a kind comparison, so a
-    /// granted Toxic (which collapses to `KeywordKind::Unknown`) does NOT clobber
-    /// an unrelated printed keyword that happens to share that `Unknown` kind.
+    /// (Toxic) so the off-zone aggregate reader counts every instance. Distinct
+    /// Ward values coexist (CR 113.2c). Exact-value deduplication preserves the
+    /// existing keyword-list representation; it does not determine
+    /// companion-trigger multiplicity. A granted Toxic (which collapses to
+    /// `KeywordKind::Unknown`) does NOT clobber an unrelated printed keyword that
+    /// happens to share that `Unknown` kind.
     #[test]
-    fn upsert_keyword_sums_toxic_but_dedups_others() {
+    fn upsert_keyword_sums_toxic_but_dedups_identical_others() {
         use crate::types::keywords::WardCost;
 
         // Summing keyword: two Toxic(1) accumulate (push) -> len 2.
@@ -1162,31 +1166,25 @@ mod tests {
             2
         );
 
-        // Non-summing keyword sharing a distinct kind: the second Ward overwrites
-        // the first (upsert-by-kind dedup preserved) -> len 1.
-        let mut ward = Vec::new();
-        upsert_keyword(
-            &mut ward,
+        // Distinct Ward values coexist (CR 113.2c). Exact-value deduplication
+        // preserves the existing keyword-list representation.
+        let ward = |generic| {
             Keyword::Ward(WardCost::Mana(ManaCost::Cost {
-                generic: 1,
+                generic,
                 shards: vec![],
-            })),
-        );
-        upsert_keyword(
-            &mut ward,
-            Keyword::Ward(WardCost::Mana(ManaCost::Cost {
-                generic: 2,
-                shards: vec![],
-            })),
-        );
-        assert_eq!(ward.len(), 1, "non-summing Ward keeps upsert-by-kind dedup");
+            }))
+        };
+        let mut wards = Vec::new();
+        upsert_keyword(&mut wards, ward(1));
+        upsert_keyword(&mut wards, ward(2));
+        upsert_keyword(&mut wards, ward(1));
         assert_eq!(
-            ward[0].keyword,
-            Keyword::Ward(WardCost::Mana(ManaCost::Cost {
-                generic: 2,
-                shards: vec![],
-            })),
-            "the later Ward instance overwrites the earlier one"
+            wards
+                .iter()
+                .map(|entry| entry.keyword.clone())
+                .collect::<Vec<_>>(),
+            vec![ward(2), ward(1)],
+            "distinct Wards coexist; the duplicate Ward {{1}} survives once, as the later entry"
         );
 
         // Clobber-protection residual: an incoming Toxic grant must NOT overwrite
@@ -2062,8 +2060,10 @@ mod tests {
         );
     }
 
+    /// CR 113.2c: two grants of the same keyword kind with different payloads
+    /// both survive off the battlefield, in application order.
     #[test]
-    fn later_effect_replaces_same_keyword_kind_payload() {
+    fn distinct_same_kind_grants_coexist_off_zone() {
         let mut state = GameState::new_two_player(42);
         let target_id = create_card(&mut state, PlayerId(0), "Think Twice", Zone::Graveyard);
         let earlier_id = create_card(&mut state, PlayerId(0), "Earlier", Zone::Battlefield);
@@ -2100,13 +2100,17 @@ mod tests {
                     }]),
             );
 
-        assert_eq!(
-            effective_off_zone_keyword(&state, target_id, KeywordKind::Flashback),
-            Some(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
-                generic: 2,
+        let flashback = |generic| {
+            Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
+                generic,
                 shards: vec![ManaCostShard::Blue],
-            })))
-        );
+            }))
+        };
+        let flashbacks: Vec<Keyword> = effective_off_zone_keywords(&state, target_id)
+            .into_iter()
+            .filter(|keyword| keyword.kind() == KeywordKind::Flashback)
+            .collect();
+        assert_eq!(flashbacks, vec![flashback(1), flashback(2)]);
     }
 
     // -- Keyword-only gather and scoped sharing --------------------------------

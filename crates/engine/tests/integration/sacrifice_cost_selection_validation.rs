@@ -602,6 +602,8 @@ fn normal_and_replacement_sacrifice_settle_once_and_survive_checked_restore() {
                                 .execute(AbilityDefinition::new(
                                     AbilityKind::Spell,
                                     Effect::ChangeZone {
+                                        actor: engine::types::ability::LibraryInstructionActor::Controller,
+                                        library_shuffle: Default::default(),
                                         origin: None,
                                         destination: Zone::Exile,
                                         target: TargetFilter::SelfRef,
@@ -989,7 +991,7 @@ fn selected_keyword_sacrifice_revalidates_its_current_quality() {
                 .unwrap();
             if kind == "offering" {
                 runner
-                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .act(GameAction::DecideOptionalCost { index: 0 })
                     .unwrap();
             }
             if kind.starts_with("emerge") {

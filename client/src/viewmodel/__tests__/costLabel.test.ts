@@ -11,6 +11,8 @@ import {
   formatCost,
   spellCostDisplay,
   stripLoyaltyCostPrefix,
+  unlessDrawCostLabel,
+  unlessPaymentCanBeDeclined,
 } from "../costLabel.ts";
 
 function makeObject(overrides: Partial<GameObject> = {}): GameObject {
@@ -409,8 +411,8 @@ describe("additionalCostChoices — multikicker (issue #454)", () => {
     const { title, options } = additionalCostChoices(repeatableKicker, 0);
 
     expect(title.toLowerCase()).toContain("multikicker");
-    const pay = options.find((o) => o.id === "pay")!;
-    const decline = options.find((o) => o.id === "decline")!;
+    const pay = options.find((o) => o.id === "0")!;
+    const decline = options.find((o) => o.id === "1")!;
     expect(pay.label).toContain("kick it");
     expect(decline.label).toBe("Cast without kicking");
     expect(decline.label.toLowerCase()).not.toContain("skip");
@@ -422,7 +424,7 @@ describe("additionalCostChoices — multikicker (issue #454)", () => {
     const { title, options } = additionalCostChoices(repeatableKicker, 2);
 
     expect(title).toContain("kicked 2");
-    const decline = options.find((o) => o.id === "decline")!;
+    const decline = options.find((o) => o.id === "1")!;
     expect(decline.label).toContain("finish casting");
     expect(decline.label).toContain("(kicked 2×)");
     expect(decline.label.toLowerCase()).not.toContain("cancel");
@@ -442,17 +444,45 @@ describe("additionalCostChoices — repeatable additional cost", () => {
     const { title, options } = additionalCostChoices(repeatableCost, 0);
 
     expect(title).toContain("Pay additional cost");
-    expect(options.find((o) => o.id === "pay")?.label).toBe("Pay {1}");
-    expect(options.find((o) => o.id === "decline")?.label).toBe("Cast without paying");
+    expect(options.find((o) => o.id === "0")?.label).toBe("Pay {1}");
+    expect(options.find((o) => o.id === "1")?.label).toBe("Cast without paying");
   });
 
   it("re-prompt shows the payment count and finish-casting decline", () => {
     const { title, options } = additionalCostChoices(repeatableCost, 2);
 
     expect(title).toContain("paid 2");
-    const decline = options.find((o) => o.id === "decline")!;
+    const decline = options.find((o) => o.id === "1")!;
     expect(decline.label).toContain("finish casting");
     expect(decline.label).toContain("(paid 2×)");
+  });
+});
+
+describe("additionalCostChoices — option ids are engine option indices", () => {
+  it("lists every Choice alternative in printed order (Dusk Mangler, #10442)", () => {
+    const threeWay: AdditionalCost = {
+      type: "Choice",
+      data: [
+        { type: "Sacrifice", target: { type: "Any" }, count: 1 },
+        { type: "Discard", count: 1 },
+        { type: "PayLife", amount: { type: "Fixed", value: 4 } },
+      ],
+    };
+
+    const { options } = additionalCostChoices(threeWay);
+
+    expect(options.map((o) => o.id)).toEqual(["0", "1", "2"]);
+  });
+
+  it("offers a Required cost as its single payment, leaving cancel to the close button", () => {
+    const required: AdditionalCost = {
+      type: "Required",
+      data: { type: "Mana", cost: { type: "Cost", shards: [], generic: 1 } },
+    };
+
+    const { options } = additionalCostChoices(required);
+
+    expect(options.map((o) => o.id)).toEqual(["0"]);
   });
 });
 
@@ -590,5 +620,112 @@ describe("spellCostDisplay", () => {
   it("does not flag an unchanged effective cost as reduced", () => {
     const { isReduced } = spellCostDisplay(cost(5, ["Blue"]), cost(5, ["Blue"]));
     expect(isReduced).toBe(false);
+  });
+});
+
+// CR 118.9 + CR 118.3: Invigorate's alternative cost "have an opponent gain 3 life"
+// is an engine `EffectCost { GainLife { player: Typed(Opponent) } }`. The label is
+// display-only formatting of those engine fields.
+describe("formatAbilityCost — recipient effect-cost", () => {
+  const opponentGainsThree = {
+    type: "EffectCost",
+    effect: {
+      type: "GainLife",
+      amount: { type: "Fixed", value: 3 },
+      player: { type: "Typed", type_filters: [], controller: "Opponent", properties: [] },
+    },
+  };
+
+  it("labels the opponent life-gain cost", () => {
+    expect(formatAbilityCost(opponentGainsThree)).toBe("Have an opponent gain 3 life");
+  });
+
+  it("labels both sides of the alternative-cost choice", () => {
+    const choice: AdditionalCost = {
+      type: "Choice",
+      data: [
+        opponentGainsThree,
+        { type: "Mana", cost: { type: "Cost", generic: 2, shards: ["Green"] } },
+      ],
+    } as unknown as AdditionalCost;
+    const { options } = additionalCostChoices(choice);
+    expect(options.map((o) => o.label)).toEqual(["Have an opponent gain 3 life", "{2}{G}"]);
+  });
+
+  it("labels the each-other-player life-gain cost", () => {
+    expect(
+      formatAbilityCost({
+        type: "EffectCost",
+        effect: {
+          type: "GainLife",
+          amount: { type: "Fixed", value: 6 },
+          player: {
+            type: "PlayerMatching",
+            player: { type: "AllExcept", exclude: { type: "Controller" } },
+          },
+        },
+      }),
+    ).toBe("Have each other player gain 6 life");
+  });
+
+  it("keeps the generic label for effect-costs it does not describe", () => {
+    expect(
+      formatAbilityCost({
+        type: "EffectCost",
+        effect: { type: "RevealHand", target: { type: "SelfRef" } },
+      }),
+    ).toBe("Activate");
+    expect(
+      formatAbilityCost({
+        type: "EffectCost",
+        effect: {
+          type: "GainLife",
+          amount: { type: "Fixed", value: 3 },
+          player: { type: "Controller" },
+        },
+      }),
+    ).toBe("Activate");
+  });
+});
+
+describe("unlessDrawCostLabel renders the engine-resolved draw", () => {
+  it("names a single one-card instruction as drawing a card", () => {
+    expect(unlessDrawCostLabel({ cards: 1, instructions: 1, stage: "Offered" })).toBe(
+      i18n.t("game:gamePage.cost.draw"),
+    );
+  });
+
+  it("counts a multi-card instruction", () => {
+    expect(unlessDrawCostLabel({ cards: 3, instructions: 1, stage: "Offered" })).toBe(
+      i18n.t("game:gamePage.cost.drawCount", { count: 3 }),
+    );
+  });
+
+  it("shows a resolved zero instead of drawing a card", () => {
+    const label = unlessDrawCostLabel({ cards: 0, instructions: 1, stage: "Offered" });
+    expect(label).toBe(i18n.t("game:gamePage.cost.drawCount", { count: 0 }));
+    expect(label).not.toBe(i18n.t("game:gamePage.cost.draw"));
+  });
+
+  it("appends the repetition the engine supplies", () => {
+    expect(unlessDrawCostLabel({ cards: 1, instructions: 65, stage: "Offered" })).toBe(
+      `${i18n.t("game:gamePage.cost.draw")} × 65`,
+    );
+  });
+});
+
+describe("unlessPaymentCanBeDeclined follows the engine's payment stage", () => {
+  it("offers a decline while the payment is only offered", () => {
+    expect(unlessPaymentCanBeDeclined({ cards: 1, instructions: 3, stage: "Offered" })).toBe(true);
+  });
+
+  it("offers a decline for a cost that is not a draw", () => {
+    expect(unlessPaymentCanBeDeclined(undefined)).toBe(true);
+  });
+
+  it("offers no decline once the payment is continuing", () => {
+    expect(unlessPaymentCanBeDeclined({ cards: 1, instructions: 2, stage: "Continuing" })).toBe(
+      false,
+    );
   });
 });

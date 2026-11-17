@@ -839,7 +839,15 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     // ("can't attack, block, or transform" — Bound by Moonsilver class). Must
     // precede continuous-grant parsing, which would otherwise return an empty vec
     // and let the line fall through to a SelfRef combat lock on the Aura source.
-    if let Some(modes) = parse_restriction_modes(pred_lower.trim().trim_end_matches('.')) {
+    // CR 611.3a: targeting prohibitions retain their condition and companion
+    // grants through the shared suffix/composition path below.
+    if let Some(modes) =
+        parse_restriction_modes(pred_lower.trim().trim_end_matches('.')).filter(|modes| {
+            !modes
+                .iter()
+                .any(|mode| matches!(mode, StaticMode::CantBeTargeted { .. }))
+        })
+    {
         return modes
             .into_iter()
             .map(|mode| {
@@ -1126,6 +1134,42 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         );
     }
 
+    // --- "can't be the target of ..." with a source-kind / quality qualifier ---
+    // CR 115.1: not expressible by `CantBeTargeted { who }`; fail closed.
+    if crate::parser::oracle_keyword::is_source_qualified_cant_be_targeted(body_lower) {
+        return vec![super::evasion::source_qualified_cant_be_targeted_gap(
+            affected,
+            description,
+        )];
+    }
+
+    // --- "can't be the target of spells or abilities [your opponents control]" ---
+    // CR 702.18a / CR 702.11b / CR 109.5: Descriptive targeting prohibition.
+    if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(body_lower) {
+        let who = match scope {
+            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
+                crate::types::statics::ProhibitionScope::AllPlayers
+            }
+            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
+                crate::types::statics::ProhibitionScope::Opponents
+            }
+        };
+        let mut def = StaticDefinition::new(StaticMode::CantBeTargeted { who })
+            .affected(affected.clone())
+            .description(description.to_string());
+        if let Some(condition) = &suffix_condition {
+            attach_gated_condition(&mut def, condition.clone(), &gap_text);
+        }
+        let companion_condition = def.condition.clone();
+        return with_keyword_companion(
+            def,
+            body_tp.original,
+            &affected,
+            description,
+            companion_condition.as_ref(),
+        );
+    }
+
     // --- Conditional grants: split "as long as" before passing to continuous parser ---
     // Handles both "gets +1/+1 as long as ..." and "has flying as long as ..."
     //
@@ -1253,7 +1297,7 @@ pub(crate) fn scale_pt_quantity(amount: i32, quantity: &QuantityExpr) -> Quantit
 }
 
 /// A member of a "loses all [other] abilities, card types, creature types, and
-/// land types" enumeration. Parser-local — maps to one `ContinuousModification`
+/// land types" enumeration (or the "has/have no abilities" form). Parser-local — maps to one `ContinuousModification`
 /// each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LossMember {
@@ -1272,45 +1316,46 @@ pub(crate) enum LossMember {
 /// every combination — the literal substrings "loses all other card types"
 /// never appear contiguously in the Oxford-comma form, so whole-phrase `tag()`
 /// arms would be dead code. None of the four tags share a prefix, so `alt`
-/// ordering carries no hazard.
+/// ordering carries no hazard. "has/have no abilities" (Xu-Ifit, Osteoharmonist)
+/// is the "has" form of the same ability removal and yields `LossMember::Abilities`.
 pub(crate) fn parse_loss_enumeration(input: &str) -> OracleResult<'_, Vec<LossMember>> {
-    preceded(
-        alt((
-            tag("loses all other "),
-            tag("lose all other "),
-            tag("loses all "),
-            tag("lose all "),
-        )),
-        separated_list1(
-            // Oxford-comma tolerant: longest separator first so ", and "
-            // is not pre-consumed by ", ".
-            alt((tag(", and "), tag(" and "), tag(", "))),
+    alt((
+        preceded(
             alt((
-                value(LossMember::Abilities, tag("abilities")),
-                value(LossMember::CardTypes, tag("card types")),
-                value(LossMember::CreatureTypes, tag("creature types")),
-                value(LossMember::LandTypes, tag("land types")),
+                tag("loses all other "),
+                tag("lose all other "),
+                tag("loses all "),
+                tag("lose all "),
             )),
+            separated_list1(
+                // Oxford-comma tolerant: longest separator first so ", and "
+                // is not pre-consumed by ", ".
+                alt((tag(", and "), tag(" and "), tag(", "))),
+                alt((
+                    value(LossMember::Abilities, tag("abilities")),
+                    value(LossMember::CardTypes, tag("card types")),
+                    value(LossMember::CreatureTypes, tag("creature types")),
+                    value(LossMember::LandTypes, tag("land types")),
+                )),
+            ),
         ),
-    )
+        value(vec![LossMember::Abilities], parse_has_no_abilities),
+    ))
     .parse(input)
 }
 
-/// Scan `lower` for a "loses all [other] ..." enumeration at any word boundary
-/// (the clause appears mid-string in "is a [type] ... and it loses all ...")
-/// and return the parsed loss members. The successful parse is the detector —
-/// no `contains()`.
+/// CR 613.1f: "has/have no abilities" — the "has" form of an ability-removing
+/// effect (layer 6). Maps to the same member as "loses all abilities".
+fn parse_has_no_abilities(input: &str) -> OracleResult<'_, ()> {
+    value((), (alt((tag("has "), tag("have "))), tag("no abilities"))).parse(input)
+}
+
+/// Scan `lower` for a "loses all [other] ..." enumeration (or the "has/have no
+/// abilities" form) at any word boundary (the clause appears mid-string in
+/// "is a [type] ... and it loses all ...") and return the parsed loss members.
+/// The successful parse is the detector — no `contains()`.
 pub(crate) fn scan_loss_enumeration(lower: &str) -> Vec<LossMember> {
-    let mut remaining = lower;
-    loop {
-        if let Ok((_, members)) = parse_loss_enumeration(remaining) {
-            return members;
-        }
-        match remaining.find(' ') {
-            Some(i) => remaining = remaining[i + 1..].trim_start(),
-            None => return Vec::new(),
-        }
-    }
+    nom_primitives::scan_at_word_boundaries(lower, parse_loss_enumeration).unwrap_or_default()
 }
 
 /// Opening anchors for a nested single-quoted granted ability inside a

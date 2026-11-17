@@ -7,7 +7,8 @@ use super::ability::{
     ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use super::card_type::CardType;
-use super::format::DeckCopyLimit;
+use super::confirmed_misparse::MisparseClass;
+use super::format::{DeckCopyLimit, DeckSizeOverride};
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 use super::oracle_diagnostic::OracleDiagnostic;
@@ -66,6 +67,18 @@ pub struct CardMetadata {
     /// so no `CardFace`/`DeckEntry` construction site needs to change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub off_stack_mana_value_override: Option<u32>,
+    /// CR 709.4b: Each half's own mana cost for a SPLIT card, in face order,
+    /// stamped alongside `off_stack_mana_value_override` by
+    /// `DeckEntry::from_resolved_face`. An effect that refers to the symbols in a
+    /// split card's mana cost sees the separate symbols of every half rather than
+    /// the whole mana cost (Jegantha sees {1} twice in Fire // Ice), and a
+    /// deck-level check has only one `CardFace`. Empty for every non-split card
+    /// (read the face's own `mana_cost`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub off_stack_mana_costs: Vec<crate::types::mana::ManaCost>,
+    /// Curated support classification only; never projected onto a game object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed_misparse: Option<MisparseClass>,
 }
 
 impl CardMetadata {
@@ -78,6 +91,8 @@ impl CardMetadata {
             && self.source_printing_ids.is_empty()
             && self.spellbook.is_empty()
             && self.off_stack_mana_value_override.is_none()
+            && self.off_stack_mana_costs.is_empty()
+            && self.confirmed_misparse.is_none()
     }
 }
 
@@ -201,6 +216,30 @@ pub struct CleaveVariant {
     pub replacements: Vec<ReplacementDefinition>,
 }
 
+/// CR 903.5a: compat reader for the `no_maximum_deck_size` key. Corpus
+/// payloads stamped before the typed retype carry a bare bool (`true` on the
+/// two stamped faces); current payloads carry the tagged [`DeckSizeOverride`]
+/// union under the same key. A missing key is handled by `default`, not here.
+fn deserialize_deck_size_override<'de, D>(
+    deserializer: D,
+) -> Result<Option<DeckSizeOverride>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Compat {
+        Legacy(bool),
+        Typed(DeckSizeOverride),
+    }
+    Ok(match Option::<Compat>::deserialize(deserializer)? {
+        None => None,
+        Some(Compat::Legacy(true)) => Some(DeckSizeOverride::NoMaximum),
+        Some(Compat::Legacy(false)) => None,
+        Some(Compat::Typed(override_value)) => Some(override_value),
+    })
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardFace {
     pub name: String,
@@ -276,6 +315,26 @@ pub struct CardFace {
     /// singleton) limit applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deck_copy_limit: Option<DeckCopyLimit>,
+    /// CR 903.5a: Deck-construction override — "A deck with this commander has
+    /// no maximum deck size" (Whtz, the Bibliophile) and the "your starting
+    /// deck can contain any number of cards beyond the maximum deck size"
+    /// class (The Covert Blue Mage). Read at deck-validation time by
+    /// `effective_deck_size_rule`, never at runtime. `None` for every other
+    /// face, keeping serialized card data byte-identical for the corpus.
+    ///
+    /// Serialized under the legacy `no_maximum_deck_size` key: current
+    /// payloads carry the tagged [`DeckSizeOverride`] union, while corpus
+    /// payloads stamped before the retype carry a bare `true`. The custom
+    /// reader accepts both; a missing key still means `None`. Keeping the key
+    /// (rather than renaming it) turns an old peer reading a new payload
+    /// into a loud type error instead of a silently dropped marker.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "no_maximum_deck_size",
+        deserialize_with = "deserialize_deck_size_override"
+    )]
+    pub deck_size_override: Option<DeckSizeOverride>,
     /// CR 717.1: Lit-up roll numbers for Attraction card variants (d6 values 1–6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attraction_lights: Vec<u8>,
@@ -374,5 +433,73 @@ impl CardRules {
                 names
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod deck_size_override_compat_tests {
+    use super::*;
+
+    fn face_json_with_marker(value: serde_json::Value) -> serde_json::Value {
+        // Serialize a full default face first: most fields carry no
+        // `#[serde(default)]`, so a hand-written minimal object would not
+        // deserialize. Mutating the one key keeps the payload realistic.
+        let mut json = serde_json::to_value(CardFace::default()).expect("face serializes");
+        json["no_maximum_deck_size"] = value;
+        json
+    }
+
+    /// CR 903.5a: the typed override serializes under the legacy
+    /// `no_maximum_deck_size` key — the key is preserved, only the value
+    /// shape changes. `None` omits the key exactly as before.
+    #[test]
+    fn typed_override_keeps_the_legacy_key() {
+        let face = CardFace {
+            deck_size_override: Some(DeckSizeOverride::NoMaximum),
+            ..CardFace::default()
+        };
+        let json = serde_json::to_value(&face).expect("face serializes");
+        assert_eq!(
+            json["no_maximum_deck_size"],
+            serde_json::json!({"type": "NoMaximum"}),
+            "the override must keep the legacy key, got: {json}"
+        );
+
+        let plain = CardFace::default();
+        let json = serde_json::to_value(&plain).expect("face serializes");
+        assert!(
+            json.get("no_maximum_deck_size").is_none(),
+            "an unmarked face must omit the key, got: {json}"
+        );
+        assert!(
+            json.get("deck_size_override").is_none(),
+            "the new field name must never leak onto the wire, got: {json}"
+        );
+    }
+
+    /// CR 903.5a: corpus payloads stamped before the retype (`true` / `false`
+    /// / `null` / missing key) still read — never silently dropped.
+    #[test]
+    fn legacy_bool_marker_parses_to_the_typed_override() {
+        let face: CardFace = serde_json::from_value(face_json_with_marker(serde_json::json!(true)))
+            .expect("legacy true parses");
+        assert_eq!(face.deck_size_override, Some(DeckSizeOverride::NoMaximum));
+
+        let face: CardFace =
+            serde_json::from_value(face_json_with_marker(serde_json::json!(false)))
+                .expect("legacy false parses");
+        assert_eq!(face.deck_size_override, None);
+
+        let face: CardFace = serde_json::from_value(face_json_with_marker(serde_json::Value::Null))
+            .expect("explicit null parses");
+        assert_eq!(face.deck_size_override, None);
+
+        let mut missing = face_json_with_marker(serde_json::json!(true));
+        missing
+            .as_object_mut()
+            .expect("object")
+            .remove("no_maximum_deck_size");
+        let face: CardFace = serde_json::from_value(missing).expect("missing key parses");
+        assert_eq!(face.deck_size_override, None);
     }
 }

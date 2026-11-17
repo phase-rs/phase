@@ -696,8 +696,7 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
             // CR 702.21a + CR 118.3: a ward cost is paid in full or not at all,
             // so every comma-separated leg is part of the one cost; a leg the
             // grammar declines leaves the cost unmodeled — decline rather than
-            // re-read the whole text as one leg (the mana fallback would make
-            // that a partial cost).
+            // re-read the whole text as one leg.
             return parts
                 .iter()
                 .map(|part| parse_ward_cost_single(part.trim()))
@@ -747,9 +746,7 @@ fn parse_get_player_counters_ward_cost(input: &str) -> OracleResult<'_, WardCost
 /// - `Err`: the text does not start with the discard verb, so it is not a
 ///   discard leg.
 /// - `Ok((_, None))`: discard-led but unmodeled (bare verb, inflected verb,
-///   unreadable or unsupported body). The caller declines the whole cost; it
-///   must never reach the mana fallback, which reads brace-free text as a free
-///   Ward {0}.
+///   unreadable or unsupported body). The caller declines the whole cost.
 /// - `Ok((_, Some(cost)))`: modeled.
 ///
 /// The verb is recognized independently of its body and carries no trailing
@@ -790,6 +787,13 @@ fn ward_discard_from_ability_cost(cost: Option<AbilityCost>) -> Option<WardCost>
         filter,
         selection,
     })
+}
+
+/// CR 702.21a: a ward leg is a mana cost only when written wholly in mana symbols.
+fn parse_ward_mana_leg(text: &str) -> Option<ManaCost> {
+    let upper = text.trim().to_ascii_uppercase();
+    let parsed = all_consuming(nom_primitives::parse_mana_cost).parse(&upper);
+    parsed.ok().map(|(_, cost)| cost)
 }
 
 /// Parse a single ward cost component (not compound).
@@ -833,21 +837,22 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
                     .or(rest.strip_prefix("an "))
                     .unwrap_or(rest),
             ));
-        let (filter, _) = parse_type_phrase_folding(after_count);
+        let (filter, rest) = parse_type_phrase_folding(after_count);
+        // CR 702.21a: unread qualifier text would make the cost cheaper than printed; decline.
+        if !rest.trim().is_empty() {
+            return None;
+        }
         return Some(WardCost::Sacrifice { count, filter });
     }
 
     // CR 702.21a + CR 701.67: "waterbend {N}" — ward cost paid via waterbend mechanic.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("waterbend").parse(lower) {
-        let cost = crate::types::mana::parse_mtgjson_mana_cost(rest.trim());
-        return Some(WardCost::Waterbend(cost));
+        return parse_ward_mana_leg(rest).map(WardCost::Waterbend);
     }
 
     // CR 702.21a + CR 122.1 + CR 104.3d: "get N <kind> counter(s)" — a
     // player-counter ward cost (The Serpent Society: "Ward—Get five poison
-    // counters."). MUST run before the mana-cost fallback below, which
-    // otherwise silently parses unrecognized cost text with no mana
-    // symbols/braces as a free, always-paid Ward (phase-rs/phase#6640).
+    // counters.").
     //
     // One grammatical authority over the count/article, kind, and
     // singular/plural axes — composed nom combinators, not string-suffix
@@ -858,18 +863,12 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
             Ok((_, cost)) => Some(cost),
             // CR 702.21a: recognized as counter-shaped ("get ...") but the
             // count, kind, or "counter(s)" tail didn't parse in full — fail
-            // closed rather than falling through to the mana-cost fallback
-            // below, which would otherwise silently produce a free,
-            // always-paid Ward for unsupported/malformed counter text
-            // (phase-rs/phase#6640's exact bug class, for different
-            // malformed input).
+            // closed.
             Err(_) => None,
         };
     }
 
-    // Fall back to mana cost parsing
-    let cost = crate::types::mana::parse_mtgjson_mana_cost(lower.trim());
-    Some(WardCost::Mana(cost))
+    parse_ward_mana_leg(lower).map(WardCost::Mana)
 }
 
 /// Split a string on ", " but only when the comma is outside mana braces {}.
@@ -1348,33 +1347,125 @@ pub(crate) enum CantBeTargetedScope {
     OpponentsOnly,
 }
 
+/// How a "can't be the target[ed]" prohibition's source qualifier reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CantBeTargetedShape {
+    /// The prohibition covers every spell and ability, optionally limited to those
+    /// an opponent controls: the only shape `StaticMode::CantBeTargeted { who }`
+    /// can express.
+    Supported(CantBeTargetedScope),
+    /// The prohibition carries a source-kind or source-quality qualifier
+    /// ("of spells", "of abilities", "of black or red spells your opponents
+    /// control", "... from nongreen sources"). `CantBeTargeted` has no axis for the
+    /// prohibited sources, so modeling it would over-block (CR 115.1a spells vs.
+    /// CR 115.1c activated abilities); the caller must decline instead.
+    SourceQualified,
+}
+
+/// CR 115.1 + CR 702.18a: parse what follows a targeting-prohibition phrase.
+/// Only the bare form and the unqualified "spells or abilities [your opponents
+/// control]" form are supported; any other source qualifier is `SourceQualified`.
+fn parse_cant_be_targeted_shape(input: &str) -> OracleResult<'_, CantBeTargetedShape> {
+    // The clause ends here: end of text, punctuation, or a duration / condition /
+    // conjunction that continues the sentence rather than the source phrase.
+    fn clause_end(i: &str) -> OracleResult<'_, ()> {
+        alt((
+            value((), eof),
+            value((), peek(alt((tag("."), tag(","), tag(";"), tag(":"))))),
+            value(
+                (),
+                peek(alt((
+                    tag(" this turn"),
+                    tag(" until "),
+                    tag(" as long as "),
+                    tag(" unless "),
+                    tag(" if "),
+                    tag(" and "),
+                ))),
+            ),
+        ))
+        .parse(i)
+    }
+    alt((
+        // "... of / by spells or abilities [your opponents control]"
+        preceded(
+            alt((tag(" of "), tag(" by "))),
+            terminated(
+                (
+                    alt((
+                        tag("spells or abilities"),
+                        tag("spell or ability"),
+                        tag("spells and abilities"),
+                    )),
+                    // CR 109.5: "your opponents control" anchors to the controller
+                    // of the prohibited source.
+                    opt(alt((
+                        tag(" your opponents control"),
+                        tag(" an opponent controls"),
+                        tag(" opponents control"),
+                    ))),
+                ),
+                clause_end,
+            ),
+        )
+        .map(|(_, opponents)| {
+            CantBeTargetedShape::Supported(if opponents.is_some() {
+                CantBeTargetedScope::OpponentsOnly
+            } else {
+                CantBeTargetedScope::AnyPlayer
+            })
+        }),
+        // Bare form: "~ can't be targeted" / "~ can't be the target".
+        value(
+            CantBeTargetedShape::Supported(CantBeTargetedScope::AnyPlayer),
+            clause_end,
+        ),
+        // Anything else names a source kind or quality.
+        value(CantBeTargetedShape::SourceQualified, nom::combinator::rest),
+    ))
+    .parse(input)
+}
+
+fn analyze_cant_be_targeted(predicate_lower: &str) -> Option<CantBeTargetedShape> {
+    let (_, _, rest) = nom_primitives::scan_preceded(predicate_lower, |i: &str| {
+        // "the target" / "the targets" (plural subject: "creatures you control can't
+        // be the targets of ...") / "targeted".
+        terminated(
+            alt((
+                tag("can't be the target"),
+                tag("can\u{2019}t be the target"),
+                tag("cannot be the target"),
+                tag("can't be targeted"),
+                tag("can\u{2019}t be targeted"),
+                tag("cannot be targeted"),
+            )),
+            opt(tag("s")),
+        )
+        .parse(i)
+    })?;
+    parse_cant_be_targeted_shape(rest)
+        .ok()
+        .map(|(_, shape)| shape)
+}
+
 /// Classify a predicate carrying a "can't be the target[ed]" prohibition.
 ///
-/// Returns `None` when no such prohibition is present, or when its scope is one
-/// this parser does not yet model precisely (e.g. a specific spell type), so a
-/// caller never collapses an unrecognized scope into a blanket restriction.
+/// Returns `None` when no such prohibition is present, or when its source
+/// qualifier is one `StaticMode::CantBeTargeted { who }` cannot express (a
+/// specific spell kind, abilities only, a source quality). A caller therefore
+/// never collapses a qualified restriction into a blanket one; it consults
+/// [`is_source_qualified_cant_be_targeted`] to fail closed instead.
 pub(crate) fn classify_cant_be_targeted(predicate_lower: &str) -> Option<CantBeTargetedScope> {
-    let is_prohibition = scan_contains(predicate_lower, "can't be the target")
-        || scan_contains(predicate_lower, "cannot be the target")
-        || scan_contains(predicate_lower, "can't be targeted")
-        || scan_contains(predicate_lower, "cannot be targeted");
-    if !is_prohibition {
-        return None;
+    match analyze_cant_be_targeted(predicate_lower)? {
+        CantBeTargetedShape::Supported(scope) => Some(scope),
+        CantBeTargetedShape::SourceQualified => None,
     }
-    // CR 702.11a: an opponent-controlled qualifier makes this Hexproof, not Shroud.
-    if scan_contains(predicate_lower, "your opponents control")
-        || scan_contains(predicate_lower, "an opponent controls")
-    {
-        return Some(CantBeTargetedScope::OpponentsOnly);
-    }
-    // CR 702.18a: the bare form ("~ can't be targeted") or the unqualified
-    // "spells or abilities" scope is blanket Shroud. Any other qualifier is left
-    // unclassified so it is not mistreated as a blanket restriction.
-    let bare = !scan_contains(predicate_lower, " of ");
-    let unqualified_scope = scan_contains(predicate_lower, "spells or abilities")
-        || scan_contains(predicate_lower, "spell or ability")
-        || scan_contains(predicate_lower, "spells and abilities");
-    (bare || unqualified_scope).then_some(CantBeTargetedScope::AnyPlayer)
+}
+
+/// True when the predicate is a targeting prohibition whose source-kind or
+/// source-quality qualifier the engine cannot model (see [`CantBeTargetedShape`]).
+pub(crate) fn is_source_qualified_cant_be_targeted(predicate_lower: &str) -> bool {
+    analyze_cant_be_targeted(predicate_lower) == Some(CantBeTargetedShape::SourceQualified)
 }
 
 /// CR 702.168d + CR 118.7a: Parse a disguise line with a trailing generic
@@ -2108,6 +2199,21 @@ pub(crate) fn parse_keyword_line_core(text: &str) -> Option<(Keyword, &str)> {
     // Oracle format: "ward {2}" → name="ward", rest="{2}"
     let (_, (name, rest)) = split_once_on(text, " ").ok()?;
     let rest = rest.trim();
+
+    // CR 702.1 + CR 702.6a: a keyword declaration is the ability's name plus its
+    // parameter. "<keyword> abilities …" ("equip abilities you activate cost {1}
+    // less") instead REFERS to abilities with that keyword, so it is never a
+    // declaration. Without this guard the generic path below reads the noun
+    // phrase as the parameter and fabricates a keyword (`Equip {0}`).
+    if terminated(
+        alt((tag::<_, _, OracleError<'_>>("abilities"), tag("ability"))),
+        not(alpha1),
+    )
+    .parse(rest)
+    .is_ok()
+    {
+        return None;
+    }
 
     // CR 702.32a: Fading N.
     // CR 702.63a: Vanishing N.
@@ -3422,7 +3528,6 @@ mod tests {
     #[test]
     fn ward_get_poison_counters_parses_as_player_counter_cost() {
         // Issue #6640 (The Serpent Society): "Ward—Get five poison counters."
-        // must not silently fall through to the mana-cost fallback.
         let result = parse_ward_cost("Get five poison counters.");
         assert_eq!(
             result,
@@ -3460,8 +3565,7 @@ mod tests {
 
     // Issue #6640 follow-up: counter-shaped "get ... counter(s)" text that
     // fails to parse (malformed count, unknown kind) must fail closed
-    // (`None`) rather than silently falling through to the mana-cost
-    // fallback and becoming a free, always-paid Ward.
+    // (`None`).
     #[test]
     fn ward_get_counters_with_unparseable_count_fails_closed() {
         let result = parse_ward_cost("Get many poison counters.");
@@ -3572,8 +3676,7 @@ mod tests {
     }
 
     /// CR 702.21a: a bare or inflected discard verb is discard-led and fails
-    /// closed; it must never reach the mana fallback, which would read it as a
-    /// free Ward {0}.
+    /// closed.
     #[test]
     fn ward_discard_bare_and_inflected_verbs_fail_closed() {
         use crate::types::ability::CardSelectionMode::Chosen;
@@ -3608,11 +3711,95 @@ mod tests {
         assert_eq!(parse_ward_cost("{2}, Discard."), None);
     }
 
+    /// CR 702.21a + CR 118.3: a ward leg is modeled only when its grammar reads all of it.
+    #[test]
+    fn ward_unmodeled_cost_legs_fail_closed() {
+        assert_eq!(
+            parse_ward_cost("{2}"),
+            Some(Keyword::Ward(WardCost::Mana(ManaCost::generic(2))))
+        );
+        // No printed Ward has a colored mana cost; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
+        assert_eq!(
+            parse_ward_cost("{2}{U}."),
+            Some(Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            })))
+        );
+        assert_eq!(
+            parse_ward_cost("{2}, Pay 2 life."),
+            Some(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::Mana(ManaCost::generic(2)),
+                WardCost::PayLife(2),
+            ])))
+        );
+        assert_eq!(
+            parse_ward_cost("Waterbend {4}."),
+            Some(Keyword::Ward(WardCost::Waterbend(ManaCost::generic(4))))
+        );
+        let Some(Keyword::Ward(WardCost::Sacrifice { count: 1, filter })) =
+            parse_ward_cost("Sacrifice a permanent with mana value 1 or greater.")
+        else {
+            panic!("Ulamog's Dreadsire's sacrifice ward must parse");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected a typed sacrifice filter, got {filter:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Cmc { .. })),
+            "{typed:?}"
+        );
+        assert!(matches!(
+            parse_ward_cost("Sacrifice three nonland permanents."),
+            Some(Keyword::Ward(WardCost::Sacrifice { count: 3, .. }))
+        ));
+
+        for unmodeled in [
+            "Collect evidence 4.",
+            "Blight 2.",
+            // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
+            "{2}, Blight 2.",
+            // No printed Ward has this shape; extends The Unagi of Kyoshi Island's "Ward—Waterbend {4}.".
+            "Waterbend frob.",
+            // No printed Ward has this shape; extends Ulamog's Dreadsire's sacrifice Ward.
+            "Sacrifice a permanent with mana value 1 or greater splorf.",
+        ] {
+            assert_eq!(parse_ward_cost(unmodeled), None, "{unmodeled}");
+        }
+
+        assert_eq!(
+            parse_router_keyword_line("Ward\u{2014}{2}, Pay 2 life.").and_then(|r| r.keyword),
+            Some(Keyword::Ward(WardCost::Compound(vec![
+                WardCost::Mana(ManaCost::generic(2)),
+                WardCost::PayLife(2),
+            ])))
+        );
+        assert_eq!(
+            parse_router_keyword_line("Ward\u{2014}Waterbend {4}.").and_then(|r| r.keyword),
+            Some(Keyword::Ward(WardCost::Waterbend(ManaCost::generic(4))))
+        );
+        for unread_tail in [
+            // No printed Ward has this shape; extends Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life.".
+            "Ward\u{2014}{2} splorf.",
+            // No printed Ward has this shape; extends The Unagi of Kyoshi Island's "Ward—Waterbend {4}.".
+            "Ward\u{2014}Waterbend {4} splorf.",
+        ] {
+            assert!(
+                parse_router_keyword_line(unread_tail).is_none(),
+                "{unread_tail}"
+            );
+        }
+    }
+
     /// The strict router must not accept a discard ward line with a trailing
     /// clause the keyword grammar never read.
     #[test]
     fn ward_discard_router_rejects_trailing_clause() {
         assert!(parse_router_keyword_line("Ward\u{2014}Discard a card.").is_some());
+        // No printed Ward has a conditional tail; extends Forum Necroscribe's "Ward—Discard a card.".
         assert!(parse_router_keyword_line(
             "Ward\u{2014}Discard a card if you control an artifact."
         )
@@ -3624,6 +3811,29 @@ mod tests {
         // CR 702.85a: Cascade is a no-parameter keyword.
         let kw = parse_granted_keyword_fragment("cascade").unwrap();
         assert_eq!(kw, Keyword::Cascade);
+    }
+
+    /// CR 702.1 + CR 702.6a: "<keyword> abilities …" refers to abilities with that
+    /// keyword and is never a declaration. The generic name/parameter path read the
+    /// noun phrase as the parameter and fabricated `Equip {0}` (Nahiri, Storm of
+    /// Stone's "equip abilities you activate cost {1} less to activate").
+    #[test]
+    fn parse_granted_keyword_fragment_rejects_keyword_ability_noun_phrase() {
+        for text in [
+            "equip abilities you activate cost {1} less to activate",
+            "ninjutsu abilities you activate cost {1} less to activate",
+            "equip ability",
+        ] {
+            assert_eq!(parse_granted_keyword_fragment(text), None, "{text}");
+        }
+        assert_eq!(
+            parse_granted_keyword_fragment("equip {2}"),
+            Some(Keyword::Equip(ManaCost::Cost {
+                shards: vec![],
+                generic: 2
+            })),
+            "control: a real equip declaration still parses"
+        );
     }
 
     /// CR 702.82c: "Devour [quality] N" (Famished Worldsire — "Devour land 3")

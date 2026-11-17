@@ -214,7 +214,13 @@ pub(crate) fn resolve_branch(
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
     resolved.context = context;
     // CR 400.7: the branch inherits the parent's OCCURRENCES, pins included.
-    resolved.replace_target_occurrences(parent_occurrences.occurrences());
+    // CR 608.2d: a branch that makes its own resolution-time choice ("they
+    // shuffle another creature they own into their library") is not bound by
+    // the parent's targets; the shared inheritance authority decides, as it
+    // does for every other chain descent.
+    if crate::game::effects::can_inherit_parent_targets(&resolved) {
+        resolved.replace_target_occurrences(parent_occurrences.occurrences());
+    }
     resolved.set_replacement_applied_recursive(replacement_applied);
     resolved.set_scoped_player_recursive(player);
     // CR 603.2 + CR 608.2c (run boon-blockers-20261010): skip the chooser-target

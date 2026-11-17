@@ -372,7 +372,7 @@ fn legacy_willie_planeswalker_only_restriction_snapshots_selected_player() {
             affected_players: RestrictionPlayerScope::SpecificPlayer(RESTRICTED),
             expiry: RestrictionExpiry::UntilEndOfNextTurnOf { player: RESTRICTED },
             activity: ProhibitedActivity::Attack {
-                defended: AttackTargetFilter::Planeswalker,
+                defended: AttackTargetFilter::Planeswalker { subtype: None },
                 protected_player: Some(PROTECTED),
             },
         }] if *stored_source == source

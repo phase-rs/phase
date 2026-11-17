@@ -167,6 +167,7 @@ const enginePartnerCandidates = vi.fn(
   async (_first: string, _candidates: string[], _draftSetCodes: readonly string[]) =>
     [] as string[],
 );
+const engineIsCardCompanion = vi.fn(async (_name: string) => false);
 vi.mock("../../../services/engineRuntime", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../services/engineRuntime")>();
   return {
@@ -178,8 +179,22 @@ vi.mock("../../../services/engineRuntime", async (importOriginal) => {
       candidates: string[],
       draftSetCodes: readonly string[],
     ) => enginePartnerCandidates(first, candidates, draftSetCodes),
+    isCardCompanion: (name: string) => engineIsCardCompanion(name),
   };
 });
+
+// CR 702.139a + CR 100.4b: the ENGINE decides whether a designated companion is
+// backed by a drafted pool copy the main deck does not use. Contract-faithful
+// fake of draft-core's `companion_has_drafted_copy_outside_deck` (one entry per
+// copy; backed iff the pool holds more copies than the deck uses).
+vi.mock("../../../viewmodel/limitedCompanion", () => ({
+  companionHasDraftedCopyOutsideDeck: async (
+    poolNames: readonly string[],
+    mainDeckNames: readonly string[],
+    companion: string,
+  ) => poolNames.filter((n) => n === companion).length
+    > mainDeckNames.filter((n) => n === companion).length,
+}));
 
 vi.mock("../../../hooks/useDeckCardData", () => ({
   useDeckCardData: () => ({
@@ -748,7 +763,7 @@ describe("LimitedDeckBuilder", () => {
     expect(screen.queryByText("Average Mana Cost")).not.toBeInTheDocument();
     const controls = screen.getByRole("button", { name: "Deck Stats" }).closest("[data-desktop-deck-controls]")!;
     expect(Array.from(controls.querySelectorAll("button")).map((button) => button.textContent))
-      .toEqual(["Add Lands", "Deck Stats"]);
+      .toEqual(["Add Lands", "Deck Stats", "Export"]);
 
     fireEvent.click(screen.getByRole("button", { name: "Deck Stats" }));
 
@@ -827,7 +842,7 @@ describe("LimitedDeckBuilder", () => {
 
     const deckControls = container.querySelector<HTMLElement>("[data-desktop-deck-controls]")!;
     expect(Array.from(deckControls.querySelectorAll("button")).map((button) => button.textContent))
-      .toEqual(["Add Lands", "Deck Stats", "Suggest Deck"]);
+      .toEqual(["Add Lands", "Deck Stats", "Export", "Suggest Deck"]);
     const deckStatusActions = container.querySelector<HTMLElement>("[data-desktop-deck-status-actions]")!;
     const deckStatus = deckStatusActions.querySelector("[data-deck-status]")!;
     const submit = within(deckStatusActions).getByRole("button", { name: "Submit Deck" });
@@ -1108,6 +1123,143 @@ describe("LimitedDeckBuilder", () => {
       expect(button).toBeEnabled();
       fireEvent.click(button);
       await waitFor(() => expect(submit).toHaveBeenCalledWith([]));
+    },
+  );
+});
+
+describe("LimitedDeckBuilder deck export", () => {
+  const WIND_DRAKE = TEST_VIEW.pool[0];
+  const SECOND_WIND_DRAKE = { ...WIND_DRAKE, instance_id: "card-2" };
+  const ONE_DRAKE_IN_DECK: DraftWorkspaceState = {
+    schemaVersion: 1,
+    placements: { "card-1": { zone: "deck", row: 0, column: 0, order: 0 } },
+    virtualBasics: [],
+  };
+
+  function editableLocal(
+    view: BuilderView,
+    workspace: DraftWorkspaceState,
+    preferences = createDefaultDraftWorkspacePreferences(),
+  ) {
+    return {
+      view,
+      workspace,
+      preferences,
+      interactionLocked: false,
+      onWorkspaceChange: () => {},
+      onPreferencesChange: () => {},
+      onSubmitDeck: () => {},
+      onAddBasicLand: () => {},
+      onRemoveBasicLand: () => {},
+    };
+  }
+
+  async function openExportText() {
+    fireEvent.click(screen.getByRole("button", { name: "Export deck" }));
+    const dialog = await screen.findByRole("dialog", { name: "Export Deck" });
+    return within(dialog).getByRole("textbox");
+  }
+
+  it("exports the deck zone as the main deck from the desktop builder", async () => {
+    const { container } = render(
+      <LimitedDeckBuilder
+        local={editableLocal(TEST_VIEW, ONE_DRAKE_IN_DECK)}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    expect(container.querySelector("[data-deck-status]")).toHaveTextContent("1 spell");
+    expect(await openExportText()).toHaveValue("[Main]\n1 Wind Drake\n");
+  });
+
+  it("exports sideboard-zone pool cards and virtual basics as the sideboard", async () => {
+    render(
+      <LimitedDeckBuilder
+        local={editableLocal(
+          { ...TEST_VIEW, pool: [WIND_DRAKE, SECOND_WIND_DRAKE] },
+          {
+            schemaVersion: 1,
+            placements: {
+              "card-1": { zone: "deck", row: 0, column: 0, order: 0 },
+              "card-2": { zone: "sideboard", row: 0, column: 0, order: 0 },
+              "island-1": { zone: "sideboard", row: 0, column: 0, order: 1 },
+            },
+            virtualBasics: [{ instanceId: "island-1", name: "Island" }],
+          },
+        )}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    expect(await openExportText()).toHaveValue(
+      "[Main]\n1 Wind Drake\n[Sideboard]\n1 Wind Drake\n1 Island\n",
+    );
+  });
+
+  it("offers export in the phone compact builder and disables it for an empty deck", () => {
+    const { unmount } = render(
+      <LimitedDeckBuilder
+        local={editableLocal(TEST_VIEW, ONE_DRAKE_IN_DECK)}
+        responsiveLayout="phone-portrait"
+      />,
+    );
+    const enabled = screen.getByRole("button", { name: "Export deck" });
+    expect(enabled).toBeEnabled();
+    expect(enabled).not.toHaveClass("cursor-not-allowed");
+    unmount();
+
+    render(
+      <LimitedDeckBuilder
+        local={editableLocal(
+          { ...TEST_VIEW, pool: [] },
+          { schemaVersion: 1, placements: {}, virtualBasics: [] },
+        )}
+        responsiveLayout="phone-portrait"
+      />,
+    );
+    const disabled = screen.getByRole("button", { name: "Export deck" });
+    expect(disabled).toBeDisabled();
+    expect(disabled).toHaveClass("cursor-not-allowed");
+  });
+
+  it("offers export in the phone compact fixed-pool builder, which has no land picker", () => {
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: TEST_VIEW,
+          workspace: ONE_DRAKE_IN_DECK,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          capabilities: { kind: "fixed-pool" },
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+        }}
+        responsiveLayout="phone-portrait"
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Add Lands" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export deck" })).toBeEnabled();
+  });
+
+  it.each(["phone-portrait", "tablet-landscape"] as const)(
+    "offers export in the %s visual builder toolbar",
+    (responsiveLayout) => {
+      render(
+        <LimitedDeckBuilder
+          local={editableLocal(TEST_VIEW, ONE_DRAKE_IN_DECK, {
+            ...createDefaultDraftWorkspacePreferences(),
+            explicitView: "board",
+          })}
+          responsiveLayout={responsiveLayout}
+        />,
+      );
+
+      expect(screen.getByRole("button", { name: "Add Lands" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Export deck" })).toBeEnabled();
     },
   );
 });
@@ -1841,6 +1993,65 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     await waitFor(() => expect(submit).not.toBeDisabled());
     fireEvent.click(submit);
     await waitFor(() => expect(submitSpy).toHaveBeenCalledWith(["Vehicle Commander"]));
+  });
+
+  it("exports the designated commander under [Commander] and out of the main deck", async () => {
+    const raff = {
+      ...TEST_VIEW.pool[0],
+      instance_id: "raff",
+      name: "Raff Capashen, Ship's Mage",
+      set_code: "cmm",
+      collector_number: "351",
+      rarity: "uncommon",
+      colors: ["W", "U"],
+      cmc: 4,
+      type_line: "Legendary Creature — Human Wizard",
+    };
+    const cards = [
+      ...Array.from({ length: 59 }, (_, index) => ({
+        ...TEST_VIEW.pool[0],
+        instance_id: `wind-${index}`,
+      })),
+      raff,
+    ];
+    engineEligible.mockImplementation(async (name: string) => name === raff.name);
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...COMMANDER_VIEW, pool: cards },
+          workspace: {
+            schemaVersion: 1,
+            placements: Object.fromEntries(cards.map((card, index) => [
+              card.instance_id,
+              { zone: "deck" as const, row: 0 as const, column: 0, order: index },
+            ])),
+            virtualBasics: [],
+          },
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          onWorkspaceChange: () => {},
+          onPreferencesChange: () => {},
+          onSubmitDeck: () => {},
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: raff.name }));
+    await waitFor(() => {
+      const panel = commanderPanelScope();
+      expect(panel.getByText(raff.name)).toBeInTheDocument();
+      expect(panel.getByRole("button", { name: "Remove" })).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Export deck" }));
+    const dialog = await screen.findByRole("dialog", { name: "Export Deck" });
+    expect(within(dialog).getByRole("textbox")).toHaveValue(
+      "[Commander]\n1 Raff Capashen, Ship's Mage\n[Main]\n59 Wind Drake\n",
+    );
   });
 
   it.each(["rejected", "false"] as const)("passes a 40-card Set-backed fixed-pool workspace through compatibility %s", async (outcome) => {
@@ -3495,5 +3706,542 @@ describe("LimitedDeckBuilder — CR 903.3 commander designation", () => {
     // granted copy of a name the deck already holds -- and a non-summing one
     // reads 2.
     expect(screen.getByText("3/60 cards")).toBeInTheDocument();
+  });
+});
+
+describe("Limited companion support", () => {
+  const lurrusPoolCard = {
+    instance_id: "lurrus-1",
+    name: "Lurrus of the Dream-Den",
+    set_code: "iko",
+    collector_number: "226",
+    rarity: "rare",
+    colors: ["W", "B"],
+    cmc: 3,
+    type_line: "Legendary Creature — Cat Nightmare",
+  };
+
+  const poolWithLurrus = [
+    ...TEST_VIEW.pool,
+    lurrusPoolCard,
+  ];
+
+  it("does not render companion slot when no companion cards are in pool", async () => {
+    engineIsCardCompanion.mockResolvedValue(false);
+    render(
+      <LimitedDeckBuilder
+        view={TEST_VIEW}
+        mainDeck={["Wind Drake"]}
+        landCounts={{ Plains: 39 }}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+      />,
+    );
+
+    // Reach guard: the engine lookup ran, so the absence below is its answer
+    // rather than a render before the candidates resolved.
+    await waitFor(() => {
+      expect(engineIsCardCompanion).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.queryByText(/companion/i)).not.toBeInTheDocument();
+    });
+  });
+
+  it("renders companion slot and candidate when companion card is in pool", async () => {
+    engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+    render(
+      <LimitedDeckBuilder
+        view={{ ...TEST_VIEW, pool: poolWithLurrus }}
+        mainDeck={["Wind Drake"]}
+        landCounts={{ Plains: 39 }}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion")).toBeInTheDocument();
+    });
+    const section = screen.getByText("Companion").closest("section")!;
+    expect(within(section).getByRole("button", { name: "Lurrus of the Dream-Den" })).toBeInTheDocument();
+  });
+
+  it("designates companion, displays requirement met badge when engine evaluates compatible, and passes companion to submitDeck", async () => {
+    engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+    compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+    const onSubmitDeck = vi.fn();
+
+    render(
+      <LimitedDeckBuilder
+        view={{ ...TEST_VIEW, pool: poolWithLurrus }}
+        mainDeck={["Wind Drake"]}
+        landCounts={{ Plains: 39 }}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={onSubmitDeck}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion")).toBeInTheDocument();
+    });
+
+    const section = screen.getByText("Companion").closest("section")!;
+    fireEvent.click(within(section).getByRole("button", { name: "Lurrus of the Dream-Den" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion requirement met")).toBeInTheDocument();
+    });
+
+    const submitBtn = screen.getByRole("button", { name: /submit deck/i });
+    expect(submitBtn).toBeEnabled();
+    fireEvent.click(submitBtn);
+
+    expect(onSubmitDeck).toHaveBeenCalledWith([], "Lurrus of the Dream-Den");
+  });
+
+  it("displays requirement not met badge and validation reasons when companion condition is violated", async () => {
+    engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+    compatibilityHarness.evaluate.mockResolvedValue({
+      ...compatibleResult(),
+      selected_format_compatible: false,
+      selected_format_reasons: [
+        "Lurrus of the Dream-Den: each permanent card in your starting deck must have mana value 2 or less",
+      ],
+    });
+
+    render(
+      <LimitedDeckBuilder
+        view={{ ...TEST_VIEW, pool: poolWithLurrus }}
+        mainDeck={["Wind Drake"]}
+        landCounts={{ Plains: 39 }}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={() => {}}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion")).toBeInTheDocument();
+    });
+
+    const section = screen.getByText("Companion").closest("section")!;
+    fireEvent.click(within(section).getByRole("button", { name: "Lurrus of the Dream-Den" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion requirement not met")).toBeInTheDocument();
+    });
+    expect(
+      screen.getByText(
+        "Lurrus of the Dream-Den: each permanent card in your starting deck must have mana value 2 or less",
+      ),
+    ).toBeInTheDocument();
+
+    const submitBtn = screen.getByRole("button", { name: /submit deck/i });
+    expect(submitBtn).toBeDisabled();
+  });
+
+  it("removes companion when remove button is clicked", async () => {
+    engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+    compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+    const onSubmitDeck = vi.fn();
+
+    render(
+      <LimitedDeckBuilder
+        view={{ ...TEST_VIEW, pool: poolWithLurrus }}
+        mainDeck={["Wind Drake"]}
+        landCounts={{ Plains: 39 }}
+        onAddToDeck={() => {}}
+        onRemoveFromDeck={() => {}}
+        onSetLandCount={() => {}}
+        onSubmitDeck={onSubmitDeck}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion")).toBeInTheDocument();
+    });
+
+    const section = screen.getByText("Companion").closest("section")!;
+    fireEvent.click(within(section).getByRole("button", { name: "Lurrus of the Dream-Den" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion requirement met")).toBeInTheDocument();
+    });
+
+    const removeBtn = within(section).getByRole("button", { name: "Remove companion" });
+    fireEvent.click(removeBtn);
+
+    await waitFor(() => {
+      expect(within(section).getByRole("button", { name: "Lurrus of the Dream-Den" })).toBeInTheDocument();
+    });
+
+    const submitBtn = screen.getByRole("button", { name: /submit deck/i });
+    fireEvent.click(submitBtn);
+    expect(onSubmitDeck).toHaveBeenCalledWith([]);
+  });
+
+  it("workspace mode: designating the only copy moves it from the deck to the sideboard", async () => {
+    engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+    compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+    const onWorkspaceChange = vi.fn();
+    const onSubmitDeck = vi.fn();
+
+    const initialWorkspace: DraftWorkspaceState = {
+      schemaVersion: 1,
+      placements: {
+        "lurrus-1": { zone: "deck", row: 0, column: 0, order: 0 },
+      },
+      virtualBasics: Array.from({ length: 39 }, (_, i) => ({
+        instanceId: `plains-virtual-${i}`,
+        name: "Plains",
+      })),
+    };
+    for (let i = 0; i < 39; i++) {
+      initialWorkspace.placements[`plains-virtual-${i}`] = { zone: "deck", row: 0, column: 0, order: i + 1 };
+    }
+
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...TEST_VIEW, pool: poolWithLurrus },
+          workspace: initialWorkspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          capabilities: { kind: "editable-pool", suggestions: false },
+          onWorkspaceChange,
+          onPreferencesChange: () => {},
+          onSubmitDeck,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion")).toBeInTheDocument();
+    });
+
+    const section = screen.getByText("Companion").closest("section")!;
+    fireEvent.click(within(section).getByRole("button", { name: "Lurrus of the Dream-Den" }));
+
+    expect(onWorkspaceChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        placements: expect.objectContaining({
+          "lurrus-1": expect.objectContaining({ zone: "sideboard" }),
+        }),
+      }),
+    );
+  });
+
+  it("workspace mode: designates a sideboard companion and preserves it through export and submission", async () => {
+    engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+    compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+    const onWorkspaceChange = vi.fn();
+    const onSubmitDeck = vi.fn();
+    const secondLurrus = { ...lurrusPoolCard, instance_id: "lurrus-2" };
+
+    const workspace: DraftWorkspaceState = {
+      schemaVersion: 1,
+      placements: {
+        "lurrus-1": { zone: "sideboard", row: 0, column: 0, order: 0 },
+        "lurrus-2": { zone: "deck", row: 0, column: 0, order: 0 },
+      },
+      virtualBasics: Array.from({ length: 39 }, (_, i) => ({
+        instanceId: `plains-virtual-${i}`,
+        name: "Plains",
+      })),
+    };
+    for (let i = 0; i < 39; i++) {
+      workspace.placements[`plains-virtual-${i}`] = { zone: "deck", row: 0, column: 0, order: i + 1 };
+    }
+
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...TEST_VIEW, pool: [...poolWithLurrus, secondLurrus] },
+          workspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          capabilities: { kind: "editable-pool", suggestions: false },
+          onWorkspaceChange,
+          onPreferencesChange: () => {},
+          onSubmitDeck,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion")).toBeInTheDocument();
+    });
+    const section = screen.getByText("Companion").closest("section")!;
+    fireEvent.click(within(section).getByRole("button", { name: "Lurrus of the Dream-Den" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion requirement met")).toBeInTheDocument();
+    });
+    // The deck copy stays in the deck: no workspace update moves it.
+    for (const [next] of onWorkspaceChange.mock.calls as [DraftWorkspaceState][]) {
+      expect(next.placements["lurrus-2"]?.zone).toBe("deck");
+    }
+
+    const submitBtn = screen.getByRole("button", { name: /submit deck/i });
+    expect(submitBtn).toBeEnabled();
+    fireEvent.click(submitBtn);
+    await waitFor(() => {
+      expect(onSubmitDeck).toHaveBeenCalledWith([], "Lurrus of the Dream-Den");
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Export deck" }));
+    const dialog = await screen.findByRole("dialog", { name: "Export Deck" });
+    const text = within(dialog).getByRole<HTMLTextAreaElement>("textbox").value;
+    expect(text).toContain("[Companion]\n1 Lurrus of the Dream-Den\n");
+    expect(text).toContain("[Sideboard]\n1 Lurrus of the Dream-Den\n");
+  });
+
+  describe("workspace mode: designation backing, Cube minimum and resubmission", () => {
+    function lurrusWorkspace(lurrusZone: "deck" | "sideboard"): DraftWorkspaceState {
+      const deckBasics = lurrusZone === "deck" ? 39 : 40;
+      const workspace: DraftWorkspaceState = {
+        schemaVersion: 1,
+        placements: { "lurrus-1": { zone: lurrusZone, row: 0, column: 0, order: 0 } },
+        virtualBasics: Array.from({ length: deckBasics }, (_, i) => ({
+          instanceId: `plains-virtual-${i}`,
+          name: "Plains",
+        })),
+      };
+      for (let i = 0; i < deckBasics; i++) {
+        workspace.placements[`plains-virtual-${i}`] = { zone: "deck", row: 0, column: 0, order: i + 1 };
+      }
+      return workspace;
+    }
+
+    function workspaceBuilder(
+      workspace: DraftWorkspaceState,
+      overrides: {
+        onSubmitDeck?: (commanders?: string[], companion?: string | null) => void;
+        initialCompanion?: string | null;
+        minDeckSize?: number;
+      } = {},
+    ) {
+      return (
+        <LimitedDeckBuilder
+          local={{
+            view: { ...TEST_VIEW, pool: poolWithLurrus, min_deck_size: overrides.minDeckSize ?? 40 },
+            workspace,
+            preferences: createDefaultDraftWorkspacePreferences(),
+            interactionLocked: false,
+            capabilities: { kind: "editable-pool", suggestions: false },
+            onWorkspaceChange: () => {},
+            onPreferencesChange: () => {},
+            onSubmitDeck: overrides.onSubmitDeck ?? (() => {}),
+            initialCompanion: overrides.initialCompanion,
+            onAddBasicLand: () => {},
+            onRemoveBasicLand: () => {},
+          }}
+          responsiveLayout="desktop"
+          showSuggestions={false}
+        />
+      );
+    }
+
+    async function exportedText(): Promise<string> {
+      fireEvent.click(screen.getByRole("button", { name: "Export deck" }));
+      const dialog = await screen.findByRole("dialog", { name: "Export Deck" });
+      return within(dialog).getByRole<HTMLTextAreaElement>("textbox").value;
+    }
+
+    it("hands the session's minimum deck size to the engine's compatibility check", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockClear();
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+
+      render(workspaceBuilder(lurrusWorkspace("sideboard"), { minDeckSize: 50 }));
+      await waitFor(() => expect(screen.getByText("Companion")).toBeInTheDocument());
+      fireEvent.click(
+        within(screen.getByText("Companion").closest("section")!)
+          .getByRole("button", { name: "Lurrus of the Dream-Den" }),
+      );
+
+      await waitFor(() => {
+        expect(compatibilityHarness.evaluate).toHaveBeenCalledWith(
+          expect.objectContaining({ companion: "Lurrus of the Dream-Den" }),
+          expect.objectContaining({ selectedFormat: "Limited", minDeckSize: 50 }),
+        );
+      });
+    });
+
+    it.each(["desktop", "phone-portrait"] as const)(
+      "offers no companion designation in the fixed-pool %s editor, whose submission cannot carry one",
+      async (responsiveLayout) => {
+        engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+        compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+        engineIsCardCompanion.mockClear();
+
+        render(
+          <LimitedDeckBuilder
+            local={{
+              view: { ...TEST_VIEW, pool: poolWithLurrus },
+              workspace: lurrusWorkspace("sideboard"),
+              preferences: createDefaultDraftWorkspacePreferences(),
+              interactionLocked: false,
+              capabilities: { kind: "fixed-pool" },
+              onWorkspaceChange: () => {},
+              onPreferencesChange: () => {},
+              onSubmitDeck: () => {},
+              // An earlier accepted designation must not surface a control either.
+              initialCompanion: "Lurrus of the Dream-Den",
+            }}
+            responsiveLayout={responsiveLayout}
+            showSuggestions={false}
+          />,
+        );
+
+        // Reach guard: the engine resolved Lurrus as a companion candidate, so the
+        // absence below is the editor's decision rather than an unresolved lookup.
+        await waitFor(() => expect(engineIsCardCompanion).toHaveBeenCalled());
+        await waitFor(() => {
+          expect(screen.queryByText("Companion")).not.toBeInTheDocument();
+        });
+        expect(screen.queryByRole("button", { name: "Lurrus of the Dream-Den" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Remove companion" })).not.toBeInTheDocument();
+        expect(screen.queryByText("Companion requirement met")).not.toBeInTheDocument();
+      },
+    );
+
+    it("exports the companion while a drafted copy sits outside the deck", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+
+      render(workspaceBuilder(lurrusWorkspace("sideboard"), {
+        initialCompanion: "Lurrus of the Dream-Den",
+      }));
+      await waitFor(() => expect(screen.getByText("Companion requirement met")).toBeInTheDocument());
+
+      const text = await exportedText();
+      expect(text).toContain("[Companion]\n1 Lurrus of the Dream-Den\n");
+      expect(text).toContain("[Sideboard]\n1 Lurrus of the Dream-Den\n");
+    });
+
+    it("never exports or submits a companion once its only copy is moved back into the deck", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+      const onSubmitDeck = vi.fn();
+
+      const { rerender } = render(workspaceBuilder(lurrusWorkspace("sideboard"), { onSubmitDeck }));
+      await waitFor(() => expect(screen.getByText("Companion")).toBeInTheDocument());
+      fireEvent.click(
+        within(screen.getByText("Companion").closest("section")!)
+          .getByRole("button", { name: "Lurrus of the Dream-Den" }),
+      );
+      await waitFor(() => expect(screen.getByText("Companion requirement met")).toBeInTheDocument());
+
+      // The player drags the only drafted copy back into the main deck.
+      rerender(workspaceBuilder(lurrusWorkspace("deck"), { onSubmitDeck }));
+      await waitFor(() => {
+        expect(screen.queryByText("Companion requirement met")).not.toBeInTheDocument();
+      });
+
+      const text = await exportedText();
+      expect(text).not.toContain("[Companion]");
+      expect(text.match(/Lurrus of the Dream-Den/g)).toHaveLength(1);
+
+      fireEvent.keyDown(document.body, { key: "Escape" });
+      fireEvent.click(screen.getByRole("button", { name: /submit deck/i }));
+      await waitFor(() => expect(onSubmitDeck).toHaveBeenCalledWith([]));
+    });
+
+    // The accepted designation can be restored from the host's authoritative
+    // view after the editor has mounted (a rejoin completes its handshake late).
+    it("adopts an accepted companion that arrives after the editor mounted", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+      const onSubmitDeck = vi.fn();
+
+      const { rerender } = render(workspaceBuilder(lurrusWorkspace("sideboard"), { onSubmitDeck }));
+      await waitFor(() => expect(screen.getByText("Companion")).toBeInTheDocument());
+      expect(screen.queryByText("Companion requirement met")).not.toBeInTheDocument();
+
+      rerender(workspaceBuilder(lurrusWorkspace("sideboard"), {
+        onSubmitDeck,
+        initialCompanion: "Lurrus of the Dream-Den",
+      }));
+      await waitFor(() => expect(screen.getByText("Companion requirement met")).toBeInTheDocument());
+      fireEvent.click(screen.getByRole("button", { name: /submit deck/i }));
+      await waitFor(() => {
+        expect(onSubmitDeck).toHaveBeenLastCalledWith([], "Lurrus of the Dream-Den");
+      });
+    });
+
+    it("never overwrites an unsaved local companion edit with a late restore", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+      const onSubmitDeck = vi.fn();
+
+      const { rerender } = render(workspaceBuilder(lurrusWorkspace("sideboard"), { onSubmitDeck }));
+      await waitFor(() => expect(screen.getByText("Companion")).toBeInTheDocument());
+      // The player designates, then explicitly removes, before the rejoin
+      // restore lands: the empty choice is an unsaved local edit.
+      fireEvent.click(
+        within(screen.getByText("Companion").closest("section")!)
+          .getByRole("button", { name: "Lurrus of the Dream-Den" }),
+      );
+      await waitFor(() => expect(screen.getByText("Companion requirement met")).toBeInTheDocument());
+      fireEvent.click(
+        within(screen.getByText("Companion").closest("section")!)
+          .getByRole("button", { name: "Remove companion" }),
+      );
+      await waitFor(() => {
+        expect(screen.queryByText("Companion requirement met")).not.toBeInTheDocument();
+      });
+
+      // The host's previously accepted designation arrives late.
+      rerender(workspaceBuilder(lurrusWorkspace("sideboard"), {
+        onSubmitDeck,
+        initialCompanion: "Lurrus of the Dream-Den",
+      }));
+      await waitFor(() => expect(screen.getByRole("button", { name: /submit deck/i })).toBeEnabled());
+      fireEvent.click(screen.getByRole("button", { name: /submit deck/i }));
+      await waitFor(() => expect(onSubmitDeck).toHaveBeenLastCalledWith([]));
+    });
+
+    it("resubmits an unchanged companion, and only the remove control clears it", async () => {
+      engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+      compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+      const onSubmitDeck = vi.fn();
+
+      render(workspaceBuilder(lurrusWorkspace("sideboard"), {
+        onSubmitDeck,
+        initialCompanion: "Lurrus of the Dream-Den",
+      }));
+      await waitFor(() => expect(screen.getByText("Companion requirement met")).toBeInTheDocument());
+
+      // Reopened from the submitted deck: submitting again keeps the designation.
+      fireEvent.click(screen.getByRole("button", { name: /submit deck/i }));
+      await waitFor(() => {
+        expect(onSubmitDeck).toHaveBeenLastCalledWith([], "Lurrus of the Dream-Den");
+      });
+
+      const section = screen.getByText("Companion").closest("section")!;
+      fireEvent.click(within(section).getByRole("button", { name: "Remove companion" }));
+      await waitFor(() => {
+        expect(screen.queryByText("Companion requirement met")).not.toBeInTheDocument();
+      });
+      fireEvent.click(screen.getByRole("button", { name: /submit deck/i }));
+      await waitFor(() => expect(onSubmitDeck).toHaveBeenLastCalledWith([]));
+    });
   });
 });

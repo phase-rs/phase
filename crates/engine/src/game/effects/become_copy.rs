@@ -643,16 +643,12 @@ impl FoldableCopyException<'_> {
             Self::SetPower { value } => values.power = Some(*value),
             Self::SetToughness { value } => values.toughness = Some(*value),
             Self::AddKeyword { keyword } => {
-                if keyword.instances_must_coexist() {
-                    values.keywords.push(keyword.clone());
-                } else if keyword.overrides_same_kind_on_grant() {
-                    values.keywords.retain(|existing| {
-                        std::mem::discriminant(existing) != std::mem::discriminant(keyword)
-                    });
-                    values.keywords.push(keyword.clone());
-                } else if !values.keywords.contains(keyword) {
-                    values.keywords.push(keyword.clone());
-                }
+                crate::game::keywords::grant_keyword_instance_into(
+                    &mut values.keywords,
+                    keyword.clone(),
+                    |keyword| keyword,
+                    crate::game::keywords::RedundantGrant::KeepEarlier,
+                );
             }
             Self::GrantAbility { definition } => {
                 let abilities = std::sync::Arc::make_mut(&mut values.abilities);

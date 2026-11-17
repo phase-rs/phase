@@ -1455,12 +1455,40 @@ pub(crate) fn parse_cant_cast_type_spells(
     }
 
     // --- "spells with even mana values" / "spells with odd mana values" ---
-    if nom_tag_lower(trimmed, trimmed, "spells with even mana value").is_some()
-        || nom_tag_lower(trimmed, trimmed, "spells with odd mana value").is_some()
-    {
-        let def =
-            StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
-        return attach_parsed_static_gate(def, gate_condition_text);
+    // CR 601.3a is the authorizing rule, and its own example is this card: "A
+    // player controls Void Winnower, which reads, in part, 'Your opponents
+    // can't cast spells with even mana values.'" That rule reads the parity as
+    // one of the "certain qualities" a prohibition names, so it belongs in
+    // `affected` — the same slot the chosen-type and chosen-color arms above
+    // use for their quality. CR 202.3 defines the mana value whose parity is
+    // taken.
+    //
+    // Attaching the filter is not decoration: `is_blocked_by_cant_be_cast_for`
+    // SKIPS its filter test when `affected` is `None` and falls through to
+    // prohibited, so an unscoped parity static locks out every spell an
+    // opponent could cast rather than the even-mana-value half — a total cast
+    // prison from a card that only ever restricts half the curve.
+    //
+    // The parity grammar itself is delegated to `parse_mana_value_suffix`, the
+    // single authority for every mana-value suffix form, instead of being
+    // respelled here; the `ManaValueParity` guard keeps this arm from claiming
+    // any other suffix form the shared parser recognizes, and full consumption
+    // keeps it from claiming a parity clause with an unparsed tail.
+    if let Some(rest) = nom_tag_lower(trimmed, trimmed, "spells ") {
+        if let Some((prop, consumed)) = parse_mana_value_suffix(rest, &mut ParseContext::default())
+        {
+            if matches!(prop, FilterProp::ManaValueParity { .. })
+                && rest[consumed..].trim().is_empty()
+            {
+                let def = StaticDefinition::new(StaticMode::CantBeCast { who })
+                    .affected(TargetFilter::Typed(TypedFilter {
+                        properties: vec![prop],
+                        ..TypedFilter::default()
+                    }))
+                    .description(text.to_string());
+                return attach_parsed_static_gate(def, gate_condition_text);
+            }
+        }
     }
 
     // --- "spells by paying alternative costs" ---
@@ -2073,6 +2101,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
                 graveyard_destination_replacement: None,
                 extra_cost: None,
                 enters_with_counter: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 required_cast_keyword: None,
                 pool: GraveyardPermissionPool::OwnGraveyard,
                 cast_limit: PermissionCastLimit::Unlimited,
@@ -2216,15 +2245,19 @@ pub(crate) fn try_parse_graveyard_cast_permission(
 
     let (filter, self_ref_permission) = parse_graveyard_permission_filter(&cleaned);
 
-    // CR 607.1 + CR 122.1 + CR 614.1c: peel the linked "if you cast a spell this
-    // way, that <permanent> enters with a [counter] counter on it" rider off the
-    // trailing text so the enters-with counter rides the permission and the
-    // remaining riders (extra_cost, condition) parse against the counter-free
-    // tail (Noctis, Prince of Lucis; Leonardo, Sewer Samurai — both finality).
+    // CR 607.1 + CR 122.1 + CR 614.1c + CR 614.1d: peel the linked "if you cast
+    // a spell this way, that <permanent> enters with a [counter] counter on it"
+    // / "… enters tapped" rider off the trailing text so the rider rides the
+    // permission and the remaining riders (extra_cost, condition) parse against
+    // the rider-free tail (Noctis, Prince of Lucis; Leonardo, Sewer Samurai —
+    // both finality; Edgar, Master Machinist — tapped).
     let (trailing, enters_rider) = split_cast_this_way_enters_rider(trailing);
-    let enters_with_counter = match enters_rider {
-        EntersWithRider::Absent => None,
-        EntersWithRider::Parsed(counter) => Some(counter),
+    let (enters_with_counter, enter_tapped) = match enters_rider {
+        EntersWithRider::Absent => (None, crate::types::zones::EtbTapState::Unspecified),
+        EntersWithRider::Parsed(counter) => {
+            (Some(counter), crate::types::zones::EtbTapState::Unspecified)
+        }
+        EntersWithRider::ParsedTapped => (None, crate::types::zones::EtbTapState::Tapped),
         EntersWithRider::Unmodeled => return None,
     };
 
@@ -2310,12 +2343,11 @@ pub(crate) fn try_parse_graveyard_cast_permission(
     // CR 601.3 + CR 607.1: once the modelled lead, anchor, riders and gate are
     // consumed, the rest of the line must be punctuation only. Any other residual
     // is an unmodelled gate ("… unless you control a Zombie") or linked rider
-    // ("If you cast a spell this way, that artifact enters tapped." — Edgar,
-    // Master Machinist; "If you do, it perpetually becomes …" — Mischievous
-    // Lookout). Emitting the permission without it would be strictly more
-    // permissive than printed. And a populated turn-restriction condition would
-    // discharge the swallowed-clause expectation that used to flag the residual.
-    // So decline, and the line falls through to an honest Unimplemented.
+    // ("If you do, it perpetually becomes …" — Mischievous Lookout). Emitting the
+    // permission without it would be strictly more permissive than printed. And
+    // a populated turn-restriction condition would discharge the
+    // swallowed-clause expectation that used to flag the residual. So decline,
+    // and the line falls through to an honest Unimplemented.
     if !is_punctuation_only(residual) {
         return None;
     }
@@ -2326,6 +2358,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         && play_mode == CardPlayMode::Cast
         && required_cast_keyword.is_none()
         && enters_with_counter.is_none()
+        && enter_tapped.is_unspecified()
         && graveyard_destination_replacement.is_none()
         && extra_cost.is_none()
         && is_punctuation_only(residual);
@@ -2349,6 +2382,7 @@ pub(crate) fn try_parse_graveyard_cast_permission(
         graveyard_destination_replacement,
         extra_cost,
         enters_with_counter,
+        enter_tapped,
         required_cast_keyword,
         pool: GraveyardPermissionPool::OwnGraveyard,
         cast_limit: PermissionCastLimit::Unlimited,
@@ -2550,6 +2584,107 @@ fn parse_cast_permission_zone_tail(input: &str) -> OracleResult<'_, Vec<Zone>> {
     .parse(input)
 }
 
+/// CR 113.6f + CR 601.3: the rider closing a card's own cast permission that
+/// confines every cast of the card to the zones that permission names.
+const EXCLUSIVE_CAST_PERMISSION_RIDER: &str = ", but not from anywhere else";
+
+/// CR 601.3 + CR 113.6f + CR 101.2: "You may cast this card from <zones>, but
+/// not from anywhere else." (Haakon, Stromgald Scourge).
+///
+/// One sentence, two rules: the card's own permission, lowered by the single
+/// permission authority [`try_parse_graveyard_cast_permission`], and a
+/// prohibition on every other origin. CR 113.6f makes that prohibition function
+/// in every zone (hand, library, exile, command), so it rides the object's own
+/// [`CastingRestriction`]s rather than a static, which functions only where its
+/// source is.
+///
+/// Fails closed: the head must lower to the card's OWN, unlimited, rider-free,
+/// duration-free cast permission ([`own_unlimited_cast_permission_zones`]).
+/// Any other head returns `None`, and the line keeps the permission parser's
+/// refusal of the residual rider.
+pub(crate) fn try_parse_exclusive_own_cast_permission(
+    text: &str,
+    lower: &str,
+) -> Option<(StaticDefinition, crate::types::ability::CastingRestriction)> {
+    let (head, after) = super::oracle_nom::bridge::split_once_on_lower(
+        text,
+        lower,
+        EXCLUSIVE_CAST_PERMISSION_RIDER,
+    )?;
+    if !is_punctuation_only(after) {
+        return None;
+    }
+    let head = format!("{head}.");
+    let head_lower = head.to_lowercase();
+    // CR 611.2a: `try_parse_graveyard_cast_permission` consumes and DISCARDS a
+    // leading duration ("Until end of turn, you may cast …"), because
+    // `StaticDefinition` has nowhere to store it. Here that would make a timed
+    // permission and its restriction permanent, so a duration-headed sentence
+    // declines before the lossy parser sees it.
+    let duration_head = {
+        use crate::parser::oracle_nom::duration::parse_duration;
+        terminated(parse_duration, tag::<_, _, OracleError<'_>>(", "))
+            .parse(head_lower.as_str())
+            .is_ok()
+    };
+    if duration_head {
+        return None;
+    }
+    let def = try_parse_graveyard_cast_permission(&head, &head_lower)?;
+    let (zones, pool) = own_unlimited_cast_permission_zones(&def)?;
+    Some((
+        def.description(text.to_string()),
+        crate::types::ability::CastingRestriction::OnlyFromZones { zones, pool },
+    ))
+}
+
+/// CR 601.3 + CR 113.6f: the zones of a card's OWN unlimited, rider-free cast
+/// permission ("You may cast this card from your graveyard [or from exile]"),
+/// with the permission's graveyard pool (CR 109.5: "your graveyard" is the
+/// caster's), or `None` for any other permission. The pool travels with the
+/// zones so the restriction keeps "your", not only "graveyard". The mode is
+/// destructured without `..`
+/// so a new permission rider must be classified here before it compiles: a
+/// rider the exclusivity clause does not account for must refuse, not ride
+/// along unexamined.
+fn own_unlimited_cast_permission_zones(
+    def: &StaticDefinition,
+) -> Option<(Vec<Zone>, GraveyardPermissionPool)> {
+    let StaticMode::GraveyardCastPermission {
+        frequency,
+        play_mode,
+        graveyard_destination_replacement,
+        extra_cost,
+        enters_with_counter,
+        enter_tapped,
+        required_cast_keyword,
+        pool,
+        cast_limit,
+        mana_spend_permission,
+        enters_modifications,
+    } = &def.mode
+    else {
+        return None;
+    };
+    let own_unlimited = *frequency == CastFrequency::Unlimited
+        && *play_mode == CardPlayMode::Cast
+        && graveyard_destination_replacement.is_none()
+        && extra_cost.is_none()
+        && enters_with_counter.is_none()
+        && enter_tapped.is_unspecified()
+        && required_cast_keyword.is_none()
+        && *pool == GraveyardPermissionPool::OwnGraveyard
+        && *cast_limit == PermissionCastLimit::Unlimited
+        && mana_spend_permission.is_none()
+        && enters_modifications.is_empty()
+        && def.affected == Some(TargetFilter::SelfRef)
+        && def.condition.is_none()
+        && def.per_player_condition.is_none()
+        && def.modifications.is_empty()
+        && !def.active_zones.is_empty();
+    own_unlimited.then(|| (def.active_zones.clone(), *pool))
+}
+
 /// CR 601.2f: Outcome of matching the "by <cost> in addition to … other costs"
 /// ADDITIONAL-cost rider on a cast-from-zone permission. A plain `Option` would
 /// conflate two structurally distinct outcomes — "no rider present" and "rider
@@ -2709,6 +2844,10 @@ enum EntersWithRider {
     Absent,
     /// Rider present and fully consumed as the trailing suffix.
     Parsed(crate::types::counter::CounterType),
+    /// CR 614.1d: "If you cast a spell this way, that <permanent> enters
+    /// tapped." present and fully consumed as the trailing suffix (Edgar,
+    /// Master Machinist).
+    ParsedTapped,
     /// Rider present but the recognizer left text after the counter clause —
     /// the caller must DECLINE so nothing is silently dropped.
     Unmodeled,
@@ -2741,20 +2880,25 @@ fn split_cast_this_way_enters_rider(trailing: &str) -> (&str, EntersWithRider) {
             // `text.len() - rest.len()` idiom) so the shared recognizer sees the
             // full "if you cast … this way, …" clause including its marker.
             let rider = &trailing[before.len()..];
-            if let Some((counter_type, rest)) =
-                super::oracle_effect::parse_cast_this_way_enters_with_counter(rider)
-            {
+            let recognized = super::oracle_effect::parse_cast_this_way_enters_with_counter(rider)
+                .map(|(counter_type, rest)| (EntersWithRider::Parsed(counter_type), rest))
+                .or_else(|| {
+                    super::oracle_effect::parse_cast_this_way_enters_tapped(rider)
+                        .map(|rest| (EntersWithRider::ParsedTapped, rest))
+                });
+            if let Some((parsed, rest)) = recognized {
                 // CR 614.1a + CR 607.1: commit the peel only when the recognizer
-                // consumed the WHOLE rider. Text after the counter clause (a
-                // destination sentence, a type-grant tail, or a future rider)
-                // must decline the permission rather than being silently dropped.
+                // consumed the WHOLE rider. Text after the rider clause (a
+                // destination sentence, a type-grant tail, "and attacking", or
+                // a future rider) must decline the permission rather than being
+                // silently dropped.
                 let after = rest.trim_start();
                 let after = opt(tag::<_, _, OracleError<'_>>("."))
                     .parse(after)
                     .map(|(after, _)| after)
                     .unwrap_or(after);
                 if after.trim().is_empty() {
-                    return (before, EntersWithRider::Parsed(counter_type));
+                    return (before, parsed);
                 }
                 // A document-level decline here is terminal for the
                 // graveyard-permission class: the document dispatcher emits the
@@ -2914,6 +3058,7 @@ fn try_parse_disjunctive_graveyard_cast_permission(
         graveyard_destination_replacement: None,
         extra_cost: None,
         enters_with_counter: None,
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         required_cast_keyword: None,
         pool: GraveyardPermissionPool::OwnGraveyard,
         cast_limit: PermissionCastLimit::Unlimited,
@@ -2964,6 +3109,7 @@ fn try_parse_unlimited_combined_graveyard_permission(
             graveyard_destination_replacement: None,
             extra_cost: None,
             enters_with_counter: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
             required_cast_keyword: None,
             pool: GraveyardPermissionPool::OwnGraveyard,
             cast_limit: PermissionCastLimit::Unlimited,
@@ -3020,12 +3166,14 @@ fn usable_disjunctive_permission_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -3268,7 +3416,10 @@ pub(crate) fn try_parse_exile_cast_permission(text: &str, lower: &str) -> Option
     let enters_with_counter = match enters_rider {
         EntersWithRider::Absent => None,
         EntersWithRider::Parsed(counter) => Some(counter),
-        EntersWithRider::Unmodeled => return None,
+        // CR 614.1d: `ExileCastPermission` has no enters-tapped carrier, so an
+        // exile permission with that rider declines (an honest gap, not a
+        // permission that silently drops the rider).
+        EntersWithRider::ParsedTapped | EntersWithRider::Unmodeled => return None,
     };
 
     // CR 108.3 + CR 109.5: apply the "cards you own" ownership constraint to the
@@ -4680,5 +4831,41 @@ mod draw_from_bottom_tests {
             parse_draw_from_bottom(&lower, text).is_none(),
             "a silently-dropped trailing clause must NOT parse"
         );
+    }
+}
+
+#[cfg(test)]
+mod cast_permission_enter_tapped_tests {
+    use super::*;
+    use crate::types::zones::EtbTapState;
+
+    /// CR 113.6f + CR 601.3 (C6): the exclusivity clause ("…, but not from
+    /// anywhere else", Haakon) accounts only for a rider-free own permission. A
+    /// permission carrying the enters-tapped rider is refused, while the same
+    /// permission without it is accepted (positive control).
+    #[test]
+    fn exclusive_own_permission_refuses_an_enters_tapped_rider() {
+        let own = |enter_tapped: EtbTapState| {
+            StaticDefinition::new(StaticMode::GraveyardCastPermission {
+                frequency: CastFrequency::Unlimited,
+                play_mode: CardPlayMode::Cast,
+                graveyard_destination_replacement: None,
+                extra_cost: None,
+                enters_with_counter: None,
+                enter_tapped,
+                required_cast_keyword: None,
+                pool: GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
+            })
+            .affected(TargetFilter::SelfRef)
+            .active_zones(vec![Zone::Graveyard])
+        };
+        assert!(
+            own_unlimited_cast_permission_zones(&own(EtbTapState::Unspecified)).is_some(),
+            "reach guard: the rider-free own permission is accepted"
+        );
+        assert!(own_unlimited_cast_permission_zones(&own(EtbTapState::Tapped)).is_none());
     }
 }
