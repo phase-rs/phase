@@ -43,7 +43,8 @@ const useReportedCardsStore = create<{
  *   surface showing the card, through the dedup store.
  * - `notSent`: this surface's last tap was dropped by telemetry (switched off,
  *   no ingest URL in this build, or a session cap reached), so nothing went out.
- *   Tapping again tries again.
+ *   Tapping again tries again. That succeeds once telemetry is switched back
+ *   on; the build gate and the session caps hold for the rest of the session.
  */
 export type CardReportStatus = "idle" | "sent" | "notSent";
 

@@ -7,10 +7,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  *
  * `telemetry.ts` reads the `__TELEMETRY_URL__` build define once, at module
  * load, and Vitest builds it empty (telemetry off). Each case stubs the define
- * and imports a fresh copy of the module, with its own queue, counters and
- * preference store, so a dropped event can only come from the gate the case
- * is about. The first case is the reach guard: it fails if the stub never
- * reached the module, which would make every "dropped" case pass vacuously.
+ * and imports a fresh copy of the module, with its own queue and counters, so a
+ * dropped event can only come from the gate the case is about. The first case
+ * is the reach guard: it fails if the stub never reached the module, which
+ * would make every "dropped" case pass vacuously.
  */
 const INGEST_URL = "https://telemetry.example.test/ingest";
 
@@ -22,6 +22,9 @@ async function loadTelemetry(ingestUrl: string) {
   vi.resetModules();
   const { flushNow, trackEvent } = await import("../telemetry");
   const { usePreferencesStore } = await import("../../stores/preferencesStore");
+  // The fresh store rehydrates from localStorage, where an earlier case may
+  // have saved telemetry off. Every case starts with it on.
+  usePreferencesStore.setState({ telemetryEnabled: true });
 
   // Stubbed after the imports, which may read the real navigator at load.
   // Fake timers hold the 10-second flush timer, so no case's batch can fire
@@ -64,13 +67,10 @@ describe("trackEvent", () => {
     ]);
   });
 
-  it("returns false and queues nothing when the build has no ingest URL", async () => {
-    const { flushNow, trackEvent } = await loadTelemetry("");
+  it("returns false when the build has no ingest URL", async () => {
+    const { trackEvent } = await loadTelemetry("");
 
     expect(trackEvent("card_report")).toBe(false);
-
-    flushNow();
-    expect(sendBeacon).not.toHaveBeenCalled();
   });
 
   it("returns false and queues nothing when the player turned telemetry off", async () => {

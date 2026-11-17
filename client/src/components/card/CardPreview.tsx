@@ -1028,27 +1028,33 @@ function MobilePreviewOverlay({
 
   // pointerdown (not click): the touch-release that opened this overlay fires
   // pointerup, not pointerdown, so a fresh tap is required to dismiss. The card
-  // and the action strip each stop it, so only a tap on the backdrop dismisses.
+  // and its action strip stop it together, so a near miss on an action never
+  // closes the preview; only a tap on the backdrop does.
   return (
     <div
       className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4 landscape:justify-end landscape:p-6"
       data-card-preview
       onPointerDown={onDismiss}
     >
-      <div className="flex flex-col items-center gap-3 landscape:flex-row-reverse landscape:items-end">
+      <div
+        className="flex flex-col items-center gap-3 landscape:flex-row-reverse landscape:items-end"
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        {/* The frame's size comes from its own width and aspect ratio alone;
+            every child is laid over it, so none depends on a percentage of a
+            height the browser might not treat as definite. */}
         <div
           className={`relative shrink-0 overflow-hidden rounded-lg shadow-2xl ${
             isRotated ? MOBILE_PREVIEW_FRAME_CLASS.rotated : MOBILE_PREVIEW_FRAME_CLASS.upright
           }`}
-          onPointerDown={(event) => event.stopPropagation()}
         >
           {art.kind === "back" ? (
-            <CardBackFallback className="h-full w-full" />
+            <CardBackFallback className="absolute inset-0 h-full w-full" />
           ) : showArtFallback ? (
-            <CardArtFallback name={cardName} className="h-full w-full" />
+            <CardArtFallback name={cardName} className="absolute inset-0 h-full w-full" />
           ) : !src ? (
             // Still resolving: a skeleton, not the artless tile.
-            <div className="h-full w-full animate-pulse bg-gray-700" />
+            <div className="absolute inset-0 animate-pulse bg-gray-700" />
           ) : (
             <img
               src={src}
@@ -1058,14 +1064,13 @@ function MobilePreviewOverlay({
               onError={() => art.advanceFailedSource?.(src)}
               className={isRotated
                 ? MOBILE_PREVIEW_ROTATED_IMAGE_CLASS
-                : `h-full w-full object-cover${isFlip ? " transition-transform duration-200" : ""}${flipped ? " rotate-180" : ""}`}
+                : `absolute inset-0 h-full w-full object-cover${isFlip ? " transition-transform duration-200" : ""}${flipped ? " rotate-180" : ""}`}
             />
           )}
         </div>
         {hasActions && (
           <div
             className="flex items-center gap-2 landscape:flex-col landscape:items-end"
-            onPointerDown={(event) => event.stopPropagation()}
             data-card-preview-actions
           >
             {isFlip && (

@@ -44,7 +44,8 @@ interface ReportCardButtonProps extends CardReportContext {
  *
  * Status is owned by {@link useCardReport}, so the button, the picker rows, and
  * the mobile preview share one authority. A report telemetry dropped reads "Not
- * sent" and stays tappable, so the player can try again by hand.
+ * sent" and stays tappable: a later tap sends it once telemetry is back on.
+ * Nothing retries on the player's behalf.
  */
 export function ReportCardButton({ className, ...context }: ReportCardButtonProps) {
   const { t } = useTranslation("game");
