@@ -52113,6 +52113,32 @@ fn parse_effect_chain_ir_body(
             );
             continue;
         }
+        // CR 608.2c + CR 102.2: "for each <player set>, … from that player's
+        // <zone> …" names the iterated player as the owner of an UNTARGETED
+        // object source. A count-only `PlayerCount` repeat cannot carry that
+        // per-player binding (the body would resolve against the controller),
+        // so the clause fails closed. A targeted body ("up to one target …
+        // from that player's graveyard") is owned by the per-opponent target
+        // fan-out and a non-possessive "that player" is owned by the
+        // token-destination / defender binders, so neither is claimed here.
+        if matches!(
+            repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount { .. }
+            })
+        ) && {
+            let body_lower = text.to_lowercase();
+            nom_primitives::scan_contains(&body_lower, "that player's ")
+                && !nom_primitives::scan_contains(&body_lower, "target ")
+        } {
+            unimplemented_clause(
+                &mut builder,
+                "player_iteration_anaphor",
+                normalized_text,
+                chunk.boundary_after,
+            );
+            continue;
+        }
         // CR 608.2c: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
             let (repeat_count, stripped_text) =

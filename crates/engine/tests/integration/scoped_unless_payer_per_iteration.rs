@@ -83,7 +83,7 @@ fn viper_attacking_with_blight_counters(
     let mut scenario = GameScenario::new_n_player(player_count, 42);
     scenario.at_phase(Phase::PreCombatMain);
     let viper = scenario
-        .add_creature_from_oracle(P0, "Rottenmouth Viper", 5, 4, ROTTENMOUTH_VIPER)
+        .add_creature_from_oracle(P0, "Rottenmouth Viper", 6, 6, ROTTENMOUTH_VIPER)
         .id();
     if starting_blight_counters > 0 {
         scenario.with_counter(viper, BLIGHT(), starting_blight_counters);
@@ -196,15 +196,10 @@ fn viper_attack_repeats_the_unless_clause_for_each_blight_counter() {
             })
             .expect("decline the current iteration's unless cost");
         runner.advance_until_stack_empty();
-        if iteration == 0 {
-            assert_eq!(
-                runner.life(P1),
-                16,
-                "the first declined iteration costs 4 life before the second prompt"
-            );
-        }
     }
 
+    // CR 101.4 + Gatherer ruling: the opponent makes all of their choices
+    // first, then loses 4 life the appropriate number of times.
     assert_eq!(runner.life(P1), 12, "two counters cause two 4-life losses");
     assert_eq!(runner.life(P0), 20, "the controller is not taxed");
     assert!(
@@ -273,7 +268,7 @@ fn viper_etb_trigger_offers_the_choice_to_each_opponent() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let viper = scenario
-        .add_creature_to_hand_from_oracle(P0, "Rottenmouth Viper", 5, 4, ROTTENMOUTH_VIPER)
+        .add_creature_to_hand_from_oracle(P0, "Rottenmouth Viper", 6, 6, ROTTENMOUTH_VIPER)
         .id();
     scenario.add_creature(P1, "Grizzly Bears", 2, 2);
     scenario.with_cards_in_hand(P1, &["Filler Card"]);

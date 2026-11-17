@@ -44766,3 +44766,38 @@ fn or_split_carries_shared_adjunct_to_bare_leg() {
         assert_eq!(legs[0].description.as_deref(), Some(first_leg), "{name}");
     }
 }
+
+/// CR 608.2c + CR 102.2: "Then for each opponent, … that player's graveyard …"
+/// binds its anaphor to each iterated opponent. A count-only `PlayerCount`
+/// repeat cannot carry that binding, so The Weaver King's clause must keep
+/// failing closed, while Rottenmouth Viper's blight-counter repeat (a count
+/// that is not a player set) stays fully supported.
+#[test]
+fn then_for_each_opponent_with_that_player_anaphor_fails_closed() {
+    let owned = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let weaver = parse_oracle_text(
+        "Shadow (This creature can block or be blocked by only creatures with shadow.)\nWhenever The Weaver King deals combat damage to a player, they mill that many cards. Then for each opponent, put a creature card from that player's graveyard that was put there from their library this turn onto the battlefield under your control.",
+        "The Weaver King",
+        &[],
+        &owned(&["Creature"]),
+        &owned(&["Horror", "Wizard"]),
+    );
+    assert_eq!(weaver.triggers.len(), 1, "{:?}", weaver.triggers);
+    let execute = weaver.triggers[0].execute.as_deref().expect("execute");
+    assert!(
+        has_unimplemented(execute),
+        "the per-opponent graveyard clause must stay an honest gap: {execute:#?}"
+    );
+
+    let viper = parse_oracle_text(
+        "Whenever this creature enters or attacks, put a blight counter on it. Then for each blight counter on it, each opponent loses 4 life unless that player sacrifices a nonland permanent of their choice or discards a card.",
+        "Rottenmouth Viper",
+        &[],
+        &owned(&["Creature"]),
+        &owned(&["Elemental", "Snake"]),
+    );
+    assert_eq!(viper.triggers.len(), 1, "{:?}", viper.triggers);
+    assert!(!has_unimplemented(
+        viper.triggers[0].execute.as_deref().expect("execute")
+    ));
+}

@@ -2872,6 +2872,12 @@ fn continues_inline_delayed_body(remainder_lower: &str) -> bool {
 fn starts_prefix_clause(current_lower: &str) -> bool {
     // CR 603.7a: Temporal prefix clauses must not be split on their internal comma.
     // CR 611.2b: "For as long as [condition], [effect]" — duration prefix clause.
+    // CR 608.2c: a sequence-connected prefix ("Then if ...", "Then, for each ...")
+    // owns its comma-delimited body exactly as the bare prefix does, so classify
+    // the clause after the shared connector is stripped. Regression: A Good Thing
+    // ("Then, if you have 1,000 or more life, you lose the game") — the splitter
+    // must not bisect the conditional at the comma and orphan the body.
+    let current_lower = strip_sequence_connector_lower(current_lower);
     alt((
         tag::<_, _, OracleError<'_>>("until "),
         tag("after "),
@@ -2879,15 +2885,6 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("when "),
         tag("whenever "),
         tag("for each "),
-        tag("then if "),
-        // "then, if ..." (with comma after "then") — same scoping as "then if".
-        // Regression: A Good Thing ("Then, if you have 1,000 or more life, you
-        // lose the game") — without this, the splitter bisects the conditional
-        // at the comma between life and "you lose", orphaning the body.
-        tag("then, if "),
-        // CR 608.2c: a sequence-connected "for each" prefix still owns its
-        // comma-delimited effect body.
-        tag("then for each "),
         tag("otherwise"),
         tag("if not"),
         tag("the next time "),
