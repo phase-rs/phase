@@ -2217,6 +2217,12 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::HasBoon { player } => {
             matches!(player, PlayerScope::RecipientController)
         }
+        // CR 122.1f: the poison predicate's subject binds to the recipient's
+        // controller under "that creature's controller is poisoned" — the
+        // same recipient-anchored rule as the monarch arm above.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            matches!(player, PlayerScope::RecipientController)
+        }
         // CR 105.2 + CR 611.3a: "Enchanted creature gets +3/+3 unless IT shares a
         // color…" — the color check is on the recipient (the enchanted creature),
         // not the Aura source, so it must route through the recipient-eval path.
@@ -2325,6 +2331,9 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2491,6 +2500,9 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2628,6 +2640,9 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -3230,6 +3245,15 @@ fn evaluate_condition_inner(
         StaticCondition::HasBoon { player } => {
             designation_player(state, player, controller, source_id, context)
                 .is_some_and(|player| eval_has_boon(state, player))
+        }
+        // CR 122.1f + CR 810.10a: "player is poisoned" reads the scoped
+        // player's poison total; in Two-Headed Giant a player is poisoned
+        // through their team's shared total, matching every other poison read.
+        // The subject resolves through the same authority as the monarch
+        // identity, so an unanswerable subject reads false (fail closed).
+        StaticCondition::PlayerIsPoisoned { player } => {
+            designation_player(state, player, controller, source_id, context)
+                .is_some_and(|player| crate::game::players::team_poison_total(state, player) >= 1)
         }
         // CR 726.3: True when the controller has the initiative.
         StaticCondition::IsInitiative => eval_is_initiative(state, controller),
@@ -5566,6 +5590,9 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing

@@ -17989,6 +17989,24 @@ pub enum StaticCondition {
     OpponentPoisonAtLeast {
         count: u32,
     },
+    /// CR 122.1f + CR 109.5: True when `player` has one or more poison counters
+    /// (CR 122.1f defines "poisoned"). `player` is the CR 109.5 subject axis:
+    /// - `PlayerScope::Controller` ← "you are poisoned"
+    /// - `PlayerScope::Opponent` ← "an opponent is poisoned"
+    /// - `PlayerScope::DefendingPlayer` ← "defending player is poisoned"
+    ///   (CR 508.5 names the player the attacking creature is attacking)
+    /// - `PlayerScope::ScopedPlayer` ← "that player is poisoned" (anaphor)
+    ///
+    /// Mirrors `StaticCondition::IsMonarch` and `TriggerCondition::IsPoisoned`
+    /// in axis parameterization. An unresolvable scope makes the condition
+    /// UNANSWERABLE at evaluation time.
+    PlayerIsPoisoned {
+        #[serde(
+            default = "player_scope_controller",
+            skip_serializing_if = "is_player_scope_controller"
+        )]
+        player: PlayerScope,
+    },
     /// CR 118.12a + CR 508.1d + CR 509.1c: "unless [player] pays [cost]" — an optional cost
     /// condition attached to a combat restriction (attack tax / block tax).
     ///
@@ -18273,6 +18291,7 @@ impl StaticCondition {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -18388,6 +18407,7 @@ impl StaticCondition {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
             | StaticCondition::DuringOpponentsTurn
@@ -18624,6 +18644,7 @@ impl StaticCondition {
             | StaticCondition::WasStartingPlayer { .. }
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn
@@ -18746,6 +18767,7 @@ impl StaticCondition {
             | StaticCondition::SpellCastWithVariantThisTurn { .. }
             | StaticCondition::AnyPlayerAttackedYouLastTurn { .. }
             | StaticCondition::OpponentPoisonAtLeast { .. }
+            | StaticCondition::PlayerIsPoisoned { .. }
             | StaticCondition::UnlessPay { .. }
             | StaticCondition::Unrecognized { .. }
             | StaticCondition::DuringYourTurn

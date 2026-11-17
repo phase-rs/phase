@@ -5478,6 +5478,11 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         SC::IsMonarch { .. } => "that player is monarch".into(),
+        // CR 122.1f: keep the subject wording parallel to `TC::IsPoisoned`.
+        SC::PlayerIsPoisoned {
+            player: PlayerScope::Controller,
+        } => "is poisoned".into(),
+        SC::PlayerIsPoisoned { .. } => "that player is poisoned".into(),
         SC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -12011,6 +12016,15 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
             player: PlayerScope::Controller | PlayerScope::RecipientController,
         } => ("IsMonarch", Handled),
         StaticCondition::IsMonarch { .. } => ("IsMonarch", Unhandled),
+        // CR 122.1f: same subject rule as the monarch arm above — the layer
+        // evaluator binds the source ("you") and recipient ("that creature's
+        // controller") subjects, and rejects any other scope at the entry
+        // gate. The unbound arm keeps a DISTINCT key so mixed scopes on one
+        // card resolve by restriction rather than HashMap insertion order.
+        StaticCondition::PlayerIsPoisoned {
+            player: PlayerScope::Controller | PlayerScope::RecipientController,
+        } => ("PlayerIsPoisoned", Handled),
+        StaticCondition::PlayerIsPoisoned { .. } => ("PlayerIsPoisonedUnboundScope", Unhandled),
         // Digital-only Alchemy (no CR entry): same scope rule as the monarch
         // arm above — the layer evaluator binds both subjects. The unbound
         // arm keeps a DISTINCT key: same-key insert would let sibling order
