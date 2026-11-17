@@ -7213,6 +7213,50 @@ fn replacement_condition_quantity_ctx(
     }
 }
 
+/// CR 614.12 + CR 616.1c: whether `def` redirects an entry to another zone and the
+/// `CreateToken` batch `event` is a copy batch whose entrants each carry their own
+/// as-enters copy and enter through a liminal `TokenEntry` (the single authority
+/// for that is `token_copy::copy_batch_enters_through_liminal_entry`).
+fn entry_redirect_deferred_to_entrant(def: &ReplacementDefinition, event: &ProposedEvent) -> bool {
+    let ProposedEvent::CreateToken {
+        copy: Some(copy),
+        spec,
+        ..
+    } = event
+    else {
+        return false;
+    };
+    if def.event != ReplacementEvent::ChangeZone {
+        return false;
+    }
+    let redirects = std::iter::successors(def.execute.as_deref(), |ability| {
+        ability.sub_ability.as_deref()
+    })
+    .any(|ability| {
+        matches!(
+            &*ability.effect,
+            Effect::ChangeZone { destination, .. } if *destination != Zone::Battlefield
+        )
+    });
+    redirects
+        && copy_entrant_has_own_entry_copy(&copy.values)
+        && crate::game::effects::token_copy::copy_batch_enters_through_liminal_entry(
+            &copy.values,
+            &copy.additional_modifications,
+            &spec.enter_with_counters,
+        )
+}
+
+/// CR 614.12 + CR 616.1c: whether a copied token's own copiable replacements include an
+/// as-enters "enter as a copy of ..." (Phyrexian Metamorph, Clone).
+fn copy_entrant_has_own_entry_copy(values: &crate::types::ability::CopiableValues) -> bool {
+    values.replacement_definitions.iter().any(|def| {
+        def.event == ReplacementEvent::Moved
+            && def.destination_zone == Some(Zone::Battlefield)
+            && def.execute.as_deref().is_some_and(ability_becomes_copy)
+    })
+}
+
 /// CR 400.7 + CR 614.1d: determine whether a replacement's `valid_card`
 /// predicate matches the event subject. Connive carries its own exact snapshot;
 /// all other events retain their established live or entry-snapshot paths.
@@ -7241,6 +7285,16 @@ fn replacement_valid_card_matches(
         {
             return false;
         }
+    }
+    // CR 614.12 + CR 616.1c: an entry REDIRECT (Hallowed Moonlight's "exile it
+    // instead") is decided against the entrant as it will exist once its own
+    // as-enters copy has settled. A copy batch whose tokens carry such a copy
+    // (Phyrexian Metamorph) enters through per-entrant `TokenEntry` events, where
+    // that copy is applied first, so the batch-level creation consult — which has
+    // no entrant yet — leaves the redirect to them. Batch-wide copy and counter
+    // replacements (Mystic Reflection, Grumgully) still apply at this consult.
+    if entry_redirect_deferred_to_entrant(repl_def, event) {
+        return false;
     }
     let ctx = &repl_def.valid_card_context(state, source_id, controller);
     if let ProposedEvent::Connive { subject, .. } = event {
@@ -14579,6 +14633,33 @@ fn replay_pending_replacement(
     result
 }
 
+/// CR 616.1c + CR 614.12: whether `proposed` is a liminal token entry whose own
+/// as-enters copy replacement has already applied and whose copy work is still
+/// pending (the post-replacement continuation the copy rides).
+fn token_entry_awaits_own_copy_settlement(state: &GameState, proposed: &ProposedEvent) -> bool {
+    let ProposedEvent::TokenEntry { entry_ref, .. } = proposed else {
+        return false;
+    };
+    if !state.has_post_replacement_drain() {
+        return false;
+    }
+    state.liminal_entries.get(entry_ref).is_some_and(|entry| {
+        entry
+            .object
+            .projected()
+            .replacement_definitions
+            .iter_all()
+            .enumerate()
+            .any(|(index, def)| {
+                def.execute.as_deref().is_some_and(ability_becomes_copy)
+                    && proposed.already_applied(&ReplacementId {
+                        source: *entry_ref,
+                        index,
+                    })
+            })
+    })
+}
+
 fn pipeline_loop(
     state: &mut GameState,
     mut proposed: ProposedEvent,
@@ -14607,6 +14688,15 @@ fn pipeline_loop(
         }
 
         if depth >= MAX_REPLACEMENT_DEPTH {
+            break;
+        }
+
+        // CR 616.1c + CR 614.12: a liminal token entrant's own as-enters copy was just
+        // applied and its copy work (the target choice) is still owed. Every other
+        // entry replacement is discovered against the entrant AFTER that copy has
+        // settled, so the pipeline stops here; the settlement authority
+        // (`engine_replacement::settle_token_entry_after_copy`) re-enters it.
+        if token_entry_awaits_own_copy_settlement(state, &proposed) {
             break;
         }
 

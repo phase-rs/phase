@@ -1362,24 +1362,103 @@ fn redirected_token_creation_replays_and_survives_save_reopen() {
 const PHYREXIAN_METAMORPH: &str = "You may have this creature enter as a copy of any artifact \
 or creature on the battlefield, except it's an artifact in addition to its other types.";
 
-/// What a Metamorph-token creation went through: prompts in order, then the final state.
+/// Verbatim Oracle text of Mimic Vat (Scryfall).
+const MIMIC_VAT: &str = "Imprint — Whenever a nontoken creature dies, you may exile that card. \
+If you do, return each other card exiled with this artifact to its owner's graveyard.\n{3}, \
+{T}: Create a token that's a copy of a card exiled with this artifact. It gains haste. Exile it \
+at the beginning of the next end step.";
+
+/// How the Metamorph token's as-enters copy is answered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetamorphAnswer {
+    /// Copy the Mimic Vat itself (a noncreature artifact).
+    CopyVat,
+    /// Copy Grizzly Bears (a creature).
+    CopyBears,
+    /// Decline the copy: the token stays a Phyrexian Metamorph creature.
+    Decline,
+}
+
+/// What a Mimic Vat activation over an imprinted Phyrexian Metamorph went through.
 struct VatRun {
     prompts: Vec<String>,
     runner: GameRunner,
+    events: Vec<GameEvent>,
 }
 
-/// DECLARED SYNTHETIC stand-in for Mimic Vat ("Create a token that's a copy of a card
-/// exiled with this artifact"; its exile-link plumbing is not what is under test): a
-/// spell that creates a token that's a copy of target artifact, aimed at P0's Phyrexian
-/// Metamorph (an artifact creature carrying the printed enter-as-a-copy replacement).
-/// P0 has, when `moonlight`, resolved Hallowed Moonlight; an Ornate Trinket (noncreature
-/// artifact) and Grizzly Bears (creature) are the copy models. The Metamorph token's
-/// as-enters copy choice is answered with `model` (`None` declines the copy).
-fn run_vat(moonlight: bool, model: Option<&str>) -> VatRun {
+/// Answer every prompt until priority settles with an empty stack, recording each.
+fn drive_prompts(
+    runner: &mut GameRunner,
+    answer: MetamorphAnswer,
+    vat: ObjectId,
+    bears: ObjectId,
+    prompts: &mut Vec<String>,
+    events: &mut Vec<GameEvent>,
+) {
+    for _ in 0..40 {
+        let result = match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
+            WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
+            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
+                prompts.push("CopyTargetChoice".to_string());
+                let target = match answer {
+                    MetamorphAnswer::CopyVat => vat,
+                    MetamorphAnswer::CopyBears => bears,
+                    MetamorphAnswer::Decline => panic!("a declined copy offers no target"),
+                };
+                assert!(valid_targets.contains(&target), "the model is offered");
+                runner.act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(target)),
+                })
+            }
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                prompts.push(format!(
+                    "ReplacementChoice({:?})",
+                    candidates
+                        .iter()
+                        .map(|c| c.description.clone())
+                        .collect::<Vec<_>>()
+                ));
+                let accept = candidates
+                    .iter()
+                    .position(|c| c.description.contains("enter as a copy"));
+                let decline = candidates.iter().position(|c| c.description == "Decline");
+                let index = match (answer, accept, decline) {
+                    (MetamorphAnswer::Decline, _, Some(index)) => index,
+                    (_, Some(index), _) => index,
+                    _ => 0,
+                };
+                runner.act(GameAction::ChooseReplacement { index })
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                prompts.push("OptionalEffectChoice".to_string());
+                runner.act(GameAction::DecideOptionalEffect { accept: true })
+            }
+            other => panic!("unexpected prompt {other:?} after {prompts:?}"),
+        };
+        events.extend(result.expect("the prompt answer is accepted").events);
+    }
+    panic!("prompts did not settle: {prompts:?}");
+}
+
+/// P0 controls Mimic Vat (a noncreature artifact: the copy model), Grizzly Bears (a
+/// creature: the other model) and a Phyrexian Metamorph, and resolves a token-copy spell
+/// aimed at the Metamorph; when `moonlight`, Hallowed Moonlight resolved first. The new
+/// token carries the Metamorph's as-enters copy, answered with `answer`.
+///
+/// DECLARED SYNTHETIC: the copy maker is `COPY_ARTIFACT`, not Mimic Vat's own ability. MEASURED
+/// at the merge base (no Hallowed Moonlight anywhere), a Mimic Vat activation over a Metamorph
+/// that Vat itself imprinted resolves `CopyTokenOf` with no token at all ("a card exiled with
+/// this artifact" finds no copy source), so the printed activation cannot carry this witness.
+/// The entrant under test is the same one Vat's token would be: a token copy of Phyrexian
+/// Metamorph.
+fn run_vat(moonlight: bool, answer: MetamorphAnswer) -> VatRun {
     let mut scenario = base_scenario();
     let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
     let copy_artifact = add_instant(&mut scenario, P0, "Copy Artifact", COPY_ARTIFACT);
-    let trinket = scenario.add_artifact_from_oracle(P0, TRINKET, "").id();
+    let vat = scenario
+        .add_artifact_from_oracle(P0, "Mimic Vat", MIMIC_VAT)
+        .id();
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let metamorph = scenario
         .add_creature_from_oracle(P0, "Phyrexian Metamorph", 2, 2, PHYREXIAN_METAMORPH)
@@ -1391,90 +1470,102 @@ fn run_vat(moonlight: bool, model: Option<&str>) -> VatRun {
         cast_hallowed(&mut runner, hallowed);
     }
     let mut prompts = Vec::new();
-    runner
+    let mut events = Vec::new();
+    let result = runner
         .cast(copy_artifact)
         .target_object(metamorph)
         .resolve();
-    for _ in 0..24 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            WaitingFor::CopyTargetChoice { valid_targets, .. } => {
-                prompts.push("CopyTargetChoice".to_string());
-                let target = model.map(|name| match name {
-                    "trinket" => trinket,
-                    _ => bears,
-                });
-                if let Some(target) = target {
-                    assert!(valid_targets.contains(&target), "the model is offered");
-                }
-                runner
-                    .act(GameAction::ChooseTarget {
-                        target: target.map(TargetRef::Object),
-                    })
-                    .expect("answer the copy choice");
-            }
-            WaitingFor::ReplacementChoice {
-                candidates, kind, ..
-            } => {
-                prompts.push(format!(
-                    "ReplacementChoice({kind:?}: {:?})",
-                    candidates
-                        .iter()
-                        .map(|c| format!("{}: {}", c.source_name, c.description))
-                        .collect::<Vec<_>>()
-                ));
-                let index = candidates
-                    .iter()
-                    .position(|c| {
-                        c.source_name == "Phyrexian Metamorph" && model.is_some()
-                            || c.source_name != "Phyrexian Metamorph" && model.is_none()
-                    })
-                    .unwrap_or(0);
-                runner
-                    .act(GameAction::ChooseReplacement { index })
-                    .expect("answer the replacement choice");
-            }
-            other => panic!("unexpected prompt {other:?} after {prompts:?}"),
-        }
+    events.extend(result.events().iter().cloned());
+    drive_prompts(&mut runner, answer, vat, bears, &mut prompts, &mut events);
+    VatRun {
+        prompts,
+        runner,
+        events,
     }
-    VatRun { prompts, runner }
 }
 
-/// F2 (control). CR 614.12 + CR 616.1c: a Metamorph copy token's own as-enters copy is
-/// offered at the token's liminal entry, and without Hallowed Moonlight a copy of a
-/// noncreature artifact simply enters.
+fn offered_copy(run: &VatRun) -> bool {
+    run.prompts
+        .iter()
+        .any(|prompt| prompt.contains("enter as a copy"))
+}
+
+/// F1 control. Without Hallowed Moonlight the Vat token copies the Vat and enters.
 #[test]
-fn metamorph_copy_token_gets_its_own_copy_choice_and_enters_without_moonlight() {
-    let run = run_vat(false, Some("trinket"));
+fn metamorph_token_copying_the_vat_enters_without_moonlight() {
+    let run = run_vat(false, MetamorphAnswer::CopyVat);
+    assert!(offered_copy(&run), "the copy is offered: {:?}", run.prompts);
     assert_eq!(
-        run.prompts.len(),
-        2,
-        "optional copy, then the model: {:?}",
-        run.prompts
+        battlefield_tokens_named(run.runner.state(), "Mimic Vat").len(),
+        1,
+        "the Vat-copy token entered"
     );
-    assert!(
-        run.prompts[0].contains("You may have ~ enter as a copy"),
-        "the entrant's own as-enters copy is offered, got {:?}",
-        run.prompts
-    );
-    let on_battlefield = battlefield_tokens_named(run.runner.state(), TRINKET);
-    assert_eq!(on_battlefield.len(), 1, "the Trinket-copy token entered");
+    assert_settled(run.runner.state(), "F1 control");
 }
 
-/// F2 (control, positive witness only). Under Hallowed Moonlight a Metamorph token that
-/// copies a creature is a creature entering: it is created and exiled, not entered.
+/// F1. CR 616.1c + CR 614.12: under Hallowed Moonlight the Metamorph token's own copy
+/// is offered first; choosing Mimic Vat makes the entrant a noncreature artifact, which
+/// Moonlight ("if a creature would enter") does not touch, so it enters.
 #[test]
-fn metamorph_copy_token_copying_a_creature_is_exiled_under_moonlight() {
-    let run = run_vat(true, Some("bears"));
+fn metamorph_token_copying_the_vat_enters_under_moonlight() {
+    let run = run_vat(true, MetamorphAnswer::CopyVat);
+    assert!(offered_copy(&run), "the copy is offered: {:?}", run.prompts);
+    let vats = battlefield_tokens_named(run.runner.state(), "Mimic Vat");
+    assert_eq!(vats.len(), 1, "the noncreature Vat copy entered");
+    let token = &run.runner.state().objects[&vats[0]];
     assert!(
-        battlefield_tokens_named(run.runner.state(), "Grizzly Bears").is_empty()
-            && battlefield_tokens_named(run.runner.state(), "Phyrexian Metamorph").is_empty(),
-        "no copy token entered the battlefield"
+        !token.card_types.core_types.contains(&CoreType::Creature),
+        "the entered copy is not a creature"
     );
-    assert_settled(run.runner.state(), "F2 creature copy");
+    assert_settled(run.runner.state(), "F1 enters");
+}
+
+/// F1 (reverse type direction + F3). Choosing Grizzly Bears makes the entrant a creature,
+/// so Moonlight exiles it: the copy was offered and answered, and exactly one Grizzly
+/// Bears token (the selected copy, not the Metamorph) was created, in exile.
+#[test]
+fn metamorph_token_copying_a_creature_is_created_in_exile_under_moonlight() {
+    let run = run_vat(true, MetamorphAnswer::CopyBears);
+    assert!(offered_copy(&run), "the copy is offered: {:?}", run.prompts);
+    assert!(
+        run.prompts
+            .iter()
+            .any(|prompt| prompt == "CopyTargetChoice"),
+        "a model was chosen: {:?}",
+        run.prompts
+    );
+    let created = created_tokens_named(&run.events, "Grizzly Bears");
+    assert_eq!(created.len(), 1, "the selected copy is created once");
+    assert_eq!(
+        zone_moves_of(&run.events, created[0]),
+        vec![(None, Zone::Exile)],
+        "and created in exile"
+    );
+    assert!(
+        created_tokens_named(&run.events, "Phyrexian Metamorph").is_empty(),
+        "the original Metamorph token was not what was created"
+    );
+    assert!(
+        battlefield_tokens_named(run.runner.state(), "Grizzly Bears").is_empty(),
+        "no Bears copy entered"
+    );
+    assert_settled(run.runner.state(), "F1 creature copy");
+}
+
+/// F1 decline. Declining the copy leaves a Phyrexian Metamorph creature, which Moonlight
+/// exiles: the creature token is created and exiled.
+#[test]
+fn declined_metamorph_copy_token_is_created_and_exiled_under_moonlight() {
+    let run = run_vat(true, MetamorphAnswer::Decline);
+    assert!(offered_copy(&run), "the copy is offered: {:?}", run.prompts);
+    let created = created_tokens_named(&run.events, "Phyrexian Metamorph");
+    assert_eq!(created.len(), 1, "the creature token is created once");
+    assert_eq!(
+        zone_moves_of(&run.events, created[0]),
+        vec![(None, Zone::Exile)],
+        "and created in exile"
+    );
+    assert_settled(run.runner.state(), "F1 decline");
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,21 +1646,114 @@ fn divine_visitation_substitute_keeps_a_copy_batchs_tapped_state() {
     assert!(outcome.state().objects[&angels[0]].tapped, "tapped");
 }
 
-/// KNOWN LIMITATION (negative test documenting current behaviour, not the rule).
-/// CR 616.1c orders an as-enters copy first and CR 614.12 evaluates the remaining entry
-/// replacements against the entrant as it will exist, so a Phyrexian Metamorph token that
-/// copies a noncreature artifact is not "a creature entering" and Hallowed Moonlight should
-/// not exile it. The engine applies the chosen copy only after the replacement pipeline has
-/// discovered and applied Moonlight against the original creature body
-/// (`engine_replacement.rs` commits the entry before `BecomeCopy` resolves), so the token is
-/// exiled. The same ordering applies to card entries on main. When the pipeline settles the
-/// copy first, this assertion must flip to the token entering.
+// ---------------------------------------------------------------------------
+// F2 — entry applicability reads the entrant as it would exist on the battlefield.
+// ---------------------------------------------------------------------------
+
+/// Verbatim Oracle text of Opalescence (Scryfall).
+const OPALESCENCE: &str = "Each other non-Aura enchantment is a creature in addition to its \
+other types and has base power and base toughness each equal to its mana value.";
+
+/// Verbatim Oracle text of Extravagant Replication (Scryfall).
+const EXTRAVAGANT_REPLICATION: &str =
+    "At the beginning of your upkeep, create a token that's a copy of another target nonland \
+permanent you control.";
+
+/// Pass priority and answer targets until Extravagant Replication's upkeep trigger has been
+/// aimed at `target` and sits on the stack with P0 holding priority.
+fn aim_replication_trigger(runner: &mut GameRunner, target: ObjectId) {
+    for _ in 0..80 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("aim the trigger");
+            }
+            WaitingFor::Priority { player } if player == P0 && !runner.state().stack.is_empty() => {
+                return;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            WaitingFor::DeclareAttackers { .. } => {
+                runner
+                    .act(GameAction::DeclareAttackers {
+                        attacks: Vec::new(),
+                        bands: Vec::new(),
+                    })
+                    .expect("declare no attackers");
+            }
+            other => panic!("unexpected {other:?} before the trigger"),
+        }
+    }
+    panic!("Extravagant Replication's trigger never reached the stack");
+}
+
+/// F2. CR 614.12: under Opalescence the token copy of Opalescence (an Enchantment) is a
+/// creature as it would exist on the battlefield, so Hallowed Moonlight — resolved in
+/// response to Extravagant Replication's upkeep trigger — creates it in exile. The same
+/// copy without Hallowed Moonlight enters.
+fn replication_copies_opalescence(moonlight: bool) -> (GameRunner, Vec<GameEvent>) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island", "Island", "Island", "Island", "Island"]);
+    scenario.with_library_top(P1, &["Island", "Island", "Island", "Island", "Island"]);
+    let hallowed = add_instant(&mut scenario, P0, "Hallowed Moonlight", HALLOWED_MOONLIGHT);
+    let opalescence = {
+        let mut card = scenario.add_enchantment_from_oracle(P0, "Opalescence", OPALESCENCE);
+        card.with_mana_cost(ManaCost::generic(4));
+        card.id()
+    };
+    // Opalescence makes Extravagant Replication a creature with power and toughness equal
+    // to its mana value ({2}{U}{U}{U}), so it survives only with that cost.
+    scenario
+        .add_enchantment_from_oracle(P0, "Extravagant Replication", EXTRAVAGANT_REPLICATION)
+        .with_mana_cost(ManaCost::generic(5));
+    let mut runner = scenario.build();
+    aim_replication_trigger(&mut runner, opalescence);
+    let mut events = Vec::new();
+    if moonlight {
+        let outcome = runner.cast(hallowed).resolve();
+        events.extend(outcome.events().iter().cloned());
+    }
+    for _ in 0..20 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                let result = runner.act(GameAction::PassPriority).expect("pass priority");
+                events.extend(result.events);
+            }
+            other => panic!("unexpected {other:?} resolving the trigger"),
+        }
+    }
+    (runner, events)
+}
+
 #[test]
-fn known_limitation_metamorph_copy_of_noncreature_is_exiled_under_moonlight() {
-    let run = run_vat(true, Some("trinket"));
-    assert!(
-        battlefield_tokens_named(run.runner.state(), TRINKET).is_empty(),
-        "current behaviour: the token is exiled although CR 616.1c/614.12 say it should enter"
+fn token_copy_of_opalescence_enters_without_moonlight() {
+    let (runner, events) = replication_copies_opalescence(false);
+    assert_eq!(
+        battlefield_tokens_named(runner.state(), "Opalescence").len(),
+        1,
+        "the copy enters (the Opalescence token is on the battlefield)"
     );
-    assert_settled(run.runner.state(), "known limitation");
+    assert_eq!(created_tokens_named(&events, "Opalescence").len(), 1);
+}
+
+#[test]
+fn moonlight_creates_the_token_copy_of_opalescence_in_exile() {
+    let (runner, events) = replication_copies_opalescence(true);
+    let created = created_tokens_named(&events, "Opalescence");
+    assert_eq!(created.len(), 1, "the copy is created once");
+    assert_eq!(
+        zone_moves_of(&events, created[0]),
+        vec![(None, Zone::Exile)],
+        "as a creature entering without having been cast, it is created in exile"
+    );
+    assert!(
+        battlefield_tokens_named(runner.state(), "Opalescence").is_empty(),
+        "no battlefield entry"
+    );
 }

@@ -6640,6 +6640,17 @@ pub fn matches_target_filter_on_battlefield_entry(
         }
         ProposedEvent::TokenEntry { entry_ref, .. } => {
             state.liminal_entries.get(entry_ref).is_some_and(|entry| {
+                // CR 614.12: an entry replacement applies according to the entrant as it
+                // would exist on the battlefield, continuous effects included (Opalescence
+                // makes an Enchantment token a creature). The tokens of the same batch
+                // entering with it are not yet on that board.
+                if let Some(projection) = BattlefieldEntrantProjection::for_liminal_token(
+                    state,
+                    *entry_ref,
+                    &entry.created_ids,
+                ) {
+                    return projection.matches(filter, ctx);
+                }
                 filter_inner_for_object(
                     state,
                     entry.object.projected(),
@@ -6667,6 +6678,13 @@ pub fn matches_target_filter_on_battlefield_entry(
             ..
         } => {
             let obj = build_battlefield_entry_token_object(*owner, spec, *enter_tapped);
+            // CR 614.12: the batch's entry applicability reads the token as it would
+            // exist on the battlefield, continuous effects included.
+            if let Some(projection) =
+                BattlefieldEntrantProjection::token_on_pre_entry_board(Cow::Borrowed(state), &obj)
+            {
+                return projection.matches(filter, ctx);
+            }
             filter_inner_for_object(
                 state,
                 &obj,
