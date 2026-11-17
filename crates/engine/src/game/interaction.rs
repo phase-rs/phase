@@ -6322,8 +6322,11 @@ fn project_action_payload(
                 push_value_surface(surfaces, InteractionRoleCode::ModeIndex, index);
             }
         }
-        GameAction::DecideOptionalCost { pay } | GameAction::PayUnlessCost { pay } => {
-            push_value_surface(surfaces, InteractionRoleCode::Pay, pay)
+        GameAction::DecideOptionalCost { index } => {
+            push_value_surface(surfaces, InteractionRoleCode::Pay, *index)
+        }
+        GameAction::PayUnlessCost { pay } => {
+            push_value_surface(surfaces, InteractionRoleCode::Pay, *pay)
         }
         GameAction::ChooseAdventureFace { creature } => push_value_surface(
             surfaces,

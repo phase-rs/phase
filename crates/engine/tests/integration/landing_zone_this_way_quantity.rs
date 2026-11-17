@@ -93,12 +93,22 @@ fn volcanic_eruption_lowers_to_destroy_all_plus_filtered_tracked_set_damage() {
         Effect::DamageAll {
             amount:
                 QuantityExpr::Ref {
-                    qty: QuantityRef::FilteredTrackedSetSize { filter, caused_by },
+                    qty:
+                        QuantityRef::FilteredTrackedSetSize {
+                            filter,
+                            caused_by,
+                            destination,
+                        },
                 },
             player_filter: Some(_),
             ..
         } => {
             assert_eq!(*caused_by, None, "landing-zone count is action-agnostic");
+            assert_eq!(
+                *destination,
+                Some(Zone::Graveyard),
+                "a destroyed Mountain a replacement exiled was never put into a graveyard"
+            );
             match filter.as_ref() {
                 TargetFilter::Typed(tf) => assert_eq!(
                     tf.type_filters,

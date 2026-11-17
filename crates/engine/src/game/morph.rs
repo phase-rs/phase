@@ -265,6 +265,9 @@ pub fn apply_face_down_creature_characteristics(
     obj: &mut crate::game::game_object::GameObject,
     profile: &crate::types::ability::FaceDownProfile,
 ) {
+    // CR 708.2: turning face down changes this same permanent's characteristics;
+    // carry its still-live resolution effects across the rebaseline.
+    let carried_live_replacements = obj.replacement_definitions.clone();
     obj.face_down = true;
     obj.name = String::new();
     obj.base_name = String::new();
@@ -319,8 +322,12 @@ pub fn apply_face_down_creature_characteristics(
     obj.base_abilities = Arc::new(Vec::new());
     obj.trigger_definitions = crate::types::definitions::Definitions::default();
     obj.base_trigger_definitions = Arc::new(Vec::new());
-    obj.replacement_definitions = crate::types::definitions::Definitions::default();
     obj.base_replacement_definitions = Arc::new(Vec::new());
+    obj.replacement_definitions =
+        crate::game::game_object::reseed_replacements_carrying_resolution_effects(
+            &carried_live_replacements,
+            &obj.base_replacement_definitions,
+        );
     obj.static_definitions = crate::types::definitions::Definitions::default();
     obj.base_static_definitions = Arc::new(Vec::new());
     obj.color = Vec::new();

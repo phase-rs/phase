@@ -4115,9 +4115,12 @@ fn parse_type_phrase_folding_unbound<'a>(
                     && extra_core_type_filters.is_empty()
                     && neg_type_filters.is_empty()
                 {
-                    if let Some(union) =
-                        parse_color_or_type_union(&properties, &other_filter, after_trimmed)
-                    {
+                    if let Some(union) = parse_color_or_type_union(
+                        &properties,
+                        &property_disjunction_ranges,
+                        &other_filter,
+                        after_trimmed,
+                    ) {
                         return (union, final_rest);
                     }
                 }
@@ -4441,6 +4444,15 @@ fn parse_type_phrase_folding_unbound<'a>(
     // list as OR branches.
     if let Some((core_types, consumed)) = parse_that_is_core_type_suffix(&lower[pos..]) {
         relative_core_type_filters = core_types;
+        pos += consumed;
+    }
+
+    // CR 109.4 + CR 608.2i: "whose controller <look-back> this turn"
+    // possessive-relative controller predicate (Steel Hellkite #3248). Sibling to the
+    // "that …" relative clause below; disjoint prefixes, so the order is grouping-only.
+    // Refuses (leaving the tail unconsumed) for predicates outside the shared leaf set.
+    if let Some((prop, consumed)) = parse_whose_controller_suffix(&lower[pos..]) {
+        properties.push(prop);
         pos += consumed;
     }
 
@@ -5100,37 +5112,7 @@ fn parse_type_phrase_folding_unbound<'a>(
             .collect::<Vec<_>>()
     };
 
-    let property_branches = if property_disjunction_ranges.is_empty() {
-        vec![properties]
-    } else {
-        let mut disjunctive_indices = vec![false; properties.len()];
-        for (start, len) in &property_disjunction_ranges {
-            for is_disjunctive in disjunctive_indices.iter_mut().skip(*start).take(*len) {
-                *is_disjunctive = true;
-            }
-        }
-        let common_props = properties
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| !disjunctive_indices[*idx])
-            .map(|(_, prop)| prop.clone())
-            .collect::<Vec<_>>();
-        let mut branch_props = vec![common_props];
-        for (start, len) in property_disjunction_ranges {
-            let disjunctive_props = properties[start..start + len].to_vec();
-            branch_props = branch_props
-                .into_iter()
-                .flat_map(|common| {
-                    disjunctive_props.iter().cloned().map(move |prop| {
-                        let mut branch = common.clone();
-                        branch.push(prop);
-                        branch
-                    })
-                })
-                .collect();
-        }
-        branch_props
-    };
+    let property_branches = expand_property_disjunctions(&properties, &property_disjunction_ranges);
 
     let mut filters = Vec::new();
     for type_filters in type_filter_branches {
@@ -5716,51 +5698,199 @@ fn finalize_or_disjunction(combined: TargetFilter, shared_props: &[FilterProp]) 
     distribute_properties_to_or(combined)
 }
 
+/// Expand the recorded property groups that the Oracle grammar joined with
+/// "or". Properties outside a recorded group remain conjunctive.
+fn expand_property_disjunctions(
+    properties: &[FilterProp],
+    ranges: &[(usize, usize)],
+) -> Vec<Vec<FilterProp>> {
+    if ranges.is_empty() {
+        return vec![properties.to_vec()];
+    }
+
+    let mut disjunctive_indices = vec![false; properties.len()];
+    for &(start, len) in ranges {
+        for is_disjunctive in disjunctive_indices.iter_mut().skip(start).take(len) {
+            *is_disjunctive = true;
+        }
+    }
+    let common_props = properties
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| !disjunctive_indices[*idx])
+        .map(|(_, prop)| prop.clone())
+        .collect::<Vec<_>>();
+    let mut branches = vec![common_props];
+    for &(start, len) in ranges {
+        let disjunctive_props = &properties[start..start + len];
+        branches = branches
+            .into_iter()
+            .flat_map(|common| {
+                disjunctive_props.iter().cloned().map(move |prop| {
+                    let mut branch = common.clone();
+                    branch.push(prop);
+                    branch
+                })
+            })
+            .collect();
+    }
+    branches
+}
+
 /// CR 105.2 + CR 205.2a: "<color> or <type> <noun>" ("black or artifact
 /// creature") joins two kinds of the same noun: the noun of that color, or the
-/// noun with that type. `left_props` hold the color-only left leg, `right` is
-/// the parsed right leg and `right_text` its lowercase source. Returns `None`
-/// unless the left leg is a color and the right leg leads with a type word.
+/// noun with that type. Color alternatives on the right join the same color
+/// group, while separately colored noun legs remain independent. `left_props`
+/// and `property_disjunction_ranges` retain the left leg's conjunction groups;
+/// `right_text` is the lowercase source of the parsed right phrase. Returns
+/// `None` unless the left leg is a color and the right leg starts with a type
+/// phrase.
 ///
 /// Skips `distribute_core_type_to_or`: backfilling the color-only leg with the
 /// right leg's whole type list would include the type adjective and make the
 /// two legs identical.
 fn parse_color_or_type_union(
     left_props: &[FilterProp],
+    property_disjunction_ranges: &[(usize, usize)],
     right: &TargetFilter,
     right_text: &str,
 ) -> Option<TargetFilter> {
-    if !left_props
+    let left_colors: Vec<ManaColor> = left_props
         .iter()
-        .any(|prop| matches!(prop, FilterProp::HasColor { .. }))
-    {
+        .filter_map(|prop| match prop {
+            FilterProp::HasColor { color } => Some(*color),
+            _ => None,
+        })
+        .collect();
+    if left_colors.is_empty() {
         return None;
     }
-    let TargetFilter::Typed(right_typed) = right else {
-        return None;
-    };
-    let (_, adjective) = nom_target::parse_type_filter_word(right_text).ok()?;
-    let mut noun = right_typed
-        .type_filters
-        .iter()
-        .filter(|type_filter| **type_filter != adjective)
-        .cloned();
-    let left = typed(
-        noun.next().unwrap_or(TypeFilter::Any),
-        None,
-        left_props.to_vec(),
-        noun.collect(),
-    );
-    let shared: Vec<FilterProp> = left_props
-        .iter()
-        .filter(|prop| !is_adjective_prefix_prop(prop))
-        .cloned()
-        .collect();
-    let combined = distribute_controller_to_or(TargetFilter::Or {
-        filters: vec![left, right.clone()],
-    });
-    let combined = distribute_shared_properties(combined, &shared);
-    Some(distribute_properties_to_or(combined))
+    match right {
+        TargetFilter::Typed(right_typed) => {
+            let (_, adjective) = nom_target::parse_type_filter_word(right_text).ok()?;
+            let mut noun = right_typed
+                .type_filters
+                .iter()
+                .filter(|type_filter| **type_filter != adjective)
+                .cloned();
+            let noun_head = noun.next().unwrap_or(TypeFilter::Any);
+            let noun_tail = noun.collect::<Vec<_>>();
+            let mut filters = expand_property_disjunctions(left_props, property_disjunction_ranges)
+                .into_iter()
+                .map(|properties| typed(noun_head.clone(), None, properties, noun_tail.clone()))
+                .collect::<Vec<_>>();
+            filters.push(right.clone());
+            let shared: Vec<FilterProp> = left_props
+                .iter()
+                .filter(|prop| !is_adjective_prefix_prop(prop))
+                .cloned()
+                .collect();
+            let combined = distribute_controller_to_or(TargetFilter::Or { filters });
+            let combined = distribute_shared_properties(combined, &shared);
+            Some(distribute_properties_to_or(combined))
+        }
+        TargetFilter::Or { filters }
+            if left_props
+                .iter()
+                .all(|prop| matches!(prop, FilterProp::HasColor { .. })) =>
+        {
+            let typed_legs = filters
+                .iter()
+                .map(|leg| match leg {
+                    TargetFilter::Typed(typed_leg)
+                        if !typed_leg.type_filters.is_empty()
+                            && !typed_leg.type_filters.contains(&TypeFilter::Any) =>
+                    {
+                        Some(typed_leg)
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let first_leg = typed_legs.first()?;
+            let first_leg_colors = first_leg
+                .properties
+                .iter()
+                .filter_map(|prop| match prop {
+                    FilterProp::HasColor { color } => Some(*color),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let mut product = Vec::new();
+            let left_color_options =
+                expand_property_disjunctions(left_props, property_disjunction_ranges)
+                    .into_iter()
+                    .flat_map(|branch| {
+                        branch.into_iter().filter_map(|prop| match prop {
+                            FilterProp::HasColor { color } => Some(color),
+                            _ => None,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+            if first_leg_colors.is_empty() {
+                let adjective_text = parse_color_prefix(right_text)
+                    .map_or(right_text, |(_, consumed)| &right_text[consumed..]);
+                let (_, adjective) = nom_target::parse_type_filter_word(adjective_text).ok()?;
+                let mut noun = first_leg
+                    .type_filters
+                    .iter()
+                    .filter(|type_filter| **type_filter != adjective)
+                    .cloned();
+                let noun_head = noun.next().unwrap_or(TypeFilter::Any);
+                let noun_tail = noun.collect::<Vec<_>>();
+                for color in &left_color_options {
+                    product.push(typed(
+                        noun_head.clone(),
+                        None,
+                        vec![FilterProp::HasColor { color: *color }],
+                        noun_tail.clone(),
+                    ));
+                }
+            }
+
+            let mut shared_colors = left_color_options;
+            for color in &first_leg_colors {
+                if !shared_colors.contains(color) {
+                    shared_colors.push(*color);
+                }
+            }
+            for (index, typed_leg) in typed_legs.into_iter().enumerate() {
+                let leg_colors: Vec<ManaColor> = typed_leg
+                    .properties
+                    .iter()
+                    .filter_map(|prop| match prop {
+                        FilterProp::HasColor { color } => Some(*color),
+                        _ => None,
+                    })
+                    .collect();
+                let common_properties: Vec<FilterProp> = typed_leg
+                    .properties
+                    .iter()
+                    .filter(|prop| !matches!(prop, FilterProp::HasColor { .. }))
+                    .cloned()
+                    .collect();
+                let joins_leading_color_group = if index == 0 {
+                    !first_leg_colors.is_empty()
+                } else {
+                    leg_colors.len() == 1 && first_leg_colors.contains(&leg_colors[0])
+                };
+                if !joins_leading_color_group {
+                    product.push(TargetFilter::Typed(typed_leg.clone()));
+                    continue;
+                }
+                for color in &shared_colors {
+                    let mut colored_leg = typed_leg.clone();
+                    colored_leg.properties = common_properties.clone();
+                    colored_leg
+                        .properties
+                        .push(FilterProp::HasColor { color: *color });
+                    product.push(TargetFilter::Typed(colored_leg));
+                }
+            }
+            (!product.is_empty()).then_some(TargetFilter::Or { filters: product })
+        }
+        _ => None,
+    }
 }
 
 /// CR 609.7 + CR 702.72a: Read a reader's whole "X or Y" qualifier ("red or
@@ -6113,6 +6243,7 @@ fn prop_reads_creature_pt(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -6993,7 +7124,8 @@ fn parse_crewed_by_source_suffix(text: &str) -> Option<(FilterProp, usize)> {
 /// source outright, a bare `Pronoun` names the source or, in a history clause,
 /// an earlier instruction's target only when the parse context supplies that
 /// antecedent, `Demonstrative` names an earlier instruction's target the same
-/// way, and `TargetCreature` names the ability's first object target.
+/// way, `OneOfThose` names any of the creature targets an earlier instruction
+/// announced, and `TargetCreature` names the ability's first object target.
 /// `resolve_relation_subject` is the single binding authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CombatRelationSubjectWord {
@@ -7005,6 +7137,9 @@ pub(crate) enum CombatRelationSubjectWord {
     TargetCreature,
     /// "that creature" — a demonstrative for an earlier instruction's target.
     Demonstrative,
+    /// "one of those creatures" — any member of the plural antecedent an earlier
+    /// instruction announced.
+    OneOfThose,
 }
 
 /// The grammatical form of a postnominal current-block-pairing clause.
@@ -7100,7 +7235,8 @@ pub(crate) struct BlockHistoryClause {
 /// The partner a block-history clause names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HistoryPartner {
-    /// A subject word the relation can bind ("it", "~", "that creature").
+    /// A subject word the relation can bind ("it", "~", "that creature", "one of
+    /// those creatures").
     Subject(CombatRelationSubjectWord),
     /// An indefinite filter phrase ("a Zombie", "a legendary creature"): any creature
     /// of a kind, not one object. No relation represents it yet, so like `Unbound` it
@@ -7108,7 +7244,7 @@ pub(crate) enum HistoryPartner {
     /// distinct because a filter-subject relation could represent it, which an unbound
     /// partner cannot.
     Filter,
-    /// Any other phrase no subject word covers ("target Wall", "one of those creatures").
+    /// Any other phrase no subject word covers ("target Wall", "another creature").
     Unbound,
 }
 
@@ -7144,6 +7280,10 @@ fn parse_history_partner(input: &str) -> OracleResult<'_, (HistoryPartner, Comba
                     value(
                         CombatRelationSubjectWord::Demonstrative,
                         tag("that creature"),
+                    ),
+                    value(
+                        CombatRelationSubjectWord::OneOfThose,
+                        (tag("one of "), tag("those creatures")),
                     ),
                     parse_source_subject_word,
                 )),
@@ -7254,8 +7394,8 @@ pub(crate) fn strip_block_history_clauses(lower: &str) -> String {
 /// one, so a represented clause can't vouch for a second clause of the same shape, and
 /// two populations of one instruction can't cover another instruction's dropped clause.
 /// Both ways a parse drops the clause land here: a partner no subject word covers
-/// (Triton Tactics: "one of those creatures"; Time to Reflect's filter phrase "a Zombie"),
-/// and a recognized "it" or "that creature" whose antecedent `resolve_relation_subject`
+/// ("target Wall"; Time to Reflect's filter phrase "a Zombie"), and a recognized "it",
+/// "that creature" or "one of those creatures" whose antecedent `resolve_relation_subject`
 /// rejects ("destroy target creature and all creatures it blocked this turn").
 pub(crate) fn population_drops_block_history_clause(
     lower: &str,
@@ -7391,7 +7531,8 @@ enum CombatClauseKind {
 }
 
 /// The single subject-binding authority. CR 608.2c + CR 115.10a: a pronoun or demonstrative
-/// bound to an earlier instruction's target gives `AnaphoricTarget`. A self-reference, or a
+/// bound to an earlier instruction's target, or "one of those creatures" bound to the
+/// creature targets an earlier instruction announced, gives `AnaphoricTarget`. A self-reference, or a
 /// pronoun whose antecedent is the source, gives `Source`. Any other antecedent, or none,
 /// has no subject, and the clause stays unconsumed for the swallow audit.
 fn resolve_relation_subject(
@@ -7412,6 +7553,13 @@ fn resolve_relation_subject(
         }
         CombatRelationSubjectWord::Demonstrative => {
             names_earlier_target(&ctx.demonstrative_object_ref)
+                .then_some(CombatRelationSubject::AnaphoricTarget)
+        }
+        // CR 608.2c + CR 601.2c: "those creatures" names the creatures the earlier
+        // instruction announced as targets when they are the nearest antecedent;
+        // the relation holds for any of them.
+        CombatRelationSubjectWord::OneOfThose => {
+            names_earlier_target(&ctx.plural_demonstrative_object_ref)
                 .then_some(CombatRelationSubject::AnaphoricTarget)
         }
         CombatRelationSubjectWord::TargetCreature => Some(CombatRelationSubject::ParentTarget),
@@ -9332,9 +9480,8 @@ fn parse_ownership_or_controller_suffix(
     // PlayerFilter rather than setting *controller. Object-side bridge into the
     // PlayerFilter enum. Longest-match-first in the verb alt (mirrors the
     // duration guard in oracle_effect/lower.rs).
-    // NOTE: the numeric "three or more" is a DEFERRED coverage gap — the bridge
-    // carries the combat-damage-by-a-Pirate semantics (≥1); the count threshold
-    // is intentionally not enforced yet. Do NOT silently over-narrow.
+    // NOTE: the numeric "three or more" threshold is carried as `min_sources`
+    // and enforced as a distinct-source count at runtime.
     if let Ok((rest, pf)) = parse_controller_predicate_clause(own_ctrl) {
         properties.push(FilterProp::ControllerMatches {
             player: Box::new(pf),
@@ -9354,19 +9501,43 @@ fn parse_ownership_or_controller_suffix(
 /// <look-back> this turn" into a `PlayerFilter`. This is the object-axis analogue
 /// of the whole `PlayerFilter` enum: it recognizes a controller predicate and
 /// hands it to `FilterProp::ControllerMatches`, so ANY player look-back can scope
-/// a target's controller. Longest-match-first in the verb `alt`. The trailing
-/// " this turn" is required so the whole relative clause is consumed.
-///
-/// Supported predicates (each a leaf of the `alt`, composed — not enumerated):
-///   - "was dealt combat damage by [<N> or more ]<subtype>" →
-///     `OpponentDealtDamage { CombatOnly, Some(Typed(subtype)), min_sources: N }`
-///     (Admiral Beckett Brass: "by three or more Pirates" → `min_sources = 3`).
-///     The "<N> or more" threshold IS enforced (distinct-source count at runtime).
-///   - "was dealt combat damage" (no source) → `OpponentDealtDamage {
-///     CombatOnly, None, min_sources: 1 }`.
-///   - "lost life" → `OpponentLostLife` (sibling unlocked by the bridge).
+/// a target's controller. The predicate leaves are shared with the
+/// possessive-relative entry (`parse_whose_controller_predicate_clause`).
 fn parse_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilter> {
     let (input, _) = tag("controlled by a player who ").parse(input)?;
+    parse_controller_predicate_leaves(input)
+}
+
+/// CR 109.4 + CR 608.2i: possessive-relative entry to the controller-predicate
+/// bridge — "whose controller <look-back> this turn" (Steel Hellkite: "each nonland
+/// permanent with mana value X whose controller was dealt combat damage by this
+/// creature this turn"). Same shared leaves and trailing-" this turn" requirement as
+/// `parse_controller_predicate_clause`; predicates outside the leaf set refuse.
+fn parse_whose_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilter> {
+    let (input, _) = tag("whose controller ").parse(input)?;
+    parse_controller_predicate_leaves(input)
+}
+
+/// Shared controller-predicate leaves for both subject forms ("controlled by a player
+/// who …" and "whose controller …"). Longest-match-first in the verb `alt`. The
+/// trailing " this turn" is required so the whole relative clause is consumed.
+///
+/// Supported predicates (each a leaf of the `alt`, composed — not enumerated):
+///   - "was dealt combat damage by [<N> or more ]<source>" →
+///     `OpponentDealtDamage { CombatOnly, Some(source), min_sources: N, All }`
+///     (Admiral Beckett Brass: "by three or more Pirates" → `min_sources = 3`;
+///     Steel Hellkite: "by this creature" → `Some(SelfRef)`, `min_sources = 1`).
+///     The "<N> or more" threshold IS enforced (distinct-source count at runtime).
+///   - "was dealt combat damage" (no source) → `OpponentDealtDamage {
+///     CombatOnly, None, min_sources: 1, All }`.
+///   - "lost life" → `OpponentLostLife` (sibling unlocked by the bridge).
+///
+/// CR 608.2c: neither subject form ("a player who …", "whose controller …")
+/// names an opponent, so the damage leaves emit `relation: All` — the damaged
+/// player qualifies even if it later controls the source (Steel Hellkite +
+/// Ray of Command). Explicit "opponent … dealt damage" grammar routes through
+/// `oracle_quantity` and keeps `Opponent`.
+pub(crate) fn parse_controller_predicate_leaves(input: &str) -> OracleResult<'_, PlayerFilter> {
     // Each leaf leaves the remainder positioned just before the trailing
     // " this turn" (leading space intact), which the outer combinator consumes
     // uniformly so the whole relative clause is required.
@@ -9378,6 +9549,7 @@ fn parse_controller_predicate_clause(input: &str) -> OracleResult<'_, PlayerFilt
                 kind: DamageKindFilter::CombatOnly,
                 source: None,
                 min_sources: 1,
+                relation: PlayerRelation::All,
             },
             terminated(tag("was dealt combat damage"), peek(tag(" this turn"))),
         ),
@@ -9429,6 +9601,8 @@ fn parse_controller_dealt_combat_damage_by(input: &str) -> OracleResult<'_, Play
             kind: DamageKindFilter::CombatOnly,
             source: Some(Box::new(source)),
             min_sources,
+            // CR 608.2c: no opponent word in this grammar (see the leaves doc).
+            relation: PlayerRelation::All,
         },
     ))
 }
@@ -9585,6 +9759,9 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 /// `nom::Err::Error`, so dispatch falls through to the `TRACKED_SET_PHRASES`
 /// table, which keeps "the exiled card" → `TrackedSet` for the common
 /// effect-exile case.
+///
+/// CR 608.2c + CR 701.68c: the filter also names an object an earlier
+/// instruction of the same resolution bound, as "the blighted creature" does.
 fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -9601,6 +9778,16 @@ fn parse_cost_paid_object_reference<'a>(
                 ),
             ),
             |i| parse_exile_cost_paid_object(i, ctx),
+            // CR 701.68c: "the blighted creature" is the object chosen when blighting.
+            // A possessive ("the blighted creature's controller") names something else.
+            value(
+                (),
+                (
+                    tag("the "),
+                    |i| parse_word_bounded(i, "blighted creature"),
+                    not(tag("'")),
+                ),
+            ),
         )),
     )
     .parse(input)
@@ -10010,6 +10197,35 @@ pub(crate) fn parse_bare_was_dealt_damage_suffix(text: &str) -> Option<(FilterPr
     ))
 }
 
+/// CR 109.4 + CR 608.2i: "whose controller <look-back> this turn" possessive-relative
+/// controller predicate on a target noun phrase (Steel Hellkite: "each nonland
+/// permanent with mana value X whose controller was dealt combat damage by this
+/// creature this turn"). Delegates the predicate to the shared controller-predicate
+/// leaves, so every leaf the "controlled by a player who" bridge supports is accepted
+/// here; any other predicate (Dwarven Sea Clan / Seasinger "controls an Island",
+/// Lullmage's Domination graveyard count) refuses with `None` and the cascade leaves
+/// the tail unconsumed, preserving those cards' current behavior.
+pub(crate) fn parse_whose_controller_suffix(text: &str) -> Option<(FilterProp, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let (rest, pf) = parse_whose_controller_predicate_clause(trimmed).ok()?;
+    // Word-boundary check: accept end-of-string or any non-alphanumeric terminator
+    // so a longer continuation cannot misfire (mirrors the bare-damage suffix above).
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if !next_char_is_boundary {
+        return None;
+    }
+    Some((
+        FilterProp::ControllerMatches {
+            player: Box::new(pf),
+        },
+        leading_ws + (trimmed.len() - rest.len()),
+    ))
+}
+
 /// Parse "that [verb phrase]" relative clause suffix on target noun phrases.
 ///
 /// Handles multiple pattern classes:
@@ -10020,6 +10236,7 @@ pub(crate) fn parse_bare_was_dealt_damage_suffix(text: &str) -> Option<(FilterPr
 /// - CR 400.7: "that entered (the battlefield) this turn" → `EnteredThisTurn`
 /// - CR 508.1a: "that attacked this turn" → `AttackedThisTurn`
 /// - CR 509.1a: "that blocked this turn" → `BlockedThisTurn`
+/// - CR 701.14a: "that fought this turn" → `FoughtThisTurn`
 /// - CR 301.5 + CR 303.4: "that are enchanted or equipped" → attachment predicate
 ///
 /// Returns `(properties, bytes_consumed)` or `None` if the text doesn't match.
@@ -10345,6 +10562,8 @@ pub(crate) fn parse_that_clause_suffix<'a>(
             FilterProp::AttackedThisTurn { defender: None },
         ),
         ("blocked this turn", FilterProp::BlockedThisTurn),
+        // CR 701.14a: "that fought this turn" (Boxing Ring).
+        ("fought this turn", FilterProp::FoughtThisTurn),
         // CR 702.171c: "that saddled it [this turn]" — the creature was tapped to
         // pay the source's saddle cost (recorded in the source's `saddled_by`,
         // cleared at end of turn so "this turn" is implicit). "it" refers to the
@@ -10900,6 +11119,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -11637,18 +11857,20 @@ enum ZonePrep {
 /// Qualifier preceding the zone word. Distinguishes ownership-bearing qualifiers
 /// ("an opponent's", "your") from plain determiners ("a", "the") and bare forms.
 /// The `Bare` variant is a zero-width match, so `parse_zone_qual` always succeeds.
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum ZoneQual {
-    /// "an opponent's ", "each opponent's " — produces `Owned{Opponent}`.
-    Opponent,
+    /// A possessive that binds the zone's owner — produces `Owned{owner}`
+    /// (CR 108.3: cards in a player's zone are owned by that player):
+    /// - "an opponent's ", "each opponent's " → `Opponent`
+    /// - "target player's " → `TargetPlayer`
+    /// - "their " → `ScopedPlayer` (in an each-player iteration the
+    ///   third-person possessive binds to the iterated player)
+    /// - "defending player's " → `DefendingPlayer` (CR 508.5a: one specific
+    ///   defending player, never any player)
+    Owner(ControllerRef),
     /// "your " — sets `ControllerRef::You` on the parent filter.
     You,
-    /// "target player's " — produces `Owned{TargetPlayer}`.
-    TargetPlayer,
-    /// "their " — produces `Owned{ScopedPlayer}`; in an each-player iteration
-    /// the third-person possessive binds to the iterated player.
-    Their,
-    /// "its owner's ", "that player's ", "defending player's ", "each player's ".
+    /// "its owner's ", "that player's ", "each player's ", "a player's ".
     /// No ownership constraint emitted; referent is resolved by context upstream.
     OtherPoss,
     /// "the chosen player's " — the player persisted on the source via an earlier
@@ -11760,7 +11982,7 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
         return None;
     }
     match qualifier {
-        ZoneQual::OtherPoss | ZoneQual::TargetPlayer => return None,
+        ZoneQual::OtherPoss | ZoneQual::Owner(ControllerRef::TargetPlayer) => return None,
         ZoneQual::Plain => {
             // This adapter admits only the singular unowned object form. The
             // shared grammar still owns adjective/plural/selection spellings.
@@ -11781,8 +12003,9 @@ pub(crate) fn parse_exile_graveyard_source(text: &str) -> Option<(Vec<FilterProp
                 controller: controller?,
             });
         }
-        // CR 108.3 + CR 404.1: retain the shared grammar's opponent/iteration owner.
-        ZoneQual::Opponent | ZoneQual::Their => {}
+        // CR 108.3 + CR 404.1 + CR 508.5a: retain the shared grammar's
+        // opponent/iteration/defending-player owner.
+        ZoneQual::Owner(_) => {}
     }
     Some((props, leading_ws + lower.len() - rest.len()))
 }
@@ -11878,84 +12101,27 @@ fn parse_zone_suffix_nom(
         (i, vec![zone])
     };
 
-    let out = if zones.len() > 1 {
-        // Multi-zone disjunction: use InAnyZone
-        match qual {
-            ZoneQual::Opponent => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::You => (
-                vec![FilterProp::InAnyZone { zones }],
-                Some(ControllerRef::You),
-            ),
-            ZoneQual::ChosenPlayer => (
-                vec![FilterProp::InAnyZone { zones }],
-                Some(ControllerRef::SourceChosenPlayer),
-            ),
-            ZoneQual::TargetPlayer => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::TargetPlayer,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::Their => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::ScopedPlayer,
-                    },
-                    FilterProp::InAnyZone { zones },
-                ],
-                None,
-            ),
-            ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InAnyZone { zones }], None),
-        }
+    // A disjunction ("from your graveyard or from your hand") names any
+    // of its zones; a single zone phrase names exactly that zone.
+    let zone_prop = if let [zone] = zones.as_slice() {
+        FilterProp::InZone { zone: *zone }
     } else {
-        // Single zone: use InZone
-        let zone = zones[0];
-        match qual {
-            ZoneQual::Opponent => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::Opponent,
-                    },
-                    FilterProp::InZone { zone },
-                ],
-                None,
-            ),
-            ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
-            ZoneQual::ChosenPlayer => (
-                vec![FilterProp::InZone { zone }],
-                Some(ControllerRef::SourceChosenPlayer),
-            ),
-            ZoneQual::TargetPlayer => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::TargetPlayer,
-                    },
-                    FilterProp::InZone { zone },
-                ],
-                None,
-            ),
-            ZoneQual::Their => (
-                vec![
-                    FilterProp::Owned {
-                        controller: ControllerRef::ScopedPlayer,
-                    },
-                    FilterProp::InZone { zone },
-                ],
-                None,
-            ),
-            ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InZone { zone }], None),
-        }
+        FilterProp::InAnyZone { zones }
+    };
+    let out = match &qual {
+        // CR 108.3: cards in a player's zone are owned by that player.
+        ZoneQual::Owner(owner) => (
+            vec![
+                FilterProp::Owned {
+                    controller: owner.clone(),
+                },
+                zone_prop,
+            ],
+            None,
+        ),
+        ZoneQual::You => (vec![zone_prop], Some(ControllerRef::You)),
+        ZoneQual::ChosenPlayer => (vec![zone_prop], Some(ControllerRef::SourceChosenPlayer)),
+        ZoneQual::OtherPoss | ZoneQual::Plain => (vec![zone_prop], None),
     };
 
     Ok((i, (out.0, out.1, qual)))
@@ -11964,21 +12130,28 @@ fn parse_zone_suffix_nom(
 fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQual> {
     alt((
         value(
-            ZoneQual::Opponent,
+            ZoneQual::Owner(ControllerRef::Opponent),
             alt((tag("an opponent's "), tag("each opponent's "))),
         ),
         value(ZoneQual::You, tag("your ")),
         // CR 613.1: must precede the `Plain` "the " arm so "the chosen player's "
         // isn't consumed as a bare "the " article.
         value(ZoneQual::ChosenPlayer, tag("the chosen player's ")),
-        value(ZoneQual::TargetPlayer, tag("target player's ")),
-        value(ZoneQual::Their, tag("their ")),
+        value(
+            ZoneQual::Owner(ControllerRef::TargetPlayer),
+            tag("target player's "),
+        ),
+        value(ZoneQual::Owner(ControllerRef::ScopedPlayer), tag("their ")),
+        // CR 508.5a: "defending player's" binds one specific defending player.
+        value(
+            ZoneQual::Owner(ControllerRef::DefendingPlayer),
+            tag("defending player's "),
+        ),
         value(
             ZoneQual::OtherPoss,
             alt((
                 tag("its owner's "),
                 tag("that player's "),
-                tag("defending player's "),
                 tag("each player's "),
                 // CR 404.1: "a player's graveyard" names a zone without binding an
                 // owner (Lodestone Bauble), so it contributes `InZone` alone.
@@ -12053,7 +12226,7 @@ pub(crate) fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleRes
 
 #[cfg(test)]
 mod tests {
-    use super::CombatRelationSubjectWord::{Demonstrative, Pronoun, SelfName};
+    use super::CombatRelationSubjectWord::{Demonstrative, OneOfThose, Pronoun, SelfName};
     use super::*;
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -12110,6 +12283,72 @@ mod tests {
                 format!("{ctx:?}"),
                 before,
                 "a refusal must not mutate context"
+            );
+        }
+    }
+
+    /// Steel Hellkite (#3248) probe: the by-leaf's `parse_target` delegation must
+    /// yield a `SelfRef` source for the normalized "~" ("by this creature").
+    #[test]
+    fn dealt_combat_damage_by_self_reference_yields_self_ref_source() {
+        let (rest, pf) =
+            parse_controller_dealt_combat_damage_by("was dealt combat damage by ~ this turn")
+                .expect("by-~ must parse");
+        assert_eq!(rest, " this turn");
+        assert!(
+            matches!(
+                &pf,
+                PlayerFilter::OpponentDealtDamage {
+                    source: Some(src),
+                    min_sources: 1,
+                    ..
+                } if matches!(&**src, TargetFilter::SelfRef)
+            ),
+            "expected a SelfRef damage source, got {pf:?}"
+        );
+    }
+
+    /// Steel Hellkite (#3248): the "whose controller" arm consumes the damage
+    /// look-back (positive control for the refusal test below).
+    #[test]
+    fn whose_controller_suffix_consumes_damage_lookback() {
+        let text = " whose controller was dealt combat damage by ~ this turn";
+        let (prop, consumed) =
+            parse_whose_controller_suffix(text).expect("damage look-back must parse");
+        assert_eq!(consumed, text.len());
+        assert!(
+            matches!(
+                &prop,
+                FilterProp::ControllerMatches { player }
+                    if matches!(
+                        &**player,
+                        PlayerFilter::OpponentDealtDamage {
+                            kind: DamageKindFilter::CombatOnly,
+                            source: Some(src),
+                            min_sources: 1,
+                            // CR 608.2c: "whose controller …" names no opponent.
+                            relation: PlayerRelation::All,
+                        } if matches!(&**src, TargetFilter::SelfRef)
+                    )
+            ),
+            "expected ControllerMatches{{OpponentDealtDamage{{CombatOnly, Some(SelfRef), 1, All}}}}, got {prop:?}"
+        );
+    }
+
+    /// Steel Hellkite (#3248): the "whose controller" arm refuses predicates outside
+    /// the shared leaf set without consuming input — Dwarven Sea Clan / Seasinger
+    /// ("controls an Island") and Lullmage's Domination (graveyard count) keep their
+    /// current behavior, and non-controller "whose" forms never reach this arm.
+    #[test]
+    fn whose_controller_suffix_refuses_non_lookback_predicates() {
+        for text in [
+            " whose controller controls an island",
+            " whose controller has eight or more cards in their graveyard",
+            " whose power is 5",
+        ] {
+            assert!(
+                parse_whose_controller_suffix(text).is_none(),
+                "{text:?} must be refused"
             );
         }
     }
@@ -13100,7 +13339,10 @@ mod tests {
             ("an elf", HistoryPartner::Filter),
             ("another creature", HistoryPartner::Unbound),
             ("target wall", HistoryPartner::Unbound),
-            ("one of those creatures", HistoryPartner::Unbound),
+            (
+                "one of those creatures",
+                HistoryPartner::Subject(OneOfThose),
+            ),
         ];
         for (head, direction) in [
             ("that blocked or was blocked by ", Either),
@@ -13155,7 +13397,7 @@ mod tests {
         population_drops_block_history_clause(lower, instructions, |word| match word {
             CombatRelationSubjectWord::Pronoun => Some(it),
             CombatRelationSubjectWord::SelfName => Some(CombatRelationSubject::Source),
-            CombatRelationSubjectWord::Demonstrative => {
+            CombatRelationSubjectWord::Demonstrative | CombatRelationSubjectWord::OneOfThose => {
                 Some(CombatRelationSubject::AnaphoricTarget)
             }
             CombatRelationSubjectWord::TargetCreature => Some(CombatRelationSubject::ParentTarget),
@@ -17379,6 +17621,28 @@ mod tests {
         let (filter, rest) = parse_target("the sacrificed creature");
         assert_eq!(filter, TargetFilter::CostPaidObject);
         assert!(rest.is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn the_blighted_creature_is_an_effect_bound_object_reference() {
+        // CR 701.68c: the phrase names the object chosen when blighting.
+        let (filter, rest) = parse_target("the blighted creature");
+        assert_eq!(filter, TargetFilter::CostPaidObject);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
+
+        let (plural, _) = parse_target("the blighted creatures");
+        assert_ne!(
+            plural,
+            TargetFilter::CostPaidObject,
+            "the referent is one object, so the plural must not bind it"
+        );
+
+        let (possessive, _) = parse_target("the blighted creature's controller");
+        assert_ne!(
+            possessive,
+            TargetFilter::CostPaidObject,
+            "a possessive names another object, so it must reach the possessive arms"
+        );
     }
 
     #[test]
@@ -24303,7 +24567,7 @@ mod tests {
     #[test]
     fn parse_target_bare_their_graveyard_scopes_to_owner() {
         // Part B bare-possessive path: bare "their graveyard" must match the
-        // owner-scoped shape produced by parse_zone_suffix_nom's ZoneQual::Their.
+        // owner-scoped shape produced by parse_zone_suffix_nom's ZoneQual::Owner(ScopedPlayer).
         let (f, _) = parse_target("their graveyard");
         let tf = typed_leg(&f).expect("typed filter");
         assert_eq!(tf.controller, None);
@@ -26138,6 +26402,11 @@ mod exile_graveyard_source_shape {
             ("from an opponent's graveyard", ControllerRef::Opponent),
             ("from each opponent's graveyard", ControllerRef::Opponent),
             ("from their graveyard", ControllerRef::ScopedPlayer),
+            // CR 508.5a: one specific defending player owns the named graveyard.
+            (
+                "from defending player's graveyard",
+                ControllerRef::DefendingPlayer,
+            ),
         ] {
             let (public, ctrl, count) = parse_zone_suffix(phrase).unwrap();
             assert_eq!(ctrl, None);
@@ -26178,6 +26447,42 @@ mod exile_graveyard_source_shape {
         assert_eq!(count, "from your graveyard or from your hand".len());
     }
 
+    /// CR 508.5a + CR 108.3: "defending player's <zone>" binds the zone's owner
+    /// to the one defending player, for every zone word and for disjunctions.
+    #[test]
+    fn defending_player_zone_qualifier_binds_the_defending_owner() {
+        let owner = FilterProp::Owned {
+            controller: ControllerRef::DefendingPlayer,
+        };
+        for (phrase, zone) in [
+            ("from defending player's graveyard", Zone::Graveyard),
+            ("in defending player's graveyard", Zone::Graveyard),
+            ("from defending player's hand", Zone::Hand),
+            ("in defending player's library", Zone::Library),
+        ] {
+            let (props, ctrl, count) = parse_zone_suffix(phrase).unwrap();
+            assert_eq!(ctrl, None, "{phrase}");
+            assert_eq!(
+                props,
+                vec![owner.clone(), FilterProp::InZone { zone }],
+                "{phrase}"
+            );
+            assert_eq!(count, phrase.len(), "{phrase}");
+        }
+        let phrase = "from defending player's graveyard or from defending player's hand";
+        let (props, ctrl, _) = parse_zone_suffix(phrase).unwrap();
+        assert_eq!(ctrl, None);
+        assert_eq!(
+            props,
+            vec![
+                owner,
+                FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Hand]
+                }
+            ]
+        );
+    }
+
     #[test]
     fn shape_adapter_declines_other_zones_owners_prepositions_and_selections() {
         assert!(parse_exile_graveyard_source("from your graveyard").is_some());
@@ -26189,7 +26494,6 @@ mod exile_graveyard_source_shape {
             "from target player's graveyard",
             "from its owner's graveyard",
             "from that player's graveyard",
-            "from defending player's graveyard",
             "from each player's graveyard",
             "from a player's graveyard",
             "in your graveyard",
@@ -26238,8 +26542,10 @@ mod color_or_type_union {
             .collect()
     }
 
-    /// CR 105.2 + CR 205.2a: Soldevi Adnate's "black or artifact creature" is a
-    /// black creature or an artifact creature, never two identical legs.
+    /// CR 105.2 + CR 205.2a: Soldevi Adnate's Oracle text is "{T}, Sacrifice a
+    /// black or artifact creature: Add an amount of {B} equal to the sacrificed
+    /// creature's mana value." Its filter is a black creature or an artifact
+    /// creature, never two identical legs.
     #[test]
     fn color_or_type_noun_reads_both_kinds() {
         let (filter, rest) = parse_type_phrase_folding("black or artifact creature");
@@ -26249,6 +26555,26 @@ mod color_or_type_union {
             vec![
                 (vec![TypeFilter::Creature], vec![ManaColor::Black]),
                 (vec![TypeFilter::Artifact, TypeFilter::Creature], vec![]),
+            ]
+        );
+    }
+
+    /// CR 105.2 + CR 205.2a: Essence Burn's Oracle text is "Essence Burn deals
+    /// 5 damage to target black or green creature or planeswalker. If that
+    /// permanent would die this turn, exile it instead." Its target names
+    /// exactly the four color/type pairs.
+    #[test]
+    fn shared_color_alternatives_cross_with_noun_alternatives() {
+        let phrase = "black or green creature or planeswalker";
+        let (filter, rest) = parse_type_phrase_folding(phrase);
+        assert_eq!(rest, "", "the full grammar phrase must be consumed");
+        assert_eq!(
+            legs(&filter),
+            vec![
+                (vec![TypeFilter::Creature], vec![ManaColor::Black]),
+                (vec![TypeFilter::Creature], vec![ManaColor::Green]),
+                (vec![TypeFilter::Planeswalker], vec![ManaColor::Black]),
+                (vec![TypeFilter::Planeswalker], vec![ManaColor::Green]),
             ]
         );
     }

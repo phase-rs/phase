@@ -1455,6 +1455,27 @@ pub enum Keyword {
     Unknown(String),
 }
 
+/// The engine's keyword-list representation policy for a newly granted keyword
+/// instance, shared by the battlefield (layer 6) and off-zone keyword paths so
+/// they cannot diverge. It preserves existing battlefield behaviour; the order in
+/// which grants are applied (CR 613.7 timestamps) is the caller's effect
+/// ordering, not decided here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordGrantPolicy {
+    /// Identical instances are kept, each as its own entry (see
+    /// [`Keyword::instances_must_coexist`]): Toxic's total sums them
+    /// (CR 702.164b); Sunburst and Bloodthirst count them per instance.
+    Accumulate,
+    /// The latest applied grant replaces every earlier entry of the same variant
+    /// (see [`Keyword::overrides_same_kind_on_grant`]): Crew, Saddle and Enchant
+    /// are single-value representations.
+    ReplaceSameVariant,
+    /// Distinct keyword values coexist. Preserve the existing representation's
+    /// exact-value deduplication; this does not determine companion-trigger
+    /// multiplicity.
+    DedupeIdentical,
+}
+
 impl Keyword {
     /// CR 702.37a/e: Construct a Morph keyword from either a ManaCost or AbilityCost.
     pub fn morph(cost: impl Into<MorphCost>) -> Self {
@@ -2377,6 +2398,18 @@ impl Keyword {
             self,
             Keyword::Crew { .. } | Keyword::Enchant(_) | Keyword::Saddle(_)
         )
+    }
+
+    /// The single authority for how a newly granted instance of this keyword
+    /// combines with the instances already on a keyword list.
+    pub fn grant_policy(&self) -> KeywordGrantPolicy {
+        if self.instances_must_coexist() {
+            KeywordGrantPolicy::Accumulate
+        } else if self.overrides_same_kind_on_grant() {
+            KeywordGrantPolicy::ReplaceSameVariant
+        } else {
+            KeywordGrantPolicy::DedupeIdentical
+        }
     }
 
     /// CR 113.2c: The runtime-REALIZED subset of [`Self::instances_function_separately`]

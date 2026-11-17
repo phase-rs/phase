@@ -147,6 +147,39 @@ fn stamp_forward_result_on_battlefield_attach_return(def: &mut AbilityDefinition
     }
 }
 
+/// CR 608.2c + CR 701.3d: "attach <attachment> to <host>. … unattach it" — the
+/// unattach anaphor names the object the Attach just attached, not the host
+/// the earlier instructions targeted. Stamp `forward_result` on an Attach whose
+/// immediate next instruction (directly or inside its delayed payload, Unexpected
+/// Request's "unattach it at the beginning of the next end step") unattaches a
+/// `ParentTarget`, so the runtime hands that instruction the attached object.
+fn stamp_forward_result_on_attach_for_unattach_anaphor(def: &mut AbilityDefinition) {
+    fn unattaches_parent_anaphor(def: &AbilityDefinition) -> bool {
+        match &*def.effect {
+            Effect::UnattachAll {
+                attachment: TargetFilter::ParentTarget,
+                ..
+            } => true,
+            Effect::CreateDelayedTrigger { effect, .. } => unattaches_parent_anaphor(effect),
+            _ => false,
+        }
+    }
+    if matches!(&*def.effect, Effect::Attach { .. })
+        && def
+            .sub_ability
+            .as_deref()
+            .is_some_and(unattaches_parent_anaphor)
+    {
+        def.forward_result = true;
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        stamp_forward_result_on_attach_for_unattach_anaphor(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        stamp_forward_result_on_attach_for_unattach_anaphor(else_ability);
+    }
+}
+
 /// CR 608.2c: A bare verb after a multi-target player subject continues that
 /// subject. A printed player subject (especially `you`) starts an independent
 /// actor-relative instruction instead.
@@ -1841,6 +1874,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSpellController
@@ -1985,6 +2019,7 @@ fn subject_anchored_optional_actor(
             | TargetFilter::ChosenCard
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::TrackedSetFiltered { .. }
+            | TargetFilter::ChoiceAssignment { .. }
             | TargetFilter::ExiledBySource
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
@@ -3989,16 +4024,21 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                 .fragment()
                 .unwrap_or_default()
                 .to_lowercase();
-            // CR 608.2c: a plural subject anaphor ("those creatures") names the
+            // CR 608.2c: a subject anaphor ("those creatures", "it") names the
             // population of the clause immediately before it — written order,
             // not a search of older history. `AntecedentSelector::LastEmitted`
-            // binds that antecedent through `AssemblyEnv::resolve`.
-            if starts_with_plural_subject_anaphor(&source_text_lower) {
+            // binds that antecedent through `AssemblyEnv::resolve`. The Radiance
+            // fan-out is a plural referent only; the mass tap/untap guard reads
+            // both grammatical numbers.
+            let plural_subject = starts_with_plural_subject_anaphor(&source_text_lower);
+            if plural_subject || starts_with_singular_subject_anaphor(&source_text_lower) {
                 if let Some(bound_index) =
                     env.resolve(&defs, AntecedentSelector::LastEmitted, None, OnMiss::Ignore)
                 {
                     let antecedent = &defs[bound_index];
-                    if let Some(population) = radiance_fanout_population(&antecedent.effect) {
+                    if let Some(population) =
+                        radiance_fanout_population(&antecedent.effect).filter(|_| plural_subject)
+                    {
                         // CR 207.2c: after a Radiance fan-out, "those creatures" is
                         // the target AND every other object the fan-out reached, so
                         // the rider fans out over the same population.
@@ -4009,9 +4049,10 @@ pub(crate) fn assemble_effect_chain_with_provenance(
                         current_defs.extend(fanout_riders);
                     } else if mass_tap_state_population(&antecedent.effect) {
                         // CR 608.2c: the antecedent is a mass tap/untap population
-                        // that no `ParentTarget` binding can represent. Pumping only
-                        // the chosen target would silently name the wrong creatures,
-                        // so the rider fails closed.
+                        // that no `ParentTarget` Pump binding can represent, whether
+                        // the rider's subject is 'they'/'those …' or the singular
+                        // 'it'/'that …' (a grant binds it through the published
+                        // selection; a pump does not), so the rider fails closed.
                         for current in &mut current_defs {
                             if matches!(
                                 &*current.effect,
@@ -4754,6 +4795,7 @@ pub(crate) fn assemble_effect_chain_with_provenance(
     // but a primary SelfRef names the creating source and cannot be rebound by
     // this flag. Delayed triggers likewise retain their creating source.
     rewire_result_anchored_subchain(&mut result);
+    stamp_forward_result_on_attach_for_unattach_anaphor(&mut result);
     fold_enters_this_way_counter_rider(&mut result);
     // CR 608.2c + CR 701.9a + CR 701.21a: a discard/sacrifice-this-way gated
     // sub-ability's bare "it" pronoun parses to the generic `ParentTarget`
@@ -6527,6 +6569,48 @@ mod arena_tests {
             effects
                 .iter()
                 .any(|effect| effect.unimplemented_description().is_some()),
+            "the unrepresentable referent must fail honestly: {effects:?}"
+        );
+    }
+
+    /// CR 608.2c: a singular "it gets +N/+M" rider whose nearest antecedent is a
+    /// mass tap names the tapped population, which no `ParentTarget` Pump can
+    /// represent, so it fails closed exactly like its plural twin. Synthetic
+    /// text: no printed card has the shape; Triton Tactics' delayed payload (a
+    /// "doesn't untap" grant, which binds) is the nearest printed card.
+    #[test]
+    fn singular_rider_after_mass_tap_population_fails_closed() {
+        let text = "Tap each creature your opponents control and it gets -1/-0 until end of turn.";
+        let parsed = crate::parser::parse_oracle_text(
+            text,
+            "Singular Probe",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        let effects = chain_effects(&parsed.abilities[0]);
+        assert!(
+            matches!(
+                effects.first(),
+                Some(Effect::SetTapState {
+                    scope: EffectScope::All,
+                    ..
+                })
+            ),
+            "reach guard: the head is the mass tap: {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Pump { .. })),
+            "no pump may name the wrong creatures: {effects:?}"
+        );
+        assert!(
+            effects.iter().any(|effect| matches!(
+                effect,
+                // allow-noncombinator: test assertion over a parsed result, not parsing dispatch
+                Effect::Unimplemented { name, .. } if name == "plural_rider_after_mass_tap_population"
+            )),
             "the unrepresentable referent must fail honestly: {effects:?}"
         );
     }

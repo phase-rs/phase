@@ -674,6 +674,9 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // windowed authority — no reach beyond the granted def.
+        grant_chain: _,
     } = def;
 
     let mut acc = effect_window_reach(effect);
@@ -2327,6 +2330,7 @@ mod tests {
             is_commander: _,       // format eligibility
             is_oathbreaker: _,     // format eligibility
             deck_copy_limit: _,    // deck construction
+            deck_size_override: _, // deck construction
             rarities: _,           // printing metadata
         } = CardFace::default();
     }
@@ -3910,7 +3914,7 @@ mod tests {
     /// described nothing on the object any more.
     ///
     /// Driven through the REAL `game::transform::transform_permanent`, not through
-    /// the two face helpers it calls — a test that called `snapshot_object_face`
+    /// the two face helpers it calls — a test that called `snapshot_object_base_face`
     /// and `apply_back_face_to_object` itself would go green even if the transform
     /// stopped using them.
     ///
@@ -3926,7 +3930,7 @@ mod tests {
     ///   `printed_cards::apply_back_face_to_object` ⇒ the post-transform assertion
     ///   fails in BOTH cases;
     /// * drop `parse_warnings: obj.parse_warnings.clone()` from
-    ///   `printed_cards::snapshot_object_face` ⇒ the transform-back assertion
+    ///   `printed_cards::snapshot_object_base_face` ⇒ the transform-back assertion
     ///   fails in the front-dirty case (the outgoing face's diagnostics are lost
     ///   rather than stashed).
     #[test]

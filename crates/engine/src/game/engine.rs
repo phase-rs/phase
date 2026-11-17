@@ -27,7 +27,8 @@ use crate::types::game_state::{
     PersistedRestoreError, PostReplacementDrainStack, ResolveAllConsentParticipant,
     ResolveAllConsentRun, ResolveAllPrioritySnapshot, RetargetScope, RetargetSlotAddress,
     StackEntry, StackEntryKind, StackResolutionAutoPassOverlay, StackResolutionBudget,
-    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, WaitingFor,
+    StackResolutionEntryFence, StackResolutionPolicy, StackResolutionSession, UntapStepProgress,
+    WaitingFor,
 };
 use crate::types::identifiers::{CardId, DelayedTriggerOrigin, ObjectId, ObjectIncarnationRef};
 use crate::types::match_config::MatchType;
@@ -1800,6 +1801,11 @@ fn apply_action_boundary_core(
             };
             let realized_token_entry =
                 effects::token::realize_settled_token_battlefield_entry(state, &mut result.events);
+            // CR 603.6a + CR 603.3b: the same convergence for entries of a completed
+            // entering instruction still held by `triggers::settle_entry_batch_scan`:
+            // a handler that settled without reaching the pipeline has not had them
+            // checked, and they are checked before any player receives priority.
+            let settled_entry_batch = settled_entry_batch_is_due(state, &result);
             // CR 608.2c + CR 608.2n: the same convergence for a resolution this action
             // completed on a route that never reached the pipeline (a spell cast during
             // a resolution, CR 608.2g, finishes its announcement here): the resolving
@@ -1811,6 +1817,7 @@ fn apply_action_boundary_core(
             if ((resumed_parked_root || reconciled_unless_payment)
                 && matches!(result.waiting_for, WaitingFor::Priority { .. }))
                 || realized_token_entry
+                || settled_entry_batch
                 || owed_spell_final_part_is_due
             {
                 if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
@@ -1866,6 +1873,20 @@ fn apply_action_boundary_core(
         committed_departure,
         follow_up_failure,
     })
+}
+
+/// CR 117.5 + CR 603.3b: a Priority result still holds entries of a completed
+/// entering instruction whose observers have not been checked. The state's wait
+/// is synchronized first, as for [`owed_spell_final_part_is_due`], because the
+/// entry gate reads it and the state's copy is only synchronized at
+/// `finish_action_boundary`.
+fn settled_entry_batch_is_due(state: &mut GameState, result: &ActionResult) -> bool {
+    let holds_entries = matches!(result.waiting_for, WaitingFor::Priority { .. })
+        && !state.unsettled_entry_batch_events.is_empty();
+    if holds_entries {
+        sync_waiting_for(state, &result.waiting_for);
+    }
+    holds_entries && triggers::settled_entry_batch_awaits_scan(state)
 }
 
 /// CR 608.2c + CR 608.2n: whether the action's result leaves a Priority window
@@ -2930,6 +2951,51 @@ fn settle_finished_game(state: &mut GameState, result: &mut ActionResult) {
     }
 }
 
+/// CR 117.2e + CR 608.2c + CR 117.5: finish a resolution whose current pause a
+/// player's departure canceled (`elimination::DepartureResume`), then settle it
+/// as any action that completed one: the owed final part (CR 608.2n),
+/// state-based actions (CR 704.3), then the queued triggered abilities. The
+/// pipeline scans `events[scan_from..]` and skips every occurrence the departure
+/// already claimed (the departure collects its own triggers once, against the
+/// observers as they were before it: CR 603.10a, CR 603.2c), so the player-loss
+/// safety net starts at the departure's events and a concession at the resumed
+/// ones. The resume runs in its own buffer, because a drain that stops on another prompt takes
+/// the buffer it is handed into its parked carrier. A departure is never
+/// undone, so a failure is reported rather than returned.
+fn settle_resolution_resumed_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    scan_from: usize,
+) {
+    let mut resumed = Vec::new();
+    if let Err(error) = resume_pending_continuation_if_priority(state, &mut resumed) {
+        tracing::error!(%error, "a resolution resumed after a departure did not finish");
+        debug_assert!(
+            false,
+            "a resolution resumed after a departure did not finish: {error}"
+        );
+    }
+    events.append(&mut resumed);
+    let provisional = state.waiting_for.clone();
+    match super::engine_priority::run_post_action_pipeline_from(
+        state,
+        events,
+        scan_from,
+        &provisional,
+        false,
+        false,
+    ) {
+        Ok(settled) => sync_waiting_for(state, &settled),
+        Err(error) => {
+            tracing::error!(%error, "a resolution resumed after a departure did not settle");
+            debug_assert!(
+                false,
+                "a resolution resumed after a departure did not settle: {error}"
+            );
+        }
+    }
+}
+
 /// CR 704.3: the terminal half of [`reconcile_terminal_result`] — the player-loss SBA safety net
 /// and the game-over check, without the loop-shortcut evaluation.
 fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
@@ -2956,7 +3022,34 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
         && !state.withholds_priority()
         && !engine_payment_choices::draw_payment_is_parked(state)
     {
-        sba::check_state_based_actions(state, &mut result.events);
+        // CR 117.2e: the loss may cancel the current pause of a resolution
+        // that is still under way (its chooser left). This net applies the
+        // loss at the prompt (#962) rather than at the next priority
+        // (CR 104.3b); the resolution is then finished before any player
+        // receives priority. The departure collected its own triggers and claimed
+        // its events (CR 603.10a, CR 603.2c), so the settlement's scan from
+        // `departure_start` takes only what happened after it.
+        let departure_start = result.events.len();
+        match sba::check_state_based_actions_reporting_departure(state, &mut result.events) {
+            super::elimination::DepartureResume::ParkedZoneChangeTail => {
+                settle_resolution_resumed_after_departure(
+                    state,
+                    &mut result.events,
+                    departure_start,
+                );
+            }
+            // CR 603.3 + CR 117.5: nothing was resumed, so no pipeline follows the
+            // loss on this route; the abilities the departure triggered and queued
+            // go on the stack before the next player has priority, as after a
+            // concession.
+            super::elimination::DepartureResume::Settled => {
+                super::elimination::drain_or_clear_deferred_triggers_after_elimination(
+                    state,
+                    super::elimination::DepartureTriggers::ScannedByCaller,
+                    &mut result.events,
+                );
+            }
+        }
         // SBA may have advanced waiting_for (e.g., GameOver, or Priority for
         // the next living player). Sync the result.
         result.waiting_for = state.waiting_for.clone();
@@ -6211,7 +6304,8 @@ pub(crate) fn shortcut_count_is_drivable(
 /// CR 800.4a + CR 800.4j: the seat that should receive priority where the active player
 /// would: when a loop-shortcut resolution hands priority back, when a completed
 /// resolution's carrier settles (including the restore-boundary recoveries), and when an
-/// answered resolution prompt hands the resolution back. Priority passes to the next player in turn order still in
+/// answered resolution prompt hands the resolution back, a step's own grant (`turns::active_player_priority`), the
+/// trigger-ordering completion, and the answer to a state-based choice. Priority passes to the next player in turn order still in
 /// the game — the
 /// active player if it is still in the game, otherwise the next living seat in turn order
 /// (elimination does not advance `active_player` when a non-acting seat concedes during the
@@ -8592,6 +8686,17 @@ fn remade_tokens(before: &GameState, after: &GameState) -> Vec<(ObjectId, Object
 /// `intrinsic_copiable_values`, so a multiset homogeneous only under `fodder_content_eq` could mint
 /// k*N copies of ONE representative while the period produced k DIFFERENT permanents.
 ///
+/// A DOUBLE-FACED MEMBER REFUSES THE CLASS (CR 732.2a + CR 111.10i). The mint gives each token
+/// only the stored faces its own sources write: `install_copiable_values_as_base` writes a Room's
+/// other half (CR 709.5b) and a prepare spell (CR 722.2b), and
+/// `token::inject_predefined_token_abilities` fills an Incubator's back face. A member that
+/// [`crate::game::transform::stored_double_face`] classifies as double-faced may hold a face none
+/// of them writes, such as a transformed Incubator's stored Incubator face, which the mint would
+/// lose. `object_content_eq` does not compare `back_face`, so every member is asked, not only the
+/// representative. A front-face-up Incubator class is refused too, although the payload supplies
+/// its back face: the gate does not ask which source supplies a face. Refusing only leaves the
+/// loop to be played out, since a shortcut is only ever suggested (CR 732.2a).
+///
 /// THE SET IS THE MINTED MEMBERS, and the criterion is what the collapse can DELIVER rather than
 /// what the frames contain. `PersistentAxisMaterialization::Tokens`' boundary mint reproduces `k`
 /// members of the class per cycle by MINTING them (CR 111.1, with CR 111.3 / CR 707.2 fixing the
@@ -8606,10 +8711,14 @@ fn derived_fodder_class(
     let new_ids = minted_battlefield_ids(before, after);
     let mut members = new_ids.iter().filter_map(|id| after.objects.get(id));
     let class = members.next()?.clone();
+    if crate::game::transform::stored_double_face(&class).is_some() {
+        return None;
+    }
     let class_values = crate::game::printed_cards::intrinsic_copiable_values(&class);
     let mut k: u32 = 1;
     for other in members {
-        if !crate::analysis::resource::fodder_content_eq(&class, other)
+        if crate::game::transform::stored_double_face(other).is_some()
+            || !crate::analysis::resource::fodder_content_eq(&class, other)
             || crate::game::printed_cards::intrinsic_copiable_values(other) != class_values
         {
             return None;
@@ -9319,6 +9428,10 @@ fn seed_representative_fodder(
             controller: owner,
             // Source-less fodder mint from a captured profile; empty mods are stamp-proof.
             donor: None,
+            // CR 732.2a + CR 707.8a: `derived_fodder_class` admits no class with a member
+            // that is double-faced by `transform::stored_double_face`, so no minted member
+            // has an other face for CR 707.8a to carry.
+            double_faced: None,
         }),
     };
     crate::game::effects::token_copy::drive_copy_token_batches(
@@ -10788,8 +10901,9 @@ fn drain_pending_deferred_life_cost_resume(
                     }
                 }
                 if pending.prepaid_actual_mana_spent.is_some() {
-                    state.pending_cast = Some(pending);
-                    super::casting_costs::finalize_automatic_mana_payment(state, player, events)
+                    super::casting_costs::resume_cast_after_deferred_life_cost(
+                        state, player, *pending, events,
+                    )
                 } else {
                     super::casting_costs::finish_pending_cost_or_cast(
                         state, player, *pending, events,
@@ -13320,7 +13434,10 @@ fn apply_action(
     // dispatch entirely — there is no priority/state check. Eliminating the player
     // performs CR 800.4a object cleanup and advances `waiting_for` if the conceder
     // owned it (see `elimination::concede`), and queues what the departure triggered
-    // (CR 603.6c), since no pipeline scans this action's events.
+    // (CR 603.6c), since no pipeline scans the departure's own events. When the
+    // departure canceled the current pause of a resolution still under way, the
+    // resolution is finished and the action settled through the post-action
+    // pipeline (`settle_resolution_resumed_after_departure`).
     if let GameAction::Concede { player_id } = action {
         // CR 614.17a + CR 118.12: keep the pre-departure base so a staged
         // payment's already-accepted prefix (including a synchronous leg that
@@ -13328,7 +13445,17 @@ fn apply_action(
         // departure's new prohibitions (`settle_after_outside_action`).
         let pre_action = state.payment_transaction.as_ref().map(|_| state.clone());
         let mut events = Vec::new();
-        super::elimination::concede(state, player_id, &mut events);
+        let departure = super::elimination::concede(state, player_id, &mut events);
+        // CR 117.2e + CR 608.2c + CR 117.5: the concession canceled the
+        // current pause of a parked zone-change owner while its resolution
+        // still owes a surviving tail. Finish that resolution, then settle
+        // the action as any action that completed one: the owed final part
+        // (CR 608.2n), state-based actions (CR 704.3), then the triggered
+        // abilities the departure queued together with the resumed ones.
+        if departure.resume == super::elimination::DepartureResume::ParkedZoneChangeTail {
+            let scan_from = events.len();
+            settle_resolution_resumed_after_departure(state, &mut events, scan_from);
+        }
         // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
         // the base the departure changed (`settle_after_outside_action`). CR
         // 104.3a: the departure itself must survive a fallible payment recovery,
@@ -13640,9 +13767,15 @@ fn apply_action(
 /// the step is left when the players next pass priority. CR 502.4 gives no
 /// player priority during the untap step; this window is the handler's
 /// departure from it.
+/// The answered prompt's `progress` says where the step continues. A current
+/// prompt's resume repeats no CR 502.1/502.2 action: `begin_untap_step` already
+/// ran them, and CR 502.4 admits nothing in between. A prompt an earlier build
+/// raised before those actions restarts the step instead; its answer is
+/// discarded, so its callers pass no declines.
 fn untap_completion_waiting_for(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    progress: UntapStepProgress,
     chosen_not_to_untap: HashSet<ObjectId>,
 ) -> WaitingFor {
     // CR 500.1 + CR 500.8: the untap step's leave can end the turn, and the
@@ -13659,8 +13792,22 @@ fn untap_completion_waiting_for(
             player: state.active_player,
         },
     );
-    match turns::begin_untap_or_subset_prompt(state, events, chosen_not_to_untap) {
-        turns::UntapCompletion::ChooseSubset(prompt) => *prompt,
+    let completion = match progress {
+        UntapStepProgress::AfterTurnBasedActions => {
+            turns::resume_untap_step(state, events, chosen_not_to_untap)
+        }
+        // CR 502.1 + CR 502.2 + CR 502.3: the determination was offered on the board before
+        // phasing, so its answer is not a CR 502.3 determination of the board the untap acts
+        // on. Begin the step from its first action; it offers fresh determinations. A
+        // main-era save carries no previous-turn record (that build checked day and night at
+        // the previous cleanup step), so the restarted CR 502.2 check changes nothing.
+        UntapStepProgress::BeforeTurnBasedActions => {
+            state.pending_untap_declines.clear();
+            turns::begin_untap_step(state, events)
+        }
+    };
+    match completion {
+        turns::UntapCompletion::Determination(prompt) => *prompt,
         // CR 500.8 + CR 500.9: a later step the interpreter reaches without
         // priority (another added untap step, or the cleanup step after a
         // step added after the end step) can defer its own transition. The
@@ -14256,9 +14403,9 @@ fn apply_non_priority_pass_action(
                         // type. A land face is put onto the battlefield via the play-land
                         // special action (CR 712.12); a spell face is cast (CR 712.11b — Esika
                         // // The Prismatic Bridge). After a swap
-                        // the new back_face (from snapshot_object_face) has layout_kind: None,
-                        // and a front-face choice clears it explicitly — so neither the
-                        // both-faces-land intercept nor the spell-face intercept re-fires.
+                        // the shared swap keeps the pair's `layout_kind` on the new back_face;
+                        // `cast_face_committed` (set above) is what keeps the both-faces-land
+                        // intercept and the spell-face intercept from re-firing.
                         let active_is_land = state.objects.get(object_id).is_some_and(|obj| {
                             obj.card_types
                                 .core_types
@@ -14594,13 +14741,13 @@ fn apply_non_priority_pass_action(
                 pending_cast,
                 ..
             },
-            GameAction::DecideOptionalCost { pay },
+            GameAction::DecideOptionalCost { index },
         ) => engine_casting::handle_optional_cost_choice(
             state,
             *player,
             *pending_cast.clone(),
             cost,
-            pay,
+            index,
             &mut events,
         )?,
         (
@@ -14653,7 +14800,7 @@ fn apply_non_priority_pass_action(
                 reach,
                 pending_cast,
             },
-            GameAction::DecideOptionalCost { pay },
+            GameAction::DecideOptionalCost { index },
         ) => engine_casting::handle_defiler_payment(
             state,
             *player,
@@ -14661,7 +14808,7 @@ fn apply_non_priority_pass_action(
             *life_cost,
             mana_reduction,
             *reach,
-            pay,
+            index,
             &mut events,
         )?,
         (
@@ -15515,15 +15662,31 @@ fn apply_non_priority_pass_action(
                 resume,
             },
             GameAction::SelectCards { cards: chosen },
-        ) => super::effects::collect_evidence::handle_choice(
-            state,
-            *player,
-            *minimum_mana_value,
-            legal_cards,
-            resume,
-            &chosen,
-            &mut events,
-        )?,
+        ) => {
+            let effect_resume = matches!(
+                resume.as_ref(),
+                crate::types::game_state::CollectEvidenceResume::Resolution { .. }
+            );
+            let next = super::effects::collect_evidence::handle_choice(
+                state,
+                *player,
+                *minimum_mana_value,
+                legal_cards,
+                resume,
+                &chosen,
+                &mut events,
+            )?;
+            // CR 608.2c + CR 701.59a: an effect-form collect evidence parked the
+            // rest of its ability behind this choice. Finish that resolution
+            // before any player receives priority, as the sibling resolution
+            // choices do; a "when you do" reflexive triggers here (CR 603.12).
+            if effect_resume && matches!(next, WaitingFor::Priority { .. }) {
+                resume_pending_continuation_if_priority(state, &mut events)?;
+                state.waiting_for.clone()
+            } else {
+                next
+            }
+        }
         (WaitingFor::CollectEvidenceChoice { player, resume, .. }, GameAction::CancelCast) => {
             engine_casting::handle_collect_evidence_cancel(state, *player, resume, &mut events)?
         }
@@ -16163,12 +16326,13 @@ fn apply_non_priority_pass_action(
             }
             casting_costs::begin_deferred_target_selection(state, caster, pending, &mut events)?
         }
-        // CR 702.174a: Caster chose which opponent receives the promised Gift.
+        // CR 601.2 + CR 115.10a: caster chose the opponent for the prompt's purpose.
         (
             WaitingFor::ChooseGiftRecipient {
                 player,
                 candidates,
                 pending_cast,
+                purpose,
                 ..
             },
             GameAction::ChooseGiftRecipient { opponent },
@@ -16180,6 +16344,7 @@ fn apply_non_priority_pass_action(
                 (**pending_cast).clone(),
                 opponent,
                 candidates,
+                purpose,
                 &mut events,
             )?
         }
@@ -16787,6 +16952,7 @@ fn apply_non_priority_pass_action(
                 player,
                 candidates,
                 chosen_not_to_untap,
+                progress,
             },
             GameAction::ChooseUntap { object_id, untap },
         ) => {
@@ -16811,18 +16977,28 @@ fn apply_non_priority_pass_action(
                 declined.push(object_id);
             }
 
-            if !remaining.is_empty() {
-                WaitingFor::UntapChoice {
-                    player: *player,
-                    candidates: remaining,
-                    chosen_not_to_untap: declined,
+            match progress {
+                // CR 502.3: the next optional decline of this determination.
+                UntapStepProgress::AfterTurnBasedActions if !remaining.is_empty() => {
+                    WaitingFor::UntapChoice {
+                        player: *player,
+                        candidates: remaining,
+                        chosen_not_to_untap: declined,
+                        progress: *progress,
+                    }
                 }
-            } else {
-                // CR 502.3: Declines are recorded; now either surface the
-                // required bounded `ChooseUntapSubset` prompt (a MaxUntapPerType
-                // cap is over its limit after declines) or untap + advance.
-                let skipped: std::collections::HashSet<ObjectId> = declined.into_iter().collect();
-                untap_completion_waiting_for(state, &mut events, skipped)
+                UntapStepProgress::AfterTurnBasedActions => {
+                    // CR 502.3: Declines are recorded; now either surface the
+                    // required bounded `ChooseUntapSubset` prompt (a MaxUntapPerType
+                    // cap is over its limit after declines) or untap + advance.
+                    let skipped: std::collections::HashSet<ObjectId> =
+                        declined.into_iter().collect();
+                    untap_completion_waiting_for(state, &mut events, *progress, skipped)
+                }
+                // CR 502.1 + CR 502.3: a prompt raised before phasing restarts the step.
+                UntapStepProgress::BeforeTurnBasedActions => {
+                    untap_completion_waiting_for(state, &mut events, *progress, HashSet::new())
+                }
             }
         }
         // CR 502.3: The active player directly determines which permanents untap
@@ -16833,7 +17009,12 @@ fn apply_non_priority_pass_action(
         // advances. The enforcement clamp inside `execute_untap_with_choices`
         // remains as a safety net for any selection that slips past validation.
         (
-            WaitingFor::ChooseUntapSubset { player, group, max },
+            WaitingFor::ChooseUntapSubset {
+                player,
+                group,
+                max,
+                progress,
+            },
             GameAction::SelectCards { cards: chosen },
         ) => {
             if state.priority_player
@@ -16858,19 +17039,27 @@ fn apply_non_priority_pass_action(
                     "Untap subset object {bad:?} is not in the over-cap group"
                 )));
             }
-            // CR 502.3: the complement of the chosen set within the prompted
-            // group stays tapped. Combine with the declines stashed from the
-            // preceding optional-decline prompt.
-            let mut skipped: std::collections::HashSet<ObjectId> =
-                std::mem::take(&mut state.pending_untap_declines)
-                    .into_iter()
-                    .collect();
-            for id in group {
-                if !chosen_set.contains(id) {
-                    skipped.insert(*id);
+            let skipped = match progress {
+                // CR 502.3: the complement of the chosen set within the prompted
+                // group stays tapped. Combine with the declines stashed from the
+                // preceding optional-decline prompt.
+                UntapStepProgress::AfterTurnBasedActions => {
+                    let mut skipped: std::collections::HashSet<ObjectId> =
+                        std::mem::take(&mut state.pending_untap_declines)
+                            .into_iter()
+                            .collect();
+                    for id in group {
+                        if !chosen_set.contains(id) {
+                            skipped.insert(*id);
+                        }
+                    }
+                    skipped
                 }
-            }
-            untap_completion_waiting_for(state, &mut events, skipped)
+                // CR 502.1 + CR 502.3: a prompt raised before phasing restarts the step,
+                // which discards this answer and the stashed declines.
+                UntapStepProgress::BeforeTurnBasedActions => HashSet::new(),
+            };
+            untap_completion_waiting_for(state, &mut events, *progress, skipped)
         }
         // CR 508.1g + CR 701.43d: the active player decides whether to pay the
         // optional "exert as it attacks" cost for the prompted attacker, one
@@ -17068,6 +17257,7 @@ fn apply_non_priority_pass_action(
             let pending = pending_effect.clone();
             let returned = *returned_id;
             let active_player = *player;
+            let action_event_start = events.len();
             let (filter, grants) = match &pending.effect {
                 crate::types::ability::Effect::ReturnAsAura {
                     enchant_filter,
@@ -17075,18 +17265,13 @@ fn apply_non_priority_pass_action(
                 } => (enchant_filter.clone(), grants.clone()),
                 _ => {
                     // CR 303.4f + CR 701.3b: attach through the entering-Aura
-                    // authority, so the CR 701.3a gate judges the same entrant
-                    // the host list was offered for. Seams that park none get
-                    // the stored object, i.e. their prior behaviour exactly.
-                    let old_target = super::zone_pipeline::attach_chosen_entering_aura_host(
-                        state, returned, &chosen,
+                    // authority, recording canonical Unattached and Attached events.
+                    super::zone_pipeline::attach_chosen_entering_aura_host(
+                        state,
+                        returned,
+                        &chosen,
+                        &mut events,
                     );
-                    if let Some(old_target) = old_target {
-                        events.push(crate::types::events::GameEvent::Unattached {
-                            attachment_id: returned,
-                            old_target,
-                        });
-                    }
                     let resumes_change_zone_iteration = state
                         .active_change_zone_frame()
                         .is_some_and(|frame| frame.pending.is_some());
@@ -17111,6 +17296,18 @@ fn apply_non_priority_pass_action(
                         super::zone_pipeline::drain_pending_batch_deliveries(state, &mut events);
                     }
                     resume_pending_continuation_if_priority(state, &mut events)?;
+                    // CR 603.2 + CR 603.6a + CR 303.4f: this answer (a token's or a
+                    // card's host choice) puts the Aura entrant onto the battlefield
+                    // (its entry tail was stashed behind the host prompt) and returns
+                    // without the post-action pipeline,
+                    // so its battlefield entries go to the entry gate here: held
+                    // while a co-entrant's host prompt is pending, matched once when
+                    // the last entrant has entered.
+                    triggers::collect_and_drain_entry_observer_triggers_if_settled(
+                        state,
+                        &mut events,
+                        action_event_start,
+                    );
                     return Ok(ActionResult::applied(events, state.waiting_for.clone()));
                 }
             };
@@ -17741,6 +17938,7 @@ fn apply_non_priority_pass_action(
         }
         (waiting_for, action) if engine_resolution_choices::handles(waiting_for) => {
             let carrier = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
+            let action_event_start = events.len();
             match engine_resolution_choices::handle_resolution_choice(
                 state,
                 waiting_for.clone(),
@@ -17748,14 +17946,32 @@ fn apply_non_priority_pass_action(
                 &mut events,
             )? {
                 engine_resolution_choices::ResolutionChoiceOutcome::WaitingFor(waiting_for) => {
-                    if matches!(waiting_for, WaitingFor::Priority { .. })
-                        && state.game_end.is_none()
-                        && state.payment_transaction.is_none()
-                        && !state.payment_transaction_replay
-                        && state.resolving_stack_entry.is_none()
-                        && !triggers::is_pending_trigger_construction_active(state)
+                    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+                        if state.game_end.is_none()
+                            && state.payment_transaction.is_none()
+                            && !state.payment_transaction_replay
+                            && state.resolving_stack_entry.is_none()
+                            && !triggers::is_pending_trigger_construction_active(state)
+                        {
+                            completed_resolution = carrier;
+                        }
+                    } else if state.pending_trigger.is_none()
+                        && state.pending_trigger_order.is_none()
                     {
-                        completed_resolution = carrier;
+                        // CR 603.6a + CR 614.12a: an answer that puts an entrant onto the
+                        // battlefield and stops on a co-entrant's prompt (a copied
+                        // "as this creature enters, choose …" answered before the next
+                        // token's copy offer) reaches no pipeline; its battlefield entries
+                        // go to the entry gate, as a replacement or copy-choice answer's do.
+                        // An answer that already collected its slice and drained it to a
+                        // trigger prompt (a pending trigger, or an ordering choice) has had
+                        // it checked, and the queued-context witnesses are gone by now.
+                        state.waiting_for = waiting_for.clone();
+                        triggers::park_entry_observer_triggers_if_paused(
+                            state,
+                            &mut events,
+                            action_event_start,
+                        );
                     }
                     waiting_for
                 }
@@ -20626,8 +20842,6 @@ fn commit_land_play(
                         source_id: None,
                         exile_links: crate::game::zone_pipeline::ExileLinkSpec::default(),
                         drain: crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                        // This resume delivery is not a library placement.
-                        library_placement: None,
                     },
                     events,
                 ) {

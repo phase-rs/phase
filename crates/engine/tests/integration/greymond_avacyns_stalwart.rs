@@ -430,6 +430,7 @@ fn ai_candidates_three_pairs_for_greymond_choice() {
     // Drive state into the keyword NamedChoice for Greymond's choice.
     let source = crate::support::exact_named_choice_source(runner.state(), greymond);
     runner.state_mut().waiting_for = WaitingFor::NamedChoice {
+        decision_subject_id: None,
         free_entry: None,
         player: P0,
         choice_type: ChoiceType::Keyword {

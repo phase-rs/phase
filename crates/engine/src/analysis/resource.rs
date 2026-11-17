@@ -32,8 +32,8 @@ use crate::types::ability::{
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
-    active_trigger_ledger_bindings_equal, DamageEventKey, DamageRecord, GameState, LKISnapshot,
-    StackEntry, StackEntryKind, TrackedMemberOrigin,
+    active_trigger_ledger_bindings_equal, AbilityUsageKey, DamageEventKey, DamageRecord, GameState,
+    LKISnapshot, StackEntry, StackEntryKind, TrackedMemberOrigin,
 };
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::ManaType;
@@ -3860,7 +3860,7 @@ fn static_mode_projected_count(mode: &crate::types::statics::StaticMode) -> Opti
         | StaticMode::CantBecomeSuspected
         | StaticMode::MaxAttackersEachCombat { .. }
         | StaticMode::MaxBlockersEachCombat { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantBeActivated { .. }
         | StaticMode::CantSearchLibrary { .. }
@@ -7714,7 +7714,7 @@ fn static_mode_references_growing_class(mode: &crate::types::statics::StaticMode
         | StaticMode::CantBecomeSuspected
         | StaticMode::MaxAttackersEachCombat { .. }
         | StaticMode::MaxBlockersEachCombat { .. }
-        | StaticMode::CantBeTargeted
+        | StaticMode::CantBeTargeted { .. }
         | StaticMode::CantBeCast { .. }
         | StaticMode::CantBeActivated { .. }
         | StaticMode::CantSearchLibrary { .. }
@@ -7868,7 +7868,7 @@ fn additional_cost_references_growing_class(a: &crate::types::ability::Additiona
     match a {
         AdditionalCost::Optional { cost, .. } | AdditionalCost::Required(cost) => reads(cost),
         AdditionalCost::Kicker { costs, .. } => costs.iter().any(reads),
-        AdditionalCost::Choice(a, b) => reads(a) || reads(b),
+        AdditionalCost::Choice(costs) => costs.iter().any(reads),
     }
 }
 
@@ -8987,6 +8987,7 @@ fn project_out_player_consumables(p: &mut Player) {
         noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
+        starting_deck_size: _,
     } = p;
     // CR 119: life is monotone in a drain/lifegain loop.
     *life = 0;
@@ -9369,25 +9370,56 @@ fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
     //      while `evaluate_condition` answers differently for them. See that
     //      function for why the straddle argument, and not a per-comparator
     //      monotonicity argument, is what governs here.
-    let keep_turn: HashSet<(ObjectId, usize)> = s
+    let keep_turn: HashSet<AbilityUsageKey> = s
         .activated_abilities_this_turn
         .keys()
         .filter(|key| {
             ability_has_per_turn_activation_gate(&s, key)
                 || ability_reads_own_activation_count(&s, key)
         })
-        .copied()
+        .cloned()
         .collect();
     s.activated_abilities_this_turn
         .retain(|key, _| keep_turn.contains(key));
-    let keep_game: HashSet<(ObjectId, usize)> = s
+    let keep_game: HashSet<AbilityUsageKey> = s
         .activated_abilities_this_game
         .keys()
         .filter(|key| ability_has_per_game_activation_gate(&s, key))
-        .copied()
+        .cloned()
         .collect();
     s.activated_abilities_this_game
         .retain(|key, _| keep_game.contains(key));
+    // CR 400.7 + CR 608.2h: the departed-incarnation tallies are the same
+    // ledger class as the live journals, so project them symmetrically: retain
+    // a departed key exactly when its live twin would be retained (a per-turn
+    // or per-game gate, or an own-activation-count reader), and clear the
+    // rest. Without this a loop that parks history in a departed incarnation
+    // (a sacrifice outlet that dies mid-cycle) compares unequal against its
+    // own earlier frames and is never certified; retaining the gated and
+    // count-reading keys keeps the fail-closed discrimination for loops whose
+    // repetition the departed count actually governs. Like the live twins, a
+    // key whose definition no longer resolves in the projected frame is
+    // cleared: the live rule (`is_some_and`) treats unresolvable keys the same
+    // way, so the two populations stay symmetric.
+    let keep_departed_turn: HashSet<(AbilityUsageKey, u64)> = s
+        .departed_activated_abilities_this_turn
+        .keys()
+        .filter(|(key, _)| {
+            ability_has_per_turn_activation_gate(&s, key)
+                || ability_reads_own_activation_count(&s, key)
+        })
+        .cloned()
+        .collect();
+    s.departed_activated_abilities_this_turn
+        .retain(|key, _| keep_departed_turn.contains(key));
+    let keep_departed_game: HashSet<(AbilityUsageKey, u64)> = s
+        .departed_activated_abilities_this_game
+        .keys()
+        .filter(|(key, _)| ability_has_per_game_activation_gate(&s, key))
+        .cloned()
+        .collect();
+    s.departed_activated_abilities_this_game
+        .retain(|key, _| keep_departed_game.contains(key));
     // CR 608.2c: AbilityUseCountThisTurn{n} is a one-shot branch SELECTOR (an effect
     // branch fires when the per-ability resolution count == n), NOT a repetition-
     // blocking legality gate. Clearing it is sound: a board-divergent Nth branch is
@@ -9451,6 +9483,9 @@ fn project_out_resources(state: &GameState) -> ResourceProjectedFrame {
     // append-only event journals a loop pumps.
     s.zone_changes_this_turn.clear();
     s.battlefield_entry_observations.clear();
+    // Indexes the ledger cleared above; a loop that passes an instruction
+    // boundary advances it every period.
+    s.instruction_boundary_marks.clear();
     s.battlefield_entries_this_turn.clear();
     s.created_tokens_this_turn.clear();
     s.players_who_created_token_this_turn.clear();
@@ -9562,6 +9597,7 @@ fn projected_player_axes(p: &Player) -> Vec<i64> {
         noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
+        starting_deck_size: _,
     } = p;
     vec![
         *poison_counters as i64,
@@ -9624,6 +9660,7 @@ fn projected_player_maps(
         noted_number: _,
         can_look_at_top_of_library: _,
         commander_color_identity: _,
+        starting_deck_size: _,
     } = p;
     vec![player_counters]
 }
@@ -9746,25 +9783,54 @@ pub(crate) fn driving_resources_non_decreasing_carried(
     true
 }
 
-/// CR 602.5b: does the ability at `key=(source,index)` carry a PER-TURN activation
-/// gate? Single authority for "is this activated-tally key a per-turn gate?".
-/// Exhaustive-by-listing `matches!` (no wildcard) so a future per-turn restriction
-/// variant forces an explicit keep/drop decision. A key whose source object is
-/// absent (un-activatable, gate moot) is treated as not-gated and projected out.
-fn ability_has_per_turn_activation_gate(state: &GameState, key: &(ObjectId, usize)) -> bool {
+/// CR 602.5c: the ability a usage key names, re-derived by acquisition
+/// (provenance stamp + rules text) — the same derivation the record and check
+/// paths use. A key naming no current ability (stale stamp, synthesized
+/// runtime grant outside `abilities[]`) classifies as not-gated, matching the
+/// old absent-index read.
+fn ability_definition_for_usage_key<'s>(
+    state: &'s GameState,
+    key: &AbilityUsageKey,
+) -> Option<&'s AbilityDefinition> {
+    // CR 602.5b: the fingerprint discriminates same-acquisition twins that
+    // differ only in body (two equip costs, reconfigure attach vs unattach —
+    // all `description: None`). Without it the lookup returns the first twin
+    // and a gated tally is misclassified as unrestricted.
+    //
+    // CR 602.5c + CR 113.2c: the grant chain discriminates same-description
+    // twins that differ only in lineage (a direct grant vs a re-donation
+    // through a carrier — e.g. a capped Locus grant vs its unrestricted
+    // twin). Without it the lookup returns whichever twin sits first in
+    // `abilities[]` and a gated tally is projected out with the unrestricted
+    // twin's fate.
     state
         .objects
-        .get(&key.0)
-        .and_then(|o| o.abilities.get(key.1))
-        .is_some_and(|def| {
-            def.activation_restrictions.iter().any(|r| {
-                matches!(
-                    r,
-                    ActivationRestriction::OnlyOnceEachTurn
-                        | ActivationRestriction::MaxTimesEachTurn { .. }
-                )
-            })
+        .get(&key.source)?
+        .abilities
+        .iter()
+        .find(|def| {
+            def.granting_object == key.provenance
+                && def.description == key.description
+                && crate::game::restrictions::ability_fingerprint(def) == key.fingerprint
+                && def.grant_chain == key.grant_chain
         })
+}
+
+/// CR 602.5b: does the ability at `key` carry a PER-TURN activation
+/// gate? Single authority for "is this activated-tally key a per-turn gate?".
+/// Exhaustive-by-listing `matches!` (no wildcard) so a future per-turn restriction
+/// variant forces an explicit keep/drop decision. A key naming no current
+/// ability (un-activatable, gate moot) is treated as not-gated and projected out.
+fn ability_has_per_turn_activation_gate(state: &GameState, key: &AbilityUsageKey) -> bool {
+    ability_definition_for_usage_key(state, key).is_some_and(|def| {
+        def.activation_restrictions.iter().any(|r| {
+            matches!(
+                r,
+                ActivationRestriction::OnlyOnceEachTurn
+                    | ActivationRestriction::MaxTimesEachTurn { .. }
+            )
+        })
+    })
 }
 
 /// CR 602.2a + CR 608.2c: does the printed ability at `key` gate anything on its
@@ -9781,7 +9847,7 @@ fn ability_has_per_turn_activation_gate(state: &GameState, key: &(ObjectId, usiz
 /// reachable, retain the count for any ability that reads it at all: retention
 /// can only make states compare DIFFERENT, which is the fail-closed direction
 /// (a loop is rejected, never falsely certified).
-fn ability_reads_own_activation_count(state: &GameState, key: &(ObjectId, usize)) -> bool {
+fn ability_reads_own_activation_count(state: &GameState, key: &AbilityUsageKey) -> bool {
     fn condition_reads_activation_tally(condition: &AbilityCondition) -> bool {
         match condition {
             AbilityCondition::AbilityUseCountThisTurn {
@@ -9822,24 +9888,16 @@ fn ability_reads_own_activation_count(state: &GameState, key: &(ObjectId, usize)
                 .any(definition_reads_activation_tally)
     }
 
-    state
-        .objects
-        .get(&key.0)
-        .and_then(|o| o.abilities.get(key.1))
-        .is_some_and(definition_reads_activation_tally)
+    ability_definition_for_usage_key(state, key).is_some_and(definition_reads_activation_tally)
 }
 
 /// CR 602.5b: per-GAME activation gate. Single authority.
-fn ability_has_per_game_activation_gate(state: &GameState, key: &(ObjectId, usize)) -> bool {
-    state
-        .objects
-        .get(&key.0)
-        .and_then(|o| o.abilities.get(key.1))
-        .is_some_and(|def| {
-            def.activation_restrictions
-                .iter()
-                .any(|r| matches!(r, ActivationRestriction::OnlyOnce))
-        })
+fn ability_has_per_game_activation_gate(state: &GameState, key: &AbilityUsageKey) -> bool {
+    ability_definition_for_usage_key(state, key).is_some_and(|def| {
+        def.activation_restrictions
+            .iter()
+            .any(|r| matches!(r, ActivationRestriction::OnlyOnce))
+    })
 }
 
 #[cfg(test)]
@@ -14142,7 +14200,10 @@ mod tests {
             vec![ActivationRestriction::OnlyOnceEachTurn],
         );
         let mut b = a.clone();
-        b.activated_abilities_this_turn.insert((oid, 0), 1); // gate progressed
+        // CR 602.5c: the gate tally is keyed by the resolved acquisition.
+        let usage = crate::game::restrictions::ability_usage_key(&b, oid, 0)
+            .expect("the gated ability resolves");
+        b.activated_abilities_this_turn.insert(usage, 1); // gate progressed
         b.players[1].life -= 1; // projected-out resource gain
         assert!(
             !loop_states_equal_modulo_resources(&a, &b),
@@ -14153,7 +14214,10 @@ mod tests {
         let mut c = GameState::new_two_player(7);
         let oid2 = battlefield_creature_with_restrictions(&mut c, 701, 0, Vec::new());
         let mut d = c.clone();
-        d.activated_abilities_this_turn.insert((oid2, 0), 1);
+        // CR 602.5c: keyed by the resolved acquisition, not the index.
+        let usage2 = crate::game::restrictions::ability_usage_key(&d, oid2, 0)
+            .expect("the ungated ability resolves");
+        d.activated_abilities_this_turn.insert(usage2, 1);
         d.players[1].life -= 1;
         assert!(
             loop_states_equal_modulo_resources(&c, &d),
@@ -14532,7 +14596,10 @@ mod tests {
             vec![ActivationRestriction::OnlyOnce],
         );
         let mut b = a.clone();
-        b.activated_abilities_this_game.insert((oid, 0), 1);
+        // CR 602.5c: the gate tally is keyed by the resolved acquisition.
+        let usage = crate::game::restrictions::ability_usage_key(&b, oid, 0)
+            .expect("the gated ability resolves");
+        b.activated_abilities_this_game.insert(usage, 1);
         b.players[1].life -= 1;
         assert!(
             !loop_states_equal_modulo_resources(&a, &b),
@@ -14542,7 +14609,10 @@ mod tests {
         let mut c = GameState::new_two_player(7);
         let oid2 = battlefield_creature_with_restrictions(&mut c, 711, 0, Vec::new());
         let mut d = c.clone();
-        d.activated_abilities_this_game.insert((oid2, 0), 1);
+        // CR 602.5c: keyed by the resolved acquisition, not the index.
+        let usage2 = crate::game::restrictions::ability_usage_key(&d, oid2, 0)
+            .expect("the ungated ability resolves");
+        d.activated_abilities_this_game.insert(usage2, 1);
         d.players[1].life -= 1;
         assert!(
             loop_states_equal_modulo_resources(&c, &d),
@@ -14715,42 +14785,37 @@ mod tests {
             vec![ActivationRestriction::AsSorcery],
         );
 
+        // CR 602.5c: predicates classify the re-derived acquisition.
+        let usage_key = |id: ObjectId| {
+            crate::game::restrictions::ability_usage_key(&state, id, 0)
+                .expect("the fixture ability resolves")
+        };
+        let per_turn_key = usage_key(per_turn);
+        let max_turn_key = usage_key(max_turn);
+        let per_game_key = usage_key(per_game);
+        let non_gate_key = usage_key(non_gate);
         // Per-turn predicate: true for the two per-turn limits, false otherwise.
-        assert!(ability_has_per_turn_activation_gate(&state, &(per_turn, 0)));
-        assert!(ability_has_per_turn_activation_gate(&state, &(max_turn, 0)));
-        assert!(!ability_has_per_turn_activation_gate(
-            &state,
-            &(per_game, 0)
-        ));
-        assert!(!ability_has_per_turn_activation_gate(
-            &state,
-            &(non_gate, 0)
-        ));
+        assert!(ability_has_per_turn_activation_gate(&state, &per_turn_key));
+        assert!(ability_has_per_turn_activation_gate(&state, &max_turn_key));
+        assert!(!ability_has_per_turn_activation_gate(&state, &per_game_key));
+        assert!(!ability_has_per_turn_activation_gate(&state, &non_gate_key));
 
         // Per-game predicate: true ONLY for OnlyOnce.
-        assert!(ability_has_per_game_activation_gate(&state, &(per_game, 0)));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(per_turn, 0)
-        ));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(max_turn, 0)
-        ));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(non_gate, 0)
-        ));
+        assert!(ability_has_per_game_activation_gate(&state, &per_game_key));
+        assert!(!ability_has_per_game_activation_gate(&state, &per_turn_key));
+        assert!(!ability_has_per_game_activation_gate(&state, &max_turn_key));
+        assert!(!ability_has_per_game_activation_gate(&state, &non_gate_key));
 
         // A missing source object is not-gated (gate moot).
-        assert!(!ability_has_per_turn_activation_gate(
-            &state,
-            &(ObjectId(9999), 0)
-        ));
-        assert!(!ability_has_per_game_activation_gate(
-            &state,
-            &(ObjectId(9999), 0)
-        ));
+        let absent = AbilityUsageKey {
+            source: ObjectId(9999),
+            provenance: None,
+            description: None,
+            fingerprint: "test".to_string(),
+            grant_chain: Vec::new(),
+        };
+        assert!(!ability_has_per_turn_activation_gate(&state, &absent));
+        assert!(!ability_has_per_game_activation_gate(&state, &absent));
     }
 
     /// Build a `TriggeredAbility` stack entry from `source`/`controller` with the
@@ -19384,15 +19449,22 @@ mod tests {
             inert(),
         )]);
 
-        state.activated_abilities_this_turn.insert((gated, 0), 3);
-        state.activated_abilities_this_turn.insert((plain, 0), 3);
+        // CR 602.5c: tallies are keyed by the resolved acquisition.
+        let gated_key = crate::game::restrictions::ability_usage_key(&state, gated, 0)
+            .expect("the gated ability resolves");
+        let plain_key = crate::game::restrictions::ability_usage_key(&state, plain, 0)
+            .expect("the plain ability resolves");
+        state
+            .activated_abilities_this_turn
+            .insert(gated_key.clone(), 3);
+        state.activated_abilities_this_turn.insert(plain_key, 3);
 
         let projected = project_out_resources(&state);
 
         assert_eq!(
             projected
                 .activated_abilities_this_turn
-                .get(&(gated, 0))
+                .get(&gated_key)
                 .copied(),
             Some(3),
             "a count the ability's own condition reads must survive projection"
@@ -19400,11 +19472,254 @@ mod tests {
         assert_eq!(
             projected
                 .activated_abilities_this_turn
-                .get(&(plain, 0))
+                .get(
+                    &crate::game::restrictions::ability_usage_key(&projected, plain, 0)
+                        .expect("the plain ability resolves after projection")
+                )
                 .copied(),
             None,
             "an ability that neither gates nor reads the count keeps the existing \
              pumped-history projection"
+        );
+    }
+
+    /// CR 602.5c + CR 602.2a: same-source, same-provenance, same-description
+    /// twins that differ only in body must NOT share a loop-projection fate.
+    /// The usage-key lookup binds the full key (fingerprint included), so the
+    /// gated twin's tally survives `project_out_resources` while the
+    /// unrestricted twin's is projected out. Reverting the fingerprint
+    /// conjunct returns the FIRST twin for the gated key, so the gated tally
+    /// is misclassified as unrestricted and dropped (RED).
+    ///
+    /// Synthetic twins: no printed card exhibits two same-description
+    /// abilities on one source differing only in body (per F2); the nearest
+    /// printed shape is reconfigure's attach vs unattach pair (both
+    /// undescribed). Both the per-turn (`OnlyOnceEachTurn`) and the per-game
+    /// (`OnlyOnce`) mirrors are pinned here.
+    #[test]
+    fn projection_retains_only_the_gated_twin_of_same_description_pair() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ActivationRestriction, Effect, EffectScope,
+            QuantityExpr, TapStateChange, TargetFilter, TypedFilter,
+        };
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+
+        let holder = inert_token(&mut state, 903, 0, "Twin Holder");
+
+        // Twin 0: unrestricted untap. Twin 1: the same description, a
+        // different body (life gain), gated once per turn / once per game.
+        // Same source, same (absent) provenance, same description — the
+        // fingerprints alone tell them apart.
+        let untap = || Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        };
+        let mut plain = AbilityDefinition::new(AbilityKind::Activated, untap());
+        plain.description = Some("Twin ability".to_string());
+        let mut gated = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+                player: TargetFilter::Controller,
+            },
+        );
+        gated.description = Some("Twin ability".to_string());
+        gated.activation_restrictions = vec![ActivationRestriction::OnlyOnceEachTurn];
+        let mut game_open = AbilityDefinition::new(AbilityKind::Activated, untap());
+        game_open.description = Some("Twin game ability".to_string());
+        let mut game_once = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                player: TargetFilter::Controller,
+            },
+        );
+        game_once.description = Some("Twin game ability".to_string());
+        game_once.activation_restrictions = vec![ActivationRestriction::OnlyOnce];
+        state.objects.get_mut(&holder).unwrap().abilities =
+            Arc::new(vec![plain, gated, game_open, game_once]);
+
+        // CR 602.5c: tallies are keyed by the resolved acquisition.
+        let key = |index: usize| {
+            crate::game::restrictions::ability_usage_key(&state, holder, index)
+                .expect("the twin ability resolves")
+        };
+        let plain_key = key(0);
+        let gated_key = key(1);
+        let game_open_key = key(2);
+        let game_once_key = key(3);
+        // The twins share everything but the fingerprint.
+        assert_eq!(plain_key.source, gated_key.source);
+        assert_eq!(plain_key.provenance, gated_key.provenance);
+        assert_eq!(plain_key.description, gated_key.description);
+        assert_ne!(
+            plain_key.fingerprint, gated_key.fingerprint,
+            "the twins must differ in body for the fingerprint to discriminate"
+        );
+        assert_eq!(game_open_key.description, game_once_key.description);
+        assert_ne!(
+            game_open_key.fingerprint, game_once_key.fingerprint,
+            "the per-game twins must differ in body too"
+        );
+
+        // Reach-guard: both tallies are present before projection.
+        state
+            .activated_abilities_this_turn
+            .insert(plain_key.clone(), 1);
+        state
+            .activated_abilities_this_turn
+            .insert(gated_key.clone(), 1);
+        state
+            .activated_abilities_this_game
+            .insert(game_open_key.clone(), 1);
+        state
+            .activated_abilities_this_game
+            .insert(game_once_key.clone(), 1);
+        assert_eq!(state.activated_abilities_this_turn.len(), 2);
+        assert_eq!(state.activated_abilities_this_game.len(), 2);
+
+        let projected = project_out_resources(&state);
+
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&gated_key)
+                .copied(),
+            Some(1),
+            "the gated twin's per-turn tally must survive projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&plain_key)
+                .copied(),
+            None,
+            "the unrestricted twin's per-turn tally keeps the pumped-history projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_game
+                .get(&game_once_key)
+                .copied(),
+            Some(1),
+            "the gated twin's per-game tally must survive projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_game
+                .get(&game_open_key)
+                .copied(),
+            None,
+            "the unrestricted twin's per-game tally keeps the pumped-history projection"
+        );
+    }
+
+    /// CR 602.5c + CR 113.2c: same-source, same-description, same-body twins
+    /// that differ ONLY in `grant_chain` must not share a loop-projection
+    /// fate. The direct twin carries no lineage; the re-donated twin carries
+    /// the carrier hop through which it was re-donated (the F4 class: a capped
+    /// Locus-style re-donation vs its unrestricted twin). Without the lineage
+    /// conjunct the lookup returns whichever twin sits first in `abilities[]`
+    /// — here the unrestricted one — so the capped twin's tally is
+    /// misclassified as unrestricted and projected out (RED). Reverting the
+    /// `grant_chain` conjunct flips the retention assertion below.
+    ///
+    /// Synthetic twins: no printed card exhibits two same-description
+    /// abilities on one source differing only in lineage; the nearest printed
+    /// shape is the Locus-capped re-donation through an animated carrier.
+    /// The per-game gate twin (`OnlyOnce`) is covered by the same fixed
+    /// predicate through `ability_has_per_game_activation_gate`, so only the
+    /// per-turn axis is pinned here.
+    #[test]
+    fn projection_retains_capped_twin_of_same_lineage_pair() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ActivationRestriction, Effect, EffectScope,
+            TapStateChange, TargetFilter, TypedFilter,
+        };
+        use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+        use std::sync::Arc;
+
+        let mut state = GameState::new_two_player(7);
+        state.phase = Phase::PreCombatMain;
+
+        let holder = inert_token(&mut state, 904, 0, "Lineage Holder");
+        let carrier = inert_token(&mut state, 905, 0, "Carrier");
+
+        let untap = || Effect::SetTapState {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+        };
+        // The same provider acquisition for both twins; only the re-donated
+        // twin carries the carrier hop.
+        let provider_stamp = ObjectIncarnationRef::of(ObjectId(906), 1);
+        let carrier_hop = ObjectIncarnationRef::of(carrier, 2);
+        let mut direct = AbilityDefinition::new(AbilityKind::Activated, untap());
+        direct.description = Some("Twin lineage ability".to_string());
+        direct.granting_object = Some(provider_stamp);
+        let mut redonated = AbilityDefinition::new(AbilityKind::Activated, untap());
+        redonated.description = Some("Twin lineage ability".to_string());
+        redonated.granting_object = Some(provider_stamp);
+        redonated.grant_chain = vec![carrier_hop];
+        redonated.activation_restrictions = vec![ActivationRestriction::OnlyOnceEachTurn];
+        // Unrestricted twin FIRST in `abilities[]`: pre-fix, the capped key
+        // resolves to it.
+        state.objects.get_mut(&holder).unwrap().abilities = Arc::new(vec![direct, redonated]);
+
+        // Reach-guards: identical in everything the pre-fix predicate
+        // compared, differing only in lineage.
+        let key = |index: usize| {
+            crate::game::restrictions::ability_usage_key(&state, holder, index)
+                .expect("the lineage twin resolves")
+        };
+        let direct_key = key(0);
+        let capped_key = key(1);
+        assert_eq!(direct_key.provenance, capped_key.provenance);
+        assert_eq!(direct_key.description, capped_key.description);
+        assert_eq!(
+            direct_key.fingerprint, capped_key.fingerprint,
+            "identical bodies must fingerprint apart from nothing: the chain, \
+             not the body, discriminates"
+        );
+        assert!(
+            direct_key.grant_chain.is_empty(),
+            "the direct twin carries no lineage"
+        );
+        assert_eq!(
+            capped_key.grant_chain,
+            vec![carrier_hop],
+            "the re-donated twin carries the carrier hop"
+        );
+
+        state
+            .activated_abilities_this_turn
+            .insert(direct_key.clone(), 1);
+        state
+            .activated_abilities_this_turn
+            .insert(capped_key.clone(), 1);
+        assert_eq!(state.activated_abilities_this_turn.len(), 2);
+
+        let projected = project_out_resources(&state);
+
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&capped_key)
+                .copied(),
+            Some(1),
+            "the re-donated (capped-lineage) twin's tally must survive projection"
+        );
+        assert_eq!(
+            projected
+                .activated_abilities_this_turn
+                .get(&direct_key)
+                .copied(),
+            None,
+            "the direct (unrestricted-lineage) twin's tally keeps the pumped-history projection"
         );
     }
 
@@ -19431,6 +19746,19 @@ mod tests {
         let projected = project_out_resources(&state);
 
         assert!(projected.battlefield_entry_observations.is_empty());
+    }
+
+    /// The instruction-boundary marks index the zone-change ledger, which the
+    /// projection clears; two periods of a loop that passes an instruction
+    /// boundary differ only in them (CR 732.2a).
+    #[test]
+    fn project_out_resources_clears_instruction_boundary_marks() {
+        let mut state = GameState::new_two_player(7);
+        state.instruction_boundary_marks = vec![1, 3];
+
+        let projected = project_out_resources(&state);
+
+        assert!(projected.instruction_boundary_marks.is_empty());
     }
 
     /// The cover admits growth beside a non-grown permanent with a spell-kind class-reading pump;
@@ -20428,7 +20756,7 @@ mod tests {
         attacker: ObjectId,
         exert_permission: TriggerDefinitionRef,
     ) -> Vec<(&'static str, crate::types::game_state::WaitingFor, bool)> {
-        use crate::types::game_state::WaitingFor;
+        use crate::types::game_state::{UntapStepProgress, WaitingFor};
         vec![
             (
                 "Priority{active} — CR 704.3 SBA point; NOT exempt, and the positive control",
@@ -20593,6 +20921,7 @@ mod tests {
                     // battlefield, not a card in hand.
                     candidates: on_board.to_vec(),
                     chosen_not_to_untap: Vec::new(),
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
                 true,
             ),
@@ -20607,6 +20936,7 @@ mod tests {
                     // empty one, so "this window enumerates no cast" would be a
                     // degenerate zero rather than a measured one.
                     max: 1,
+                    progress: UntapStepProgress::AfterTurnBasedActions,
                 },
                 true,
             ),
@@ -20718,6 +21048,8 @@ mod tests {
             filter: crate::types::ability::default_target_filter_any(),
             optional,
             decline_runs_continuation: false,
+            cardinality: crate::types::ability::ObjectSelectionCardinality::SINGLE,
+            pending_mana_ability: None,
         }
     }
 
@@ -26005,7 +26337,20 @@ mod tests {
         use crate::game::engine::entry_publishes_pin_slots;
         use crate::types::ability::{AbilityCost, Effect, QuantityExpr, TargetFilter};
 
-        let (state, src) = u2_relief_board();
+        let (board, src) = u2_relief_board();
+        // CR 118.3 + CR 608.2d: fund the proposer's pool with {1} on the
+        // test-local clone (the shared `u2_relief_board` fixture stays
+        // read-only) so the fixed-Mana offer is genuinely payable and the
+        // `may` slot mints through the state-reading branch again.
+        let mut state = board.clone();
+        state.players[0]
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                ManaType::Colorless,
+                src,
+                false,
+                Vec::new(),
+            ));
         let mana = || AbilityCost::Mana {
             cost: crate::types::mana::ManaCost::Cost {
                 shards: vec![],
@@ -26099,6 +26444,51 @@ mod tests {
                  slot minted through a state-reading branch can never reach a published offer"
             );
         }
+    }
+
+    /// F1 relief negative (CR 118.3 + CR 608.2d): the (a) arm two tests up
+    /// mints a `may` slot for a *funded* fixed-{1} `PayCost`. This matched
+    /// row differs in exactly the funding: on the unfunded shared fixture
+    /// the same shape-(B) entry mints NOTHING at the analysis layer. The
+    /// reach-guards prove the refusal is the feasibility gate, not routing —
+    /// the branch still resolves the payer to the proposer.
+    #[test]
+    fn unfunded_fixed_mana_may_offer_mints_no_relief_slot() {
+        use crate::game::engine::entry_publishes_pin_slots;
+        use crate::types::ability::{AbilityCost, Effect, TargetFilter};
+
+        let (board, src) = u2_relief_board();
+        assert!(
+            board.players[0].mana_pool.is_empty(),
+            "reach-guard: the shared fixture funds nothing, so the {{1}} offer is infeasible"
+        );
+        let entry = u2_shape_b_entry(
+            src,
+            990,
+            Effect::PayCost {
+                cost: AbilityCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![],
+                        generic: 1,
+                    },
+                },
+                scale: None,
+                payer: TargetFilter::Controller,
+            },
+            |_| {},
+        );
+        let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
+            panic!("the fixture is a triggered ability");
+        };
+        assert_eq!(
+            crate::game::effects::optional_prompt_player(&board, ability),
+            Some(PlayerId(0)),
+            "reach-guard: routing still returns the proposer — only the mint is withheld"
+        );
+        assert!(
+            entry_publishes_pin_slots(&board, &entry, PlayerId(0)).is_none(),
+            "CR 608.2d: an infeasible fixed-mana `may` offer mints no relief slot"
+        );
     }
 
     /// R33 arms (a) / (b) / (a′1) / (c) — THE FROZEN EXEMPTION IS KEYED TO THE CERTIFYING
@@ -27652,7 +28042,20 @@ mod tests {
         use crate::game::engine::entry_publishes_pin_slots;
         use crate::types::ability::{AbilityCost, Effect, TargetFilter};
 
-        let (frame, src) = u2_relief_board();
+        let (board, src) = u2_relief_board();
+        // CR 118.3 + CR 608.2d: fund the proposer's pool with {1} on the
+        // test-local clone (the shared `u2_relief_board` fixture stays
+        // read-only) so the fixed-Mana offer is genuinely payable and the
+        // fixture reaches the mint again.
+        let mut frame = board.clone();
+        frame.players[0]
+            .mana_pool
+            .add(crate::types::mana::ManaUnit::new(
+                ManaType::Colorless,
+                src,
+                false,
+                Vec::new(),
+            ));
         let entry = u2_shape_b_entry(
             src,
             9310,
@@ -33921,6 +34324,7 @@ mod tests {
                 kind: crate::types::ability::DamageKindFilter::Any,
                 source: Some(Box::new(TargetFilter::SourceController)),
                 min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             },
         };
         assert_eq!(

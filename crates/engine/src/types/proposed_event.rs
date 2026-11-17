@@ -3,13 +3,14 @@ use std::collections::HashSet;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::game::game_object::{
-    AttachTarget, DisplayIdentity, GameObject, ObjectIncarnationRefExt,
+    AttachTarget, BackFaceData, DisplayIdentity, GameObject, ObjectIncarnationRefExt,
 };
 
 use super::counter::CounterType;
 
 use super::ability::{
-    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile, TargetRef,
+    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
+    LibraryPosition, TargetRef,
 };
 use super::events::EventObjectSnapshot;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -396,6 +397,33 @@ pub struct CopyTokenSpec {
     /// `None` where no donor is in scope; consumers fall back to the token id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub donor: Option<ObjectIncarnationRef>,
+    /// CR 707.8a: both faces when the copy source is a double-faced permanent or
+    /// card; `None` for a single-faced source and for every producer that is not
+    /// an effect creating a token copy (each states why at its literal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub double_faced: Option<CopiedDoubleFaces>,
+}
+
+/// CR 707.8a: the faces of a token copy of a double-faced permanent, or of a
+/// double-faced card in another zone. `hidden` is the face that is not up,
+/// installed as the token's stored face with the copy's exceptions folded in
+/// (CR 707.9a/b/d); `up` names the face that is up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopiedDoubleFaces {
+    pub hidden: Box<BackFaceData>,
+    pub up: CopiedFaceUp,
+}
+
+/// CR 707.8a: which face of a double-faced copy token is up, as the copied
+/// object showed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopiedFaceUp {
+    /// CR 712.8d: the front face.
+    Front,
+    /// CR 712.8e: a nonmodal double-faced permanent's back face (`transformed`).
+    TransformedBack,
+    /// CR 712.8f: a modal double-faced permanent's back face (`modal_back_face`).
+    ModalBack,
 }
 
 /// CR 614.1a + CR 111.1 + CR 616.1f: one batch of a CreateToken event — the
@@ -503,6 +531,13 @@ pub enum ProposedEvent {
         object_id: ObjectId,
         from: Zone,
         to: Zone,
+        /// Final placement carried by this proposal. Explicit null is authoritative;
+        /// only save migration may import a missing field from a legacy carrier.
+        /// Boxed: `LibraryPosition` is 96 B and only library moves carry one, so
+        /// inline it would widen every `ProposedEvent` held by `GameState`
+        /// (`game_state_size.rs`).
+        #[serde(default)]
+        library_placement: Option<Box<LibraryPosition>>,
         cause: Option<ObjectId>,
         /// CR 303.4f: When an Aura enters the battlefield by a non-spell
         /// effect and the effect does not specify what it enchants, the
@@ -1198,6 +1233,7 @@ impl ProposedEvent {
             object_id,
             from,
             to,
+            library_placement: None,
             cause,
             attach_to: None,
             enter_tapped: EtbTapState::Unspecified,
@@ -1841,6 +1877,43 @@ mod tests {
     use crate::types::mana::ManaColor;
 
     #[test]
+    fn zone_change_library_placement_wire_preserves_presence_and_values() {
+        let event = ProposedEvent::zone_change(ObjectId(7), Zone::Hand, Zone::Library, None);
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            wire["ZoneChange"]["library_placement"],
+            serde_json::Value::Null
+        );
+        assert!(wire["ZoneChange"].get("library_placement").is_some());
+        let mut legacy = wire.clone();
+        legacy["ZoneChange"]
+            .as_object_mut()
+            .unwrap()
+            .remove("library_placement");
+        assert_eq!(
+            serde_json::from_value::<ProposedEvent>(legacy).unwrap(),
+            event
+        );
+        for position in [
+            LibraryPosition::Top,
+            LibraryPosition::Bottom,
+            LibraryPosition::NthFromTop { n: 3 },
+        ] {
+            let mut positioned = wire.clone();
+            positioned["ZoneChange"]["library_placement"] =
+                serde_json::to_value(&position).unwrap();
+            let decoded: ProposedEvent = serde_json::from_value(positioned.clone()).unwrap();
+            assert!(
+                matches!(&decoded, ProposedEvent::ZoneChange { library_placement: Some(actual), .. } if **actual == position)
+            );
+            assert_eq!(serde_json::to_value(decoded).unwrap(), positioned);
+        }
+        let mut malformed = wire;
+        malformed["ZoneChange"]["library_placement"] = serde_json::json!({"type": "NotAPosition"});
+        assert!(serde_json::from_value::<ProposedEvent>(malformed).is_err());
+    }
+
+    #[test]
     fn replacement_id_equality_and_hash() {
         let id1 = ReplacementId {
             source: ObjectId(1),
@@ -2285,6 +2358,7 @@ mod tests {
             source_id: ObjectId(1),
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         }
     }
 
@@ -2317,6 +2391,35 @@ mod tests {
         assert!(with_named.get("attack_request").is_some(), "{with_named}");
         let back: CopyTokenSpec = serde_json::from_value(with_named).expect("round-trips");
         assert_eq!(back.attack_request, named);
+    }
+
+    /// CR 707.8a: a single-faced copy omits `double_faced` from the wire, a
+    /// payload without the key reads as single-faced, and both faces round-trip.
+    #[test]
+    fn copy_token_double_faced_wire_shape_is_additive() {
+        let plain = serde_json::to_value(copy_token_spec_with(TokenAttackRequest::Unspecified))
+            .expect("serializes");
+        assert!(plain.get("double_faced").is_none(), "{plain}");
+        let back: CopyTokenSpec = serde_json::from_value(plain).expect("reads without the key");
+        assert_eq!(back.double_faced, None);
+
+        let mut spec = copy_token_spec_with(TokenAttackRequest::Unspecified);
+        let hidden = BackFaceData {
+            name: "Sinuous Predator".to_string(),
+            power: Some(4),
+            toughness: Some(4),
+            layout_kind: Some(crate::types::card::LayoutKind::Transform),
+            ..BackFaceData::default()
+        };
+        let faces = CopiedDoubleFaces {
+            hidden: Box::new(hidden),
+            up: CopiedFaceUp::TransformedBack,
+        };
+        spec.double_faced = Some(faces.clone());
+        let with_faces = serde_json::to_value(&spec).expect("serializes");
+        assert!(with_faces.get("double_faced").is_some(), "{with_faces}");
+        let back: CopyTokenSpec = serde_json::from_value(with_faces).expect("round-trips");
+        assert_eq!(back.double_faced, Some(faces));
     }
 
     #[test]

@@ -252,9 +252,10 @@ pub enum GameAction {
     ChooseAnnouncingOpponent {
         opponent: PlayerId,
     },
-    /// CR 702.174a: The spell controller's answer to
-    /// `WaitingFor::ChooseGiftRecipient` — which opponent receives the promised
-    /// gift. `opponent` must be one of that prompt's `candidates`.
+    /// CR 601.2 + CR 115.10a: the caster's answer to `WaitingFor::ChooseGiftRecipient`
+    /// — which opponent is chosen for the prompt's `purpose` (Gift recipient,
+    /// CR 702.174a, or an effect-as-cost's player, CR 601.2h). `opponent` must be
+    /// one of the prompt's `candidates`.
     ChooseGiftRecipient {
         opponent: PlayerId,
     },
@@ -508,8 +509,13 @@ pub enum GameAction {
     SelectModes {
         indices: Vec<usize>,
     },
+    /// CR 601.2b: Resolve a `WaitingFor::OptionalCostChoice` by selecting an
+    /// option index. For `AdditionalCost::Optional`, index 0 = pay the cost,
+    /// index 1 = skip. For `AdditionalCost::Choice`, the index selects which
+    /// alternative cost to pay. For `AdditionalCost::Kicker`, index 0 = pay
+    /// kicker, index 1 = decline (handled separately for repeatable kicker).
     DecideOptionalCost {
-        pay: bool,
+        index: usize,
     },
     /// CR 715.3a: Choose creature face (true) or Adventure half (false).
     ChooseAdventureFace {

@@ -1,6 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::ObjectIncarnationRefExt;
-use crate::game::game_object::{DisplayIdentity, DisplaySource, GameObject};
+use crate::game::game_object::{
+    BackFaceData, DisplayIdentity, DisplaySource, GameObject, MergeKind,
+};
 use crate::game::layers::{compute_current_copiable_values, remove_core_type, remove_subtype_set};
 use crate::game::quantity::resolve_quantity;
 use crate::game::{targeting, zones};
@@ -9,7 +11,7 @@ use crate::types::ability::{
     EntryAttackDestination, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
     TriggerCondition, TriggerDefinition,
 };
-use crate::types::card::PrintedLoyalty;
+use crate::types::card::{LayoutKind, PrintedLoyalty};
 #[cfg(test)]
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::events::GameEvent;
@@ -18,8 +20,10 @@ use crate::types::game_state::{
     PendingCopyTokenResolution, PendingCounterPostAction, PendingLiminalEntryResume, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
+use crate::types::keywords::Keyword;
+use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
+    CopiedDoubleFaces, CopyTokenSpec, EtbTapState, ProposedEvent, TokenCharacteristics,
 };
 use crate::types::resolution::ChildStackDepth;
 use crate::types::resolved_commands::{
@@ -146,17 +150,18 @@ pub fn resolve(
             // the object was bound and then became a new object (CR 400.7), so the
             // copy has no legal source and resolves as a clean no-op through the
             // empty-source path below, which still emits `EffectResolved`.
-            match ability.cost_paid_object.as_ref() {
-                None => {
-                    return Err(EffectError::MissingParam(
-                        "CopyTokenOf requires a cost-paid object".to_string(),
-                    ));
-                }
-                Some(snapshot) => snapshot
-                    .live_object_id(state)
-                    .map(|id| vec![id])
-                    .unwrap_or_default(),
+            //
+            // CR 608.2c + CR 701.68c: an earlier instruction of this resolution
+            // can bind the referent instead of a cost ("the blighted creature"),
+            // so the read goes through the shared ladder. Absence stays an error
+            // for either binder: a chain whose producer can produce nothing is
+            // gated at that producer, so only a chain with no producer reaches it.
+            if ability.cost_paid_object.is_none() && ability.effect_context_object.is_none() {
+                return Err(EffectError::MissingParam(
+                    "CopyTokenOf requires a cost-paid object".to_string(),
+                ));
             }
+            crate::game::effects::resolved_effect_object_ids(state, ability, target_filter)
         } else if matches!(
             target_filter,
             TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
@@ -259,6 +264,8 @@ pub fn resolve(
     // CR 616.1 choice.
     let mut remaining = VecDeque::with_capacity(copy_sources.len());
     for source in copy_sources {
+        // CR 707.8a: read before `source.values` moves into the spec.
+        let double_faced = copied_double_faces(state, &source);
         remaining.push_back(PendingCopyTokenBatch {
             owner: token_owner,
             count,
@@ -282,6 +289,7 @@ pub fn resolve(
                 // CR 608.2h + CR 707.9b: carry the donor incarnation Step 1
                 // bound so donor-referential exceptions halve donor values.
                 donor: Some(source.incarnation),
+                double_faced,
             }),
         });
     }
@@ -384,6 +392,120 @@ pub(crate) fn copy_source(
             CopySource::last_known(state, captured_own_source(ability)?)
         }
     }
+}
+
+/// CR 707.8a: the faces a token copy of `source` gets. `None` unless the copy
+/// source is a live double-faced permanent or double-faced card whose faces the
+/// token can carry; the token is then single-faced, with the copiable values of
+/// the face that's up (CR 707.8). A departed donor read through last-known
+/// information also gives `None`, a known gap rather than the CR 707.8a answer.
+///
+/// [`transform::stored_double_face`](crate::game::transform::stored_double_face)
+/// answers whether the donor is double-faced. The checks here are the copy's own:
+/// the donor must still be the object the copy read, a meld card's back face is
+/// not an other face a token can have, and a copied prepare spell or Room half is
+/// stored beside the faces (`GameObject::double_faced_token_alternative`).
+pub(crate) fn copied_double_faces(
+    state: &GameState,
+    source: &CopySource,
+) -> Option<CopiedDoubleFaces> {
+    // CR 400.7: the faces are read only from the object the copy read its values
+    // from, never from a later object under the same id. A departed donor read
+    // through last-known information therefore gives none, and its token is
+    // single-faced. That is a known gap, not the CR 707.8a answer, which would
+    // make that token double-faced too. Examples: Blade of Selves ("Equipped
+    // creature has myriad.") after the attacker has left; Saw in Half.
+    // Last-known information records no other face. The gap predates this change.
+    let obj = state
+        .objects
+        .get(&source.incarnation.object_id)
+        .filter(|obj| ObjectIncarnationRef::from_object(obj) == source.incarnation)?;
+    // CR 712.1 + CR 111.10i: only a double-faced card or double-faced token has an
+    // other face. `stored_double_face` refuses a face-down stash (CR 708.2), a
+    // merged permanent (CR 730.2i), a Room and every single-faced alternative.
+    let stored = crate::game::transform::stored_double_face(obj)?;
+    // Meld is refused. CR 712.4b: a meld card's back face determines
+    // characteristics only as half of a melded permanent; CR 712.4c: meld cards
+    // can't transform. `Mutate | Augment` were already refused above (CR 730.2i).
+    match obj.merge_kind {
+        Some(MergeKind::Meld) => return None,
+        Some(MergeKind::Mutate | MergeKind::Augment) | None => {}
+    }
+    if stored.layout_kind == Some(LayoutKind::Meld) {
+        return None;
+    }
+    // CR 712.8d/e/f: the token is up on the face its source showed.
+    let up = crate::game::transform::face_up(obj);
+    let hidden = if obj.layer1_copy_effect.is_some() {
+        // CR 707.8a + CR 613.2: each face is the copied object's face "as modified
+        // by any other copy effects that apply to that object", so under a Layer-1
+        // copy effect the other face takes the copied values, as the face up does.
+        let mut scratch = scratch_face_object();
+        crate::game::printed_cards::install_copiable_values_as_base(&mut scratch, &source.values);
+        let mut face = crate::game::printed_cards::snapshot_object_base_face(&scratch);
+        face.layout_kind = stored.layout_kind;
+        face.is_swap_snapshot = stored.is_swap_snapshot;
+        face
+    } else {
+        // CR 707.2: the stored face is that face's copiable values.
+        stored.clone()
+    };
+    Some(CopiedDoubleFaces {
+        hidden: Box::new(hidden),
+        up,
+    })
+}
+
+/// CR 707.8a + CR 707.9a/b/d: a double-faced copy token's stored face with the
+/// copy's exceptions applied, as they apply to the face that's up. Soul
+/// Separator's rulings: "If you copy a double-faced creature card with Soul
+/// Separator's ability, the resulting Spirit token will be a double-faced token.
+/// The listed exceptions will apply to both the front and back faces of the
+/// Spirit token." and "If the copied creature card has an ability that defines
+/// its power and toughness, such as that of Sage of Ancient Lore, the Spirit
+/// token will still have base power and toughness 1/1."
+///
+/// `cda_overriding` prunes the characteristic-defining abilities the exceptions
+/// override (CR 707.9d), `extra_keywords` are granted (CR 707.9a) and `stamped`
+/// are stamped through the one copy-exception folder (CR 707.9b). Every one of
+/// them writes the face's base, so the exceptions survive the token's own
+/// transforms. Returns the face unchanged when all three are empty.
+pub(crate) fn fold_copy_exceptions_into_face(
+    face: &BackFaceData,
+    cda_overriding: &[ContinuousModification],
+    extra_keywords: &[Keyword],
+    stamped: &[ContinuousModification],
+    all_creature_types: &[String],
+) -> BackFaceData {
+    if cda_overriding.is_empty() && extra_keywords.is_empty() && stamped.is_empty() {
+        return face.clone();
+    }
+    let mut scratch = scratch_face_object();
+    crate::game::printed_cards::apply_back_face_to_object(&mut scratch, face.clone());
+    let pruned = super::copy_exception::prune_copy_exception_overridden_cdas(
+        &scratch.base_static_definitions,
+        cda_overriding,
+    );
+    scratch.base_static_definitions = Arc::new(pruned.definitions.clone());
+    scratch.static_definitions = Arc::new(pruned.definitions).into();
+    super::token::grant_copy_extra_keywords(&mut scratch, extra_keywords);
+    apply_immediate_copy_token_modifications_to_object(&mut scratch, stamped, all_creature_types);
+    let mut folded = crate::game::printed_cards::snapshot_object_base_face(&scratch);
+    folded.layout_kind = face.layout_kind;
+    folded.is_swap_snapshot = face.is_swap_snapshot;
+    folded
+}
+
+/// A detached object a stored face is installed on to be read back as a face. It
+/// never enters `GameState`.
+fn scratch_face_object() -> GameObject {
+    GameObject::new(
+        ObjectId(0),
+        CardId(0),
+        PlayerId(0),
+        String::new(),
+        Zone::Battlefield,
+    )
 }
 
 /// CR 707.2: whether `effect` copies its ability's own source: "a copy of
@@ -555,45 +677,67 @@ fn drain_copy_token_resolution(
         // Reset before replacements run so prevention publishes nothing, while
         // a substitute creation may still publish the ids this owner adopts.
         state.last_created_token_ids.clear();
-        match crate::game::replacement::replace_event(state, proposed, events) {
-            crate::game::replacement::ReplacementResult::Execute(event) => {
-                // CR 614.1a + CR 608.2c: the frame is taken, so the delivery
-                // authority leaves the ledger as this batch's whole created
-                // referent, appended batches included: own batch first on
-                // completion, `[]` after a batch paused with more of the event
-                // still to deliver (the event publishes to this frame when it
-                // finishes), and the ids so far after its last batch, a copy
-                // batch, paused. `Suppress`: this frame's drain emits the
-                // effect's terminal `EffectResolved{CopyTokenOf}`, so no pause
-                // of the event owes one.
-                let completed = super::token::apply_create_token_after_replacement_with_created_ids(
-                    state,
-                    event,
-                    Vec::new(),
-                    crate::types::game_state::PendingEffectResolutionEvent::Suppress,
-                    events,
-                );
-                if !completed {
-                    pending
-                        .created_ids
-                        .extend(state.last_created_token_ids.clone());
-                    let copy_owner = pending.clone();
-                    park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
-                    // CR 603.6a + CR 603.3b: earlier completed batches and this
-                    // batch's committed prefix still owe their entry observers.
-                    super::token::handoff_paused_liminal_copy_token_batch(
-                        state,
-                        Some(&copy_owner),
-                        events,
-                    );
-                    return;
+        // CR 111.1 + CR 614.12: this frame is off the resolution stack while the batch is
+        // scanned and delivered, so the tokens its earlier batches created (co-entrants of
+        // this one) are published for that window. Every park below runs after the window
+        // closes, so a parked frame is never shadowed by the publication.
+        let delivery = publish_committed_copy_tokens(state, pending.created_ids.clone(), |state| {
+            match crate::game::replacement::replace_event(state, proposed, events) {
+                crate::game::replacement::ReplacementResult::Execute(event) => {
+                    // CR 614.1a + CR 608.2c: the frame is taken, so the delivery
+                    // authority leaves the ledger as this batch's whole created
+                    // referent, appended batches included: own batch first on
+                    // completion, `[]` after a batch paused with more of the event
+                    // still to deliver (the event publishes to this frame when it
+                    // finishes), and the ids so far after its last batch, a copy
+                    // batch, paused. `Suppress`: this frame's drain emits the
+                    // effect's terminal `EffectResolved{CopyTokenOf}`, so no pause
+                    // of the event owes one.
+                    let completed =
+                        super::token::apply_create_token_after_replacement_with_created_ids(
+                            state,
+                            event,
+                            Vec::new(),
+                            crate::types::game_state::PendingEffectResolutionEvent::Suppress,
+                            events,
+                        );
+                    if completed {
+                        CopyBatchDelivery::Completed
+                    } else {
+                        CopyBatchDelivery::Paused
+                    }
                 }
+                crate::game::replacement::ReplacementResult::Prevented => {
+                    CopyBatchDelivery::Prevented
+                }
+                crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+                    CopyBatchDelivery::NeedsChoice(player)
+                }
+            }
+        });
+        match delivery {
+            CopyBatchDelivery::Completed => {
                 pending
                     .created_ids
                     .extend(state.last_created_token_ids.clone());
             }
-            crate::game::replacement::ReplacementResult::Prevented => {}
-            crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+            CopyBatchDelivery::Paused => {
+                pending
+                    .created_ids
+                    .extend(state.last_created_token_ids.clone());
+                let copy_owner = pending.clone();
+                park_copy_token_after_current_batch(state, pending, stack_depth_before_batch);
+                // CR 603.6a + CR 603.3b: earlier completed batches and this
+                // batch's committed prefix still owe their entry observers.
+                super::token::handoff_paused_liminal_copy_token_batch(
+                    state,
+                    Some(&copy_owner),
+                    events,
+                );
+                return;
+            }
+            CopyBatchDelivery::Prevented => {}
+            CopyBatchDelivery::NeedsChoice(player) => {
                 // CR 614.6 + CR 608.2c: this batch's creation event waits on a replacement
                 // answer. Its tokens are owed to this owner: handed over by the delivery that
                 // creates them, or, when the answer replaces the event with a different
@@ -639,6 +783,123 @@ fn drain_copy_token_resolution(
         source_id: pending.source_id,
         subject: None,
     });
+}
+
+/// What one copy batch's CreateToken event did inside its publication window; the owner is
+/// parked, if at all, after the window closes.
+enum CopyBatchDelivery {
+    Completed,
+    /// A batch member paused; the owner parks below the child stack it raised.
+    Paused,
+    Prevented,
+    /// CR 616.1: the event itself needs a replacement-order choice by this player.
+    NeedsChoice(crate::types::player::PlayerId),
+}
+
+/// CR 111.1 + CR 614.12: run `deliver` with `committed` published as the tokens a copy-token
+/// resolution whose owner frame is off the resolution stack has already created, then restore
+/// the previous publication (a nested resolution can't clobber an outer one). The single
+/// writer of `GameState::active_copy_token_resolution_tokens`; its windows are the inline
+/// drain (`drain_copy_token_resolution`) and a token event's delivery while it holds the
+/// owner (`token::deliver_with_held_copy_owner`: a compound event, or a single-batch copy
+/// event).
+pub(crate) fn publish_committed_copy_tokens<R>(
+    state: &mut GameState,
+    committed: Vec<ObjectId>,
+    deliver: impl FnOnce(&mut GameState) -> R,
+) -> R {
+    let outer = state.active_copy_token_resolution_tokens.replace(committed);
+    let delivered = deliver(state);
+    state.active_copy_token_resolution_tokens = outer;
+    delivered
+}
+
+/// CR 614.12 + CR 111.1 (Clone Legion ruling 2015-02-25): the tokens entering in the same
+/// event as `entrant`, which don't yet exist as it enters: the ones its copy-token
+/// resolution already created, plus `batch_prefix`, the ones its own batch (or its compound
+/// event's earlier positions) already created. The resolution's tokens are the published
+/// ones while its owner frame is off the resolution stack, otherwise the innermost parked
+/// `CopyToken` frame's (an outer resolution's frame is never read while one is published).
+/// Deduplicated, in order, without `entrant`. Linear in the resolution's tokens plus
+/// `batch_prefix`: membership is a hash-set probe, so a token-multiplied batch whose every
+/// entrant asks for its co-entrants costs quadratic, not cubic, time overall.
+pub(crate) fn copy_token_co_entrants(
+    state: &GameState,
+    entrant: ObjectId,
+    batch_prefix: &[ObjectId],
+) -> Vec<ObjectId> {
+    let resolution: &[ObjectId] = match &state.active_copy_token_resolution_tokens {
+        Some(published) => published,
+        None => state
+            .resolution_stack
+            .iter()
+            .filter_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::CopyToken(owner) => {
+                    Some(owner.created_ids.as_slice())
+                }
+                crate::types::resolution::ResolutionFrame::AbilityContinuation(_)
+                | crate::types::resolution::ResolutionFrame::RepeatFor(_)
+                | crate::types::resolution::ResolutionFrame::RepeatUntil(_)
+                | crate::types::resolution::ResolutionFrame::RepeatedOptionalPayment(_)
+                | crate::types::resolution::ResolutionFrame::ChangeZone(_)
+                | crate::types::resolution::ResolutionFrame::BatchDelivery(_)
+                | crate::types::resolution::ResolutionFrame::CounterMoves(_)
+                | crate::types::resolution::ResolutionFrame::CounterRemovals(_)
+                | crate::types::resolution::ResolutionFrame::CounterAdditions(_)
+                | crate::types::resolution::ResolutionFrame::DebugCardEntries(_)
+                | crate::types::resolution::ResolutionFrame::EachPlayerCopyChosen(_)
+                | crate::types::resolution::ResolutionFrame::ChooseOneOf(_)
+                | crate::types::resolution::ResolutionFrame::VoteBallot(_)
+                | crate::types::resolution::ResolutionFrame::PerPlayerZoneChoice(_)
+                | crate::types::resolution::ResolutionFrame::PerCategoryZoneChoice(_)
+                | crate::types::resolution::ResolutionFrame::OptionalEffect(_)
+                | crate::types::resolution::ResolutionFrame::CoinFlip(_)
+                | crate::types::resolution::ResolutionFrame::DieRoll(_)
+                | crate::types::resolution::ResolutionFrame::Proliferate(_)
+                | crate::types::resolution::ResolutionFrame::MultiDraw(_)
+                | crate::types::resolution::ResolutionFrame::Discard(_)
+                | crate::types::resolution::ResolutionFrame::ConniveReentry(_)
+                | crate::types::resolution::ResolutionFrame::LifeTotalAssignment(_)
+                | crate::types::resolution::ResolutionFrame::SpellResolution(_)
+                | crate::types::resolution::ResolutionFrame::MutateMerge(_)
+                | crate::types::resolution::ResolutionFrame::CipherEncode(_)
+                | crate::types::resolution::ResolutionFrame::PostReplacement(_) => None,
+            })
+            .last()
+            .unwrap_or_default(),
+    };
+    let capacity = resolution.len() + batch_prefix.len();
+    let mut seen: HashSet<ObjectId> = HashSet::with_capacity(capacity);
+    let mut co_entrants: Vec<ObjectId> = Vec::with_capacity(capacity);
+    for id in resolution.iter().chain(batch_prefix) {
+        if *id != entrant && seen.insert(*id) {
+            co_entrants.push(*id);
+        }
+    }
+    co_entrants
+}
+
+/// CR 614.12 + CR 111.1 (Clone Legion ruling 2015-02-25): the tokens entering in the same
+/// event as `entrant`, a token whose entry is still being decided (a liminal entry: its
+/// batch prefix is the entry's `created_ids`) or completed after its copy-target answer
+/// (committed: its batch is the ledger its finalize published, `last_created_token_ids`,
+/// which lists it, the same ledger the batch continuation resumes from). Unioned with the
+/// copy-token resolution's tokens by [`copy_token_co_entrants`]. Empty for any other
+/// object: a card entrant keeps the live read.
+pub(crate) fn entering_token_co_entrants(state: &GameState, entrant: ObjectId) -> Vec<ObjectId> {
+    if let Some(entry) = state
+        .liminal_entries
+        .get(&entrant)
+        .filter(|entry| entry.object.is_token_projection())
+    {
+        return copy_token_co_entrants(state, entrant, &entry.created_ids);
+    }
+    // The ledger is assigned by this entrant's own finalize, so listing it is what proves
+    // the ledger is its batch; a card, or a placed token at its payment prompt, is never in it.
+    if state.last_created_token_ids.contains(&entrant) {
+        return copy_token_co_entrants(state, entrant, &state.last_created_token_ids);
+    }
+    Vec::new()
 }
 
 /// Park a copy-token owner as the direct paused frame, or below the complete
@@ -799,6 +1060,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         source_id,
         controller,
         donor,
+        double_faced,
     } = copy;
     let name = values.name.clone();
     // CR 508.4: a resume carries the earlier ids so they are republished, but a
@@ -830,14 +1092,36 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     // path bypasses the ZoneChange replacement pass, so the copied card's
     // intrinsic "enters with counters" replacement is seeded here from its
     // copiable replacement set rather than firing during entry.
-    let etb_counters: Vec<(crate::types::counter::CounterType, u32)> =
-        crate::game::printed_cards::intrinsic_face_counters(copied_loyalty, None)
-            .into_iter()
-            .chain(crate::game::printed_cards::self_etb_counter_replacements(
-                &values.replacement_definitions,
-            ))
-            .chain(enter_with_counters.iter().cloned())
-            .collect();
+    //
+    // The three parts are held apart because only the copied "enters with" abilities are
+    // gated per token (CR 614.12, below): `intrinsic` is the CR 306.5b loyalty ability. It
+    // is an ability and is removable, but it has no `ReplacementDefinition` for
+    // `retains_replacement` to compare, so this seam leaves it ungated. Residual (stated,
+    // red): a token copy that would exist as a creature planeswalker under a creature
+    // remover (Gideon Blackblade copied on its controller's turn; Applied Geometry of a
+    // planeswalker) should enter with no loyalty counters and then go to the graveyard
+    // (CR 704.5i). `enter_with_counters` are the creating effect's own, not an ability of
+    // the token, so they are never gated.
+    let intrinsic = crate::game::printed_cards::intrinsic_face_counters(copied_loyalty, None);
+    let own_entries: Vec<(
+        crate::types::ability::ReplacementDefinition,
+        crate::types::counter::CounterType,
+        u32,
+    )> = crate::game::printed_cards::self_etb_counter_replacement_entries(
+        &values.replacement_definitions,
+    )
+    .map(|(def, counter_type, count)| (def.clone(), counter_type, count))
+    .collect();
+    let etb_counters: Vec<(crate::types::counter::CounterType, u32)> = intrinsic
+        .iter()
+        .cloned()
+        .chain(
+            own_entries
+                .iter()
+                .map(|(_, counter_type, count)| (counter_type.clone(), *count)),
+        )
+        .chain(enter_with_counters.iter().cloned())
+        .collect();
 
     // Liminal choice is loop-invariant; compute once so the terminal drain below
     // can mirror the former continue_liminal_copy_token_batch tail for this path.
@@ -849,7 +1133,35 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
     // 303.4f/g projection below can be built while `state` is borrowed.
     let all_creature_types = state.all_creature_types.clone();
 
+    // CR 614.12: one pre-event board per uninterrupted batch. Future tokens have no
+    // object on this board. Refresh extends the absent prefix and updates live history
+    // reads; only history-dependent residents can need another board layer pass.
+    // A pause drops it; non-entry side effects conservatively invalidate it below.
+    let mut entry_board: Option<crate::game::filter::TokenEntryBatchBoard> = None;
+    let mut entry_events_start = events.len();
+
     for index in 0..final_count {
+        if events[entry_events_start..]
+            .iter()
+            .any(|event| match event {
+                GameEvent::TokenCreated { object_id, .. }
+                | GameEvent::CounterAdded { object_id, .. } => !created_ids.contains(object_id),
+                // CR 614.12: recording an entry replacement on an absent co-entrant
+                // does not change the board before the entry event. Its modified body
+                // is refreshed below; any other event still invalidates the cache.
+                GameEvent::ReplacementApplied { source_id, .. } => !created_ids.contains(source_id),
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from,
+                    to,
+                    ..
+                } if from.is_none() && *to == Zone::Battlefield => !created_ids.contains(object_id),
+                _ => true,
+            })
+        {
+            entry_board = None;
+        }
+        entry_events_start = events.len();
         // CR 508.4: this token's own destination, selected by its creation
         // ordinal within the batch.
         let attack_destination = attack_request.for_entrant(created_ids.len() - prefix_len);
@@ -870,6 +1182,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 source_id,
                 controller,
                 donor,
+                double_faced: double_faced.clone(),
             });
             // CR 707.9b/9c: this seam only runs when every exception is
             // stampable onto copiable values before entry, so the body is
@@ -924,7 +1237,28 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 enter_with_choices: None,
                 applied: std::collections::HashSet::new(),
             };
-            match crate::game::replacement::replace_event(state, proposed, events) {
+            let has_own_entry_replacements = state
+                .liminal_entries
+                .get(&token_id)
+                .is_some_and(|entry| !entry.object.projected().replacement_definitions.is_empty());
+            if has_own_entry_replacements && entry_board.is_none() {
+                let absent = copy_token_co_entrants(state, token_id, &created_ids);
+                entry_board = Some(crate::game::filter::TokenEntryBatchBoard::new(
+                    state, &absent,
+                ));
+            }
+            if let Some(board) = entry_board.as_mut() {
+                board.refresh(
+                    state,
+                    &copy_token_co_entrants(state, token_id, &created_ids),
+                );
+            }
+            match crate::game::replacement::replace_event_on_entry_board(
+                state,
+                proposed,
+                events,
+                entry_board.as_ref().map(|cached| cached.board()),
+            ) {
                 crate::game::replacement::ReplacementResult::Execute(event) => {
                     if state.has_post_replacement_drain() {
                         if let Some(waiting_for) =
@@ -1001,6 +1335,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             source_id,
             controller,
             donor,
+            double_faced: double_faced.clone(),
         });
         // CR 707.9: unlike the liminal seam, this one applies its exceptions
         // AFTER the birth through `apply_token_modifications`, which is pausable,
@@ -1027,8 +1362,104 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 entry_timestamp,
                 resulting_tapped,
             );
+            // CR 707.9b: this seam applies its exceptions to the displayed face
+            // later, through the pausable `apply_token_modifications`, so the
+            // stored face takes them here, at the birth, before any of that
+            // path's pause points.
+            if copy_spec.double_faced.is_some() && !copy_spec.additional_modifications.is_empty() {
+                if let Some(face) = token.back_face.take() {
+                    token.back_face = Some(fold_copy_exceptions_into_face(
+                        &face,
+                        &[],
+                        &[],
+                        &copy_spec.additional_modifications,
+                        &all_creature_types,
+                    ));
+                }
+            }
             ObjectIncarnationRef::from_object(token)
         });
+
+        // CR 614.12 + CR 613.1f: realize continuous effects for this entrant
+        // BEFORE discovering its copied payment or its copied counters — an
+        // ability-removing effect (Humility) must suppress a payment the entrant
+        // must not have. Mirrors `finish_copy_target_choice_entry`
+        // (`engine_replacement.rs:2927`).
+        crate::game::layers::mark_layers_full(state);
+        crate::game::layers::flush_layers(state);
+
+        // CR 707.9b/9c + CR 614.12: the entrant as it will exist AFTER the copy
+        // exceptions, not the bare copied body. Both CR 614.12 readings below —
+        // which copied "enters with" counters it keeps, and its CR 303.4f/g host —
+        // read this one body.
+        //
+        // `materialize_token_copy_body` is a documented no-op for
+        // `DeferredToUnjournaledSeam` — on this path the exceptions land later, at
+        // `apply_token_modifications` — so at this point the stored object still
+        // carries the UNMODIFIED copiable values. The liminal seam folds its
+        // exceptions before its own consult, so without this projection the two
+        // copy seams disagree about what the entrant is, and an exception that
+        // adds or removes `Creature` (CR 303.4d), adds or removes the `Aura`
+        // subtype, or changes color (CR 702.16c) flips the CR 303.4f/g verdict.
+        // The failure mode is silent: a token that is never created.
+        //
+        // A PROJECTION rather than an early mutation of the stored object: the
+        // exceptions must still be applied exactly once, by the seam that owns
+        // them and can pause (`AddCounterOnEnter` reaches
+        // `add_counter_with_replacement`), and several arms — `AddPower`,
+        // `GrantAbility`, `GrantTrigger` — are not idempotent under a second pass.
+        let entrant_body = state.objects.get(&token_id).map(|token| {
+            let mut body = token.clone();
+            apply_immediate_copy_token_modifications_to_object(
+                &mut body,
+                &additional_modifications,
+                &all_creature_types,
+            );
+            body
+        });
+
+        // CR 614.12 + CR 613.1f + CR 614.1c + CR 707.9b: a copied "enters with"
+        // ability applies only if the token, as it would exist on the battlefield
+        // (its exceptions folded in, the continuous effects that already exist
+        // applied, the tokens entering with it absent), still has it. An ability
+        // remover that would apply to it (Humility, Overwhelming Splendor on its
+        // controller) leaves the copied counters off; the loyalty and the creating
+        // effect's own counters are not gated (see their split above). Same order
+        // as the routing list, so counter replacements see the same sequence.
+        let token_etb_counters: Vec<(crate::types::counter::CounterType, u32)> = {
+            let projection = entrant_body
+                .as_ref()
+                .filter(|_| !own_entries.is_empty())
+                .and_then(|body| {
+                    let board = entry_board.get_or_insert_with(|| {
+                        let mut absent = copy_token_co_entrants(state, token_id, &created_ids);
+                        absent.push(token_id);
+                        crate::game::filter::TokenEntryBatchBoard::new(state, &absent)
+                    });
+                    let mut absent = copy_token_co_entrants(state, token_id, &created_ids);
+                    absent.push(token_id);
+                    board.refresh(state, &absent);
+                    crate::game::filter::BattlefieldEntrantProjection::token_on_pre_entry_board(
+                        std::borrow::Cow::Borrowed(board.board()),
+                        body,
+                    )
+                });
+            intrinsic
+                .iter()
+                .cloned()
+                .chain(
+                    own_entries
+                        .iter()
+                        .filter(|(def, _, _)| {
+                            projection
+                                .as_ref()
+                                .is_none_or(|projection| projection.retains_replacement(def))
+                        })
+                        .map(|(_, counter_type, count)| (counter_type.clone(), *count)),
+                )
+                .chain(enter_with_counters.iter().cloned())
+                .collect()
+        };
 
         // CR 508.4: the tail resumes the rest of the batch counting its own
         // tokens from zero, so its request starts past the tokens created so
@@ -1041,7 +1472,7 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             copy: resume_copy,
             enter_tapped,
             enter_with_counters: enter_with_counters.clone(),
-            etb_counters: etb_counters.clone(),
+            etb_counters: token_etb_counters,
             remaining_count: final_count.saturating_sub(index + 1),
             attack_destination: attack_destination.clone(),
         };
@@ -1056,13 +1487,8 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // birth, aura attach, copy exceptions, entry counters, entry events,
         // and the rest of the batch — behind the player's answer. The prompt
         // is the funnel's own (`PayAmountChoice` raised by the surface call);
-        // nothing here hand-raises a second one.
-        // CR 614.12 + CR 613.1f: realize continuous effects for this entrant
-        // BEFORE discovering its copied payment — an ability-removing effect
-        // (Humility) must suppress a payment the entrant must not have.
-        // Mirrors `finish_copy_target_choice_entry` (`engine_replacement.rs:2927`).
-        crate::game::layers::mark_layers_full(state);
-        crate::game::layers::flush_layers(state);
+        // nothing here hand-raises a second one. The layers were flushed for this
+        // entrant above.
         if crate::game::replacement::surface_copied_entry_payment(state, token_id, events).is_some()
         {
             state.last_created_token_ids = created_ids.clone();
@@ -1083,41 +1509,16 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
             };
         }
 
-        // CR 707.9b/9c + CR 614.12: the consult below must see the entrant as it
-        // will exist AFTER the copy exceptions, not the bare copied body.
-        //
-        // `materialize_token_copy_body` is a documented no-op for
-        // `DeferredToUnjournaledSeam` — on this path the exceptions land later, at
-        // `apply_token_modifications` — so at this point the stored object still
-        // carries the UNMODIFIED copiable values. The liminal seam folds its
-        // exceptions before its own consult, so without this projection the two
-        // copy seams disagree about what the entrant is, and an exception that
-        // adds or removes `Creature` (CR 303.4d), adds or removes the `Aura`
-        // subtype, or changes color (CR 702.16c) flips the CR 303.4f/g verdict.
-        // The failure mode is silent: a token that is never created.
-        //
-        // A PROJECTION rather than an early mutation of the stored object: the
-        // exceptions must still be applied exactly once, by the seam that owns
-        // them and can pause (`AddCounterOnEnter` reaches
-        // `add_counter_with_replacement`), and several arms — `AddPower`,
-        // `GrantAbility`, `GrantTrigger` — are not idempotent under a second pass.
-        let entrant_projection = state.objects.get(&token_id).map(|token| {
-            let mut projection = token.clone();
-            apply_immediate_copy_token_modifications_to_object(
-                &mut projection,
-                &additional_modifications,
-                &all_creature_types,
-            );
-            projection
-        });
-
         // CR 303.4f + CR 303.4g: decide the entering Aura's host BEFORE the CR 733
         // birth is journaled (append-only, no retraction) and BEFORE the attach is
         // applied, so the CR 303.4g "if the Aura is a token, it isn't created" arm
         // can withhold the birth and the attach can never take a lower journal
         // ordinal than the birth it depends on. Same decide/act split the liminal
         // seam uses in `token::commit_liminal_token_entry_with_post_actions`.
-        let hosts = match entrant_projection.as_ref() {
+        // It reads `entrant_body`, built above, which predates an inline
+        // determined-0 payment latch; that latch writes only a
+        // `ChosenAttribute::Number`, which host legality doesn't read.
+        let hosts = match entrant_body.as_ref() {
             Some(entrant) => {
                 crate::game::zone_pipeline::entering_aura_hosts_projected(state, token_id, entrant)
             }
@@ -1177,7 +1578,8 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
                 .expect("resolved copy-token creation must have a live journal cause");
         }
 
-        match crate::game::zone_pipeline::apply_entering_aura_hosts(state, token_id, hosts) {
+        match crate::game::zone_pipeline::apply_entering_aura_hosts(state, token_id, hosts, events)
+        {
             // `NoLegalHost` is unreachable here — the empty-host arm above `continue`d.
             crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
             | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
@@ -1646,7 +2048,9 @@ pub(crate) fn continue_copy_token_after_entry_payment(
             // pauses again behind the AURA variant — the birth above is
             // already journaled, so that resume's straight-to-finish shape
             // stays sound.
-            match crate::game::zone_pipeline::apply_entering_aura_hosts(state, token_id, hosts) {
+            match crate::game::zone_pipeline::apply_entering_aura_hosts(
+                state, token_id, hosts, events,
+            ) {
                 crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
                 | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
                 | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
@@ -2407,6 +2811,7 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
+    use crate::types::proposed_event::CopiedFaceUp;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::{FrameKind, ResolutionStateWire};
     use crate::types::triggers::TriggerMode;
@@ -2460,6 +2865,7 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         };
         let mut events = Vec::new();
         let status = apply_copy_token_after_replacement(
@@ -2576,6 +2982,7 @@ mod tests {
             source_id,
             controller: PlayerId(0),
             donor: None,
+            double_faced: None,
         }
     }
 
@@ -6525,6 +6932,257 @@ mod tests {
         );
     }
 
+    /// A front-face-up transform card on the battlefield whose stored face is
+    /// `layout`, as Kessig Prowler // Sinuous Predator stores it.
+    fn double_faced_donor(state: &mut GameState, layout: Option<LayoutKind>) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(1),
+            PlayerId(0),
+            "Kessig Prowler".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().back_face = Some(BackFaceData {
+            name: "Sinuous Predator".to_string(),
+            power: Some(4),
+            toughness: Some(4),
+            card_types: CardType {
+                core_types: vec![CoreType::Creature],
+                ..CardType::default()
+            },
+            layout_kind: layout,
+            ..BackFaceData::default()
+        });
+        id
+    }
+
+    /// The copy source as `CopySource::live` reads it.
+    fn live_source(state: &GameState, id: ObjectId) -> CopySource {
+        let obj = &state.objects[&id];
+        CopySource {
+            incarnation: ObjectIncarnationRef::from_object(obj),
+            values: crate::game::printed_cards::intrinsic_copiable_values(obj),
+            display: obj.display_identity(),
+        }
+    }
+
+    fn capture_after(
+        layout: Option<LayoutKind>,
+        tweak: impl FnOnce(&mut GameObject, &mut CopySource),
+    ) -> Option<CopiedDoubleFaces> {
+        let mut state = GameState::new_two_player(42);
+        let id = double_faced_donor(&mut state, layout);
+        let mut source = live_source(&state, id);
+        tweak(state.objects.get_mut(&id).unwrap(), &mut source);
+        copied_double_faces(&state, &source)
+    }
+
+    /// CR 707.8a + CR 712.8d/e/f: the capture's up face follows the donor's
+    /// flags, and its hidden face is the donor's stored face, whether that face
+    /// has a printed layout (Kessig Prowler) or none (an Incubator token's Phyrexian face, CR 111.10i).
+    #[test]
+    fn copied_double_faces_follows_the_up_face() {
+        for layout in [Some(LayoutKind::Transform), None] {
+            let faces = capture_after(layout, |_, _| {}).expect("a front-up donor has faces");
+            assert_eq!(faces.up, CopiedFaceUp::Front);
+            assert_eq!(faces.hidden.name, "Sinuous Predator");
+            assert_eq!(faces.hidden.layout_kind, layout);
+        }
+        let faces = capture_after(Some(LayoutKind::Transform), |obj, _| obj.transformed = true)
+            .expect("a transformed donor has faces");
+        assert_eq!(faces.up, CopiedFaceUp::TransformedBack);
+        let faces = capture_after(Some(LayoutKind::Modal), |obj, _| obj.modal_back_face = true)
+            .expect("a modal donor cast back face up has faces");
+        assert_eq!(faces.up, CopiedFaceUp::ModalBack);
+    }
+
+    /// CR 707.8a + CR 613.2: under a Layer-1 copy effect the hidden face is the
+    /// copied values (Mirrorweave making Kessig Prowler a Grizzly Bears), and it
+    /// keeps the stored face's layout.
+    #[test]
+    fn copied_double_faces_under_a_layer1_copy_takes_the_copied_values() {
+        let faces = capture_after(Some(LayoutKind::Transform), |obj, source| {
+            obj.layer1_copy_effect = Some(crate::types::ability::CopyEffectInstanceRef {
+                continuous_effect_id: 1,
+                modification_index: 0,
+            });
+            source.values.name = "Grizzly Bears".to_string();
+            source.values.power = Some(2);
+            source.values.toughness = Some(2);
+        })
+        .expect("a copied double-faced donor has faces");
+        assert_eq!(faces.hidden.name, "Grizzly Bears");
+        assert_eq!(
+            (faces.hidden.power, faces.hidden.toughness),
+            (Some(2), Some(2))
+        );
+        assert_eq!(faces.hidden.layout_kind, Some(LayoutKind::Transform));
+    }
+
+    // The copy-only refusals. Each changes one thing on the donor of the positive
+    // captures above, so each refusal is that one check's.
+
+    /// CR 400.7: the faces are read only from the object the copy read its values
+    /// from. The live object under the donor's id is a later object (its
+    /// incarnation moved on) with a different stored face, and the capture never
+    /// reads that face. This asserts the guard only: whether a departed donor's
+    /// token is single-faced is a known gap, not the CR 707.8a answer, and is not
+    /// asserted here. Nearest printed board: Saw in Half ("Destroy target
+    /// creature. If that creature dies this way, its controller creates two tokens
+    /// that are copies of that creature, …") destroying Kessig Prowler.
+    #[test]
+    fn copied_double_faces_never_reads_a_later_object() {
+        let faces = capture_after(Some(LayoutKind::Transform), |obj, _| {
+            obj.incarnation += 1;
+            obj.back_face.as_mut().unwrap().name = "Later Face".to_string();
+        });
+        assert_ne!(
+            faces.map(|faces| faces.hidden.name),
+            Some("Later Face".to_string()),
+            "CR 400.7: a later object under the same id never supplies the faces"
+        );
+    }
+
+    /// CR 712.4b: a melded permanent. Nearest printed board: Cackling Counterpart copying Brisela, Voice of Nightmares (Bruna, the Fading Light melded with Gisela, the Broken Blade).
+    #[test]
+    fn copied_double_faces_refuses_a_melded_permanent() {
+        let faces = capture_after(Some(LayoutKind::Transform), |obj, _| {
+            obj.merge_kind = Some(MergeKind::Meld);
+        });
+        assert!(faces.is_none());
+    }
+
+    /// CR 712.4b: a meld card's stored back face. Nearest printed board: Cackling Counterpart copying Bruna, the Fading Light ("(Melds with Gisela, the Broken Blade.)").
+    #[test]
+    fn copied_double_faces_refuses_a_meld_back_face() {
+        assert!(capture_after(Some(LayoutKind::Meld), |_, _| {}).is_none());
+    }
+
+    /// CR 709.5b: values copied from a Room. Nearest printed board, by a read: Opalescence ("Each other non-Aura enchantment is a creature in addition to its other types …") animates Unholy Annex // Ritual Chamber, Mirrorweave targeting it makes Kessig Prowler a copy of the Room, and Cackling Counterpart copies the Prowler.
+    /// The token keeps both faces, and stores the Room half beside them
+    /// (`GameObject::double_faced_token_alternative`, CR 707.8a + CR 709.5b).
+    #[test]
+    fn copied_double_faces_keeps_both_faces_beside_room_values() {
+        let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
+            source.values.room_halves = Some(crate::types::ability::RoomCopiableHalves {
+                left: crate::types::ability::RoomHalfIdentity {
+                    name: "Left".to_string(),
+                    mana_cost: crate::types::mana::ManaCost::NoCost,
+                },
+                right: None,
+            });
+        })
+        .expect("CR 707.8a: a double-faced donor copying a Room keeps both faces");
+        assert_eq!(faces.hidden.name, "Sinuous Predator");
+    }
+
+    /// CR 722.2b: values copied from a preparation creature. Nearest printed board: Mirrorweave targeting Encouraging Aviator ("Whenever this creature attacks, it becomes prepared. …") makes Kessig Prowler a copy of it, and Cackling Counterpart copies the Prowler.
+    /// The token keeps both faces, and stores the prepare spell beside them
+    /// (`GameObject::double_faced_token_alternative`, CR 707.8a + CR 722.2b).
+    #[test]
+    fn copied_double_faces_keeps_both_faces_beside_preparation_values() {
+        let faces = capture_after(Some(LayoutKind::Transform), |_, source| {
+            source.values.prepare_face = Some(Arc::new(BackFaceData::default()));
+        })
+        .expect("CR 707.8a: a double-faced donor copying a preparation creature keeps both faces");
+        assert_eq!(faces.hidden.name, "Sinuous Predator");
+    }
+
+    /// CR 712.8d + CR 707.8a: both back-face flags set shows the front face
+    /// (nearest printed board: Valentin, Dean of the Vein cast as Lisette, Dean
+    /// of the Root, then Moonmist), so the copy is front face up with the
+    /// donor's stored face hidden.
+    #[test]
+    fn copied_double_faces_reads_the_front_face_up_under_both_flags() {
+        let faces = capture_after(Some(LayoutKind::Modal), |obj, _| {
+            obj.transformed = true;
+            obj.modal_back_face = true;
+        })
+        .expect("a donor with both flags set has faces");
+        assert_eq!(faces.up, CopiedFaceUp::Front);
+        assert_eq!(faces.hidden.name, "Sinuous Predator");
+    }
+
+    /// CR 708.2: a face-down donor's `back_face` is its face-down stash, which
+    /// `transform::stored_double_face` refuses. A double-faced card can be face down: CR 712.15
+    /// covers one that enters the battlefield face down, as Soul Summons ("Manifest the top card
+    /// of your library.") can manifest Kessig Prowler; CR 712.16 stops only turning a double-faced
+    /// permanent face down. This stub is synthetic: it marks a Transform-layout face as the stash
+    /// where that printed board stores the manifested card's own face. Nearest printed board:
+    /// Cackling Counterpart copying a Kessig Prowler manifested by Soul Summons.
+    #[test]
+    fn copied_double_faces_refuses_a_face_down_donor() {
+        let faces = capture_after(Some(LayoutKind::Transform), |obj, _| obj.face_down = true);
+        assert!(faces.is_none());
+    }
+
+    /// CR 707.9a/b/d: the fold lands each exception in the stored face's base:
+    /// a type, a trigger, a P/T value and a keyword, and prunes the CDA the P/T
+    /// exception overrides while keeping a non-CDA static.
+    /// No printed copy carries all four exceptions at once: the type is Nexus of Becoming's ("except it's a 3/3 Golem artifact creature in addition to its other types"), the trigger Grub, Notorious Auntie's, the P/T Soul Separator's ("except it's 1/1") and the keyword Kiki-Jiki, Mirror Breaker's ("except it has haste"). The face is a synthetic stand-in for Werewolf of Ancient Hunger, whose printed P/T ability is a CDA ("power and toughness are each equal to the total number of cards in all players' hands"); its fixed CDA and its trample static are not printed text. The printed boards are the integration rows in grub_storied_matriarch_769.rs.
+    #[test]
+    fn fold_copy_exceptions_into_face_lands_exceptions_in_the_face() {
+        let cda = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .cda()
+            .modifications(vec![ContinuousModification::SetDynamicPower {
+                value: QuantityExpr::Fixed { value: 3 },
+            }]);
+        let non_cda = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }]);
+        let face = BackFaceData {
+            name: "Werewolf of Ancient Hunger".to_string(),
+            power: Some(0),
+            toughness: Some(0),
+            card_types: CardType {
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Werewolf".to_string()],
+                ..CardType::default()
+            },
+            static_definitions: Arc::new(vec![cda, non_cda.clone()]).into(),
+            layout_kind: Some(LayoutKind::Transform),
+            is_swap_snapshot: false,
+            ..BackFaceData::default()
+        };
+        let set_power = ContinuousModification::SetPower { value: 1 };
+        let trigger = TriggerDefinition::new(TriggerMode::Phase);
+        let stamped = vec![
+            ContinuousModification::AddType {
+                core_type: CoreType::Artifact,
+            },
+            ContinuousModification::GrantTrigger {
+                trigger: Box::new(trigger),
+            },
+            set_power.clone(),
+        ];
+
+        let folded = fold_copy_exceptions_into_face(
+            &face,
+            std::slice::from_ref(&set_power),
+            &[Keyword::Haste],
+            &stamped,
+            &[],
+        );
+
+        assert!(folded.card_types.core_types.contains(&CoreType::Artifact));
+        assert_eq!(folded.trigger_definitions.iter_all().count(), 1);
+        assert_eq!(folded.power, Some(1));
+        assert!(folded.keywords.contains(&Keyword::Haste));
+        let statics: Vec<_> = folded.static_definitions.iter_all().cloned().collect();
+        assert_eq!(statics, vec![non_cda], "CR 707.9d: only the CDA is pruned");
+        assert_eq!(folded.layout_kind, Some(LayoutKind::Transform));
+        assert!(!folded.is_swap_snapshot);
+
+        assert_eq!(
+            fold_copy_exceptions_into_face(&face, &[], &[], &[], &[]),
+            face,
+            "no exceptions leave the face as it is"
+        );
+    }
+
     /// CR 608.2c + CR 614.6: declined replacements preserve each batch's tokens
     /// in instruction order. Constructed custody fixture, independent of
     /// the printed spell's event grouping. Both answers use the engine action path.
@@ -6739,6 +7397,8 @@ mod tests {
             additional_modifications: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            // Single-faced fixture values: no other face to carry.
+            double_faced: None,
             attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id,
@@ -6778,6 +7438,101 @@ mod tests {
             vec![earlier, created[0]],
             "the owner's earlier-batch token survives the batch ledger's re-sync"
         );
+    }
+
+    /// Constructed custody fixture: the first batch is already committed and the
+    /// second is offered. This deliberately makes no claim about Clone Legion's
+    /// grouping. CR 614.12a: the Voice choice precedes the shared entry, so the
+    /// held owner's Margle must remain absent while the order answer delivers it.
+    #[test]
+    fn held_copy_owner_publishes_earlier_tokens_during_replacement_answer() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        let mut scenario = GameScenario::new();
+        let margle = scenario.add_creature_from_oracle(P0, "Margle, Cousin of Yargle", 5, 2,
+            "Other creatures you control lose all abilities, can't gain abilities, and get +2/+2.").id();
+        let voice = scenario.add_creature_from_oracle(P1, "Voice of All", 2, 2,
+            "Flying\nAs this creature enters, choose a color.\nThis creature has protection from the chosen color.").id();
+        scenario.add_enchantment_from_oracle(P0, "Parallel Lives",
+            "If an effect would create one or more tokens under your control, it creates twice that many of those tokens instead.");
+        scenario.add_enchantment_from_oracle(P1, "Halving Season",
+            "If an opponent would create one or more tokens, they create half that many of each of those kinds of tokens instead, rounded down.\nIf an opponent would put one or more counters on a permanent or player, they put half that many of each of those kinds of counters on that permanent or player instead, rounded down.");
+        let mut runner = scenario.build();
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&margle)
+            .unwrap()
+            .is_token = true;
+        let mut copy = named_attack_copy_spec(runner.state(), voice, Vec::new());
+        copy.tapped = false;
+        copy.enters_attacking = false;
+        copy.attack_request = crate::types::proposed_event::TokenAttackRequest::Unspecified;
+        runner
+            .state_mut()
+            .push_copy_token(PendingCopyTokenResolution {
+                created_ids: vec![margle],
+                remaining: VecDeque::from([PendingCopyTokenBatch {
+                    owner: P0,
+                    copy: Box::new(copy),
+                    count: 1,
+                }]),
+                effect_kind: EffectKind::CopyTokenOf,
+                source_id: voice,
+                referent_set: None,
+                offered_batch: OfferedBatchCustody::Settled,
+            });
+        let mut events = Vec::new();
+        drain_pending_copy_token_resolution(runner.state_mut(), &mut events);
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("required order prompt: {:?}", runner.state().waiting_for);
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(candidates.len(), 2);
+        let index = candidates
+            .iter()
+            .position(|candidate| candidate.source_name == "Parallel Lives")
+            .unwrap();
+        assert_eq!(
+            runner.state().active_copy_token().unwrap().created_ids,
+            vec![margle]
+        );
+        runner.act(GameAction::ChooseReplacement { index }).unwrap();
+        let WaitingFor::NamedChoice {
+            player, options, ..
+        } = &runner.state().waiting_for
+        else {
+            panic!(
+                "the held owner's publication must preserve Voice's entry choice: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        let choice = options[0].clone();
+        runner.act(GameAction::ChooseOption { choice }).unwrap();
+        let copies: Vec<_> = runner
+            .state()
+            .objects
+            .values()
+            .filter(|obj| obj.is_token && obj.name == "Voice of All")
+            .collect();
+        assert_eq!(copies.len(), 1);
+        assert!(copies[0]
+            .chosen_attributes
+            .iter()
+            .any(|choice| matches!(choice, ChosenAttribute::Color(_))));
+        assert_eq!(
+            runner.state().last_created_token_ids,
+            vec![margle, copies[0].id]
+        );
+        assert!(runner.state().active_copy_token().is_none());
+        assert!(runner.state().active_copy_token_resolution_tokens.is_none());
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
     }
 
     /// R16 constructed ledger fixture, independent of any spell's batch grouping.
@@ -7009,5 +7764,151 @@ mod tests {
                 "{offered:?} owner resumed over the ledger {ledger:?}"
             );
         }
+    }
+
+    fn parked_copy_token_owner(created_ids: Vec<ObjectId>) -> PendingCopyTokenResolution {
+        PendingCopyTokenResolution {
+            created_ids,
+            remaining: VecDeque::new(),
+            effect_kind: EffectKind::CopyTokenOf,
+            source_id: ObjectId(900),
+            referent_set: None,
+            offered_batch: OfferedBatchCustody::Settled,
+        }
+    }
+
+    /// CR 614.12 + CR 111.1: the published resolution tokens and the batch prefix overlap;
+    /// the co-entrants keep first-seen order, list each token once, and leave out the
+    /// entrant itself.
+    #[test]
+    fn copy_token_co_entrants_dedups_published_tokens_and_batch_prefix_in_order() {
+        let mut state = GameState::new_two_player(42);
+        state.active_copy_token_resolution_tokens =
+            Some(vec![ObjectId(1), ObjectId(2), ObjectId(3)]);
+        assert_eq!(
+            copy_token_co_entrants(
+                &state,
+                ObjectId(2),
+                &[ObjectId(3), ObjectId(4), ObjectId(4)]
+            ),
+            vec![ObjectId(1), ObjectId(3), ObjectId(4)]
+        );
+    }
+
+    /// With no published slot the innermost parked `CopyToken` frame's tokens are the
+    /// resolution's; an outer frame's are not read.
+    #[test]
+    fn copy_token_co_entrants_reads_the_innermost_parked_frame_without_a_published_slot() {
+        let mut state = GameState::new_two_player(42);
+        state.push_copy_token(parked_copy_token_owner(vec![ObjectId(10), ObjectId(11)]));
+        state.push_copy_token(parked_copy_token_owner(vec![ObjectId(20), ObjectId(21)]));
+        assert!(
+            state.active_copy_token_resolution_tokens.is_none(),
+            "REACH-GUARD: no published slot, so the frame fallback runs"
+        );
+        assert_eq!(
+            copy_token_co_entrants(&state, ObjectId(21), &[ObjectId(22), ObjectId(20)]),
+            vec![ObjectId(20), ObjectId(22)]
+        );
+    }
+
+    /// A published slot wins over a parked frame (an outer resolution's frame is never read
+    /// while one is published), and the entrant is excluded from both sources.
+    #[test]
+    fn copy_token_co_entrants_prefers_the_published_slot_and_excludes_the_entrant() {
+        let mut state = GameState::new_two_player(42);
+        state.push_copy_token(parked_copy_token_owner(vec![ObjectId(10)]));
+        state.active_copy_token_resolution_tokens = Some(vec![ObjectId(5), ObjectId(6)]);
+        assert_eq!(
+            copy_token_co_entrants(&state, ObjectId(5), &[ObjectId(5), ObjectId(7)]),
+            vec![ObjectId(6), ObjectId(7)]
+        );
+    }
+
+    /// A liminal token entry `entry_ref` whose batch already created `created_ids`.
+    fn liminal_token_entry(
+        entry_ref: ObjectId,
+        created_ids: Vec<ObjectId>,
+    ) -> crate::types::game_state::LiminalEntry {
+        let object = GameObject::new(
+            entry_ref,
+            CardId(0),
+            PlayerId(0),
+            "Liminal Copy".to_string(),
+            Zone::Battlefield,
+        );
+        crate::types::game_state::LiminalEntry {
+            object: crate::types::game_state::LiminalEntrant::Token(
+                crate::types::game_state::TokenProjection::materialize(object),
+            ),
+            name: "Liminal Copy".to_string(),
+            source_id: ObjectId(999),
+            controller: PlayerId(0),
+            enters_attacking: false,
+            attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
+            attach_to: None,
+            sacrifice_at: None,
+            remaining_count: 0,
+            created_ids,
+            copy_resume: None,
+            spec_resume: None,
+            enter_tapped: EtbTapState::Unspecified,
+            enter_with_counters: Vec::new(),
+            kind: crate::types::game_state::LiminalEntryKind::Token,
+            replacement_applied: HashSet::new(),
+        }
+    }
+
+    /// CR 614.12 + CR 111.1: an entering token's co-entrants are the resolution's tokens
+    /// plus its batch: the liminal entry's prefix while its entry is decided (i), and the
+    /// ledger that lists it once it has committed (ii). Anything else, the placed-route
+    /// payment's entrant included, has none (iii).
+    #[test]
+    fn entering_token_co_entrants_reads_the_liminal_prefix_or_the_ledger_that_lists_it() {
+        let (a, b, e) = (ObjectId(1), ObjectId(2), ObjectId(5));
+
+        let mut liminal = GameState::new_two_player(42);
+        liminal.push_copy_token(parked_copy_token_owner(vec![b]));
+        liminal
+            .liminal_entries
+            .insert(e, liminal_token_entry(e, vec![a]));
+        assert_eq!(entering_token_co_entrants(&liminal, e), vec![b, a], "(i)");
+
+        let mut committed = GameState::new_two_player(42);
+        committed.push_copy_token(parked_copy_token_owner(vec![b]));
+        committed.last_created_token_ids = vec![a, e];
+        assert!(
+            committed.liminal_entries.is_empty(),
+            "REACH-GUARD (ii): the entry has committed"
+        );
+        assert_eq!(
+            entering_token_co_entrants(&committed, e),
+            vec![b, a],
+            "(ii)"
+        );
+
+        let mut unlisted = GameState::new_two_player(42);
+        unlisted.push_copy_token(parked_copy_token_owner(vec![b]));
+        unlisted.last_created_token_ids = vec![a];
+        assert!(
+            !copy_token_co_entrants(&unlisted, e, &unlisted.last_created_token_ids).is_empty(),
+            "REACH-GUARD (iii): the frame and the ledger hold tokens"
+        );
+        assert!(entering_token_co_entrants(&unlisted, e).is_empty(), "(iii)");
+    }
+
+    /// No published slot, no parked frame, and no batch prefix: nothing co-enters.
+    #[test]
+    fn copy_token_co_entrants_is_empty_without_any_source() {
+        let state = GameState::new_two_player(42);
+        assert!(copy_token_co_entrants(&state, ObjectId(1), &[]).is_empty());
+
+        let mut published_empty = GameState::new_two_player(42);
+        published_empty.active_copy_token_resolution_tokens = Some(Vec::new());
+        published_empty.push_copy_token(parked_copy_token_owner(vec![ObjectId(10)]));
+        assert!(
+            copy_token_co_entrants(&published_empty, ObjectId(1), &[]).is_empty(),
+            "an empty published slot still shadows the parked frame"
+        );
     }
 }

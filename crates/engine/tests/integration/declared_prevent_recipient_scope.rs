@@ -436,15 +436,41 @@ fn defend_the_hearth_mints_no_target_slot_and_shields_players() {
     let life_before = runner.state().players[1].life;
     let outcome = runner.combat_damage();
 
-    assert!(
-        outcome.state().objects[&z].damage_marked > 0,
-        "reach guard: combat damage to a creature is not prevented"
-    );
+    assert_eq!(outcome.zone_of(x), Zone::Battlefield);
+    assert_eq!(outcome.zone_of(y), Zone::Graveyard);
+    assert_eq!(outcome.zone_of(z), Zone::Graveyard);
     assert_eq!(
         outcome.state().players[1].life,
         life_before,
         "combat damage to the player is prevented"
     );
+    assert!(!outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::DamageDealt {
+            target: TargetRef::Player(player),
+            ..
+        } if *player == P1
+    )));
+    assert!(outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(id),
+            amount: 2,
+            is_combat: true,
+            ..
+        } if *source_id == y && *id == z
+    )));
+    assert!(outcome.events().iter().any(|event| matches!(
+        event,
+        GameEvent::DamageDealt {
+            source_id,
+            target: TargetRef::Object(id),
+            amount: 2,
+            is_combat: true,
+            ..
+        } if *source_id == z && *id == y
+    )));
 }
 
 /// Put Fylgja on `a`, with four healing counters.

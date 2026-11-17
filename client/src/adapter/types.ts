@@ -1,4 +1,3 @@
-import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import type {
   InteractionActionId,
   InteractionId,
@@ -812,7 +811,9 @@ export interface ReplayPlayerDeckList {
   contraption_deck: string[];
   sticker_sheets: string[];
   signature_spell: string[];
-  bracket_tier: string;
+  /** `null` when the deck declares no bracket. */
+  bracket_tier: string | null;
+  combo_declaration?: import("../types/bracketEstimate").ComboDeclaration;
   /** The owner's explicit printing choices; display-only. Absent when empty. */
   printings?: DeckPrinting[];
 }
@@ -1090,6 +1091,14 @@ export type PayCostKind =
   // doc comment). See `TapCreaturesSelectionMode` above.
   | { type: "TapCreatures"; mode: TapCreaturesSelectionMode }
   | { type: "Behold"; action: "ChooseOrReveal" | "ExileChosen" };
+
+// CR 701.59a: resumption context after a `CollectEvidenceChoice`. The frontend
+// reads only the tag; the inner payload is opaque pass-through.
+export type CollectEvidenceResume =
+  | { type: "Casting"; data: unknown }
+  | { type: "Effect"; data: unknown }
+  | { type: "Resolution"; data: { source_id: ObjectId } }
+  | { type: "ManaAbility"; data: unknown };
 
 // CR 118.12 + CR 601.2b + CR 605.3b + CR 702.37e: resumption context after a `PayCost`
 // choice. The frontend treats the inner pending payload as opaque pass-through.
@@ -1863,6 +1872,10 @@ export type ChooseFromZoneConstraint =
 
 // Mirrors Rust `SharedQualityRelation` (relation among the chosen cards).
 export type SharedQualityRelation = "Shares" | "DoesNotShare";
+
+// Mirrors Rust `ObjectSelectionCardinality` (CR 608.2d resolution-time choice
+// cardinality). Omitted on the wire when it is the single-card default.
+export type ObjectSelectionCardinality = "AnyNumber" | { Exactly: { count: number } };
 
 export type SearchSelectionConstraint =
   | { type: "None" }
@@ -2752,10 +2765,19 @@ export type AdditionalCost =
   | { type: "Optional"; data: { cost: SerializedAbilityCost; repeatable?: boolean } }
   | { type: "Kicker"; data: { costs: SerializedAbilityCost[]; repeatable?: boolean } }
   | { type: "Required"; data: SerializedAbilityCost }
-  | { type: "Choice"; data: [SerializedAbilityCost, SerializedAbilityCost] };
+  | { type: "Choice"; data: SerializedAbilityCost[] };
 
 /** Mirrors Rust AbilityCost serialization (serde tag = "type"). */
 export type SerializedAbilityCost = { type: string; [key: string]: unknown };
+
+/**
+ * CR 601.2 + CR 115.10a: why the caster is choosing an opponent in
+ * `ChooseGiftRecipient` — engine-provided purpose; absent = Gift (serde default).
+ * `EffectCost` carries the spell cost being paid for the chosen opponent.
+ */
+export type CastOpponentChoicePurpose =
+  | { type: "Gift" }
+  | { type: "EffectCost"; cost: SerializedAbilityCost };
 
 export type ResolutionOptionalPaymentChoice =
   | { type: "Decline" }
@@ -3053,6 +3075,12 @@ export type HeroEventKind =
 /** One hero's recorded answer. Mirrors `engine::types::game_state::HeroEventAnswer`. */
 export type HeroEventAnswer = { hero: PlayerId; cards: ObjectId[] };
 
+/**
+ * Engine-owned (CR 502.1–502.3): where the untap step stood when an untap determination was
+ * raised. Mirrors `engine::types::game_state::UntapStepProgress`; the UI never reads it.
+ */
+export type UntapStepProgress = "BeforeTurnBasedActions" | "AfterTurnBasedActions";
+
 export type WaitingFor =
   | { type: "Priority"; data: { player: PlayerId } }
   | { type: "ResolveAllConsent"; data: { epoch: number; representative: PlayerId } }
@@ -3130,7 +3158,7 @@ export type WaitingFor =
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "DigRestSplitChoice"; data: { player: PlayerId; library_owner: PlayerId; cards: ObjectId[]; top_count: number; bottom_count: number; scope: DigRestSplitScope; source_id?: ObjectId | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
-  | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
+  | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean; decline_runs_continuation?: boolean; cardinality?: ObjectSelectionCardinality; pending_mana_ability?: unknown } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean; up_to?: boolean; allows_partial_find?: boolean; constraint?: SearchSelectionConstraint; ordering_hint?: SearchOrderingHint; split?: SearchDestinationSplit | null } }
   | { type: "SearchPartitionChoice"; data: { player: PlayerId; cards: ObjectId[]; primary_destination: Zone; primary_count: number; primary_enter_tapped: boolean; rest_destination: Zone; source_id: ObjectId } }
   | { type: "OutsideGameChoice"; data: { player: PlayerId; source_id: ObjectId; choices: OutsideGameChoiceEntry[]; count: number; reveal?: boolean; up_to?: boolean; destination: Zone } }
@@ -3139,7 +3167,7 @@ export type WaitingFor =
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore; min_main_deck_size: number; max_sideboard_size: number | null } }
   | { type: "BetweenGamesChoosePlayDraw"; data: { player: PlayerId; game_number: number; score: MatchScore } }
   | { type: "ChooseStartingPlayer"; data: { player: PlayerId; candidates: PlayerId[] } }
-  | { type: "NamedChoice"; data: { player: PlayerId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" | "PendingEntry" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
+  | { type: "NamedChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; choice_type: string | Record<string, unknown>; options: string[]; source?: { prompt: { identity: unknown; controller: PlayerId; display_name: string }; binding: "ResolutionContext" | "ExactObjectAndResolution" | "PendingEntry" }; persist_player?: PlayerId; free_entry?: FreeEntry } }
   | { type: "OpponentGuess"; data: { player: PlayerId; options: string[]; choice_type: string | Record<string, unknown>; source: { prompt: { identity: unknown; controller: PlayerId; display_name: string } }; proposition_truth?: boolean } }
   | { type: "SpellbookDraft"; data: { player: PlayerId; source_id: ObjectId; options: string[]; destination: Zone; tapped?: boolean } }
   | { type: "DamageSourceChoice"; data: { player: PlayerId; source_filter: TargetFilter; options: ObjectId[] } }
@@ -3203,7 +3231,7 @@ export type WaitingFor =
           | { type: "ResolvingEffect"; data: unknown };
       };
     }
-  | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
+  | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: CollectEvidenceResume } }
   | { type: "HarmonizeTapChoice"; data: { player: PlayerId; eligible_creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "OptionalEffectChoice"; data: { player: PlayerId; decision_subject_id?: ObjectId; source_id: ObjectId; description?: string; may_trigger_key?: MayTriggerAutoChoiceKey; same_card_may_trigger_choice_available?: boolean } }
   | { type: "ResolutionOptionalPaymentChoice"; data: { player: PlayerId; source_id: ObjectId; costs: Array<{ index: number; cost: SerializedAbilityCost }> } }
@@ -3233,8 +3261,8 @@ export type WaitingFor =
   | { type: "BattleProtectorChoice"; data: { player: PlayerId; battle_id: ObjectId; candidates: PlayerId[] } }
   | { type: "TributeChoice"; data: { player: PlayerId; source_id: ObjectId; count: number } }
   | { type: "CombatTaxPayment"; data: { player: PlayerId; context: CombatTaxContext; total_cost: ManaCost; per_creature: [ObjectId, ManaCost][]; pending: CombatTaxPending } }
-  | { type: "UntapChoice"; data: { player: PlayerId; candidates: ObjectId[]; chosen_not_to_untap?: ObjectId[] } }
-  | { type: "ChooseUntapSubset"; data: { player: PlayerId; group: ObjectId[]; max: number } }
+  | { type: "UntapChoice"; data: { player: PlayerId; candidates: ObjectId[]; chosen_not_to_untap?: ObjectId[]; progress?: UntapStepProgress } }
+  | { type: "ChooseUntapSubset"; data: { player: PlayerId; group: ObjectId[]; max: number; progress?: UntapStepProgress } }
   | { type: "ExertChoice"; data: { player: PlayerId; attacker: ObjectId; permission: TriggerDefinitionRef; remaining?: { attacker: ObjectId; permission: TriggerDefinitionRef }[] } }
   | { type: "EnlistChoice"; data: { player: PlayerId; attacker: ObjectId; eligible: ObjectId[]; remaining?: ObjectId[] } }
   | { type: "PhyrexianPayment"; data: { player: PlayerId; spell_object: ObjectId; shards: PhyrexianShard[] } }
@@ -3291,7 +3319,7 @@ export type WaitingFor =
   // picks WHICH opponent makes the choice before the zone choice is presented.
   | { type: "ChooseFromZoneOpponentChooser"; data: { player: PlayerId; candidates: PlayerId[]; ability: unknown; purpose?: "Ordinary" | "BindReciprocalConsume" | "PerPlayerChoiceOrder" | "SubstituteChooser" | "SubstituteArranger" } }
   | { type: "ChooseAnnouncingOpponent"; data: { player: PlayerId; candidates: PlayerId[]; choice_index: number; choice_count: number; target_type?: CoreType; pending_cast: unknown } }
-  | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; pending_cast: unknown } }
+  | { type: "ChooseGiftRecipient"; data: { player: PlayerId; candidates: PlayerId[]; gift_kind?: { type: string }; purpose?: CastOpponentChoicePurpose; pending_cast: unknown } }
   | { type: "ClashCardPlacement"; data: { player: PlayerId; card: ObjectId; remaining: [PlayerId, ObjectId][]; bottom_cards?: ObjectId[] } }
   // Eye to Eye / Mouth to Mouth: a real-time sustained-clicking contest. Nobody submits a
   // GameAction here — the host (server, or the local driver) stamps clicks and ticks the
@@ -3554,6 +3582,12 @@ export type LogSegment =
 
 export interface GameLogEntry {
   seq: number;
+  /**
+   * The game of the match the engine logged this entry in. Absent on the first
+   * game's entries and on entries the client writes itself; the engine reads an
+   * absent one as the first game.
+   */
+  game_number?: number;
   turn: number;
   phase: Phase;
   category: LogCategory;
@@ -3757,7 +3791,7 @@ export type GameAction =
   | { type: "SubmitLifeRedistribution"; data: { option_index: number } }
   | { type: "ChooseDamageSource"; data: { source: ObjectId } }
   | { type: "SelectModes"; data: { indices: number[] } }
-  | { type: "DecideOptionalCost"; data: { pay: boolean } }
+  | { type: "DecideOptionalCost"; data: { index: number } }
   | { type: "RespondToSpliceOffer"; data: { card: ObjectId | null } }
   | { type: "ChooseAdventureFace"; data: { creature: boolean } }
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
@@ -4029,7 +4063,7 @@ export type GameEvent =
   // CR 701.42a: a meld pair entered the battlefield as one melded permanent.
   // `object_id` is the melded permanent; `partner_id` is the pair's other card.
   | { type: "Melded"; data: { object_id: ObjectId; partner_id: ObjectId; controller: PlayerId } }
-  | { type: "DayNightChanged"; data: { new_state: string } }
+  | { type: "DayNightChanged"; data: { new_state: string; previous?: DayNight | null } }
   | { type: "TurnedFaceUp"; data: { object_id: ObjectId } }
   | { type: "TurnedFaceDown"; data: { object_id: ObjectId } }
   | { type: "CardsRevealed"; data: { player: PlayerId; card_ids?: ObjectId[]; card_names: string[] } }
@@ -5471,7 +5505,6 @@ export const AdapterErrorCode = {
   WASM_ERROR: "WASM_ERROR",
   INVALID_ACTION: "INVALID_ACTION",
   DECK_REJECTED: "DECK_REJECTED",
-  BRACKET_ESTIMATION_UNSUPPORTED: "bracket-estimation/unsupported",
   /** Engine rejected game init because one or more decks are not bracket 5 at a cEDH table. */
   BRACKET_VIOLATION: "BRACKET_VIOLATION",
   /**
@@ -5862,6 +5895,13 @@ export interface AiLlmProposalResult {
   reasoning?: string | null;
   error?: string;
   /**
+   * The engine's typed refusal (`phase_llm::LlmError`), when it carries one.
+   * `threadUnavailable` means the provider would not continue the seat's
+   * message thread: the engine has dropped it, and the same decision may be
+   * asked once more as a fresh request.
+   */
+  errorKind?: { kind: string };
+  /**
    * Provider-reported token usage (`phase_llm::wire::TokenUsage`), present on
    * success and refusal alike. Diagnostic only.
    */
@@ -5869,6 +5909,7 @@ export interface AiLlmProposalResult {
     inputTokens?: number | null;
     outputTokens?: number | null;
     cachedInputTokens?: number | null;
+    cacheCreationInputTokens?: number | null;
   } | null;
 }
 
@@ -5886,12 +5927,36 @@ export interface LlmDecisionRequestResult {
   reasoning?: string;
   fingerprint?: string;
   optionCount?: number;
-  /** Characters of prompt the request carries (system + user). */
+  /**
+   * Characters of prompt the request carries: system and user for a full
+   * request, the one update message for a message-thread continue.
+   */
   promptChars?: number;
   request?: LlmHttpRequestSpec;
+  /**
+   * The message-thread turn this request is, or `null` for a self-contained
+   * request. Handed back with the reply, so the engine records the reply
+   * against the request that produced it and no other.
+   */
+  threadTurn?: number | null;
   error?: string;
   /** The engine's typed refusal (`phase_llm::LlmError`), when it carries one. */
   errorKind?: { kind: string };
+}
+
+/**
+ * Both platform clocks, read together, to time a seat's message thread by
+ * (`phase_llm::ClockReading`). A thread expires five idle minutes after its
+ * last request, in real time, and neither clock measures that alone:
+ * `Date.now()` counts a sleep, but a clock correction can step it, and
+ * `performance.now()` never steps, but can stop while the machine sleeps. The
+ * engine counts an idle time only where the two agree on it.
+ */
+export interface LlmClockReading {
+  /** `Date.now()`. */
+  wallMs: number;
+  /** `performance.now()`. */
+  monotonicMs: number;
 }
 
 /** Result of submitting an opaque AI proposal to its issuing authority. */
@@ -5987,21 +6052,35 @@ export interface EngineAdapter {
    * Optional capability: an adapter that omits it simply has no LLM seats, and
    * the AI controller uses the heuristic path. `historyJson` is the
    * engine-authored game log the caller has accumulated, handed back for
-   * rendering.
+   * rendering. `settingsRevision` numbers the seat's own provider settings: the
+   * controller advances it at every change the player makes to them, and the
+   * engine keeps a seat's message thread only under the revision it was
+   * opened under. `clock` is both clocks as the request is built; the request
+   * goes out no earlier, and a message thread's idle expiry runs from its last
+   * request.
    */
   buildLlmDecisionRequest?(
     difficulty: string,
     playerId: number,
     endpointJson: string,
     historyJson: string,
+    settingsRevision: number,
+    clock: LlmClockReading,
   ): Promise<LlmDecisionRequestResult | null>;
-  /** Binds an LLM response to an engine-issued proposal, or reports why it could not. */
+  /**
+   * Binds an LLM response to an engine-issued proposal, or reports why it could
+   * not. `threadTurn` is the built request's `threadTurn`. `clock` is both
+   * clocks as the reply arrived: the engine judges a message thread the reply
+   * reports lost by how long it had idled by then.
+   */
   getAiActionProposalFromLlmResponse?(
     playerId: number,
     fingerprint: string,
+    threadTurn: number | null,
     provider: string,
     status: number,
     responseBody: string,
+    clock: LlmClockReading,
   ): Promise<AiLlmProposalResult | null>;
   /** The engine-owned LLM provider/model catalog for the settings UI. */
   llmProviderCatalog?(): Promise<unknown>;
@@ -6010,15 +6089,6 @@ export interface EngineAdapter {
   exportPersistenceState?(): Promise<string>;
   dispose(): void;
 
-  /**
-   * Estimates a Commander deck's bracket from card contents. Returns null
-   * when the deck has no commander, is empty, or the adapter doesn't
-   * support local deck analysis (multiplayer adapters throw via
-   * `AdapterError` instead of silently returning null).
-   *
-   * Pure — no game state, no side effects. Safe to call on every deck edit.
-   */
-  estimateBracket(deck: BracketDeckRequest): Promise<BracketEstimate | null>;
 }
 
 /**
@@ -6276,6 +6346,16 @@ export interface PlayerSummary {
   player_key: string;
   display_name: string;
   dropped: boolean;
+  /**
+   * Whether this entrant has submitted a deck for server-hosted play (lobby
+   * protocol v22). A readiness flag only — the deck itself is private and never
+   * crosses the wire, so an opponent cannot see a decklist before the match.
+   *
+   * Optional here so a snapshot from a pre-v22 broker (which omits it) still
+   * types, and so existing fixtures need no churn; a v22 broker always sends it.
+   * `undefined` reads as "not submitted", the same tolerance `report_gate` uses.
+   */
+  deck_submitted?: boolean;
 }
 
 /**

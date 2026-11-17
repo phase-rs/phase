@@ -67,7 +67,9 @@ fn cast_paying_casualty_declining_teamwork(
                 // Decline Teamwork; pay Casualty.
                 let pay = !is_teamwork_cost(&cost);
                 runner
-                    .act(GameAction::DecideOptionalCost { pay })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    })
                     .expect("optional-cost decision must be accepted");
             }
             WaitingFor::PayCost {
@@ -174,7 +176,9 @@ fn teamwork_payment_satisfies_teamwork_rider_when_composed_with_casualty() {
                 // Pay Teamwork; decline Casualty.
                 let pay = is_teamwork_cost(&cost);
                 runner
-                    .act(GameAction::DecideOptionalCost { pay })
+                    .act(GameAction::DecideOptionalCost {
+                        index: if pay { 0 } else { 1 },
+                    })
                     .expect("optional-cost decision must be accepted");
             }
             WaitingFor::PayCost {

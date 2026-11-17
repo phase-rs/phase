@@ -1541,6 +1541,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -2311,6 +2312,7 @@ fn legacy_quantity_ref(x: &QuantityRef) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -2586,6 +2588,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
@@ -2731,6 +2734,7 @@ fn legacy_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -2795,6 +2799,9 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         // and `writes_event_object` carriers).
         TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        // CR 603.10a + CR 608.2c: fail-closed — a per-ability record keyed to population
+        // members; a missed TRUE is the CR 603.3b under-prompt.
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::ChosenCard
@@ -3064,6 +3071,7 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         | FilterProp::ControlledContinuouslySinceTurnBegan
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -3200,6 +3208,11 @@ fn legacy_trigger_definition(td: &TriggerDefinition) -> bool {
             .is_some_and(legacy_static_condition)
         || td.valid_card.as_ref().is_some_and(legacy_target_filter)
         || td.valid_source.as_ref().is_some_and(legacy_target_filter)
+        || td
+            .blocker_count
+            .as_ref()
+            .and_then(|threshold| threshold.blocker.as_ref())
+            .is_some_and(legacy_target_filter)
 }
 
 /// D5: every effect position where a frozen tag can appear. `{ .. }` elides
@@ -3885,7 +3898,7 @@ fn legacy_effect(x: &Effect) -> bool {
         // batch prompt this flag feeds is never consulted for it.
         Effect::EpicCopy { .. } => false,
         Effect::CreateDelayedTrigger { effect, .. } => legacy_definition(effect),
-        Effect::CreateDrawReplacement { replacement_effect } => legacy_effect(replacement_effect),
+        Effect::CreateDrawReplacement { replacement_effect } => legacy_definition(replacement_effect),
         Effect::RollDie { count, results, .. } => {
             legacy_quantity_expr(count) || results.iter().any(|r| legacy_definition(&r.effect))
         }
@@ -4526,6 +4539,7 @@ fn filter_prop_operand_reads(prop: &FilterProp) -> RwProfile {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -4757,6 +4771,7 @@ fn walk_ability(
         parent_target_missing_reason: _,
         activation_cost_reduction: _,
         activation_record: _,
+        announced_usage_key: _,
         control_change_instruction: _,
     } = a;
 
@@ -4911,6 +4926,9 @@ fn walk_definition(
         unlowered_guard: _,
         face_down_in_exile: _,
         granting_object: _,
+        // CR 113.2c + CR 602.5c: re-donation lineage; a usage-key input, not a
+        // read or write — creates no resolution-time dependency.
+        grant_chain: _,
     } = a;
 
     // §4.3.2: own `player_scope` overrides the inherited scope (Brink's Discard
@@ -6325,10 +6343,6 @@ fn rw_effect(
         // ---- Control (SetMembership external) ----
         Effect::GainControl { target: _ }
         | Effect::GainControlAll { target: _ }
-        | Effect::GiveControl {
-            target: _,
-            recipient: _,
-        }
         | Effect::ExchangeControl {
             target_a: _,
             target_b: _,
@@ -6336,6 +6350,22 @@ fn rw_effect(
             let mut p = ext_write(StateKind::SetMembership);
             p.writes_membership_external_census.merge(Census::Any);
             p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            (p, Some(WriteScope::External))
+        }
+        // CR 603.10a + CR 608.2c: the handoff reads its object filter AND its
+        // recipient filter, and either can name a per-member-bound referent — the
+        // per-object assignment (`ChoiceAssignment`) is a record the resolving
+        // ability keyed to its own population members. Both are profiled through
+        // the one filter profiler (which also records the member-bound bit), so a
+        // same-event group of distinct sources cannot take the auto-order path.
+        Effect::GiveControl { target, recipient } => {
+            let mut p = ext_write(StateKind::SetMembership);
+            p.writes_membership_external_census.merge(Census::Any);
+            p.writes_membership_external_zones.merge(ZoneSpan::Any);
+            flag_legacy_write_target(&mut p, target);
+            flag_member_bound_write_target(&mut p, target);
+            p.merge(rw_target_filter(target));
+            p.merge(rw_target_filter(recipient));
             (p, Some(WriteScope::External))
         }
 
@@ -6460,11 +6490,7 @@ fn rw_effect(
                 .unwrap_or_else(RwProfile::empty),
             None,
         ),
-        Effect::CreateDrawReplacement { replacement_effect } => {
-            let (mut b, _) = rw_effect(replacement_effect, None, pscope, chain_move_owner);
-            b.drop_writes();
-            (b, None)
-        }
+        Effect::CreateDrawReplacement { replacement_effect } => (deferred(replacement_effect), None),
         Effect::PreventDamage {
             amount_dynamic,
             target: _,
@@ -6756,6 +6782,7 @@ fn rw_effect(
             selection: _,
             choice_optional: _,
             reveal: _,
+            cardinality: _,
         } => {
             let mut p = RwProfile::empty();
             if let Some(q) = count {
@@ -7046,6 +7073,9 @@ fn rw_quantity_ref(x: &QuantityRef) -> RwProfile {
             reads_player_of(StateKind::PlayerLife)
         }
         QuantityRef::StartingLifeTotal { player } => rw_player_scope(player),
+        // CR 103.2a: the starting-deck latch lives on the player — same
+        // player-scope read profile as the starting-life snapshot.
+        QuantityRef::StartingDeckSize { player } => rw_player_scope(player),
         // CR 701.57a: reads the transient last-discover scalar, written only by
         // discover resolution (never by a sibling trigger) — no ordering-relevant
         // read/write, mirroring StartingLifeTotal.
@@ -7443,10 +7473,11 @@ fn rw_ability_condition(x: &AbilityCondition) -> RwProfile {
         // read would spuriously pair against every event-object writer
         // (damage, counters).
         AbilityCondition::ChosenLabelIs { label: _ } => RwProfile::empty(),
-        // Both `AbilityUseCountThisTurn` tallies read a per-turn journal keyed
-        // by this ability's own `(source_id, ability_index)` — the same read
-        // bucket for `Resolved` (`ability_resolutions_this_turn`) and
-        // `Activated` (`activated_abilities_this_turn`). Neither field selects a
+        // Both `AbilityUseCountThisTurn` tallies read a per-turn journal: the
+        // `Resolved` tally reads `ability_resolutions_this_turn` keyed by
+        // `(source_id, ability_index)`, while the `Activated` tally reads
+        // `activated_abilities_this_turn` keyed by the per-acquisition
+        // `AbilityUsageKey` (CR 602.5c). Neither field selects a
         // different KIND or SCOPE of state, so the profile is unchanged by the
         // tally axis; both are destructured without `..` so a future field
         // forces re-classification.
@@ -7930,6 +7961,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::SourceChosenPlayer
@@ -7970,6 +8002,9 @@ fn rw_player_filter(x: &PlayerFilter) -> RwProfile {
             source,
             kind: _,
             min_sources: _,
+            // Static candidate-population selector; no read/write impact (same
+            // as `ControlsCount.relation` below).
+            relation: _,
         } => {
             let mut p = reads_player_of(StateKind::JournalLife);
             if let Some(source) = source.as_deref() {
@@ -8235,6 +8270,29 @@ mod tests {
         };
         assert_eq!(profile(AttackSubject::EventAttackers), reads_event_live());
         assert_eq!(profile(AttackSubject::You), RwProfile::empty());
+    }
+
+    /// CR 103.2a: the starting-deck latch profiles exactly like the
+    /// starting-life snapshot for every player scope. The revert (an empty
+    /// profile) would drop the latch from read/write ordering.
+    #[test]
+    fn starting_deck_size_profiles_like_starting_life_total() {
+        for scope in [
+            PlayerScope::Controller,
+            PlayerScope::ScopedPlayer,
+            PlayerScope::Target,
+        ] {
+            assert_eq!(
+                rw_quantity_ref(&QuantityRef::StartingDeckSize {
+                    player: scope.clone()
+                }),
+                rw_quantity_ref(&QuantityRef::StartingLifeTotal { player: scope }),
+            );
+        }
+        // The latch is not one of the 12 frozen legacy tags.
+        assert!(!legacy_quantity_ref(&QuantityRef::StartingDeckSize {
+            player: PlayerScope::Controller,
+        }));
     }
 
     #[test]

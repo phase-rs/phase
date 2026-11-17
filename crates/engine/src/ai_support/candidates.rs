@@ -10,7 +10,8 @@ use crate::game::keywords;
 use crate::game::mana_sources;
 use crate::game::mulligan;
 use crate::types::ability::{
-    ChoiceType, CounterCostSelection, TapCreaturesSelectionMode, TargetRef,
+    ChoiceType, CounterCostSelection, ObjectSelectionCardinality, TapCreaturesSelectionMode,
+    TargetRef,
 };
 use crate::types::actions::{
     CastChoice, GameAction, LearnOption, MulliganChoice, OutsideGameSelection,
@@ -1156,7 +1157,9 @@ pub fn candidate_actions_broad_with_probe(
         // never advantageous to the AI, and the engine validates `len() <= max`.
         // Search may still enumerate alternative subsets via legal-actions if a
         // richer policy is wired later; this guarantees the AI never wedges.
-        WaitingFor::ChooseUntapSubset { player, group, max } => {
+        WaitingFor::ChooseUntapSubset {
+            player, group, max, ..
+        } => {
             let chosen: Vec<ObjectId> = group.iter().copied().take(*max).collect();
             vec![candidate(
                 GameAction::SelectCards { cards: chosen },
@@ -1470,13 +1473,25 @@ pub fn candidate_actions_broad_with_probe(
             player,
             cards,
             optional,
+            cardinality,
             ..
         } => {
-            // CR 701.20a: Normal reveal forces exactly one pick. Optional reveal
-            // (e.g., reveal-lands) additionally permits an empty selection to
-            // signal "I decline to reveal" — the source's decline branch fires.
-            let mut variants = select_cards_variants(*player, cards, Some(1));
-            if *optional {
+            // CR 608.2d: issue the selections the prompt's published cardinality
+            // admits. Normal post-reveal choices take exactly one card; CR 107.1c
+            // "any number" (Metalworker) admits every subset, which the shared
+            // any-size enumerator covers with none, all, and each single card.
+            let mut variants = match cardinality {
+                ObjectSelectionCardinality::Exactly { count } => {
+                    select_cards_variants(*player, cards, Some(*count as usize))
+                }
+                ObjectSelectionCardinality::AnyNumber => {
+                    select_cards_variants(*player, cards, None)
+                }
+            };
+            // CR 701.20a: an optional reveal (e.g., reveal-lands) additionally
+            // permits an empty selection to signal "I decline to reveal" — the
+            // source's decline branch fires.
+            if *optional && !matches!(cardinality, ObjectSelectionCardinality::AnyNumber) {
                 variants.push(candidate(
                     GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
@@ -2296,18 +2311,20 @@ pub fn candidate_actions_broad_with_probe(
             };
             bounded_select_card_candidates(*player, cards, sizes)
         }
-        WaitingFor::OptionalCostChoice { player, .. } => vec![
-            candidate(
-                GameAction::DecideOptionalCost { pay: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::DecideOptionalCost { pay: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
+        // CR 601.2b: one candidate per option the prompt actually presents.
+        // `optional_cost_options` is the shared authority for the index domain,
+        // so candidate enumeration cannot disagree with the handler's
+        // bounds check about how many answers exist.
+        WaitingFor::OptionalCostChoice { player, cost, .. } => (0
+            ..crate::game::casting_costs::optional_cost_options(cost).len())
+            .map(|index| {
+                candidate(
+                    GameAction::DecideOptionalCost { index },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 702.47a–e: splice another eligible card onto the spell, or finish.
         WaitingFor::SpliceOffer {
             player, eligible, ..
@@ -2370,12 +2387,12 @@ pub fn candidate_actions_broad_with_probe(
         // CR 601.2b: Defiler cycle — accept or decline life payment for mana reduction.
         WaitingFor::DefilerPayment { player, .. } => vec![
             candidate(
-                GameAction::DecideOptionalCost { pay: true },
+                GameAction::DecideOptionalCost { index: 0 },
                 TacticalClass::Selection,
                 Some(*player),
             ),
             candidate(
-                GameAction::DecideOptionalCost { pay: false },
+                GameAction::DecideOptionalCost { index: 1 },
                 TacticalClass::Selection,
                 Some(*player),
             ),
@@ -9005,6 +9022,7 @@ mod tests {
         names.extend((0..10_000).map(|i| format!("Bulk Card {i}")));
         state.all_card_names = names.into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::card_name(),
@@ -9028,6 +9046,7 @@ mod tests {
     fn card_name_prompt(mut state: GameState, names: Vec<String>) -> GameState {
         state.all_card_names = names.into();
         state.waiting_for = WaitingFor::NamedChoice {
+            decision_subject_id: None,
             free_entry: None,
             player: PlayerId(0),
             choice_type: ChoiceType::card_name(),
@@ -9515,7 +9534,11 @@ mod tests {
                 .activation_restrictions(vec![ActivationRestriction::OnlyOnceEachTurn]),
             );
         }
-        state.activated_abilities_this_turn.insert((source, 0), 1);
+        // CR 602.5c: the used-budget entry is keyed by the resolved
+        // acquisition, not the index.
+        let usage = crate::game::restrictions::ability_usage_key(&state, source, 0)
+            .expect("the printed ability resolves");
+        state.activated_abilities_this_turn.insert(usage, 1);
 
         let actions = candidate_actions(&state);
         assert!(!actions.iter().any(|candidate| {

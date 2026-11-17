@@ -2780,12 +2780,16 @@ pub(super) fn parse_targeted_action_ast(
             .parse(input)
         })
         .is_some();
-        // CR 115.1d + CR 601.2c: Preserve the "up to N target" count instead of discarding
-        // it. `strip_optional_target_prefix` already parses the quantifier; the
-        // spec was previously dropped here, so "gain control of up to two target
-        // creatures" collapsed to a single optional slot and only one creature
-        // could be chosen (issue #6205).
-        let (target_text, multi_target) = super::strip_optional_target_prefix(rest);
+        // CR 115.1d + CR 601.2c: Preserve the target count instead of discarding
+        // it. Exact counts ("X target", "two target") must be tried before the
+        // optional prefixes, because an exact count makes every slot mandatory:
+        // "gain control of X target creatures" collapsed to a single target slot
+        // when the exact prefix was dropped (issue #7862). "up to N target" and
+        // "any number of target" keep their count through the optional prefix
+        // (issue #6205).
+        let (target_text, multi_target) = super::strip_exact_target_prefix(rest)
+            .map(|(count, rest)| (rest, Some(MultiTargetSpec::exact(count))))
+            .unwrap_or_else(|| super::strip_optional_target_prefix(rest));
         // CR 608.2k: A singular bare object pronoun ("gains control of it") in a subject-bearing
         // clause is an anaphor, not a parent-target chain. Route it through
         // `resolve_it_pronoun` — identical to the tap/sacrifice/counter clauses — so
@@ -4425,7 +4429,7 @@ pub(super) fn parse_hand_reveal_ast(
     // This function only handles hand-related reveals.
 
     if nom_primitives::scan_contains(lower, "hand") {
-        let (target, card_filter) =
+        let (target, card_filter, cardinality) =
             parse_hand_reveal_target_and_card_filter(after_reveal_lower, ctx);
         // CR 701.20a: a counted reveal ("X cards from their hand", "a card at
         // random from their hand") reveals that many cards, not the whole hand.
@@ -4438,9 +4442,19 @@ pub(super) fn parse_hand_reveal_ast(
         {
             return parse_counted_hand_reveal(after_reveal, ctx);
         }
+        // CR 107.1c + CR 701.20a: an any-number reveal without a readable card
+        // filter is an honest gap, not a reveal that can never select a card.
+        if cardinality == ObjectSelectionCardinality::AnyNumber
+            && matches!(card_filter, TargetFilter::None)
+        {
+            return Some(HandRevealImperativeAst::UnreadableAnyNumberFilter {
+                fragment: text.to_string(),
+            });
+        }
         return Some(HandRevealImperativeAst::RevealAll {
             target,
             card_filter,
+            cardinality,
         });
     }
 
@@ -4509,11 +4523,15 @@ fn parse_reveal_hand_owner(input: &str) -> OracleResult<'_, TargetFilter> {
 fn parse_hand_reveal_target_and_card_filter(
     after_reveal_lower: &str,
     ctx: &mut ParseContext,
-) -> (TargetFilter, TargetFilter) {
+) -> (TargetFilter, TargetFilter, ObjectSelectionCardinality) {
     if let Ok((_, target)) = all_consuming(terminated(parse_subject_hand_owner, opt(tag("."))))
         .parse(after_reveal_lower.trim())
     {
-        return (target, TargetFilter::None);
+        return (
+            target,
+            TargetFilter::None,
+            ObjectSelectionCardinality::SINGLE,
+        );
     }
 
     // CR 701.20a + reflexive choose: "<possessive> hand and you choose a [filter]
@@ -4535,12 +4553,27 @@ fn parse_hand_reveal_target_and_card_filter(
                     .is_ok();
 
             if chooses_card_from_it {
-                return (target, super::parse_choose_filter(choose, ctx));
+                return (
+                    target,
+                    super::parse_choose_filter(choose, ctx),
+                    ObjectSelectionCardinality::SINGLE,
+                );
             }
         }
     }
 
-    if let Ok((after_all, _)) = tag::<_, _, OracleError<'_>>("all ").parse(after_reveal_lower) {
+    // CR 107.1c + CR 701.20a: "any number of [type] cards in your hand" lets the
+    // player choose which matching cards (zero or more) to reveal; "all [type]
+    // cards" keeps the historical single post-reveal choice.
+    if let Ok((after_quantifier, cardinality)) = alt((
+        value(
+            ObjectSelectionCardinality::AnyNumber,
+            tag::<_, _, OracleError<'_>>("any number of "),
+        ),
+        value(ObjectSelectionCardinality::SINGLE, tag("all ")),
+    ))
+    .parse(after_reveal_lower)
+    {
         let Ok((hand_phrase, descriptor)) = terminated(
             take_until::<_, _, OracleError<'_>>(" cards"),
             alt((
@@ -4548,42 +4581,54 @@ fn parse_hand_reveal_target_and_card_filter(
                 tag(" cards from "),
             )),
         )
-        .parse(after_all) else {
-            return (TargetFilter::Any, TargetFilter::None);
+        .parse(after_quantifier) else {
+            return (TargetFilter::Any, TargetFilter::None, cardinality);
         };
         let target = parse_hand_possessive_target(hand_phrase)
             .map(|(_, target)| target)
             .unwrap_or(TargetFilter::Any);
         if descriptor.trim().is_empty() {
-            return (target, TargetFilter::Any);
+            return (target, TargetFilter::Any, cardinality);
         }
         let singular = format!("{} card", descriptor.trim());
         let (filter, rem) =
             parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
         if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
-            return (target, filter);
+            return (target, filter, cardinality);
         }
-        return (target, TargetFilter::None);
+        return (target, TargetFilter::None, cardinality);
     }
 
     // CR 701.20a: "reveal a card from your hand" / "reveal an [type] card from ..."
     let Ok((after_article, _)) =
         alt((tag::<_, _, OracleError<'_>>("a "), tag("an "))).parse(after_reveal_lower)
     else {
-        return (TargetFilter::Any, TargetFilter::None);
+        return (
+            TargetFilter::Any,
+            TargetFilter::None,
+            ObjectSelectionCardinality::SINGLE,
+        );
     };
     if let Ok((hand_phrase, _)) = tag::<_, _, OracleError<'_>>("card from ").parse(after_article) {
         let target = parse_hand_possessive_target(hand_phrase)
             .map(|(_, target)| target)
             .unwrap_or(TargetFilter::Any);
-        return (target, TargetFilter::Any);
+        return (
+            target,
+            TargetFilter::Any,
+            ObjectSelectionCardinality::SINGLE,
+        );
     }
     let Ok((hand_phrase, descriptor)) = terminated(
         take_until::<_, _, OracleError<'_>>(" card from "),
         tag(" card from "),
     )
     .parse(after_article) else {
-        return (TargetFilter::Any, TargetFilter::None);
+        return (
+            TargetFilter::Any,
+            TargetFilter::None,
+            ObjectSelectionCardinality::SINGLE,
+        );
     };
     let target = parse_hand_possessive_target(hand_phrase)
         .map(|(_, target)| target)
@@ -4592,9 +4637,13 @@ fn parse_hand_reveal_target_and_card_filter(
     let (filter, rem) =
         parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
     if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
-        (target, filter)
+        (target, filter, ObjectSelectionCardinality::SINGLE)
     } else {
-        (target, TargetFilter::None)
+        (
+            target,
+            TargetFilter::None,
+            ObjectSelectionCardinality::SINGLE,
+        )
     }
 }
 
@@ -4615,17 +4664,22 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             },
             choice_optional: false,
             reveal: false,
+            cardinality: ObjectSelectionCardinality::SINGLE,
         },
         HandRevealImperativeAst::RevealAll {
             target,
             card_filter,
+            cardinality,
         } => Effect::RevealHand {
             target,
             card_filter,
             count: None,
             selection: crate::types::ability::CardSelectionMode::Chosen,
+            // CR 107.1c: an "any number" selection already admits zero, so it
+            // is not a "may" choice.
             choice_optional: false,
             reveal: true,
+            cardinality,
         },
         HandRevealImperativeAst::RevealPartial {
             count,
@@ -4638,6 +4692,7 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
             selection,
             choice_optional: false,
             reveal: true,
+            cardinality: ObjectSelectionCardinality::SINGLE,
         },
         // CR 701.20a: Back-reference reveal — distinct from RevealHand (zone-wide).
         // ParentTarget binds at runtime to the parent ability's affected IDs.
@@ -4646,6 +4701,9 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
         },
         // CR 701.20: Reveal a targeted object (Hauntwoods Shrieker).
         HandRevealImperativeAst::RevealObject { target } => Effect::Reveal { target },
+        HandRevealImperativeAst::UnreadableAnyNumberFilter { fragment } => {
+            Effect::unimplemented("reveal_any_number_card_filter", fragment)
+        }
     }
 }
 
@@ -7216,6 +7274,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             selection: crate::types::ability::CardSelectionMode::Chosen,
             choice_optional,
             reveal: true,
+            cardinality: ObjectSelectionCardinality::SINGLE,
         },
         // CR 608.2d: Anaphoric "choose N of them/those" → select from the tracked set
         // populated by the preceding effect (RevealTop, RevealHand, ExileTop, etc.).
@@ -7571,6 +7630,26 @@ pub(super) fn parse_utility_imperative_ast(
         let (target, target_rem) = parse_target_with_ctx(target_text, ctx);
         if attachment_rem.trim().is_empty() && target_rem.trim().is_empty() {
             return Some(UtilityImperativeAst::UnattachAll { attachment, target });
+        }
+    }
+    // CR 701.3d: "unattach it" names one attachment by anaphor and no host, so
+    // it is unattached from whatever it is attached to. Only a parent-referent
+    // anaphor is admitted: other operands ("unattach ~", "unattach enchanted
+    // Equipment") have no resolver binding here and stay unimplemented.
+    if let Some(((), object_text)) = nom_on_lower(text, lower, |input| {
+        value((), tag("unattach ")).parse(input)
+    }) {
+        let (attachment, rem) = parse_target_with_ctx(object_text, ctx);
+        if rem.trim().is_empty()
+            && matches!(
+                attachment,
+                TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+            )
+        {
+            return Some(UtilityImperativeAst::UnattachAll {
+                attachment,
+                target: TargetFilter::Any,
+            });
         }
     }
     // CR 701.27 + CR 701.28: "transform" and "convert" are equivalent game actions.
@@ -14471,6 +14550,7 @@ fn is_player_axis_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSource
@@ -19823,23 +19903,13 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
         (trimmed, Duration::UntilEndOfTurn)
     };
 
-    // CR 702.18a / 702.11a: "can't be the target [of ...]" granted to the target
-    // for a duration is a Shroud / Hexproof keyword grant (Vines of Vastwood). Map
-    // it to the keyword so the targeting check applies the correct controller scope
-    // (Hexproof leaves the controller able to target), reusing the enforced keyword
-    // path rather than a scope-less rule static.
+    // CR 702.18a + CR 109.5: "can't be the target [of ...]" granted to the target
+    // for a duration (Vines of Vastwood). The opponent-scoped form is scoped from
+    // the granting controller, not Hexproof; see `cant_be_targeted_effect_grant`.
     if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(clean) {
-        let keyword = match scope {
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
-                crate::types::keywords::Keyword::Shroud
-            }
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
-                crate::types::keywords::Keyword::Hexproof
-            }
-        };
         return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
-                .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
+                .modifications(vec![super::subject::cant_be_targeted_effect_grant(scope)])],
             duration: Some(duration),
             target: None,
             end_cost: None,
@@ -23122,6 +23192,57 @@ mod tests {
             "Expected GainControl, got {effect:?}"
         );
         let _ = (text, lower);
+    }
+
+    /// CR 115.1d + CR 601.2c: Mass Manipulation's printed text carries an
+    /// uppercase `X` ("Gain control of X target creatures and/or
+    /// planeswalkers."). The gain-control branch dispatches through
+    /// `nom_on_lower`, which returns original-case text, so the exact-count
+    /// prefix must match case-insensitively — otherwise the count is dropped
+    /// and the engine offers one target slot instead of X (issue #7862).
+    #[test]
+    fn parse_gain_control_of_x_target_creatures_from_printed_case() {
+        use crate::types::ability::{MultiTargetSpec, QuantityExpr, QuantityRef, TypeFilter};
+        let text = "Gain control of X target creatures and/or planeswalkers";
+        let lower = text.to_lowercase();
+        let ast = parse_targeted_action_ast(text, &lower, &mut ParseContext::default())
+            .expect("Mass Manipulation's printed text should parse");
+        match ast {
+            TargetedImperativeAst::GainControl {
+                multi_target,
+                target,
+                ..
+            } => {
+                assert_eq!(
+                    multi_target,
+                    Some(MultiTargetSpec::exact(QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string()
+                        }
+                    })),
+                    "printed uppercase X must still yield an exact(X) count"
+                );
+                let TargetFilter::Or { filters } = target else {
+                    panic!("expected Or filter for and/or, got {target:?}");
+                };
+                assert_eq!(filters.len(), 2);
+                assert!(
+                    filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Creature)
+                    )),
+                    "filter must include Creature"
+                );
+                assert!(
+                    filters.iter().any(|filter| matches!(
+                        filter,
+                        TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Planeswalker)
+                    )),
+                    "filter must include Planeswalker"
+                );
+            }
+            other => panic!("Expected GainControl AST, got {other:?}"),
+        }
     }
 
     /// CR 613.1b: Hellkite Tyrant — "gain control of all artifacts that player
@@ -31291,6 +31412,135 @@ mod tests {
             Some(MultiTargetSpec::exact(QuantityExpr::Fixed { value: 3 }))
         );
         assert_eq!(execute.target_choice_timing, TargetChoiceTiming::Resolution);
+    }
+
+    /// SHAPE — CR 510.1a: "… and this creature assigns no combat damage this
+    /// turn" after a bare " and " is its own subject-predicate clause. Covers the
+    /// printed members of the class (Goblin Vandal after a Destroy, Rysorian
+    /// Badger after a GainLife). Before the clause splitter recognised the
+    /// conjunct, it stayed glued to the leading imperative: the trailing "this
+    /// turn" was stripped onto that imperative and the rider fell to an
+    /// `Unimplemented` sub-ability.
+    #[test]
+    fn self_assigns_no_combat_damage_conjunct_splits_off_the_leading_imperative() {
+        let cases = [
+            (
+                "Goblin Vandal",
+                "Whenever this creature attacks and isn't blocked, you may pay {R}. If you do, destroy target artifact defending player controls and this creature assigns no combat damage this turn.",
+                vec!["Goblin".to_string(), "Rogue".to_string()],
+            ),
+            (
+                "Rysorian Badger",
+                "Whenever this creature attacks and isn't blocked, you may exile up to two target creature cards from defending player's graveyard. If you do, you gain 1 life for each card exiled this way and this creature assigns no combat damage this turn.",
+                vec!["Badger".to_string()],
+            ),
+        ];
+        for (name, oracle, subtypes) in cases {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &[],
+                &["Creature".to_string()],
+                &subtypes,
+            );
+            let execute = parsed
+                .triggers
+                .first()
+                .and_then(|trigger| trigger.execute.as_ref())
+                .unwrap_or_else(|| panic!("{name} trigger execute"));
+            assert!(
+                !crate::parser::oracle::has_unimplemented(execute),
+                "{name} must parse fully: {execute:?}"
+            );
+            // Walk to the last link of the chain: the rider, immediately after
+            // the conditional ("If you do") leading imperative.
+            let mut chain: Vec<&AbilityDefinition> = vec![execute];
+            while let Some(next) = chain.last().and_then(|def| def.sub_ability.as_deref()) {
+                chain.push(next);
+            }
+            let [.., leading, rider] = chain.as_slice() else {
+                panic!("{name}: expected a leading imperative and a rider, got {chain:?}");
+            };
+            assert_eq!(
+                leading.duration, None,
+                "{name}: the rider's \"this turn\" must not leak onto the leading imperative"
+            );
+            let Effect::GenericEffect {
+                static_abilities,
+                duration,
+                ..
+            } = rider.effect.as_ref()
+            else {
+                panic!("{name}: expected the rider GenericEffect, got {rider:?}");
+            };
+            assert_eq!(duration, &Some(Duration::UntilEndOfTurn), "{name}");
+            let [rule] = static_abilities.as_slice() else {
+                panic!("{name}: expected one rule modification, got {static_abilities:?}");
+            };
+            assert_eq!(rule.mode, StaticMode::AssignNoCombatDamage, "{name}");
+            assert_eq!(rule.affected, Some(TargetFilter::SelfRef), "{name}");
+        }
+    }
+
+    /// SHAPE — CR 508.5a + CR 108.3: a target card "from defending player's
+    /// graveyard" is owned by that one defending player, not by any player.
+    /// Covers the attack-trigger class across the exile (Rysorian Badger,
+    /// Graven Abomination) and reanimate (Rakshasa Debaser) verbs.
+    #[test]
+    fn defending_player_graveyard_target_binds_the_defending_owner() {
+        let cases = [
+            (
+                "Rysorian Badger",
+                "Whenever this creature attacks and isn't blocked, you may exile up to two target creature cards from defending player's graveyard. If you do, you gain 1 life for each card exiled this way and this creature assigns no combat damage this turn.",
+            ),
+            (
+                "Graven Abomination",
+                "Whenever this creature attacks, exile target card from defending player's graveyard.",
+            ),
+            (
+                "Rakshasa Debaser",
+                "Whenever this creature attacks, put target creature card from defending player's graveyard onto the battlefield under your control.",
+            ),
+        ];
+        for (name, oracle) in cases {
+            let parsed = crate::parser::oracle::parse_oracle_text(
+                oracle,
+                name,
+                &[],
+                &["Creature".to_string()],
+                &[],
+            );
+            let execute = parsed
+                .triggers
+                .first()
+                .and_then(|trigger| trigger.execute.as_ref())
+                .unwrap_or_else(|| panic!("{name} trigger execute"));
+            // Reach guard: the owner binding below comes from a complete parse.
+            assert!(
+                !crate::parser::oracle::has_unimplemented(execute),
+                "{name} must parse fully: {execute:?}"
+            );
+            let Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                target: TargetFilter::Typed(target),
+                ..
+            } = execute.effect.as_ref()
+            else {
+                panic!("{name}: expected a graveyard-origin ChangeZone, got {execute:?}");
+            };
+            assert!(
+                target.properties.contains(&FilterProp::Owned {
+                    controller: ControllerRef::DefendingPlayer,
+                }),
+                "{name}: target must be owned by the defending player: {target:?}"
+            );
+            assert!(
+                target.properties.contains(&FilterProp::InZone {
+                    zone: Zone::Graveyard,
+                }),
+                "{name}: target must be in a graveyard: {target:?}"
+            );
+        }
     }
 
     #[test]

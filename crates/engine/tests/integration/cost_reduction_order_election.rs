@@ -673,7 +673,9 @@ fn an_accepted_defiler_reduction_is_ordered_before_the_cost_floor() {
             "the Defiler offer must be presented before costs are locked in"
         );
         runner
-            .act(GameAction::DecideOptionalCost { pay })
+            .act(GameAction::DecideOptionalCost {
+                index: if pay { 0 } else { 1 },
+            })
             .expect("the Defiler decision must be accepted");
         runner
             .state()
@@ -736,7 +738,9 @@ fn an_accepted_defiler_reduction_can_create_the_election_itself() {
             })
             .expect("the cast must begin");
         runner
-            .act(GameAction::DecideOptionalCost { pay })
+            .act(GameAction::DecideOptionalCost {
+                index: if pay { 0 } else { 1 },
+            })
             .expect("the Defiler decision must be accepted");
         matches!(
             runner.state().waiting_for,
@@ -1030,7 +1034,7 @@ fn a_declared_kicker_survives_the_cost_reduction_election() {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("the kicker must be payable");
 
     let (costs, orders) = match &runner.state().waiting_for {
@@ -1800,7 +1804,7 @@ fn an_equal_value_announcement_that_changes_what_can_pay_is_still_offered() {
         setup.begin_manual_cast().expect("the cast must begin");
         setup
             .runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("the Defiler decision must be accepted");
         setup
     }
