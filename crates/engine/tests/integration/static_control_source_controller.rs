@@ -16,7 +16,7 @@ use engine::types::events::GameEvent;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaCost, ManaCostShard};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 
@@ -616,4 +616,86 @@ fn incremental_layer_pass_after_the_steal_matches_a_full_pass() {
         (library_size(&runner, P0), library_size(&runner, P1)),
         (library_size(&full, P0), library_size(&full, P1))
     );
+}
+
+/// R8 (cost): a chain of Confiscates, each enchanting the one before, the first
+/// enchanting P1's Island, all cast by P0. Only the Confiscate enchanting a
+/// source can change that source's controller, so a full pass previews at most
+/// one provider per remaining effect: k(k-1)/2 for k Confiscates, not the
+/// cubic total of previewing every attached Aura.
+#[test]
+fn confiscate_chain_previews_only_the_enchanting_provider() {
+    let mut scenario = board(2);
+    let island = scenario.add_basic_land(P1, ManaColor::Blue);
+    let confiscates: Vec<ObjectId> = (0..5)
+        .map(|_| add_aura(&mut scenario, P0, "Confiscate", CONFISCATE))
+        .collect();
+    let mut runner = scenario.build();
+    let mut host = island;
+    for (k, &confiscate) in confiscates.iter().enumerate() {
+        make_aura(&mut runner, confiscate, TypedFilter::permanent());
+        cast_aura(&mut runner, P0, confiscate, host);
+        assert_eq!(
+            runner.state().objects[&confiscate]
+                .attached_to
+                .and_then(|target| target.as_object()),
+            Some(host),
+            "REACH: Confiscate {k} enchants the previous link"
+        );
+        perf_counters::reset();
+        evaluate_layers(runner.state_mut());
+        let links = k as u64 + 1;
+        assert_eq!(
+            perf_counters::control_dependency_snapshot().previews,
+            links * (links - 1) / 2,
+            "previews per full pass with {links} Confiscates"
+        );
+        host = confiscate;
+    }
+    assert_eq!(
+        controller(&runner, island),
+        P0,
+        "REACH: the Island was taken"
+    );
+    for &confiscate in &confiscates {
+        assert_eq!(controller(&runner, confiscate), P0);
+    }
+}
+
+/// R9: the worked example. P1's Confiscate enchants P1's own Control Magic,
+/// which enchants P0's creature; P0's Word of Seizing takes the Confiscate.
+/// CR 613.8a + CR 613.8c: before Word applies, Confiscate would give Control
+/// Magic to P1, who already controls it, so Control Magic is independent and
+/// applies first; Confiscate waits for Word. P0 ends with both Auras and P1
+/// keeps the creature.
+#[test]
+fn word_of_seizing_on_a_redundant_confiscate_leaves_the_creature_with_p1() {
+    let mut scenario = board(2);
+    let creature = scenario.add_vanilla(P0, 2, 2);
+    let magic = add_aura(&mut scenario, P1, "Control Magic", CONTROL_MAGIC);
+    let confiscate = add_aura(&mut scenario, P1, "Confiscate", CONFISCATE);
+    let word = add_word_of_seizing(&mut scenario, P0);
+    let mut runner = scenario.build();
+    make_aura(&mut runner, magic, TypedFilter::creature());
+    make_aura(&mut runner, confiscate, TypedFilter::permanent());
+    cast_aura(&mut runner, P1, magic, creature);
+    cast_aura(&mut runner, P1, confiscate, magic);
+    assert_eq!(
+        (controller(&runner, magic), controller(&runner, creature)),
+        (P1, P1),
+        "REACH: P1 controls Control Magic and the creature"
+    );
+
+    give_priority(&mut runner, P0);
+    let outcome = runner.cast(word).target_object(confiscate).resolve();
+    let mut events = outcome.events().to_vec();
+    settle(&mut runner, &mut events);
+    assert_eq!(
+        controller(&runner, confiscate),
+        P0,
+        "REACH: P0 controls Confiscate"
+    );
+    assert_eq!(controller(&runner, magic), P0);
+    assert_eq!(controller(&runner, creature), P1);
+    assert_eq!(changes_of(&events, creature), vec![]);
 }

@@ -11065,11 +11065,16 @@ fn control_effect_output(
 /// only through a controller `dependent` reads: one its affected filter or
 /// condition reads, or the controller of `dependent`'s own source, which a
 /// static's "you" names. A resolved effect's "you" was fixed when it resolved (CR 109.5), so for
-/// a transient only the filter and condition remain. Answers before any clone.
+/// a transient only the filter and condition remain. For the source, the gate
+/// asks the provider's own affected set (CR 613.6: its retained set once it
+/// started; CR 613.1b: otherwise its affected filter under the same context the
+/// apply path uses, which only narrows it), so a provider on another object in
+/// an Aura chain is rejected. Answers before any clone.
 fn control_provider_cannot_change(
     state: &GameState,
     dependent: &ActiveContinuousEffect,
     provider: &ActiveContinuousEffect,
+    started_effect_sets: &StartedContinuousEffectSets,
 ) -> bool {
     let reads = target_filter_characteristic_reads(&dependent.affected_filter).union(
         dependent
@@ -11081,16 +11086,20 @@ fn control_provider_cannot_change(
     if reads.intersects(CharacteristicKinds::CONTROLLER) {
         return false;
     }
-    dependent.transient_id.is_some()
-        || match effect_names_single_affected_object(provider) {
-            Some(id) => id != dependent.source_id,
-            None => attachment_relation_rejects(
-                state,
-                &provider.affected_filter,
+    if dependent.transient_id.is_some() {
+        return true;
+    }
+    match continuous_effect_group_key(state, provider).and_then(|key| started_effect_sets.get(&key))
+    {
+        Some(retained) => !retained.contains(&dependent.source_id),
+        None => {
+            let ctx = FilterContext::from_source_with_controller(
                 provider.source_id,
-                dependent.source_id,
-            ),
+                active_effect_condition_controller(state, provider),
+            );
+            !matches_target_filter(state, dependent.source_id, &provider.affected_filter, &ctx)
         }
+    }
 }
 
 /// CR 613.8a(b): applying `provider` now would change what `dependent` does.
@@ -11169,7 +11178,12 @@ fn apply_control_effects_in_dependency_order(
                             .is_some_and(|(dependent_key, provider_key)| {
                                 dependent_key == provider_key
                             })
-                        || control_provider_cannot_change(state, dependent, provider)
+                        || control_provider_cannot_change(
+                            state,
+                            dependent,
+                            provider,
+                            started_effect_sets,
+                        )
                     {
                         continue;
                     }
