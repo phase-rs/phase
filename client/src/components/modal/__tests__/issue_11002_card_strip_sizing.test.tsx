@@ -18,15 +18,17 @@ import { CardChoiceModal } from "../CardChoiceModal.tsx";
 import { ChoiceOverlay, ScrollableCardStrip } from "../ChoiceOverlay.tsx";
 import { RetargetChoiceModal } from "../RetargetChoiceModal.tsx";
 
-// Issue #11002: card choices (Search Library, Dig, Scry, ...) and the
-// graveyard/exile viewer showed their cards at battlefield size. The strips
-// sized cards with `.card-choice-strip [role="img"]`, a rule keyed to the
-// markup CardImage rendered when it was written. CardImage later drew loaded
-// art as a plain <img>, which has no role attribute, so the rule stopped
-// matching without any error, and the strip's wrapper never grew into the
-// overlay body. These tests pin the replacement from both ends: the strip's
-// frame fills its parent and sets the --card-w/--card-h pair, and everything
-// drawn in a strip reads that pair, whatever its markup.
+// Issue #11002: on a phone, card choices (Search Library, Dig, Scry, ...) and
+// the graveyard/exile viewer showed their cards at battlefield size. The
+// strips sized cards with `.card-choice-strip [role="img"]`, a rule keyed to
+// the markup CardImage rendered when it was written. CardImage later drew
+// loaded art as a plain <img>, which has no role attribute, so the rule
+// stopped matching without any error, and the strip's wrapper never grew into
+// the overlay body. These tests pin the replacement from both ends: below lg,
+// where the overlay fills the screen, the strip's frame fills its parent and
+// sets the --card-w/--card-h pair, and everything drawn in a strip reads that
+// pair, whatever its markup. From lg up the cards keep the board size on
+// purpose: desktop testing found it reads well there.
 
 vi.mock("../../../hooks/useCardImage.ts", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../hooks/useCardImage.ts")>()),
@@ -58,7 +60,7 @@ afterEach(() => {
 });
 
 type StyleRule = {
-  /** Preludes of the blocks around the rule, outermost first, such as `@media (width >= 64rem)`. */
+  /** Preludes of the blocks around the rule, outermost first, such as `@media (width < 64rem)`. */
   enclosedBy: string[];
   selectors: string[];
   declarations: Map<string, string>;
@@ -117,6 +119,10 @@ const STYLESHEET_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../../
 const STYLE_RULES = readStyleRules(readFileSync(STYLESHEET_PATH, "utf8"));
 const BELOW_LG = "@media (width < 64rem)";
 const STRIP_CLASS = /\.(card-strip-frame|card-choice-strip|zone-viewer-strip)(?![\w-])/;
+/** A strip class in a selector's last compound: the rule styles the frame or a strip itself. */
+const STYLES_A_STRIP = /\.(card-strip-frame|card-choice-strip|zone-viewer-strip)(?![\w-])[^\s>+~]*$/;
+const SIZING_PROPERTY =
+  /^(min-|max-)?(width|height|inline-size|block-size)$|^(aspect-ratio|flex(-basis)?|container(-type)?)$|^--card-/;
 
 /**
  * The declarations index.css gives `element` through rules that select one of
@@ -256,11 +262,10 @@ describe("the strip's frame", () => {
     // Desktop's board-size cards (from .card-scale-reset) read well in testing,
     // so the frame and the strips size nothing outside the below-lg block, and
     // no strip rule takes anything from the viewport height.
-    const sizingProperties = ["--card-h", "--card-w", "container-type", "flex", "height", "min-height"];
-    const bareStripSelectors = [".card-strip-frame", ".card-choice-strip", ".zone-viewer-strip"];
+    // A pseudo-element, such as the scrollbar, sizes only itself, not the cards.
     const sizingRules = STYLE_RULES.filter((rule) =>
-      rule.selectors.some((selector) => bareStripSelectors.includes(selector))
-      && sizingProperties.some((property) => rule.declarations.has(property)),
+      rule.selectors.some((selector) => STYLES_A_STRIP.test(selector) && !selector.includes("::"))
+      && Array.from(rule.declarations.keys()).some((property) => SIZING_PROPERTY.test(property)),
     );
     // Reach guard: the scan must find the below-lg sizing rule, or the loop below proves nothing.
     expect(sizingRules.length).toBeGreaterThan(0);
@@ -347,7 +352,7 @@ describe("what a strip draws besides a card", () => {
     expect(badge.parentElement).toHaveClass("absolute", "inset-0");
   });
 
-  it("draws a player target's tile in a retarget strip at the cards' size", () => {
+  it("draws a player target's tile at the cards' size below lg and at its desktop size from lg", () => {
     const { data } = retargetChoiceWaitingForFactory
       .withData({
         scope: { type: "All" },
@@ -358,15 +363,18 @@ describe("what a strip draws besides a card", () => {
 
     render(<RetargetChoiceModal data={data} />);
 
-    expect(screen.getByText(getPlayerDisplayName(0))).toHaveClass("w-[var(--card-w)]", "h-[var(--card-h)]");
+    expect(screen.getByText(getPlayerDisplayName(0))).toHaveClass(
+      "w-[var(--card-w)]",
+      "h-[var(--card-h)]",
+      "lg:w-32",
+      "lg:h-44",
+    );
   });
 });
 
 it("never sizes a strip's cards by reaching into their markup", () => {
   // A strip class, any pseudo-classes or compound classes on it, then a combinator.
   const reachesIntoStrip = /\.(card-strip-frame|card-choice-strip|zone-viewer-strip)[^\s>+~,]*[\s>+~]/;
-  const sizingProperty =
-    /^(min-|max-)?(width|height|inline-size|block-size)$|^(aspect-ratio|flex|flex-basis)$|^--card-/;
   const descendantRules = STYLE_RULES.filter((rule) =>
     rule.selectors.some((selector) => reachesIntoStrip.test(selector))
     || rule.enclosedBy.some((prelude) => STRIP_CLASS.test(prelude)),
@@ -376,7 +384,7 @@ it("never sizes a strip's cards by reaching into their markup", () => {
 
   for (const rule of descendantRules) {
     for (const property of rule.declarations.keys()) {
-      expect(property, rule.selectors.join(", ")).not.toMatch(sizingProperty);
+      expect(property, rule.selectors.join(", ")).not.toMatch(SIZING_PROPERTY);
     }
   }
 });

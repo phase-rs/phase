@@ -739,7 +739,7 @@ select.select-dark option {
 
    From lg up the overlay takes its height from its content, and the cards keep
    the board size .card-scale-reset gives them, which testing confirmed reads
-   well on desktop. Nothing here applies there.
+   well on desktop. No sizing rule here applies there.
 
    Below lg the overlay fills the screen, and board-size cards are too small to
    read on a phone. There the frame ScrollableCardStrip renders grows into the

@@ -306,11 +306,10 @@ function ZoneCard({
       {/* Resolve the image via the engine's printed_ref (oracle_id + face)
           like every other object-rendering modal — name-only lookup fails for
           DFC / transformed / back-face cards (e.g. a transformed planeswalker),
-          which then falls back to the broken-image div. In the zone strip that
-          fallback is sized up to ~560px, so a failed image rendered "huge" with
-          text instead of art. `faceDown` overrides all of that with the shared
-          card-back placeholder (CardImage.tsx) whenever this viewer has no
-          look-permission on a face-down exile (see `hiddenFromViewer` above) —
+          which then falls back to the broken-image div. `faceDown` overrides
+          all of that with the shared card-back placeholder (CardImage.tsx)
+          whenever this viewer has no look-permission on a face-down exile
+          (see `hiddenFromViewer` above) —
           it must NOT be the raw `obj.face_down`, which is also true for the
           legitimate Hideaway/Foretell controller who the engine intends to
           let see the real card. */}
