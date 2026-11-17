@@ -578,8 +578,8 @@ fn incremental_layer_pass_after_the_steal_matches_a_full_pass() {
     act(&mut full, GameAction::PassPriority, &mut full_events);
     let full_counters = perf_counters::snapshot();
     settle(&mut full, &mut full_events);
-    assert_eq!(
-        full_counters.layers_incremental, 0,
+    assert!(
+        full_counters.layers_full_eval > 0 && full_counters.layers_incremental == 0,
         "REACH: the forced-full arm ran: {full_counters:?}"
     );
 
@@ -591,12 +591,12 @@ fn incremental_layer_pass_after_the_steal_matches_a_full_pass() {
             .map(|id| (*id, state.objects[id].controller))
             .collect()
     };
-    let transients = |runner: &GameRunner| -> Vec<(u64, ObjectId)> {
+    let transients = |runner: &GameRunner| -> Vec<_> {
         runner
             .state()
             .transient_continuous_effects
             .iter()
-            .map(|tce| (tce.id, tce.source_id))
+            .cloned()
             .collect()
     };
     let control_events = |events: &[GameEvent]| -> Vec<GameEvent> {
