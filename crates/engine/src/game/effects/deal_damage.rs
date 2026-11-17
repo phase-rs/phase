@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::ability_utils::append_to_sub_chain;
+use crate::game::effects::counters;
 use crate::game::effects::player_counter;
 use crate::game::effects::{append_to_pending_continuation, mark_pending_continuation_parent};
 use crate::game::filter;
@@ -763,19 +764,32 @@ pub(crate) fn apply_damage_after_replacement(
             }
 
             if is_creature && (ctx.has_wither || ctx.has_infect) {
-                // CR 120.3d + CR 702.80 + CR 702.90: Wither/infect damage to a
-                // creature is dealt as -1/-1 counters.
+                // CR 120.3d + CR 702.80a / CR 702.90c: Wither and infect
+                // damage causes the source's controller to PUT -1/-1 counters
+                // on the creature — a put-counters event, so it routes
+                // through `add_counter_with_replacement` like every other
+                // placement: AddCounter replacements (Solemnity-class
+                // preventions, Constrictor-class modifiers) apply, a
+                // `CounterAdded` event is emitted for triggers, and layers
+                // are marked by the authority. A parked replacement choice
+                // propagates as `NeedsChoice`, as in the infect-to-player
+                // arm below.
+                if !counters::add_counter_with_replacement(
+                    state,
+                    ctx.controller,
+                    *obj_id,
+                    CounterType::Minus1Minus1,
+                    actual_amount,
+                    events,
+                ) {
+                    return DamageResult::NeedsChoice;
+                }
                 if let Some(target_obj) = state.objects.get_mut(obj_id) {
-                    let entry = target_obj
-                        .counters
-                        .entry(CounterType::Minus1Minus1)
-                        .or_insert(0);
-                    *entry += actual_amount;
+                    // CR 702.2b: Track deathtouch for SBA lethal-damage check.
                     if ctx.has_deathtouch {
                         target_obj.dealt_deathtouch_damage = true;
                     }
                 }
-                crate::game::layers::mark_layers_full(state);
             } else if is_creature {
                 if let Some(target_obj) = state.objects.get_mut(obj_id) {
                     // CR 120.3e: Damage to a creature marks damage.

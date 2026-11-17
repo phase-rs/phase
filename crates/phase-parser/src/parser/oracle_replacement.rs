@@ -7,7 +7,8 @@ use nom::branch::alt;
 use nom::bytes::complete::{is_not, tag, tag_no_case, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, char, multispace0, multispace1};
 use nom::combinator::{
-    all_consuming, cond, eof, map_opt, map_parser, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, cond, eof, map, map_opt, map_parser, not, opt, peek, recognize, rest, value,
+    verify,
 };
 use nom::multi::{many_till, separated_list1};
 use nom::sequence::{delimited, pair, preceded, terminated};
@@ -41,8 +42,8 @@ use super::oracle_nom::prevention::{
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target::{
-    controller_phrase_among, parse_self_reference, parse_type_filter_word, parse_type_phrase,
-    ControllerPhrase,
+    controller_phrase_among, parse_controller_suffix, parse_self_reference, parse_type_filter_word,
+    parse_type_phrase, ControllerPhrase,
 };
 use super::oracle_quantity::capitalize_first;
 use super::oracle_target::{
@@ -14354,9 +14355,13 @@ fn parse_global_object_counter_prohibition(
 }
 
 /// CR 614.17 + CR 614.6 + CR 122.1: Parse inverted type-scoped counter
-/// prohibitions such as "Creatures can't have counters put on them." Lowers to
-/// the same `AddCounter` + `Prevent` replacement as Solemnity's object-counter
-/// line, scoped to a single permanent type on the battlefield.
+/// prohibitions such as "Creatures can't have counters put on them." (bare),
+/// "Creatures you control can't have -1/-1 counters put on them." (Darksteel
+/// Angel; Melira, Sylvok Outcast), and "Creatures your opponents control
+/// can't have +1/+1 counters put on them." (Blightbeetle). Lowers to the same
+/// `AddCounter` + `Prevent` replacement as Solemnity's object-counter line,
+/// scoped to the named population on the battlefield and — when the text
+/// names a counter type — to that type via `counter_match`.
 fn parse_inverted_typed_counter_prohibition(
     lower: &str,
     original_text: &str,
@@ -14366,32 +14371,67 @@ fn parse_inverted_typed_counter_prohibition(
     // put on them") rather than the object ("Counters can't be put on
     // creatures"). Same replacement class, so it reuses the shared type-list
     // combinators and covers every permanent type (and comma/or-separated
-    // lists) in one arm.
+    // lists) in one arm. Two optional axes compose inside it: a controller
+    // qualifier on the subject and a counter-type restriction on the
+    // prohibition.
     let mut combinator = all_consuming(terminated(
-        terminated(
+        (
             separated_list1(
                 parse_counter_prohibition_type_separator,
                 parse_counter_prohibition_type,
             ),
-            tag::<_, _, OracleError<'_>>(" can't have counters put on them"),
+            // Optional controller qualifier. `opt` never fails and never
+            // partially consumes, so the bare form falls through to
+            // " can't have …" unchanged.
+            opt(preceded(
+                tag(" "),
+                verify(parse_controller_suffix, |controller| {
+                    matches!(controller, ControllerRef::You | ControllerRef::Opponent)
+                }),
+            )),
+            tag::<_, _, OracleError<'_>>(" can't have "),
+            // Optional counter type. An `alt` (typed arm first), not `opt` +
+            // tag: nom sequences do not backtrack into a succeeded `opt`, so
+            // if the type parser ever consumed "counters" as a `Generic`
+            // token the bare form would fail closed. Separate arms retry the
+            // bare form from the start.
+            alt((
+                map(
+                    terminated(
+                        terminated(nom_primitives::parse_counter_type_typed, tag(" ")),
+                        tag("counters put on them"),
+                    ),
+                    Some,
+                ),
+                value(None, tag("counters put on them")),
+            )),
         ),
         opt(tag(".")),
     ));
-    let (_rest, type_filters) = combinator.parse(lower.trim()).ok()?;
+    let (_, (type_filters, controller, _, counter_type)) = combinator.parse(lower.trim()).ok()?;
     let type_filter = match type_filters.as_slice() {
         [single] => single.clone(),
         _ => TypeFilter::AnyOf(type_filters),
     };
+    let typed = match controller {
+        Some(ctrl) => TypedFilter::new(type_filter).controller(ctrl),
+        None => TypedFilter::new(type_filter),
+    };
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::AddCounter)
-            .valid_card(attach_zone_to_filter(
-                TargetFilter::Typed(TypedFilter::new(type_filter)),
-                Zone::Battlefield,
-            ))
-            .quantity_modification(QuantityModification::Prevent)
-            .description(original_text.to_string()),
-    )
+    let mut def = ReplacementDefinition::new(ReplacementEvent::AddCounter)
+        .valid_card(attach_zone_to_filter(
+            TargetFilter::Typed(typed),
+            Zone::Battlefield,
+        ))
+        .quantity_modification(QuantityModification::Prevent)
+        .description(original_text.to_string());
+    // CR 122.1 + CR 614.1a: a named counter type restricts the replacement to
+    // that type; the counter-agnostic wording leaves `counter_match` unset
+    // (any-counter behavior, as before).
+    if let Some(ct) = counter_type {
+        def = def.counter_match(CounterMatch::OfType(ct));
+    }
+    Some(def)
 }
 
 fn parse_counter_prohibition_type_separator(input: &str) -> OracleResult<'_, &str> {
@@ -29105,6 +29145,111 @@ mod tests {
                 ),
                 "{oracle_type} must scope to {expected:?} on the battlefield"
             );
+        }
+    }
+
+    #[test]
+    fn controlled_population_counter_type_prohibition_parses() {
+        // CR 614.6 + CR 122.1 + CR 614.17: "Creatures you control can't have
+        // -1/-1 counters put on them." (Darksteel Angel; Melira, Sylvok
+        // Outcast) and "Creatures your opponents control can't have +1/+1
+        // counters put on them." (Blightbeetle) lower to the AddCounter+Prevent
+        // replacement scoped to that controller's creatures on the
+        // battlefield, matching only the named counter type.
+        for (text, controller, counter_type) in [
+            (
+                "Creatures you control can't have -1/-1 counters put on them.",
+                ControllerRef::You,
+                CounterType::Minus1Minus1,
+            ),
+            (
+                "Creatures your opponents control can't have +1/+1 counters put on them.",
+                ControllerRef::Opponent,
+                CounterType::Plus1Plus1,
+            ),
+        ] {
+            let def =
+                parse_replacement_line(text, "T").unwrap_or_else(|| panic!("{text:?} must parse"));
+            assert_eq!(def.event, ReplacementEvent::AddCounter);
+            assert_eq!(
+                def.quantity_modification,
+                Some(QuantityModification::Prevent)
+            );
+            assert!(
+                matches!(
+                    &def.valid_card,
+                    Some(TargetFilter::Typed(tf))
+                        if tf.type_filters == vec![TypeFilter::Creature]
+                            && tf.controller == Some(controller)
+                            && tf.properties.iter().any(|p| matches!(
+                                p,
+                                FilterProp::InZone { zone: Zone::Battlefield }
+                            ))
+                ),
+                "{text:?} must scope to its controller's creatures on the battlefield"
+            );
+            assert_eq!(
+                def.counter_match,
+                Some(CounterMatch::OfType(counter_type)),
+                "{text:?} must match only its named counter type"
+            );
+        }
+    }
+
+    #[test]
+    fn controlled_population_prohibition_rejects_unattested_shapes() {
+        // Positive reach-guard: the attested shape parses. Without it, an arm
+        // that rejects everything would pass these negatives vacuously.
+        parse_replacement_line(
+            "Creatures you control can't have -1/-1 counters put on them.",
+            "Darksteel Angel",
+        )
+        .expect("attested prohibition must parse (reach-guard)");
+        // No printed card quantifies the population ("All creatures …") or
+        // uses "placed on" in this shape (MTGJSON census 5.3.0+20261116) —
+        // the arm stays tight to the class.
+        for text in [
+            "All creatures you control can't have -1/-1 counters put on them.",
+            "Creatures you control can't have -1/-1 counters placed on them.",
+        ] {
+            assert!(
+                parse_replacement_line(text, "T").is_none(),
+                "{text:?} must not parse (no printed card exhibits it)"
+            );
+        }
+    }
+
+    #[test]
+    fn darksteel_angel_full_oracle_routes_counter_line_to_replacement() {
+        use crate::types::ability::Effect;
+
+        // CR 614.17 + CR 122.1: the full Darksteel Angel oracle routes line 3
+        // through priority 8 to the counter-prohibition arm: one AddCounter
+        // Prevent replacement, and no Unimplemented gap on the counters line.
+        let parsed = parse_oracle_text(
+            "Flying, indestructible\nYou can't lose the game and your opponents can't win the game.\nCreatures you control can't have -1/-1 counters put on them.",
+            "Darksteel Angel",
+            &["Flying".to_string(), "Indestructible".to_string()],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Angel".to_string()],
+        );
+        assert!(
+            parsed.replacements.iter().any(|d| {
+                d.event == ReplacementEvent::AddCounter
+                    && d.quantity_modification == Some(QuantityModification::Prevent)
+            }),
+            "line 3 must lower to an AddCounter Prevent replacement; replacements = {:?}",
+            parsed.replacements
+        );
+        for ability in &parsed.abilities {
+            if let Effect::Unimplemented { description, .. } = ability.effect.as_ref() {
+                let text = description.as_deref().unwrap_or("");
+                assert!(
+                    // allow-noncombinator: string assertion in a test, not parsing dispatch.
+                    !text.to_lowercase().contains("counter"),
+                    "no Unimplemented gap may remain on the counters line: {text:?}"
+                );
+            }
         }
     }
 
