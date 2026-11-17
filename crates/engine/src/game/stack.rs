@@ -2,8 +2,8 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousEffectOnset, ContinuousModification,
     CopyCountStatus, DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition,
-    KeywordAction, PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition, SpellContext,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
+    InstructionJoin, KeywordAction, PlayerFilter, QuantityExpr, ResolvedAbility, SiblingCondition,
+    SpellContext, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetReadOrigin, TargetRef,
     TargetSelectionMode, TriggerCondition, TriggerDefinitionRef,
 };
 use crate::types::card_type::CoreType;
@@ -3259,9 +3259,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                                     exile_links: zone_pipeline::ExileLinkSpec::default(),
                                     drain:
                                         crate::types::game_state::PostReplacementDrainOwner::CallerEpilogue,
-                                    // Spell resolution delivers to the battlefield
-                                    // or graveyard — never a library placement.
-                                    library_placement: None,
                                 },
                                 events,
                             ) {
@@ -4930,6 +4927,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         target_reads,
         entry_onset,
         sibling_condition,
+        instruction_join,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -5029,6 +5027,8 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
+        // CR 608.2c: a list slot continues its sibling's instruction, not the vanilla shape.
+        && *instruction_join == InstructionJoin::Own
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -5189,6 +5189,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         target_reads,
         entry_onset,
         sibling_condition,
+        instruction_join,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -5265,6 +5266,8 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
+        // CR 608.2c: a list slot continues its sibling's instruction, not the vanilla shape.
+        && *instruction_join == InstructionJoin::Own
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -5427,6 +5430,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         target_reads,
         entry_onset,
         sibling_condition,
+        instruction_join,
         modal,
         mode_abilities,
         parent_target_missing_reason,
@@ -5508,6 +5512,8 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         // Kathril) is not the vanilla batchable shape this proof
         // covers — its independent OR-branch gate must be evaluated per entry.
         && *sibling_condition == SiblingCondition::Dependent
+        // CR 608.2c: a list slot continues its sibling's instruction, not the vanilla shape.
+        && *instruction_join == InstructionJoin::Own
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
@@ -5778,6 +5784,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         target_reads: a_target_reads,
         entry_onset: a_entry_onset,
         sibling_condition: a_sibling_condition,
+        instruction_join: a_instruction_join,
         modal: a_modal,
         mode_abilities: a_mode_abilities,
         parent_target_missing_reason: a_parent_target_missing_reason,
@@ -5873,6 +5880,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         target_reads: b_target_reads,
         entry_onset: b_entry_onset,
         sibling_condition: b_sibling_condition,
+        instruction_join: b_instruction_join,
         modal: b_modal,
         mode_abilities: b_mode_abilities,
         parent_target_missing_reason: b_parent_target_missing_reason,
@@ -5990,6 +5998,7 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         && a_target_reads == b_target_reads
         && a_entry_onset == b_entry_onset
         && a_sibling_condition == b_sibling_condition
+        && a_instruction_join == b_instruction_join
         && a_modal == b_modal
         && a_mode_abilities == b_mode_abilities
         && a_parent_target_missing_reason == b_parent_target_missing_reason
@@ -11549,7 +11558,6 @@ mod tests {
                     batch_events: Vec::new(),
                     damage_to_players: Vec::new(),
                     prevention_tally: Vec::new(),
-                    lives_before: vec![20, 20],
                     sub_step: crate::types::game_state::CombatDamageSubStep::Regular,
                     replacement: None,
                     phase_c_remnant: None,

@@ -401,7 +401,10 @@ mod tests {
         let outcome = view.replace(
             &mut state,
             |board, _| {
-                board.record_loop_decision(crate::game::play_trace::AnswerOptionality::Mandatory);
+                board.record_remembered_answer(
+                    P0,
+                    crate::game::play_trace::AnswerOptionality::Mandatory,
+                );
                 ReplacementResult::Prevented
             },
             &mut events,

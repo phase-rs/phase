@@ -57,6 +57,16 @@
 #   `--deck-size` is OPTIONAL: a post-U5 dump needs no stage, and `deck_size_gate` stays
 #   the authority on whether one was needed.
 #
+#   `--additional-phase '<AdditionalPhase effect JSON>'` is OPTIONAL: it replaces every
+#   pre-#9332 `AdditionalPhase` (one carrying `phase`), whose `after: <Phase>` cannot say
+#   "this main phase", with the operator's value, which is the parser's output for the
+#   card. `legacy_shape_gate` refuses an artifact that still carries one, which is also
+#   how legacy sites that differ are refused (one value cannot answer two cards).
+#
+# THE TRIGGER-ORDER TEMPLATE STAGE is unconditional: a `decision_templates` element
+# holding an `Order` without `slot` (the legacy `{pos, source}` shape) is deleted, and
+# current-shape templates are kept.
+#
 #   # Control mode: re-run the FULL recipe and check it against the committed
 #   # fixture, then check the patch had teeth. Runnable by anyone, at any time,
 #   # with no engine build.
@@ -91,6 +101,7 @@ PRISTINE=""
 EXPECT_SHA=""
 EFFECT_KIND=""
 DECK_SIZE=""
+ADDITIONAL_PHASE=""
 DS_TYPE=""
 DS_DATA=""
 OUT=""
@@ -107,6 +118,7 @@ while [ $# -gt 0 ]; do
     --expect-sha256) EXPECT_SHA="${2:?--expect-sha256 needs a hash}"; shift 2 ;;
     --effect-kind)   EFFECT_KIND="${2:?--effect-kind needs an EffectKind variant name}"; shift 2 ;;
     --deck-size)     DECK_SIZE="${2:?--deck-size needs <Minimum|Exactly>:<count>}"; shift 2 ;;
+    --additional-phase) ADDITIONAL_PHASE="${2:?--additional-phase needs an AdditionalPhase effect JSON}"; shift 2 ;;
     --out)           OUT="${2:?--out needs a path}"; shift 2 ;;
     --control)       CONTROL_MODE=1; shift ;;
     -h|--help)       usage 0 ;;
@@ -136,6 +148,12 @@ fi
 for tool in unzip jq gzip sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || { echo "required tool not found: $tool" >&2; exit 1; }
 done
+if [ -n "$ADDITIONAL_PHASE" ] \
+   && ! jq -e 'type == "object" and .type == "AdditionalPhase" and (has("phase") | not)' \
+        <<<"$ADDITIONAL_PHASE" >/dev/null 2>&1; then
+  echo "--additional-phase must be a current-shape AdditionalPhase object — got: $ADDITIONAL_PHASE" >&2
+  exit 1
+fi
 
 # 1. Verify the pristine input. Abort rather than migrate an unexpected dump —
 #    fixture<->dump correspondence is by CONTENT, never by filename (the name
@@ -193,11 +211,24 @@ if [ -n "$DECK_SIZE" ]; then
                      (.; setpath($p; {type: $ds_type, data: $ds_data}))'
 fi
 
+# The two legacy shapes no current decoder reads, as jq predicates on one value.
+LEGACY_ORDER='type == "object" and has("Order") and (.Order | type == "object" and has("source") and (has("slot") | not))'
+LEGACY_PHASE='type == "object" and .type == "AdditionalPhase" and has("phase")'
+# Shared tail, unconditional: a template holding a legacy order is deleted.
+TEMPLATE_STAGE="reduce (paths(type == \"array\") | select(.[-1] == \"decision_templates\")) as \$p
+                  (.; setpath(\$p; getpath(\$p) | map(select(any(..; $LEGACY_ORDER) | not))))"
+# Shared tail: with `--additional-phase`, every legacy site takes the operator's value when
+# they are all one value; otherwise they are left for `legacy_shape_gate` to refuse.
+ADDITIONAL_PHASE_STAGE="if \$additional_phase != null
+     and ([paths($LEGACY_PHASE) as \$p | getpath(\$p)] | unique | length) == 1
+  then reduce paths($LEGACY_PHASE) as \$p (.; setpath(\$p; \$additional_phase))
+  else . end"
+
 # Applies the recipe to stdin, writing to stdout. ONE definition of the transform, so
 # the migration, the control arms, and the self-tests cannot drift apart.
 transform() {   # transform <patched|unpatched>
   local mode="$1" tail filter
-  tail="$DECK_SIZE_STAGE | $PROJECT"
+  tail="$DECK_SIZE_STAGE | $TEMPLATE_STAGE | $ADDITIONAL_PHASE_STAGE | $PROJECT"
   filter="$tail"
   if [ "$mode" = patched ]; then
     filter="(if (.gameState.waiting_for.data.target_slots? // null) != null
@@ -205,6 +236,7 @@ transform() {   # transform <patched|unpatched>
                else . end) | stamp_trigger_firing | stamp_delayed_allocators | $tail"
   fi
   jq -c --arg k "$EFFECT_KIND" --arg ds_type "$DS_TYPE" --argjson ds_data "${DS_DATA:-0}" \
+    --argjson additional_phase "${ADDITIONAL_PHASE:-null}" \
     -f <(printf '%s\n%s\n' "$(cat "$FIRING_LIB")" "$filter")
 }
 
@@ -366,6 +398,21 @@ deck_size_gate() {   # deck_size_gate <staged> <dest> — refuse, and reap the s
   return 1
 }
 
+# LEGACY-SHAPE GATE: no artifact leaves here carrying a legacy trigger-order template or a
+# pre-#9332 `AdditionalPhase`, either of which the strict decoder rejects.
+legacy_shape_gate() {   # legacy_shape_gate <staged> <dest> — refuse, and reap the stage
+  local staged="$1" dest="$2" bad
+  bad="$(gzip -dc "$staged" | jq -c "[paths($LEGACY_ORDER), paths($LEGACY_PHASE)
+                                      | map(tostring) | join(\".\")]")"
+  [ "$bad" != "[]" ] || return 0
+  echo "REFUSING TO EMIT $dest — legacy shape at: $bad" >&2
+  echo "  REMEDY: AdditionalPhase sites need --additional-phase '<the parser's AdditionalPhase for" >&2
+  echo "  the card>', and are left alone when they differ (one value cannot answer two cards); a" >&2
+  echo "  legacy Order outside decision_templates is not this recipe's to repair." >&2
+  rm -f "$staged"
+  return 1
+}
+
 regenerate() {   # regenerate <patched|unpatched> <destination>
   local mode="$1" dest="$2" staged
   mkdir -p "$(dirname "$dest")"
@@ -387,6 +434,7 @@ regenerate() {   # regenerate <patched|unpatched> <destination>
     return 1
   fi
   deck_size_gate "$staged" "$dest" || return 1
+  legacy_shape_gate "$staged" "$dest" || return 1
   # A failed `mv` leaves `$staged` in place; the trap reaps it on exit.
   mv "$staged" "$dest" || return 1
 }
@@ -553,7 +601,61 @@ selftests() {
     echo "SELFTEST DECK_SIZE_MIGRATED=true (both envelope shapes, driven through deck_size_gate)"
   fi
 
-  echo "SELFTEST ATOMIC_ON_FAILURE=true ENVELOPE_PRESERVED=true DECK_SIZE_REFUSED=true (each with a positive control)"
+  # (d) a legacy trigger-order template is deleted; (d′) POSITIVE control: a current-shape
+  # template passes through unchanged, so (d) is not a stage that deletes every template.
+  local legacy_template='{"decisions":[{"Order":{"pos":0,"source":{"AllCopies":{"card_id":1,"trigger_description":"t"}}}}],"key":{"kind":"TriggerOrdering","sources":[]},"owner":0,"replay":"Static"}'
+  local slot_template='{"decisions":[{"Order":{"slot":{"source":{"AllCopies":{"card_id":1,"trigger_description":"t"}},"point":"TriggerOrder","index":0},"pos":0}}],"key":{"kind":"TriggerOrdering","sources":[]},"owner":0,"replay":"Static"}'
+  out="$(printf '{"gameState":{"decision_templates":[%s]}}' "$legacy_template" | transform patched)"
+  if [ "$(printf '%s' "$out" | jq -c '.gameState.decision_templates')" != "[]" ]; then
+    echo "SELFTEST LEGACY_TEMPLATE_DELETED=false — $out" >&2
+    rm -rf "$tmp"; return 1
+  fi
+  out="$(printf '{"gameState":{"decision_templates":[%s]}}' "$slot_template" | transform patched)"
+  if [ "$(printf '%s' "$out" | jq -S -c '.gameState.decision_templates')" != "$(printf '[%s]' "$slot_template" | jq -S -c .)" ]; then
+    echo "SELFTEST LEGACY_TEMPLATE_DELETED=vacuous — a current-shape template changed: $out" >&2
+    rm -rf "$tmp"; return 1
+  fi
+  # (d″) a current replacement-order decision point `{pos, positions}` is not the legacy shape.
+  local order_point='{"gameState":{"waiting_for":{"data":{"schema":{"points":[{"kind":{"Order":{"pos":0,"positions":2}}}]}}}}}'
+  printf '%s' "$order_point" | transform patched | gzip -9 -n > "$tmp/order.json.gz"
+  if ! legacy_shape_gate "$tmp/order.json.gz" "$tmp/never" \
+     || [ "$(gzip -dc "$tmp/order.json.gz" | jq -S -c .gameState.waiting_for)" != "$(printf '%s' "$order_point" | jq -S -c .gameState.waiting_for)" ]; then
+    echo "SELFTEST ORDER_POINT_PASSES=false — a current {pos, positions} Order point was refused or changed" >&2
+    rm -rf "$tmp"; return 1
+  fi
+
+  # (e) a legacy AdditionalPhase without `--additional-phase` is refused by the gate, the
+  # stage reaped and the destination untouched; (e′) POSITIVE control: with the value the
+  # site is replaced and the gate passes; (e″) two distinct legacy sites are refused even
+  # with the value.
+  local legacy_phase='{"type":"AdditionalPhase","phase":"BeginCombat","after":"PreCombatMain","followed_by":["PostCombatMain"],"target":{"type":"Controller"},"count":{"type":"Fixed","value":1},"attacker_restriction":null}'
+  local current_phase='{"type":"AdditionalPhase","recipient":{"type":"NoPlayer"},"segment":{"type":"Phase","data":"Combat"},"after":{"type":"ThisPhase","data":{"named":["PrecombatMain","PostcombatMain"]}},"followed_by":[{"type":"Phase","data":"PostcombatMain"}],"count":{"type":"Fixed","value":1},"attacker_restriction":null}'
+  local staged
+  printf '%s' 'COMMITTED-FIXTURE-SENTINEL' > "$tmp/phase-dest"
+  sentinel="$(sha256sum "$tmp/phase-dest" | cut -d' ' -f1)"
+  staged="$(stage_path "$tmp/phase-dest")"
+  printf '{"gameState":{"a":[%s,%s]}}' "$legacy_phase" "$legacy_phase" \
+    | ADDITIONAL_PHASE="" transform patched | gzip -9 -n > "$staged"
+  if legacy_shape_gate "$staged" "$tmp/phase-dest" 2>/dev/null || [ -e "$staged" ] \
+     || [ "$(sha256sum "$tmp/phase-dest" | cut -d' ' -f1)" != "$sentinel" ]; then
+    echo "SELFTEST LEGACY_PHASE_REFUSED=false — an unmigrated AdditionalPhase passed, or its stage or destination was not left as refused" >&2
+    rm -rf "$tmp"; return 1
+  fi
+  printf '{"gameState":{"a":[%s,%s]}}' "$legacy_phase" "$legacy_phase" \
+    | ADDITIONAL_PHASE="$current_phase" transform patched | gzip -9 -n > "$tmp/phase.json.gz"
+  if ! legacy_shape_gate "$tmp/phase.json.gz" "$tmp/never" \
+     || [ "$(gzip -dc "$tmp/phase.json.gz" | jq -S -c '.gameState.a | unique')" != "$(printf '[%s]' "$current_phase" | jq -S -c .)" ]; then
+    echo "SELFTEST LEGACY_PHASE_REFUSED=vacuous — the operator's value did not replace the legacy sites" >&2
+    rm -rf "$tmp"; return 1
+  fi
+  printf '{"gameState":{"a":[%s,%s]}}' "$legacy_phase" "$(printf '%s' "$legacy_phase" | jq -c '.after = "PostCombatMain"')" \
+    | ADDITIONAL_PHASE="$current_phase" transform patched | gzip -9 -n > "$tmp/phase2.json.gz"
+  if legacy_shape_gate "$tmp/phase2.json.gz" "$tmp/never" 2>/dev/null; then
+    echo "SELFTEST LEGACY_PHASE_REFUSED=ambiguity-blind — one value answered two distinct legacy sites" >&2
+    rm -rf "$tmp"; return 1
+  fi
+
+  echo "SELFTEST ATOMIC_ON_FAILURE=true ENVELOPE_PRESERVED=true DECK_SIZE_REFUSED=true LEGACY_TEMPLATE_DELETED=true ORDER_POINT_PASSES=true LEGACY_PHASE_REFUSED=true (each with a positive control)"
   rm -rf "$tmp"
 }
 
@@ -578,6 +680,7 @@ if [ "$CONTROL_MODE" -eq 1 ]; then
 
   echo "CONTROL pristine=$(basename "$PRISTINE") sha256=$ACTUAL_SHA"
   echo "CONTROL effect_kind=$EFFECT_KIND deck_size=${DECK_SIZE:-none} out=$OUT"
+  echo "CONTROL additional_phase=${ADDITIONAL_PHASE:-none}"
   echo "CONTROL jq=$JQ_VERSION gzip=$GZIP_VERSION"
 
   # ARM 1 — the patched regeneration reproduces the committed fixture.
@@ -689,5 +792,6 @@ SLOTS="$(gzip -dc "$OUT" | jq -c '[.gameState.waiting_for.data.target_slots[]?.e
 #    DIFFERENT bytes. `deck_size=none` records that no `--deck-size` was passed.
 echo "MIGRATED pristine=$(basename "$PRISTINE") sha256=$ACTUAL_SHA"
 echo "MIGRATED effect_kind=$EFFECT_KIND deck_size=${DECK_SIZE:-none} stamped_slots=$SLOTS"
+echo "MIGRATED additional_phase=${ADDITIONAL_PHASE:-none}"
 echo "MIGRATED out=$OUT sha256=$OUT_SHA"
 echo "MIGRATED jq=$JQ_VERSION gzip=$GZIP_VERSION"

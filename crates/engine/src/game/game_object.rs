@@ -3176,6 +3176,7 @@ impl GameObject {
                 additional_cost_payments: self.additional_cost_payments.clone(),
                 cast_cost_paid_object: self.cast_cost_paid_object.clone(),
                 granting_object: None,
+                subject_scope: crate::types::game_state::SubjectIncarnationScope::Live,
             }),
             power: self.power,
             toughness: self.toughness,
@@ -3215,6 +3216,7 @@ impl GameObject {
             block_pairs: Vec::new(),
             co_departed: Vec::new(),
             co_entered: Vec::new(),
+            instruction_lead: None,
             attached_to: self.attached_to,
             // CR 400.7: filled in by `move_to_zone` from the live object AFTER the
             // battlefield-entry incarnation bump; `None` here (pre-entry snapshot).
