@@ -5248,8 +5248,7 @@ mod tests {
             .map(|(index, color)| ManaUnit {
                 pip_id: ManaPipId(index as u64 + 1),
                 ..make_unit(color)
-            })
-            .collect(),
+            }),
         );
         let before = fingerprint(&pool.units().collect::<Vec<_>>());
         let select = |choices: Option<&[ShardChoice]>, budget| {
