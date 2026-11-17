@@ -910,7 +910,7 @@ fn live_base_mana_output(
         restrictions,
         production_override.as_ref(),
         option.object_id,
-        source_could_produce_two_or_more_colors,
+        source_could_produce_two_or_more_colors.into(),
     )
 }
 
@@ -961,7 +961,7 @@ fn live_taps_for_mana_output(
         restrictions,
         Some(production_override),
         ability.source_id,
-        source_could_produce_two_or_more_colors,
+        source_could_produce_two_or_more_colors.into(),
     )
 }
 
@@ -1042,7 +1042,7 @@ fn live_mana_output_units(
     restrictions: &[ManaSpendRestriction],
     production_override: Option<&ProductionOverride>,
     restriction_source_id: ObjectId,
-    source_could_produce_two_or_more_colors: bool,
+    source_color_capability: SourceColorCapability,
 ) -> Vec<LiveManaOutputUnit> {
     let mana_types = match production_override {
         Some(ProductionOverride::SingleColor(color))
@@ -1086,7 +1086,7 @@ fn live_mana_output_units(
         .into_iter()
         .map(|mana_type| LiveManaOutputUnit {
             mana_type,
-            source_color_capability: source_could_produce_two_or_more_colors.into(),
+            source_color_capability,
             supertype: source_is_snow(state, restriction_source_id)
                 .then_some(crate::types::mana::ManaSupertype::Snow),
             restrictions: restrictions.clone(),
