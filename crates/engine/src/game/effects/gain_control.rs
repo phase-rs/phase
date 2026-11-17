@@ -28,7 +28,10 @@ pub(crate) fn capture_control_change_instruction(
     population: impl IntoIterator<Item = ObjectId>,
 ) -> Arc<ControlChangeInstructionCapture> {
     Arc::new(ControlChangeInstructionCapture {
-        watchers: Arc::new(crate::game::triggers::latch_control_change_watchers(state)),
+        watchers: Arc::new(crate::game::triggers::latch_control_change_watchers(
+            state,
+            crate::types::triggers::ControlChangeSide::Loses,
+        )),
         doublers: Arc::new(crate::game::triggers::active_trigger_doublers(state)),
         subjects: population
             .into_iter()
@@ -180,6 +183,33 @@ pub(crate) fn publish_controller_changed(
 ) {
     if member.old_controller == new_controller {
         return;
+    }
+    // CR 613.1b: one control change publishes one event. When the layer pass
+    // that realizes this change already ran (the CR 514.2 cleanup reversion
+    // settles before it publishes), its derived copy is retracted and this
+    // instruction's boundary evidence wins; otherwise the change is announced,
+    // so the realizing pass consumes it instead of queueing it again.
+    if let Some(subject) = state
+        .objects
+        .get(&member.object_id)
+        .map(ObjectIncarnationRef::from_object)
+    {
+        let derived = state.layer_control_changes.iter().position(|queued| {
+            queued.subject == subject
+                && matches!(
+                    queued.event,
+                    GameEvent::ControllerChanged { new_controller: derived_to, .. }
+                        if derived_to == new_controller
+                )
+        });
+        match derived {
+            Some(position) => {
+                state.layer_control_changes.remove(position);
+            }
+            None => state
+                .announced_control_changes
+                .push((subject, new_controller)),
+        }
     }
     if let Some(link) = member
         .link

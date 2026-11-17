@@ -395,9 +395,12 @@ pub struct EventObjectSnapshot {
 /// moment immediately before its instruction.
 ///
 /// Deliberately not an `Option`: the absent case is a named policy. A payload
-/// saved before this field existed, or any event built without an instruction
-/// capture, is `Unrecorded`, and `Unrecorded` never authorizes a look-back
-/// control-change trigger. It is never reconstructed from current state.
+/// saved before this field existed, any event built without an instruction
+/// capture, or a change a full layer evaluation derived on a board with no
+/// look-back control-change trigger to read it
+/// (`triggers::look_back_control_change_listener_exists`), is `Unrecorded`,
+/// and `Unrecorded` never authorizes a look-back control-change trigger. It is
+/// never reconstructed from current state.
 ///
 /// `Observed` holds only the key of its observation in
 /// `GameState::control_change_observations`. The observation itself (latched
@@ -435,6 +438,23 @@ pub struct ControlChangeObservation {
     /// against a doubler the instruction itself moved or removed.
     #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
     pub doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
+    /// CR 603.10 + CR 113.7a: for a change a full layer evaluation derived,
+    /// every functioning gain-side control-change watcher ("when you gain
+    /// control of ~"), with its controller, immediately AFTER the change. A
+    /// derived change is published at the next drain, after later instructions
+    /// of the same resolution may have moved its watcher (CR 608.2c), so its
+    /// gain-side triggers are collected from this latch and never from a later
+    /// board. `None` (an instruction-published change, or a payload saved
+    /// before this field): the gain side is an ordinary trigger, collected from
+    /// the board.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gain_watchers: Option<std::sync::Arc<Vec<TriggerSourceContext>>>,
+    /// CR 603.2d + CR 603.10: the functioning trigger-doubling statics, with
+    /// their controllers, on the same post-change board `gain_watchers` was
+    /// latched on. A latched gain-side trigger is counted against these, not
+    /// against the board at publication (where a doubler may have left).
+    #[serde(default, skip_serializing_if = "latched_doublers_are_empty")]
+    pub gain_doublers: std::sync::Arc<Vec<LatchedTriggerDoubler>>,
 }
 
 /// CR 603.2d: one functioning "triggers an additional time" static ability
@@ -491,6 +511,8 @@ impl ControlChangeInstructionCapture {
                 subject: subject.clone(),
                 watchers: self.watchers.clone(),
                 doublers: self.doublers.clone(),
+                gain_watchers: None,
+                gain_doublers: std::sync::Arc::default(),
             })
     }
 }
@@ -526,6 +548,17 @@ pub struct ControlChangeLink {
     pub capture: std::sync::Arc<ControlChangeInstructionCapture>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub published: std::collections::BTreeSet<ObjectId>,
+}
+
+/// CR 613.1b + CR 603.2: a control change a full layer evaluation derived and no
+/// instruction announced, waiting to be published into an action's event buffer
+/// (`layers::publish_layer_control_changes`). `subject` is the exact incarnation
+/// whose controller the pass changed (CR 400.7); `event` is always the
+/// `GameEvent::ControllerChanged` it publishes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueuedControlChange {
+    pub subject: ObjectIncarnationRef,
+    pub event: GameEvent,
 }
 
 /// How an [`EventObjectSnapshot`] can answer a given [`TargetFilter`] shape.

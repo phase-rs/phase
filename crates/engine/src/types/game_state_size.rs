@@ -125,6 +125,13 @@
 //! large rarely-populated field went inline, so the ceiling moves by the rule
 //! to 15,376.next_multiple_of(256) + 256 = 15,872.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
+//! 15,904 B when the layer pass's control-change working memory
+//! (`layer_control_changes`, `announced_control_changes`, two 24 B `Vec`s)
+//! met main's small fields since its base. Both lists are empty at every
+//! action boundary, so they are lazily boxed (`LazyBoxedVec`, 8 B each);
+//! `GameState` then measures 15,872 B, at the unchanged ceiling.
+//!
 //! `GameState` re-measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
 //! 15,904 B when the canonical library-placement branch merged main: its
 //! `ProposedEvent::ZoneChange::library_placement` held a 96 B

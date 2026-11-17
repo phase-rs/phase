@@ -10839,6 +10839,42 @@ fn effect_resolution_unless_any_player_pays_life() {
     ));
 }
 
+/// CR 118.12a + CR 608.2c: Sword-Point Diplomacy — the per-card "unless any
+/// opponent pays 3 life" clause lowers to a member-driven loop over the
+/// revealed set, each iteration moving that card to hand unless an opponent pays.
+#[test]
+fn sword_point_diplomacy_unless_any_opponent_pays_life() {
+    let def = parse_effect_chain(
+        "Reveal the top three cards of your library. For each of those cards, put that card into your hand unless any opponent pays 3 life. Then exile the rest.",
+        AbilityKind::Spell,
+    );
+    let defs = chain_defs(&def);
+    assert_eq!(defs.len(), 3, "{defs:#?}");
+    let per_card = defs[1];
+    assert_eq!(unimplemented_name(per_card), None, "{per_card:#?}");
+    let unless_pay = per_card.unless_pay.as_ref().expect("unless_pay");
+    assert_eq!(unless_pay.payer, TargetFilter::Opponent);
+    assert!(matches!(
+        unless_pay.cost,
+        AbilityCost::PayLife {
+            amount: QuantityExpr::Fixed { value: 3 }
+        }
+    ));
+    assert!(
+        matches!(
+            &*per_card.effect,
+            Effect::ChangeZone {
+                destination: Zone::Hand,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ),
+        "{:?}",
+        per_card.effect
+    );
+    assert!(per_card.repeat_for.is_some(), "{per_card:#?}");
+}
+
 /// CR 118.12a: Nicol Bolas, the Deceiver [+3] — "Each opponent loses 3
 /// life unless that player sacrifices ... or discards a card." The "that
 /// player" payer pronoun + "-s" verb forms must route through the
@@ -102070,6 +102106,62 @@ fn exile_one_face_down_leaves_the_other_for_its_own_placement() {
 /// them out of the library. Devourer of Destiny is the printed card that proves
 /// the clause parses; it adds "Exile the rest" (a routed remainder), so the
 /// silent form is exercised here as the clause pair the sequence parser accepts.
+/// CR 701.20e + CR 608.2c: Ashnod's Cylix carries the put-back and the exile
+/// on a player subject ("Target player looks at …, puts one of them back on top
+/// of their library, then exiles the rest"). The third-person verbs and "their
+/// library" fold into the same single look-and-keep `Dig` as Devourer of
+/// Destiny's second-person form, so "the rest" is the looked-at cards minus the
+/// kept one — never a tracked set naming the kept card. The bare "puts one" is
+/// mandatory: exactly one card stays on top.
+#[test]
+fn ashnods_cylix_put_back_and_exile_the_rest_fold_into_one_dig() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "{3}, {T}: Target player looks at the top three cards of their library, puts one of \
+         them back on top of their library, then exiles the rest.",
+        "Ashnod's Cylix",
+        &[],
+        &["Artifact".to_string()],
+        &[],
+    );
+    let ability = parsed.abilities.first().expect("the activated ability");
+    match &*ability.effect {
+        Effect::Dig {
+            player,
+            count,
+            keep_count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+            reveal,
+            ..
+        } => {
+            assert_eq!(
+                *player,
+                TargetFilter::ParentTarget,
+                "the target player's library"
+            );
+            assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+            assert_eq!(*keep_count, Some(1));
+            assert!(!*up_to, "\"puts one of them\" keeps exactly one card");
+            assert!(matches!(filter, TargetFilter::Any));
+            assert_eq!(
+                *destination,
+                Some(Zone::Library),
+                "kept card goes back on top"
+            );
+            assert_eq!(*rest_destination, Some(Zone::Exile), "the rest is exiled");
+            assert!(!*reveal, "a private look");
+        }
+        other => panic!("expected one look-and-keep Dig, got {other:?}"),
+    }
+    assert!(
+        ability.sub_ability.is_none(),
+        "the put-back and the exile fold into the Dig: {:?}",
+        ability.sub_ability
+    );
+}
+
 #[test]
 fn put_one_back_on_top_without_a_rest_clause_keeps_the_others_in_the_library() {
     let parsed = crate::parser::oracle::parse_oracle_text(

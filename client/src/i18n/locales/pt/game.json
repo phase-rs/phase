@@ -1812,6 +1812,10 @@
       "title": "Ordenar as cópias",
       "subtitle": "Escolha a mágica cuja cópia vai para a pilha em seguida"
     },
+    "memberOrder": {
+      "title": "Ordene os cards",
+      "subtitle": "Escolha qual card é processado em seguida"
+    },
     "collectEvidence": {
       "title": "Coletar Evidências",
       "subtitle": "Exile cartas de seu cemitério com valor de mana total {{minimum}} ou maior"

@@ -1366,18 +1366,26 @@ fn parse_put_all_back_in_any_order(lower: &str) -> bool {
         .is_ok()
 }
 
-fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
-    let (rest, _) = (
+/// CR 701.20e + CR 608.2c: "[you may] put[s] [up to] one of them/those cards
+/// [back] on top [of <library>]" after a look `Dig` — keep one looked-at card
+/// on top of the library it came from. Returns how many are kept and the
+/// remainder order. "You may" / "up to" make the keep optional; the bare
+/// verb is mandatory (Ashnod's Cylix: "puts one of them back on top of their
+/// library"). The third-person "puts" is the same instruction carried by a
+/// player subject ("Target player looks at …, puts …").
+fn parse_put_one_dig_card_on_top(lower: &str) -> Option<(PutCount, DigRestOrder)> {
+    let (rest, (may, up_to, _, _, _, _)) = (
         alt((
-            tag::<_, _, OracleError<'_>>("you may put "),
-            tag("may put "),
-            tag("put "),
+            value(true, tag::<_, _, OracleError<'_>>("you may put ")),
+            value(true, tag("may put ")),
+            value(false, tag("puts ")),
+            value(false, tag("put ")),
         )),
         opt(tag("up to ")),
         alt((tag("one of those cards"), tag("one of them"))),
         opt(tag(" back")),
-        tag(" "),
-        alt((tag("on top of your library"), tag("on top"))),
+        tag(" on top"),
+        opt(preceded(tag(" of "), parse_split_library_owner)),
     )
         .parse(lower.trim())
         .ok()?;
@@ -1392,12 +1400,22 @@ fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
     terminated(opt(tag::<_, _, OracleError<'_>>(".")), eof)
         .parse(rest)
         .ok()?;
-    Some(order.unwrap_or(DigRestOrder::Preserve))
+    let count = if may || up_to.is_some() {
+        PutCount::up(1)
+    } else {
+        PutCount::exactly(1)
+    };
+    Some((count, order.unwrap_or(DigRestOrder::Preserve)))
 }
 
+/// "exile[s] the rest" — the third-person verb is the same instruction carried
+/// by a player subject (Ashnod's Cylix: "…, then exiles the rest").
 fn parse_exile_rest_clause(lower: &str) -> bool {
     (
-        tag::<_, _, OracleError<'_>>("exile the rest"),
+        alt((
+            tag::<_, _, OracleError<'_>>("exile the rest"),
+            tag("exiles the rest"),
+        )),
         opt(tag(".")),
         eof,
     )
@@ -9758,18 +9776,16 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         // Dig — keep up to one looked-at card on top, leaving the remainder
         // for a following rest-placement clause.
         Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower).is_some() => {
+            let (quantity, rest_order) =
+                parse_put_one_dig_card_on_top(&lower).expect("continuation guard just matched");
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::up(1),
+                quantity,
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Library),
-                rest_destination: matches!(
-                    parse_put_one_dig_card_on_top(&lower),
-                    Some(DigRestOrder::Random)
-                )
-                .then_some(Zone::Library),
+                rest_destination: matches!(rest_order, DigRestOrder::Random)
+                    .then_some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: parse_put_one_dig_card_on_top(&lower)
-                    .expect("continuation guard just matched"),
+                rest_order,
                 rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
