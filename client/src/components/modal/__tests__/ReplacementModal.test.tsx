@@ -2,6 +2,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { Reorder } from "framer-motion";
 
 import type { ReplacementChoiceKind, WaitingFor } from "../../../adapter/types.ts";
 import { useGameStore, type GameStore } from "../../../stores/gameStore.ts";
@@ -97,6 +98,29 @@ describe("ReplacementModal", () => {
     expect(screen.getByRole("checkbox")).not.toBeChecked();
     fireEvent.click(screen.getByRole("button", { name: "Confirm Order" }));
     expect(dispatchMock).toHaveBeenCalledWith({ type: "ChooseReplacement", data: { index: 0 } });
+  });
+
+  // #11007: framer writes an inline `touch-action` on a reorder item that
+  // listens for its own drags, and that claims every vertical swipe starting
+  // on it.
+  it("leaves no inline touch-action on the ordering rows, so a swipe on a row scrolls", () => {
+    // Reach guard: under happy-dom, an item that listens for its own drags
+    // does carry framer's inline value, so its absence below is a real check.
+    const { unmount } = render(
+      <Reorder.Group axis="y" values={[0]} onReorder={vi.fn()}>
+        <Reorder.Item value={0}>Row</Reorder.Item>
+      </Reorder.Group>,
+    );
+    expect(screen.getByRole("listitem").style.getPropertyValue("touch-action")).toBe("pan-x");
+    unmount();
+
+    seed(prompt());
+    render(<ReplacementModal />);
+    const rows = screen.getAllByRole("listitem");
+    expect(rows).toHaveLength(3);
+    for (const row of rows) {
+      expect(row.style.getPropertyValue("touch-action")).toBe("");
+    }
   });
 
   it.each(["OptionalBranch", "SearchFoundDestination"] as const)("hides remember for ineligible %s", (type) => {

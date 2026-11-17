@@ -2555,7 +2555,7 @@
     "appliedLast": "Aplicado el último: este prevalece",
     "resultLabel": "Resultado: {{outcome}}",
     "confirmOrder": "Confirmar orden",
-    "dragHint": "Arrastra para reordenar o usa las flechas.",
+    "dragHint": "Arrastra desde el tirador <grip>⠿</grip> para reordenar o usa las flechas.",
     "chooseSubtitle": "Elige qué efecto de reemplazo aplicar.",
     "candidateFallback": "Efecto de reemplazo {{number}}",
     "orderSubtitleComposing": "Todos estos efectos cambian cómo ocurre este evento. Arrastra para fijar el orden en que se aplican: todos se aplican, así que el orden cambia el resultado (CR 616.1).",
@@ -2564,6 +2564,7 @@
     "composesNote": "Todos los efectos se aplican: el orden cambia cómo se combinan.",
     "moveUpNamed": "Mover {{name}} antes",
     "moveDownNamed": "Mover {{name}} después",
+    "dragHandleNamed": "Arrastra {{name}} para reordenar",
     "positionAnnounce": "Posición {{position}} de {{total}}"
   },
   "retargetChoice": {
