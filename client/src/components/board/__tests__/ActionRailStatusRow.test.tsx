@@ -8,9 +8,13 @@
  * rects. The numbers model an 844×390 phone: the plate ends at x=480, the
  * Manual / Undo column hanging off it ends at x=530, and the row's right edge
  * sits at x=838, level with both.
+ *
+ * Happy DOM's ResizeObserver never fires either, so a controlled one stands in.
+ * It records what each observer watches and, like a browser, notifies only the
+ * observers watching the element a test reports as resized.
  */
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
@@ -32,38 +36,155 @@ function setViewport(width: number, height: number) {
   Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: height });
 }
 
-/** A stand-in for the mounted PlayerHud: its Flex Layout widget, the HUD root,
- *  and the Manual / Undo column hanging off the plate's right edge. */
+const resizeObservers = new Set<ControlledResizeObserver>();
+
+class ControlledResizeObserver implements ResizeObserver {
+  readonly observed = new Set<Element>();
+  readonly callback: ResizeObserverCallback;
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+    resizeObservers.add(this);
+  }
+
+  observe(target: Element) {
+    this.observed.add(target);
+  }
+
+  unobserve(target: Element) {
+    this.observed.delete(target);
+  }
+
+  disconnect() {
+    this.observed.clear();
+  }
+}
+
+/** Notifies every observer watching `target`, as a browser does when the
+ *  element's size changes. An element nobody observes notifies no one. */
+function reportResize(target: Element) {
+  act(() => {
+    for (const observer of resizeObservers) {
+      if (observer.observed.has(target)) observer.callback([], observer);
+    }
+  });
+}
+
+/** A stand-in for the mounted PlayerHud, in PlayerArea's structure: a board
+ *  column holding the creature row, the middle-row wrapper with the HUD anchor
+ *  inside it, and the other-permanent row. The anchor holds the HUD's Flex
+ *  Layout widget, the HUD root, and the Manual / Undo column hanging off the
+ *  plate's right edge. */
 function mountPlayerHud() {
+  const boardColumn = document.createElement("div");
+  const creatureRow = document.createElement("div");
+  const middleRowWrapper = document.createElement("div");
+  const anchor = document.createElement("div");
+  anchor.setAttribute("data-player-hud-anchor", "");
   const widget = document.createElement("div");
   widget.setAttribute("data-flex-zone", "playerHud");
   const playerHud = document.createElement("div");
   const sideControls = document.createElement("div");
   sideControls.setAttribute("data-player-hud-side-controls", "");
+  const otherRow = document.createElement("div");
+
   playerHud.appendChild(sideControls);
   widget.appendChild(playerHud);
-  document.body.appendChild(widget);
+  anchor.appendChild(widget);
+  middleRowWrapper.appendChild(anchor);
+  boardColumn.append(creatureRow, middleRowWrapper, otherRow);
+  document.body.appendChild(boardColumn);
 
   playerHud.getBoundingClientRect = () => new DOMRect(330, 300, 150, 46);
   sideControls.getBoundingClientRect = () => new DOMRect(484, 296, 46, 54);
-  return { widget, playerHud, sideControls };
+  return { widget, playerHud, sideControls, creatureRow, middleRowWrapper, otherRow };
 }
 
-/** Renders the row inside a stand-in rail widget and gives the row its docked
- *  screen rect. The resize event stands in for the first real layout. */
-function renderRow(playerHud: HTMLElement) {
+type HudFixture = ReturnType<typeof mountPlayerHud>;
+
+/** Renders the row inside a stand-in rail widget and gives the row its screen
+ *  rect, docked by default. The resize event stands in for the first real
+ *  layout. */
+function renderRow(playerHud: HTMLElement, rowRect = new DOMRect(520, 318, 318, 26)) {
   render(
     <div data-flex-zone="actionRail">
       <ActionRailStatusRow playerHud={playerHud} />
     </div>,
   );
   const row = screen.getByTestId("action-rail-status-row");
-  row.getBoundingClientRect = () => new DOMRect(520, 318, 318, 26);
+  row.getBoundingClientRect = () => rowRect;
   act(() => {
     window.dispatchEvent(new Event("resize"));
   });
   return row;
 }
+
+interface ResizeCase {
+  what: string;
+  /** Moves rects as that resize would, and returns the element that resized. */
+  resize: (fixture: HudFixture & { row: HTMLElement; rail: HTMLElement }) => Element;
+  maxWidth: string;
+}
+
+/** One resize per subscription the row makes, each reported on its own, from
+ *  the docked 302px bound. Every outcome differs from 302px, so a subscription
+ *  that went missing leaves the stale bound and fails its case. */
+const RESIZE_CASES: ResizeCase[] = [
+  {
+    what: "the Manual / Undo column growing (Undo appears)",
+    resize: ({ sideControls }) => {
+      sideControls.getBoundingClientRect = () => new DOMRect(484, 296, 86, 54);
+      return sideControls;
+    },
+    // 838 - 570 - 6.
+    maxWidth: "262px",
+  },
+  {
+    what: "the plate growing (a badge appears), which pushes the column right",
+    resize: ({ playerHud, sideControls }) => {
+      playerHud.getBoundingClientRect = () => new DOMRect(330, 300, 170, 46);
+      sideControls.getBoundingClientRect = () => new DOMRect(504, 296, 46, 54);
+      return playerHud;
+    },
+    // 838 - 550 - 6.
+    maxWidth: "282px",
+  },
+  {
+    what: "the other-permanent row growing, which lifts the HUD above the row",
+    resize: ({ playerHud, sideControls, otherRow }) => {
+      playerHud.getBoundingClientRect = () => new DOMRect(330, 200, 150, 46);
+      sideControls.getBoundingClientRect = () => new DOMRect(484, 196, 46, 54);
+      return otherRow;
+    },
+    maxWidth: "",
+  },
+  {
+    what: "the middle row growing, which drops the HUD below the row",
+    resize: ({ playerHud, sideControls, middleRowWrapper }) => {
+      playerHud.getBoundingClientRect = () => new DOMRect(330, 352, 150, 46);
+      sideControls.getBoundingClientRect = () => new DOMRect(484, 348, 46, 54);
+      return middleRowWrapper;
+    },
+    maxWidth: "",
+  },
+  {
+    what: "the rail growing (more action buttons), which lifts the row above the HUD",
+    resize: ({ row, rail }) => {
+      row.getBoundingClientRect = () => new DOMRect(520, 240, 318, 26);
+      return rail;
+    },
+    maxWidth: "",
+  },
+  {
+    what: "a chip growing wider than the room right of the HUD",
+    resize: () => {
+      const statusChip = screen.getByRole("status");
+      statusChip.getBoundingClientRect = () => new DOMRect(528, 320, 310, 22);
+      return statusChip;
+    },
+    maxWidth: "",
+  },
+];
 
 describe("ActionRailStatusRow", () => {
   beforeEach(() => {
@@ -84,10 +205,13 @@ describe("ActionRailStatusRow", () => {
       playerNames: new Map([[1, "Giada"]]),
     });
     setViewport(844, 390);
+    resizeObservers.clear();
+    vi.stubGlobal("ResizeObserver", ControlledResizeObserver);
   });
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
     document.body.replaceChildren();
     setViewport(initialViewport.width, initialViewport.height);
     useGameStore.getState().reset();
@@ -153,9 +277,10 @@ describe("ActionRailStatusRow", () => {
     const row = renderRow(playerHud);
     expect(row.style.maxWidth).toBe("302px");
 
-    // The plate has moved, but no observed resize or drag reports it (Happy
-    // DOM's ResizeObserver never fires). Turning Full Control on mounts its
-    // chip in the row, and that alone has to bring the bound up to date.
+    // The plate has moved, but no resize or drag reports it (the controlled
+    // ResizeObserver fires only when a test reports a resize). Turning Full
+    // Control on mounts its chip in the row, and that alone has to bring the
+    // bound up to date.
     playerHud.getBoundingClientRect = () => new DOMRect(400, 300, 150, 46);
     sideControls.getBoundingClientRect = () => new DOMRect(554, 296, 46, 54);
     await act(async () => {
@@ -163,6 +288,34 @@ describe("ActionRailStatusRow", () => {
     });
     expect(screen.getByRole("button", { name: "Full Control On" })).toBeInTheDocument();
     await waitFor(() => expect(row.style.maxWidth).toBe("232px"));
+  });
+
+  // Each case is driven by one reported resize alone: no window resize, no
+  // style mutation and no chip mounting.
+  it.each(RESIZE_CASES)("keeps the bound current after $what", ({ resize, maxWidth }) => {
+    const fixture = mountPlayerHud();
+    const row = renderRow(fixture.playerHud);
+    expect(row.style.maxWidth).toBe("302px");
+    const rail = row.parentElement;
+    if (!rail) throw new Error("the row renders inside the rail widget");
+
+    reportResize(resize({ ...fixture, row, rail }));
+    expect(row.style.maxWidth).toBe(maxWidth);
+  });
+
+  it("keeps the bound current when the row itself drops from two lines to one", () => {
+    const fixture = mountPlayerHud();
+    // A HUD level only with the row's wrapped upper line: 258-306 against a
+    // two-line row at 290-344.
+    fixture.playerHud.getBoundingClientRect = () => new DOMRect(330, 262, 150, 40);
+    fixture.sideControls.getBoundingClientRect = () => new DOMRect(484, 258, 46, 48);
+    const row = renderRow(fixture.playerHud, new DOMRect(520, 290, 318, 54));
+    expect(row.style.maxWidth).toBe("302px");
+
+    // Back to one line at 318-344: nothing level with the HUD any more.
+    row.getBoundingClientRect = () => new DOMRect(520, 318, 318, 26);
+    reportResize(row);
+    expect(row.style.maxWidth).toBe("");
   });
 
   it("follows the rail when it is dragged", async () => {
