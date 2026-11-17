@@ -115,7 +115,8 @@ function readStyleRules(source: string): StyleRule[] {
 // to a root-relative URL, which readFileSync cannot open.
 const STYLESHEET_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../../../index.css");
 const STYLE_RULES = readStyleRules(readFileSync(STYLESHEET_PATH, "utf8"));
-const LG_BREAKPOINT = "@media (width >= 64rem)";
+const BELOW_LG = "@media (width < 64rem)";
+const STRIP_CLASS = /\.(card-strip-frame|card-choice-strip|zone-viewer-strip)(?![\w-])/;
 
 /**
  * The declarations index.css gives `element` through rules that select one of
@@ -243,7 +244,7 @@ describe("the strip's frame", () => {
   });
 
   it("grows into its parent and sizes the cards from its own height below the lg breakpoint", () => {
-    const frameStyle = declarationsFor(stripFrame(), []);
+    const frameStyle = declarationsFor(stripFrame(), [BELOW_LG]);
 
     expect(frameStyle.get("flex")).toMatch(/^1(\s|$)/);
     expect(frameStyle.get("container-type")).toBe("size");
@@ -251,16 +252,31 @@ describe("the strip's frame", () => {
     expect(frameStyle.get("--card-w")).toContain("var(--card-h)");
   });
 
-  it("asks for a share of the viewport height from the lg breakpoint, and can still shrink", () => {
-    const frameStyle = declarationsFor(stripFrame(), [LG_BREAKPOINT]);
+  it("leaves the cards at the board size from the lg breakpoint", () => {
+    // Desktop's board-size cards (from .card-scale-reset) read well in testing,
+    // so the frame and the strips size nothing outside the below-lg block, and
+    // no strip rule takes anything from the viewport height.
+    const sizingProperties = ["--card-h", "--card-w", "container-type", "flex", "height", "min-height"];
+    const bareStripSelectors = [".card-strip-frame", ".card-choice-strip", ".zone-viewer-strip"];
+    const sizingRules = STYLE_RULES.filter((rule) =>
+      rule.selectors.some((selector) => bareStripSelectors.includes(selector))
+      && sizingProperties.some((property) => rule.declarations.has(property)),
+    );
+    // Reach guard: the scan must find the below-lg sizing rule, or the loop below proves nothing.
+    expect(sizingRules.length).toBeGreaterThan(0);
+    for (const rule of sizingRules) {
+      expect(rule.enclosedBy, rule.selectors.join(", ")).toEqual([BELOW_LG]);
+    }
 
-    // The overlay takes its height from its content here, so the frame stops
-    // growing, prefers a viewport-relative height, and shrinks with the overlay.
-    expect(frameStyle.get("flex")).toMatch(/^0\s+1(\s|$)/);
-    expect(frameStyle.get("height")).toContain("vh");
-    // The cards keep reading the frame's own height at every width.
-    expect(frameStyle.has("container-type")).toBe(false);
-    expect(frameStyle.has("--card-h")).toBe(false);
+    const stripRules = STYLE_RULES.filter((rule) =>
+      rule.selectors.some((selector) => STRIP_CLASS.test(selector))
+      || rule.enclosedBy.some((prelude) => STRIP_CLASS.test(prelude)),
+    );
+    for (const rule of stripRules) {
+      for (const value of rule.declarations.values()) {
+        expect(value, rule.selectors.join(", ")).not.toMatch(/\d(vh|svh|dvh|lvh)\b/);
+      }
+    }
   });
 });
 
@@ -347,14 +363,13 @@ describe("what a strip draws besides a card", () => {
 });
 
 it("never sizes a strip's cards by reaching into their markup", () => {
-  const stripClass = /\.(card-strip-frame|card-choice-strip|zone-viewer-strip)(?![\w-])/;
   // A strip class, any pseudo-classes or compound classes on it, then a combinator.
   const reachesIntoStrip = /\.(card-strip-frame|card-choice-strip|zone-viewer-strip)[^\s>+~,]*[\s>+~]/;
   const sizingProperty =
     /^(min-|max-)?(width|height|inline-size|block-size)$|^(aspect-ratio|flex|flex-basis)$|^--card-/;
   const descendantRules = STYLE_RULES.filter((rule) =>
     rule.selectors.some((selector) => reachesIntoStrip.test(selector))
-    || rule.enclosedBy.some((prelude) => stripClass.test(prelude)),
+    || rule.enclosedBy.some((prelude) => STRIP_CLASS.test(prelude)),
   );
   // Reach guard: the scan must see the strips' descendant rules, or the loop below proves nothing.
   expect(descendantRules.length).toBeGreaterThan(0);

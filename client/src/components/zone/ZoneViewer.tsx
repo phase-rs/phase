@@ -141,8 +141,8 @@ export function ZoneViewer({
       bodyClassName="flex min-h-0 flex-col"
       overlayClassName="z-[60]"
     >
-      {/* A flex column, so the card strip grows into the panel body and sizes
-          its cards from the height it gets (see ScrollableCardStrip). */}
+      {/* A flex column, so below lg the card strip grows into the panel body
+          and sizes its cards from the height it gets (see ScrollableCardStrip). */}
       <div className="flex min-h-0 flex-1 flex-col px-2 pb-2 lg:px-6 lg:pb-6">
         {cards.length === 0 ? (
           <p className="py-8 text-center text-sm italic text-gray-600">
