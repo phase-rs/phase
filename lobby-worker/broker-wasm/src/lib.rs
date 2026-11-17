@@ -15,9 +15,9 @@
 use lobby_broker::{
     compare_announcement_to_info, info_url, normalize_announced_url, parse_lobby_client_message,
     score, validate_announcement, Broker, BrokerEnv, ConnState, InfoMatch, InfoMismatchField,
-    LobbyClientMessage, LobbyServerMessage, Outbound, ParsedFrame, RawAnnouncement,
+    LobbyServerMessage, Outbound, ParsedFrame, PersistedChange, RawAnnouncement,
     ServerAnnouncement, ServerCounters, ServerInfoDocument, DIRECTORY_VERSION, INFO_PATH,
-    PROTOCOL_VERSION, RTT_BUCKET_EDGES_MS, SCORE_BUCKET_MS, SCORE_WINDOW_MS,
+    PROTOCOL_VERSION, RTT_BUCKET_EDGES_MS, SCORE_BUCKET_MS, SCORE_WINDOW_MS, SNAPSHOT_STORAGE_KEY,
 };
 use rand::Rng;
 use serde::Serialize;
@@ -164,47 +164,6 @@ fn reject_reply(message: &str) -> Vec<Outbound> {
     vec![Outbound::ToSelf(LobbyServerMessage::error(message))]
 }
 
-/// Whether a client frame can mutate the shared `LobbyManager` (and therefore
-/// requires the shell to re-snapshot it to DO storage). Conservative: read-only
-/// frames return `false` so a periodic `Ping`/`SubscribeLobby` never triggers a
-/// storage write (Subscribe only flips per-socket `ConnState`, which lives in
-/// the WS attachment, not storage). Exhaustive so a new protocol variant forces
-/// a deliberate classification here.
-fn mutates_lobby(msg: &LobbyClientMessage) -> bool {
-    match msg {
-        LobbyClientMessage::CreateGameWithSettings { .. }
-        | LobbyClientMessage::JoinGameWithPassword { .. }
-        | LobbyClientMessage::LookupJoinTarget { .. }
-        | LobbyClientMessage::UpdateLobbyMetadata { .. }
-        | LobbyClientMessage::UnregisterLobby { .. }
-        // Every tournament write lands in the `TournamentManager` the broker
-        // snapshot carries, so each must mark the DO dirty. Classifying one of
-        // these `false` would lose the write on the next hibernation —
-        // silently, and only for tournaments, since lobby traffic would keep
-        // re-snapshotting around it.
-        | LobbyClientMessage::CreateTournament { .. }
-        | LobbyClientMessage::JoinTournament { .. }
-        | LobbyClientMessage::StartTournamentRound { .. }
-        | LobbyClientMessage::ReportMatchResult { .. }
-        | LobbyClientMessage::DropFromTournament { .. }
-        | LobbyClientMessage::EndTournament { .. }
-        // Rotation REPLACES the stored secret, so it writes tournament state
-        // exactly as the six above do. Classifying it `false` would lose the
-        // rotation on the next hibernation and hand the holder back a secret
-        // the broker no longer accepts — the sharpest possible instance of
-        // this classification's silent failure mode, because the caller has
-        // already discarded the old one.
-        | LobbyClientMessage::RenewTournamentCredential { .. } => true,
-        // `GetTournament` is a pure read, like `SubscribeLobby`: classifying
-        // it `true` would write storage on every poll of a public listing.
-        LobbyClientMessage::GetTournament { .. }
-        | LobbyClientMessage::ClientHello { .. }
-        | LobbyClientMessage::SubscribeLobby
-        | LobbyClientMessage::UnsubscribeLobby
-        | LobbyClientMessage::Ping { .. } => false,
-    }
-}
-
 /// Result of a connection-scoped broker call ([`WasmBroker::handle`] /
 /// [`WasmBroker::on_disconnect`]). `conn` is the post-call per-socket state to
 /// write back to the WebSocket attachment.
@@ -253,9 +212,23 @@ impl WasmBroker {
         }
     }
 
-    /// Serialize the whole broker for DO storage. Infallible for our types.
+    /// Serialize the whole broker for DO storage as ASCII-only JSON, the exact
+    /// text the broker's capacity accounting measures (a string with any
+    /// character above U+00FF is stored by V8 at two bytes per code unit, so
+    /// the broker never emits one). Infallible for our types.
     pub fn snapshot(&self) -> String {
-        serde_json::to_string(&self.inner).expect("broker state always serializes")
+        self.inner.snapshot_json()
+    }
+
+    /// `true` when [`Self::snapshot`] fits the Durable Object row (key, V8
+    /// framing and value). Writes through `Broker::handle` are admitted against
+    /// the same measure; the shell asks this before the writes that are not
+    /// (the reaper and disconnect), so it never hands `storage.put()` a value
+    /// the store would refuse. A snapshot restored from the released writer's
+    /// raw-UTF-8 form that would be too large escaped is kept raw (see
+    /// `lobby_broker::snapshot_codec`), so this holds for it too.
+    pub fn snapshot_fits_storage(&self) -> bool {
+        self.inner.snapshot_fits_storage()
     }
 
     /// `true` when the broker holds nothing in any durable registry. Lets the
@@ -302,12 +275,15 @@ impl WasmBroker {
                 // A host's frame may advance its listing's liveness clock, and
                 // that write must reach DO storage, or a restore after eviction
                 // hands back the stale clock and reaps a live host. Evaluated
-                // before `handle`, which performs the refresh. The refresh is
-                // quantized, so this is at most one write per host per
-                // `LIVENESS_REFRESH_SECS`.
-                let dirty =
-                    mutates_lobby(&msg) || self.inner.host_liveness_refresh_due(&conn, &env);
-                (self.inner.handle(&mut conn, *msg, &env), dirty, None)
+                // before `handle_reporting`, which performs the refresh. The
+                // refresh is quantized, so this is at most one write per host per
+                // `LIVENESS_REFRESH_SECS`. Whether the frame itself changed
+                // durable state is the broker's answer, not a classification of
+                // the variant: a refused no-op request writes nothing.
+                let liveness_due = self.inner.host_liveness_refresh_due(&conn, &env);
+                let handled = self.inner.handle_reporting(&mut conn, *msg, &env);
+                let dirty = handled.persisted == PersistedChange::Changed || liveness_due;
+                (handled.outbounds, dirty, None)
             }
             // A frame the parser couldn't accept — an unknown tag or a field
             // that failed validation (e.g. a blank display_name). Reply with an
@@ -321,6 +297,20 @@ impl WasmBroker {
             ParsedFrame::Malformed(e) => {
                 let reason = format!("malformed frame: {e}");
                 (reject_reply(&reason), false, Some(reason))
+            }
+            // A correlated tournament action (today `SubmitTournamentDeck`) whose
+            // deck failed its bounds. Answer with a correlated
+            // `TournamentActionRejected` so the client's correlated authority
+            // settles the pending submission instead of ignoring a bare `Error`.
+            // Nothing mutated, so still flag `reject` and skip the snapshot.
+            ParsedFrame::RejectedTournamentAction { request_id, reason } => {
+                let outbounds = vec![Outbound::ToSelf(
+                    LobbyServerMessage::TournamentActionRejected {
+                        request_id,
+                        message: reason.clone(),
+                    },
+                )];
+                (outbounds, false, Some(reason))
             }
         };
 
@@ -363,6 +353,15 @@ impl Default for WasmBroker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The Durable Object storage key the shell persists [`WasmBroker::snapshot`]
+/// under. Read from the broker, which subtracts this key's bytes from the
+/// store's key-and-value ceiling when it admits a write, so the key the shell
+/// writes cannot drift from the one the capacity bound accounts for.
+#[wasm_bindgen]
+pub fn snapshot_storage_key() -> String {
+    SNAPSHOT_STORAGE_KEY.to_string()
 }
 
 /// The broker's per-viewer projection of one serialized fan-out frame.
@@ -531,89 +530,87 @@ fn result_json(r: CallResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lobby_broker::{BracketShape, MatchArity, PodOutcome, ScoringPolicy, ServerMode};
+    use lobby_broker::{BracketShape, LobbyClientMessage, MatchArity, ScoringPolicy, ServerMode};
 
-    /// The classification is the whole contract, and getting it wrong is
-    /// SILENT: a mutating frame classified `false` leaves the shell skipping
-    /// its snapshot, so the write survives until the DO next hibernates and
-    /// then vanishes. Every variant is enumerated explicitly rather than
-    /// sampled, because there is no runtime symptom to catch a missed one.
+    /// `dirty` is the broker's own report of whether durable state changed, and
+    /// getting it wrong is SILENT in the costly direction: a write reported clean
+    /// leaves the shell skipping its snapshot, so it survives only until the DO
+    /// next hibernates. Driven through the production `handle` path with real
+    /// events rather than a per-variant table.
     #[test]
-    fn tournament_variants_are_classified_by_whether_they_write() {
-        let mutating = [
-            LobbyClientMessage::CreateTournament {
-                name: "Friday Night".into(),
-                arity: MatchArity::HEAD_TO_HEAD,
-                scoring: Some(ScoringPolicy::default()),
-                bracket: BracketShape::Swiss,
-                total_rounds: None,
-                plus_rounds: None,
-                format: None,
-                match_type: None,
-            },
-            LobbyClientMessage::JoinTournament {
-                code: "TOUR01".into(),
-                player_key: "key-a".into(),
-                display_name: "Alice".into(),
-            },
-            // Uncorrelated fixtures: whether a gated frame WRITES is a property
-            // of the action, not of whether the caller asked to be told about
-            // it, so the correlator is irrelevant to this classification and
-            // `None` is the fixture that says so.
-            LobbyClientMessage::StartTournamentRound {
-                code: "TOUR01".into(),
-                organizer_token: "tok".into(),
-                request_id: None,
-            },
-            LobbyClientMessage::ReportMatchResult {
-                code: "TOUR01".into(),
-                pairing_id: 0,
-                player_token: "tok".into(),
-                outcome: PodOutcome::Draw,
-                request_id: None,
-            },
-            LobbyClientMessage::DropFromTournament {
-                code: "TOUR01".into(),
-                player_token: "tok".into(),
-                request_id: None,
-            },
-            LobbyClientMessage::EndTournament {
-                code: "TOUR01".into(),
-                organizer_token: "tok".into(),
-                request_id: None,
-            },
-        ];
-        for msg in &mutating {
-            assert!(
-                mutates_lobby(msg),
-                "{msg:?} writes tournament state and MUST mark the DO dirty"
-            );
-        }
+    fn dirty_follows_whether_the_frame_changed_durable_state() {
+        const T0: f64 = 1_000_000.0;
+        let frame = |msg: &LobbyClientMessage| serde_json::to_string(msg).expect("frame encodes");
+        let mut b = WasmBroker::new();
+        let (conn, _) = call(&mut b, "{}", &frame(&create_tournament_msg()), T0);
+        let created: ConnState = serde_json::from_str(&conn).expect("conn parses");
+        let code = created
+            .organized_tournaments
+            .first()
+            .expect("reach guard: the create registered an event")
+            .clone();
 
+        let join = |code: &str, key: &str| {
+            frame(&LobbyClientMessage::JoinTournament {
+                code: code.into(),
+                player_key: key.into(),
+                display_name: key.into(),
+            })
+        };
+        let (_, dirty) = call(&mut b, "{}", &join(&code, "alice"), T0);
+        assert!(dirty, "a successful join writes tournament state");
+
+        let persisted = b.snapshot();
+        let (_, dirty) = call(&mut b, "{}", &join("NOSUCH", "bob"), T0);
+        assert!(!dirty, "a join to a missing event changes nothing");
+        assert_eq!(b.snapshot(), persisted, "and the snapshot is untouched");
+
+        let (_, dirty) = call(
+            &mut b,
+            "{}",
+            &frame(&LobbyClientMessage::GetTournament { code: code.clone() }),
+            T0,
+        );
         assert!(
-            !mutates_lobby(&LobbyClientMessage::GetTournament {
-                code: "TOUR01".into()
-            }),
+            !dirty,
             "GetTournament is a pure read; a `true` here writes storage on every poll"
         );
+        let (_, dirty) = call(
+            &mut b,
+            "{}",
+            &frame(&LobbyClientMessage::SubscribeLobby),
+            T0,
+        );
+        assert!(!dirty);
+        let (_, dirty) = call(
+            &mut b,
+            "{}",
+            &frame(&LobbyClientMessage::Ping { timestamp: 1 }),
+            T0,
+        );
+        assert!(!dirty);
+        let (_, dirty) = call(
+            &mut b,
+            "{}",
+            &frame(&LobbyClientMessage::UnregisterLobby {
+                game_code: "GAME01".into(),
+            }),
+            T0,
+        );
+        assert!(dirty, "an unregister removes state and is persisted");
     }
 
-    /// Regression guard: the pre-existing classifications are untouched by
-    /// this extension.
-    #[test]
-    fn pre_existing_variant_classifications_are_unchanged() {
-        assert!(mutates_lobby(&LobbyClientMessage::UnregisterLobby {
-            game_code: "GAME01".into()
-        }));
-        assert!(mutates_lobby(&LobbyClientMessage::UpdateLobbyMetadata {
-            game_code: "GAME01".into(),
-            current_players: 1,
-            max_players: 2,
-            consumed_reservation_tokens: Vec::new(),
-        }));
-        assert!(!mutates_lobby(&LobbyClientMessage::SubscribeLobby));
-        assert!(!mutates_lobby(&LobbyClientMessage::UnsubscribeLobby));
-        assert!(!mutates_lobby(&LobbyClientMessage::Ping { timestamp: 1 }));
+    fn create_tournament_msg() -> LobbyClientMessage {
+        LobbyClientMessage::CreateTournament {
+            name: "Friday Night".into(),
+            arity: MatchArity::HEAD_TO_HEAD,
+            scoring: Some(ScoringPolicy::default()),
+            bracket: BracketShape::Swiss,
+            total_rounds: None,
+            plus_rounds: None,
+            format: None,
+            match_type: None,
+        }
     }
 
     /// Drives one frame through the shim the way the DO does, returning the
@@ -702,6 +699,119 @@ mod tests {
             "the persisted clock is the refreshed one, so the listing survives: {reaped}"
         );
         assert_eq!(restored.active_games(), 1);
+    }
+
+    /// The text the shell hands `storage.put()` is ASCII-only, so V8 stores it as
+    /// a one-byte string and its length is the stored size the broker measured;
+    /// a non-ASCII event name persists as escapes and restores, and a snapshot
+    /// stored before this encoding (raw UTF-8) still restores.
+    #[test]
+    fn the_stored_snapshot_is_ascii_restores_and_accepts_the_legacy_form() {
+        let mut b = WasmBroker::new();
+        let msg = match create_tournament_msg() {
+            LobbyClientMessage::CreateTournament {
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+                plus_rounds,
+                format,
+                match_type,
+                ..
+            } => LobbyClientMessage::CreateTournament {
+                name: "\u{0100}ther \u{1F409} \u{65E5}\u{672C}".into(),
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+                plus_rounds,
+                format,
+                match_type,
+            },
+            other => panic!("unexpected {other:?}"),
+        };
+        let frame = serde_json::to_string(&msg).expect("frame encodes");
+        let (_, dirty) = call(&mut b, "{}", &frame, 1_000_000.0);
+        assert!(dirty, "reach guard: the create wrote state");
+
+        let stored = b.snapshot();
+        assert!(stored.is_ascii(), "the stored text is ASCII-only");
+        assert!(stored.contains(r"\u0100ther"), "escaped, not raw: {stored}");
+        let restored = WasmBroker::from_snapshot(&stored);
+        assert!(!restored.is_empty(), "the escaped snapshot restores");
+        assert_eq!(restored.snapshot().len(), stored.len());
+
+        let legacy = serde_json::to_string(&b.inner).expect("legacy encoding");
+        assert!(!legacy.is_ascii(), "reach guard: the legacy form is raw");
+        let from_legacy = WasmBroker::from_snapshot(&legacy);
+        assert!(!from_legacy.is_empty(), "a legacy snapshot still restores");
+        assert_eq!(from_legacy.snapshot(), stored, "and re-emits ASCII-only");
+    }
+
+    /// F1: a snapshot the released writer stored as raw UTF-8 that fits storage
+    /// only as a two-byte string must restore and re-snapshot into a form that
+    /// still fits, through the real `from_snapshot` / `snapshot` path.
+    #[test]
+    fn a_released_writer_unicode_snapshot_restores_into_a_storable_form() {
+        const NAME: &str = "marker-name";
+        let mut b = WasmBroker::new();
+        let msg = match create_tournament_msg() {
+            LobbyClientMessage::CreateTournament {
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+                plus_rounds,
+                format,
+                match_type,
+                ..
+            } => LobbyClientMessage::CreateTournament {
+                name: NAME.into(),
+                arity,
+                scoring,
+                bracket,
+                total_rounds,
+                plus_rounds,
+                format,
+                match_type,
+            },
+            other => panic!("unexpected {other:?}"),
+        };
+        let frame = serde_json::to_string(&msg).expect("frame encodes");
+        let (_, dirty) = call(&mut b, "{}", &frame, 1_000_000.0);
+        assert!(dirty, "reach guard: the create wrote state");
+
+        // 3.6M `Ā`: 7.2 MB as a two-byte string, 21.6 MB as `\u0100` escapes.
+        let mut value = serde_json::to_value(&b.inner).expect("value");
+        fn rename(value: &mut serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::String(s) if s == NAME => {
+                    *s = "\u{0100}".repeat(3_600_000);
+                    true
+                }
+                serde_json::Value::Array(items) => items.iter_mut().any(rename),
+                serde_json::Value::Object(map) => map.values_mut().any(rename),
+                _ => false,
+            }
+        }
+        assert!(rename(&mut value), "reach guard: the event name was found");
+        let legacy = serde_json::to_string(&value).expect("released encoding");
+        assert!(!legacy.is_ascii());
+        assert!(
+            legacy.chars().map(char::len_utf16).sum::<usize>() * 2 < 8_000_000,
+            "reach guard: the released writer's value fit the store"
+        );
+
+        let restored = WasmBroker::from_snapshot(&legacy);
+        assert!(!restored.is_empty(), "restored rather than reset");
+        let stored = restored.snapshot();
+        assert!(
+            !stored.is_ascii(),
+            "kept raw: the escaped form is 3x larger"
+        );
+        assert!(restored.snapshot_fits_storage());
+        let again = WasmBroker::from_snapshot(&stored);
+        assert_eq!(again.snapshot(), stored, "the stored form round-trips");
     }
 
     /// `/games` serves this listing, so it must hold the listed rooms only: a
@@ -969,5 +1079,84 @@ mod tests {
         assert_eq!(directory_normalize_url("wss://evil@real.example/ws"), None);
         assert_eq!(directory_normalize_url("ws://host.example/ws"), None);
         assert_eq!(directory_normalize_url("wss://127.0.0.1/ws"), None);
+    }
+
+    /// The persistence boundary seen through the shim the DO calls. A broker
+    /// whose persisted value is already at its ceiling refuses a metadata-growing
+    /// write (a registration, no deck involved) with a plain error outbound:
+    /// the snapshot and the connection attachment come back exactly as sent, and
+    /// no success outbound exists for the shell to deliver ahead of its `put`.
+    #[test]
+    fn a_registration_at_the_ceiling_is_refused_through_the_shim_without_changing_state() {
+        use lobby_broker::{CreateTournamentRequest, MAX_SNAPSHOT_ENCODED_BYTES};
+
+        const T0: f64 = 1_000_000.0;
+        let env = WorkerEnv { now_ms: T0 as u64 };
+        let mut broker = Broker::new();
+        // Admitted state is not required to build the fixture: it only has to put
+        // the persisted value at/over its ceiling with events whose metadata is
+        // past its allowance, so write the registry directly with big event names
+        // across enough events.
+        let mut first_code = String::new();
+        for event in 0..13 {
+            let code = format!("PAD{event:03}");
+            broker
+                .tournaments_mut()
+                .create_tournament(
+                    &code,
+                    CreateTournamentRequest {
+                        name: "p".repeat(600_000),
+                        arity: MatchArity::HEAD_TO_HEAD,
+                        scoring: ScoringPolicy::default(),
+                        bracket: BracketShape::Swiss,
+                        total_rounds: None,
+                        plus_rounds: None,
+                        format: None,
+                        match_type: None,
+                    },
+                    &env,
+                )
+                .expect("fixture event");
+            if first_code.is_empty() {
+                first_code = code;
+            }
+        }
+        let mut b = WasmBroker { inner: broker };
+        let persisted = b.snapshot();
+        assert!(
+            persisted.len() > MAX_SNAPSHOT_ENCODED_BYTES,
+            "reach guard: the fixture sits past the ceiling ({} bytes)",
+            persisted.len()
+        );
+
+        let join = serde_json::to_string(&LobbyClientMessage::JoinTournament {
+            code: first_code,
+            player_key: "late".into(),
+            display_name: "Late".into(),
+        })
+        .expect("join serializes");
+        let conn = serde_json::to_string(&ConnState::default()).expect("conn serializes");
+        let result: serde_json::Value =
+            serde_json::from_str(&b.handle(&conn, &join, T0)).expect("call result is JSON");
+
+        let outbounds = result["outbounds"].to_string();
+        assert!(
+            outbounds.contains("at capacity"),
+            "the refusal names the capacity: {outbounds}"
+        );
+        assert!(
+            !outbounds.contains("TournamentJoined"),
+            "no success outbound may exist for a write that was not kept: {outbounds}"
+        );
+        assert_eq!(
+            result["conn"],
+            serde_json::from_str::<serde_json::Value>(&conn).expect("conn is JSON"),
+            "the attachment is returned untouched"
+        );
+        assert_eq!(
+            b.snapshot(),
+            persisted,
+            "the broker the shell would snapshot is byte-identical to before the frame"
+        );
     }
 }

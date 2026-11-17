@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use crate::game::functioning_abilities::static_kind_present;
 use crate::game::layers;
@@ -10,7 +10,7 @@ use crate::game::zone_pipeline::{
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, LossReason};
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::match_config::MatchPhase;
@@ -19,9 +19,8 @@ use crate::types::proposed_event::ProposedEvent;
 use crate::types::statics::{StaticMode, StaticModeKind};
 use crate::types::zones::Zone;
 
-use super::elimination::DepartureTriggers;
+use super::elimination::{DepartureResume, DepartureTriggers, LookedBackDeparture};
 use super::filter::{matches_target_filter, FilterContext};
-use super::players::PoisonLossMeasure;
 use super::speed::{controls_start_your_engines_in, set_speed};
 use super::zones;
 
@@ -100,16 +99,30 @@ fn mid_resolution_entry_pauses_sba(state: &GameState) -> bool {
 /// CR 704.3: Run state-based actions in a fixpoint loop until no more actions are performed,
 /// capped at MAX_SBA_ITERATIONS.
 pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller);
+    let _ = run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller);
+}
+
+/// CR 704.3 + CR 117.2e: [`check_state_based_actions`] for the player-loss
+/// safety net, which can run while a resolution is paused on a player's
+/// replacement choice. Reports a departure that canceled that pause, so the
+/// caller finishes the resolution before any player receives priority.
+pub(crate) fn check_state_based_actions_reporting_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> DepartureResume {
+    run_state_based_actions(state, events, &[], DepartureTriggers::ScannedByCaller).0
 }
 
 /// CR 704.3 + CR 117.5: [`check_state_based_actions`] inside a post-action pass, which places
 /// what is waiting to be put on the stack at its own settle.
+///
+/// Returns how many triggered abilities a player's departure in it queued: the last that
+/// many contexts of `deferred_triggers`.
 pub(crate) fn check_state_based_actions_in_pass(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
-) {
-    run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass);
+) -> usize {
+    run_state_based_actions(state, events, &[], DepartureTriggers::PlacedByPass).1
 }
 
 /// CR 704.3 + CR 704.5v + CR 510.3a: run state-based actions in a fixpoint loop
@@ -122,8 +135,8 @@ pub(crate) fn check_state_based_actions_with_waiting_triggers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     waiting: &[crate::game::triggers::PendingTriggerContext],
-) {
-    run_state_based_actions(state, events, waiting, DepartureTriggers::ScannedByCaller);
+) -> usize {
+    run_state_based_actions(state, events, waiting, DepartureTriggers::ScannedByCaller).1
 }
 
 fn run_state_based_actions(
@@ -131,7 +144,7 @@ fn run_state_based_actions(
     events: &mut Vec<GameEvent>,
     waiting: &[crate::game::triggers::PendingTriggerContext],
     departures: DepartureTriggers,
-) {
+) -> (DepartureResume, usize) {
     // CR 104.1 + CR 704.3: a game that has already ended is terminal, and no
     // player will receive priority again — so no state-based actions are
     // performed. Without this guard the player-loss collectors below would run
@@ -151,9 +164,56 @@ fn run_state_based_actions(
         || state.match_phase != MatchPhase::InGame
         || matches!(state.waiting_for, WaitingFor::GameOver { .. })
     {
-        return;
+        return (DepartureResume::Settled, 0);
     }
+    let mut departed = Vec::new();
+    let mut iteration_starts = Vec::new();
+    let mut held_by_earlier_checks = Vec::new();
+    let resume = run_state_based_action_iterations(
+        state,
+        events,
+        waiting,
+        departures,
+        &mut departed,
+        &mut iteration_starts,
+        &mut held_by_earlier_checks,
+    );
+    // CR 603.3b: what the earlier checks' departures triggered joins the queue
+    // now, ahead of the last check's, as one batch with the caller's own.
+    // CR 800.4d: an ability whose controller left in a later check is removed.
+    let held_by_earlier_checks =
+        crate::game::triggers::retire_departed_controller_contexts(state, held_by_earlier_checks);
+    let queued_by_earlier_iterations = held_by_earlier_checks.len();
+    state.deferred_triggers.extend(held_by_earlier_checks);
+    // CR 704.3 + CR 603.10a: the state-based-action event is complete and stamped
+    // as one simultaneous event, so the abilities a player's departure in it
+    // triggered are collected now, once, against the observers latched before
+    // that departure. A game that ended triggers nothing (`collect`, CR 104.1).
+    // CR 704.3: a departure's simultaneous event ends where the next iteration
+    // of the check began, or with the check.
+    let queued: usize = departed
+        .into_iter()
+        .map(|departure| {
+            let batch_end = iteration_starts
+                .iter()
+                .copied()
+                .find(|start| *start >= departure.departure_end())
+                .unwrap_or(events.len());
+            departure.collect(state, events, batch_end)
+        })
+        .sum();
+    (resume, queued + queued_by_earlier_iterations)
+}
 
+fn run_state_based_action_iterations(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+    departures: DepartureTriggers,
+    departed: &mut Vec<LookedBackDeparture>,
+    iteration_starts: &mut Vec<usize>,
+    held_by_earlier_checks: &mut Vec<crate::game::triggers::PendingTriggerContext>,
+) -> DepartureResume {
     // CR 604.2: Re-evaluate layers so computed P/T reflects current static abilities.
     if state.layers_dirty.is_dirty() {
         // Snapshot P/T before layer re-evaluation for delta logging.
@@ -187,9 +247,31 @@ fn run_state_based_actions(
         }
     }
 
+    // CR 117.5 + CR 704.3 + CR 603.2: inside a post-action pass, control changes
+    // derived before this check (an SBA earlier in the loop put an Aura into a
+    // graveyard, CR 704.5m) are published into the batch the pass collects
+    // before priority. Other callers do not scan this buffer, so their changes
+    // stay queued for the next scanned drain or the action-return drain.
+    if departures == DepartureTriggers::PlacedByPass {
+        layers::publish_layer_control_changes(state, events);
+    }
+
     for _ in 0..MAX_SBA_ITERATIONS {
         let mut any_performed = false;
         let iteration_events_start = events.len();
+        // CR 704.3 + CR 603.10: each check is its own event, and what a
+        // departure in an earlier check triggered is read in the game
+        // immediately after that check, before this one changes it (a player
+        // this check removes takes their permanents with them).
+        // The collected abilities are held out of the queue until the checks
+        // are over: a later check's elimination drains the queue, and these
+        // belong to the batch of the caller that runs the checks.
+        let first_collected = state.deferred_triggers.len();
+        for departure in std::mem::take(departed) {
+            departure.collect(state, events, iteration_events_start);
+        }
+        held_by_earlier_checks.extend(state.deferred_triggers.split_off(first_collected));
+        iteration_starts.push(iteration_events_start);
 
         // CR 704.3 + CR 104.4a + CR 704.5a-c + CR 704.6c: Every player-loss
         // condition met in this single SBA check forms ONE simultaneous event.
@@ -208,25 +290,22 @@ fn run_state_based_actions(
         }
         // CR 704.5a-c + CR 704.6c: collect every player-loss SBA from this
         // check before applying any of them.
-        let mut losers: Vec<PlayerId> = collect_life_losers(state);
-        losers.extend(collect_draw_from_empty_losers(state));
-        losers.extend(collect_poison_losers(state));
-        losers.extend(collect_commander_damage_losers(state));
-
-        // A player can meet several loss conditions at once — dedup so each is
-        // eliminated (and emits PlayerLost) exactly once.
-        losers.sort_unstable();
-        losers.dedup();
-        if !losers.is_empty() {
+        let losses = player_losses(state);
+        if !losses.is_empty() {
             any_performed = true;
-            for &loser in &losers {
-                events.push(GameEvent::PlayerLost { player_id: loser });
-            }
-            super::elimination::eliminate_players(state, &losers, departures, events);
+            let outcome = super::elimination::eliminate_players(state, &losses, departures, events);
+            let resume = outcome.resume;
+            departed.extend(outcome.looked_back);
 
             // If the game ended (a sole winner or a CR 104.4a draw), stop now.
             if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-                return;
+                return DepartureResume::Settled;
+            }
+            // CR 704.4 + CR 117.2e: the departure canceled the current pause of a
+            // resolution that is still under way. Its remaining state-based
+            // actions wait for that resolution to finish; the caller resumes it.
+            if resume == DepartureResume::ParkedZoneChangeTail {
+                return resume;
             }
         }
 
@@ -249,7 +328,7 @@ fn run_state_based_actions(
         // `pending_replacement` guard (after lethal-damage) still handles
         // regeneration replacements created *within* this loop.
         if mid_resolution_entry_pauses_sba(state) {
-            return;
+            return DepartureResume::Settled;
         }
 
         // CR 903.9a: A commander in graveyard or exile (since last SBA check) may
@@ -257,7 +336,7 @@ fn run_state_based_actions(
         // ask the player, similar to the legend rule.
         check_commander_zone_return(state);
         if matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }) {
-            return;
+            return DepartureResume::Settled;
         }
 
         let battlefield_snapshot = state.battlefield_phased_in_ids();
@@ -275,7 +354,7 @@ fn run_state_based_actions(
 
         // CR 614.3 / CR 701.19b: If a regeneration replacement choice is pending, pause SBA evaluation.
         if mid_resolution_entry_pauses_sba(state) {
-            return;
+            return DepartureResume::Settled;
         }
 
         if has_battlefield_sbas {
@@ -292,14 +371,14 @@ fn run_state_based_actions(
             if check_legend_rule(state, events, &mut any_performed, &battlefield_snapshot)
                 == SbaPassControl::Stop
             {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5m: If an Aura is attached to an illegal object or player, it is put into
             // its owner's graveyard.
             check_unattached_auras(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5n: If an Equipment or Fortification is attached to an illegal
@@ -312,7 +391,7 @@ fn run_state_based_actions(
             // gone — only attached Roles compete for the per-(host, controller) slot.
             check_role_uniqueness(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5k: If two or more permanents have the world supertype, all but the one
@@ -321,13 +400,13 @@ fn run_state_based_actions(
             // choiceless — modeled on check_role_uniqueness.
             check_world_rule(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5i + CR 306.9: If a planeswalker has loyalty 0, it is put into its owner's graveyard.
             check_zero_loyalty(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5v + CR 310.7: a Siege with defense 0 that isn't the source of an
@@ -342,7 +421,7 @@ fn run_state_based_actions(
                 waiting,
             );
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5p: If a battle or creature is attached to an object or player — or
@@ -361,7 +440,7 @@ fn run_state_based_actions(
             // controller chooses an appropriate protector; graveyard if none can be chosen.
             check_battle_protector(state, events, &mut any_performed, &battlefield_snapshot);
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5s + CR 714.4: If a Saga has lore counters >= its final chapter number,
@@ -374,11 +453,11 @@ fn run_state_based_actions(
                 waiting,
             );
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5q: +1/+1 and -1/-1 counters on the same permanent cancel in pairs.
-            check_counter_cancellation(state, &mut any_performed, &battlefield_snapshot);
+            check_counter_cancellation(state, events, &mut any_performed, &battlefield_snapshot);
         }
 
         // CR 704.5d: Tokens in zones other than the battlefield cease to exist.
@@ -394,7 +473,7 @@ fn run_state_based_actions(
                 &battlefield_snapshot,
             );
             if mid_resolution_entry_pauses_sba(state) {
-                return;
+                return DepartureResume::Settled;
             }
 
             // CR 704.5z: A player controlling Start your engines! gets speed 1 if they had none.
@@ -426,7 +505,7 @@ fn run_state_based_actions(
                 Some(crate::game::planechase::PlaneswalkResolution::Deferred)
             )
         {
-            return;
+            return DepartureResume::Settled;
         }
 
         // CR 904.10 / CR 314.6: A face-up non-ongoing scheme with no scheme
@@ -456,6 +535,7 @@ fn run_state_based_actions(
             break;
         }
     }
+    DepartureResume::Settled
 }
 
 /// CR 704.5z + CR 702.179a: If a player controls a permanent with start your engines!
@@ -686,60 +766,13 @@ fn cant_lose_active_for(state: &GameState, player_id: PlayerId) -> bool {
 }
 
 /// CR 704.5a/704.5b/704.5c/704.6c: Whether a player-loss SBA would currently
-/// eliminate at least one non-eliminated player. This is intentionally narrower
-/// than running the full SBA loop: callers that are only trying to avoid waiting
-/// on a dead player during a non-priority continuation should not trigger
-/// unrelated SBA choice prompts such as commander-zone or legend-rule choices.
+/// eliminate at least one non-eliminated player, read from the same collectors
+/// the SBA check runs. This is intentionally narrower than running the full SBA
+/// loop: callers that are only trying to avoid waiting on a dead player during a
+/// non-priority continuation should not trigger unrelated SBA choice prompts such
+/// as commander-zone or legend-rule choices.
 pub(crate) fn has_pending_player_loss_sba(state: &GameState) -> bool {
-    let life_loss = state.players.iter().any(|player| {
-        // CR 704.5a + CR 810.8c: A player (or team) with 0 or less life loses.
-        !player.is_eliminated
-            && !player.is_phased_out()
-            && super::players::team_life_total(state, player.id) <= 0
-            && !player_has_cant_lose(state, player.id)
-    });
-    if life_loss {
-        return true;
-    }
-
-    let drew_from_empty = state.players.iter().any(|player| {
-        // CR 704.5b: A player who attempted to draw from an empty library loses
-        // the game the next time state-based actions are checked.
-        !player.is_eliminated
-            && player.drew_from_empty_library
-            && !player_has_cant_lose(state, player.id)
-    });
-    if drew_from_empty {
-        return true;
-    }
-
-    let poison_loss = state.players.iter().any(|player| {
-        // CR 704.5c + CR 704.6b / CR 810.8d: the format's individual threshold
-        // (ten by default), or fifteen shared by the team. Archenemy Commander
-        // takes the individual branch for every seat — CR 904.13c keeps poison
-        // unshared even though life is shared. `players::poison_loss_measure`
-        // is the shared authority (twin of `collect_poison_losers`).
-        !player.is_eliminated
-            && super::players::poison_loss_measure(state, player)
-                .is_some_and(PoisonLossMeasure::is_lethal)
-            && !player_has_cant_lose(state, player.id)
-    });
-    if poison_loss {
-        return true;
-    }
-
-    let threshold = match state.format_config.commander_damage_threshold {
-        Some(threshold) => threshold as u32,
-        None => return false,
-    };
-
-    state.commander_damage.iter().any(|entry| {
-        // CR 704.6c: In Commander, a player dealt 21+ combat damage by the same
-        // commander over the course of the game loses.
-        entry.damage >= threshold
-            && !state.eliminated_players.contains(&entry.player)
-            && !player_has_cant_lose(state, entry.player)
-    })
+    !player_losses(state).is_empty()
 }
 
 /// Check if a static ability from `source_controller` with the given `affected` filter
@@ -793,6 +826,29 @@ fn static_affects_player(
     }
 }
 
+/// CR 704.3 + CR 704.5a-c + CR 704.6c: every player a player-loss SBA of this
+/// check removes, with every condition it meets.
+fn player_losses(state: &GameState) -> BTreeMap<PlayerId, BTreeSet<LossReason>> {
+    let mut losses: BTreeMap<PlayerId, BTreeSet<LossReason>> = BTreeMap::new();
+    for (losers, reason) in [
+        (collect_life_losers(state), LossReason::LifeTotal),
+        (
+            collect_draw_from_empty_losers(state),
+            LossReason::DrewFromEmptyLibrary,
+        ),
+        (collect_poison_losers(state), LossReason::Poison),
+        (
+            collect_commander_damage_losers(state),
+            LossReason::CommanderDamage,
+        ),
+    ] {
+        for loser in losers {
+            losses.entry(loser).or_default().insert(reason);
+        }
+    }
+    losses
+}
+
 /// CR 704.5a + CR 810.8c: A player (or, in a team-based format, a team) with 0
 /// or less life loses the game. Pure collector — the SBA driver batches all
 /// loss conditions into a single simultaneous event (CR 704.3) so simultaneous
@@ -817,8 +873,7 @@ fn collect_life_losers(state: &GameState) -> Vec<PlayerId> {
         // is never a CR 704.5a "0 or less life" loser. Belt-and-suspenders with
         // the life-loss→mill redirect (its life never drops), but this makes
         // "no life total" a hard guarantee independent of the redirect.
-        .filter(|p| !super::horde::player_has_no_life_total(state, p.id))
-        .filter(|p| super::players::team_life_total(state, p.id) <= 0)
+        .filter(|p| super::players::LossPool::life(state, p.id).is_some_and(|pool| pool.reached()))
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
         .collect()
@@ -848,10 +903,7 @@ fn collect_poison_losers(state: &GameState) -> Vec<PlayerId> {
         .iter()
         .filter(|p| !p.is_eliminated)
         .filter(|p| {
-            // Twin of the `has_pending_player_loss_sba` poison branch above,
-            // through the same authority, `players::poison_loss_measure`:
-            // Archenemy Commander takes the individual branch (CR 904.13c).
-            super::players::poison_loss_measure(state, p).is_some_and(PoisonLossMeasure::is_lethal)
+            super::players::LossPool::poison(state, p.id).is_some_and(|pool| pool.reached())
         })
         .filter(|p| !player_has_cant_lose(state, p.id))
         .map(|p| p.id)
@@ -1126,7 +1178,6 @@ fn perform_creature_deaths(
                         source_id: source,
                         exile_links: ExileLinkSpec::default(),
                         drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                        library_placement: None,
                     };
                     if let ZoneDeliveryResult::NeedsChoice(_) =
                         zone_pipeline::deliver(state, approved, ctx, events)
@@ -1213,9 +1264,6 @@ fn perform_creature_deaths(
                                     source_id: source,
                                     exile_links: ExileLinkSpec::default(),
                                     drain: crate::types::game_state::PostReplacementDrainOwner::DeliveryTail,
-                                    // SBA destroy/sacrifice deliveries target the
-                                    // graveyard — never a library placement.
-                                    library_placement: None,
                                 };
                                 // CR 704.3: completing all SBAs may require a
                                 // replacement choice surfaced by the delivery tail
@@ -2213,8 +2261,8 @@ fn check_illegal_attachment_unattach(
         // Deliberately hand-mutates rather than routing through
         // `effects::attach::unattach`: that helper flushes layers per object and
         // records a CR 733 journal command, and neither existing SBA unattach
-        // path journals or flushes. SBAs are deterministic sweeps that replay
-        // re-executes, so journaling here would double-record.
+        // path journals or flushes. (The counter and cease SBAs, by contrast, do
+        // journal through their own removal paths.)
         if let Some(old_target) = old_target
             .as_ref()
             .filter(|target| should_emit_sba_unattached_event(state, target))
@@ -2448,13 +2496,20 @@ fn check_saga_sacrifice(
 /// only one type remains.
 /// CR 702.26b: Phased-out permanents are treated as though they don't exist;
 /// their counters aren't touched by this SBA.
+///
+/// The removal goes through `apply_counter_removal`, the single counter-removal
+/// authority: it journals the edit, prunes zero entries, marks the layers dirty
+/// (P/T counters, CR 613.4c), retires "for as long as it has a +1/+1 counter"
+/// durations (CR 611.2b), and emits one `CounterRemoved` event per kind so
+/// counter-removal triggers see the annihilation (Protean Hydra ruling).
 fn check_counter_cancellation(
     state: &mut GameState,
+    events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
     battlefield_snapshot: &[ObjectId],
 ) {
     for &obj_id in battlefield_snapshot {
-        let Some(obj) = live_battlefield_object_mut(state, &obj_id) else {
+        let Some(obj) = live_battlefield_object(state, &obj_id) else {
             continue;
         };
         let p1p1 = obj
@@ -2470,12 +2525,23 @@ fn check_counter_cancellation(
         let cancel = p1p1.min(m1m1);
         if cancel > 0 {
             // CR 704.5q: Remove N of each where N = min(+1/+1, -1/-1)
-            obj.counters.insert(CounterType::Plus1Plus1, p1p1 - cancel);
-            obj.counters
-                .insert(CounterType::Minus1Minus1, m1m1 - cancel);
-            obj.counters.retain(|_, v| *v > 0);
-            state.layers_dirty.mark_full(); // P/T affected via Layer 7d
-            *any_performed = true;
+            let removed_p1p1 = crate::game::effects::counters::apply_counter_removal(
+                state,
+                obj_id,
+                CounterType::Plus1Plus1,
+                cancel,
+                events,
+            );
+            let removed_m1m1 = crate::game::effects::counters::apply_counter_removal(
+                state,
+                obj_id,
+                CounterType::Minus1Minus1,
+                cancel,
+                events,
+            );
+            if removed_p1p1 > 0 || removed_m1m1 > 0 {
+                *any_performed = true;
+            }
         }
     }
 }
@@ -2726,6 +2792,16 @@ mod tests {
         GameState::new_two_player(42)
     }
 
+    fn player_losses_in(events: &[GameEvent]) -> Vec<(PlayerId, BTreeSet<LossReason>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                GameEvent::PlayerLost { player_id, reasons } => Some((*player_id, reasons.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Convert a fresh battlefield object into a zero-defense battle for the
     /// CR 704.5v/w waiting-batch tests below. `siege` selects whether it gets
     /// the Siege battle type.
@@ -2944,6 +3020,7 @@ mod tests {
         )
         .expect("the fixture begins with no carrier installed");
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ability),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -3059,12 +3136,30 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(0)
-            }
-        )));
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(0), BTreeSet::from([LossReason::LifeTotal]))]
+        );
+    }
+
+    /// CR 704.3: one check finding a player at 0 life with ten poison counters
+    /// records both reasons on one `PlayerLost`.
+    #[test]
+    fn sba_zero_life_and_ten_poison_records_both_reasons() {
+        let mut state = setup();
+        state.players[0].life = 0;
+        state.players[0].poison_counters = 10;
+        let mut events = Vec::new();
+
+        check_state_based_actions(&mut state, &mut events);
+
+        assert_eq!(
+            player_losses_in(&events),
+            [(
+                PlayerId(0),
+                BTreeSet::from([LossReason::LifeTotal, LossReason::Poison])
+            )]
+        );
     }
 
     #[test]
@@ -3880,12 +3975,10 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(0)
-            }
-        )));
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(0), BTreeSet::from([LossReason::Poison]))]
+        );
     }
 
     #[test]
@@ -4738,7 +4831,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -4919,7 +5011,6 @@ mod tests {
             depth: 0,
             is_optional: false,
             choice_player: None,
-            library_placement: None,
             exile_controller: None,
             exile_duration: None,
             exile_tracking: crate::types::game_state::ZoneDeliveryExileTracking::None,
@@ -4979,17 +5070,16 @@ mod tests {
         state.players[1].is_eliminated = true;
         state.eliminated_players.push(PlayerId(1));
         state.players[1].life = 0;
+        state.players[2].life = 0;
         let mut events = Vec::new();
 
         check_state_based_actions(&mut state, &mut events);
 
-        // No new events for already-eliminated player
-        assert!(!events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(1)
-            }
-        )));
+        // No new events for already-eliminated player; P2's loss is the reach guard.
+        assert_eq!(
+            player_losses_in(&events),
+            [(PlayerId(2), BTreeSet::from([LossReason::LifeTotal]))]
+        );
     }
 
     #[test]
@@ -5070,6 +5160,13 @@ mod tests {
         // Both team A members eliminated
         assert!(state.players[0].is_eliminated);
         assert!(state.players[1].is_eliminated);
+        assert_eq!(
+            player_losses_in(&events),
+            [
+                (PlayerId(0), BTreeSet::from([LossReason::LifeTotal])),
+                (PlayerId(1), BTreeSet::from([LossReason::LifeTotal])),
+            ]
+        );
         // Team B wins
         assert!(matches!(
             state.waiting_for,
@@ -5111,10 +5208,49 @@ mod tests {
 
         assert!(state.players[0].is_eliminated);
         assert!(state.players[1].is_eliminated);
+        assert_eq!(
+            player_losses_in(&events),
+            [
+                (PlayerId(0), BTreeSet::from([LossReason::Poison])),
+                (PlayerId(1), BTreeSet::from([LossReason::Poison])),
+            ]
+        );
         assert!(matches!(
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
         ));
+    }
+
+    /// CR 704.5a: the pending-loss check reads the collectors, so the Horde seat, which has no
+    /// life total, is no pending loser at 0 life.
+    #[test]
+    fn pending_player_loss_reads_the_collectors() {
+        let mut state = GameState::new(
+            FormatConfig::horde(
+                crate::types::format::ChallengeDeck::CybermanHorde.default_ruleset(),
+            ),
+            3,
+            42,
+        );
+        assert!(crate::game::horde::player_has_no_life_total(
+            &state,
+            PlayerId(0)
+        ));
+        state.players[0].life = 0;
+        assert!(player_losses(&state).is_empty());
+        assert!(!has_pending_player_loss_sba(&state));
+
+        state.players[0].life = 20;
+        state.players[1].life = 0;
+        state.players[2].life = 0;
+        assert_eq!(
+            player_losses(&state),
+            BTreeMap::from([
+                (PlayerId(1), BTreeSet::from([LossReason::LifeTotal])),
+                (PlayerId(2), BTreeSet::from([LossReason::LifeTotal])),
+            ])
+        );
+        assert!(has_pending_player_loss_sba(&state));
     }
 
     #[test]
@@ -5150,6 +5286,14 @@ mod tests {
         assert!(state.players[0].is_eliminated);
         assert!(state.players[1].is_eliminated);
         assert!(!state.players[2].is_eliminated);
+        // CR 704.6c for P1; CR 810.8a folds its teammate P0 in.
+        assert_eq!(
+            player_losses_in(&events),
+            [
+                (PlayerId(1), BTreeSet::from([LossReason::CommanderDamage])),
+                (PlayerId(0), BTreeSet::from([LossReason::CommanderDamage])),
+            ]
+        );
         assert!(matches!(
             state.waiting_for,
             WaitingFor::GameOver { winner: Some(_) }
@@ -5623,12 +5767,13 @@ mod tests {
                 winner: Some(PlayerId(1))
             }
         ));
-        assert!(events.iter().any(|e| matches!(
-            e,
-            GameEvent::PlayerLost {
-                player_id: PlayerId(0)
-            }
-        )));
+        assert_eq!(
+            player_losses_in(&events),
+            [(
+                PlayerId(0),
+                BTreeSet::from([LossReason::DrewFromEmptyLibrary])
+            )]
+        );
     }
 
     #[test]
@@ -5659,6 +5804,7 @@ mod tests {
         crate::game::elimination::eliminate_players_simultaneously(
             &mut state,
             &[PlayerId(1)],
+            LossReason::OpponentWon,
             &mut events,
         );
         assert!(
@@ -5686,7 +5832,7 @@ mod tests {
         );
         assert!(
             !events[game_over_at..].iter().any(
-                |event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == PlayerId(0))
+                |event| matches!(event, GameEvent::PlayerLost { player_id, reasons: _ } if *player_id == PlayerId(0))
             ),
             "no PlayerLost for the winner after GameOver"
         );
@@ -6008,6 +6154,53 @@ mod tests {
             0,
             "Should have 0 -1/-1 counters remaining"
         );
+    }
+
+    /// CR 704.5q: the annihilation goes through the counter-removal authority,
+    /// so it emits exactly one `CounterRemoved` per kind, each carrying the
+    /// cancelled amount N = min(+1/+1, -1/-1). Discriminator: before the SBA
+    /// routed through `apply_counter_removal` it emitted no event.
+    #[test]
+    fn counter_cancellation_emits_one_removal_event_per_kind() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        obj.counters.insert(CounterType::Plus1Plus1, 3);
+        obj.counters.insert(CounterType::Minus1Minus1, 2);
+
+        let mut events = Vec::new();
+        check_state_based_actions(&mut state, &mut events);
+
+        // Reach guard: the SBA annihilated the pairs.
+        let obj = state.objects.get(&id).unwrap();
+        assert_eq!(obj.counters.get(&CounterType::Plus1Plus1).copied(), Some(1));
+        assert!(!obj.counters.contains_key(&CounterType::Minus1Minus1));
+
+        let removals_of = |kind: CounterType| -> Vec<u32> {
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::CounterRemoved {
+                        object_id,
+                        counter_type,
+                        count,
+                        ..
+                    } if *object_id == id && *counter_type == kind => Some(*count),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(removals_of(CounterType::Plus1Plus1), vec![2]);
+        assert_eq!(removals_of(CounterType::Minus1Minus1), vec![2]);
     }
 
     #[test]

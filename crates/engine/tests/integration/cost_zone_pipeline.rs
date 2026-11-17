@@ -995,7 +995,6 @@ fn stage_prevented_cost_move(state: &mut GameState, source: engine::types::ident
         depth: 0,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
@@ -4039,6 +4038,7 @@ fn mana_self_exile_cost_redirect_serializes_and_resumes_unless_payment_once() {
         effect_description: Some("unless payment witness".to_string()),
         remaining: vec![P1],
         repeat: None,
+        affected_object: None,
     };
     let mut initial_events = Vec::new();
     let initial = activate_mana_ability(
@@ -4254,6 +4254,7 @@ fn auto_tap_cost_move_redirect_preserves_outer_unless_payment() {
         effect_description: Some("auto-tap unless payment witness".to_string()),
         remaining: vec![P1],
         repeat: None,
+        affected_object: None,
     };
 
     let paused = runner
@@ -5338,7 +5339,6 @@ fn effect_pay_cost_composite_mana_life_prevention_serializes_and_rides_once() {
         depth: 0,
         is_optional: false,
         choice_player: None,
-        library_placement: None,
         exile_controller: None,
         exile_duration: None,
         exile_tracking: engine::types::game_state::ZoneDeliveryExileTracking::None,
@@ -9772,6 +9772,7 @@ fn prevented_mana_cost_move_serializes_and_restores_unless_payment_root() {
             effect_description: Some("prevented unless payment witness".to_string()),
             remaining: vec![P1],
             repeat: None,
+            affected_object: None,
         },
         None,
     )
