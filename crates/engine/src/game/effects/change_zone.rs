@@ -1309,6 +1309,9 @@ pub fn resolve(
     // was put onto the stack (activated) or triggered (triggered) but before its
     // initial one-shot zone change, the object does not move.
     if until_event_already_occurred(state, ability, events) {
+        // CR 609.3 + CR 608.2c: nothing moved, so a following "this way"
+        // count reads 0 rather than an earlier chain step's count.
+        state.last_effect_count = Some(0);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -1391,6 +1394,7 @@ pub fn resolve(
     if matches!(target_filter, TargetFilter::ParentTarget)
         && ability.parent_target_missing_reason.is_some()
     {
+        state.last_effect_count = Some(0);
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::from(&ability.effect),
             source_id: ability.source_id,
@@ -1453,9 +1457,16 @@ pub fn resolve(
         // Exception: when `target_choice_timing == Resolution` the player has not
         // yet had a chance to choose — targets are empty by design and the zone-scan
         // path must be reached so `EffectZoneChoice` can be issued.
+        //
+        // Every early return in this empty-targets block moved nothing, so each
+        // stamps `last_effect_count = Some(0)` before returning. CR 609.3: the
+        // move did only as much as possible (nothing); CR 608.2c: a following
+        // "this way" step (`QuantityRef::PreviousEffectCount`) must read that 0,
+        // not inherit a count an earlier chain step left behind.
         if ability.targeting_is_optional()
             && !matches!(ability.target_choice_timing, TargetChoiceTiming::Resolution)
         {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1469,6 +1480,24 @@ pub fn resolve(
         // remains (for example, a Warp delayed exile after a blink), the zone-scan
         // fallback must not rediscover a same-id return by raw equality.
         if matches!(target_filter, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+            state.last_effect_count = Some(0);
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+                subject: None,
+            });
+            return Ok(completed_result(0));
+        }
+
+        // CR 400.7: an untargeted "it" whose inferred referent was this ability's own
+        // source names nothing once the source changed zones; return before the zone
+        // scan, exactly as the SelfRef guard above.
+        if crate::game::targeting::inferred_source_referent_is_unbound(
+            state,
+            ability,
+            target_filter,
+        ) {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1490,6 +1519,7 @@ pub fn resolve(
         // (CR 603.7b) — it simply affected nothing, and the game log / event
         // observers / chain machinery must see that.
         if ability.pinned_object_targets_all_stale(state) {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1506,6 +1536,7 @@ pub fn resolve(
         // which would otherwise find nothing only through `filter.rs`'s slot
         // arm and would set `cost_payment_failed_flag` on the way out.
         if matches!(target_filter, TargetFilter::ParentTargetSlot { .. }) {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1545,6 +1576,7 @@ pub fn resolve(
         if (origin == Some(Zone::Library) || origin.is_none())
             && matches!(target_filter, TargetFilter::Any)
         {
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -1593,6 +1625,7 @@ pub fn resolve(
             if !up_to {
                 state.cost_payment_failed_flag = true;
             }
+            state.last_effect_count = Some(0);
             events.push(GameEvent::EffectResolved {
                 kind: EffectKind::from(&ability.effect),
                 source_id: ability.source_id,
@@ -11191,6 +11224,62 @@ mod tests {
 
         assert!(!state.players[0].graveyard.contains(&obj_id));
         assert_eq!(state.objects[&obj_id].zone, Zone::Exile);
+    }
+
+    /// CR 400.7: Regenerations Restored sacrificed before its own trigger
+    /// resolves — "exile it" infers the source, which is now a new object in the
+    /// graveyard. The move does nothing: no zone scan, no failure flag, and the
+    /// effect still reports that it resolved.
+    #[test]
+    fn unresolved_parent_target_with_departed_source_moves_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Regenerations Restored".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                actor: crate::types::ability::LibraryInstructionActor::Controller,
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                library_shuffle: Default::default(),
+                enter_transformed: false,
+                enters_under: None,
+                enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+        ability.trigger_source = Some(crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&obj_id],
+        ));
+        let mut setup = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Graveyard, &mut setup);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&obj_id].zone, Zone::Graveyard);
+        assert!(!state.cost_payment_failed_flag);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, GameEvent::EffectResolved { .. })));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ZoneChanged { .. })));
     }
 
     /// CR 603.10a / Bronzehide Lion class: LTB self-return triggers where the

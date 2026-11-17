@@ -316,6 +316,10 @@ pub fn build_resolved_from_def_with_targets(
     // parser-stamped `SiblingCondition` never reaches the resolved sub and the
     // keyword list collapses after the first false gate.
     resolved.sibling_condition = def.sibling_condition;
+    // CR 608.2c: Carry the parser-stamped list-slot identity through so a
+    // further target slot of one instruction ("destroy target artifact, target
+    // creature, ...") continues the instruction its preceding slot began.
+    resolved.instruction_join = def.instruction_join;
     // CR 700.2b + CR 603.3c: Carry the reflexive modal choice + per-mode abilities
     // through so try_materialize_reflexive_trigger can route a gated modal
     // trigger (Caesar) to AbilityModeChoice instead of resolving the modes
