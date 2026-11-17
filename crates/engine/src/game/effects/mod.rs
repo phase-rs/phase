@@ -31175,8 +31175,8 @@ struct ConditionReferent {
     event_subject: bool,
 }
 
-/// CR 603.2 + CR 608.2h: the incarnation of the spell a `SpellCast`/`SpellCopied` event
-/// names. The event carries none, so it is read from the object: still on the stack, the
+/// CR 603.2 + CR 608.2h: the incarnation of the spell a `SpellCopied` event (or a `SpellCast`
+/// whose trigger carries no pin) names. The event carries none, so it is read from the object: still on the stack, the
 /// live incarnation; otherwise the incarnation of its latest recorded exit, which for a
 /// spell countered or otherwise moved off the stack before its trigger resolves is the stack
 /// exit that `exit_lki_for_incarnation` answers from (limit: a spell that went on to leave
@@ -31218,9 +31218,13 @@ fn resolve_condition_referent(
             let event = state.current_trigger_event.as_ref()?;
             let id = targeting::extract_source_from_event(event)?;
             let pin = match event {
-                GameEvent::SpellCast { .. } | GameEvent::SpellCopied { .. } => {
-                    Some(spell_event_incarnation(state, id)?)
-                }
+                // CR 601.2i + CR 400.7: a cast trigger names the occurrence it was put on the
+                // stack for (`triggering_spell_identity`), so a same-id recast cannot answer for it.
+                GameEvent::SpellCast { .. } => Some(
+                    targeting::triggering_spell_identity(state)
+                        .or_else(|| spell_event_incarnation(state, id))?,
+                ),
+                GameEvent::SpellCopied { .. } => Some(spell_event_incarnation(state, id)?),
                 _ => {
                     targeting::event_context_incarnation(&TargetFilter::TriggeringSource, event, id)
                 }
@@ -31292,7 +31296,19 @@ fn resolve_condition_referent(
                 TargetRef::Player(_) => None,
             })
         }
-        _ => None,
+        ObjectScope::Source
+        | ObjectScope::Recipient
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
+        | ObjectScope::EventTarget
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::BatchSource
+        | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject
+        | ObjectScope::SpecificObject { .. } => None,
     }
 }
 

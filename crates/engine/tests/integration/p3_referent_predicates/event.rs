@@ -352,23 +352,7 @@ fn p3s2a_deekah_tokens_carry_the_triggering_spells_mana_value() {
     );
 }
 
-// ---------------------------------------------------------------- the extra trigger measured in ticket 82
-
-/// Ticket 82 measured 4 `+1/+1` counters from the UNCONDITIONAL base parse where 3 magecraft triggers were
-/// expected. This census prints and asserts the event sequence of the real Overrun + Twincast line.
-#[test]
-fn p3s2a_prismari_twincast_event_census() {
-    let (_r, _p, events) = prismari_twincast();
-    for (i, e) in events.iter().enumerate() {
-        let d = format!("{e:?}");
-        eprintln!("EV{i:02} {}", &d[..d.len().min(170)]);
-    }
-    let (cast, copied, added) = census(&events);
-    eprintln!(
-        "census: cast={cast} copied={copied} counter_added={added} total_events={}",
-        events.len()
-    );
-}
+// ---------------------------------------------------------------- copy observers collected exactly once
 
 /// Pass priority one step at a time and record, for every Prismari trigger that reaches the stack, the event that
 /// caused it (`StackEntryKind::TriggeredAbility.trigger_event`).
@@ -489,5 +473,110 @@ fn p3s2a_epic_copy_triggers_prismari_apprentice_once() {
         plus_counters(r.state(), p),
         2,
         "the Epic copy of the MV 8 sorcery triggers magecraft exactly once"
+    );
+}
+
+// ---------------------------------------------------------------- copy of a targeted spell (CopyRetarget walk)
+
+/// Pass priority (keeping copy targets when asked) until the stack is empty; every Prismari trigger that reaches the stack is
+/// recorded once by its stack id.
+fn prismari_triggers_through(r: &mut GameRunner, p: ObjectId) -> usize {
+    use engine::types::game_state::StackEntryKind;
+    let mut seen: Vec<ObjectId> = Vec::new();
+    for _ in 0..60 {
+        for e in r.state().stack.iter() {
+            if let StackEntryKind::TriggeredAbility { source_id, .. } = &e.kind {
+                if *source_id == p && !seen.contains(&e.id) {
+                    seen.push(e.id);
+                }
+            }
+        }
+        if r.state().stack.is_empty() {
+            break;
+        }
+        match r.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                r.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::CopyRetarget { .. } => {
+                r.act(GameAction::KeepAllCopyTargets)
+                    .expect("keep copy targets");
+            }
+            other => panic!("unexpected decision {other:?}"),
+        }
+    }
+    seen.len()
+}
+
+/// CR 603.2c + CR 707.10: Twincast copying a TARGETED spell goes through the CopyRetarget walk, which must not collect the
+/// copy event a second time. Printed: magecraft triggers for the
+/// cast of Lightning Bolt, the cast of Twincast and the copy of Bolt = 3.
+#[test]
+fn p3s2a_prismari_twincast_on_targeted_spell_triggers_three_times() {
+    let mut sc = scenario();
+    sc.with_mana_pool(P0, mana_for(&[LIGHTNING_BOLT_COST, TWINCAST_COST], 0));
+    let p = add_prismari(&mut sc);
+    let bolt = sc
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT)
+        .with_mana_cost(cost(LIGHTNING_BOLT_COST))
+        .id();
+    let twincast = sc
+        .add_spell_to_hand_from_oracle(P0, "Twincast", true, TWINCAST)
+        .with_mana_cost(cost(TWINCAST_COST))
+        .id();
+    let mut r = sc.build();
+    let mut c = r.cast(bolt).target_player(P1).commit();
+    let _c2 = c.cast(twincast).target_object(bolt).commit();
+    let n = prismari_triggers_through(&mut r, p);
+    assert_eq!(n, 3, "cast Bolt, cast Twincast, copy of Bolt");
+}
+
+/// CR 608.2h + CR 400.7: Prismari Apprentice's trigger for the FIRST cast of a spell reads that cast's last known mana value even
+/// after the same card was recast (a new object, CR 400.7) before the trigger resolved. P0 casts Stroke of Genius with X=3
+/// (MV 6; trigger T1), P1 Remands it, P0 recasts it with X=0 (MV 3; trigger T2). T1 sees MV 6 and puts the counter; T2 sees MV 3.
+#[test]
+fn p3s2a_prismari_trigger_reads_its_own_cast_after_a_recast() {
+    const STROKE: &str = "Target player draws X cards.";
+    const STROKE_COST: &str = "{X}{2}{U}";
+    const REMAND: &str = "Counter target spell. If that spell is countered this way, put it into its owner's hand instead of into that player's graveyard. Draw a card.";
+    const REMAND_COST: &str = "{1}{U}";
+    let mut sc = scenario();
+    sc.with_mana_pool(P0, mana_for(&[STROKE_COST, "{2}{U}"], 3));
+    sc.with_mana_pool(P1, mana_for(&[REMAND_COST], 0));
+    sc.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
+    sc.with_library_top(P1, &["Island", "Island", "Island", "Island"]);
+    let p = add_prismari(&mut sc);
+    let stroke = sc
+        .add_spell_to_hand_from_oracle(P0, "Stroke of Genius", true, STROKE)
+        .with_mana_cost(cost(STROKE_COST))
+        .id();
+    let remand = sc
+        .add_spell_to_hand_from_oracle(P1, "Remand", true, REMAND)
+        .with_mana_cost(cost(REMAND_COST))
+        .id();
+    let mut r = sc.build();
+    let _ = r.cast(stroke).x(3).target_player(P0).commit();
+    assert_eq!(
+        r.state().stack.len(),
+        2,
+        "Stroke and Prismari trigger T1; waiting {:?}",
+        r.state().waiting_for
+    );
+    r.act(GameAction::PassPriority).expect("P0 passes");
+    let _ = r.cast(remand).target_object(stroke).commit();
+    for _ in 0..10 {
+        if r.state().stack.len() == 1 {
+            break;
+        }
+        r.act(GameAction::PassPriority).expect("pass");
+    }
+    assert_eq!(r.state().stack.len(), 1, "only T1 is left");
+    assert_eq!(zone(r.state(), stroke), Zone::Hand, "Remanded");
+    let _ = r.cast(stroke).x(0).target_player(P0).commit();
+    drain(&mut r);
+    assert_eq!(
+        plus_counters(r.state(), p),
+        1,
+        "T1 (the MV 6 cast) puts the counter; T2 (the MV 3 recast) does not"
     );
 }

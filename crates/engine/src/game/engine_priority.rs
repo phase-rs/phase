@@ -1,5 +1,5 @@
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
@@ -990,31 +990,7 @@ pub(crate) fn parked_batch_origin(
 /// CR 117.5 + CR 603.3b: hold a pass's triggers for the boundary's one batch.
 /// A resolving spell that still owes its final part owns their placement.
 fn hold_pass_triggers(state: &mut GameState, events: &[GameEvent]) {
-    // CR 707.10 + CR 603.2: `copy_spell` collects its `SpellCopied` observers itself and
-    // places them before the pass, so a copy event whose observers are already on the stack
-    // must not be collected again (Prismari Apprentice's "whenever you cast or copy an
-    // instant or sorcery spell" fired twice for one Twincast copy; issue #2866 class). A
-    // `SpellCopied` nobody collected inline (Epic's upkeep copy, `epic.rs`) is still the
-    // pass's to collect.
-    let collectable: Vec<GameEvent> = events
-        .iter()
-        .filter(|event| !spell_copied_observers_already_placed(state, event))
-        .cloned()
-        .collect();
-    triggers::collect_parked_triggers_into_deferred(state, &collectable, pass_hold_origin(state));
-}
-
-/// CR 707.10: whether `event` is a `SpellCopied` whose observer triggers are already on the
-/// stack — put there by the effect that created the copy, which collects them inline.
-fn spell_copied_observers_already_placed(state: &GameState, event: &GameEvent) -> bool {
-    matches!(event, GameEvent::SpellCopied { .. })
-        && state.stack.iter().any(|entry| {
-            matches!(
-                &entry.kind,
-                StackEntryKind::TriggeredAbility { trigger_event: Some(placed), .. }
-                    if placed == event
-            )
-        })
+    triggers::collect_parked_triggers_into_deferred(state, events, pass_hold_origin(state));
 }
 
 /// A resolving spell that still owes its final part owns their placement.
