@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Add instruction_join (list-slot instruction identity), ZoneChangeRecord.instruction_lead and GameEvent::CounterRemoved.instruction_lead; an older peer resolves a list-form sentence as separate instructions and folds counter removals of different instructions into one trigger"
+}

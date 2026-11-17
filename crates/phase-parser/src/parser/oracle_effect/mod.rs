@@ -135,12 +135,12 @@ use crate::types::ability::{
     DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
     DieResultBranch, DigRestOrder, Duration, EachDamageRecipient, Effect, EffectOutcomeSignal,
     EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject,
-    IntensityScope, IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition,
-    LibraryShuffleMode, ManaProduction, ManaSpendPermission, ManaTargetRole, MultiTargetSpec,
-    NameStickerSet, NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint,
-    PerPlayerScope, PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness,
-    PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount, PreventionScope,
-    ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
+    InstructionJoin, IntensityScope, IterationKindBinding, KeeperConstraint, KeeperCounterMark,
+    LibraryPosition, LibraryShuffleMode, ManaProduction, ManaSpendPermission, ManaTargetRole,
+    MultiTargetSpec, NameStickerSet, NumberDistinctness, ObjectProperty, ObjectScope,
+    OriginConstraint, PerPlayerScope, PerpetualModification, PlayPermissionInvalidation,
+    PlayerChoiceDistinctness, PlayerFilter, PlayerRelation, PlayerScope, PreventionAmount,
+    PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
     ReciprocalZoneChoiceRole, ReplacementCondition, ReplacementDefinition, ResolutionCastWindow,
     RestrictionExpiry, RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
     SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
@@ -24468,6 +24468,13 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
+    // CR 608.2c: a verbless conjunct ("... and target artifact", "... and ~")
+    // takes the primary's verb below, so it is a further slot of the primary's
+    // one instruction rather than an instruction of its own. Set by every
+    // carry-forward that accepts its reparse; a conjunct with its own verb
+    // ("tap target creature and put a stun counter on it") stays `Own`.
+    let mut shares_primary_verb = false;
+
     // CR 608.2c: Verb carry-forward for bare "target X" / "another target X"
     // clauses in compound actions. When the sub-text starts with "target" or
     // "another target" and parsed as Unimplemented or the structural TargetOnly
@@ -24494,6 +24501,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
             let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
+                shares_primary_verb = true;
             }
         }
     }
@@ -24562,6 +24570,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                     unless_pay: None,
                     entry_onset: ContinuousEffectOnset::WhenFollowed,
                 };
+                shares_primary_verb = true;
             }
         }
     }
@@ -24578,6 +24587,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
             let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
+                shares_primary_verb = true;
                 if sub_clause.multi_target.is_none() {
                     sub_clause.multi_target = up_to_spec;
                 }
@@ -24611,6 +24621,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
             let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
+                shares_primary_verb = true;
             }
         }
     }
@@ -24629,6 +24640,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
             let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
+                shares_primary_verb = true;
             }
         }
     }
@@ -24646,6 +24658,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
             let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
+                shares_primary_verb = true;
             }
         }
     }
@@ -24665,6 +24678,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
             let reparsed = parse_imperative_effect(&reparsed_text, &mut continuation_ctx);
             if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
                 sub_clause = reparsed;
+                shares_primary_verb = true;
             }
         }
     }
@@ -24701,6 +24715,7 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
                     reparsed.multi_target = extract_put_counter_multi_target(&reparsed_text);
                 }
                 sub_clause = reparsed;
+                shares_primary_verb = true;
             }
         }
     }
@@ -24782,6 +24797,11 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
     // opponent and the inner effect drains the scoped player (not the source's
     // controller). See `lift_effect_player_class_to_scope`.
     sub_ability.player_scope = sub_player_scope;
+    // CR 608.2c: a verbless conjunct is a further slot of the primary's
+    // instruction ("destroy target creature and target artifact").
+    if shares_primary_verb {
+        sub_ability.instruction_join = InstructionJoin::ListSlot;
+    }
 
     // CR 115.1d: Recover the PRIMARY clause's "up to N" cardinality, which
     // `try_parse_verb_and_target` discards when it lowers a PutCounter to a
@@ -53019,31 +53039,37 @@ fn parse_effect_chain_ir_body(
         // conjunctions. When a clause parses as Unimplemented and starts with "target",
         // inherit the verb from the previous successfully-parsed effect and re-parse.
         // Handles patterns like "destroy target artifact, target creature, ..." (Decimate).
+        // The verbless chunk is a further target slot of the previous chunk's
+        // instruction (`InstructionJoin::ListSlot`), stamped once it is pushed.
         let text_no_qty_lower = text_no_qty.to_lowercase();
-        let clause = if matches!(clause.effect, Effect::Unimplemented { .. })
-            && tag::<_, _, OracleError<'_>>("target ")
-                .parse(text_no_qty_lower.as_str())
-                .is_ok()
-        {
-            if let Some(verb) = builder
-                .clauses()
-                .last()
-                .and_then(|prev| extract_effect_verb(&prev.parsed.effect))
+        let (clause, chunk_instruction_join) =
+            if matches!(clause.effect, Effect::Unimplemented { .. })
+                && tag::<_, _, OracleError<'_>>("target ")
+                    .parse(text_no_qty_lower.as_str())
+                    .is_ok()
             {
-                let reparsed_text = format!("{verb} {text_no_qty}");
-                let reparsed =
-                    parse_effect_clause_with_damage_context(&reparsed_text, ctx, damage_context);
-                if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
-                    reparsed
+                if let Some(verb) = builder
+                    .clauses()
+                    .last()
+                    .and_then(|prev| extract_effect_verb(&prev.parsed.effect))
+                {
+                    let reparsed_text = format!("{verb} {text_no_qty}");
+                    let reparsed = parse_effect_clause_with_damage_context(
+                        &reparsed_text,
+                        ctx,
+                        damage_context,
+                    );
+                    if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
+                        (reparsed, InstructionJoin::ListSlot)
+                    } else {
+                        (clause, InstructionJoin::Own)
+                    }
                 } else {
-                    clause
+                    (clause, InstructionJoin::Own)
                 }
             } else {
-                clause
-            }
-        } else {
-            clause
-        };
+                (clause, InstructionJoin::Own)
+            };
 
         // CR 608.2c + CR 117.3a: Anchor-subject inheritance. Before this chunk is
         // stored in the IR, check whether a caster-defaulted player-scope effect
@@ -54948,6 +54974,12 @@ fn parse_effect_chain_ir_body(
                 .head_window(head_window.clone())
                 .declared_player_group(clause_declared_group)
                 .push();
+            // CR 608.2c: a verbless target chunk that took the previous chunk's
+            // verb ("destroy target artifact, target creature, ...") continues
+            // that instruction.
+            if let Some(pushed) = builder.last_mut() {
+                pushed.instruction_join = chunk_instruction_join;
+            }
 
             // CR 115.1 + CR 608.2c: the comparative gate's "that creature" reads the
             // single object the immediately preceding instruction announced

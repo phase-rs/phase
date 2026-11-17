@@ -457,7 +457,8 @@ fn resolved_ability_axes(a: &ResolvedAbility, mode: ScanMode) -> Axes<'_> {
         target_reads: _, // TargetReadOrigin tag; `Target` reads are classified on condition/effect
         entry_onset: _,  // ContinuousEffectOnset tag, no dynamic read
         sibling_condition: _, // SiblingCondition replication marker, no dynamic read
-        distribute: _,   // announcement unit tag/string, no resolution-time dynamic read
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
+        distribute: _,       // announcement unit tag/string, no resolution-time dynamic read
         parent_target_missing_reason: _, // seam flag
         activation_cost_reduction: _,
         activation_record: _,
@@ -7555,6 +7556,7 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes<'_> 
         entry_onset: _,  // ContinuousEffectOnset tag, no dynamic read
         iteration_kind_binding: _,
         sibling_condition: _,
+        instruction_join: _, // CR 608.2c instruction-identity marker, read only by the instruction scope
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
         // every tree that pipeline produces — which is every tree a runtime walker

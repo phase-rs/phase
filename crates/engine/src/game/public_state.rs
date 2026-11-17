@@ -1255,6 +1255,7 @@ mod tests {
                 object_id: land_id,
                 counter_type: CounterType::Generic("depletion".to_string()),
                 count: 1,
+                instruction_lead: None,
             }],
         );
         // Direct observable of the fix: the marking layer raised the mana gate.

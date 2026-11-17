@@ -2673,7 +2673,12 @@ fn finalize_action_rules_state(state: &mut GameState, events: &mut Vec<GameEvent
     let start = events.len();
     if super::layers::publish_layer_control_changes(state, events) > 0 {
         let origin = engine_priority::parked_batch_origin(&state.waiting_for);
-        super::triggers::collect_parked_triggers_into_deferred(state, &events[start..], origin);
+        super::triggers::collect_parked_triggers_into_deferred_observing(
+            state,
+            &events[start..],
+            origin,
+            None,
+        );
         super::triggers::collect_parked_delayed_triggers_into_deferred(
             state,
             &events[start..],
