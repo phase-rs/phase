@@ -4,7 +4,7 @@
 //! A spell deals its damage while on the stack, then leaves the stack before
 //! the engine collects the triggers that damage caused. Once it has moved it is
 //! a new object (CR 400.7), and an Adventure card is also back to its creature
-//! characteristics (CR 715.3b + CR 715.3d). Frolicking Familiar // Blow Off
+//! characteristics (CR 715.3b + CR 715.4). Frolicking Familiar // Blow Off
 //! Steam is a red instant on the stack and a blue creature card in exile, so it
 //! separates a qualifier read from the damage event from one read from the
 //! card afterwards.

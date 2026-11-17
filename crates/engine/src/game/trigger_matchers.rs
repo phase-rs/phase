@@ -775,8 +775,9 @@ pub(super) fn combat_source_incarnation(
 /// read keeps every relation a damage snapshot does not carry (attachments,
 /// token and commander status, counters). Once the source has become a new
 /// object (CR 400.7) — a resolved spell put into its owner's graveyard or
-/// exile, an Adventure restored to its creature card (CR 715.3b +
-/// CR 715.3d), a permanent moved by the same resolution — the live object no
+/// exile, an Adventure back to its creature characteristics once off the
+/// stack (CR 715.3b + CR 715.4), a permanent moved by the same resolution —
+/// the live object no
 /// longer describes the event, and the `DamageRecord` snapshot written when
 /// the damage was dealt answers instead. The trigger source's own departure
 /// keeps its existing departure-record path in `target_filter_matches_object`.
@@ -16602,7 +16603,7 @@ mod tests {
     /// record shape the damage pipeline writes, then moves the source to
     /// `departs_to` (CR 400.7: a new object) and gives the new object
     /// `later_types` / `later_colors`, as an Adventure restored to its
-    /// creature card would be (CR 715.3d). Returns the source and the
+    /// creature card would be (CR 715.4). Returns the source and the
     /// incarnation it dealt the damage as.
     fn damage_then_depart(
         state: &mut GameState,
