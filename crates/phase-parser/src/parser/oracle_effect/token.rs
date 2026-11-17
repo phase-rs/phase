@@ -4864,72 +4864,121 @@ mod token_attachment_connector_tests {
 }
 
 #[cfg(test)]
-mod vren_token_dynamic_pt_tests {
+mod quoted_token_static_trailing_comma_tests {
     use super::*;
+    use crate::parser::oracle_effect::StaticMode;
 
-    const VREN_TOKEN_TEXT: &str = "Create X 1/1 black Rat creature tokens with \"This token gets +1/+1 for each other Rat you control,\" where X is the number of creatures that were exiled under your opponents' control this turn.";
-
-    fn assert_other_rat_count(value: &QuantityExpr) {
-        let QuantityExpr::Ref {
-            qty:
-                QuantityRef::ObjectCount {
-                    filter: TargetFilter::Typed(filter),
-                },
-        } = value
-        else {
-            panic!("expected ObjectCount over a typed Rat filter, got {value:?}");
-        };
-        assert_eq!(filter.controller, Some(ControllerRef::You));
+    fn assert_dynamic_for_each_count(statics: &[StaticDefinition], token: &str) {
+        let modifications: Vec<_> = statics
+            .iter()
+            .flat_map(|def| def.modifications.iter())
+            .collect();
         assert!(
-            filter
-                .type_filters
-                .contains(&TypeFilter::Subtype("Rat".to_string())),
-            "count must be restricted to the Rat subtype: {:?}",
-            filter.type_filters
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddDynamicPower { .. }
+            )),
+            "{token}: expected dynamic power, got {modifications:?}"
         );
-        assert!(filter.properties.contains(&FilterProp::Another));
-    }
-
-    /// CR 613.4c: Vren's token modifier scales dynamically with other Rats.
-    #[test]
-    fn vren_token_static_counts_other_rats_for_dynamic_power_and_toughness() {
-        let effect = try_parse_token(
-            &VREN_TOKEN_TEXT.to_lowercase(),
-            VREN_TOKEN_TEXT,
-            &mut ParseContext::default(),
-        )
-        .expect("Vren's token creation clause must parse");
-        let Effect::Token {
-            static_abilities, ..
-        } = effect
-        else {
-            panic!("expected token effect");
-        };
-        assert_eq!(static_abilities.len(), 1);
-        let modifications = &static_abilities[0].modifications;
-        let dynamic_power = modifications
-            .iter()
-            .find_map(|modification| match modification {
-                ContinuousModification::AddDynamicPower { value } => Some(value),
-                _ => None,
-            })
-            .expect("expected dynamic power");
-        let dynamic_toughness = modifications
-            .iter()
-            .find_map(|modification| match modification {
-                ContinuousModification::AddDynamicToughness { value } => Some(value),
-                _ => None,
-            })
-            .expect("expected dynamic toughness");
-        assert_other_rat_count(dynamic_power);
-        assert_other_rat_count(dynamic_toughness);
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddDynamicToughness { .. }
+            )),
+            "{token}: expected dynamic toughness, got {modifications:?}"
+        );
         assert!(
             !modifications.iter().any(|modification| matches!(
                 modification,
                 ContinuousModification::AddPower { .. }
                     | ContinuousModification::AddToughness { .. }
             )),
-            "the quoted +1/+1 must not fall back to fixed modifiers: {modifications:?}"
+            "{token}: the quoted +1/+1 must not fall back to fixed modifiers: {modifications:?}"
         );
+    }
+
+    fn assert_cant_block(statics: &[StaticDefinition], token: &str) {
+        assert!(
+            statics.iter().any(|def| def.mode == StaticMode::CantBlock),
+            "{token}: expected a CantBlock static, got {statics:?}"
+        );
+    }
+
+    fn token_statics(clause: &str) -> Vec<StaticDefinition> {
+        let effect = try_parse_token(&clause.to_lowercase(), clause, &mut ParseContext::default())
+            .unwrap_or_else(|| panic!("token clause must parse: {clause}"));
+        let Effect::Token {
+            static_abilities, ..
+        } = effect
+        else {
+            panic!("expected Effect::Token for {clause}");
+        };
+        static_abilities
+    }
+
+    /// CR 111.3 + CR 613.4c: Oracle prints a token's quoted static followed by a
+    /// sentence comma that sits INSIDE the closing quote ("... you control,"). The
+    /// comma is clause punctuation, not part of the static, so `push_parsed_statics`
+    /// must yield the same statics with and without it. Verbatim token clauses
+    /// (Scryfall Oracle text) for each shape that prints the inner comma:
+    /// a for-each `+1/+1` body ending the quote (Vren, the Relentless; The Bear Force
+    /// Pilot; The Bear Force Pilot Runner) and a keyword-like restriction body
+    /// (Tangled Colony; The Mycotyrant). Those two rows stop at the quoted body: their
+    /// "where X is ..." riders need the surrounding trigger context, which is a separate
+    /// concern from the comma.
+    #[test]
+    fn quoted_token_static_ignores_trailing_sentence_comma() {
+        type Check = fn(&[StaticDefinition], &str);
+        // (token, clause prefix up to the opening quote, quoted body, clause suffix, check)
+        let rows: [(&str, &str, &str, &str, Check); 5] = [
+            (
+                "Vren, the Relentless",
+                "Create X 1/1 black Rat creature tokens with ",
+                "This token gets +1/+1 for each other Rat you control",
+                " where X is the number of creatures that were exiled under your opponents' control this turn.",
+                assert_dynamic_for_each_count,
+            ),
+            (
+                "The Bear Force Pilot",
+                "Create a 0/0 colorless artifact Vehicle token with flying, ",
+                "This creature gets +1/+1 for each Bear you control",
+                " and crew 2.",
+                assert_dynamic_for_each_count,
+            ),
+            (
+                "The Bear Force Pilot Runner",
+                "Create a 0/0 colorless Vehicle artifact token with flying, ",
+                "This creature gets +1/+1 for each Bear you control",
+                " and crew 2.",
+                assert_dynamic_for_each_count,
+            ),
+            (
+                "Tangled Colony",
+                "Create X 1/1 black Rat creature tokens with ",
+                "This token can't block",
+                "",
+                assert_cant_block,
+            ),
+            (
+                "The Mycotyrant",
+                "Create X 1/1 black Fungus creature tokens with ",
+                "This token can't block",
+                "",
+                assert_cant_block,
+            ),
+        ];
+        for (token, prefix, body, suffix, check) in rows {
+            let printed = token_statics(&format!("{prefix}\"{body},\"{suffix}"));
+            let bare = token_statics(&format!("{prefix}\"{body}\"{suffix}"));
+            assert!(
+                !printed.is_empty(),
+                "{token}: reach guard, no statics parsed"
+            );
+            assert_eq!(
+                printed, bare,
+                "{token}: the trailing sentence comma changed the parse"
+            );
+            check(&printed, token);
+        }
     }
 }

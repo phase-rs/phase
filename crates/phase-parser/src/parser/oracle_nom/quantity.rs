@@ -9420,6 +9420,7 @@ mod tests {
 
     #[test]
     fn zone_change_count_exiled_under_controller_supports_type_and_number_forms() {
+        // Only Vren, the Relentless prints this shape ("...the number of creatures that were exiled under your opponents' control this turn"); the singular, "your" and artifact rows exercise the combinator's axes, not printed cards.
         for (phrase, filter) in [
             (
                 "creatures that were exiled under your opponents' control this turn",
