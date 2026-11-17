@@ -555,6 +555,7 @@ pub(crate) fn eliminate_players(
                         trigger_event: None,
                         effect_description: None,
                         remaining: Vec::new(),
+                        affected_object: None,
                         repeat: None,
                     };
                     state.pending_player_scope_unless_payment = Some(pending);
