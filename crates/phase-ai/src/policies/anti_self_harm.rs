@@ -361,6 +361,10 @@ fn effect_loses_game_for_controller(effect: &Effect) -> bool {
                     phase: Phase::End,
                     ..
                 } | DelayedTriggerCondition::AtNextPhase { phase: Phase::End }
+                    | DelayedTriggerCondition::AtBeginningOfGrantedTurn {
+                        phase: Phase::End,
+                        ..
+                    }
             ) && ability_tree_any(effect, effect_loses_game_for_controller)
         }
         _ => false,
@@ -7724,11 +7728,9 @@ mod tests {
     fn extra_turn_spell(state: &mut GameState, self_loss: bool) -> ObjectId {
         extra_turn_spell_with_self_loss_phase(
             state,
-            self_loss.then_some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+            self_loss.then_some(DelayedTriggerCondition::AtBeginningOfGrantedTurn {
                 phase: Phase::End,
-                player: PlayerId(0),
-                gate: engine::types::ability::TurnGate::None,
-                binding: DelayedTriggerPlayerBinding::Controller,
+                turn: None,
             }),
         )
     }
@@ -8003,6 +8005,55 @@ mod tests {
             pre_cast_verdict_for_spell(&state, spell_id),
             PolicyVerdict::Reject { reason }
                 if reason.kind == "anti_self_harm_extra_turn_self_loss"
+        ));
+    }
+
+    /// CR 500.7 + CR 603.7a: the production parse of Final Fortune ("At the
+    /// beginning of that turn's end step, you lose the game") is rejected, and
+    /// Time Warp's parse (no loss clause) is allowed.
+    #[test]
+    fn production_parsed_final_fortune_is_rejected_and_time_warp_allowed() {
+        let parsed_spell = |state: &mut GameState, name: &str, text: &str| {
+            let abilities = engine::parser::oracle::parse_oracle_text(
+                text,
+                name,
+                &[],
+                &["Instant".to_string()],
+                &[],
+            )
+            .abilities;
+            let id = create_object(
+                state,
+                CardId(state.next_object_id),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Hand,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.abilities = Arc::new(abilities);
+            id
+        };
+        let mut state = make_state();
+        state.players[0].life = 38;
+        let final_fortune = parsed_spell(
+            &mut state,
+            "Final Fortune",
+            "Take an extra turn after this one. At the beginning of that turn's end step, you lose the game.",
+        );
+        let time_warp = parsed_spell(
+            &mut state,
+            "Time Warp",
+            "Target player takes an extra turn after this one.",
+        );
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, final_fortune),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_extra_turn_self_loss"
+        ));
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, time_warp),
+            PolicyVerdict::Score { .. }
         ));
     }
 

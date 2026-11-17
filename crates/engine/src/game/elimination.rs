@@ -2826,6 +2826,7 @@ mod tests {
         PendingReplacement, PendingSpellResolution, PendingZoneChangeDelivery, PromptSourceBinding,
         ResolutionSourceRelatch, ScheduledTurnControl, StackEntry, StackEntryKind,
     };
+    use crate::types::identifiers::ExtraTurnId;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
         ObjectIncarnationRef, TriggerFiring,
@@ -4465,6 +4466,7 @@ mod tests {
         state.extra_turns = vec![ExtraTurn {
             player: PlayerId(2),
             anchor: PlayerId(2),
+            id: ExtraTurnId(1),
         }];
         let queued_before = state.extra_turns.clone();
         let mut events = Vec::new();
