@@ -27606,6 +27606,25 @@ pub(super) fn find_one_of_cost(cost: &AbilityCost) -> Option<&Vec<AbilityCost>> 
     }
 }
 
+/// CR 702.6a + CR 702.29a: the keyword an `AlternativeKeywordCost` static can
+/// replace the cost of, for an activated ability carrying `tag`.
+fn alternative_keyword_kind(tag: AbilityTag) -> Option<KeywordKind> {
+    match tag {
+        AbilityTag::Equip => Some(KeywordKind::Equip),
+        AbilityTag::Cycling => Some(KeywordKind::Cycling),
+        AbilityTag::Boast
+        | AbilityTag::Evolve
+        | AbilityTag::Exhaust
+        | AbilityTag::Outlast
+        | AbilityTag::Backup
+        | AbilityTag::PowerUp
+        | AbilityTag::Augment => None,
+    }
+}
+
+/// Every ability tag [`alternative_keyword_kind`] maps, for the inverse lookup.
+const ALTERNATIVE_KEYWORD_TAGS: [AbilityTag; 2] = [AbilityTag::Equip, AbilityTag::Cycling];
+
 /// CR 602.2b + CR 118.9: An active keyword-cost static adds an alternative
 /// activation-cost branch before the shared cost lock. Its condition is already
 /// applied by `battlefield_active_statics`; the source filter and first-use
@@ -27617,21 +27636,12 @@ fn activation_cost_with_alternative_keyword_costs(
     source_id: ObjectId,
     base_cost: AbilityCost,
 ) -> AbilityCost {
-    use crate::types::ability::AbilityTag;
-    use crate::types::keywords::KeywordKind;
     use crate::types::statics::CastFrequency;
 
-    let Some((ability_tag, keyword)) = ability.ability_tag.and_then(|tag| match tag {
-        AbilityTag::Equip => Some((tag, KeywordKind::Equip)),
-        AbilityTag::Cycling => Some((tag, KeywordKind::Cycling)),
-        AbilityTag::Boast
-        | AbilityTag::Evolve
-        | AbilityTag::Exhaust
-        | AbilityTag::Outlast
-        | AbilityTag::Backup
-        | AbilityTag::PowerUp
-        | AbilityTag::Augment => None,
-    }) else {
+    let Some((ability_tag, keyword)) = ability
+        .ability_tag
+        .and_then(|tag| alternative_keyword_kind(tag).map(|keyword| (tag, keyword)))
+    else {
         return base_cost;
     };
 
@@ -27653,23 +27663,30 @@ fn activation_cost_with_alternative_keyword_costs(
         if *granted_keyword != keyword {
             continue;
         }
+        let context =
+            super::filter::FilterContext::from_source_with_controller(static_source.id, player);
         if definition.affected.as_ref().is_some_and(|filter| {
-            let context =
-                super::filter::FilterContext::from_source_with_controller(static_source.id, player);
             !super::filter::matches_target_filter(state, source_id, filter, &context)
         }) {
             continue;
         }
         let frequency_available = match frequency.unwrap_or(CastFrequency::Unlimited) {
             CastFrequency::Unlimited => true,
-            CastFrequency::OncePerTurn => !state
-                .abilities_activated_this_turn_by_player
-                .get(&player)
-                .is_some_and(|records| {
-                    records
-                        .iter()
-                        .any(|record| record.ability_tag == Some(ability_tag))
-                }),
+            // CR 611.3a: "the first <keyword> ability you activate each turn" is
+            // a fact about the turn's activation journal, read through the
+            // shared first-activation authority so loop detection keeps the
+            // same row.
+            CastFrequency::OncePerTurn => !earlier_activation_this_turn_qualified(
+                state,
+                ability_tag.keyword_str(),
+                ActivationExemption::None,
+                None,
+                definition.affected.as_ref(),
+                None,
+                static_source.id,
+                player,
+                &context,
+            ),
             CastFrequency::OncePerTurnPerPermanentType => false,
         };
         if frequency_available && !alternatives.contains(cost) {
@@ -36219,16 +36236,39 @@ pub(crate) fn cost_observable_activation_journal(
                           affected: Option<&TargetFilter>,
                           static_source_id: ObjectId,
                           static_controller: PlayerId| {
-        let StaticMode::ReduceAbilityCost {
-            keyword,
-            exemption,
-            activator,
-            targets,
-            frequency: Some(CastFrequency::OncePerTurn),
-            ..
-        } = reduce_mode
-        else {
-            return;
+        // The gates each kind of modifier reads off a journal row, the same
+        // ones its pricing path passes to `first_qualifying_activation_this_turn`.
+        let (keyword, exemption, activator, targets) = match reduce_mode {
+            StaticMode::ReduceAbilityCost {
+                keyword,
+                exemption,
+                activator,
+                targets,
+                frequency: Some(CastFrequency::OncePerTurn),
+                ..
+            } => (
+                keyword.as_str(),
+                *exemption,
+                activator.as_ref(),
+                targets.as_ref(),
+            ),
+            // CR 118.9 + CR 611.3a: "the first <keyword> ability you activate
+            // each turn" (Bruenor Battlehammer, Gavi, Kíli): the activator is
+            // the static's controller and no target gate applies.
+            StaticMode::AlternativeKeywordCost {
+                keyword,
+                frequency: Some(CastFrequency::OncePerTurn),
+                ..
+            } => {
+                let Some(tag) = ALTERNATIVE_KEYWORD_TAGS
+                    .into_iter()
+                    .find(|tag| alternative_keyword_kind(*tag) == Some(*keyword))
+                else {
+                    return;
+                };
+                (tag.keyword_str(), ActivationExemption::None, None, None)
+            }
+            _ => return,
         };
         let ctx = super::filter::FilterContext::from_source_with_controller(
             static_source_id,
@@ -36237,10 +36277,10 @@ pub(crate) fn cost_observable_activation_journal(
         if let Some(row) = first_qualifying_activation_this_turn(
             state,
             keyword,
-            *exemption,
-            activator.as_ref(),
+            exemption,
+            activator,
             affected,
-            targets.as_ref(),
+            targets,
             static_source_id,
             static_controller,
             &ctx,
@@ -36295,12 +36335,17 @@ pub(crate) fn cost_observable_activation_journal(
     journal
 }
 
-/// CR 611.3a: a "first activated ability … each turn" cost modifier, the one
-/// kind of modifier that reads the turn's activation journal.
+/// CR 611.3a: a "first activated ability … each turn" cost modifier, the kinds
+/// of modifier that read the turn's activation journal: a once-per-turn
+/// `ReduceAbilityCost` (Training Grounds-style discounts) and a once-per-turn
+/// `AlternativeKeywordCost` ("the first equip ability you activate each turn").
 fn is_first_activation_modifier(mode: &StaticMode) -> bool {
     matches!(
         mode,
         StaticMode::ReduceAbilityCost {
+            frequency: Some(CastFrequency::OncePerTurn),
+            ..
+        } | StaticMode::AlternativeKeywordCost {
             frequency: Some(CastFrequency::OncePerTurn),
             ..
         }
@@ -39619,5 +39664,115 @@ mod selected_impulse_authority_tests {
             Some(CastingPermissionIndex(4)),
         ));
         assert!(!exile_cast_pays_printed_mana_cost(state, obj, P0, None));
+    }
+}
+
+#[cfg(test)]
+mod alternative_keyword_cost_journal_tests {
+    use super::{cost_observable_activation_journal, is_first_activation_modifier};
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, Effect, QuantityExpr, TargetFilter,
+    };
+    use crate::types::statics::StaticMode;
+    use crate::types::zones::Zone;
+
+    /// An equip-tagged activated ability, the shape the journal records.
+    fn equip_ability() -> AbilityDefinition {
+        let mut def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        )
+        .cost(AbilityCost::Mana {
+            cost: crate::types::mana::ManaCost::Cost {
+                shards: Vec::new(),
+                generic: 1,
+            },
+        });
+        def.ability_tag = Some(AbilityTag::Equip);
+        def
+    }
+
+    /// CR 118.9 + CR 611.3a + CR 732.2a: Bruenor Battlehammer's "You may pay {0}
+    /// rather than pay the equip cost of the first equip ability you activate
+    /// each turn." reads the turn's activation journal, so loop detection keeps
+    /// the first equip row while a board with no such static strips it.
+    ///
+    /// Reverting the `AlternativeKeywordCost` arm of `is_first_activation_modifier`
+    /// / `cost_observable_activation_journal` empties the kept journal in the
+    /// first assertion.
+    #[test]
+    fn once_per_turn_alternative_keyword_cost_keeps_the_first_equip_row() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Each creature you control gets +2/+0 for each Equipment attached to it.
+You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn.",
+            "Bruenor Battlehammer",
+            &[],
+            &[
+                String::from("Creature"),
+                String::from("Dwarf"),
+                String::from("Warrior"),
+            ],
+            &[],
+        );
+        let definition = parsed
+            .statics
+            .into_iter()
+            .find(|s| matches!(s.mode, StaticMode::AlternativeKeywordCost { .. }))
+            .expect("Bruenor's equip line parses to an alternative keyword cost");
+        // Reach guard: the parsed line is the once-per-turn alternative shape.
+        assert!(
+            matches!(
+                definition.mode,
+                StaticMode::AlternativeKeywordCost {
+                    frequency: Some(crate::types::statics::CastFrequency::OncePerTurn),
+                    ..
+                }
+            ),
+            "{:?}",
+            definition.mode
+        );
+        assert!(is_first_activation_modifier(&definition.mode));
+
+        let mut scenario = GameScenario::new();
+        let source = scenario.add_creature(P0, "Equipment Source", 1, 1).id();
+        let mut runner = scenario.build();
+        let mut state = runner.state_mut();
+        let bruenor = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(900),
+            P0,
+            "Bruenor Battlehammer".to_string(),
+            Zone::Battlefield,
+        );
+        let row =
+            super::capture_activation_record_from(&state, P0, source, Some(&equip_ability()), &[])
+                .expect("a live source yields a record");
+        assert_eq!(row.ability_tag, Some(AbilityTag::Equip));
+        state
+            .abilities_activated_this_turn_by_player
+            .entry(P0)
+            .or_default()
+            .push_back(row);
+
+        // No modifier reads the journal: the row is projected out.
+        assert!(
+            cost_observable_activation_journal(&state).is_empty(),
+            "with no first-activation modifier on the board the row is stripped"
+        );
+
+        state
+            .objects
+            .get_mut(&bruenor)
+            .expect("Bruenor exists")
+            .static_definitions
+            .push(definition);
+        let journal = cost_observable_activation_journal(&state);
+        let kept = journal.get(&P0).expect("the first equip row is kept");
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].ability_tag, Some(AbilityTag::Equip));
     }
 }
