@@ -24481,6 +24481,43 @@ mod tests {
             ],
             "the departed-and-returned occurrence is a NEW object (CR 400.7); the other opponent is untouched"
         );
+
+        // The shape-A half of the same gap ("target creature that player
+        // controls" + a per-opponent `multi_target` population) goes through the
+        // same arm, so it must drop the blinked occurrence too.
+        let mut shape_a = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+            },
+            ability.targets.clone(),
+            ObjectId(900),
+            PlayerId(0),
+        );
+        shape_a.multi_target = Some(MultiTargetSpec::bounded(
+            1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::PlayerCount {
+                    filter: PlayerFilter::Opponent,
+                },
+            },
+        ));
+        shape_a.target_pins = ability.target_pins.clone();
+        assert!(
+            is_per_opponent_target_fanout(&shape_a),
+            "reach guard: the shape-A declaration is a fanout"
+        );
+        assert_eq!(
+            validate_per_opponent_target_fanout_targets(&state, &shape_a),
+            vec![
+                OccurrenceVerdict::Dropped,
+                OccurrenceVerdict::Dropped,
+                OccurrenceVerdict::Dropped,
+                OccurrenceVerdict::Legal,
+            ],
+            "the shape-A arm keeps the announced-identity check"
+        );
     }
 
     /// CR 109.4 + CR 115.7a: a retarget slot pool must bind BOTH anaphor forms.
@@ -24495,38 +24532,42 @@ mod tests {
             create_creature(&mut state, PlayerId(0), CardId(1), "Controller Creature");
         let opp_one_creature = create_creature(&mut state, PlayerId(1), CardId(2), "Opp One");
         let opp_two_creature = create_creature(&mut state, PlayerId(2), CardId(3), "Opp Two");
-        let ability = repeated_per_opponent_object_choice(
+        // Both printed anaphor forms must be bound for a `SpecificPlayer` pool:
+        // the unconstrained form (nine cards) and the `You` form (Mega Flare,
+        // Shellshock, Tolarian Contempt). The `SpecificPlayer` flavor is what
+        // `emit_fanout_objects` stores as a slot's enforcement filter, and
+        // `change_targets::slot_pool` evaluates it with the RETARGETING spell's
+        // controller (PlayerId(0) here), never the header opponent.
+        for filter in [
             TargetFilter::Typed(TypedFilter::permanent()),
-            TargetChoiceTiming::Stack,
-        );
-        // The `SpecificPlayer` flavor is what `emit_fanout_objects` stores as a
-        // slot's enforcement filter, and `change_targets::slot_pool` evaluates it
-        // with the RETARGETING spell's controller (PlayerId(0) here), never the
-        // header opponent.
-        for (bound, expected) in [
-            (PlayerId(1), opp_one_creature),
-            (PlayerId(2), opp_two_creature),
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
         ] {
-            let filter = per_opponent_fanout_object_filter_as(
-                &ability,
-                ControllerRef::SpecificPlayer { id: bound },
-            )
-            .expect("fanout filter");
-            let pool = crate::game::targeting::find_legal_targets_for_ability_with_controller(
-                &state,
-                &filter,
-                &ability,
-                PlayerId(0),
-            );
-            assert_eq!(
-                pool,
-                vec![TargetRef::Object(expected)],
-                "the slot pool is exactly the bound opponent's set for {bound:?}"
-            );
-            assert!(
-                !pool.contains(&TargetRef::Object(caster_creature)),
-                "the retargeting controller's own permanent must never be in a fanout slot pool"
-            );
+            let ability = repeated_per_opponent_object_choice(filter, TargetChoiceTiming::Stack);
+            for (bound, expected) in [
+                (PlayerId(1), opp_one_creature),
+                (PlayerId(2), opp_two_creature),
+            ] {
+                let filter = per_opponent_fanout_object_filter_as(
+                    &ability,
+                    ControllerRef::SpecificPlayer { id: bound },
+                )
+                .expect("fanout filter");
+                let pool = crate::game::targeting::find_legal_targets_for_ability_with_controller(
+                    &state,
+                    &filter,
+                    &ability,
+                    PlayerId(0),
+                );
+                assert_eq!(
+                    pool,
+                    vec![TargetRef::Object(expected)],
+                    "the slot pool is exactly the bound opponent's set for {bound:?}"
+                );
+                assert!(
+                    !pool.contains(&TargetRef::Object(caster_creature)),
+                    "the retargeting controller's own permanent must never be in a fanout slot pool"
+                );
+            }
         }
     }
 

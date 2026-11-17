@@ -345,6 +345,11 @@ const DOCTORS_CHILDHOOD_BARN: &str = "Creatures enter tapped.\nWhenever chaos en
 /// back in only along with that host (CR 702.26g).
 const SHUKO: &str = "Equipped creature gets +1/+0.\nEquip {0}";
 
+/// Cloudshift — verbatim Oracle text. A leave-and-return that keeps the storage
+/// `ObjectId` and bumps the incarnation (CR 400.7).
+const CLOUDSHIFT: &str =
+    "Exile target creature you control, then return that card to the battlefield under your control.";
+
 /// Pacifism — verbatim Oracle text.
 const PACIFISM: &str = "Enchant creature\nEnchanted creature can't attack or block.";
 
@@ -360,29 +365,15 @@ struct BarnBoard {
     equipment: ObjectId,
 }
 
-fn barn_board() -> BarnBoard {
+/// Install The Doctor's Childhood Barn face up plus a second plane waiting in
+/// the planar deck, on an already-built scenario. Returns `(barn, departure)`.
+fn install_barn_planes(runner: &mut GameRunner) -> (ObjectId, ObjectId) {
     use engine::database::synthesis::synthesize_planechase;
     use engine::game::deck_loading::create_planar_deck_card;
     use engine::game::planechase::restamp_planar_objects_to_controller;
     use engine::parser::oracle::parse_oracle_text;
     use engine::types::card::CardFace;
     use engine::types::card_type::CoreType;
-    use engine::types::format::FormatConfig;
-    use engine::types::player::PlayerId;
-
-    let p2 = PlayerId(2);
-    let mut scenario = GameScenario::new_with_format(FormatConfig::planechase(), 3, 11);
-    scenario.at_phase(Phase::PreCombatMain);
-
-    let chosen_host = scenario.add_creature(P1, "Chosen Host", 3, 3).id();
-    let chosen_aura = scenario
-        .add_enchantment_from_oracle(p2, "Pacifism", PACIFISM)
-        .with_subtypes(vec!["Aura"])
-        .id();
-    let incidental_equipment = scenario
-        .add_artifact_from_oracle(P1, "Shuko", SHUKO)
-        .with_subtypes(vec!["Equipment"])
-        .id();
 
     let parsed = parse_oracle_text(
         DOCTORS_CHILDHOOD_BARN,
@@ -403,8 +394,47 @@ fn barn_board() -> BarnBoard {
     };
     synthesize_planechase(&mut face);
 
+    let state = runner.state_mut();
+    let barn = create_planar_deck_card(state, &face, P0);
+    state.planar_deck.retain(|id| *id != barn);
+    state.objects.get_mut(&barn).unwrap().face_down = false;
+    state.command_zone.push_back(barn);
+    state.planar_controller = Some(P0);
+
+    let mut departure = CardFace {
+        name: "Quiet Departure".to_string(),
+        card_type: engine::types::card_type::CardType {
+            core_types: vec![CoreType::Plane],
+            ..Default::default()
+        },
+        ..CardFace::default()
+    };
+    synthesize_planechase(&mut departure);
+    let departure_plane = create_planar_deck_card(state, &departure, P0);
+    restamp_planar_objects_to_controller(state);
+    (barn, departure_plane)
+}
+
+fn barn_board() -> BarnBoard {
+    use engine::types::format::FormatConfig;
+    use engine::types::player::PlayerId;
+
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_with_format(FormatConfig::planechase(), 3, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let chosen_host = scenario.add_creature(P1, "Chosen Host", 3, 3).id();
+    let chosen_aura = scenario
+        .add_enchantment_from_oracle(p2, "Pacifism", PACIFISM)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let incidental_equipment = scenario
+        .add_artifact_from_oracle(P1, "Shuko", SHUKO)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+
     let mut runner = scenario.build();
-    let (barn, departure_plane) = {
+    {
         let state = runner.state_mut();
         state.objects.get_mut(&chosen_aura).unwrap().attached_to = Some(chosen_host.into());
         state
@@ -425,26 +455,9 @@ fn barn_board() -> BarnBoard {
             .attachments
             .push(incidental_equipment);
         engine::game::layers::mark_layers_full(state);
-
-        let barn = create_planar_deck_card(state, &face, P0);
-        state.planar_deck.retain(|id| *id != barn);
-        state.objects.get_mut(&barn).unwrap().face_down = false;
-        state.command_zone.push_back(barn);
-        state.planar_controller = Some(P0);
-
-        let mut departure = CardFace {
-            name: "Quiet Departure".to_string(),
-            card_type: engine::types::card_type::CardType {
-                core_types: vec![CoreType::Plane],
-                ..Default::default()
-            },
-            ..CardFace::default()
-        };
-        synthesize_planechase(&mut departure);
-        let departure_plane = create_planar_deck_card(state, &departure, P0);
-        restamp_planar_objects_to_controller(state);
-        (barn, departure_plane)
+        ()
     };
+    let (barn, departure_plane) = install_barn_planes(&mut runner);
     assert!(
         runner.state().planar_deck.contains(&departure_plane),
         "the second plane must be waiting in the planar deck"
@@ -484,6 +497,198 @@ fn open_barn_prompt(
         }
     }
     panic!("Barn's chaos trigger must raise a target prompt");
+}
+
+/// One unattached creature per opponent — the shape a response-window test
+/// needs, where blinking or destroying one opponent's pick must not disturb the
+/// other's. P1 holds a free Cloudshift.
+struct BarnTwoBoard {
+    runner: GameRunner,
+    host: ObjectId,
+    aura: ObjectId,
+    cloudshift: ObjectId,
+}
+
+fn barn_board_two_creatures() -> BarnTwoBoard {
+    use engine::types::format::FormatConfig;
+    use engine::types::mana::ManaCost;
+    use engine::types::player::PlayerId;
+
+    let p2 = PlayerId(2);
+    let mut scenario = GameScenario::new_with_format(FormatConfig::planechase(), 3, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P1, "First Pick", 2, 2).id();
+    let second = scenario.add_creature(p2, "Second Pick", 2, 2).id();
+    let cloudshift = scenario
+        .add_spell_to_hand_from_oracle(P1, "Cloudshift", true, CLOUDSHIFT)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    install_barn_planes(&mut runner);
+    assert_eq!(
+        runner.state().objects[&cloudshift].zone,
+        engine::types::zones::Zone::Hand,
+        "fixture reach guard: Cloudshift is in P1's hand"
+    );
+    BarnTwoBoard {
+        runner,
+        host: first,
+        aura: second,
+        cloudshift,
+    }
+}
+
+/// CR 400.7 + CR 608.2b: a fanout occurrence must still be the object that was
+/// ANNOUNCED there. Responding to the Barn's chaos ability with Cloudshift on
+/// one opponent's pick makes a NEW object with the same storage id; that
+/// occurrence is illegal and is not affected, while the other opponent's pick
+/// still phases out, binds the delayed phase-in, and carries the can't-phase-in
+/// rider.
+#[test]
+fn childhood_barn_blinked_pick_is_dropped_and_the_other_still_phases_out() {
+    use engine::game::effects::phase_out::resolve_phase_in;
+    use engine::types::player::PlayerId;
+
+    let BarnTwoBoard {
+        mut runner,
+        host: first,
+        aura: second,
+        cloudshift,
+    } = barn_board_two_creatures();
+    let p2 = PlayerId(2);
+
+    let mut events = Vec::new();
+    let target_slots = open_barn_prompt(&mut runner, &mut events);
+    assert_eq!(
+        target_slots.len(),
+        4,
+        "one header + object slot per opponent"
+    );
+
+    // Announce both picks through the real prompt.
+    let incarnation_before = runner.state().objects[&first].incarnation;
+    events.extend(
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![
+                    TargetRef::Player(P1),
+                    TargetRef::Object(first),
+                    TargetRef::Player(p2),
+                    TargetRef::Object(second),
+                ],
+            })
+            .expect("Barn accepts one permanent from each opponent")
+            .events,
+    );
+
+    // The trigger is on the stack. Pass priority until P1 (the pick's
+    // controller, and the only seat that may Cloudshift it) holds it.
+    for _ in 0..8 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P1
+        ) {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority toward P1's response window")
+                .events,
+        );
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { player } if player == P1
+        ),
+        "reach guard: P1 holds priority for the response, got {:?}",
+        runner.state().waiting_for
+    );
+    runner.cast(cloudshift).target_object(first).commit();
+    // Resolve Cloudshift and then the Barn trigger step by step, collecting the
+    // events through the production action so the phase-out claims are observed.
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority through Cloudshift and the chaos ability")
+                .events,
+        );
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "Cloudshift and the chaos ability must both resolve"
+    );
+    assert_ne!(
+        runner.state().objects[&first].incarnation,
+        incarnation_before,
+        "reach guard: Cloudshift made a new object (CR 400.7)"
+    );
+
+    let phased_out = |object_id: ObjectId| {
+        events.iter().find_map(|event| match event {
+            GameEvent::PermanentPhasedOut {
+                object_id: event_id,
+                indirect,
+            } if *event_id == object_id => Some(*indirect),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        phased_out(first),
+        None,
+        "the blinked pick is a new object, so that occurrence is not affected (CR 608.2b)"
+    );
+    assert_eq!(
+        phased_out(second),
+        Some(false),
+        "the surviving opponent's pick still phases out"
+    );
+
+    let delayed_targets: Vec<ObjectId> = runner
+        .state()
+        .delayed_triggers
+        .iter()
+        .flat_map(|trigger| trigger.ability.targets.iter())
+        .filter_map(|target| match target {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        })
+        .collect();
+    assert!(
+        delayed_targets.contains(&second),
+        "the surviving pick binds the delayed phase-in, got {delayed_targets:?}"
+    );
+    // The delayed clause snapshots the ANNOUNCED permanents, so it also carries
+    // the blinked id. That is harmless and unobservable: the blinked object was
+    // never phased out, so a phase-in of it is a no-op (asserted below).
+    assert!(
+        runner.state().objects[&first].is_phased_in(),
+        "the blinked pick was never phased out, so the delayed phase-in cannot affect it"
+    );
+
+    // CR 101.2 + CR 702.26b: the can't-phase-in rider holds on the survivor.
+    let phase_in = engine::types::ability::ResolvedAbility::new(
+        engine::types::ability::Effect::PhaseIn {
+            target: engine::types::ability::TargetFilter::SpecificObject { id: second },
+        },
+        vec![TargetRef::Object(second)],
+        second,
+        P0,
+    );
+    let mut phase_in_events = Vec::new();
+    resolve_phase_in(runner.state_mut(), &phase_in, &mut phase_in_events)
+        .expect("explicit phase-in resolves");
+    assert!(
+        runner.state().objects[&second].is_phased_out(),
+        "the survivor stays phased out while Barn is face up"
+    );
 }
 
 /// CR 115.6 + CR 115.1 + CR 608.2c: each opponent's "up to one" slot is an
