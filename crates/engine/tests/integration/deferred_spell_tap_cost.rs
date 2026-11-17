@@ -4,12 +4,12 @@
 //! window (CR 601.2g), are held for that payment, and are tapped when the total
 //! cost is paid. Oracle text is verbatim from Scryfall.
 
-use engine::game::mana_abilities::is_mana_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AdditionalCost, AdditionalCostOrigin, AdditionalCostRepeatability, TargetRef,
 };
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
     CastPaymentMode, CastingVariant, ConvokeMode, ManaChoice, PersistedGameState,
@@ -47,6 +47,9 @@ const GOLD_MYR: &str = "{T}: Add {W}.";
 const KRARK_CLAN_IRONWORKS: &str = "Sacrifice an artifact: Add {C}{C}.";
 const HEAT_RAY: &str = "Heat Ray deals X damage to target creature.";
 const THERMOPOD: &str = "{S}: This creature gains haste until end of turn. ({S} can be paid with one mana from a snow source.)\nSacrifice a creature: Add {R}.";
+const GRAND_ARCHITECT: &str = "Other blue creatures you control get +1/+1.\n{U}: Target artifact creature becomes blue until end of turn.\nTap an untapped blue creature you control: Add {C}{C}. Spend this mana only to cast artifact spells or activate abilities of artifacts.";
+const PILI_PALA: &str = "Flying\n{2}, {Q}: Add one mana of any color. ({Q} is the untap symbol.)";
+const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
 const SPRINGLEAF_DRUM: &str =
     "{T}, Tap an untapped creature you control: Add one mana of any color.";
 
@@ -208,9 +211,9 @@ struct Script {
     convoke: Vec<ObjectId>,
     /// Creatures whose convoke is attempted (on a copy) when the payment step opens.
     probe_convoke: Vec<ObjectId>,
-    /// A mana ability activated when the payment step opens, and the
-    /// permanent its cost taps or sacrifices.
-    mana_ability: Option<(ObjectId, ObjectId)>,
+    /// Mana abilities the player activates when the payment step opens, each
+    /// with the permanent its cost taps or sacrifices.
+    mana_abilities: Vec<(ObjectId, Option<ObjectId>)>,
     completion: Completion,
 }
 
@@ -248,10 +251,19 @@ struct Run {
     harmonize_published_root: Option<bool>,
     /// The deferred selection `state.pending_cast` held at the Phyrexian prompt.
     root_at_phyrexian: Option<Vec<ObjectId>>,
-    /// The largest X offered.
+    /// The largest X offered, and the held and tapped creatures then.
     x_max: Option<u32>,
-    /// What the payment-step mana ability's cost prompt offered.
+    held_at_x: Option<Vec<ObjectId>>,
+    tapped_at_x: Option<Vec<bool>>,
+    /// What the payment-step mana ability's cost prompt offered the player,
+    /// and what the AI would select there.
     mana_ability_offer: Option<Vec<ObjectId>>,
+    ai_prompt_offer: Option<Vec<ObjectId>>,
+    /// Mana sources offered to the player and to the AI when payment opened,
+    /// and the mana actions the player took.
+    human_sources: Vec<ObjectId>,
+    ai_sources: Vec<ObjectId>,
+    mana_actions: Vec<GameAction>,
 }
 
 /// The engine's own save/undo/P2P restore pipeline.
@@ -357,9 +369,13 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, script: &Script, watch: &[Obje
                     target: script.target.map(TargetRef::Object),
                 }
             }
-            WaitingFor::ChooseXValue { max, .. } => {
+            WaitingFor::ChooseXValue {
+                max, pending_cast, ..
+            } => {
                 run.prompts.push(Prompt::X);
                 run.x_max = Some(max);
+                run.held_at_x = Some(pending_cast.deferred_tap_ids().collect());
+                run.tapped_at_x = Some(tapped(runner, watch));
                 GameAction::ChooseX { value: script.x }
             }
             WaitingFor::HarmonizeTapChoice {
@@ -388,6 +404,8 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, script: &Script, watch: &[Obje
                     run.tapped_at_mana_payment = Some(tapped(runner, watch));
                     run.root_at_mana_payment = root_selection(runner);
                     run.convoke_mode = convoke_mode;
+                    run.human_sources = sources(offered_to_player(runner));
+                    run.ai_sources = sources(ai_actions(runner));
                     run.convoke_candidates = engine::ai_support::candidate_actions(runner.state())
                         .into_iter()
                         .filter_map(|candidate| match candidate.action {
@@ -418,9 +436,8 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, script: &Script, watch: &[Obje
                             .expect("an unreserved creature convokes");
                         run.events.extend(result.events);
                     }
-                    if let Some((source, pays_with)) = script.mana_ability {
-                        let offer = activate(runner, source, pays_with, &mut run.events);
-                        run.mana_ability_offer = Some(offer);
+                    for &(source, pays_with) in &script.mana_abilities {
+                        activate(runner, source, pays_with, &mut run);
                     }
                 }
                 if script.completion == Completion::Refused {
@@ -451,44 +468,53 @@ fn cast(runner: &mut GameRunner, spell: ObjectId, script: &Script, watch: &[Obje
     run
 }
 
-/// Activates `source`'s mana ability, paying its cost with `pays_with`;
-/// returns what the cost prompt offered.
-fn activate(
-    runner: &mut GameRunner,
-    source: ObjectId,
-    pays_with: ObjectId,
-    events: &mut Vec<GameEvent>,
-) -> Vec<ObjectId> {
-    let abilities = &runner.state().objects[&source].abilities;
-    let ability_index = abilities
+/// CR 605.3a: the mana actions the player is offered (`legal_actions_full`'s
+/// per-object map, what the frontend offers).
+fn offered_to_player(runner: &GameRunner) -> Vec<GameAction> {
+    let grouped = engine::ai_support::legal_actions_full(runner.state()).2;
+    grouped.into_values().flatten().collect()
+}
+
+fn ai_actions(runner: &GameRunner) -> Vec<GameAction> {
+    let candidates = engine::ai_support::candidate_actions(runner.state());
+    candidates.into_iter().map(|c| c.action).collect()
+}
+
+fn sources(actions: Vec<GameAction>) -> Vec<ObjectId> {
+    actions
         .iter()
-        .position(is_mana_ability)
-        .expect("a mana ability");
-    let mut action = GameAction::ActivateAbility {
-        source_id: source,
-        ability_index,
-        payment_mode: CastPaymentMode::Auto,
-    };
-    let mut offer = Vec::new();
+        .filter_map(GameAction::source_object)
+        .collect()
+}
+
+/// Takes the mana action the player is offered for `source`, paying a
+/// tap-another cost with `pays_with`.
+fn activate(runner: &mut GameRunner, source: ObjectId, pays_with: Option<ObjectId>, run: &mut Run) {
+    let mut action = offered_to_player(runner)
+        .into_iter()
+        .find(|action| action.source_object() == Some(source))
+        .expect("the player is offered the mana ability");
+    run.mana_actions.push(action.clone());
     loop {
-        events.extend(
-            runner
-                .act(action)
-                .expect("the mana ability activates")
-                .events,
-        );
+        let result = runner.act(action).expect("the mana ability activates");
+        run.events.extend(result.events);
         action = match runner.state().waiting_for.clone() {
             WaitingFor::PayCost { choices, .. } => {
-                offer = choices;
-                GameAction::SelectCards {
-                    cards: vec![pays_with],
-                }
+                run.mana_ability_offer = Some(choices);
+                let selected = ai_actions(runner).into_iter().filter_map(|a| match a {
+                    GameAction::SelectCards { cards } => Some(cards),
+                    _ => None,
+                });
+                run.ai_prompt_offer = Some(selected.flatten().collect());
+                let cards = vec![pays_with.expect("the creature paying the cost")];
+                GameAction::SelectCards { cards }
             }
             WaitingFor::ChooseManaColor { .. } => GameAction::ChooseManaColor {
                 choice: ManaChoice::SingleColor(ManaType::Red),
                 count: 1,
             },
-            _ => return offer,
+            WaitingFor::ManaAbilityManaPayment { .. } => GameAction::PassPriority,
+            _ => return,
         };
     }
 }
@@ -771,11 +797,12 @@ fn creature_held_for_teamwork_is_not_offered_to_conspire() {
             Prompt::Target,
         ]
     );
-    let mut conspire_offer = run.offers[1].clone();
-    conspire_offer.sort();
-    let mut expected = vec![board.wort, board.djinn];
-    expected.sort();
-    assert_eq!(conspire_offer, expected, "the held Goblin is not offered");
+    let expected = sorted(vec![board.wort, board.djinn]);
+    assert_eq!(
+        sorted(run.offers[1].clone()),
+        expected,
+        "the held Goblin is not offered"
+    );
     assert_eq!(run.tapped_at_targets, Some(vec![false, false, false]));
     for id in watch {
         assert_eq!(taps(&run, id), 1);
@@ -851,14 +878,7 @@ struct DruidBoard {
 /// and two Goblins; P0's pool is empty.
 fn druid_board(druids: usize) -> DruidBoard {
     let (mut scenario, victim, _, goblins) = table(2);
-    let druids = (0..druids)
-        .map(|_| {
-            scenario
-                .add_creature_from_oracle(P0, "Zhur-Taa Druid", 1, 1, ZHUR_TAA_DRUID)
-                .with_color(RED_GREEN.to_vec())
-                .id()
-        })
-        .collect();
+    let druids = (0..druids).map(|_| add_druid(&mut scenario)).collect();
     scenario.add_basic_land(P0, ManaColor::Red);
     let pyromatics = pyromatics(&mut scenario);
     DruidBoard {
@@ -868,6 +888,25 @@ fn druid_board(druids: usize) -> DruidBoard {
         goblins,
         druids,
     }
+}
+
+fn add_druid(scenario: &mut GameScenario) -> ObjectId {
+    let mut druid = scenario.add_creature_from_oracle(P0, "Zhur-Taa Druid", 1, 1, ZHUR_TAA_DRUID);
+    druid.with_color(RED_GREEN.to_vec()).id()
+}
+
+/// Whether `id`'s mana ability was offered to (the player, the AI) when the
+/// payment step opened.
+fn offered(run: &Run, id: ObjectId) -> (bool, bool) {
+    (
+        run.human_sources.contains(&id),
+        run.ai_sources.contains(&id),
+    )
+}
+
+fn sorted(mut ids: Vec<ObjectId>) -> Vec<ObjectId> {
+    ids.sort();
+    ids
 }
 
 fn tapped_for_mana(run: &Run, id: ObjectId) -> Option<usize> {
@@ -1130,7 +1169,7 @@ fn teamwork_selection_is_revalidated_when_the_cost_is_paid() {
         script.payment_mode = CastPaymentMode::Manual;
         script.pay_once = vec![AdditionalCostOrigin::Teamwork];
         script.selections = vec![vec![gold_myr]];
-        script.mana_ability = Some((ironworks, sacrificed));
+        script.mana_abilities = vec![(ironworks, Some(sacrificed))];
         script.completion = completion;
         let run = cast(&mut runner, alliance, &script, &[gold_myr]);
 
@@ -1174,7 +1213,7 @@ fn held_creature_still_counts_its_non_tap_mana_toward_x() {
         script.pay_once = vec![AdditionalCostOrigin::Other];
         script.selections = vec![vec![wort, partner]];
         script.x = 1;
-        script.mana_ability = Some((thermopod, goblins[0]));
+        script.mana_abilities = vec![(thermopod, Some(goblins[0]))];
         let run = cast(&mut runner, heat_ray, &script, &[wort, partner]);
 
         let declared = run.prompts.iter().position(|p| *p == Prompt::PayCost);
@@ -1191,34 +1230,197 @@ fn held_creature_still_counts_its_non_tap_mana_toward_x() {
     }
 }
 
-/// CR 605.3a + CR 601.2h: Springleaf Drum's "tap an untapped creature you
-/// control" cost, activated during Pyromatics' payment, offers the unheld Wort
-/// but neither Goblin held for conspire.
+// ---------------------------------------------------------------------------
+// The player's own mana activations (CR 601.2g + CR 605.3a)
+// ---------------------------------------------------------------------------
+
+/// CR 601.2g + CR 605.3a + CR 107.6 (Matt's closing row): Pili-Pala, held for
+/// Cruel Alliance's teamwork, is tapped for {C}{C} through Grand Architect;
+/// that mana pays Pili-Pala's own {2},{Q}, which untaps it; it is tapped again
+/// for teamwork when the cost is paid.
 #[test]
-fn creatures_held_for_conspire_cant_pay_a_mana_ability_tap_cost() {
-    let (mut scenario, victim, wort, goblins) = table(2);
-    let drum = scenario
-        .add_artifact_from_oracle(P0, "Springleaf Drum", SPRINGLEAF_DRUM)
+fn held_creature_can_tap_for_mana_and_untap_before_the_commit() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let victim = victim(&mut scenario);
+    let architect = scenario
+        .add_creature_from_oracle(P0, "Grand Architect", 1, 3, GRAND_ARCHITECT)
+        .with_color(vec![ManaColor::Blue])
         .id();
-    let pyromatics = pyromatics(&mut scenario);
-    pool(&mut scenario, ManaType::Red, 2);
+    // Made blue by the Architect's {U} ability earlier this turn.
+    let pili = scenario
+        .add_creature_from_oracle(P0, "Pili-Pala", 1, 1, PILI_PALA)
+        .as_artifact_creature()
+        .with_color(vec![ManaColor::Blue])
+        .id();
+    let alliance = scenario
+        .add_spell_to_hand(P0, "Cruel Alliance", false)
+        .with_mana_cost(cost(2, &[ManaCostShard::Black]))
+        .with_color(vec![ManaColor::Black])
+        .from_oracle_text_with_keywords(&[], CRUEL_ALLIANCE)
+        .id();
+    pool(&mut scenario, ManaType::Black, 5);
     let mut runner = scenario.build();
 
     let mut script = Script::new(victim);
     script.payment_mode = CastPaymentMode::Manual;
-    script.pay_once = vec![AdditionalCostOrigin::Other];
-    script.selections = vec![goblins.clone()];
-    script.mana_ability = Some((drum, wort));
-    let run = cast(&mut runner, pyromatics, &script, &goblins);
+    script.pay_once = vec![AdditionalCostOrigin::Teamwork];
+    script.selections = vec![vec![pili]];
+    script.mana_abilities = vec![(architect, Some(pili)), (pili, None)];
+    let run = cast(&mut runner, alliance, &script, &[pili]);
 
-    let offer = run
-        .mana_ability_offer
-        .as_ref()
-        .expect("reach: the Drum's cost prompt");
-    assert!(offer.contains(&wort), "the unheld Wort is offered");
-    for goblin in &goblins {
-        assert!(!offer.contains(goblin), "a held Goblin is not offered");
-        assert_eq!(taps(&run, *goblin), 1, "tapped once, for conspire");
+    assert_eq!(run.tapped_at_targets, Some(vec![false]));
+    assert_eq!(run.mana_ability_offer, Some(vec![architect, pili]));
+    let untapped = run.events.iter().position(
+        |event| matches!(event, GameEvent::PermanentUntapped { object_id, .. } if *object_id == pili),
+    );
+    let last_tap = run.events.iter().rposition(
+        |event| matches!(event, GameEvent::PermanentTapped { object_id, .. } if *object_id == pili),
+    );
+    assert_eq!(taps(&run, pili), 2, "for mana, then for teamwork");
+    assert!(untapped.expect("reach: {Q} untapped it") < last_tap.expect("tapped"));
+    assert!(runner.state().objects[&pili].tapped);
+    let spell = runner.state().stack[0].ability().expect("Cruel Alliance");
+    let paid = &spell.context.additional_cost_payments;
+    assert_eq!(paid[0].origin, AdditionalCostOrigin::Teamwork);
+}
+
+/// CR 601.2h: a held creature the player tapped for mana and didn't untap
+/// can't pay the deferred tap when the cost is paid. The automatic payer and
+/// the AI never offer it; the player is offered it.
+#[test]
+fn held_creature_still_tapped_at_the_commit_is_refused() {
+    let mut board = druid_board(1);
+    let (druid, goblin) = (board.druids[0], board.goblins[0]);
+    let mut script = Script::new(board.victim);
+    script.payment_mode = CastPaymentMode::Manual;
+    script.pay_once = vec![AdditionalCostOrigin::Other];
+    script.selections = vec![vec![druid, goblin]];
+    script.mana_abilities = vec![(druid, None)];
+    script.completion = Completion::Refused;
+    let watch = [druid, goblin];
+    let run = cast(&mut board.runner, board.pyromatics, &script, &watch);
+
+    assert_eq!(offered(&run, druid), (true, false), "the player only");
+    assert_eq!(tapped(&board.runner, &[druid, goblin]), vec![true, false]);
+}
+
+/// CR 107.3 + CR 601.2f: a Druid held for conspire doesn't count toward X.
+/// Heat Ray under Djinn + Wort, replicate declined, conspire with Wort and the
+/// Druid (held: X up to 0) or with Wort and a Goblin (Druid free: X up to 1).
+#[test]
+fn held_creature_does_not_count_its_tap_mana_toward_x() {
+    // Case 0 holds the Druid; case 1 holds a Goblin and leaves the Druid free.
+    for (case, x_max) in [(0, 0), (1, 1)] {
+        let (mut scenario, target, wort, goblins) = table(1);
+        add_djinn(&mut scenario);
+        let druid = add_druid(&mut scenario);
+        let heat_ray = red_spell(
+            &mut scenario,
+            "Heat Ray",
+            cost(0, &[ManaCostShard::X, ManaCostShard::Red]),
+            &[],
+            HEAT_RAY,
+        );
+        pool(&mut scenario, ManaType::Red, 1);
+        let mut runner = scenario.build();
+
+        let partner = [druid, goblins[0]][case];
+        let mut script = Script::new(target);
+        script.pay_once = vec![AdditionalCostOrigin::Other];
+        script.selections = vec![vec![wort, partner]];
+        let run = cast(&mut runner, heat_ray, &script, &[wort, partner]);
+
+        assert_eq!(run.held_at_x, Some(vec![wort, partner]), "reach: held at X");
+        assert_eq!(run.tapped_at_x, Some(vec![false, false]));
+        assert_eq!(run.x_max, Some(x_max));
     }
-    assert_eq!(taps(&run, wort), 1, "tapped for the Drum");
+}
+
+/// CR 605.3a + CR 601.2g: Springleaf Drum's "tap an untapped creature you
+/// control" cost during Pyromatics' payment. Case 0: Wort and the only Goblin
+/// are both held. The player is offered the Drum and its prompt offers both;
+/// the AI isn't offered the Drum; Wort tapped for the Drum then can't pay
+/// conspire. Case 1: a second Goblin is free. The AI is offered the Drum and
+/// would pay with the free Goblin only; the player's prompt offers all three.
+#[test]
+fn held_creatures_pay_a_mana_ability_tap_cost_only_by_the_players_choice() {
+    for case in 0..2 {
+        let (mut scenario, victim, wort, goblins) = table(1 + case);
+        let drum = scenario
+            .add_artifact_from_oracle(P0, "Springleaf Drum", SPRINGLEAF_DRUM)
+            .id();
+        let pyromatics = pyromatics(&mut scenario);
+        pool(&mut scenario, ManaType::Red, 2);
+        let mut runner = scenario.build();
+
+        let held = vec![wort, goblins[0]];
+        let mut script = Script::new(victim);
+        script.payment_mode = CastPaymentMode::Manual;
+        script.pay_once = vec![AdditionalCostOrigin::Other];
+        script.selections = vec![held.clone()];
+        let pays_with = *goblins.last().expect("a Goblin");
+        script.mana_abilities = vec![(drum, Some(if case == 0 { wort } else { pays_with }))];
+        script.completion = [Completion::Refused, Completion::Completes][case];
+        let run = cast(&mut runner, pyromatics, &script, &held);
+
+        assert_eq!(offered(&run, drum), (true, case == 1));
+        let offer = sorted(run.mana_ability_offer.clone().expect("reach: its prompt"));
+        assert_eq!(offer, sorted([vec![wort], goblins.clone()].concat()));
+        if case == 1 {
+            assert_eq!(run.ai_prompt_offer, Some(vec![pays_with]));
+            for id in [wort, goblins[0], pays_with] {
+                assert_eq!(taps(&run, id), 1);
+            }
+        }
+    }
+}
+
+/// CR 305.6 + CR 601.2g + CR 601.2h: Dryad Arbor's intrinsic "{T}: Add {G}"
+/// while it's held for conspire on Giant Growth (Djinn + Wort, replicate
+/// declined). The player is offered the land tap (no printed ability) and it
+/// is accepted; the payment is then refused because Arbor is still tapped.
+/// Without the tap the cast completes and Arbor is tapped once, for conspire.
+#[test]
+fn held_land_creature_taps_for_its_intrinsic_mana_by_the_players_choice() {
+    for completion in [Completion::Refused, Completion::Completes] {
+        let (mut scenario, _, wort, goblins) = table(1);
+        add_djinn(&mut scenario);
+        // Dryad Arbor: a green Forest Dryad land creature; its mana ability is the
+        // Forest's intrinsic one (CR 305.6).
+        let arbor = creature(&mut scenario, "Dryad Arbor", 1, &[ManaColor::Green]);
+        let growth = scenario
+            .add_spell_to_hand(P0, "Giant Growth", true)
+            .with_mana_cost(cost(0, &[ManaCostShard::Green]))
+            .with_color(vec![ManaColor::Green])
+            .from_oracle_text_with_keywords(&[], GIANT_GROWTH)
+            .id();
+        pool(&mut scenario, ManaType::Green, 1);
+        let mut runner = scenario.build();
+        let obj = runner.state_mut().objects.get_mut(&arbor).expect("Arbor");
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes = vec!["Forest".into(), "Dryad".into()];
+        obj.base_card_types = obj.card_types.clone();
+
+        let held = vec![arbor, goblins[0]];
+        let mut script = Script::new(wort);
+        script.payment_mode = CastPaymentMode::Manual;
+        script.pay_once = vec![AdditionalCostOrigin::Other];
+        script.selections = vec![held.clone()];
+        if completion == Completion::Refused {
+            script.mana_abilities = vec![(arbor, None)];
+        }
+        script.completion = completion;
+        let run = cast(&mut runner, growth, &script, &held);
+
+        assert_eq!(offered(&run, arbor), (true, false), "the player only");
+        let refused = completion == Completion::Refused;
+        if refused {
+            // The land path (TapLandForMana), via the Forest's layer-granted ability.
+            let action = run.mana_actions.as_slice();
+            assert!(matches!(action, [GameAction::TapLandForMana { .. }]));
+        }
+        assert_eq!(tapped(&runner, &held), vec![true, !refused]);
+        assert_eq!(taps(&run, arbor), 1);
+    }
 }

@@ -988,8 +988,11 @@ pub(crate) fn object_cant_tap(state: &crate::types::game_state::GameState, id: O
 
 /// CR 601.2b + CR 601.2h: whether `id` is held for the in-flight spell's
 /// deferred tap cost (conspire or teamwork selected before targets). Until the
-/// payment commit taps it, a held permanent can't be tapped to pay another cost
-/// or for mana. This is a payment reservation, not CR 701.26a "can't become
+/// payment commit taps it, a held permanent can't pay another part of that cost
+/// (convoke, Harmonize, another tap cost), and automatic payment won't tap it
+/// for mana; the player may still tap it for mana (CR 601.2g,
+/// `ManaActivationPurpose::Explicit`) if it is untapped again by the commit.
+/// This is a payment reservation, not CR 701.26a "can't become
 /// tapped", so effect taps and `object_cant_tap` don't read it. The single
 /// authority read at every payment-eligibility chokepoint; the in-flight root is
 /// `state.pending_cast` (published through `with_payment_root` during payment
@@ -1025,12 +1028,6 @@ pub(crate) fn tap_permanent_for_cost(
     if object_cant_tap(state, id) {
         return Err(EngineError::ActionNotAllowed(
             "This permanent can't become tapped".to_string(),
-        ));
-    }
-    // Backstop: tap_payment_eligible, the tap-cost prompt and the mana-ability readers hold first.
-    if payment_tap_reserved(state, id) {
-        return Err(EngineError::ActionNotAllowed(
-            "This permanent is held to pay the spell's tap cost".to_string(),
         ));
     }
     if crate::game::object_state::resolve_and_apply_object_edit(

@@ -2514,8 +2514,20 @@ pub fn candidate_actions_broad_with_probe(
             choices,
             count,
             min_count,
-            ..
-        } => bounded_select_card_candidates(*player, choices, *min_count..=*count),
+            resume,
+        } => {
+            // CR 601.2g + CR 601.2h: the AI plans its mana-ability payments, so
+            // it doesn't spend a creature held for the spell's deferred tap cost.
+            let choices: Vec<ObjectId> = choices
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    !matches!(resume, CostResume::ManaAbility { .. })
+                        || !crate::game::restrictions::payment_tap_reserved(state, id)
+                })
+                .collect();
+            bounded_select_card_candidates(*player, &choices, *min_count..=*count)
+        }
         // CR 117.1 + CR 601.2b: Aggregate-threshold "exile any number" cost
         // (Baron Helmut Zemo's Boast). The threshold is satisfied by ANY chosen
         // subset whose summed `property` meets the comparator, so enumerate

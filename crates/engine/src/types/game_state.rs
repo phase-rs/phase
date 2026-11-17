@@ -11590,8 +11590,9 @@ impl PendingCast {
     }
 
     /// CR 601.2h: whether `id` is held for this spell's deferred tap cost. A
-    /// held permanent can't be tapped to pay anything else, or for mana, before
-    /// that payment commits. The single membership test behind
+    /// held permanent can't pay another part of that cost, and automatic
+    /// payment won't tap it for mana; the player may (CR 601.2g) if it is
+    /// untapped again by the commit. The single membership test behind
     /// `restrictions::payment_tap_reserved`.
     pub fn holds_tap_reservation(&self, id: ObjectId) -> bool {
         self.deferred_tap_ids().any(|held| held == id)

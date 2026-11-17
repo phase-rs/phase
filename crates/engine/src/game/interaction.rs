@@ -80,6 +80,9 @@ use super::{mana_sources, turn_control, visibility};
 
 pub const MAX_INTERACTION_STRING_LEN: usize = 256;
 const MAX_INTERACTION_SESSION_ID_LEN: usize = 128;
+/// CR 601.2g + CR 605.3a: the player's own mana offers.
+const EXPLICIT_MANA: super::mana_abilities::ManaActivationPurpose =
+    super::mana_abilities::ManaActivationPurpose::Explicit;
 const MAX_INTERACTION_SERIAL_LEN: usize = 32;
 
 fn action_rejection_for_interaction_reason(reason: InteractionReasonCode) -> ActionRejection {
@@ -2218,7 +2221,7 @@ fn mana_payment_direct_actions(
     if activation_upper_bound.is_none_or(|count| count > MAX_INTERACTION_LIST_LEN) {
         return Err(InteractionReasonCode::PayloadTooLarge);
     }
-    let mut actions = super::mana_sources::activatable_mana_actions_for_player(state, player);
+    let mut actions = super::mana_sources::mana_actions_for_player(state, player, EXPLICIT_MANA);
     let tapped_for_mana = state
         .lands_tapped_for_mana
         .get(&player)
@@ -2465,7 +2468,7 @@ fn direct_choice_projection(
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
             let mut actions =
-                super::mana_sources::activatable_mana_actions_for_player(state, *player);
+                super::mana_sources::mana_actions_for_player(state, *player, EXPLICIT_MANA);
             // CR 601.2g-h + CR 118.3a: a manual window adds confirming and
             // directing pool units.
             if super::casting::payment_mode_pays_mana_manually(pending_mana_ability.payment_mode) {
@@ -7234,7 +7237,7 @@ fn actor_candidates(
     }
     if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
         let mana_actions =
-            super::mana_sources::activatable_mana_actions_for_player(state, semantic_owner);
+            super::mana_sources::mana_actions_for_player(state, semantic_owner, EXPLICIT_MANA);
         let undo_actions = state
             .lands_tapped_for_mana
             .get(&semantic_owner)
