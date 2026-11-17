@@ -6,7 +6,7 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import { useUiStore } from "../stores/uiStore";
-import { dispatchAction } from "../game/dispatch";
+import { dispatchAction, undoLastAction } from "../game/dispatch";
 import { getCanActForWaitingState, getPlayerId } from "./usePlayerId";
 import { useAltToggle } from "./useAltToggle";
 import { useShiftHeld } from "./useShiftHeld";
@@ -82,7 +82,6 @@ export function useKeyboardShortcuts({
         gameState,
         waitingFor,
         dispatch,
-        undo,
         stateHistory,
         gameMode,
         manaPaymentShortcutActions,
@@ -156,7 +155,7 @@ export function useKeyboardShortcuts({
           if (!e.ctrlKey && !e.metaKey && !isAuthorityRemote(gameMode)) {
             e.preventDefault();
             if (stateHistory.length > 0) {
-              undo();
+              void undoLastAction();
             }
           }
           break;

@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 
+import { undoLastAction } from "../../game/dispatch.ts";
 import { isAuthorityRemote, useGameStore } from "../../stores/gameStore.ts";
 
 /**
@@ -12,12 +13,11 @@ export function UndoButton() {
   const canUndo = useGameStore(
     (s) => s.stateHistory.length > 0 && !isAuthorityRemote(s.gameMode),
   );
-  const undo = useGameStore((s) => s.undo);
 
   if (!canUndo) return null;
   return (
     <button
-      onClick={undo}
+      onClick={() => void undoLastAction()}
       className="flex items-center gap-1 rounded-md bg-gray-800/80 px-2.5 py-1 text-[11px] font-medium text-gray-400 transition-colors hover:bg-gray-700/80 hover:text-gray-200"
     >
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor" className="h-3 w-3">

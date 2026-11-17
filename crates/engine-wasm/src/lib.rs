@@ -6452,17 +6452,55 @@ mod restored_card_db_requirements_tests {
 
     /// A routing probe, apart from the hand-back sequence: during the turn
     /// Mindslaver hands to P2, P1's decision asked as P1's own seat, which the
-    /// controller never does, is still P2's to make (CR 723.5) and goes out
-    /// with no thread.
+    /// controller never does, is P2's to make (CR 723.5), so P1 is asked
+    /// nothing. The refused build leaves P1's thread as it was.
     #[test]
-    fn a_decision_mindslaver_controls_asked_as_its_owners_seat_uses_no_thread() {
+    fn a_decision_mindslaver_controls_asked_as_its_owners_seat_builds_no_request() {
         use engine::game::scenario::P1;
         let mut log = Vec::new();
         reach_the_turn_mindslaver_controls(&mut log);
 
-        let as_owner = build_llm_decision(P1, &log);
-        assert_eq!(thread_of(&as_owner), serde_json::Value::Null, "{as_owner}");
-        assert!(as_owner["threadTurn"].is_null(), "{as_owner}");
+        let history = serde_json::to_string(&log).expect("the log serializes");
+        let as_owner = build_llm_decision_request_inner(
+            "Medium",
+            P1.0,
+            THREADED_ENDPOINT,
+            &history,
+            0,
+            in_step(0),
+        )
+        .expect("the build runs");
+        assert_eq!(as_owner, serde_json::Value::Null);
+        assert!(
+            has_open_llm_thread(P1),
+            "a refused build leaves the owner's thread open"
+        );
+
+        clear_game_state();
+    }
+
+    /// Issue #10999: a seat is asked only a decision it may make. While P1
+    /// holds priority, P0 has none, so a build for P0 returns no request
+    /// instead of P1's decision rendered from P1's view, P1's hand included.
+    #[test]
+    fn a_build_for_a_seat_with_no_decision_returns_no_request() {
+        let asked = PlayerId(0);
+        let acting = PlayerId(1);
+        install_llm_decision(acting);
+
+        let built = build_llm_decision_request_inner(
+            "Medium",
+            asked.0,
+            THREADED_ENDPOINT,
+            "[]",
+            0,
+            in_step(0),
+        )
+        .expect("the build runs");
+        assert_eq!(built, serde_json::Value::Null);
+
+        // Reach guard: asked as the seat that holds it, the decision builds.
+        build_llm_decision(acting, &[]);
 
         clear_game_state();
     }
@@ -9130,7 +9168,14 @@ fn build_llm_decision_request_inner(
         engine::game::layers::flush_layers(state);
         let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
         let contract = AiDecisionContract::issue(state, semantic_owner);
-        if contract.candidates.is_empty() {
+        // Only the seat the engine authorizes to submit this decision is asked
+        // it: its owner, or the owner's controller (CR 723.5). For any other
+        // seat, `ai_semantic_owner` names whoever is acting, so without this a
+        // seat with no decision to make would get the acting player's
+        // decision, rendered from that player's view, hand included. Refused
+        // before the standing pass and the thread memory are consulted, so a
+        // refused build changes nothing.
+        if contract.authorized_actor != PlayerId(player_id) || contract.candidates.is_empty() {
             return serde_json::Value::Null;
         }
         let is_standing_pass = LLM_DECISION_MEMORY.with(|cell| {

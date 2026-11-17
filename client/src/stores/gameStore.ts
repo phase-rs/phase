@@ -264,6 +264,19 @@ interface GameStoreState {
   viewerInteraction: ViewerInteraction | null;
   /** Undo ring: engine-authored trusted checkpoints, never screen projections. */
   stateHistory: UndoCheckpoint[];
+  /**
+   * Counts the undos begun since the page loaded; `reset` keeps it. `undo`
+   * advances it before its first await, so work begun earlier can tell, when
+   * it resumes, that an undo took its timeline back: the store's `dispatch`
+   * then commits nothing, and the AI controller drops the decision under way.
+   */
+  undoEpoch: number;
+  /**
+   * True from the moment an undo begins until it has committed or failed. The
+   * AI controller starts no decision meanwhile: the store still shows the
+   * state being undone, while the engine may already hold the restored one.
+   */
+  undoInFlight: boolean;
   /** Debug rewind targets: trusted envelopes for the same reason. */
   turnCheckpoints: PersistedGameState[];
   /**
@@ -368,6 +381,11 @@ interface GameStoreActions {
    */
   resumeNativeSolo: (gameId: string, adapter: EngineAdapter) => Promise<void>;
   dispatch: (action: GameAction) => Promise<GameEvent[]>;
+  /**
+   * Restore the newest checkpoint on the undo ring. The game's controls call
+   * `undoLastAction` (`dispatch.ts`) instead, which first abandons the work the
+   * dispatch pipeline still has in flight for the state being undone.
+   */
   undo: () => Promise<void>;
   /**
    * Replace the server-published rollback targets. Only `dispatch.ts` calls
@@ -448,6 +466,21 @@ export function nextGameSessionGeneration(): number {
 export type GameStore = GameStoreState & GameStoreActions;
 
 /**
+ * Whether `undo` would take an action back now: this client owns the engine
+ * state, the ring holds a checkpoint to restore, and no undo is running yet.
+ * `undoLastAction` asks before it abandons the work in flight, so a press with
+ * nothing to undo leaves that work alone.
+ */
+export function canUndo(store: GameStore): store is GameStore & { adapter: EngineAdapter } {
+  return (
+    store.adapter !== null
+    && !store.undoInFlight
+    && !isAuthorityRemote(store.gameMode)
+    && store.stateHistory.length > 0
+  );
+}
+
+/**
  * Seed the store from a server-authoritative adapter whose `initialize()` has
  * already produced the current game state (resumed P2P host, or a reconnected
  * native solo game). These games have no client-side undo history and no local
@@ -507,6 +540,8 @@ const initialState: GameStoreState = {
   stuckDiagnostic: null,
   viewerInteraction: null,
   stateHistory: [],
+  undoEpoch: 0,
+  undoInFlight: false,
   turnCheckpoints: [],
   rewindTargets: [],
   lobbyProgress: null,
@@ -700,7 +735,7 @@ export const useGameStore = create<GameStore>()(
 
     dispatch: async (action) => {
       const submittedAction = applySpellPaymentPreference(action);
-      const { adapter, gameState, gameId, gameMode, gameSessionGeneration } = get();
+      const { adapter, gameState, gameId, gameMode, gameSessionGeneration, undoEpoch } = get();
       if (!adapter || !gameState) {
         throw new Error("Game not initialized");
       }
@@ -737,6 +772,8 @@ export const useGameStore = create<GameStore>()(
       } catch (err) {
         if (reportStructuredActionRejection(err) === "stale") {
           const snapshot = await adapter.getSnapshot();
+          // An undo begun meanwhile commits its own snapshot of the restored game.
+          if (get().undoEpoch !== undoEpoch) return [];
           get().commitEngineSnapshot(snapshot, { events: [], logEntries: [] });
           if (gameId) void saveAuthoritativeGame(gameId, adapter, snapshot.state);
           return [];
@@ -750,6 +787,11 @@ export const useGameStore = create<GameStore>()(
       // Read-then-commit with no `await` between, so no other commit interleaves.
       const checkpoint = checkpointPromise ? await checkpointPromise : null;
       const current = get();
+      // An undo begun while this action was out took it back: the restore
+      // replaced the state it was applied to. Its events, log lines and
+      // checkpoint belong to the undone timeline, and the undo commits the
+      // board itself, so nothing of this action is committed or saved.
+      if (current.undoEpoch !== undoEpoch) return [];
       // The checkpoint was captured before submit; only attach it when the
       // session is unchanged, so a stale checkpoint cannot enter a
       // replacement game's history.
@@ -771,36 +813,55 @@ export const useGameStore = create<GameStore>()(
     },
 
     undo: async () => {
-      const { stateHistory, adapter, gameMode } = get();
-      if (isAuthorityRemote(gameMode)) return;
-      if (stateHistory.length === 0 || !adapter) return;
-
+      const store = get();
+      if (!canUndo(store)) return;
+      const { adapter, gameSessionGeneration, stateHistory } = store;
       const previous = stateHistory[stateHistory.length - 1];
 
-      // Sync engine state with the restored trusted checkpoint
-      await adapter.restoreState(previous.state);
-      // Commit the snapshot's OWN state, not `previous`: post-restore the engine
-      // is the source of truth, and taking both halves from one snapshot is what
-      // keeps the pair coherent. Newest-by-construction, so it passes the gate.
-      const snapshot = await adapter.getSnapshot();
+      // Before the first await: from the restore on, the engine may hold the
+      // restored state while the store still shows the one being undone. The
+      // new epoch tells work begun before now that its timeline is going, and
+      // `undoInFlight` holds off new AI decisions until this undo settles.
+      const epoch = store.undoEpoch + 1;
+      set({ undoEpoch: epoch, undoInFlight: true });
+      try {
+        // Sync engine state with the restored trusted checkpoint
+        await adapter.restoreState(previous.state);
+        // Commit the snapshot's OWN state, not `previous`: post-restore the engine
+        // is the source of truth, and taking both halves from one snapshot is what
+        // keeps the pair coherent. Newest-by-construction, so it passes the gate.
+        const snapshot = await adapter.getSnapshot();
 
-      // The restore rewound the engine, not this store's log: drop every entry
-      // from the undone action on, a line logged during the restore included.
-      // The commit replaces the whole log, so it is read after the last await,
-      // as it stands now. `nextLogSeq` keeps counting, so a seq still names one
-      // entry only, for anything that remembers one (the log panel keys its
-      // rows by seq). Not covered: a play still animating when Undo is pressed
-      // commits its lines after this rewind, because undo does not abandon
-      // in-flight dispatches as `restoreGameState` does (#11014).
-      const logHistory = get().logHistory.filter((entry) => entry.seq < previous.logSeq);
-      get().commitEngineSnapshot(snapshot, {
-        extraState: {
-          events: [],
-          logHistory,
-          stateHistory: stateHistory.slice(0, -1),
-          restoredStackAutomation: null,
-        },
-      });
+        // A game torn down or replaced while the undo ran is not the one it
+        // restored, and must not take its snapshot.
+        const current = get();
+        if (current.adapter !== adapter || current.gameSessionGeneration !== gameSessionGeneration) {
+          return;
+        }
+
+        // The restore rewound the engine, not this store's log: drop every entry
+        // from the undone action on, a line logged during the restore included.
+        // The commit replaces the whole log, so it is read after the last await,
+        // as it stands now. `nextLogSeq` keeps counting, so a seq still names one
+        // entry only, for anything that remembers one (the log panel keys its
+        // rows by seq). The ring keeps step with the log: it is the ring this
+        // undo found, less the checkpoint it restores, so a checkpoint pushed
+        // during the restore goes too.
+        const logHistory = current.logHistory.filter((entry) => entry.seq < previous.logSeq);
+        current.commitEngineSnapshot(snapshot, {
+          extraState: {
+            events: [],
+            logHistory,
+            stateHistory: stateHistory.slice(0, -1),
+            restoredStackAutomation: null,
+          },
+        });
+      } finally {
+        // Cleared on every exit, a failed restore included, so the AI seats
+        // decide again. Only by this undo: after a game swap, a newer one may
+        // hold the flag.
+        if (get().undoEpoch === epoch) set({ undoInFlight: false });
+      }
     },
 
     setRewindTargets: (targets) => {
@@ -808,11 +869,13 @@ export const useGameStore = create<GameStore>()(
     },
 
     reset: () => {
-      const { adapter } = get();
+      const { adapter, undoEpoch } = get();
       if (adapter) {
         adapter.dispose();
       }
-      set({ ...initialState, gameSessionGeneration: nextGameSessionGeneration() });
+      // The epoch only ever grows, so an undo still settling from the last
+      // game never mistakes the next game's undo for its own.
+      set({ ...initialState, gameSessionGeneration: nextGameSessionGeneration(), undoEpoch });
     },
 
     setAdapter: (adapter) => {

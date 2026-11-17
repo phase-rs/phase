@@ -20,6 +20,7 @@ import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
 import {
+  canUndo,
   captureTrustedCheckpoint,
   isAuthorityRemote,
   nextGameSessionGeneration,
@@ -266,16 +267,16 @@ function sameBoundGameSession(
 /**
  * Discard every queued and in-flight dispatch and release the mutex.
  *
- * Two callers, both of which abandon the game the pending work belongs to:
- * `restoreGameState` (the engine state is replaced wholesale) and
- * `clearPromptOverlayState` (a game-session boundary). Bumping
+ * Three callers, each of which abandons the game state the pending work belongs
+ * to: `restoreGameState` and `undoLastAction` (the engine state is replaced
+ * wholesale) and `clearPromptOverlayState` (a game-session boundary). Bumping
  * `dispatchGeneration` makes every downstream `isDispatchContextCurrent` guard
  * decline, so a `processAction` continuation still in flight can neither commit
  * nor release a newer dispatch's mutex. That covers the action and remote
  * dispatch pipelines. `dispatchInteraction` also captures this generation and
  * its bound session, then checks both after each asynchronous boundary.
- * `restoreGameState` still commits without capturing the generation, so it
- * remains unaffected by the bump and can write.
+ * `restoreGameState` and the store's `undo` still commit without capturing the
+ * generation, so they remain unaffected by the bump and can write.
  * Queued work is *resolved*, not rejected: a caller
  * awaiting an action in an abandoned game has nothing to recover from and
  * must not see a spurious rejection.
@@ -1290,6 +1291,29 @@ export async function restoreGameState(
   }
 
   return null;
+}
+
+/**
+ * Undo the local player's last undoable action. The one entry point for the
+ * Undo button and the Z shortcut.
+ *
+ * Like `restoreGameState`, the undo replaces the engine state wholesale, so it
+ * abandons the dispatch pipeline's queued and in-flight work first. A play still
+ * animating would otherwise commit after the rewind: its log lines into the
+ * rewound log, which the next LLM prompt is built from, and its checkpoint onto
+ * the ring, where the next undo would redo it. Work outside the pipeline (the
+ * store's own `dispatch`, the AI controller) is fenced by the undo epoch that
+ * `undo` advances before its first await.
+ *
+ * Nothing is abandoned when `undo` would do nothing, so a press with nothing
+ * to undo, or during an undo, leaves work in flight alone. If the restore
+ * itself fails, the abandoned commits are lost as they are under
+ * `restoreGameState`, and the stale-screen watchdog re-syncs the board.
+ */
+export async function undoLastAction(): Promise<void> {
+  if (!canUndo(useGameStore.getState())) return;
+  abandonPendingDispatches();
+  await useGameStore.getState().undo();
 }
 
 /**
