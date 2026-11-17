@@ -147,7 +147,7 @@ describe("gameStore commitEngineSnapshot — revision gate", () => {
     const accepted = useGameStore.getState().commitEngineSnapshot(stale, {
       events,
       logEntries: [logEntry("stale-but-real")],
-      stateHistory: [checkpoint],
+      undoCheckpoint: checkpoint,
     });
 
     const store = useGameStore.getState();
@@ -158,8 +158,9 @@ describe("gameStore commitEngineSnapshot — revision gate", () => {
     expect(store.logHistory).toEqual([{ ...logEntry("stale-but-real"), seq: 0 }]);
     expect(store.nextLogSeq).toBe(1);
     // A checkpoint is a PRE-action state — valid whichever pair wins. Dropping it
-    // would silently lose an undo step.
-    expect(store.stateHistory).toEqual([checkpoint]);
+    // would silently lose an undo step. Its log position is where this
+    // commit's own entries begin.
+    expect(store.stateHistory).toEqual([{ state: checkpoint, logSeq: 0 }]);
     // …but the pair itself is still the newer one.
     expect(store.waitingFor).toEqual(OPTIONAL_EFFECT_CHOICE);
   });

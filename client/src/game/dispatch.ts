@@ -755,14 +755,10 @@ async function processAction(
   // Re-check after the await: a session boundary mid-animation must not let
   // a stale checkpoint resurrect history into the replacement game.
   if (!isDispatchContextCurrent(generation, session)) return;
-  const store = useGameStore.getState();
-  const stateHistory = checkpoint
-    ? [...store.stateHistory, checkpoint].slice(-MAX_UNDO_HISTORY)
-    : undefined;
-  store.commitEngineSnapshot(snapshotResult, {
+  useGameStore.getState().commitEngineSnapshot(snapshotResult, {
     events,
     logEntries: result.log_entries ?? [],
-    stateHistory,
+    undoCheckpoint: checkpoint ?? undefined,
     extraState: { restoredStackAutomation: null },
   });
 
