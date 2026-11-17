@@ -152,7 +152,7 @@ pub enum ListingDelta {
     Unlisted,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct LobbyGameMeta {
     /// `default` loads a snapshot written before the field as host-present.
     #[serde(default)]
@@ -242,7 +242,7 @@ impl From<LobbyManagerSnapshot> for LobbyManager {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(from = "LobbyManagerSnapshot")]
 pub struct LobbyManager {
     games: HashMap<String, LobbyGameMeta>,
