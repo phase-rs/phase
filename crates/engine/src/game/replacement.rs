@@ -2104,6 +2104,35 @@ pub(crate) fn replacement_is_optional(state: &GameState, rid: ReplacementId) -> 
             .is_some_and(|repl| replacement_mode_is_optional(&repl.mode))
 }
 
+/// CR 608.2f + CR 614.5 (F2): whether `rid` is a whole-entry one-shot copy
+/// replacement — a `consume_on_apply` entry replacement (Mystic Reflection)
+/// whose single application converts every batch of a compound `CreateToken`
+/// event at once. Consults both definition storages: object/liminal
+/// definitions via `replacement_definition_for_id`, and floating spell shields
+/// under the `ObjectId(0)` sentinel in `pending_damage_replacements`.
+///
+/// Never consults `is_consumed`: consumption is marked as the one-shot
+/// applies, and the gate asks about the definition's shape, not its live
+/// state. The pipeline's own candidate scan already skips consumed entries.
+pub(crate) fn replacement_is_whole_event_entry_copy(state: &GameState, rid: ReplacementId) -> bool {
+    let definition = if rid.source == ObjectId(0) {
+        state.pending_damage_replacements.get(rid.index)
+    } else {
+        replacement_definition_for_id(state, rid)
+    };
+    definition.is_some_and(|def| def.consume_on_apply && def.event == ReplacementEvent::ChangeZone)
+}
+
+/// CR 608.2f + CR 614.6 (F1/F2): abandon a paused simultaneous multi-seat
+/// token clause whose compound event was fully prevented — take the record so
+/// the deferred publication never runs, and clear the created-token ledger so
+/// the previous result cannot read as this one's (mirrors the single-seat
+/// Prevented arm).
+pub(crate) fn abort_simultaneous_token_clause(state: &mut GameState) {
+    state.pending_simultaneous_token_clause = None;
+    state.last_created_token_ids = Vec::new();
+}
+
 /// CR 903.9b: The commander owner makes this optional-replacement choice. All
 /// other replacement choices retain the ordinary CR 616.1 affected-player rule.
 fn replacement_choice_player(
@@ -24045,6 +24074,143 @@ mod tests {
         assert!(
             obj.replacement_definitions[0].is_consumed,
             "consume_on_apply replacement should be consumed after full prevention"
+        );
+    }
+
+    /// CR 608.2f + CR 614.5 (F2/CLS): the whole-entry-copy classifier fires
+    /// exactly for `consume_on_apply` + `ChangeZone`, in every definition
+    /// storage — and a consumed one-shot still classifies (consumption is
+    /// pipeline state, not definition shape).
+    #[test]
+    fn whole_event_entry_copy_classifies_consume_on_apply_change_zone_in_every_storage() {
+        let entry_copy = || {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::ChangeZone);
+            def.consume_on_apply = true;
+            def
+        };
+        // Object storage.
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![entry_copy()]);
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        assert!(
+            replacement_is_whole_event_entry_copy(&state, rid),
+            "an object-hosted entry one-shot must classify"
+        );
+        // Liminal projection storage.
+        let mut liminal_state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let entry_ref = ObjectId(20);
+        let mut liminal = GameObject::new(
+            entry_ref,
+            CardId(0),
+            PlayerId(0),
+            "Liminal Copy".to_string(),
+            Zone::Battlefield,
+        );
+        liminal.replacement_definitions.push(entry_copy());
+        liminal_state.liminal_entries.insert(
+            entry_ref,
+            LiminalEntry {
+                object: crate::types::game_state::LiminalEntrant::Token(
+                    crate::types::game_state::TokenProjection::materialize(liminal),
+                ),
+                name: "Liminal Copy".to_string(),
+                source_id: ObjectId(999),
+                controller: PlayerId(0),
+                enters_attacking: false,
+                attack_destination: crate::types::ability::EntryAttackDestination::AnyDefender,
+                attach_to: None,
+                sacrifice_at: None,
+                remaining_count: 0,
+                created_ids: Vec::new(),
+                copy_resume: None,
+                spec_resume: None,
+                enter_tapped: EtbTapState::Unspecified,
+                enter_with_counters: Vec::new(),
+                kind: crate::types::game_state::LiminalEntryKind::Token,
+                replacement_applied: HashSet::new(),
+            },
+        );
+        let rid = ReplacementId {
+            source: entry_ref,
+            index: 0,
+        };
+        assert!(
+            replacement_is_whole_event_entry_copy(&liminal_state, rid),
+            "a liminal-projected entry one-shot must classify"
+        );
+        // Floating shield storage.
+        let mut floating = GameState::new_two_player(42);
+        floating.pending_damage_replacements.push(entry_copy());
+        let rid = ReplacementId {
+            source: ObjectId(0),
+            index: 0,
+        };
+        assert!(
+            replacement_is_whole_event_entry_copy(&floating, rid),
+            "a floating entry one-shot must classify"
+        );
+        // Negatives: the entry event without the one-shot flag, and the
+        // one-shot flag without the entry event.
+        let plain = test_state_with_object(
+            ObjectId(10),
+            Zone::Battlefield,
+            vec![ReplacementDefinition::new(ReplacementEvent::ChangeZone)],
+        );
+        let rid = ReplacementId {
+            source: ObjectId(10),
+            index: 0,
+        };
+        assert!(
+            !replacement_is_whole_event_entry_copy(&plain, rid),
+            "a continuous entry replacement must not classify"
+        );
+        let mut count_shot = ReplacementDefinition::new(ReplacementEvent::CreateToken);
+        count_shot.consume_on_apply = true;
+        let token_shot = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![count_shot]);
+        assert!(
+            !replacement_is_whole_event_entry_copy(&token_shot, rid),
+            "a non-entry one-shot must not classify"
+        );
+        // Hostile: a consumed one-shot still classifies.
+        let mut spent = entry_copy();
+        spent.is_consumed = true;
+        let consumed = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![spent]);
+        assert!(
+            replacement_is_whole_event_entry_copy(&consumed, rid),
+            "consumption must not change the definition's shape"
+        );
+    }
+
+    /// CR 608.2f + CR 614.6 (F2/B2-Prev): aborting a paused simultaneous
+    /// token clause takes the record (the deferred publication never runs)
+    /// and clears the created-token ledger, so a fully prevented compound
+    /// leaves no tokens behind and no stale referent.
+    #[test]
+    fn abort_simultaneous_token_clause_takes_the_record_and_clears_the_ledger() {
+        let mut state = GameState::new_two_player(42);
+        state.pending_simultaneous_token_clause = Some(Box::new(
+            crate::types::game_state::PendingSimultaneousTokenClause {
+                source_id: ObjectId(7),
+                seats: vec![PlayerId(0), PlayerId(1)],
+                scoped_events_before: 0,
+                accumulated: Vec::new(),
+            },
+        ));
+        state.last_created_token_ids = vec![ObjectId(9)];
+        abort_simultaneous_token_clause(&mut state);
+        assert!(
+            state.pending_simultaneous_token_clause.is_none(),
+            "the record must be taken"
+        );
+        assert!(
+            state.last_created_token_ids.is_empty(),
+            "the ledger must be cleared"
+        );
+        assert!(
+            crate::game::effects::created_token_union_from_events(&state, &[]).is_empty(),
+            "no tokens survive a fully prevented clause"
         );
     }
 

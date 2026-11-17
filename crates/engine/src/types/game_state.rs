@@ -15462,6 +15462,11 @@ fn visit_persisted_live_zone_changed_records(
         // prevention shield's rider (CR 615.5) — their `turn_zone_change_index`
         // must be rebound on load for the same reason as the siblings above.
         "pending_combat_lifelink",
+        // `PendingSimultaneousTokenClause::accumulated` holds the parked
+        // token clause's spans, which include the seats' entry `ZoneChanged`
+        // records — their `turn_zone_change_index` must be rebound on load
+        // for the same reason as the siblings above.
+        "pending_simultaneous_token_clause",
         "stack",
         "waiting_for",
         "resolution_stack",
@@ -26285,6 +26290,13 @@ declare_game_state! {
 
     // Replacement effects
     pub pending_replacement: Option<PendingReplacement>,
+    /// CR 608.2f + CR 614.5: see [`PendingSimultaneousTokenClause`]. Boxed
+    /// like its `pending_combat_lifelink` sibling — `GameState` is moved by
+    /// value through the server action and AI paths and has a hard stack
+    /// budget (`game_state_size.rs`), so a multi-`Vec` parked record rides
+    /// behind a pointer, not inline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_simultaneous_token_clause: Option<Box<PendingSimultaneousTokenClause>>,
     /// CR 510.2 + CR 616.1: see [`PendingCombatLifelink`]. Boxed like its
     /// `pending_discard_batch` sibling — `GameState` is moved by value through
     /// the server action and AI paths and has a hard stack budget
@@ -32098,6 +32110,32 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
     }
 }
 
+/// CR 608.2f + CR 614.5: a simultaneous multi-seat bare-token clause whose
+/// compound `CreateToken` event paused mid-flight — on a CR 616.1 ordering
+/// choice (several mandatory replacements) or inside delivery (an entry-copy
+/// one-shot's copies pausing for as-enters choices). Installed before the
+/// pipeline runs; the counter-drain feeds reunite every action buffer's clause
+/// span into `accumulated`, and the Execute-arm priority block finishes the
+/// clause (terminal events, player actions, clause results, per-seat union)
+/// once no prompt, replacement, cursor, or copy owner remains.
+///
+/// Transient pause state holding only public-board events, like its
+/// `pending_combat_lifelink` sibling — never viewer-filtered.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingSimultaneousTokenClause {
+    /// The creating instruction's source, naming the deferred terminal events.
+    pub source_id: ObjectId,
+    /// The instructed seats, in fan-out order; the zero-fill domain and the
+    /// per-seat attribution keys at completion.
+    pub seats: Vec<PlayerId>,
+    /// Clause start within the installing action's buffer; the installing
+    /// action feeds only this slice, later actions feed whole buffers.
+    pub scoped_events_before: usize,
+    /// Every fed clause span, overlapping by construction (entry+exit feeds);
+    /// consumers dedup (union by object id, actions by first occurrence).
+    pub accumulated: Vec<GameEvent>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
     pub proposed: ProposedEvent,
@@ -36682,6 +36720,7 @@ impl GameState {
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
+            pending_simultaneous_token_clause: None,
             pending_combat_lifelink: None,
             liminal_entries: HashMap::new(),
             pending_liminal_entry_resume: None,
@@ -40530,6 +40569,9 @@ impl GameState {
             max_lands_per_turn: _,
             priority_pass_count: _,
             pending_replacement: _,
+            // Unbounded within its clause (entry+exit feeds), like its
+            // `pending_combat_lifelink` sibling's batch events.
+            pending_simultaneous_token_clause: _,
             pending_combat_lifelink: _,
             replacement_may_cost_paused: _,
             post_replacement_token_choice_applied: _,
@@ -42368,6 +42410,14 @@ fn _gamestate_partition_is_total(s: &GameState) {
         max_lands_per_turn: _,
         priority_pass_count: _,
         pending_replacement: _,
+        //   - `pending_simultaneous_token_clause`: COMPARED (hand-written `impl
+        //     PartialEq` conjunct) — the parked span of one CR 608.2f token
+        //     clause. `accumulated` only GROWS within the clause, so two states
+        //     differing in this field are genuinely different points in the
+        //     same turn-based action and COMPARING it can never suppress a
+        //     legitimate loop's detection. Classified identically to its
+        //     `pending_combat_lifelink` sibling below.
+        pending_simultaneous_token_clause: _,
         //   - `pending_combat_lifelink`: COMPARED (hand-written `impl PartialEq` conjunct) — the
         //     parked tail of one CR 510.2 combat-damage batch. `remaining` only SHRINKS and
         //     `batch_events` only GROWS within a batch, so two states differing in this field are
@@ -43107,6 +43157,7 @@ impl PartialEq for GameState {
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
+            && self.pending_simultaneous_token_clause == other.pending_simultaneous_token_clause
             && self.deferred_entry_events == other.deferred_entry_events
             && self.unsettled_entry_batch_events == other.unsettled_entry_batch_events
             && self.pending_token_battlefield_entry == other.pending_token_battlefield_entry

@@ -21724,7 +21724,7 @@ fn install_previous_effect_counts_by_player(
 /// created referent is not derived here: the driver collects it per seat
 /// ([`SeatCreatedTokens`]) and publishes it when the clause has completed
 /// (`publish_created_token_union`), never mid-fan-out.
-fn publish_player_scope_clause_results(
+pub(crate) fn publish_player_scope_clause_results(
     state: &mut GameState,
     outer: &ResolvedAbility,
     scoped_template: &ResolvedAbility,
@@ -21811,8 +21811,8 @@ fn publish_player_scope_clause_results(
 /// for its detached tail: the linked-exile batch. The clause's created tokens
 /// are collected per seat by the driver itself ([`SeatCreatedTokens`]), since
 /// only the driver knows which seat's instruction each window belongs to.
-struct PlayerScopeClauseBatches {
-    linked_exile: Vec<ObjectIncarnationRef>,
+pub(crate) struct PlayerScopeClauseBatches {
+    pub(crate) linked_exile: Vec<ObjectIncarnationRef>,
 }
 
 /// CR 111.1 + CR 400.7 + CR 608.2f + CR 614.1a: the tokens created inside one
@@ -21821,7 +21821,7 @@ struct PlayerScopeClauseBatches {
 /// Membership is the window, not the event's `source_id`: a replacement that
 /// substitutes or appends tokens (CR 614.1a) stamps its own source on them, yet
 /// they are created by this action. Callers pass only the clause's own windows.
-fn created_token_union_from_events(
+pub(crate) fn created_token_union_from_events(
     state: &GameState,
     events: &[GameEvent],
 ) -> Vec<ObjectIncarnationRef> {
@@ -21850,7 +21850,7 @@ fn created_token_union_from_events(
 /// were when created (CR 400.7).
 /// Called only at clause completion: a paused copy-token creation resumes from
 /// the ledger, so it must never be overwritten mid-fan-out.
-fn publish_created_token_union(state: &mut GameState, seats: &[SeatCreatedTokens]) {
+pub(crate) fn publish_created_token_union(state: &mut GameState, seats: &[SeatCreatedTokens]) {
     state.last_created_token_ids = seats
         .iter()
         .flat_map(|entry| &entry.tokens)
@@ -21881,7 +21881,7 @@ fn begin_seat_created_tokens(results: &mut Vec<SeatCreatedTokens>, seat: PlayerI
 /// already attributed to any seat is not re-added: overlapping windows (a
 /// resumed action's buffer, a generated leg's node) report it once, to the
 /// seat whose window saw it first.
-fn extend_seat_created_tokens(
+pub(crate) fn extend_seat_created_tokens(
     results: &mut Vec<SeatCreatedTokens>,
     seat: PlayerId,
     additions: Vec<ObjectIncarnationRef>,
@@ -21904,7 +21904,10 @@ fn extend_seat_created_tokens(
 /// Appends an empty entry for `seat` when it has none, without moving an
 /// existing entry (attribution to a seat never changes which seat is in
 /// progress).
-fn begin_seat_created_tokens_if_absent(results: &mut Vec<SeatCreatedTokens>, seat: PlayerId) {
+pub(crate) fn begin_seat_created_tokens_if_absent(
+    results: &mut Vec<SeatCreatedTokens>,
+    seat: PlayerId,
+) {
     if !results.iter().any(|entry| entry.seat == seat) {
         results.push(SeatCreatedTokens {
             seat,
@@ -25211,13 +25214,12 @@ enum SimultaneousTokenOutcome {
     /// per-seat results are filled and the driver continues to the shared
     /// clause publication below.
     Done,
-    /// The pipeline or delivery parked for a choice. Unreachable for gated
-    /// shapes (every admitted candidate is mandatory; every gated batch is
-    /// pause-free — vanilla delivery with no counters, hosts, or attacking
-    /// seats); `waiting_for` is set exactly as the single-seat path sets it
-    /// and the driver returns to the waiter. Per-seat clause bookkeeping is
-    /// best-effort in this arm (documented limitation, no silent corruption:
-    /// the tokens themselves are delivered by the existing resume machinery).
+    /// The pipeline parked for a CR 616.1 ordering choice, or delivery paused
+    /// on an entry-copy choice. The clause record is installed and the B0
+    /// clause slice is fed; `waiting_for` is set exactly as the single-seat
+    /// path sets it and the driver returns to the waiter. The Execute-arm
+    /// priority block finishes the clause (terminal events, player actions,
+    /// clause results, per-seat union) once every seat's entry has committed.
     Waiting,
     /// The shape is not eligible (or a proposal parked/failed); the driver
     /// runs the legacy per-seat legs. No state was mutated.
@@ -25295,9 +25297,14 @@ fn simultaneous_token_fan_out_applies(
 /// seats ride one compound `CreateToken` event through the pipeline once — a
 /// consumed one-shot (Mystic Reflection) converts every seat instead of only
 /// the first seat's. Returns `Done` with per-seat results filled (the driver
-/// continues to the shared clause publication), `Waiting` when the pipeline
-/// or delivery parked (unreachable for gated shapes; see the enum docs), or
-/// `NotApplicable` without mutating state.
+/// continues to the shared clause publication), `Waiting` with the clause
+/// record installed when the pipeline or delivery parked (finished later by
+/// the Execute-arm priority block), or `NotApplicable` without mutating
+/// state. Triage: any optional candidate keeps the legacy legs (per-seat
+/// accept/decline); at most one mandatory candidate auto-applies; several
+/// mandatory candidates ride the compound iff their order is immaterial or a
+/// whole-entry one-shot copy rides along (CR 614.5 converts every batch in
+/// one application).
 fn try_resolve_simultaneous_token_fan_out(
     state: &mut GameState,
     scoped_template: &ResolvedAbility,
@@ -25307,6 +25314,11 @@ fn try_resolve_simultaneous_token_fan_out(
     events: &mut Vec<GameEvent>,
     scoped_events_before: usize,
 ) -> SimultaneousTokenOutcome {
+    // A paused clause owns the record until its deferred publication runs; a
+    // re-entrant fan-out keeps the legacy legs rather than disturbing it.
+    if state.pending_simultaneous_token_clause.is_some() {
+        return SimultaneousTokenOutcome::NotApplicable;
+    }
     // Per-seat proposals, exactly as the legacy legs bind them (CR 109.5: the
     // seat is the acting player).
     state.cost_payment_failed_flag = false;
@@ -25371,50 +25383,81 @@ fn try_resolve_simultaneous_token_fan_out(
         applied,
     };
 
-    // CR 616.1: only shapes the synchronous arms below can finish take the
-    // compound path — at most one applicable replacement, and it must be
-    // mandatory. Anything needing an ordering or optional choice keeps the
-    // legacy legs (identical behavior, sequential consumption).
+    // CR 616.1 (F2): triage the compound's candidates. Any optional
+    // candidate keeps the legacy legs (per-seat accept/decline prompts); at
+    // most one mandatory candidate auto-applies below. Several mandatory
+    // candidates ride the compound iff their order is immaterial (the
+    // pipeline auto-applies every order-free set) or a whole-entry one-shot
+    // copy rides along (CR 614.5 converts every batch in one application, so
+    // the ordering prompt is answered once for the whole event, not per
+    // seat).
     let candidates = crate::game::replacement::find_applicable_replacements(
         state,
         &compound,
         crate::game::replacement::replacement_registry(),
     );
-    if candidates.len() > 1 {
+    // Sentinel-aware (commander/dredge/registry-hosted included).
+    if candidates
+        .iter()
+        .any(|rid| crate::game::replacement::replacement_is_optional(state, *rid))
+    {
         return SimultaneousTokenOutcome::NotApplicable;
     }
-    if let Some(rid) = candidates.first() {
-        // Sentinel-aware (commander/dredge/registry-hosted included): only a
-        // mandatory candidate auto-applies without a prompt.
-        if crate::game::replacement::replacement_is_optional(state, *rid) {
-            return SimultaneousTokenOutcome::NotApplicable;
-        }
+    if candidates.len() > 1
+        && crate::game::replacement::replacement_ordering_is_material(state, &candidates, &compound)
+        && !candidates
+            .iter()
+            .any(|rid| crate::game::replacement::replacement_is_whole_event_entry_copy(state, *rid))
+    {
+        return SimultaneousTokenOutcome::NotApplicable;
     }
+
+    // CR 608.2f (F1): install the pause-carrying clause record before the
+    // pipeline runs, so every park below (and every later action's drain)
+    // feeds the clause span the deferred publication reunites.
+    state.pending_simultaneous_token_clause = Some(Box::new(
+        crate::types::game_state::PendingSimultaneousTokenClause {
+            source_id: scoped_template.source_id,
+            seats: matching_players.to_vec(),
+            scoped_events_before,
+            accumulated: Vec::new(),
+        },
+    ));
 
     match crate::game::replacement::replace_event(state, compound, events) {
         crate::game::replacement::ReplacementResult::Execute(event) => {
-            let completed = token::deliver_create_token_event(
-                state,
-                event,
-                Vec::new(),
-                crate::types::game_state::PendingEffectResolutionEvent::Emit,
-                events,
-            )
-            .is_completed();
+            // CR 608.2f (F1): while the clause record is installed, delivery
+            // owes no terminal event of its own — the deferred publication
+            // emits one per instructed seat, mirroring the Done path below.
+            let pause_event = if state.pending_simultaneous_token_clause.is_some() {
+                crate::types::game_state::PendingEffectResolutionEvent::Suppress
+            } else {
+                crate::types::game_state::PendingEffectResolutionEvent::Emit
+            };
+            let completed =
+                token::deliver_create_token_event(state, event, Vec::new(), pause_event, events)
+                    .is_completed();
             if !completed {
-                debug_assert!(false, "simultaneous token delivery paused on a gated shape");
+                // The B0 park: this action's clause slice joins the span; the
+                // Execute-arm priority block finishes the clause once every
+                // seat's entry has committed.
+                counters::feed_simultaneous_token_clause(state, &events[scoped_events_before..]);
                 return SimultaneousTokenOutcome::Waiting;
             }
         }
         crate::game::replacement::ReplacementResult::Prevented => {
-            // CR 609.3: nothing was created — mirror the single-seat Prevented
-            // arm so the previous result cannot read as this one's.
-            state.last_created_token_ids = Vec::new();
+            // CR 609.3: nothing was created — abandon the clause record and
+            // clear the ledger (mirrors the single-seat Prevented arm, so the
+            // previous result cannot read as this one's).
+            crate::game::replacement::abort_simultaneous_token_clause(state);
         }
         crate::game::replacement::ReplacementResult::NeedsChoice(player) => {
+            // The B0 park: this action's clause slice joins the span; the
+            // answer resumes through the ordinary replacement path, and the
+            // Execute-arm priority block finishes the clause at completion.
+            counters::feed_simultaneous_token_clause(state, &events[scoped_events_before..]);
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
-            debug_assert!(false, "simultaneous token pipeline parked on a gated shape");
             return SimultaneousTokenOutcome::Waiting;
         }
     }
@@ -25446,6 +25489,9 @@ fn try_resolve_simultaneous_token_fan_out(
             .unwrap_or(matching_players[0]);
         extend_seat_created_tokens(seat_results, holder, vec![pin]);
     }
+    // The compound finished synchronously: the live slice above already
+    // published everything, so take and discard the record.
+    state.pending_simultaneous_token_clause = None;
     SimultaneousTokenOutcome::Done
 }
 
@@ -30176,7 +30222,7 @@ fn resolve_chain_body(
 /// `PlayerFilter::PerformedActionThisWay`. This is distinct from
 /// `last_zone_changed_ids`: "searched this way" keys off the player action even
 /// when the search finds no card.
-fn record_player_actions_performed(state: &mut GameState, new_events: &[GameEvent]) {
+pub(crate) fn record_player_actions_performed(state: &mut GameState, new_events: &[GameEvent]) {
     for event in new_events {
         if let GameEvent::PlayerPerformedAction {
             player_id, action, ..
