@@ -254,8 +254,13 @@ describe("the strip's frame", () => {
 
     expect(frameStyle.get("flex")).toMatch(/^1(\s|$)/);
     expect(frameStyle.get("container-type")).toBe("size");
-    expect(frameStyle.get("--card-h")).toContain("100cqh");
-    expect(frameStyle.get("--card-w")).toContain("var(--card-h)");
+    // The whole declarations, so a value that keeps the tokens but yields an
+    // unusable card size fails.
+    expect(frameStyle.get("--card-strip-chrome-h")).toBe("2.75rem");
+    expect(frameStyle.get("--card-h")).toBe(
+      "min(100cqh - var(--card-strip-chrome-h), (100cqw - 2rem) * 7 / 5, 560px)",
+    );
+    expect(frameStyle.get("--card-w")).toBe("calc(var(--card-h) * 5 / 7)");
   });
 
   it("leaves the cards at the board size from the lg breakpoint", () => {
