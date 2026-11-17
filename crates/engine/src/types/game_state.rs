@@ -35571,32 +35571,6 @@ impl GameState {
         self.resolution_stack.push_batch_delivery(pending);
     }
 
-    /// The BatchDelivery owner of one logical group, addressed by identity.
-    pub fn batch_delivery_for_group(
-        &self,
-        group: LogicalZoneChangeGroupId,
-    ) -> Option<&PendingBatchDeliveries> {
-        self.resolution_stack.batch_delivery_for_group(group)
-    }
-
-    /// Mutable form of [`Self::batch_delivery_for_group`].
-    pub fn batch_delivery_for_group_mut(
-        &mut self,
-        group: LogicalZoneChangeGroupId,
-    ) -> Option<&mut PendingBatchDeliveries> {
-        self.resolution_stack.batch_delivery_for_group_mut(group)
-    }
-
-    /// Re-park a batch's owner in place by its logical group identity, leaving
-    /// any child frames above it untouched.
-    pub fn replace_batch_delivery_for_group(
-        &mut self,
-        pending: PendingBatchDeliveries,
-    ) -> Result<(), ResolutionStackError> {
-        self.resolution_stack
-            .replace_batch_delivery_for_group(pending)
-    }
-
     /// Re-park the active BatchDelivery owner after another replacement pause.
     pub fn replace_active_batch_delivery(
         &mut self,
