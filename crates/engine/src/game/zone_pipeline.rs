@@ -1935,6 +1935,7 @@ pub(crate) fn parked_member_boundary(
 /// permanent's component batch delivers for. That owner alone collects the
 /// departure's triggers, so a handed-back batch retains its segments without
 /// collecting them.
+#[allow(clippy::too_many_arguments)]
 fn deliver_batch(
     state: &mut GameState,
     reqs: Vec<ZoneMoveRequest>,
