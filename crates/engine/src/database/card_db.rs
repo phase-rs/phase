@@ -127,12 +127,12 @@ impl CardDatabase {
     }
 
     /// Load a pre-processed card-data export from an already-open reader.
-    /// Keeps compressed test fixtures on the same deserialization path as the
-    /// production file loader without changing production's buffered-file flow.
-    pub fn from_export_reader<R: Read>(reader: R) -> Result<Self, Box<dyn std::error::Error>> {
-        let entries: HashMap<String, CardExportEntry> =
-            serde_json::from_reader(BufReader::new(reader))?;
-        Ok(Self::from_export_entries(entries))
+    /// The stream is read into memory and parsed by [`Self::from_json_str`], because
+    /// serde_json parses a `str` much faster than an `io::Read`.
+    pub fn from_export_reader<R: Read>(mut reader: R) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut json = String::new();
+        reader.read_to_string(&mut json)?;
+        Ok(Self::from_json_str(&json)?)
     }
 
     /// Load from a card-data export JSON string.
@@ -732,33 +732,19 @@ pub(crate) fn build_search_face_keys(
     face_index: &HashMap<String, CardFace>,
     face_order_index: &HashMap<String, usize>,
 ) -> Vec<String> {
-    let mut keys: Vec<String> = face_index.keys().cloned().collect();
-    keys.sort_by(|left_key, right_key| {
-        let left_oracle = face_index
-            .get(left_key)
-            .and_then(|face| face.scryfall_oracle_id.as_deref())
-            .unwrap_or("");
-        let right_oracle = face_index
-            .get(right_key)
-            .and_then(|face| face.scryfall_oracle_id.as_deref())
-            .unwrap_or("");
-        left_oracle
-            .cmp(right_oracle)
-            .then_with(|| {
-                face_order_index
-                    .get(left_key)
-                    .copied()
-                    .unwrap_or(usize::MAX)
-                    .cmp(
-                        &face_order_index
-                            .get(right_key)
-                            .copied()
-                            .unwrap_or(usize::MAX),
-                    )
-            })
-            .then_with(|| left_key.cmp(right_key))
-    });
-    keys
+    // Each face's sort key is read once, not once per comparison.
+    let mut keyed: Vec<(&str, usize, &String)> = face_index
+        .iter()
+        .map(|(key, face)| {
+            (
+                face.scryfall_oracle_id.as_deref().unwrap_or(""),
+                face_order_index.get(key).copied().unwrap_or(usize::MAX),
+                key,
+            )
+        })
+        .collect();
+    keyed.sort_unstable();
+    keyed.into_iter().map(|(_, _, key)| key.clone()).collect()
 }
 
 /// CR 205.2b + CR 205.3m + CR 308.1: subtype categories are disjoint — a
@@ -1045,6 +1031,52 @@ mod tests {
             rarities: Default::default(),
             attraction_lights: vec![],
         }
+    }
+
+    #[test]
+    fn export_reader_matches_the_streaming_parse_on_the_committed_fixture() {
+        use crate::test_support::{assert_same_database, fixture_path};
+        use flate2::read::GzDecoder;
+
+        let open = || GzDecoder::new(BufReader::new(std::fs::File::open(fixture_path()).unwrap()));
+        let streamed = CardDatabase::from_export_entries(
+            serde_json::from_reader(BufReader::new(open())).expect("streaming parse"),
+        );
+        let buffered = CardDatabase::from_export_reader(open()).expect("buffered parse");
+        assert_same_database(&streamed, &buffered);
+    }
+
+    #[test]
+    fn search_face_keys_order_by_oracle_id_then_face_order_then_key() {
+        let rows: [(&str, Option<&str>, Option<usize>); 6] = [
+            ("ancestral recall", None, None),
+            ("black lotus", None, None),
+            ("delver of secrets", Some("o-dv"), None),
+            ("insectile aberration", Some("o-dv"), Some(1)),
+            ("revival", Some("o-rr"), Some(0)),
+            ("revenge", Some("o-rr"), Some(1)),
+        ];
+        let mut face_index = HashMap::new();
+        let mut face_order_index = HashMap::new();
+        for (key, oracle, order) in rows {
+            let mut face = test_face(key);
+            face.scryfall_oracle_id = oracle.map(str::to_string);
+            face_index.insert(key.to_string(), face);
+            if let Some(order) = order {
+                face_order_index.insert(key.to_string(), order);
+            }
+        }
+        assert_eq!(
+            build_search_face_keys(&face_index, &face_order_index),
+            [
+                "ancestral recall",
+                "black lotus",
+                "insectile aberration",
+                "delver of secrets",
+                "revival",
+                "revenge",
+            ]
+        );
     }
 
     /// CR 118.12a: the corpus-wide half of the unenforceable-gate authority.
