@@ -16992,6 +16992,38 @@ fn trigger_nth_draw_first_or_second_card() {
     );
 }
 
+// No printed card uses these wordings; they guard the building block's refusal arms.
+// A non-prefix ordinal list ("second or third", "first or third") must not be read as a
+// contiguous "N or earlier" prefix, so no `NthDrawThisTurn` constraint is produced.
+// Each negative is paired with the same-shaped, positive "first or second" reach guard.
+#[test]
+fn trigger_nth_draw_non_prefix_ordinal_lists_are_refused() {
+    for text in [
+        "Whenever you draw your second or third card each turn, put an ingenuity counter on Lady Octopus.",
+        "Whenever you draw your first or third card each turn, put an ingenuity counter on Lady Octopus.",
+    ] {
+        let reach_guard = parse_trigger_line(
+            "Whenever you draw your first or second card each turn, put an ingenuity counter on Lady Octopus.",
+            "Lady Octopus, Inspired Inventor",
+        );
+        assert_eq!(
+            reach_guard.constraint,
+            Some(TriggerConstraint::NthDrawThisTurn {
+                n: 2,
+                comparator: crate::types::ability::Comparator::LE,
+            }),
+            "reach guard: the same-shaped first-or-second line must produce LE 2"
+        );
+        let def = parse_trigger_line(text, "Lady Octopus, Inspired Inventor");
+        assert!(
+            !matches!(
+                def.constraint,
+                Some(TriggerConstraint::NthDrawThisTurn { .. })
+            ),
+            "{text:?} must not produce NthDrawThisTurn: {def:?}"
+        );
+    }
+}
 #[test]
 fn trigger_nth_draw_you_in_a_turn_phrasing() {
     // CR 603.2: "When you draw your Nth card in a turn" (Sneaky Snacker phrasing)

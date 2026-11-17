@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "TriggerConstraint::NthDrawThisTurn gains serde-defaulted comparator (LE for 'first or second card each turn', CR 121.2 + CR 603.2); an older full-game/P2P peer drops it and reads an exact Nth draw"
+}

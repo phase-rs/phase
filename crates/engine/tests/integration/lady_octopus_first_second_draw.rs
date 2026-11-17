@@ -9,7 +9,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 
 const LADY_OCTOPUS: &str = "Whenever you draw your first or second card each turn, put an \
@@ -18,6 +18,14 @@ ingenuity counter on Lady Octopus.\n\
 number of ingenuity counters on Lady Octopus without paying its mana cost.";
 const OPT: &str = "Scry 1. (Look at the top card of your library. You may put that card on the \
 bottom.)\nDraw a card.";
+
+// Printed cost of Lady Octopus and Opt: {U}.
+fn blue_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    }
+}
 
 fn ingenuity_counters(runner: &GameRunner, lady: ObjectId) -> u32 {
     runner.state().objects[&lady]
@@ -58,16 +66,20 @@ fn lady_octopus_triggers_for_first_and_second_draw_only_and_resets_each_turn() {
     let lady = scenario
         .add_creature_from_oracle(P0, "Lady Octopus, Inspired Inventor", 0, 2, LADY_OCTOPUS)
         .as_legendary()
+        .with_mana_cost(blue_cost())
         .with_subtypes(vec!["Human", "Scientist", "Villain"])
         .id();
     let first_opt = scenario
         .add_spell_to_hand_from_oracle(P0, "Opt", true, OPT)
+        .with_mana_cost(blue_cost())
         .id();
     let second_opt = scenario
         .add_spell_to_hand_from_oracle(P0, "Opt", true, OPT)
+        .with_mana_cost(blue_cost())
         .id();
     let third_opt = scenario
         .add_spell_to_hand_from_oracle(P0, "Opt", true, OPT)
+        .with_mana_cost(blue_cost())
         .id();
     for index in 0..5 {
         scenario.add_card_to_library_top(P0, &format!("Draw {index}"));

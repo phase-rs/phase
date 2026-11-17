@@ -41215,21 +41215,14 @@ pub enum ReplacementCondition {
     Unrecognized { text: String },
 }
 
-/// The historical wire shape of `NthSpellThisTurn` represented an exact ordinal.
+/// The historical wire shape of `NthSpellThisTurn` (and `NthDrawThisTurn`) represented an
+/// exact ordinal.
 /// Keep that meaning when a persisted export has no comparator field.
-fn default_nth_spell_comparator() -> Comparator {
+fn default_exact_ordinal_comparator() -> Comparator {
     Comparator::EQ
 }
 
-fn is_default_nth_spell_comparator(comparator: &Comparator) -> bool {
-    *comparator == Comparator::EQ
-}
-
-fn default_nth_draw_comparator() -> Comparator {
-    Comparator::EQ
-}
-
-fn is_default_nth_draw_comparator(comparator: &Comparator) -> bool {
+fn is_default_exact_ordinal_comparator(comparator: &Comparator) -> bool {
     *comparator == Comparator::EQ
 }
 
@@ -41276,8 +41269,8 @@ pub enum TriggerConstraint {
     NthSpellThisTurn {
         n: u32,
         #[serde(
-            default = "default_nth_spell_comparator",
-            skip_serializing_if = "is_default_nth_spell_comparator"
+            default = "default_exact_ordinal_comparator",
+            skip_serializing_if = "is_default_exact_ordinal_comparator"
         )]
         comparator: Comparator,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -41289,8 +41282,8 @@ pub enum TriggerConstraint {
     NthDrawThisTurn {
         n: u32,
         #[serde(
-            default = "default_nth_draw_comparator",
-            skip_serializing_if = "is_default_nth_draw_comparator"
+            default = "default_exact_ordinal_comparator",
+            skip_serializing_if = "is_default_exact_ordinal_comparator"
         )]
         comparator: Comparator,
     },
