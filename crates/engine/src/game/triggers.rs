@@ -29536,6 +29536,7 @@ pub mod tests {
 
         fn live_frame(source_id: ObjectId) -> OptionalEffectFrame {
             OptionalEffectFrame {
+                parked_poll: None,
                 ability: Box::new(ResolvedAbility::new(
                     Effect::Draw {
                         count: QuantityExpr::Fixed { value: 1 },

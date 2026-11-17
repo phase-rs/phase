@@ -1132,6 +1132,7 @@ mod tests {
         ordinary_optional.optional = true;
         ordinary_optional.set_controller_recursive(PlayerId(0));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ordinary_optional),
             trigger_event: None,
             trigger_events: Vec::new(),

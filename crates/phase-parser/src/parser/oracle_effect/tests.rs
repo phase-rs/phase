@@ -102614,6 +102614,74 @@ fn each_player_search_then_shuffle_anchors_the_scoped_players_library() {
     );
 }
 
+/// CR 118.12 + CR 115.10a: an *offered* payment's possessive names the player
+/// being offered it, and that binding is made here, during typed lowering.
+///
+/// "Any player may pay half their life, rounded up" — the "their" is the
+/// responder's. A third-person possessive otherwise lowers to
+/// `PlayerScope::Target`, which is correct only when the ability really
+/// announces a player target; inside this shell there is none, so leaving it as
+/// `Target` makes the amount resolve to 0 at runtime — a free cost whose "If a
+/// player does" rider still fires.
+///
+/// Blocker 3 of the #10741 round-3 review. The runtime used to patch this up by
+/// reading "no `TargetRef::Player` in `ability.targets`" as proof that no player
+/// target was announced, but those slots are also populated from the triggering
+/// event (CR 115.10a separates an affected player from a target), so an
+/// event-hydrated slot suppressed a rebind that was owed. Reverting
+/// `bind_offered_payment_possessive` leaves a `Target` scope here and fails this
+/// row.
+#[test]
+fn an_offered_payment_binds_its_possessive_to_the_responder() {
+    let def = parse_effect_chain(
+        "any player may pay half their life, rounded up. if a player does, counter ~",
+        AbilityKind::Spell,
+    );
+
+    // Reach-guard: the any-player-may shell must actually have peeled, or the
+    // binding under test was never reached and the scope assertions below would
+    // be asserting about some other grammar entirely.
+    assert!(
+        def.optional,
+        "the any-player-may shell must lower as optional; got {def:?}"
+    );
+
+    fn find_pay_cost(def: &crate::types::ability::AbilityDefinition) -> Option<AbilityCost> {
+        if let Effect::PayCost { ref cost, .. } = *def.effect {
+            return Some(cost.clone());
+        }
+        def.sub_ability.as_deref().and_then(find_pay_cost)
+    }
+    let mut cost = find_pay_cost(&def)
+        .unwrap_or_else(|| panic!("expected an offered PayCost somewhere in {def:?}"));
+
+    let mut scopes = Vec::new();
+    cost.for_each_quantity_expr_mut(&mut |expr| {
+        expr.each_ref_mut(&mut |qty| {
+            if let Some(scope) = qty.player_scope_mut() {
+                scopes.push(scope.clone());
+            }
+        });
+    });
+
+    // Reach-guard: the amount really is player-relative. Without this, an
+    // encoding that carried no player scope at all would satisfy the "no
+    // dangling Target" assertion vacuously.
+    assert!(
+        !scopes.is_empty(),
+        "\"half their life\" must lower to a player-relative amount; cost={cost:?}"
+    );
+    assert!(
+        !scopes.contains(&crate::types::ability::PlayerScope::Target),
+        "the possessive must not be left dangling as Target — there is no \
+         announced player target in this shell; scopes={scopes:?}"
+    );
+    assert!(
+        scopes.contains(&crate::types::ability::PlayerScope::ScopedPlayer),
+        "the possessive must bind to the responder (ScopedPlayer); scopes={scopes:?}"
+    );
+}
+
 /// SHAPE: CR 608.2c + CR 118.12 + CR 120.1: an accepting player is the recipient of
 /// a self-named damage instruction that says "to that player". Object anaphors
 /// in the amount must not overwrite the recipient before the accepting-player

@@ -6572,6 +6572,7 @@ pub(crate) mod tests {
         trigger_ability.trigger_source = record(powers[1]).trigger_source_context;
 
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0))),
             trigger_event: Some(optional_event),
             trigger_events: Vec::new(),
