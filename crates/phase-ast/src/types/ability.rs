@@ -9075,10 +9075,10 @@ pub enum TargetFilter {
     /// enchant ability (defined per CR 303.4a), and CR 608.2c requires reading
     /// the whole sentence to bind each anaphor to its true referent at resolution.
     ///
-    /// Never persisted as a `ResolvedAbility` field: it is concretized eagerly,
-    /// in place, to `SpecificObject { id }` in the `forward_result` block of
-    /// `effects/mod.rs`, at the one point where the pre-rebind `source_id` and
-    /// the about-to-be-mutated sub-ability clone coexist.
+    /// A `GenericEffect` static's `affected` is concretized to `SpecificObject { id }`
+    /// in the `forward_result` block of `effects/mod.rs`; an `Attach` attachment
+    /// stays `OriginalSource` and resolves live against the trigger source's
+    /// incarnation (CR 400.7).
     ///
     /// Unlike the current ability's primary `SelfRef` or a moved-object
     /// `ParentTarget`, this pins the pre-rebind producer for legacy grants.
@@ -41487,6 +41487,9 @@ pub struct TriggerDefinition {
     pub damage_kind: DamageKindFilter,
     #[serde(default)]
     pub secondary: bool,
+    /// CR 805.4d: on a `TriggerMode::Phase` trigger, the per-player scope of its step ("each
+    /// player's", "each opponent's", an enchanted player's): per-player firing is decided by
+    /// the typed scope the parser records, never inferred from effect shape.
     #[serde(default)]
     pub valid_target: Option<TargetFilter>,
     /// CR 115.1: The player leaf of a becomes-target trigger's SUBJECT (e.g. the

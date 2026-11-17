@@ -312,7 +312,7 @@ fn fractal_harness_zero_zero_token_does_not_satisfy_bond_and_survives() {
                 ..
             }
         ));
-        assert_eq!(put.sub_link, SubAbilityLink::SequentialSibling);
+        assert_eq!(put.sub_link, SubAbilityLink::ContinuationStep);
         let attach = put.sub_ability.as_ref().expect("Attach sub");
         assert!(matches!(attach.effect.as_ref(), Effect::Attach { .. }));
     }

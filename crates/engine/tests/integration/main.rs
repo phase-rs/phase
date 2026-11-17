@@ -332,6 +332,7 @@ mod loop_shortcut_drain_boards;
 mod loop_shortcut_mana_engine;
 mod loop_shortcut_offer_writer_census;
 mod loop_shortcut_ranking;
+mod loop_shortcut_real_dumps;
 mod loop_shortcut_seat_pin_census;
 mod loop_shortcut_shortening;
 mod love_on_the_battlefield_combat_counters;
@@ -357,6 +358,7 @@ mod through_the_forest_gate;
 mod resolution_progress_contract;
 
 mod ignite_memories_random_reveal;
+mod issue_8115_temporal_extortion_extra_turn;
 mod niambi_granted_trigger_once_each_turn;
 mod q_stacking_the_deck;
 mod risky_move_gain_control_trigger;

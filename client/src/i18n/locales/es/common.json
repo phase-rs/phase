@@ -72,7 +72,7 @@
   },
   "comboDetector": {
     "label": "Detector de combos (experimental)",
-    "title": "Detectar bucles infinitos: terminar bucles obligatorios automáticamente y mostrar recursos ∞ (desactivado por defecto)",
+    "title": "Detectar bucles infinitos: terminar bucles obligatorios automáticamente, ofrecer atajos para los bucles que controla un jugador y mostrar recursos ∞ (desactivado por defecto)",
     "off": "Desactivado",
     "interactive": "Interactivo"
   },

@@ -89,7 +89,7 @@ pub(crate) fn probe_resolution(
         return ResolutionProbe::Prompted;
     }
     // The SAME re-entrancy guard `apply_confirmed_shortcut` holds across its own
-    // clone-and-drive. It suppresses ring accumulation and shortcut detection
+    // clone-and-drive. It suppresses play-trace recording and shortcut detection
     // inside the probe, which is exactly the recursion hazard a speculative
     // resolve would otherwise open.
     let _probe = SimulationProbeGuard::enter();

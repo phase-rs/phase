@@ -1071,12 +1071,18 @@ fn rebind_child_to_forwarded_objects(
     {
         child.source_id = moved[0];
     }
-    if let Effect::Attach { target, .. } = &child.effect {
+    if let Effect::Attach {
+        attachment: TargetFilter::OriginalSource,
+        ..
+    } = &child.effect
+    {
+        // CR 400.7 + CR 701.3a: the moved card is the host, and `OriginalSource` stays a live check of the trigger source's incarnation, so a source that left and returned attaches nothing.
+    } else if let Effect::Attach { target, .. } = &child.effect {
         let attach_target_is_last_created = matches!(target, TargetFilter::LastCreated);
         // CR 608.2c: ParentTarget hosts inherit an explicit parent
         // choice when present (Necrotic Plague). When none was chosen,
         // fall back to the ability source as host — CR 301.5b +
-        // CR 701.3a put→attach-to-~ (Iron Man, Armored Skyhunter).
+        // CR 701.3a put→attach-it-to-~, where the moved card is the attachment (Iron Man).
         // Do not append the source on top of an already-bound host:
         // that would let ParentTarget resolve to the returned Aura.
         let attach_target_is_parent = matches!(target, TargetFilter::ParentTarget);
@@ -1085,7 +1091,14 @@ fn rebind_child_to_forwarded_objects(
                 if !producer_targets.is_empty() {
                     // The producer's occurrences, each with its own pin.
                     child.replace_target_occurrences(producer_targets.to_vec());
-                } else {
+                } else if child.trigger_source.as_ref().is_none_or(|source| {
+                    source.identity.reference.object_id != producer
+                        || matches!(
+                            source.source_read(state),
+                            crate::types::game_state::TriggerSourceRead::ExactLive(_)
+                        )
+                }) {
+                    // CR 400.7: a trigger source that left and returned is a new object, so it is not the host.
                     child.push_target(TargetRef::Object(producer));
                 }
             }
@@ -2188,6 +2201,23 @@ pub(crate) fn resume_resolution_frames(state: &mut GameState, events: &mut Vec<G
         ResolutionFrame::DieRoll(_) => {
             roll_die::drain_active_die_roll(state, events);
         }
+        // CR 101.4: a continuing any-player poll parked under the accepted
+        // action's own prompt arms here — i.e. only once that prompt's owner is
+        // consumed, which is what puts the next responder's offer after the
+        // accepted action finishes rather than racing its child (blocker 1 of
+        // the #10741 review). An unparked frame is a live offer and falls
+        // through to the direct-choice rule below.
+        ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+            parked_poll: Some(_),
+            ..
+        }) => {
+            // CR 102.1 + CR 800.4f: the arming judges the parked seats again,
+            // because a responder can have left the game while the accepted
+            // action resolved. Fallible only on a resolution-stack invariant,
+            // which this drain cannot propagate (see the sibling drains above).
+            let _ =
+                crate::game::engine_payment_choices::arm_parked_opponent_may_poll(state, events);
+        }
         ResolutionFrame::OptionalEffect(_)
         | ResolutionFrame::CoinFlip(_)
         | ResolutionFrame::Proliferate(_)
@@ -2848,10 +2878,15 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             });
             let delivery_start = events.len();
             let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
+            let owner = crate::game::effects::change_zone::change_zone_member_owner(
+                logical_zone_change_group.logical_group_id,
+                anticipated_pause.as_ref(),
+            );
             match crate::game::effects::change_zone::process_one_zone_move_with_terminal(
                 state,
                 &ctx,
                 member,
+                owner,
                 logical_zone_change_group.announced_members(),
                 events,
             ) {
@@ -2934,15 +2969,13 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
                         WaitingFor::EntryAttackTargetChoice { .. }
                     );
                     let paused_current = (!entry_target_choice).then(|| {
-                        state
-                            .pending_zone_change_delivery_from_replacement()
-                            .or_else(|| {
-                                anticipated_pause.map(|mut boundary| {
-                                    boundary.append_delivery_events(&events[delivery_start..]);
-                                    boundary
-                                })
-                            })
-                            .expect("replacement pause must retain its exact boundary")
+                        crate::game::zone_pipeline::parked_member_boundary(
+                            state,
+                            logical_zone_change_group.logical_group_id,
+                            anticipated_pause,
+                            &events[delivery_start..],
+                        )
+                        .expect("replacement pause must retain its exact boundary")
                     });
                     let trigger_events: Vec<GameEvent> = events[events_before_drain..]
                         .iter()
@@ -19831,6 +19864,21 @@ pub(crate) fn bind_accepting_seat(ability: &mut ResolvedAbility, seat: PlayerId)
     {
         typed.controller = Some(ControllerRef::ScopedPlayer);
     }
+    // CR 118.12 + CR 608.2c: "[A player] may [pay a cost]. If [that player]
+    // [does], [effect]" — the offered action is a cost paid on resolution, and
+    // the rider checks whether that player chose to pay it. So an accepted
+    // "any player may pay ..." is paid by the seat that accepted. Exactly the
+    // point the sacrifice rebind above makes: the parsed `payer` records who
+    // was OFFERED the payment (the "any player may" shell lowers to
+    // `Controller`), not who performs it.
+    //
+    // Only the payer binds here. The cost's own possessive amount ("pay half
+    // THEIR life") is bound during typed lowering by
+    // `clause_shell::bind_offered_payment_possessive`, because the printed text
+    // is the only thing that knows which antecedent a possessive has.
+    if let Effect::PayCost { payer, .. } = &mut ability.effect {
+        *payer = TargetFilter::ScopedPlayer;
+    }
 }
 
 /// CR 701.21a + CR 701.26a + CR 608.2d: the permanents a seat could choose for an
@@ -19924,6 +19972,51 @@ pub(crate) fn offered_seat_cannot_accept(
         || blight::blighting_player_cannot_blight(state, &bound)
         || opponent_may_selection_pool(state, &bound, seat)
             .is_some_and(|pool| pool.legal.is_empty())
+        || seat_cannot_pay_offered_cost(state, &bound, seat)
+}
+
+/// CR 118.3 + CR 608.2d: "A player can't pay a cost without having the necessary
+/// resources to pay it fully", and a player "can't choose an option that's illegal
+/// or impossible". Dash Hopes says so in print: "A player can't choose to pay 5 life
+/// unless they actually have 5 or more life to pay."
+///
+/// This is only answerable once the payer is bound to the seat
+/// (`bind_accepting_seat`); judged against the ability's controller it would ask
+/// about the wrong player entirely. A seat that cannot pay must not spend its slot
+/// as an acceptance: the resolver's own failure channel
+/// (`cost_payment_failed_flag`) would still keep the "if a player does" rider from
+/// firing, but the ledger would record an acceptance that never happened
+/// (`PlayerActionKind::AcceptedOptionalEffect`, which "did a player do this" riders
+/// read), so the question is asked before the slot is spent.
+///
+/// Asked through the single payment authority with exactly the scope
+/// `pay::resolve_ability_cost_payment` uses, so this can never refuse a payment that
+/// resolver would have taken.
+fn seat_cannot_pay_offered_cost(
+    state: &GameState,
+    bound: &ResolvedAbility,
+    seat: PlayerId,
+) -> bool {
+    let Effect::PayCost { cost, .. } = &bound.effect else {
+        return false;
+    };
+    !crate::game::costs::can_pay(
+        state,
+        seat,
+        bound.source_id,
+        cost,
+        &crate::game::costs::PaymentScope::Resolution {
+            ability: bound,
+            cost_move_root: crate::game::costs::ResolutionCostMoveRoot::EffectPayCost,
+            // CR 118.12 + CR 121.2b: this seat is being offered the choice for the
+            // first time, so the question is a fresh one — the same origin
+            // `resolve_ability_cost_payment` will pay under when they accept.
+            // `LatchedSuffix` would resume a choice already made and would stop a
+            // prevented event from refusing the payment, so asking under it could
+            // advertise an offer the resolver then declines to honour.
+            origin: crate::types::game_state::ResolutionPaymentOrigin::FreshChoice,
+        },
+    )
 }
 
 /// CR 608.2d + CR 701.68b + CR 101.4: the next seat to offer, judged when it is
@@ -20052,8 +20145,8 @@ pub(crate) enum OptionalFeasibility {
 /// entry, per candidate window, per beat, where production pays it once per resolution. LAST
 /// ordering restricts the clone-bearing arm to `optional ∧ ¬optional_for ∧ ¬repeat ∧
 /// Effect::CastFromZone` entries — a strict subset of the population production already pays
-/// for. It is deliberately NOT charged against `PROBE_BUDGET`: that counter bounds CR 732.2a
-/// certification ASKS at the verdict door, and putting wall-clock cost on the same counter
+/// for. It is deliberately NOT charged against `PROBE_BUDGET`: that counter bounds the CR 732.2a
+/// certification probes `probe_resolution` charges, and putting wall-clock cost on the same counter
 /// would re-base every metered row's pinned spend and make neither number readable.
 pub(crate) struct UpfrontOptionalGate {
     /// CR 608.2d: [`optional_prompt_player`] names who ANNOUNCES it — not always the controller.
@@ -20144,25 +20237,6 @@ pub(crate) fn upfront_optional_gate(
                 origin,
             }),
     })
-}
-
-/// CR 603.5: is that gate ALREADY ANSWERED by a stored "don't ask again" preference?
-///
-/// The CONSUMER half of [`upfront_optional_gate`], so the mint's suppression, the analysis's
-/// relief and production's own early return can no longer disagree about which mays are
-/// answered. `None` ⇒ the gate will PROMPT, or there is no gate, or the ability carries no
-/// `may_trigger_origin` for a preference to key on — all three are unspecified windows, which
-/// is the fail-closed direction for every consumer.
-///
-/// Passes [`OptionalFeasibility::Probe`]: a caller asking "is this already answered?" has by
-/// definition not run the feasibility probe itself.
-pub(crate) fn stored_may_answer(
-    state: &GameState,
-    ability: &ResolvedAbility,
-) -> Option<AutoMayChoice> {
-    let gate = upfront_optional_gate(state, ability, OptionalFeasibility::Probe)?;
-    let key = gate.key.as_ref()?;
-    state.may_trigger_auto_choice_for_live_prompt(key)
 }
 
 /// CR 603.12a + CR 608.2c: True when this ability is a "you may pay {cost} up to
@@ -25271,6 +25345,7 @@ fn offer_optional_in_apnap_order(
     state
         .install_direct_choice_frame(
             ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                parked_poll: None,
                 ability: Box::new(hydrated_ability),
                 trigger_event: state.current_trigger_event.clone(),
                 trigger_events: state.current_trigger_events.clone(),
@@ -26720,14 +26795,17 @@ fn resolve_chain_body(
                 )?;
                 return Ok(progress);
             }
-            if may_trigger_key.as_ref().is_some_and(|key| {
+            if let Some(key) = may_trigger_key.as_ref().filter(|key| {
                 matches!(
                     state.may_trigger_auto_choice_for_live_prompt(key),
                     Some(AutoMayChoice::Decline)
                 )
             }) {
                 // CR 603.5: the remembered decline is the controller's optional choice.
-                state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
+                state.record_remembered_answer(
+                    key.player,
+                    crate::game::play_trace::AnswerOptionality::Optional,
+                );
                 progress = resolve_optional_effect_decision_step(
                     state,
                     ability.clone(),
@@ -26740,6 +26818,7 @@ fn resolve_chain_body(
             state
                 .install_direct_choice_frame(
                     ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                        parked_poll: None,
                         ability: Box::new(ability_with_event_context_targets(state, ability)),
                         trigger_event: state.current_trigger_event.clone(),
                         trigger_events: state.current_trigger_events.clone(),
@@ -26761,19 +26840,19 @@ fn resolve_chain_body(
             .description
             .clone()
             .or_else(|| crate::game::un_actions::say_phrase_prompt(&ability.effect));
-        // Deliberately the DIRECT store read rather than `stored_may_answer`, and this is
-        // not a duplicated authority: the KEY is what has to be built in one place, and it
-        // was — by `upfront_optional_gate`, above. `stored_may_answer` would re-enter the
-        // authority with `Probe` and run the feasibility clone a second time, which is the
-        // exact defect `OptionalFeasibility` exists to prevent. Same key, same store, same
-        // answer, one probe.
+        // Deliberately the DIRECT store read, and this is not a duplicated authority: the
+        // KEY is what has to be built in one place, and it was — by `upfront_optional_gate`,
+        // above.
         let same_card_may_trigger_choice_available = may_trigger_key
             .as_ref()
             .is_some_and(|key| state.may_trigger_same_card_choice_available(key));
         if let Some(ref key) = may_trigger_key {
             if let Some(choice) = state.may_trigger_auto_choice_for_live_prompt(key) {
                 // CR 603.5: the remembered answer is the controller's optional choice.
-                state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
+                state.record_remembered_answer(
+                    key.player,
+                    crate::game::play_trace::AnswerOptionality::Optional,
+                );
                 progress = resolve_optional_effect_decision_step(
                     state,
                     ability_with_event_context_targets(state, ability),
@@ -26789,6 +26868,7 @@ fn resolve_chain_body(
         state
             .install_direct_choice_frame(
                 ResolutionFrame::OptionalEffect(OptionalEffectFrame {
+                    parked_poll: None,
                     ability: Box::new(hydrated_ability),
                     // CR 608.2: capture the triggering event in lockstep with the stashed
                     // ability while `current_trigger_event` is still live (we are inside
@@ -33931,20 +34011,10 @@ mod tests {
         }
         let instance = instance.expect("Pantlaza's trigger reaches the stack");
 
-        // Positive control: before the action is taken the instance opens a keyed gate,
-        // and a stored answer for that key is read.
+        // Positive control: before the action is taken the instance opens a keyed gate.
         let gate = upfront_optional_gate(runner.state(), &instance, OptionalFeasibility::Probe)
             .expect("an untaken instance opens its gate");
-        let key = gate
-            .key
-            .clone()
-            .expect("the may-trigger instance carries a key");
-        let mut remembered = runner.state().clone();
-        remembered.set_may_trigger_auto_choice(key.clone(), AutoMayChoice::Accept);
-        assert_eq!(
-            stored_may_answer(&remembered, &instance),
-            Some(AutoMayChoice::Accept)
-        );
+        assert!(gate.key.is_some(), "the may-trigger instance carries a key");
 
         runner.advance_until_stack_empty();
         assert!(matches!(
@@ -33979,12 +34049,6 @@ mod tests {
         assert!(
             upfront_optional_gate(runner.state(), &instance, OptionalFeasibility::Probe).is_none(),
             "an instance whose indicated action was taken opens no gate"
-        );
-        let mut remembered = runner.state().clone();
-        remembered.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
-        assert!(
-            stored_may_answer(&remembered, &instance).is_none(),
-            "no gate, so no stored answer is read for the spent instance"
         );
     }
 
@@ -44191,6 +44255,7 @@ mod tests {
         let mut first = optional_gain_life(first_key.source_id, PlayerId(0), 1);
         first.sub_ability = Some(Box::new(continuation(first_key.source_id)));
         state.push_optional_effect_frame(OptionalEffectFrame {
+            parked_poll: None,
             ability: Box::new(first),
             trigger_event: None,
             trigger_events: Vec::new(),
@@ -44237,6 +44302,7 @@ mod tests {
 
         let reject_forged_same_card = |state: &mut GameState, key: MayTriggerAutoChoiceKey| {
             state.push_optional_effect_frame(OptionalEffectFrame {
+                parked_poll: None,
                 ability: Box::new(optional_gain_life(key.source_id, PlayerId(0), 1)),
                 trigger_event: None,
                 trigger_events: Vec::new(),
@@ -49095,7 +49161,12 @@ mod tests {
             Some(fan_out_of(source, seats.clone(), seats.clone()));
 
         let mut events = Vec::new();
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
 
         let fan_out = state
             .pending_discard_batch
@@ -61190,7 +61261,12 @@ mod tests {
             "phase_out_player must actually transition P1"
         );
         assert!(state.players[1].is_phased_out());
-        crate::game::elimination::eliminate_player(&mut state, PlayerId(2), &mut events);
+        crate::game::elimination::eliminate_player(
+            &mut state,
+            PlayerId(2),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         assert!(state.players[2].is_eliminated);
 
         let ability = ResolvedAbility::new(Effect::Clash, vec![], ObjectId(1), PlayerId(0));
@@ -70441,6 +70517,7 @@ mod entry_observation_settlement_tests {
                 .expect("empty batch group retains its pre-delivery latch");
             let pending = PendingBatchDeliveries {
                 library_reorder: None,
+                component_delivery_parent: None,
                 logical_zone_change_group,
                 paused_current: None,
                 remaining: Vec::new(),

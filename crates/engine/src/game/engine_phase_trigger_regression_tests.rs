@@ -2118,6 +2118,7 @@ fn optional_effect_choice_accept_preserves_nested_effect_zone_choice_continuatio
     ability.sub_ability = Some(Box::new(draw));
 
     state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
+        parked_poll: None,
         ability: Box::new(ability),
         trigger_event: None,
         trigger_events: Vec::new(),
@@ -2172,6 +2173,7 @@ fn opponent_may_choice_accept_preserves_nested_effect_zone_choice_continuation()
     ability.sub_ability = Some(Box::new(draw_that_many(source_id, PlayerId(1))));
 
     state.push_optional_effect_frame(crate::types::OptionalEffectFrame {
+        parked_poll: None,
         ability: Box::new(ability),
         trigger_event: None,
         trigger_events: Vec::new(),
