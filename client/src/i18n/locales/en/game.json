@@ -2475,6 +2475,9 @@
     "optionalTriggers": "Optional triggers ({{count, number}})",
     "replacementChoices": "Replacement choices ({{count, number}})"
   },
+  "choiceModal": {
+    "holdForFullCard": "Hold to see the full card"
+  },
   "optionalEffect": {
     "sourceFallback": "Effect",
     "title": "{{name}} - Optional Effect",

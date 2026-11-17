@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GameAction, GameState, WaitingFor } from "../../../adapter/types.ts";
@@ -223,5 +223,140 @@ describe("OptionalEffectModalContent", () => {
     );
     expect(screen.getByLabelText(sameCardLabel)).not.toBeChecked();
     expect(screen.getByLabelText(rememberLabel)).not.toBeChecked();
+  });
+});
+
+// Issue #11006: on a phone on its side the stacked prompt was a narrow column
+// taller than the screen, with half the width unused. There it splits into two
+// columns: the card on the left, and Yes and No side by side above the
+// remember checkboxes on the right. happy-dom does no layout, so these pin the
+// structure, against happy-dom's real `matchMedia`.
+describe("OptionalEffectModalContent on a short landscape screen", () => {
+  const SHORT_LANDSCAPE_QUERY = "(max-height: 500px) and (orientation: landscape)";
+  const DEFAULT_SCREEN = { innerWidth: window.innerWidth, innerHeight: window.innerHeight };
+  const REMEMBER_LABEL = "Don't ask again this game";
+  const SAME_CARD_LABEL = "Use this choice for every copy of this card this game";
+  const HOLD_HINT = "Hold to see the full card";
+
+  // Assignment, not `Object.defineProperty`: vitest's window accessors pass a
+  // set on to happy-dom, whose `matchMedia` reads its own size. Redefining the
+  // property would leave that size, and every media query, unchanged.
+  function setScreen(width: number, height: number) {
+    Object.assign(window, { innerWidth: width, innerHeight: height });
+  }
+
+  function renderRhysticStudy() {
+    const rhysticStudy = gameObjectFactory
+      .enchantment()
+      .onBattlefield()
+      .named("Rhystic Study")
+      .withId(100)
+      .build();
+    const waitingFor = optionalEffectChoiceWaitingForFactory
+      .withData({
+        player: 0,
+        source_id: rhysticStudy.id,
+        description: "Whenever an opponent casts a spell, you may draw a card unless that player pays {1}.",
+        may_trigger_key: { player: 0, source_id: rhysticStudy.id, origin: { type: "Printed", trigger_index: 0 } },
+        same_card_may_trigger_choice_available: true,
+      })
+      .build();
+    return renderModal(waitingFor, { [rhysticStudy.id]: rhysticStudy });
+  }
+
+  function expectStacked() {
+    const yes = screen.getByRole("button", { name: "Yes" });
+    const options = yes.parentElement as HTMLElement;
+
+    expect(screen.getByRole("dialog", { name: "Rhystic Study - Optional Effect" })).toHaveClass("max-w-sm");
+    expect(screen.getByRole("button", { name: "No" }).parentElement).toBe(options);
+    expect(options).toHaveClass("flex", "flex-col");
+    expect(options).not.toHaveClass("grid-cols-2");
+    expect(screen.queryByText(HOLD_HINT)).not.toBeInTheDocument();
+    expect(screen.getByLabelText(REMEMBER_LABEL).closest("label")).not.toHaveClass("min-h-11");
+  }
+
+  afterEach(() => {
+    Object.assign(window, DEFAULT_SCREEN);
+  });
+
+  it("puts the card on the left, and Yes and No side by side above the checkboxes on the right", () => {
+    setScreen(844, 390);
+    // Reach guard: the screen above is the one the layout keys on.
+    expect(window.matchMedia(SHORT_LANDSCAPE_QUERY).matches).toBe(true);
+
+    const dispatch = renderRhysticStudy();
+
+    const yes = screen.getByRole("button", { name: "Yes" });
+    const actionRow = yes.parentElement as HTMLElement;
+    const actionColumn = actionRow.parentElement as HTMLElement;
+    const columns = actionColumn.parentElement as HTMLElement;
+    const cardColumn = columns.firstElementChild as HTMLElement;
+
+    // The dialog widens from `max-w-sm` to hold both columns.
+    expect(screen.getByRole("dialog", { name: "Rhystic Study - Optional Effect" })).toHaveClass("max-w-3xl");
+    expect(columns).toHaveClass("grid", "grid-cols-2");
+    expect(Array.from(columns.children)).toEqual([cardColumn, actionColumn]);
+    expect(cardColumn).toContainElement(screen.getByRole("img", { name: "Rhystic Study" }));
+
+    expect(screen.getByRole("button", { name: "No" }).parentElement).toBe(actionRow);
+    expect(actionRow).toHaveClass("grid", "grid-cols-2");
+
+    // A hint under the card says it can be held for the full card. A mouse
+    // previews on hover, so the hint shows only for a coarse pointer.
+    const hint = screen.getByText(HOLD_HINT);
+    expect(cardColumn).toContainElement(hint);
+    expect(hint).toHaveClass("hidden", "pointer-coarse:block");
+
+    const remember = screen.getByLabelText(REMEMBER_LABEL);
+    const sameCard = screen.getByLabelText(SAME_CARD_LABEL);
+    expect(actionColumn).toContainElement(remember);
+    expect(actionColumn).toContainElement(sameCard);
+    expect(remember.closest("label")).toHaveClass("min-h-11");
+    expect(sameCard.closest("label")).toHaveClass("min-h-11");
+
+    fireEvent.click(sameCard);
+    fireEvent.click(yes);
+
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "DecideOptionalEffectAndRemember",
+      data: { choice: { type: "Accept" }, scope: { type: "SameCard" } },
+    });
+  });
+
+  it.each([
+    ["a desktop screen", 1280, 800],
+    ["a portrait phone", 390, 844],
+  ])("stays stacked on %s", (_screen, width, height) => {
+    setScreen(width, height);
+
+    renderRhysticStudy();
+
+    expectStacked();
+  });
+
+  it("stays stacked on a short portrait window, so only landscape splits", () => {
+    setScreen(400, 480);
+    // Reach guard: the window is short, so only its orientation keeps it stacked.
+    expect(window.matchMedia("(max-height: 500px)").matches).toBe(true);
+    expect(window.matchMedia(SHORT_LANDSCAPE_QUERY).matches).toBe(false);
+
+    renderRhysticStudy();
+
+    expectStacked();
+  });
+
+  it("splits when the phone turns to landscape with the prompt open", () => {
+    setScreen(390, 844);
+    renderRhysticStudy();
+    expectStacked();
+
+    setScreen(844, 390);
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+
+    expect(screen.getByRole("dialog", { name: "Rhystic Study - Optional Effect" })).toHaveClass("max-w-3xl");
+    expect(screen.getByRole("button", { name: "Yes" }).parentElement).toHaveClass("grid-cols-2");
   });
 });
