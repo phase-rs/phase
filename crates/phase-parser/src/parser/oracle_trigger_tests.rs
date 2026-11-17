@@ -37378,21 +37378,22 @@ fn dealt_damage_newly_opened_cell_parses_single_source_tail() {
 }
 
 #[test]
-fn dealt_damage_previously_covered_cell_keeps_trailing_tail() {
-    // The honesty guard is AXIS-SCOPED, not blanket: a cell the former `tag()`
-    // arms already covered keeps its pre-existing behavior byte-identically.
-    // Chandra's Phoenix's dropped source restriction is a KNOWN PRE-EXISTING
-    // gap that predates the parameterization — recorded, not endorsed. Widening
-    // the guard to a blanket remainder check would regress this card (and,
-    // invisibly to coverage, Glyph of Life), so this test is the narrowness
-    // sentinel. Verbatim Oracle text.
+fn dealt_damage_chandras_phoenix_source_clause_unsupported() {
+    // CR 120.1 + CR 120.3: "by a red instant or sorcery spell you control or
+    // by a red planeswalker you control" — the spell types (instant/sorcery)
+    // and the disjunction are not modeled in the damage source grammar. The
+    // parser honestly rejects this rather than silently dropping the qualifier
+    // and emitting an unrestricted DamageReceived that would fire on creature
+    // damage. Consistent with the BecomesBlocked threshold guard.
     let def = parse_trigger_line(
         "Whenever an opponent is dealt damage by a red instant or sorcery spell you control or by a red planeswalker you control, return this card from your graveyard to your hand.",
         "Chandra's Phoenix",
     );
-    assert_eq!(def.mode, TriggerMode::DamageReceived);
-    assert_eq!(def.damage_kind, DamageKindFilter::Any);
-    assert_eq!(def.damage_amount, None);
+    assert!(
+        matches!(def.mode, TriggerMode::Unknown(_)),
+        "Chandra's Phoenix source clause must stay unsupported, got {:?}",
+        def.mode
+    );
 }
 
 #[test]

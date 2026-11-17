@@ -26359,7 +26359,7 @@ fn effect_emblem_trigger_with_subject_predicate_text_stays_emblem() {
     use crate::types::triggers::TriggerMode;
 
     let def = parse_effect_chain(
-            "You get an emblem with \"Whenever an opponent is dealt combat damage by one or more creatures you control, if that player lost less than 8 life this turn, they lose life equal to the difference.\"",
+            "You get an emblem with \"Whenever an opponent is dealt combat damage by a creature you control, if that player lost less than 8 life this turn, they lose life equal to the difference.\"",
             AbilityKind::Activated,
         );
 
@@ -92307,7 +92307,7 @@ fn difference_draw_keeps_the_trigger_rewrite_contract() {
     );
 
     let lolth = parse_named_face(
-        "Whenever a creature you control dies, put a loyalty counter on Lolth.\n[0]: You draw a card and you lose 1 life.\n[−3]: Create two 2/1 black Spider creature tokens with reach and menace.\n[−8]: You get an emblem with \"Whenever an opponent is dealt combat damage by one or more creatures you control, if that player lost less than 8 life this turn, they lose life equal to the difference.\"",
+        "Whenever a creature you control dies, put a loyalty counter on Lolth.\n[0]: You draw a card and you lose 1 life.\n[−3]: Create two 2/1 black Spider creature tokens with reach and menace.\n[−8]: You get an emblem with \"Whenever an opponent is dealt combat damage by a creature you control, if that player lost less than 8 life this turn, they lose life equal to the difference.\"",
         "Lolth, Spider Queen",
         &["Planeswalker"],
     );

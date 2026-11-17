@@ -16676,7 +16676,7 @@ fn try_parse_event(
     /// Similar to `parse_damage_source_subject` but without the trailing space
     /// before "deals" requirement.
     fn parse_damage_source_subject_passive(input: &str) -> OracleResult<'_, TargetFilter> {
-        // CR 109.4: printed damage-source phrases either use an article
+        // CR 109.5: printed damage-source phrases either use an article
         // ("a source") or the article-less determiner "another source" (Ghyrson).
         // Parse "another" on the same axis as the article so it can feed the
         // existing `FilterProp::Another` runtime evaluator.
@@ -16690,7 +16690,7 @@ fn try_parse_event(
         ))
         .parse(input)?;
 
-        // Optional post-article "another " → FilterProp::Another. CR 109.4 governs object
+        // Optional post-article "another " → FilterProp::Another. CR 109.5 governs object
         // identity in references; "another" reads "an object distinct from the
         // ability source" and is enforced by `FilterProp::Another` at the
         // `game/filter.rs` runtime evaluator.
@@ -16715,9 +16715,10 @@ fn try_parse_event(
         // misclassify the subject.
         let (rest, color) = opt(terminated(nom_primitives::parse_color, tag(" "))).parse(rest)?;
 
-        // CR 109.4: Head noun — "source" (any), a card type, or a negated type
-        // prefix ("noncreature source"). The negated variant uses
-        // `TypeFilter::Non(Box::new(…))` so the runtime filter excludes that type.
+        // Head noun — "source" (any damage source, CR 120.3), a card type
+        // (CR 205), or a negated type prefix ("noncreature source"). The negated
+        // variant uses `TypeFilter::Non(Box::new(…))` so the runtime filter
+        // excludes that type.
         let core_head = alt((
             value(
                 Some(TypeFilter::Non(Box::new(TypeFilter::Creature))),
@@ -17115,8 +17116,11 @@ fn try_parse_event(
                 // If there's a "by " prefix that wasn't consumed by the singular-
                 // article parser, it's an unmodeled threshold form (e.g. "by two or
                 // more creatures"). Reject the line honestly instead of degrading
-                // to the bare form.
-                let has_unparsed_by = remaining.trim_start().starts_with("by ");
+                // to the bare form. Use nom peek to match the recipient-disjunction
+                // check's approach.
+                let has_unparsed_by = peek(tag::<_, _, OracleError<'_>>("by "))
+                    .parse(remaining.trim_start())
+                    .is_ok();
                 if has_unparsed_by && blocker_filter.is_none() {
                     return None;
                 }
@@ -17235,6 +17239,18 @@ fn try_parse_event(
                         | (DamageChannel::Excess, DamageKindFilter::Any, None)
                         | (DamageChannel::Excess, DamageKindFilter::NoncombatOnly, None)
                 );
+                // CR 120.1 + CR 120.3: if a "by <source>" qualifier is present but
+                // could not be parsed into a source_filter (e.g. "by a red instant or
+                // sorcery spell you control" — spell types not modeled), reject the
+                // line honestly rather than emitting an unrestricted DamageReceived
+                // that would over-fire on creature damage. Mirrors the BecomesBlocked
+                // guard at line ~17119.
+                let has_unparsed_by = peek(tag::<_, _, OracleError<'_>>("by "))
+                    .parse(remaining.trim_start())
+                    .is_ok();
+                if has_unparsed_by && source_filter.is_none() {
+                    return None;
+                }
                 if !previously_covered && !remaining.trim().is_empty() {
                     return None;
                 }
