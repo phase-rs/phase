@@ -57,8 +57,9 @@ const SCOPE_PILL_CLASS: Record<PhaseStopScope, string> = {
  * opens the phase-stop sheet with full-size per-step stop controls.
  *
  * `compact` (short landscape screens) swaps the spaced-out uppercase name for
- * its short form ("Main 1") so the action rail fits beside the player HUD; the
- * accessible name keeps the full phase name.
+ * its short form ("Main 1") so the action rail fits beside the player HUD. The
+ * accessible name always carries the name on screen, so speech input can say
+ * what the chip shows.
  */
 export function MobilePhaseChip({
   className,
@@ -80,7 +81,7 @@ export function MobilePhaseChip({
   // in that stop's scope color. Stops on other phases surface in the sheet.
   const currentStop = phaseStops.find((s) => s.phase === phase);
 
-  const phaseLabel = t(`phaseName.${phase}`);
+  const phaseLabel = compact ? t(`phaseShortName.${phase}`) : t(`phaseName.${phase}`);
 
   return (
     <>
@@ -102,9 +103,7 @@ export function MobilePhaseChip({
         <span aria-hidden className="text-cyan-300 [&>svg]:h-3 [&>svg]:w-3">
           <PhaseIconFor phase={phase} />
         </span>
-        <span className="truncate">
-          {compact ? t(`phaseShortName.${phase}`) : phaseLabel}
-        </span>
+        <span className="truncate">{phaseLabel}</span>
         {currentStop && (
           <span
             aria-hidden

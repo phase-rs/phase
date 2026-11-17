@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, createRef } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -50,6 +50,16 @@ describe("PlayerHud", () => {
     expect(screen.getByLabelText("Speed 3")).toBeInTheDocument();
     expect(screen.getByText("Speed: 3")).toBeInTheDocument();
     expect(screen.queryByText("Speed")).toBeNull();
+  });
+
+  it("hands its root to a ref and marks the Manual / Undo column for the action rail", () => {
+    // ActionRailStatusRow measures this root and this column to keep its
+    // status chips clear of the plate on short landscape screens (#11010).
+    const ref = createRef<HTMLDivElement>();
+    render(<PlayerHud ref={ref} />);
+
+    expect(ref.current).toHaveAttribute("data-player-hud", "0");
+    expect(ref.current?.querySelector("[data-player-hud-side-controls]")).not.toBeNull();
   });
 
   it("hides local zero poison counters", () => {

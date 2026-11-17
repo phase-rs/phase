@@ -35,9 +35,9 @@ interface ActionRailStatusRowProps {
 export function ActionRailStatusRow({ playerHud }: ActionRailStatusRowProps) {
   const isMobile = useIsMobile();
   const isCompactHeight = useIsCompactHeight();
-  // The row only displays in landscape below `lg` (portrait docks these chips
-  // on the left), so here a compact height below `lg` is a short landscape
-  // screen. Desktop keeps the full row.
+  // Below `lg` the row only displays in landscape (portrait docks these chips
+  // on the left), so there a compact height is a short landscape screen.
+  // Desktop keeps the full row, however short the window.
   const compact = isMobile && isCompactHeight;
   const [row, setRow] = useState<HTMLDivElement | null>(null);
   const maxWidth = useHudClearanceWidth(row, playerHud, compact);
@@ -46,7 +46,9 @@ export function ActionRailStatusRow({ playerHud }: ActionRailStatusRowProps) {
     <div
       ref={setRow}
       data-testid="action-rail-status-row"
-      className={`hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex ${compact ? "flex-wrap-reverse justify-end" : ""}`}
+      // Compact chips keep their natural width (`shrink-0`): a line that cannot
+      // hold a chip wraps it upward rather than squeezing it.
+      className={`hidden flex-row items-center gap-1.5 max-lg:landscape:flex lg:flex ${compact ? "flex-wrap-reverse justify-end [&>*]:shrink-0" : ""}`}
       style={maxWidth === undefined ? undefined : { maxWidth }}
     >
       {/* <lg only: desktop conveys phase via the PhaseDot strips in
@@ -74,8 +76,9 @@ interface HudClusterBounds {
 
 /**
  * The widest the row may lay out, in its own unscaled pixels, and still end
- * right of the HUD cluster. Undefined while the row is free to take its natural
- * width: disabled, not mounted, or not level with the cluster.
+ * right of the HUD cluster. Undefined while the row keeps its natural width:
+ * disabled, not mounted, not level with the cluster, or with less room right
+ * of the cluster than its widest chip needs.
  *
  * Remeasures on every size change and on every drag of either widget, so the
  * bound follows a moved rail or plate.
@@ -92,20 +95,39 @@ function useHudClearanceWidth(
     if (!enabled || !row || !playerHud) return;
 
     const sideControls = playerHud.querySelector<HTMLElement>("[data-player-hud-side-controls]");
-    const measure = () => {
-      const cluster = measureHudCluster(playerHud, sideControls);
-      setMaxWidth(hudClearanceWidth(row.getBoundingClientRect(), cluster, railScale));
-    };
-    measure();
-
-    // Size changes: chips coming and going, the plate's badges, Manual and
-    // Undo appearing, the rail's action buttons (they lift the row), and the
-    // board resizing around the centered HUD.
     const rail = row.closest<HTMLElement>("[data-flex-zone]");
     const hudWidget = playerHud.closest<HTMLElement>("[data-flex-zone]");
-    const hudContainer = playerHud.closest("[data-player-hud-anchor]")?.parentElement;
+    // PlayerArea centers the HUD's anchor in its middle-row wrapper, in a
+    // column between the creature row and the other-permanent row. The wrapper
+    // resizing, or a row beside it growing, moves the HUD without resizing it.
+    const boardColumn = playerHud.closest("[data-player-hud-anchor]")?.parentElement?.parentElement;
+
+    const measure = () => {
+      let widestChip = 0;
+      for (const chip of row.children) {
+        // A chip's own sheet (the phase-stop sheet) mounts inside the row as a
+        // fixed overlay; it is not a chip, so its width does not count.
+        if (window.getComputedStyle(chip).position === "fixed") continue;
+        // Chips come and go and change width with what they say, so each pass
+        // observes the chips present now (observing one twice is a no-op).
+        resizeObserver?.observe(chip);
+        widestChip = Math.max(widestChip, chip.getBoundingClientRect().width);
+      }
+      setMaxWidth(
+        hudClearanceWidth(
+          row.getBoundingClientRect(),
+          measureHudCluster(playerHud, sideControls),
+          widestChip,
+          railScale,
+        ),
+      );
+    };
+
+    // Size changes: the plate's badges, Manual and Undo appearing, the rail's
+    // action buttons (they lift the row), and the board rows around the HUD.
     const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
-    for (const element of [row, rail, playerHud, sideControls, hudContainer]) {
+    const boardRows = boardColumn ? Array.from(boardColumn.children) : [];
+    for (const element of [row, rail, playerHud, sideControls, ...boardRows]) {
       if (element) resizeObserver?.observe(element);
     }
     // Moves: DraggableWidget applies drag offsets and box scale as inline
@@ -115,6 +137,7 @@ function useHudClearanceWidth(
       if (widget) styleObserver.observe(widget, { attributes: true, attributeFilter: ["style"] });
     }
     window.addEventListener("resize", measure);
+    measure();
 
     return () => {
       resizeObserver?.disconnect();
@@ -146,16 +169,22 @@ function measureHudCluster(
 function hudClearanceWidth(
   row: DOMRect,
   cluster: HudClusterBounds,
+  widestChip: number,
   railScale: number,
 ): number | undefined {
   // Only a cluster level with the row can be overlapped: a plate or rail
-  // dragged apart vertically leaves the row free to grow.
+  // dragged apart vertically leaves the row free to grow. This reads the row
+  // as laid out now, so a cluster level with only a wrapped upper line keeps
+  // the bound, while one level with no line leaves the row on one line. Both
+  // keep the row clear of the cluster, and each holds once reached, so the
+  // bound never oscillates.
   if (cluster.bottom <= row.top || cluster.top >= row.bottom) return undefined;
   // The row is right-aligned in the rail, so its right edge stays put however
-  // wide it gets. A cluster reaching past that edge leaves no room to its
-  // right, and the row keeps its natural width.
+  // wide it gets. With no room right of the cluster, or less than the widest
+  // chip needs, a bound would only stack chips that still overflow back over
+  // the HUD, so the row keeps its natural width.
   const clearance = row.right - cluster.right - HUD_CLEARANCE_GAP_PX;
-  if (clearance <= 0) return undefined;
+  if (clearance <= 0 || clearance < widestChip) return undefined;
   // The rail's Flex Layout box scale scales the row too, so convert screen
   // pixels back to the row's own. Whole pixels keep remeasures from churning.
   return Math.floor(clearance / railScale);

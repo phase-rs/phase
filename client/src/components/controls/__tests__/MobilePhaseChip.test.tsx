@@ -25,10 +25,12 @@ describe("MobilePhaseChip", () => {
     ).toHaveTextContent("Main Phase 1");
   });
 
-  it("shows the short phase name when compact, keeping the full name as the accessible name", () => {
+  it("shows the short phase name when compact, in its text and its accessible name", () => {
     render(<MobilePhaseChip compact />);
 
-    const chip = screen.getByRole("button", { name: /Current phase: Main Phase 1\./ });
+    // The visible label stays inside the accessible name (WCAG 2.5.3), so a
+    // speech-input user can say what the chip shows.
+    const chip = screen.getByRole("button", { name: /Current phase: Main 1\./ });
     expect(chip).toHaveTextContent("Main 1");
     expect(chip).not.toHaveTextContent("Main Phase 1");
   });

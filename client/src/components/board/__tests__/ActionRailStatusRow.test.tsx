@@ -98,7 +98,7 @@ describe("ActionRailStatusRow", () => {
     const row = renderRow(playerHud);
 
     expect(row).toHaveClass("flex-wrap-reverse", "justify-end");
-    const phaseChip = screen.getByRole("button", { name: /Current phase: Main Phase 1\./ });
+    const phaseChip = screen.getByRole("button", { name: /Current phase: Main 1\./ });
     expect(phaseChip).toHaveTextContent("Main 1");
     expect(phaseChip).not.toHaveTextContent("Main Phase 1");
     expect(screen.getByRole("button", { name: "View full hand (5 cards)" })).toHaveTextContent(/^5$/);
@@ -131,6 +131,20 @@ describe("ActionRailStatusRow", () => {
     await waitFor(() => expect(row.style.maxWidth).toBe(""));
   });
 
+  it("keeps its natural width when the plate leaves less room than a chip needs", async () => {
+    const { widget, playerHud, sideControls } = mountPlayerHud();
+    const row = renderRow(playerHud);
+    expect(row.style.maxWidth).toBe("302px");
+
+    // A 90px chip, then the plate dragged up against the rail: 838 - 760 - 6
+    // leaves 72px, so a bound could only stack chips that still overflow.
+    screen.getByRole("status").getBoundingClientRect = () => new DOMRect(600, 320, 90, 22);
+    playerHud.getBoundingClientRect = () => new DOMRect(560, 300, 150, 46);
+    sideControls.getBoundingClientRect = () => new DOMRect(714, 296, 46, 54);
+    widget.setAttribute("style", "transform: translateX(230px)");
+    await waitFor(() => expect(row.style.maxWidth).toBe(""));
+  });
+
   it("follows the rail when it is dragged", async () => {
     const { playerHud } = mountPlayerHud();
     const row = renderRow(playerHud);
@@ -155,8 +169,9 @@ describe("ActionRailStatusRow", () => {
     expect(row.style.maxWidth).toBe("201px");
   });
 
-  it("keeps the full row on desktop", () => {
-    setViewport(1280, 800);
+  it("keeps the full row on desktop, even in a short window", () => {
+    // Short enough for useIsCompactHeight, but `lg` wide: still desktop.
+    setViewport(1280, 450);
     const { playerHud } = mountPlayerHud();
     const row = renderRow(playerHud);
 

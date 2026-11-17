@@ -2250,18 +2250,18 @@
     "Upkeep": "维持步骤"
   },
   "phaseShortName": {
-    "Untap": "重置",
-    "Upkeep": "维持",
-    "Draw": "抓牌",
-    "PreCombatMain": "主阶段1",
     "BeginCombat": "战斗开始",
+    "Cleanup": "净化",
+    "CombatDamage": "战斗伤害",
     "DeclareAttackers": "攻击",
     "DeclareBlockers": "阻挡",
-    "CombatDamage": "战斗伤害",
+    "Draw": "抓牌",
+    "End": "结束",
     "EndCombat": "战斗结束",
     "PostCombatMain": "主阶段2",
-    "End": "结束",
-    "Cleanup": "净化"
+    "PreCombatMain": "主阶段1",
+    "Untap": "重置",
+    "Upkeep": "维持"
   },
   "phaseStop": {
     "beginCombatDescription": "选择攻击者之前的最后一个优先权窗口。",
