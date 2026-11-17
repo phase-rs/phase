@@ -9962,13 +9962,19 @@ fn alternative_keyword_cost_with_unmodeled_tail_is_not_parsed() {
         "statics: {:?}",
         r.statics
     );
-    // Positive: the unmodeled "if you control a Dwarf" tail is not dropped. The line falls
-    // out of the static route into a conditional ability that keeps the tail as its
-    // condition, rather than a bare alternative-cost static that would ignore it.
+    // Paired guard on the parser itself: the tailed line is rejected by the
+    // alternative-keyword-cost parser, while the nearest printed line (Bruenor
+    // Battlehammer) is accepted, so the rejection is due to the tail alone.
     assert!(
-        r.abilities.iter().any(|a| a.condition.is_some()),
-        "the trailing clause must survive as a condition: {:?}",
-        r.abilities
+        crate::parser::oracle_static::parse_alternative_keyword_cost(text).is_none(),
+        "the unmodeled tail must make the parser decline the line"
+    );
+    assert!(
+        crate::parser::oracle_static::parse_alternative_keyword_cost(
+            "You may pay {0} rather than pay the equip cost of the first equip ability you activate each turn."
+        )
+        .is_some(),
+        "Bruenor Battlehammer's printed line must still parse"
     );
 }
 
