@@ -1398,7 +1398,7 @@ Trample";
                                 QuantityRef::SpellsCast {
                                     scope: CountScope::Controller,
                                     filter: Some(filter),
-                                    ..
+                                    window: TurnWindow::ThisTurn,
                                 },
                         },
                     comparator: Comparator::GE,
@@ -1462,7 +1462,7 @@ Trample";
                             qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: None,
-                                ..
+                                window: TurnWindow::ThisTurn
                             }
                         },
                         comparator: Comparator::GE,

@@ -5032,7 +5032,7 @@ fn trigger_intervening_if_spell_from_hand_this_turn_attaches_condition() {
                         QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
-                            ..
+                            window: TurnWindow::ThisTurn,
                         },
                 },
             comparator: Comparator::EQ,
@@ -5045,7 +5045,7 @@ fn trigger_intervening_if_spell_from_hand_this_turn_attaches_condition() {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })), .. },
+                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::EQ,
                     rhs: QuantityExpr::Fixed { value: 0 },
@@ -14561,6 +14561,7 @@ fn parse_greatest_mana_value_among_instant_and_sorcery_spells_cast_this_turn() {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::SpellsCast {
                     filter: Some(_),
+                    window: TurnWindow::ThisTurn,
                     ..
                 },
             },
@@ -14950,7 +14951,7 @@ fn trigger_end_step_if_cast_both_creature_and_noncreature_this_turn() {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::SpellsCast {
                             scope: crate::types::ability::CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), .. },
+                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -14962,7 +14963,7 @@ fn trigger_end_step_if_cast_both_creature_and_noncreature_this_turn() {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::SpellsCast {
                             scope: crate::types::ability::CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), .. },
+                            filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -30713,6 +30714,7 @@ fn combinator_handles_played_land_or_cast_spell_from_outside_hand_this_turn() {
                 qty:
                     QuantityRef::SpellsCast {
                         filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                        window: TurnWindow::ThisTurn,
                         ..
                     },
             },

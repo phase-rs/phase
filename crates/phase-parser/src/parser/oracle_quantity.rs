@@ -9860,7 +9860,11 @@ mod tests {
             parse_for_each_clause("spell you've cast this turn from anywhere other than your hand")
                 .expect("cast-origin for-each clause must parse");
         match qty {
-            QuantityRef::SpellsCast { scope, filter, .. } => {
+            QuantityRef::SpellsCast {
+                scope,
+                filter,
+                window: TurnWindow::ThisTurn,
+            } => {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
                 assert_eq!(
@@ -10019,7 +10023,12 @@ mod tests {
         .expect("cast-origin CDA spell-history clause must parse");
         match expr {
             QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCast { scope, filter, .. },
+                qty:
+                    QuantityRef::SpellsCast {
+                        scope,
+                        filter,
+                        window: TurnWindow::ThisTurn,
+                    },
             } => {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");
@@ -10046,7 +10055,12 @@ mod tests {
         .expect("qualifier-then-time cast-origin clause must parse");
         match expr {
             QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCast { scope, filter, .. },
+                qty:
+                    QuantityRef::SpellsCast {
+                        scope,
+                        filter,
+                        window: TurnWindow::ThisTurn,
+                    },
             } => {
                 assert_eq!(scope, CountScope::Controller);
                 let filter = filter.expect("cast-origin clause must carry a filter");

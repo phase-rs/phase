@@ -7516,6 +7516,7 @@ fn spell_condition_origin_zones(condition: &StaticCondition) -> Option<Vec<Zone>
                 qty:
                     QuantityRef::SpellsCast {
                         filter: Some(filter),
+                        window: TurnWindow::ThisTurn,
                         ..
                     },
             },
@@ -15070,7 +15071,7 @@ mod tests {
                         QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
-                            ..
+                            window: TurnWindow::ThisTurn,
                         },
                 },
             comparator: Comparator::GE,
@@ -15153,6 +15154,7 @@ mod tests {
                     qty:
                         QuantityRef::SpellsCast {
                             filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
+                            window: TurnWindow::ThisTurn,
                             ..
                         },
                 },
@@ -21480,7 +21482,7 @@ mod tests {
                             QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { filters }),
-                                ..
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -21515,7 +21517,7 @@ mod tests {
                             QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { filters }),
-                                ..
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -21547,7 +21549,7 @@ mod tests {
                             QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
-                                ..
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -21571,7 +21573,7 @@ mod tests {
                             QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
-                                ..
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -21600,7 +21602,7 @@ mod tests {
                         lhs: QuantityExpr::Ref {
                             qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
-                                filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), .. },
+                                filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), window: TurnWindow::ThisTurn },
                         },
                         comparator: Comparator::GE,
                         rhs: QuantityExpr::Fixed { value: 1 },
@@ -21612,7 +21614,7 @@ mod tests {
                         lhs: QuantityExpr::Ref {
                             qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
-                                filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), .. },
+                                filter: Some(TargetFilter::Typed(TypedFilter { type_filters, .. })), window: TurnWindow::ThisTurn },
                         },
                         comparator: Comparator::GE,
                         rhs: QuantityExpr::Fixed { value: 1 },
@@ -21641,7 +21643,7 @@ mod tests {
                                 lhs: QuantityExpr::Ref {
                                     qty: QuantityRef::SpellsCast {
                                         scope: CountScope::Controller,
-                                        filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })), .. },
+                                        filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })), window: TurnWindow::ThisTurn },
                                 },
                                 comparator: Comparator::GE,
                                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -21698,7 +21700,7 @@ mod tests {
                             QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
-                                ..
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::EQ,
@@ -22263,7 +22265,7 @@ mod tests {
                             QuantityRef::SpellsCast {
                                 scope: CountScope::Opponents,
                                 filter: Some(TargetFilter::Or { filters }),
-                                ..
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -22288,7 +22290,7 @@ mod tests {
                             QuantityRef::SpellsCast {
                                 scope: CountScope::Opponents,
                                 filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })),
-                                ..
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,
@@ -22335,7 +22337,7 @@ mod tests {
                         qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: None,
-                            ..
+                            window: TurnWindow::ThisTurn
                         }
                     }
                 ));

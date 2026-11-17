@@ -1607,7 +1607,7 @@ mod tests {
                             QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { .. }),
-                                ..
+                                window: crate::types::ability::TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,

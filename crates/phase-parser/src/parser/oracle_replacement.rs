@@ -18538,7 +18538,7 @@ mod tests {
                             QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: Some(filter),
-                                ..
+                                window: TurnWindow::ThisTurn,
                             },
                     },
                 comparator: Comparator::GE,

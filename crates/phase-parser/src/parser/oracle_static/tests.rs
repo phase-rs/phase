@@ -6823,7 +6823,7 @@ fn self_cost_reduction_another_filtered_spell_requires_prior_matching_spell() {
                     QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(TargetFilter::Or { filters }),
-                        ..
+                        window: TurnWindow::ThisTurn,
                     },
             },
         comparator: Comparator::GE,
@@ -8420,7 +8420,7 @@ fn static_zimone_first_x_spell_each_turn_reduces_per_plus1_counter() {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
-                        filter: Some(inner), .. },
+                        filter: Some(inner), window: TurnWindow::ThisTurn },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -8475,7 +8475,7 @@ fn static_first_qualified_spell_costs_less_has_filter_and_condition() {
             condition,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCast { scope: CountScope::Controller, filter: Some(inner), .. },
+                    qty: QuantityRef::SpellsCast { scope: CountScope::Controller, filter: Some(inner), window: TurnWindow::ThisTurn },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },
@@ -8523,7 +8523,7 @@ fn static_first_qualified_spell_costs_more_handles_each_opponent_casts() {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
-                    filter: Some(inner), .. },
+                    filter: Some(inner), window: TurnWindow::ThisTurn },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },
@@ -8564,7 +8564,7 @@ fn static_first_unqualified_spell_costs_less_keeps_first_spell_gate() {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
-                    filter: Some(inner), .. },
+                    filter: Some(inner), window: TurnWindow::ThisTurn },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },
@@ -8607,7 +8607,7 @@ fn static_first_kicked_spell_costs_less() {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
-                    filter: Some(inner), .. },
+                    filter: Some(inner), window: TurnWindow::ThisTurn },
             },
             comparator: Comparator::EQ,
             rhs: QuantityExpr::Fixed { value: 0 },
@@ -28303,7 +28303,7 @@ fn assert_first_spell_gate(
                     QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(inner),
-                        ..
+                        window: TurnWindow::ThisTurn,
                     },
             },
         comparator: Comparator::EQ,
@@ -28563,6 +28563,7 @@ fn nth_qualified_spell_filter_second_spell_gates_on_one_prior_cast() {
         QuantityExpr::Ref {
             qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
+                window: TurnWindow::ThisTurn,
                 ..
             },
         }

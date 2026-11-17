@@ -6907,7 +6907,7 @@ fn sift_through_sands_condition_requires_both_named_spells() {
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
-                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })), .. },
+                            filter: Some(TargetFilter::Typed(TypedFilter { properties, .. })), window: TurnWindow::ThisTurn },
                     },
                     comparator: Comparator::GE,
                     rhs: QuantityExpr::Fixed { value: 1 },
@@ -12593,7 +12593,7 @@ fn parses_activate_only_filtered_spell_count_condition() {
                     qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: Some(TargetFilter::Or { .. }),
-                        ..
+                        window: TurnWindow::ThisTurn
                     },
                 },
                 comparator: Comparator::GE,
@@ -26761,7 +26761,7 @@ fn instant_or_sorcery_cast_activation_restriction_does_not_emit_condition_warnin
                     lhs: QuantityExpr::Ref {
                         qty: QuantityRef::SpellsCast {
                             filter: Some(TargetFilter::Or { filters }),
-                            ..
+                            window: TurnWindow::ThisTurn, ..
                         }
                     },
                     comparator: Comparator::GE,
