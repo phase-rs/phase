@@ -705,9 +705,7 @@ pub(crate) fn parse_collect_evidence_alt_cost(text: &str) -> Option<StaticDefini
     // matches "rather than pay " without a leading space.
     let tp = TextPair::new(&tp.original[consumed..], i_lower).trim_start();
 
-    let cost = AbilityCost::CollectEvidence {
-        amount: crate::types::ability::CollectEvidenceAmount::Fixed(amount),
-    };
+    let cost = AbilityCost::CollectEvidence { amount };
 
     // "rather than pay [the/its] mana cost for [filter] spells you cast".
     let tp = nom_tag_tp(&tp, "rather than pay ")?;
