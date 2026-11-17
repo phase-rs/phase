@@ -659,25 +659,30 @@ impl ActionIds<'_> {
         let WaitingFor::OutsideGameChoice { choices, .. } = &self.state.waiting_for else {
             return None;
         };
+        // Matched on the entry's source alone, so a new source cannot compile
+        // without deciding how its card is named.
         choices.iter().find_map(|entry| {
-            let place = match (&entry.source, selection) {
-                (
-                    OutsideGameChoiceSource::Sideboard {
-                        sideboard_index, ..
-                    },
-                    OutsideGameSelection::Sideboard {
-                        sideboard_index: chosen,
-                    },
-                ) if sideboard_index == chosen => "sideboard",
-                (
-                    OutsideGameChoiceSource::BoosterPack { pack_slot, .. },
-                    OutsideGameSelection::BoosterPack { pack_slot: chosen },
-                ) if pack_slot == chosen => "booster pack",
-                (OutsideGameChoiceSource::Companion { .. }, OutsideGameSelection::Companion) => {
-                    "companion"
+            let place = match &entry.source {
+                OutsideGameChoiceSource::Sideboard {
+                    sideboard_index, ..
+                } => matches!(
+                    selection,
+                    OutsideGameSelection::Sideboard { sideboard_index: chosen }
+                        if chosen == sideboard_index
+                )
+                .then_some("sideboard"),
+                OutsideGameChoiceSource::BoosterPack { pack_slot, .. } => matches!(
+                    selection,
+                    OutsideGameSelection::BoosterPack { pack_slot: chosen } if chosen == pack_slot
+                )
+                .then_some("booster pack"),
+                OutsideGameChoiceSource::Companion { .. } => {
+                    matches!(selection, OutsideGameSelection::Companion).then_some("companion")
                 }
-                _ => return None,
-            };
+                // An exiled card is an object in the game, already named by
+                // its object label above.
+                OutsideGameChoiceSource::FaceUpExile { .. } => None,
+            }?;
             Some(format!("{} ({place})", one_line(&entry.name)))
         })
     }
@@ -2435,14 +2440,40 @@ mod tests {
     /// CR 400.11a + CR 406.3: Karn, the Great Creator's "−2: You may reveal an
     /// artifact card you own from outside the game or choose a face-up artifact
     /// card you own in exile." A sideboard card is offered by its slot, which
-    /// names no object, and a card in exile by its object. Each option names
-    /// the card it brings in and where it is.
+    /// names no object, and a card in exile by its object. CR 400.11b: Booster
+    /// Tutor ("Open a sealed Magic booster pack, reveal the cards, and put one
+    /// of them into your hand.") offers a card by its slot in the opened pack.
+    /// CR 702.139a: Mastermind's Acquisition ("Put a card you own from outside
+    /// the game into your hand.") can offer the revealed companion. Each option
+    /// names the card it brings in and where it is.
     #[test]
     fn an_outside_game_option_names_the_card_it_brings_in() {
         use engine::types::actions::OutsideGameSelection;
         use engine::types::card::CardFace;
-        use engine::types::game_state::{OutsideGameChoiceEntry, OutsideGameChoiceSource};
+        use engine::types::game_state::{
+            OutsideGameChoiceEntry, OutsideGameChoiceSource, PackOrigin,
+        };
         use engine::types::zones::Zone;
+
+        fn chosen(board: &Board, selection: OutsideGameSelection) -> String {
+            described(
+                board,
+                GameAction::ChooseOutsideGameCards {
+                    selections: vec![selection],
+                },
+            )
+        }
+        fn offered(board: &mut Board, entry: OutsideGameChoiceEntry) {
+            board.state.waiting_for = WaitingFor::OutsideGameChoice {
+                player: VIEWER,
+                source_id: board.bolt,
+                choices: vec![entry],
+                count: 1,
+                reveal: true,
+                up_to: true,
+                destination: Zone::Hand,
+            };
+        }
 
         let mut board = board();
         let exiled = engine::game::create_object(
@@ -2475,21 +2506,51 @@ mod tests {
             up_to: true,
             destination: Zone::Hand,
         };
-        let chosen = |selection| {
-            described(
-                &board,
-                GameAction::ChooseOutsideGameCards {
-                    selections: vec![selection],
-                },
-            )
-        };
         assert_eq!(
-            chosen(OutsideGameSelection::Sideboard { sideboard_index: 0 }),
+            chosen(
+                &board,
+                OutsideGameSelection::Sideboard { sideboard_index: 0 }
+            ),
             "Choose Outside Game Cards (Selections: Pithing Needle (sideboard))"
         );
         assert_eq!(
-            chosen(OutsideGameSelection::FaceUpExile { object_id: exiled }),
+            chosen(
+                &board,
+                OutsideGameSelection::FaceUpExile { object_id: exiled }
+            ),
             "Choose Outside Game Cards (Selections: Sol Ring (exile, owned by You))"
+        );
+
+        offered(
+            &mut board,
+            OutsideGameChoiceEntry {
+                source: OutsideGameChoiceSource::BoosterPack {
+                    pack_slot: 4,
+                    origin: PackOrigin::Set("DSK".to_string()),
+                    card: Box::new(CardFace::default()),
+                },
+                count: 1,
+                name: "Fear of Missing Out".to_string(),
+            },
+        );
+        assert_eq!(
+            chosen(&board, OutsideGameSelection::BoosterPack { pack_slot: 4 }),
+            "Choose Outside Game Cards (Selections: Fear of Missing Out (booster pack))"
+        );
+
+        offered(
+            &mut board,
+            OutsideGameChoiceEntry {
+                source: OutsideGameChoiceSource::Companion {
+                    card: Box::new(CardFace::default()),
+                },
+                count: 1,
+                name: "Lurrus of the Dream-Den".to_string(),
+            },
+        );
+        assert_eq!(
+            chosen(&board, OutsideGameSelection::Companion),
+            "Choose Outside Game Cards (Selections: Lurrus of the Dream-Den (companion))"
         );
     }
 

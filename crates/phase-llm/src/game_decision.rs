@@ -2069,13 +2069,16 @@ mod tests {
             .candidates
             .iter()
             .enumerate()
-            .filter_map(|(position, candidate)| match candidate.action {
-                GameAction::ActivateAbility {
+            .filter_map(|(position, candidate)| {
+                let GameAction::ActivateAbility {
                     source_id,
                     ability_index,
                     ..
-                } if source_id == brightling => Some((position, ability_index)),
-                _ => None,
+                } = candidate.action
+                else {
+                    return None;
+                };
+                (source_id == brightling).then_some((position, ability_index))
             })
             .collect();
         // Reach guard: the engine offers all four, the Plains paying for any.
