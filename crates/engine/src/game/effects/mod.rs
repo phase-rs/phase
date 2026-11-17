@@ -22983,7 +22983,31 @@ fn resolve_chain_body(
                             ..
                         })
                     );
-                if sub_outlives_false_parent_gate(sub)
+                // CR 603.2c + CR 607.2a: Detention Sphere pattern — the targeted
+                // exile and same-name mass exile are resolved inline within the
+                // parent's logical zone-change group (see change_zone::resolve).
+                // Skip the sub_ability here to avoid double-resolution and
+                // duplicate trigger batches (e.g., Ketramose).
+                let is_detention_sphere_pattern = matches!(
+                    &ability.effect,
+                    Effect::ChangeZone {
+                        destination: Zone::Exile,
+                        ..
+                    }
+                ) && matches!(
+                    &sub.effect,
+                    Effect::ChangeZoneAll {
+                        destination: Zone::Exile,
+                        target,
+                        ..
+                    } if matches!(
+                        target,
+                        TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
+                    )
+                );
+                if is_detention_sphere_pattern {
+                    // Already resolved inline; do not resolve again.
+                } else if sub_outlives_false_parent_gate(sub)
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
                         && (sub.condition.is_none() || is_ordinal_sequential_sibling))
                 {

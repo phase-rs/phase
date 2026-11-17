@@ -52868,17 +52868,20 @@ fn maelstrom_pulse_destroys_only_same_named_permanents() {
         typed.properties
     );
     assert!(
-        typed.properties.contains(&FilterProp::Another),
-        "DestroyAll must exclude the targeted permanent itself, got {:?}",
+        typed
+            .properties
+            .contains(&FilterProp::DistinctFrom {
+                reference: Box::new(TargetFilter::ParentTarget),
+            }),
+        "DestroyAll must exclude the targeted permanent itself via DistinctFrom(ParentTarget), got {:?}",
         typed.properties
     );
 }
 
 /// CR 201.2 + CR 201.2a: Detention Sphere's "target nonland permanent not
-/// named Detention Sphere and all other permanents with the same name as that
-/// permanent" keeps both the name restriction on the target and the
-/// same-name mass exile (issue #10125). Before the fix the "not named" suffix
-/// stopped the target parse and both clauses were dropped.
+/// named Detention Sphere" keeps the name restriction on the target. CR 607.2a:
+/// the linked "all other permanents with the same name as that
+/// permanent" mass exile is a separate effect in the same chain (issue #10125).
 #[test]
 fn detention_sphere_keeps_not_named_target_and_same_name_mass_exile() {
     let parsed = crate::parser::parse_oracle_text(
@@ -52927,7 +52930,13 @@ fn detention_sphere_keeps_not_named_target_and_same_name_mass_exile() {
         mass.controller, None,
         "\"all other permanents\" spans every controller"
     );
-    assert!(mass.properties.contains(&FilterProp::Another));
+    assert!(
+        mass.properties.contains(&FilterProp::DistinctFrom {
+            reference: Box::new(TargetFilter::ParentTarget),
+        }),
+        "mass exile must exclude the parent target, got {:?}",
+        mass.properties
+    );
     assert!(mass
         .properties
         .contains(&FilterProp::SameNameAsParentTarget));

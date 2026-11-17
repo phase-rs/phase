@@ -155,8 +155,8 @@ fn legions_to_ashes_exiles_only_that_players_same_name_tokens() {
     );
 }
 
-/// CR 608.2c: Legion's End exiles the target and that player's same-name
-/// creatures; the caster's same-name creature is untouched.
+/// CR 607.2a + CR 608.2c: Legion's End exiles the target and that
+/// player's same-name creatures; the caster's same-name creature is untouched.
 #[test]
 fn legions_end_spares_the_casters_same_name_creature() {
     let mut scenario = GameScenario::new();
@@ -1145,7 +1145,7 @@ fn mass_exile_that_exiles_its_own_source_still_satisfies_if_you_do() {
 /// CR 201.2 + CR 115.1: Detention Sphere's ETB target is "a nonland permanent
 /// not named Detention Sphere" — another Detention Sphere is not a legal
 /// target. CR 201.2a: the mass conjunct exiles every other permanent with the
-/// target's name regardless of controller, and CR 607.2a + CR 607.3: the
+/// target's name regardless of controller, and CR 607.2a: the
 /// leaves-the-battlefield trigger returns all of them, not just the target.
 #[test]
 fn detention_sphere_exiles_same_named_permanents_and_returns_them_all() {
@@ -1258,7 +1258,7 @@ fn detention_sphere_exiles_same_named_permanents_and_returns_them_all() {
         "the other Sphere must stay"
     );
 
-    // CR 607.2a + CR 607.3: the leaves-the-battlefield trigger returns every
+    // CR 607.2a: the leaves-the-battlefield trigger returns every
     // card the enters trigger exiled, under each owner's control.
     let _ = runner.cast(disenchant).target_object(sphere).commit();
     settle(&mut runner);

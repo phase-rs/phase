@@ -1560,19 +1560,24 @@ pub fn parse_target_with_syntax<'a>(
             parse_type_phrase_folding_with_ctx(&text[target_offset..], ctx);
         let type_phrase_end = lower.len() - rest_after_type_phrase.len();
         let (filter, rest) = parse_target_not_named_suffix(filter, rest_after_type_phrase);
-        // CR 115.1: an object-headed coordinated list whose later leg is a
-        // player ("creature token, player, or planeswalker") is still one
-        // target slot. Extend only when a player leg actually appears, so
+        // CR 109.2b: a "spell" reference targets a spell on the stack. An
+        // object-headed coordinated list whose later leg is a player
+        // ("creature token, player, or planeswalker") is still one target
+        // slot. Extend only when a player leg actually appears, so
         // player-free lists keep their ordinary type-phrase semantics.
         let mut tentative_ctx = ctx.clone();
         let (combined, extended_rest, saw_player) =
             parse_coordinated_target_tail(filter.clone(), rest, &mut tentative_ctx);
         if saw_player || continues_suffixed_type_list(&filter, rest) {
             *ctx = tentative_ctx;
-            return (combined, extended_rest, syntax);
+            return (
+                scope_target_spell_phrase(combined, &lower[target_offset..type_phrase_end]),
+                extended_rest,
+                syntax,
+            );
         }
         return (
-            scope_target_spell_phrase(filter, &lower[target_offset..type_phrase_end]),
+            scope_target_spell_phrase(combined, &lower[target_offset..type_phrase_end]),
             rest,
             syntax,
         );
@@ -2695,10 +2700,10 @@ fn parse_named_filter_terminator(input: &str) -> Result<(&str, ()), nom::Err<Ora
         value((), tag(" that ")),
         value((), tag(" with ")),
         value((), tag(" without ")),
-        // CR 201.2a: a coordinated mass conjunct opens a new noun phrase after
-        // the name ("not named Detention Sphere and all other permanents with
-        // the same name as that permanent"). Bare " and " stays inside the name
-        // ("Gisa and Geralf").
+        // CR 608.2c: a coordinated mass conjunct opens a new noun phrase
+        // after the name ("not named Detention Sphere and all other
+        // permanents with the same name as that permanent"). Bare " and " stays
+        // inside the name ("Gisa and Geralf").
         value((), tag(" and all other ")),
         // CR 201.2 + CR 400.1: origin-zone suffixes are outside the literal
         // card name ("card named X from your graveyard"). Require a real zone

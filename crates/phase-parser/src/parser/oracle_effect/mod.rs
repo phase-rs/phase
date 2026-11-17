@@ -23418,6 +23418,30 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
         }
     }
 
+    // CR 201.2 + CR 608.2c: Same-name mass exile continuations ("exile target X
+    // and all other Xs with the same name as that X") must exclude the parent
+    // target, not the source. The "all other" quantifier adds FilterProp::Another
+    // (source exclusion), but for same-name continuations we need target-relative
+    // exclusion via DistinctFrom { ParentTarget }.
+    crate::parser::oracle_effect::each_target_filter_mut(&mut sub_clause.effect, &mut |target| {
+        if let TargetFilter::Typed(tf) = target {
+            let has_same_name = tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::SameNameAsParentTarget));
+            let has_another = tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::Another));
+            if has_same_name && has_another {
+                tf.properties.retain(|p| !matches!(p, FilterProp::Another));
+                tf.properties.push(FilterProp::DistinctFrom {
+                    reference: Box::new(TargetFilter::ParentTarget),
+                });
+            }
+        }
+    });
+
     // CR 608.2c + CR 701.8a: Self-reference carry-forward for compound actions.
     // "destroy that creature and ~" splits on " and " into sub-text "~" which
     // lacks a verb. Prepend the primary verb so it becomes "destroy ~" — parsed
@@ -40706,7 +40730,7 @@ pub fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mut Targe
         }
         Effect::PutCounter { target, .. } | Effect::RemoveCounter { target, .. } => f(target),
         Effect::GoadAll { target } => f(target),
-        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } => f(target),
+        Effect::ChangeZone { target, .. } | Effect::ChangeZoneAll { target, .. } | Effect::DestroyAll { target, .. } => f(target),
         Effect::LoseLife {
             target: Some(target),
             ..
