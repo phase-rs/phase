@@ -6547,19 +6547,18 @@ pub(crate) fn matches_target_filter_on_projected_battlefield_entry(
         return matches_target_filter_on_battlefield_entry(state, event, filter, ctx);
     }
     match event {
-        ProposedEvent::TokenEntry { entry_ref, .. } => {
-            if state.liminal_entries.contains_key(entry_ref) {
-                // CR 614.12 + CR 614.4: every token entering in the same event is absent from the
-                // board (Clone Legion ruling: the tokens enter at the same time), the resolution's
-                // earlier batches included — the same authority the entrant's own-replacement
-                // retention reads.
-                let co_entrants =
-                    crate::game::effects::token_copy::entering_token_co_entrants(state, *entry_ref);
-                if let Some(projection) =
-                    BattlefieldEntrantProjection::for_liminal_token(state, *entry_ref, &co_entrants)
-                {
-                    return projection.matches(filter, ctx);
-                }
+        // CR 614.12 + CR 614.4: every token entering in the same event is absent from the board
+        // (Clone Legion ruling: the tokens enter at the same time), the resolution's earlier
+        // batches included — the same authority the entrant's own-replacement retention reads.
+        ProposedEvent::TokenEntry { entry_ref, .. }
+            if state.liminal_entries.contains_key(entry_ref) =>
+        {
+            let co_entrants =
+                crate::game::effects::token_copy::entering_token_co_entrants(state, *entry_ref);
+            if let Some(projection) =
+                BattlefieldEntrantProjection::for_liminal_token(state, *entry_ref, &co_entrants)
+            {
+                return projection.matches(filter, ctx);
             }
         }
         ProposedEvent::CreateToken {
