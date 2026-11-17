@@ -24,6 +24,7 @@ import {
   captureTrustedCheckpoint,
   isAuthorityRemote,
   nextGameSessionGeneration,
+  UndoSnapshotError,
   useGameStore,
   saveAuthoritativeGame,
   saveCheckpoints,
@@ -1327,19 +1328,26 @@ export async function undoLastAction(): Promise<void> {
       debugLog(`undo: failed after its game ended: ${err instanceof Error ? err.message : String(err)}`, "info");
       return;
     }
-    if (await recoverFromEngineFailure(err, "undo")) return;
-    // The engine is in one piece: the restore failed and left it as it was,
-    // abandoned work included, or the read after a restore failed and `undo`
-    // rewound the history with it. Either way the store never committed the
-    // engine's state, so show it, and the board and every seat's next decision
-    // agree with it. Abandoned work's log lines and checkpoint are lost, as
-    // under `restoreGameState`. Nothing is rethrown: the Undo controls fire
-    // and forget.
-    reportActionError(err);
+    // Either the restore failed, which presumably left the engine as it was,
+    // abandoned work included, or the read after a successful restore failed,
+    // and the engine holds the restored game. The store committed neither.
+    const restored = err instanceof UndoSnapshotError ? err : null;
+    const failure = restored ? restored.readError : err;
+    // Recovery rebuilds the engine from the store's board, or reloads the
+    // game, so the store's history is left as it is, matching that board.
+    if (await recoverFromEngineFailure(failure, "undo")) return;
+    // Otherwise show the engine's own state, read again, so the board and every
+    // seat's next decision agree with it, with the rewound history when the
+    // restore succeeded. Abandoned work's log lines and checkpoint are lost, as
+    // under `restoreGameState`. Nothing is rethrown: the Undo controls fire and
+    // forget.
+    reportActionError(failure);
     try {
       const snapshot = await store.adapter.getSnapshot();
       if (!isSameGame()) return;
-      await processRemoteUpdate(snapshot, []);
+      useGameStore.getState().commitEngineSnapshot(snapshot, {
+        extraState: restored?.rewoundHistory(),
+      });
     } catch (resyncErr) {
       // The engine cannot be read, so the board cannot be shown as it is.
       if (isSameGame() && !(await recoverFromEngineFailure(resyncErr, "undo-resync"))) {
@@ -1350,10 +1358,11 @@ export async function undoLastAction(): Promise<void> {
 }
 
 /**
- * Hand an engine failure during an undo to the recovery `processAction` uses
- * for the same failures: a panic is triaged, and an unresponsive or lost engine
- * prompts a reload. Returns false for any other failure, which the caller
- * reports itself.
+ * Hand an engine failure during an undo to the recovery path: a panic goes to
+ * `routePanic`, and an unresponsive or lost engine goes straight to
+ * `notifyEngineLost`. Unlike `processAction`, no rehydrate is tried for a lost
+ * engine, because the store's board is the state being undone. Returns false
+ * for any other failure, which the caller reports itself.
  */
 async function recoverFromEngineFailure(err: unknown, reason: string): Promise<boolean> {
   if (isEnginePanic(err)) {

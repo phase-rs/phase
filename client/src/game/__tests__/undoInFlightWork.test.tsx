@@ -24,7 +24,7 @@ import {
   isDispatchIdle,
   undoLastAction,
 } from "../dispatch";
-import { onEngineLost, type EngineLostEvent } from "../engineRecovery";
+import { onEngineLost, onNonFatalPanic, type EngineLostEvent } from "../engineRecovery";
 
 // `debugLog` writes into the game log, the very history under test.
 vi.mock("../debugLog", () => ({ debugLog: vi.fn() }));
@@ -439,19 +439,68 @@ describe("work in flight when Undo is pressed", () => {
     expect(useAppNotificationStore.getState().notification?.description).toBe("snapshot failed");
   });
 
-  it("hands an engine that stops answering during the undo to the engine-lost path", async () => {
-    const { applies, restoreFails } = await startGame();
+  it("asks for a reload, and leaves the history alone, when the engine loses its state after the restore", async () => {
+    const { adapter, applies } = await startGame();
     applies(AFTER_FIRST_PASS, FIRST_PASS);
     await dispatchAction({ type: "PassPriority" }, HUMAN);
     const lost: EngineLostEvent[] = [];
     const stopListening = onEngineLost((event) => lost.push(event));
 
-    restoreFails(new AdapterError(AdapterErrorCode.ENGINE_UNRESPONSIVE, "engine timed out", false));
+    const read = adapter.getSnapshot.getMockImplementation()!;
+    adapter.getSnapshot.mockImplementationOnce(async () => {
+      await read();
+      throw new AdapterError(AdapterErrorCode.STATE_LOST, "engine state lost", false);
+    });
     await undoLastAction();
     stopListening();
 
+    expect(adapter.restoreState).toHaveBeenCalledOnce();
     expect(lost).toEqual([{ reason: "undo", panic: undefined }]);
     expect(useAppNotificationStore.getState().notification).toBeNull();
+    // The reload resumes from the saved game; until then nothing is rewound.
+    expect(loggedLines()).toEqual([...EARLIER_LINES, "Player 1 passes for the first time"]);
+    expect(useGameStore.getState().stateHistory).toHaveLength(1);
     expect(useGameStore.getState().undoInFlight).toBe(false);
+  });
+
+  it("leaves the history with the board a panic after the restore is rebuilt from", async () => {
+    const { adapter, applies } = await startGame();
+    applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+    const panics: EngineLostEvent[] = [];
+    const stopListening = onNonFatalPanic((event) => panics.push(event));
+
+    const read = adapter.getSnapshot.getMockImplementation()!;
+    adapter.getSnapshot.mockImplementationOnce(async () => {
+      await read();
+      throw new AdapterError(AdapterErrorCode.ENGINE_PANIC, "engine panicked", false, "panicked at state.rs");
+    });
+    await undoLastAction();
+    stopListening();
+
+    // The panic triage rebuilt the engine from the store's board, the undone
+    // one, so the undone pass's lines and checkpoint stay with it.
+    expect(panics).toEqual([{ reason: "undo-panic", panic: "panicked at state.rs" }]);
+    expect(adapter.restoreState).toHaveBeenCalledTimes(2);
+    expect(useGameStore.getState().gameState).toEqual(AFTER_FIRST_PASS);
+    expect(await adapter.getState()).toEqual(AFTER_FIRST_PASS);
+    expect(loggedLines()).toEqual([...EARLIER_LINES, "Player 1 passes for the first time"]);
+    expect(useGameStore.getState().stateHistory).toHaveLength(1);
+  });
+
+  it("asks for a reload when the board cannot be read again after a failed restore", async () => {
+    const { adapter, applies, restoreFails } = await startGame();
+    applies(AFTER_FIRST_PASS, FIRST_PASS);
+    await dispatchAction({ type: "PassPriority" }, HUMAN);
+    const lost: EngineLostEvent[] = [];
+    const stopListening = onEngineLost((event) => lost.push(event));
+
+    restoreFails(new Error("restore failed"));
+    adapter.getSnapshot.mockImplementationOnce(() => Promise.reject(new Error("worker crashed")));
+    await undoLastAction();
+    stopListening();
+
+    expect(useAppNotificationStore.getState().notification?.description).toBe("restore failed");
+    expect(lost).toEqual([{ reason: "undo-resync", panic: undefined }]);
   });
 });
