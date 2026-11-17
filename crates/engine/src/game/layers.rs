@@ -11037,7 +11037,7 @@ fn control_effect_output(
 /// does. Layer 2 writes only controllers, so `provider` can change `dependent`
 /// only through a controller `dependent` reads: one its affected filter or
 /// condition reads, or the controller of `dependent`'s own source, which a
-/// static's "you" names. A resolved effect's "you" is fixed (CR 611.2c), so for
+/// static's "you" names. A resolved effect's "you" was fixed when it resolved (CR 109.5), so for
 /// a transient only the filter and condition remain. Answers before any clone.
 fn control_provider_cannot_change(
     state: &GameState,
@@ -11112,8 +11112,9 @@ fn control_effect_depends_on(
 /// asked again after each effect applies (CR 613.8c), never as a fixed point
 /// over the whole bucket. So P1's Confiscate on P1's own Control Magic changes
 /// nothing about Control Magic before P0's Word of Seizing (on that Confiscate)
-/// applies; Control Magic is then independent and applies first by timestamp,
-/// and only afterwards does Confiscate become dependent on Word. The Layer 6
+/// applies, so Control Magic is independent and applies first by timestamp.
+/// Confiscate already depends on Word, since applying Word changes whom
+/// Confiscate gives Control Magic to, so Word applies before it. The Layer 6
 /// referenced-grant selector reads the rule the same way.
 fn apply_control_effects_in_dependency_order(
     state: &mut GameState,
