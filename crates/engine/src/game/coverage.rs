@@ -5042,7 +5042,20 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         } => match subject {
             // CR 603.2: the object the trigger event names, not a declared target.
             ObjectScope::EventSource => format!("triggering object is {}", fmt_target(filter)),
-            _ => format!("target is {}", fmt_target(filter)),
+            ObjectScope::Source
+            | ObjectScope::Target
+            | ObjectScope::Recipient
+            | ObjectScope::CostPaidObject
+            | ObjectScope::Anaphoric
+            | ObjectScope::Demonstrative
+            | ObjectScope::AmassedArmy
+            | ObjectScope::EventTarget
+            | ObjectScope::OtherRevealedCard
+            | ObjectScope::OwnedLinkedExileCard
+            | ObjectScope::BatchSource
+            | ObjectScope::ChainRootTarget
+            | ObjectScope::GrantingObject
+            | ObjectScope::SpecificObject { .. } => format!("target is {}", fmt_target(filter)),
         },
         AbilityCondition::TriggeringSpellTargetsFilter { filter } => {
             format!("triggering spell targets {}", fmt_target(filter))

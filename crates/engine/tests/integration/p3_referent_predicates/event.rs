@@ -354,8 +354,8 @@ fn p3s2a_deekah_tokens_carry_the_triggering_spells_mana_value() {
 
 // ---------------------------------------------------------------- copy observers collected exactly once
 
-/// Pass priority one step at a time and record, for every Prismari trigger that reaches the stack, the event that
-/// caused it (`StackEntryKind::TriggeredAbility.trigger_event`).
+/// Pass priority one step at a time and count the distinct Prismari triggers that reach the stack: the cast of
+/// Overrun, the cast of Twincast and the copy of Overrun make three, each collected once.
 #[test]
 fn p3s2a_prismari_twincast_trigger_events() {
     use engine::types::game_state::StackEntryKind;
@@ -373,21 +373,12 @@ fn p3s2a_prismari_twincast_trigger_events() {
     let mut r = sc.build();
     cast_spell(&mut r, overrun);
     cast_spell(&mut r, twincast);
-    let mut seen: Vec<(ObjectId, String)> = Vec::new();
+    let mut seen: Vec<ObjectId> = Vec::new();
     for _ in 0..40 {
         for e in r.state().stack.iter() {
-            if let StackEntryKind::TriggeredAbility {
-                source_id,
-                trigger_event,
-                ..
-            } = &e.kind
-            {
-                if *source_id == p && !seen.iter().any(|(id, _)| *id == e.id) {
-                    let d = trigger_event
-                        .as_ref()
-                        .map(|t| format!("{t:?}"))
-                        .unwrap_or_else(|| "None".into());
-                    seen.push((e.id, d[..d.len().min(160)].to_string()));
+            if let StackEntryKind::TriggeredAbility { source_id, .. } = &e.kind {
+                if *source_id == p && !seen.contains(&e.id) {
+                    seen.push(e.id);
                 }
             }
         }
@@ -400,9 +391,6 @@ fn p3s2a_prismari_twincast_trigger_events() {
             }
             other => panic!("unexpected decision {other:?}"),
         }
-    }
-    for (id, d) in &seen {
-        eprintln!("PRISMARI-TRIGGER stack id {id:?} <- {d}");
     }
     assert_eq!(seen.len(), 3, "printed: magecraft triggers for the cast of Overrun, the cast of Twincast and the copy of Overrun");
 }

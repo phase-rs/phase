@@ -1,5 +1,5 @@
 //! Verbatim Oracle text and printed mana costs, copied from the Scryfall API
-//! (`cards/named?exact=`, fetched 2026-11-16; equal to the pinned MTGJSON text for the six S2a members).
+//! (`cards/named?exact=`, fetched 2026-11-16; equal to the pinned MTGJSON text for the six cards these tests cover).
 #![allow(dead_code)]
 
 pub const ANGRATH_THE_FLAME_CHAINED: &str = "+1: Each opponent discards a card and loses 2 life.\n−3: Gain control of target creature until end of turn. Untap it. It gains haste until end of turn. Sacrifice it at the beginning of the next end step if it has mana value 3 or less.\n−8: Each opponent loses life equal to the number of cards in their graveyard.";
