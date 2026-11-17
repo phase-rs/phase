@@ -132,7 +132,6 @@ export function WhatsNewModal({
       eyebrow="phase.rs"
       title={t("whatsNew.title")}
       size="lg"
-      scrollable
       onClose={onClose}
     >
       {hasEntries && (
