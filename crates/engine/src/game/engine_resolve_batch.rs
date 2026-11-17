@@ -816,6 +816,18 @@ fn seed_remaining_consented_priority_passes(
     let current_rep = topology::priority_pass_representative(state, current_seat);
     let participants = topology::priority_pass_participants(state);
     let current_idx = participants.iter().position(|seat| *seat == current_rep)?;
+    // CR 805.5b: seed the current team's own unpassed living members first —
+    // one holder pass never passes the team. No callback: consent covers them.
+    // The current seat is excluded: its own pass goes through the boundary
+    // `apply` below.
+    for member in topology::team_members(state, current_rep) {
+        if member == current_seat || state.priority_passes.contains(&member) {
+            continue;
+        }
+        let actor = turn_control::authorized_submitter_for_player(state, member);
+        state.priority_passes.insert(member);
+        recorded.push((actor, GameAction::PassPriority));
+    }
     for offset in 1..participants.len() {
         let representative = participants[(current_idx + offset) % participants.len()];
         // CR 805.5b: seed every unpassed living member of the remaining team,
@@ -833,6 +845,11 @@ fn seed_remaining_consented_priority_passes(
 
 enum PriorityCycleFastForward {
     Seeded,
+    /// A consulted member vetoed the fast-forward with a non-pass action
+    /// (or the `Stop` decision): the teammate's window must survive, so the
+    /// batch stops without applying anything. Structural lookup failure keeps
+    /// returning `CannotSeed`, which falls through instead.
+    Vetoed,
     CannotSeed,
     Stop,
 }
@@ -933,7 +950,7 @@ where
                 &mut seeded_actions,
             ) {
                 PriorityCycleFastForward::Seeded | PriorityCycleFastForward::CannotSeed => {}
-                PriorityCycleFastForward::Stop => break,
+                PriorityCycleFastForward::Vetoed | PriorityCycleFastForward::Stop => break,
             }
         }
 
@@ -1028,17 +1045,21 @@ where
     // other living teammates still owe individual passes. Seed them first
     // (consulting each via callback) before the other teams in rotation.
     for member in topology::team_members(state, current_rep) {
-        if member == requester || member == current_seat || state.priority_passes.contains(&member)
-        {
+        if member == current_seat || state.priority_passes.contains(&member) {
             continue;
         }
         let actor = turn_control::authorized_submitter_for_player(state, member);
-        match choose_non_requester_action(state, actor) {
-            ResolveAllCallbackDecision::Action(GameAction::PassPriority) => {}
-            ResolveAllCallbackDecision::Action(_) | ResolveAllCallbackDecision::Proposal { .. } => {
-                return PriorityCycleFastForward::CannotSeed;
+        // CR 805.5b: the requester-teammate is seeded without consultation —
+        // its pass is the request itself. Other members are consulted.
+        if actor != requester {
+            match choose_non_requester_action(state, actor) {
+                ResolveAllCallbackDecision::Action(GameAction::PassPriority) => {}
+                ResolveAllCallbackDecision::Action(_)
+                | ResolveAllCallbackDecision::Proposal { .. } => {
+                    return PriorityCycleFastForward::Vetoed;
+                }
+                ResolveAllCallbackDecision::Stop => return PriorityCycleFastForward::Stop,
             }
-            ResolveAllCallbackDecision::Stop => return PriorityCycleFastForward::Stop,
         }
         seeded.push((member, actor));
     }
@@ -1060,7 +1081,7 @@ where
                     ResolveAllCallbackDecision::Action(GameAction::PassPriority) => {}
                     ResolveAllCallbackDecision::Action(_)
                     | ResolveAllCallbackDecision::Proposal { .. } => {
-                        return PriorityCycleFastForward::CannotSeed;
+                        return PriorityCycleFastForward::Vetoed;
                     }
                     ResolveAllCallbackDecision::Stop => return PriorityCycleFastForward::Stop,
                 }
@@ -1437,10 +1458,126 @@ mod tests {
         })
         .expect("the fixture's fast-forward is representable");
 
-        assert_eq!(calls.get(), 2);
+        // CR 805.5b: a veto-sourced refusal stops the batch before anything
+        // applies — the current seat's pass is NOT applied past the veto, so
+        // the window survives with no pass recorded.
+        assert_eq!(calls.get(), 1);
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 1);
+        assert!(
+            state.priority_passes.is_empty(),
+            "a vetoed seed must drop its scratch buffer without mutation"
+        );
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::Priority { player } if player == PlayerId(0)
+            ),
+            "the window must survive the veto, got {:?}",
+            result.waiting_for
+        );
         assert!(!state.phase_stops.contains_key(&PlayerId(1)));
+    }
+
+    #[test]
+    fn requester_teammate_is_seeded_in_order_without_consultation() {
+        // P0 holds priority; the batch requester is the non-current teammate.
+        let mut state = two_hg_priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
+        let calls = Cell::new(Vec::new());
+
+        let result = resolve_all_fast_forward(&mut state, PlayerId(1), 0, |_, actor| {
+            calls.set({
+                let mut seen = calls.take();
+                seen.push(actor);
+                seen
+            });
+            ResolveAllCallbackDecision::Action(GameAction::PassPriority)
+        })
+        .expect("the fixture's fast-forward is representable");
+
+        // CR 805.5b: the requester-teammate is seeded without consultation —
+        // only the current seat and the other team are consulted.
+        assert_eq!(
+            calls.take(),
+            vec![PlayerId(0), PlayerId(2), PlayerId(3)],
+            "the requester-teammate must be seeded, not consulted or skipped"
+        );
+        assert_eq!(result.items_resolved, 1);
+        assert!(state.stack.is_empty());
+        // The requester's pass is recorded right after the current seat's own
+        // pass — a replay can submit them in this order through `apply`.
+        assert_eq!(
+            result.recorded_actions,
+            vec![
+                (PlayerId(0), GameAction::PassPriority),
+                (PlayerId(1), GameAction::PassPriority),
+                (PlayerId(2), GameAction::PassPriority),
+                (PlayerId(3), GameAction::PassPriority),
+            ],
+            "every seeded pass must be recorded in replay-submittable order"
+        );
+    }
+
+    #[test]
+    fn current_teammate_veto_stops_without_applying() {
+        // P0 holds priority and requests; the current teammate P1 vetoes in
+        // the first (current-team) loop — a different arm from the rotation
+        // veto covered by `raw_future_non_pass_callback_...`.
+        let mut state = two_hg_priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
+        let calls = Cell::new(0);
+
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
+            calls.set(calls.get() + 1);
+            ResolveAllCallbackDecision::Action(GameAction::SetPhaseStops {
+                stops: vec![PhaseStop {
+                    phase: Phase::PreCombatMain,
+                    scope: PhaseStopScope::AllTurns,
+                }],
+            })
+        })
+        .expect("the fixture's fast-forward is representable");
+
+        // CR 805.5b: the teammate's veto stops the batch before anything
+        // applies — the window survives with no pass recorded.
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result.items_resolved, 0);
+        assert_eq!(state.stack.len(), 1);
+        assert!(
+            state.priority_passes.is_empty(),
+            "a vetoed seed must drop its scratch buffer without mutation"
+        );
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::Priority { player } if player == PlayerId(0)
+            ),
+            "the teammate's window must survive the veto, got {:?}",
+            result.waiting_for
+        );
+        assert!(!state.phase_stops.contains_key(&PlayerId(1)));
+    }
+
+    #[test]
+    fn departed_side_lookup_failure_still_returns_cannot_seed() {
+        // Team A fully departed: the current seat's side has no living
+        // members, so its representative is absent from the rotation. The
+        // structural failure must keep returning `CannotSeed` — never a veto.
+        let mut state = two_hg_priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
+        let mut events = Vec::new();
+        super::super::elimination::eliminate_player(&mut state, PlayerId(0), &mut events);
+
+        let mut seeded = Vec::new();
+        let outcome = seed_remaining_priority_cycle_passes(
+            &mut state,
+            PlayerId(0),
+            PlayerId(2),
+            &mut |_, _| -> ResolveAllCallbackDecision {
+                panic!("a lookup failure must not consult any member")
+            },
+            &mut seeded,
+        );
+        assert!(matches!(outcome, PriorityCycleFastForward::CannotSeed));
+        assert!(seeded.is_empty());
     }
 
     #[test]

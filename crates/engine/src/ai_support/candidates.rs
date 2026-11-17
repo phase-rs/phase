@@ -5420,7 +5420,8 @@ pub(crate) fn priority_actions_with_probe(
 
     // CR 702.49: Offer Ninjutsu-family activations during combat
     // CR 702.61a: Ninjutsu is an activated ability — blocked by split second.
-    if !split_second_active && state.active_player == player {
+    // CR 805.5a: any living teammate may act when the team has priority.
+    if !split_second_active && is_active {
         let family_cards = keywords::ninjutsu_family_activatable_sources(state, player);
         for (ninjutsu_object_id, _card_id, variant, cost) in &family_cards {
             let returnable = keywords::returnable_creatures_for_variant(state, player, variant);

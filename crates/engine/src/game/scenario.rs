@@ -1784,6 +1784,14 @@ impl GameRunner {
         };
         let mut seats = vec![holder];
         seats.extend(super::players::teammates(&self.state, holder));
+        // CR 805.5b: a recorded pass is idempotent — re-applying one errors,
+        // so skip seats that already passed and keep the remaining passes'
+        // events. Collected up front: the filter borrows the pass records
+        // while the submit loop below needs the state mutably.
+        let seats: Vec<PlayerId> = seats
+            .into_iter()
+            .filter(|seat| !self.state.priority_passes.contains(seat))
+            .collect();
         let mut events = Vec::new();
         for seat in seats {
             let submitter = super::turn_control::authorized_submitter_for_player(&self.state, seat);

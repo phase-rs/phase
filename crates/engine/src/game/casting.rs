@@ -2057,8 +2057,15 @@ pub(crate) fn foretell_cost(state: &GameState, object_id: ObjectId) -> Option<Ma
 /// CR 702.143a-b: A player may foretell a card from hand any time they have
 /// priority during their turn by paying {2}. This is a special action and does
 /// not use the stack.
+/// CR 805.5a: "their turn" is the team's turn — any living teammate of the
+/// active player may foretell when the team has priority.
 pub fn can_foretell_card(state: &GameState, player: PlayerId, object_id: ObjectId) -> bool {
-    if state.active_player != player {
+    // CR 702.143a + CR 805.5a: mirror the team-aware `is_active` predicate —
+    // the acting seat may be any living teammate of the active player.
+    let team_turn = state.active_player == player
+        || (super::topology::side_takes_shared_turn(state, state.active_player)
+            && super::topology::team_members(state, state.active_player).contains(&player));
+    if !team_turn {
         return false;
     }
 
@@ -2430,7 +2437,12 @@ pub fn handle_foretell(
     card_id: CardId,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    if state.active_player != player {
+    // CR 702.143a + CR 805.5a: as in `can_foretell_card` — the acting seat may
+    // be any living teammate of the active player, not only the representative.
+    if !(state.active_player == player
+        || (super::topology::side_takes_shared_turn(state, state.active_player)
+            && super::topology::team_members(state, state.active_player).contains(&player)))
+    {
         return Err(EngineError::ActionNotAllowed(
             "Foretell is legal only during your turn".to_string(),
         ));

@@ -2573,3 +2573,83 @@ fn a_grantor_may_revoke_only_its_own_consent_at_the_engine_boundary() {
         "one grantor must not be able to revoke another's consent"
     );
 }
+
+/// CR 805.5b: the consented proof collapse on a shared-team turn resolves —
+/// the current team's unpassed teammate is seeded with the rotation, so the
+/// pass cycle completes instead of stalling on the missing pass.
+///
+/// Pre-fix, `seed_remaining_consented_priority_passes` only seeded the OTHER
+/// teams (`offset 1..`), never the current team's unpassed members: the
+/// boundary pass could not complete the cycle, the proof stalled, and the
+/// stack stayed put.
+#[test]
+fn shared_team_consent_run_seeds_the_current_teammate_and_resolves() {
+    let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.stack.push_back(no_op_entry(1, P0));
+
+    apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll {
+            max_resolutions: 7,
+            scope: ResolveAllScope::Shared,
+        },
+    )
+    .expect("the priority holder begins Resolve All consent");
+    let epoch = match &state.waiting_for {
+        WaitingFor::ResolveAllConsent {
+            epoch,
+            representative,
+        } => {
+            assert_eq!(
+                *representative, P2,
+                "reach-guard: the other team's representative is queued, got {representative:?}"
+            );
+            *epoch
+        }
+        other => panic!("expected queued consent, got {other:?}"),
+    };
+
+    // Legacy wire path, mirroring `ready_two_seat_state`: the final grant
+    // latches Ready so the proof collapse below runs `materialize_...`.
+    state
+        .resolve_all_consent_run
+        .as_mut()
+        .expect("pending run exists")
+        .auto_pass_baseline = None;
+
+    apply(
+        &mut state,
+        P2,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect("the queued representative may grant");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::ResolveAllReady { .. }),
+        "reach-guard: the final grant latches Ready, got {:?}",
+        state.waiting_for
+    );
+
+    let result =
+        resolve_all_ready_prefix_with(&mut state, P0, ResolveAllContinuation::StopAtPriority)
+            .expect("the fixture's Resolve All prefix is representable");
+    // The seeded teammate pass completes the cycle: the single entry
+    // resolves and nothing remains live.
+    assert_eq!(
+        result.items_resolved,
+        1,
+        "safe-prefix result={result:?}, waiting={:?}, stack_len={}",
+        state.waiting_for,
+        state.stack.len(),
+    );
+    assert!(
+        state.stack.is_empty(),
+        "the consented run must resolve the stack instead of stalling on the teammate's missing pass"
+    );
+}

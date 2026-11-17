@@ -144,12 +144,161 @@ pub fn eligible_ai_decision(
     // until the safety cap.
     let owners = turn_control::decision_owners(state);
     let unpassed: Vec<PlayerId> = match &state.waiting_for {
-        engine::types::game_state::WaitingFor::Priority { .. } => owners
+        WaitingFor::Priority { .. } => owners
             .iter()
             .copied()
             .filter(|owner| !state.priority_passes.contains(owner))
             .collect(),
-        _ => owners.clone(),
+        // Every other window resolves to the engine's acting players
+        // unchanged. Exhaustive by construction: a new `WaitingFor` variant
+        // fails to compile here until it is classified.
+        WaitingFor::ResolveAllConsent { .. } => owners.clone(),
+        WaitingFor::ResolveAllReady { .. } => owners.clone(),
+        WaitingFor::MeldPairChoice { .. } => owners.clone(),
+        WaitingFor::MeldAttackTargetChoice { .. } => owners.clone(),
+        WaitingFor::EntryAttackTargetChoice { .. } => owners.clone(),
+        WaitingFor::MulliganDecision { .. } => owners.clone(),
+        WaitingFor::OpeningHandBottomCards { .. } => owners.clone(),
+        WaitingFor::ManaPayment { .. } => owners.clone(),
+        WaitingFor::ManaSourceSelection { .. } => owners.clone(),
+        WaitingFor::AssistChoosePlayer { .. } => owners.clone(),
+        WaitingFor::AssistPayment { .. } => owners.clone(),
+        WaitingFor::ChooseXValue { .. } => owners.clone(),
+        WaitingFor::TargetSelection { .. } => owners.clone(),
+        WaitingFor::DeclareAttackers { .. } => owners.clone(),
+        WaitingFor::DeclareBlockers { .. } => owners.clone(),
+        WaitingFor::UntapChoice { .. } => owners.clone(),
+        WaitingFor::ChooseUntapSubset { .. } => owners.clone(),
+        WaitingFor::ExertChoice { .. } => owners.clone(),
+        WaitingFor::EnlistChoice { .. } => owners.clone(),
+        WaitingFor::GameOver { .. } => owners.clone(),
+        WaitingFor::ReplacementChoice { .. } => owners.clone(),
+        WaitingFor::EntryControllerChoice { .. } => owners.clone(),
+        WaitingFor::OrderTriggers { .. } => owners.clone(),
+        WaitingFor::CopyTargetChoice { .. } => owners.clone(),
+        WaitingFor::ExploreChoice { .. } => owners.clone(),
+        WaitingFor::ReturnAsAuraTarget { .. } => owners.clone(),
+        WaitingFor::ChooseTokenHost { .. } => owners.clone(),
+        WaitingFor::EquipTarget { .. } => owners.clone(),
+        WaitingFor::CrewVehicle { .. } => owners.clone(),
+        WaitingFor::StationTarget { .. } => owners.clone(),
+        WaitingFor::SaddleMount { .. } => owners.clone(),
+        WaitingFor::ScryChoice { .. } => owners.clone(),
+        WaitingFor::RippleRevealChoice { .. } => owners.clone(),
+        WaitingFor::RippleBottomOrder { .. } => owners.clone(),
+        WaitingFor::RevealUntilBottomOrder { .. } => owners.clone(),
+        WaitingFor::DigBottomOrder { .. } => owners.clone(),
+        WaitingFor::ArrangePlanarDeckTopChoice { .. } => owners.clone(),
+        WaitingFor::RedistributeLifeTotals { .. } => owners.clone(),
+        WaitingFor::CoinFlipKeepChoice { .. } => owners.clone(),
+        WaitingFor::DieKeepChoice { .. } => owners.clone(),
+        WaitingFor::DigChoice { .. } => owners.clone(),
+        WaitingFor::DigRestSplitChoice { .. } => owners.clone(),
+        WaitingFor::SurveilChoice { .. } => owners.clone(),
+        WaitingFor::RevealChoice { .. } => owners.clone(),
+        WaitingFor::SearchChoice { .. } => owners.clone(),
+        WaitingFor::SearchPartitionChoice { .. } => owners.clone(),
+        WaitingFor::OutsideGameChoice { .. } => owners.clone(),
+        WaitingFor::ChooseFromZoneChoice { .. } => owners.clone(),
+        WaitingFor::BeholdChoice { .. } => owners.clone(),
+        WaitingFor::EmpowerJaceChoice { .. } => owners.clone(),
+        WaitingFor::SpellCopyOrderChoice { .. } => owners.clone(),
+        WaitingFor::ChooseOneOfBranch { .. } => owners.clone(),
+        WaitingFor::ConniveDiscard { .. } => owners.clone(),
+        WaitingFor::DiscardChoice { .. } => owners.clone(),
+        WaitingFor::HeroEventChoice { .. } => owners.clone(),
+        WaitingFor::EffectZoneChoice { .. } => owners.clone(),
+        WaitingFor::DrawnThisTurnTopdeckChoice { .. } => owners.clone(),
+        WaitingFor::LearnChoice { .. } => owners.clone(),
+        WaitingFor::ManifestDreadChoice { .. } => owners.clone(),
+        WaitingFor::TriggerTargetSelection { .. } => owners.clone(),
+        WaitingFor::BetweenGamesSideboard { .. } => owners.clone(),
+        WaitingFor::BetweenGamesChoosePlayDraw { .. } => owners.clone(),
+        WaitingFor::ChooseStartingPlayer { .. } => owners.clone(),
+        WaitingFor::NamedChoice { .. } => owners.clone(),
+        WaitingFor::OpponentGuess { .. } => owners.clone(),
+        WaitingFor::SpellbookDraft { .. } => owners.clone(),
+        WaitingFor::DamageSourceChoice { .. } => owners.clone(),
+        WaitingFor::ModeChoice { .. } => owners.clone(),
+        WaitingFor::DiscardToHandSize { .. } => owners.clone(),
+        WaitingFor::OptionalCostChoice { .. } => owners.clone(),
+        WaitingFor::ChooseGiftRecipient { .. } => owners.clone(),
+        WaitingFor::SpliceOffer { .. } => owners.clone(),
+        WaitingFor::DefilerPayment { .. } => owners.clone(),
+        WaitingFor::OrderCostReductions { .. } => owners.clone(),
+        WaitingFor::CastOffer { .. } => owners.clone(),
+        WaitingFor::ModalFaceChoice { .. } => owners.clone(),
+        WaitingFor::AlternativeCastChoice { .. } => owners.clone(),
+        WaitingFor::MutateMergeChoice { .. } => owners.clone(),
+        WaitingFor::CipherEncodeChoice { .. } => owners.clone(),
+        WaitingFor::CastingVariantChoice { .. } => owners.clone(),
+        WaitingFor::ChoosePermanentTypeSlot { .. } => owners.clone(),
+        WaitingFor::MultiTargetSelection { .. } => owners.clone(),
+        WaitingFor::AbilityModeChoice { .. } => owners.clone(),
+        WaitingFor::OptionalEffectChoice { .. } => owners.clone(),
+        WaitingFor::ResolutionOptionalPaymentChoice { .. } => owners.clone(),
+        WaitingFor::PairChoice { .. } => owners.clone(),
+        WaitingFor::TributeChoice { .. } => owners.clone(),
+        WaitingFor::MiracleReveal { .. } => owners.clone(),
+        WaitingFor::OpponentMayChoice { .. } => owners.clone(),
+        WaitingFor::LoopShortcut { .. } => owners.clone(),
+        WaitingFor::RespondToShortcut { .. } => owners.clone(),
+        WaitingFor::PrecastCopyShortcutOffer { .. } => owners.clone(),
+        WaitingFor::RespondToPrecastCopyShortcut { .. } => owners.clone(),
+        WaitingFor::UnlessPayment { .. } => owners.clone(),
+        WaitingFor::UnlessPaymentChooseCost { .. } => owners.clone(),
+        WaitingFor::WardDiscardChoice { .. } => owners.clone(),
+        WaitingFor::WardSacrificeChoice { .. } => owners.clone(),
+        WaitingFor::UnlessBounceChoice { .. } => owners.clone(),
+        WaitingFor::ChooseRingBearer { .. } => owners.clone(),
+        WaitingFor::ChooseRoomDoor { .. } => owners.clone(),
+        WaitingFor::ChooseDungeon { .. } => owners.clone(),
+        WaitingFor::ChooseDungeonRoom { .. } => owners.clone(),
+        WaitingFor::SpecializeColor { .. } => owners.clone(),
+        WaitingFor::PayCost { .. } => owners.clone(),
+        WaitingFor::ActivationCostOneOfChoice { .. } => owners.clone(),
+        WaitingFor::CostTypeChoice { .. } => owners.clone(),
+        WaitingFor::BlightChoice { .. } => owners.clone(),
+        WaitingFor::PayManaAbilityMana { .. } => owners.clone(),
+        WaitingFor::ManaAbilityManaPayment { .. } => owners.clone(),
+        WaitingFor::ChooseManaColor { .. } => owners.clone(),
+        WaitingFor::CollectEvidenceChoice { .. } => owners.clone(),
+        WaitingFor::HarmonizeTapChoice { .. } => owners.clone(),
+        WaitingFor::RevealUntilKeptChoice { .. } => owners.clone(),
+        WaitingFor::RepeatDecision { .. } => owners.clone(),
+        WaitingFor::TopOrBottomChoice { .. } => owners.clone(),
+        WaitingFor::PopulateChoice { .. } => owners.clone(),
+        WaitingFor::ClashChooseOpponent { .. } => owners.clone(),
+        WaitingFor::ChooseFromZoneOpponentChooser { .. } => owners.clone(),
+        WaitingFor::ChooseAnnouncingOpponent { .. } => owners.clone(),
+        WaitingFor::ClashCardPlacement { .. } => owners.clone(),
+        WaitingFor::PhysicalContest { .. } => owners.clone(),
+        WaitingFor::VoteChoice { .. } => owners.clone(),
+        WaitingFor::SeparatePilesChooseOpponent { .. } => owners.clone(),
+        WaitingFor::SeparatePilesPartition { .. } => owners.clone(),
+        WaitingFor::SeparatePilesChoice { .. } => owners.clone(),
+        WaitingFor::SecretAgendaChoice { .. } => owners.clone(),
+        WaitingFor::CompanionReveal { .. } => owners.clone(),
+        WaitingFor::ChooseLegend { .. } => owners.clone(),
+        WaitingFor::CommanderZoneChoice { .. } => owners.clone(),
+        WaitingFor::BattleProtectorChoice { .. } => owners.clone(),
+        WaitingFor::ProliferateChoice { .. } => owners.clone(),
+        WaitingFor::TimeTravelChoice { .. } => owners.clone(),
+        WaitingFor::ChooseObjectsSelection { .. } => owners.clone(),
+        WaitingFor::CategoryChoice { .. } => owners.clone(),
+        WaitingFor::EachPlayerCopyChosenSelection { .. } => owners.clone(),
+        WaitingFor::KeepWithinTotalPowerChoice { .. } => owners.clone(),
+        WaitingFor::KeepExactPermanentsChoice { .. } => owners.clone(),
+        WaitingFor::CopyRetarget { .. } => owners.clone(),
+        WaitingFor::AssignCombatDamage { .. } => owners.clone(),
+        WaitingFor::AssignBlockerDamage { .. } => owners.clone(),
+        WaitingFor::DistributeAmong { .. } => owners.clone(),
+        WaitingFor::MoveCountersDistribution { .. } => owners.clone(),
+        WaitingFor::RemoveCountersChoice { .. } => owners.clone(),
+        WaitingFor::PayAmountChoice { .. } => owners.clone(),
+        WaitingFor::RetargetChoice { .. } => owners.clone(),
+        WaitingFor::CombatTaxPayment { .. } => owners.clone(),
+        WaitingFor::PhyrexianPayment { .. } => owners.clone(),
     };
     let owners = if unpassed.is_empty() {
         owners
@@ -626,7 +775,9 @@ mod tests {
     };
     use engine::game::engine::{apply, start_game_with_starting_player};
     use engine::game::mulligan::free_reveal_futile_for;
+    use engine::game::topology::shared_poison_members;
     use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
+    use engine::types::ability::EffectKind;
     use engine::types::ability::{
         AbilityDefinition, AbilityKind, Effect, QuantityExpr, ResolvedAbility, TargetFilter,
     };
@@ -635,7 +786,7 @@ mod tests {
     use engine::types::format::{ChallengeDeck, FormatConfig};
     use engine::types::game_state::{
         AutoMayChoice, MayTriggerAutoChoiceKey, MayTriggerOrigin, StackEntry, StackEntryKind,
-        StackResolutionPolicy, WaitingFor,
+        StackResolutionPolicy, UntapStepProgress, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::phase::Phase;
@@ -1256,25 +1407,174 @@ mod tests {
             "the ally must act or pass on its team's turn"
         );
 
-        // Stage 2: a live stack. The ally's pass must take the verified
-        // stack-pass path (permits + same-window owner check) and record
-        // without ApplyFailed. The stack stays: the human rep never passes,
-        // so unanimous pass is correctly not reached.
+        // S1 context (labelled, never asserted): Stage 1's unbounded drain
+        // ends this horde fixture's game (`GameOver`), so no same-fixture
+        // Stage-2 presence is asserted here — a presence on the drained
+        // fixture is unachievable. The Stage-2 honesty proof lives in
+        // `ai_ally_pass_records_on_live_team_stack`, on a dedicated live 2HG
+        // fixture, instead.
+    }
+
+    /// CR 805.5b Stage-2 honesty on a live stack: the AI ally's pass records
+    /// on a dedicated 2HG fixture. Stage 1's horde fixture cannot carry this
+    /// proof — its unbounded drain ends the game — so this test parks a live
+    /// window on the human representative with the ally holding an empty hand:
+    /// the ally's only legal action is the pass, and the human rep never
+    /// passes, so unanimous pass is unreachable and the stack must stay.
+    #[test]
+    fn ai_ally_pass_records_on_live_team_stack() {
+        let rep = PlayerId(0);
+        let ally = PlayerId(1);
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 7);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = rep;
+        state.priority_player = rep;
+        state.waiting_for = WaitingFor::Priority { player: rep };
         push_no_op_stack_entry(&mut state, 91_001);
+        // Layout probe: the 2HG family pools poison per team off the same
+        // `team_members` authority (`topology.rs`), so the public
+        // `shared_poison_members` read-out proves the ally shares the rep's
+        // team. If the 2HG seat layout ever differs, this reds first.
+        assert!(
+            shared_poison_members(&state, rep).contains(&ally),
+            "layout: the ally must share the representative's team"
+        );
+        // Pre-run liveness quartet: a dead fixture must red here, never as a
+        // vacuous post-run green.
+        assert!(
+            state.game_end.is_none(),
+            "the fixture must be live before the driver runs"
+        );
+        assert!(
+            matches!(&state.waiting_for, WaitingFor::Priority { player } if *player == rep),
+            "the window must be parked on the human rep, got {:?}",
+            state.waiting_for
+        );
+        assert!(!state.stack.is_empty(), "the stack must be live");
+        assert!(
+            state.priority_passes.is_empty(),
+            "no passes may be recorded before the driver runs"
+        );
+        // Absence: construction yields empty passes; pre-seeding the ally
+        // reds this and proves the presence below is driver-produced.
+        assert!(
+            !state.priority_passes.contains(&ally),
+            "absence: the ally must hold no pass before the driver runs"
+        );
+        let top_id = state.stack.back().map(|entry| entry.id);
+
+        let ai_players = HashSet::from([ally]);
+        let ai_configs = HashMap::from([(ally, AiConfig::default())]);
         let session = AiSession::arc_from_game(&state);
+        let mut rng = rand::rngs::SmallRng::seed_from_u64(7);
         let run = run_ai_actions(&mut state, &ai_players, &ai_configs, &mut rng, &session);
+
         assert!(
             !matches!(run.stop, AiActionsStop::ApplyFailed { .. }),
             "ally stack passes must apply, got {:?}",
             run.stop
         );
-        assert!(
-            !state.stack.is_empty(),
-            "the human rep never passed, so the stack must stay"
-        );
+        // Presence is `contains`, not equality: the driver's verified-pass
+        // session path may also account the parked representative's window,
+        // while a direct `apply` records exactly the acting teammate. The
+        // test proves the ally's pass records; it does not lock in the
+        // session path's extra record.
         assert!(
             state.priority_passes.contains(&ally),
-            "the ally's pass must record on the live stack"
+            "presence: the ally's pass must record on the live stack"
         );
+        assert_eq!(
+            run.results.len(),
+            1,
+            "exactly the ally's single pass — Stage-2 honesty, not a vacuous green"
+        );
+        assert!(
+            matches!(run.stop, AiActionsStop::NoEligibleAiActor),
+            "clean handoff once no AI seat can act, got {:?}",
+            run.stop
+        );
+        assert!(
+            state.game_end.is_none(),
+            "anti-S1 tripwire: the game must still be live after the run"
+        );
+        assert_eq!(state.stack.len(), 1, "the stack must stay");
+        assert_eq!(
+            state.stack.back().map(|entry| entry.id),
+            top_id,
+            "the same top entry must survive — no resolution ran"
+        );
+    }
+
+    /// U6 hardening (no revert claim): outside `Priority`, an already-passed
+    /// member stays eligible — the unpassed filter lives only on the
+    /// `Priority` arm. Exhaustiveness is compile-time (no fallback arm); this
+    /// pins dispatch parity for one window per family (turn action, step
+    /// choice, resolution choice).
+    #[test]
+    fn non_priority_windows_ignore_pass_records() {
+        let rep = PlayerId(1);
+        let ally = PlayerId(2);
+        let mut state = GameState::new(
+            FormatConfig::horde(ChallengeDeck::ZombiesHorde.default_ruleset()),
+            4,
+            42,
+        );
+        state.phase = Phase::PreCombatMain;
+        state.active_player = rep;
+        state.priority_player = rep;
+        state.priority_passes.insert(ally);
+        state.priority_pass_count = 1;
+        let ai_players = HashSet::from([ally]);
+
+        // Contrast: on `Priority` the passed ally is filtered out, so nobody
+        // is eligible.
+        state.waiting_for = WaitingFor::Priority { player: rep };
+        assert!(
+            eligible_ai_decision(&state, &ai_players).is_none(),
+            "the unpassed filter must hide a passed member on Priority"
+        );
+
+        let windows = [
+            (
+                "DeclareAttackers",
+                WaitingFor::DeclareAttackers {
+                    player: ally,
+                    valid_attacker_ids: Vec::new(),
+                    valid_attack_targets: Vec::new(),
+                    valid_attack_targets_by_attacker: None,
+                    attacker_constraints: Default::default(),
+                },
+            ),
+            (
+                "ChooseUntapSubset",
+                WaitingFor::ChooseUntapSubset {
+                    player: ally,
+                    group: Vec::new(),
+                    max: 1,
+                    progress: UntapStepProgress::AfterTurnBasedActions,
+                },
+            ),
+            (
+                "DiscardChoice",
+                WaitingFor::DiscardChoice {
+                    player: ally,
+                    count: 1,
+                    cards: Vec::new(),
+                    source_id: ObjectId(9),
+                    effect_kind: EffectKind::Discard,
+                    up_to: false,
+                    unless_filter: None,
+                    discard_frame: None,
+                },
+            ),
+        ];
+        for (label, waiting) in windows {
+            state.waiting_for = waiting;
+            assert_eq!(
+                eligible_ai_decision(&state, &ai_players),
+                Some((ally, ally)),
+                "{label} must resolve to the engine's acting players unchanged"
+            );
+        }
     }
 }
