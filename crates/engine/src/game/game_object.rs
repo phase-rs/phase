@@ -4743,13 +4743,16 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// CR 607.2d: the persisted chosen player in a set of chosen attributes, live
-/// or last-known. The single reader behind [`GameObject::chosen_player`].
+/// CR 607.2d: the latest persisted chosen player in a set of chosen attributes, live or
+/// last-known. The single reader behind [`GameObject::chosen_player`].
 pub(crate) fn chosen_player_in(attributes: &[ChosenAttribute]) -> Option<PlayerId> {
-    attributes.iter().find_map(|attribute| match attribute {
-        ChosenAttribute::Player(player) => Some(*player),
-        _ => None,
-    })
+    attributes
+        .iter()
+        .rev()
+        .find_map(|attribute| match attribute {
+            ChosenAttribute::Player(player) => Some(*player),
+            _ => None,
+        })
 }
 
 /// CR 607.2d + CR 608.2c: Resolve "the chosen player" from the source's

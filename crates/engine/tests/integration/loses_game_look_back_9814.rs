@@ -12,7 +12,7 @@ use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::{ChoiceType, ChosenAttribute};
 use engine::types::actions::GameAction;
 use engine::types::events::{GameEvent, LossReason};
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaType::{Black as B, Blue as U, Green as G, Red as R, White as W};
 use engine::types::mana::{ManaType, ManaUnit};
@@ -325,11 +325,9 @@ fn stolen_share_the_spoils_triggers_when_its_owner_concedes() {
     );
 }
 
-/// R4: with Maskwood Nexus, Shinryu is a Human, so Moonmist turns it back and then to Shinryu
-/// again. CR 712.18: it stays the same object; CR 607.2d: "the chosen player" is the player
-/// chosen by the most recent transformation's linked choice, not the first.
-#[test]
-fn re_transformed_shinryu_reads_only_the_latest_choice() {
+/// R4's board: with Maskwood Nexus, Shinryu is a Human, so Moonmist turns it back and then to
+/// Shinryu again (chose P1, then P2). CR 712.18: it stays the same object.
+fn re_transformed() -> Board {
     let mists = [(P0, "Moonmist"); 3];
     let mut board = board(P0, &mists, &[(P0, "Maskwood Nexus")]);
     let (zenos, mists) = (board.zenos, board.hand.clone());
@@ -337,18 +335,43 @@ fn re_transformed_shinryu_reads_only_the_latest_choice() {
     assert_eq!(chosen(&board.runner, zenos), [ChosenAttribute::Player(P1)]);
     moonmist(&mut board.runner, mists[1], zenos, None);
     moonmist(&mut board.runner, mists[2], zenos, Some(P2));
-    let latest = chosen(&board.runner, zenos);
-    assert_eq!(
-        latest,
-        [ChosenAttribute::Player(P2)],
-        "CR 607.2d: the new choice replaces"
-    );
+    board
+}
+
+/// R4, CR 607.2d: "the chosen player" is the most recent linked choice, not the first.
+#[test]
+fn re_transformed_shinryu_reads_only_the_latest_choice() {
+    let mut board = re_transformed();
+    let latest = chosen(&board.runner, board.zenos);
+    assert_eq!(latest, [ChosenAttribute::Player(P2)], "CR 607.2d: replaced");
     lose(&mut board, P1, Loss::Life);
-    assert_eq!(
-        winner(&board.runner),
-        None,
-        "P1 was chosen by an earlier transformation"
-    );
+    assert_eq!(winner(&board.runner), None, "P1 was an earlier choice");
     lose(&mut board, P2, Loss::Life);
     assert_eq!(winner(&board.runner), Some(Some(P0)));
+}
+
+/// R6: a game saved before the fix holds both choices, oldest first (the save is rewritten to
+/// that shape). Restored through the production pipeline, the chosen player is the latest.
+#[test]
+fn restored_pre_fix_shinryu_reads_its_latest_choice() {
+    let mut board = re_transformed();
+    let both = [ChosenAttribute::Player(P1), ChosenAttribute::Player(P2)];
+    let key = "\"chosen_attributes\":";
+    let field = |c: &[_]| key.to_owned() + &serde_json::to_string(c).unwrap();
+    let saved = PersistedGameState::capture(board.runner.state().clone());
+    let saved = serde_json::to_string(&saved).unwrap();
+    let held = saved.contains(&field(&both[1..]));
+    assert!(held, "reach: the save holds it");
+    let saved = saved.replace(&field(&both[1..]), &field(&both));
+    for (loser, loss, won) in [(P2, Loss::Concede, Some(Some(P0))), (P1, Loss::Life, None)] {
+        let restore = serde_json::from_str::<PersistedGameState>(&saved).unwrap();
+        let ready = restore.prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated);
+        let ready = ready.unwrap();
+        board.runner =
+            GameRunner::from_state(ready.finalize_after_rehydration(|_| Ok(())).unwrap());
+        let restored = chosen(&board.runner, board.zenos);
+        assert_eq!(restored, both, "reach: restored as saved");
+        lose(&mut board, loser, loss);
+        assert_eq!(winner(&board.runner), won, "{loser:?} lost");
+    }
 }
