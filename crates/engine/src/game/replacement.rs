@@ -7706,6 +7706,31 @@ fn evaluate_replacement_condition(
                 ..
             }
         ),
+        // CR 614.16: "if an effect would put one or more counters" — true iff
+        // the event is a counter placement (an `AddCounter`, or the add stage
+        // of a `MoveCounter`) whose cause is effect-driven: the resolving
+        // spell/ability effect itself, or another replacement/prevention
+        // effect's modification. Cost payments and turn-based actions stamp
+        // `Other` and fail closed here.
+        ReplacementCondition::EffectCausedPlacement => {
+            let cause = match event {
+                ProposedEvent::AddCounter { placement, .. } => match placement {
+                    CounterPlacement::Object { cause, .. }
+                    | CounterPlacement::Player { cause, .. }
+                    | CounterPlacement::Energy { cause, .. } => Some(*cause),
+                },
+                ProposedEvent::MoveCounter {
+                    stage: CounterMoveStage::Add,
+                    cause,
+                    ..
+                } => Some(*cause),
+                _ => None,
+            };
+            matches!(
+                cause,
+                Some(CounterCause::ResolvingEffect | CounterCause::ReplacementOrPrevention)
+            )
+        }
         // CR 500.7 + CR 614.10: Replacement applies only for extra turns.
         // Checks the event's `is_extra_turn` flag directly; returns `false` for
         // any non-`BeginTurn` event so a misattached `OnlyExtraTurn` doesn't
@@ -23249,6 +23274,176 @@ mod tests {
             None,
             &dummy_begin_turn_event(),
         ));
+    }
+
+    /// CR 614.16 (V7): `EffectCausedPlacement` is true iff the event is a
+    /// counter placement — an `AddCounter`, or the add stage of a
+    /// `MoveCounter` — whose `CounterCause` is effect-driven
+    /// (`ResolvingEffect` or `ReplacementOrPrevention`). Cost payments and
+    /// turn-based actions stamp `Other` and fail closed here, as do
+    /// non-placement events and the move's remove stage. Hand-built defs over
+    /// hand-built events: no parser-tagged def exists yet (Phase 4), and no
+    /// caller assigns a real cause yet (Phase 3), so every `Other` row doubles
+    /// as the pre-tag neutrality proof — the arm is reachable but inert.
+    #[test]
+    fn effect_caused_placement_matches_effect_driven_counter_placements() {
+        use crate::types::player::PlayerCounterKind;
+
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        let condition = ReplacementCondition::EffectCausedPlacement;
+        let check = |event: &ProposedEvent| {
+            evaluate_replacement_condition(
+                &condition,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                None,
+                event,
+            )
+        };
+        let add_object = |cause| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Object {
+                actor: PlayerId(0),
+                object_id: ObjectId(30),
+                counter_type: CounterType::Plus1Plus1,
+                cause,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let add_player = |cause| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Player {
+                actor: PlayerId(0),
+                player_id: PlayerId(1),
+                counter_kind: PlayerCounterKind::Poison,
+                cause,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let add_energy = |cause| ProposedEvent::AddCounter {
+            placement: CounterPlacement::Energy {
+                actor: PlayerId(0),
+                player_id: PlayerId(0),
+                cause,
+            },
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let move_add = |cause| ProposedEvent::MoveCounter {
+            actor: PlayerId(0),
+            source_id: ObjectId(30),
+            destination_id: ObjectId(31),
+            counter_type: CounterType::Plus1Plus1,
+            remove_count: 1,
+            add_count: 1,
+            stage: CounterMoveStage::Add,
+            cause,
+            applied: HashSet::new(),
+        };
+
+        // Condition x event-kind x cause: effect-driven placements match on
+        // every placement shape; `Other` (cost / turn-based-action / Phase-1
+        // default) fails closed on every shape.
+        for cause in [
+            CounterCause::ResolvingEffect,
+            CounterCause::ReplacementOrPrevention,
+        ] {
+            assert!(
+                check(&add_object(cause)),
+                "{cause:?} object placement must match"
+            );
+            assert!(
+                check(&add_player(cause)),
+                "{cause:?} player placement must match"
+            );
+            assert!(
+                check(&add_energy(cause)),
+                "{cause:?} energy placement must match"
+            );
+            assert!(
+                check(&move_add(cause)),
+                "{cause:?} move-add stage must match"
+            );
+        }
+        for event in [
+            add_object(CounterCause::Other),
+            add_player(CounterCause::Other),
+            add_energy(CounterCause::Other),
+            move_add(CounterCause::Other),
+        ] {
+            assert!(!check(&event), "Other-caused placement must fail closed");
+        }
+
+        // Sibling/negative: the move's remove stage is not a "put" even when
+        // the initiating cause is effect-driven; non-counter events never match
+        // even when they carry their own effect flag (per-arm isolation from
+        // the Leng arm).
+        assert!(
+            !check(&ProposedEvent::MoveCounter {
+                actor: PlayerId(0),
+                source_id: ObjectId(30),
+                destination_id: ObjectId(31),
+                counter_type: CounterType::Plus1Plus1,
+                remove_count: 1,
+                add_count: 1,
+                stage: CounterMoveStage::Remove,
+                cause: CounterCause::ResolvingEffect,
+                applied: HashSet::new(),
+            }),
+            "move-remove stage must not match"
+        );
+        assert!(
+            !check(&ProposedEvent::CreateToken {
+                owner: PlayerId(1),
+                count: 1,
+                spec: Box::new(test_token_spec(PlayerId(0), CoreType::Creature)),
+                copy: None,
+                enter_tapped: EtbTapState::Unspecified,
+                appended: Vec::new(),
+                applied: HashSet::new(),
+            }),
+            "CreateToken must fail closed"
+        );
+        assert!(
+            !check(&ProposedEvent::Discard {
+                player_id: PlayerId(1),
+                object_id: ObjectId(40),
+                source_id: None,
+                caused_by_effect: true,
+                discard_frame: None,
+                applied: HashSet::new(),
+            }),
+            "an effect-caused discard must not match the placement gate"
+        );
+
+        // Hostile stacking shape (Selesnya ruling): two copies of the condition
+        // compose — both see the same effect-driven placement.
+        let doubled = ReplacementCondition::And {
+            conditions: vec![condition.clone(), condition],
+        };
+        assert!(
+            evaluate_replacement_condition(
+                &doubled,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                None,
+                &add_object(CounterCause::ResolvingEffect),
+            ),
+            "stacked copies must both match an effect placement"
+        );
+        assert!(
+            !evaluate_replacement_condition(
+                &doubled,
+                PlayerId(0),
+                ObjectId(10),
+                &state,
+                None,
+                &add_object(CounterCause::Other),
+            ),
+            "stacked copies must both reject an Other placement"
+        );
     }
 
     #[test]
