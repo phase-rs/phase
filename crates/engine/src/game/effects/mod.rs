@@ -31676,11 +31676,21 @@ fn resolve_condition_referent(
             let pin = match event {
                 // CR 601.2i + CR 400.7: a cast trigger names the occurrence it was put on the
                 // stack for (`triggering_spell_identity`), so a same-id recast cannot answer for it.
-                GameEvent::SpellCast { .. } => Some(
+                GameEvent::SpellCast {
+                    card_id: _,
+                    controller: _,
+                    object_id: _,
+                    cast_mana_value: _,
+                } => Some(
                     targeting::triggering_spell_identity(state)
                         .or_else(|| spell_event_incarnation(state, id))?,
                 ),
-                GameEvent::SpellCopied { .. } => Some(spell_event_incarnation(state, id)?),
+                GameEvent::SpellCopied {
+                    card_id: _,
+                    controller: _,
+                    object_id: _,
+                    original_id: _,
+                } => Some(spell_event_incarnation(state, id)?),
                 _ => {
                     targeting::event_context_incarnation(&TargetFilter::TriggeringSource, event, id)
                 }
@@ -31703,7 +31713,7 @@ fn resolve_condition_referent(
             if let Some(index) = subject_slot {
                 return match targeting::resolve_live_parent_slot_from_root(state, ability, index) {
                     Some(TargetRef::Object(id)) => Some(unpinned(id)),
-                    _ => None,
+                    Some(TargetRef::Player(_)) | None => None,
                 };
             }
             // CR 608.2c + CR 301.5a + CR 301.5f: "put a +1/+1 counter on
@@ -31724,7 +31734,7 @@ fn resolve_condition_referent(
             }) {
                 return match hosts.as_slice() {
                     [host] => Some(unpinned(*host)),
-                    _ => None,
+                    [] | [_, _, ..] => None,
                 };
             }
             // CR 400.7 + CR 608.2b: the first object target keeps its announced
@@ -31792,7 +31802,13 @@ fn evaluate_target_matches_filter(
     let id = referent.id;
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
     if use_lki {
-        if let Some(GameEvent::ZoneChanged { record, .. }) = state.current_trigger_event.as_ref() {
+        if let Some(GameEvent::ZoneChanged {
+            object_id: _,
+            from: _,
+            to: _,
+            record,
+        }) = state.current_trigger_event.as_ref()
+        {
             if record.object_id == id {
                 return crate::game::filter::matches_target_filter_on_zone_change_record(
                     state, record, filter, &ctx,

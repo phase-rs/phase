@@ -28970,7 +28970,7 @@ fn target_has_pt_threshold_gate_lowers_to_target_filter() {
             filter: TargetFilter::Typed(tf),
             use_lki: false,
             subject_slot: None,
-            ..
+            subject: ObjectScope::Target,
         }) = &def.condition
         {
             if let [FilterProp::PtComparison {
@@ -36379,12 +36379,21 @@ fn mana_value_referent_gate_binds_the_object_the_clause_names() {
             gates(sub, out);
         }
     }
+    /// Parse `text` as the printed card `name` with printed `type_line` ("Legendary Creature — Human Shaman") and the
+    /// keywords MTGJSON lists for it, and collect its mana-value gates.
     fn gates_of(
         text: &str,
         name: &str,
-        types: &[&str],
+        type_line: &str,
+        keywords: &[Keyword],
     ) -> Vec<(String, ObjectScope, bool, Comparator, i32)> {
-        let r = parse(text, name, &[], types, &[]);
+        let (head, subtypes) = type_line.split_once(" — ").unwrap_or((type_line, ""));
+        let types: Vec<&str> = head
+            .split_whitespace()
+            .filter(|w| !matches!(*w, "Legendary" | "Basic" | "Snow"))
+            .collect();
+        let subtypes: Vec<&str> = subtypes.split_whitespace().collect();
+        let r = parse(text, name, keywords, &types, &subtypes);
         let mut out = Vec::new();
         for def in r
             .abilities
@@ -36396,45 +36405,53 @@ fn mana_value_referent_gate_binds_the_object_the_clause_names() {
         out
     }
 
-    for (name, text, types, expected) in [
+    // (name, printed type line, keywords, verbatim Oracle text, expected gate). Name, type line and text are the
+    // Scryfall `cards/named?exact=` values (checked by `results/111/scripts/check_printed.py`).
+    for (name, type_line, keywords, text, expected) in [
         (
             "Reject Imperfection",
-            "Counter target spell. If that spell's mana value was 3 or less, proliferate.",
-            &["Instant"][..],
+            "Instant",
+            &[][..],
+            "Counter target spell. If that spell's mana value was 3 or less, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
             ("Proliferate", ObjectScope::Target, true, Comparator::LE, 3),
         ),
         (
             "Sound the Trumpets",
-            "Counter target spell. If that spell's mana value was 2 or less, recruit.",
-            &["Instant"][..],
+            "Instant",
+            &[][..],
+            "Counter target spell. If that spell's mana value was 2 or less, recruit. (Draw a card, then discard a card. If you discarded a nonland card, create a 1/1 white Human Soldier creature token.)",
             ("Draw", ObjectScope::Target, true, Comparator::LE, 2),
         ),
         (
             "Carnivorous Canopy",
-            "Destroy target artifact, enchantment, or creature with flying. If that permanent's mana value was 3 or less, proliferate.",
-            &["Instant"][..],
+            "Sorcery",
+            &[][..],
+            "Destroy target artifact, enchantment, or creature with flying. If that permanent's mana value was 3 or less, proliferate. (Choose any number of permanents and/or players, then give each another counter of each kind already there.)",
             ("Proliferate", ObjectScope::Target, true, Comparator::LE, 3),
         ),
         (
             "Vindictive Triumph",
+            "Instant",
+            &[][..],
             "Exile target creature or planeswalker. If that permanent's mana value was 3 or less, return it to the battlefield tapped under your control. Exile it at the beginning of the next end step.",
-            &["Instant"][..],
             ("ChangeZone", ObjectScope::Target, true, Comparator::LE, 3),
         ),
         (
             "Prismari Apprentice",
+            "Creature — Human Shaman",
+            &[][..],
             "Magecraft — Whenever you cast or copy an instant or sorcery spell, this creature can't be blocked this turn. If that spell has mana value 5 or greater, put a +1/+1 counter on this creature.",
-            &["Creature"][..],
             ("PutCounter", ObjectScope::EventSource, false, Comparator::GE, 5),
         ),
         (
             "Herald of Ilharg",
-            "Whenever you cast a creature spell, put two +1/+1 counters on this creature. If that spell has mana value 5 or greater, this creature deals damage equal to the number of counters on it to each opponent.",
-            &["Creature"][..],
+            "Creature — Boar Beast",
+            &[Keyword::Trample][..],
+            "Trample\nWhenever you cast a creature spell, put two +1/+1 counters on this creature. If that spell has mana value 5 or greater, this creature deals damage equal to the number of counters on it to each opponent.",
             ("DamageEachPlayer", ObjectScope::EventSource, false, Comparator::GE, 5),
         ),
     ] {
-        let found = gates_of(text, name, types);
+        let found = gates_of(text, name, type_line, keywords);
         let (effect, subject, use_lki, comparator, threshold) = expected;
         assert_eq!(
             found,
@@ -36446,18 +36463,20 @@ fn mana_value_referent_gate_binds_the_object_the_clause_names() {
     // Claim set: the present-tense possessive "that spell's mana value is N or greater" keeps
     // its quantity route (it is not claimed by the mana-value noun surface), so the printed
     // cards that use it stay as they were (Prismari Pianist, Zaffai, Thunder Conductor).
-    for (name, text) in [
+    for (name, type_line, text) in [
         (
             "Prismari Pianist",
+            "Creature — Djinn Bard",
             "Whenever you cast an instant or sorcery spell, create a 1/1 blue and red Elemental creature token. If that spell's mana value is 5 or greater, create three of those tokens instead.",
         ),
         (
             "Zaffai, Thunder Conductor",
+            "Legendary Creature — Human Shaman",
             "Magecraft — Whenever you cast or copy an instant or sorcery spell, scry 1. If that spell's mana value is 5 or greater, create a 4/4 blue and red Elemental creature token. If that spell's mana value is 10 or greater, Zaffai deals 10 damage to an opponent chosen at random.",
         ),
     ] {
         assert!(
-            gates_of(text, name, &["Creature"]).is_empty(),
+            gates_of(text, name, type_line, &[]).is_empty(),
             "{name}: the present-tense `is` form is not a TargetMatchesFilter mana-value gate"
         );
     }

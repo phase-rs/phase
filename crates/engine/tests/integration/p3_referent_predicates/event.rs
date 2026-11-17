@@ -15,8 +15,7 @@ use engine::types::zones::Zone;
 // ---------------------------------------------------------------- Herald of Ilharg (printed 3/3)
 
 fn add_herald(sc: &mut engine::game::scenario::GameScenario) -> ObjectId {
-    sc.add_creature_from_oracle(P0, "Herald of Ilharg", 3, 3, HERALD_OF_ILHARG)
-        .id()
+    add_creature_on_battlefield(sc, P0, &HERALD_OF_ILHARG)
 }
 
 /// P0 casts a textless filler creature spell of mana value `mv`; nothing responds.
@@ -76,22 +75,16 @@ fn herald_countered(mv: u32, x: Option<u32>) -> (GameRunner, ObjectId, ObjectId,
     let mut sc = scenario();
     let extra = x.map_or(mv as usize, |x| 2 * x as usize);
     sc.with_mana_pool(P0, mana_for(&[], extra));
-    sc.with_mana_pool(P1, mana_for(&[ESSENCE_SCATTER_COST], 0));
+    sc.with_mana_pool(P1, mana_for(&[ESSENCE_SCATTER.cost], 0));
     let herald = add_herald(&mut sc);
     let spell = match x {
-        Some(_) => sc
-            .add_creature_to_hand_from_oracle(P0, "Walking Ballista", 0, 0, WALKING_BALLISTA)
-            .with_mana_cost(cost(WALKING_BALLISTA_COST))
-            .id(),
+        Some(_) => add_creature_in_hand(&mut sc, P0, &WALKING_BALLISTA),
         None => sc
             .add_creature_to_hand(P0, "Filler Bear", 2, 2)
             .with_mana_cost(ManaCost::generic(mv))
             .id(),
     };
-    let scatter = sc
-        .add_spell_to_hand_from_oracle(P1, "Essence Scatter", true, ESSENCE_SCATTER)
-        .with_mana_cost(cost(ESSENCE_SCATTER_COST))
-        .id();
+    let scatter = add_spell(&mut sc, P1, &ESSENCE_SCATTER);
     let mut r = sc.build();
     cast_spell(&mut r, spell);
     if let Some(x) = x {
@@ -197,20 +190,16 @@ fn cant_be_blocked(state: &GameState, id: ObjectId) -> bool {
 }
 
 fn add_prismari(sc: &mut engine::game::scenario::GameScenario) -> ObjectId {
-    sc.add_creature_from_oracle(P0, "Prismari Apprentice", 2, 2, PRISMARI_APPRENTICE)
-        .id()
+    add_creature_on_battlefield(sc, P0, &PRISMARI_APPRENTICE)
 }
 
 /// P0 casts a real sorcery with no target (Overrun MV 5 / Harmonize MV 4): the magecraft trigger fires on the CAST.
-fn prismari_cast(name: &str, oracle: &str, printed_cost: &str) -> (GameRunner, ObjectId) {
+fn prismari_cast(card: &Printed) -> (GameRunner, ObjectId) {
     let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[printed_cost], 0));
+    sc.with_mana_pool(P0, mana_for(&[card.cost], 0));
     sc.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
     let p = add_prismari(&mut sc);
-    let spell = sc
-        .add_spell_to_hand_from_oracle(P0, name, false, oracle)
-        .with_mana_cost(cost(printed_cost))
-        .id();
+    let spell = add_spell(&mut sc, P0, card);
     let mut r = sc.build();
     let out = r.cast(spell).resolve();
     assert_eq!(
@@ -228,7 +217,7 @@ fn prismari_cast(name: &str, oracle: &str, printed_cost: &str) -> (GameRunner, O
 
 #[test]
 fn p3s2a_prismari_mv5_cast_is_unblockable_and_gets_a_counter() {
-    let (r, p) = prismari_cast("Overrun", OVERRUN, OVERRUN_COST);
+    let (r, p) = prismari_cast(&OVERRUN);
     assert!(cant_be_blocked(r.state(), p), "can't be blocked this turn");
     assert_eq!(
         plus_counters(r.state(), p),
@@ -239,7 +228,7 @@ fn p3s2a_prismari_mv5_cast_is_unblockable_and_gets_a_counter() {
 
 #[test]
 fn p3s2a_prismari_mv4_cast_is_unblockable_with_no_counter() {
-    let (r, p) = prismari_cast("Harmonize", HARMONIZE, HARMONIZE_COST);
+    let (r, p) = prismari_cast(&HARMONIZE);
     assert!(
         cant_be_blocked(r.state(), p),
         "reach guard: the unblockable sentence is unconditional"
@@ -251,16 +240,10 @@ fn p3s2a_prismari_mv4_cast_is_unblockable_with_no_counter() {
 /// cast Overrun (MV 5), cast Twincast (MV 2), copy of Overrun (MV 5). Printed: counters on the first and the third = 2.
 fn prismari_twincast() -> (GameRunner, ObjectId, Vec<GameEvent>) {
     let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[OVERRUN_COST, TWINCAST_COST], 0));
+    sc.with_mana_pool(P0, mana_for(&[OVERRUN.cost, TWINCAST.cost], 0));
     let p = add_prismari(&mut sc);
-    let overrun = sc
-        .add_spell_to_hand_from_oracle(P0, "Overrun", false, OVERRUN)
-        .with_mana_cost(cost(OVERRUN_COST))
-        .id();
-    let twincast = sc
-        .add_spell_to_hand_from_oracle(P0, "Twincast", true, TWINCAST)
-        .with_mana_cost(cost(TWINCAST_COST))
-        .id();
+    let overrun = add_spell(&mut sc, P0, &OVERRUN);
+    let twincast = add_spell(&mut sc, P0, &TWINCAST);
     let mut r = sc.build();
     let mut c = r.cast(overrun).commit();
     let mut events: Vec<GameEvent> = c.events().to_vec();
@@ -312,22 +295,10 @@ fn p3s2a_prismari_twincast_copy_of_mv5_spell_earns_a_second_counter() {
 #[test]
 fn p3s2a_deekah_tokens_carry_the_triggering_spells_mana_value() {
     let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[OVERRUN_COST, TWINCAST_COST], 0));
-    sc.add_creature_from_oracle(
-        P0,
-        "Deekah, Fractal Theorist",
-        3,
-        3,
-        DEEKAH_FRACTAL_THEORIST,
-    );
-    let overrun = sc
-        .add_spell_to_hand_from_oracle(P0, "Overrun", false, OVERRUN)
-        .with_mana_cost(cost(OVERRUN_COST))
-        .id();
-    let twincast = sc
-        .add_spell_to_hand_from_oracle(P0, "Twincast", true, TWINCAST)
-        .with_mana_cost(cost(TWINCAST_COST))
-        .id();
+    sc.with_mana_pool(P0, mana_for(&[OVERRUN.cost, TWINCAST.cost], 0));
+    add_creature_on_battlefield(&mut sc, P0, &DEEKAH_FRACTAL_THEORIST);
+    let overrun = add_spell(&mut sc, P0, &OVERRUN);
+    let twincast = add_spell(&mut sc, P0, &TWINCAST);
     let mut r = sc.build();
     let mut c = r.cast(overrun).commit();
     let c2 = c.cast(twincast).target_object(overrun).commit();
@@ -360,16 +331,10 @@ fn p3s2a_deekah_tokens_carry_the_triggering_spells_mana_value() {
 fn p3s2a_prismari_twincast_trigger_events() {
     use engine::types::game_state::StackEntryKind;
     let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[OVERRUN_COST, TWINCAST_COST], 0));
+    sc.with_mana_pool(P0, mana_for(&[OVERRUN.cost, TWINCAST.cost], 0));
     let p = add_prismari(&mut sc);
-    let overrun = sc
-        .add_spell_to_hand_from_oracle(P0, "Overrun", false, OVERRUN)
-        .with_mana_cost(cost(OVERRUN_COST))
-        .id();
-    let twincast = sc
-        .add_spell_to_hand_from_oracle(P0, "Twincast", true, TWINCAST)
-        .with_mana_cost(cost(TWINCAST_COST))
-        .id();
+    let overrun = add_spell(&mut sc, P0, &OVERRUN);
+    let twincast = add_spell(&mut sc, P0, &TWINCAST);
     let mut r = sc.build();
     cast_spell(&mut r, overrun);
     cast_spell(&mut r, twincast);
@@ -403,7 +368,7 @@ fn p3s2a_prismari_twincast_trigger_events() {
 #[test]
 fn p3s2a_epic_copy_triggers_prismari_apprentice_once() {
     let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[ENDLESS_SWARM_COST], 0));
+    sc.with_mana_pool(P0, mana_for(&[ENDLESS_SWARM.cost], 0));
     sc.with_library_top(
         P0,
         &["Forest", "Forest", "Forest", "Forest", "Forest", "Forest"],
@@ -413,11 +378,7 @@ fn p3s2a_epic_copy_triggers_prismari_apprentice_once() {
         &["Island", "Island", "Island", "Island", "Island", "Island"],
     );
     let p = add_prismari(&mut sc);
-    let swarm = sc
-        .add_spell_to_hand_from_oracle(P0, "Endless Swarm", false, ENDLESS_SWARM)
-        .from_oracle_text_with_keywords(&["Epic"], ENDLESS_SWARM)
-        .with_mana_cost(cost(ENDLESS_SWARM_COST))
-        .id();
+    let swarm = add_spell(&mut sc, P0, &ENDLESS_SWARM);
     let mut r = sc.build();
     cast_spell(&mut r, swarm);
     // Magecraft on the CAST of the MV 8 sorcery.
@@ -502,16 +463,10 @@ fn prismari_triggers_through(r: &mut GameRunner, p: ObjectId) -> usize {
 #[test]
 fn p3s2a_prismari_twincast_on_targeted_spell_triggers_three_times() {
     let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[LIGHTNING_BOLT_COST, TWINCAST_COST], 0));
+    sc.with_mana_pool(P0, mana_for(&[LIGHTNING_BOLT.cost, TWINCAST.cost], 0));
     let p = add_prismari(&mut sc);
-    let bolt = sc
-        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", true, LIGHTNING_BOLT)
-        .with_mana_cost(cost(LIGHTNING_BOLT_COST))
-        .id();
-    let twincast = sc
-        .add_spell_to_hand_from_oracle(P0, "Twincast", true, TWINCAST)
-        .with_mana_cost(cost(TWINCAST_COST))
-        .id();
+    let bolt = add_spell(&mut sc, P0, &LIGHTNING_BOLT);
+    let twincast = add_spell(&mut sc, P0, &TWINCAST);
     let mut r = sc.build();
     let mut c = r.cast(bolt).target_player(P1).commit();
     let _c2 = c.cast(twincast).target_object(bolt).commit();
@@ -524,24 +479,14 @@ fn p3s2a_prismari_twincast_on_targeted_spell_triggers_three_times() {
 /// (MV 6; trigger T1), P1 Remands it, P0 recasts it with X=0 (MV 3; trigger T2). T1 sees MV 6 and puts the counter; T2 sees MV 3.
 #[test]
 fn p3s2a_prismari_trigger_reads_its_own_cast_after_a_recast() {
-    const STROKE: &str = "Target player draws X cards.";
-    const STROKE_COST: &str = "{X}{2}{U}";
-    const REMAND: &str = "Counter target spell. If that spell is countered this way, put it into its owner's hand instead of into that player's graveyard. Draw a card.";
-    const REMAND_COST: &str = "{1}{U}";
     let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[STROKE_COST, "{2}{U}"], 3));
-    sc.with_mana_pool(P1, mana_for(&[REMAND_COST], 0));
+    sc.with_mana_pool(P0, mana_for(&[STROKE_OF_GENIUS.cost, "{2}{U}"], 3));
+    sc.with_mana_pool(P1, mana_for(&[REMAND.cost], 0));
     sc.with_library_top(P0, &["Forest", "Forest", "Forest", "Forest"]);
     sc.with_library_top(P1, &["Island", "Island", "Island", "Island"]);
     let p = add_prismari(&mut sc);
-    let stroke = sc
-        .add_spell_to_hand_from_oracle(P0, "Stroke of Genius", true, STROKE)
-        .with_mana_cost(cost(STROKE_COST))
-        .id();
-    let remand = sc
-        .add_spell_to_hand_from_oracle(P1, "Remand", true, REMAND)
-        .with_mana_cost(cost(REMAND_COST))
-        .id();
+    let stroke = add_spell(&mut sc, P0, &STROKE_OF_GENIUS);
+    let remand = add_spell(&mut sc, P1, &REMAND);
     let mut r = sc.build();
     let _ = r.cast(stroke).x(3).target_player(P0).commit();
     assert_eq!(

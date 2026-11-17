@@ -27,21 +27,15 @@ fn scried(events: &[GameEvent]) -> bool {
 
 /// P0 casts the real spell `name` at P1's filler permanent (built by `victim`), through the production cast path.
 fn cast_at(
-    name: &str,
-    oracle: &str,
-    printed_cost: &str,
-    is_instant: bool,
+    card: &Printed,
     victim: impl Fn(&mut GameScenario) -> ObjectId,
 ) -> (GameRunner, ObjectId, Vec<GameEvent>) {
     let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[printed_cost], 0));
+    sc.with_mana_pool(P0, mana_for(&[card.cost], 0));
     add_counter_holder(&mut sc);
     sc.with_library_top(P0, &["Forest", "Forest", "Forest"]);
     let v = victim(&mut sc);
-    let spell = sc
-        .add_spell_to_hand_from_oracle(P0, name, is_instant, oracle)
-        .with_mana_cost(cost(printed_cost))
-        .id();
+    let spell = add_spell(&mut sc, P0, card);
     let mut r = sc.build();
     let out = r.cast(spell).target_object(v).resolve();
     let events = out.events().to_vec();
@@ -78,13 +72,7 @@ fn tokens_named(r: &GameRunner, name: &str) -> usize {
 #[test]
 fn p3s2a_ctl_serum_snare_bounce_then_proliferate() {
     for (mvn, expect) in [(2, true), (5, false)] {
-        let (r, v, _) = cast_at(
-            "Serum Snare",
-            SERUM_SNARE,
-            SERUM_SNARE_COST,
-            true,
-            creature(mvn),
-        );
+        let (r, v, _) = cast_at(&SERUM_SNARE, creature(mvn));
         assert_eq!(
             zone(r.state(), v),
             Zone::Hand,
@@ -101,13 +89,7 @@ fn p3s2a_ctl_serum_snare_bounce_then_proliferate() {
 #[test]
 fn p3s2a_ctl_tainted_treats_food_iff_mv_4_or_less() {
     for (mvn, food) in [(2, 1), (6, 0)] {
-        let (r, v, _) = cast_at(
-            "Tainted Treats",
-            TAINTED_TREATS,
-            TAINTED_TREATS_COST,
-            true,
-            creature(mvn),
-        );
+        let (r, v, _) = cast_at(&TAINTED_TREATS, creature(mvn));
         assert_eq!(
             zone(r.state(), v),
             Zone::Graveyard,
@@ -120,13 +102,7 @@ fn p3s2a_ctl_tainted_treats_food_iff_mv_4_or_less() {
 #[test]
 fn p3s2a_ctl_extinguish_the_light_gains_3_iff_mv_3_or_less() {
     for (mvn, gain) in [(2, 3), (5, 0)] {
-        let (r, v, _) = cast_at(
-            "Extinguish the Light",
-            EXTINGUISH_THE_LIGHT,
-            EXTINGUISH_THE_LIGHT_COST,
-            true,
-            creature(mvn),
-        );
+        let (r, v, _) = cast_at(&EXTINGUISH_THE_LIGHT, creature(mvn));
         assert_eq!(
             zone(r.state(), v),
             Zone::Graveyard,
@@ -139,13 +115,7 @@ fn p3s2a_ctl_extinguish_the_light_gains_3_iff_mv_3_or_less() {
 #[test]
 fn p3s2a_ctl_fading_hope_scries_iff_mv_3_or_less() {
     for (mvn, expect) in [(2, true), (5, false)] {
-        let (r, v, ev) = cast_at(
-            "Fading Hope",
-            FADING_HOPE,
-            FADING_HOPE_COST,
-            true,
-            creature(mvn),
-        );
+        let (r, v, ev) = cast_at(&FADING_HOPE, creature(mvn));
         assert_eq!(
             zone(r.state(), v),
             Zone::Hand,
@@ -158,13 +128,7 @@ fn p3s2a_ctl_fading_hope_scries_iff_mv_3_or_less() {
 #[test]
 fn p3s2a_ctl_perilous_voyage_scries_iff_mv_2_or_less() {
     for (mvn, expect) in [(2, true), (4, false)] {
-        let (r, v, ev) = cast_at(
-            "Perilous Voyage",
-            PERILOUS_VOYAGE,
-            PERILOUS_VOYAGE_COST,
-            true,
-            creature(mvn),
-        );
+        let (r, v, ev) = cast_at(&PERILOUS_VOYAGE, creature(mvn));
         assert_eq!(
             zone(r.state(), v),
             Zone::Hand,
@@ -177,13 +141,7 @@ fn p3s2a_ctl_perilous_voyage_scries_iff_mv_2_or_less() {
 #[test]
 fn p3s2a_ctl_seedship_impact_lander_iff_mv_2_or_less() {
     for (mvn, lander) in [(1, 1), (4, 0)] {
-        let (r, v, _) = cast_at(
-            "Seedship Impact",
-            SEEDSHIP_IMPACT,
-            SEEDSHIP_IMPACT_COST,
-            true,
-            artifact(mvn),
-        );
+        let (r, v, _) = cast_at(&SEEDSHIP_IMPACT, artifact(mvn));
         assert_eq!(
             zone(r.state(), v),
             Zone::Graveyard,
@@ -196,13 +154,7 @@ fn p3s2a_ctl_seedship_impact_lander_iff_mv_2_or_less() {
 #[test]
 fn p3s2a_ctl_raze_to_the_ground_draws_iff_mv_1_or_less() {
     for (mvn, drawn) in [(1, 1), (3, 0)] {
-        let (r, v, _) = cast_at(
-            "Raze to the Ground",
-            RAZE_TO_THE_GROUND,
-            RAZE_TO_THE_GROUND_COST,
-            false,
-            artifact(mvn),
-        );
+        let (r, v, _) = cast_at(&RAZE_TO_THE_GROUND, artifact(mvn));
         assert_eq!(
             zone(r.state(), v),
             Zone::Graveyard,
@@ -218,12 +170,9 @@ fn p3s2a_ctl_raze_to_the_ground_draws_iff_mv_1_or_less() {
 fn p3s2a_ctl_brackish_blunder_map_iff_it_was_tapped() {
     for (tapped, maps) in [(true, 1), (false, 0)] {
         let mut sc = scenario();
-        sc.with_mana_pool(P0, mana_for(&[BRACKISH_BLUNDER_COST], 0));
+        sc.with_mana_pool(P0, mana_for(&[BRACKISH_BLUNDER.cost], 0));
         let v = { sc.add_creature(P1, "Filler Victim", 2, 2).id() };
-        let spell = sc
-            .add_spell_to_hand_from_oracle(P0, "Brackish Blunder", true, BRACKISH_BLUNDER)
-            .with_mana_cost(cost(BRACKISH_BLUNDER_COST))
-            .id();
+        let spell = add_spell(&mut sc, P0, &BRACKISH_BLUNDER);
         let mut r = sc.build();
         r.state_mut().objects.get_mut(&v).expect("victim").tapped = tapped;
         assert_eq!(
@@ -255,13 +204,7 @@ fn nonbasic_land(basic: bool) -> impl Fn(&mut GameScenario) -> ObjectId {
 #[test]
 fn p3s2a_ctl_molten_rain_two_damage_iff_land_was_nonbasic() {
     for (basic, dmg) in [(false, 2), (true, 0)] {
-        let (r, v, _) = cast_at(
-            "Molten Rain",
-            MOLTEN_RAIN,
-            MOLTEN_RAIN_COST,
-            false,
-            nonbasic_land(basic),
-        );
+        let (r, v, _) = cast_at(&MOLTEN_RAIN, nonbasic_land(basic));
         assert_eq!(
             zone(r.state(), v),
             Zone::Graveyard,
@@ -274,13 +217,7 @@ fn p3s2a_ctl_molten_rain_two_damage_iff_land_was_nonbasic() {
 #[test]
 fn p3s2a_ctl_choking_sands_two_damage_iff_land_was_nonbasic() {
     for (basic, dmg) in [(false, 2), (true, 0)] {
-        let (r, v, _) = cast_at(
-            "Choking Sands",
-            CHOKING_SANDS,
-            CHOKING_SANDS_COST,
-            false,
-            nonbasic_land(basic),
-        );
+        let (r, v, _) = cast_at(&CHOKING_SANDS, nonbasic_land(basic));
         assert_eq!(
             zone(r.state(), v),
             Zone::Graveyard,
@@ -295,13 +232,7 @@ fn p3s2a_ctl_choking_sands_two_damage_iff_land_was_nonbasic() {
 #[test]
 fn p3s2a_ctl_fatal_push_destroys_only_mv_2_or_less() {
     for (mvn, destroyed) in [(2, true), (3, false)] {
-        let (r, v, _) = cast_at(
-            "Fatal Push",
-            FATAL_PUSH,
-            FATAL_PUSH_COST,
-            true,
-            creature(mvn),
-        );
+        let (r, v, _) = cast_at(&FATAL_PUSH, creature(mvn));
         let z = zone(r.state(), v);
         assert_eq!(
             z == Zone::Graveyard,
@@ -318,13 +249,7 @@ fn p3s2a_ctl_fatal_push_destroys_only_mv_2_or_less() {
 #[test]
 fn p3s2a_ctl_anoint_with_affliction_exiles_only_mv_3_or_less() {
     for (mvn, exiled) in [(3, true), (4, false)] {
-        let (r, v, _) = cast_at(
-            "Anoint with Affliction",
-            ANOINT_WITH_AFFLICTION,
-            ANOINT_WITH_AFFLICTION_COST,
-            true,
-            creature(mvn),
-        );
+        let (r, v, _) = cast_at(&ANOINT_WITH_AFFLICTION, creature(mvn));
         let z = zone(r.state(), v);
         assert_eq!(
             z == Zone::Exile,
@@ -337,36 +262,25 @@ fn p3s2a_ctl_anoint_with_affliction_exiles_only_mv_3_or_less() {
 #[test]
 fn p3s2a_ctl_burning_hands_six_damage_iff_target_is_green() {
     for (green, dmg) in [(true, 6u32), (false, 2u32)] {
-        let (r, v, _) = cast_at(
-            "Burning Hands",
-            BURNING_HANDS,
-            BURNING_HANDS_COST,
-            true,
-            move |sc| {
-                let mut b = sc.add_creature(P1, "Filler Victim", 1, 12);
-                b.with_color(vec![if green {
-                    ManaColor::Green
-                } else {
-                    ManaColor::Blue
-                }]);
-                b.id()
-            },
-        );
+        let (r, v, _) = cast_at(&BURNING_HANDS, move |sc| {
+            let mut b = sc.add_creature(P1, "Filler Victim", 1, 12);
+            b.with_color(vec![if green {
+                ManaColor::Green
+            } else {
+                ManaColor::Blue
+            }]);
+            b.id()
+        });
         assert_eq!(r.state().objects[&v].damage_marked, dmg, "green {green}");
     }
 }
 
 // ---- past tense, stack exit (the countered spell) ----
 
-fn counter_creature_spell(
-    name: &str,
-    oracle: &str,
-    printed_cost: &str,
-    legendary: bool,
-) -> GameRunner {
+fn counter_creature_spell(card: &Printed, legendary: bool) -> GameRunner {
     let mut sc = scenario();
     sc.with_mana_pool(P0, mana_for(&[], 1));
-    sc.with_mana_pool(P1, mana_for(&[printed_cost], 0));
+    sc.with_mana_pool(P1, mana_for(&[card.cost], 0));
     sc.with_library_top(P1, &["Island", "Island", "Island"]);
     let target = {
         let mut b = sc.add_creature_to_hand(P0, "Filler Spell", 2, 2);
@@ -376,10 +290,7 @@ fn counter_creature_spell(
         }
         b.id()
     };
-    let counter = sc
-        .add_spell_to_hand_from_oracle(P1, name, true, oracle)
-        .with_mana_cost(cost(printed_cost))
-        .id();
+    let counter = add_spell(&mut sc, P1, card);
     let mut r = sc.build();
     cast_spell(&mut r, target);
     r.act(GameAction::PassPriority).expect("P0 passes");
@@ -400,12 +311,7 @@ fn counter_creature_spell(
 #[test]
 fn p3s2a_ctl_glorious_gale_ring_tempts_iff_the_countered_spell_was_legendary() {
     for (legendary, tempted) in [(true, true), (false, false)] {
-        let r = counter_creature_spell(
-            "Glorious Gale",
-            GLORIOUS_GALE,
-            GLORIOUS_GALE_COST,
-            legendary,
-        );
+        let r = counter_creature_spell(&GLORIOUS_GALE, legendary);
         let level = r.state().ring_level.get(&P1).copied().unwrap_or(0);
         assert_eq!(
             level > 0,
@@ -421,7 +327,7 @@ fn p3s2a_ctl_statute_of_denial_gate_on_a_draw_head() {
     for (blue, drew) in [(true, true), (false, false)] {
         let mut sc = scenario();
         sc.with_mana_pool(P0, mana_for(&[], 1));
-        sc.with_mana_pool(P1, mana_for(&[STATUTE_OF_DENIAL_COST], 0));
+        sc.with_mana_pool(P1, mana_for(&[STATUTE_OF_DENIAL.cost], 0));
         sc.with_library_top(P1, &["Island", "Island", "Island"]);
         if blue {
             sc.add_creature(P1, "Filler Blue Creature", 1, 1)
@@ -431,10 +337,7 @@ fn p3s2a_ctl_statute_of_denial_gate_on_a_draw_head() {
             .add_creature_to_hand(P0, "Filler Spell", 2, 2)
             .with_mana_cost(ManaCost::generic(1))
             .id();
-        let counter = sc
-            .add_spell_to_hand_from_oracle(P1, "Statute of Denial", true, STATUTE_OF_DENIAL)
-            .with_mana_cost(cost(STATUTE_OF_DENIAL_COST))
-            .id();
+        let counter = add_spell(&mut sc, P1, &STATUTE_OF_DENIAL);
         let mut r = sc.build();
         cast_spell(&mut r, target);
         r.act(GameAction::PassPriority).expect("pass");

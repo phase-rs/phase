@@ -30428,7 +30428,8 @@ fn suffix_power_equality_condition_preserves_pump_duration() {
         Some(AbilityCondition::TargetMatchesFilter {
             filter: TargetFilter::Typed(ref typed),
             use_lki: false,
-            ..
+            subject_slot: None,
+            subject: ObjectScope::Target,
         }) if matches!(
             typed.properties.as_slice(),
             [crate::types::ability::FilterProp::PtComparison {

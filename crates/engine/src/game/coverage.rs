@@ -5038,7 +5038,10 @@ fn fmt_ability_condition(cond: &AbilityCondition) -> String {
         }
         AbilityCondition::HasObjectTarget => "has an object target".into(),
         AbilityCondition::TargetMatchesFilter {
-            filter, subject, ..
+            filter,
+            use_lki: _,
+            subject_slot: _,
+            subject,
         } => match subject {
             // CR 603.2: the object the trigger event names, not a declared target.
             ObjectScope::EventSource => format!("triggering object is {}", fmt_target(filter)),

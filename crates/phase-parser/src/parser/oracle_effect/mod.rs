@@ -1747,7 +1747,7 @@ fn rewrite_keyword_anaphor_for_cost_paid_parent(
         filter,
         use_lki: false,
         subject_slot: None,
-        ..
+        subject: ObjectScope::Target,
     }) = &condition
     else {
         return condition;
@@ -1814,7 +1814,7 @@ fn keyword_anaphor_referent_is_unpublished_resolution_pick(
         filter,
         use_lki: false,
         subject_slot: None,
-        ..
+        subject: ObjectScope::Target,
     }) = condition
     else {
         return false;

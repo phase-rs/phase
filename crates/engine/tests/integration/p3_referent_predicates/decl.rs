@@ -13,17 +13,15 @@ use engine::types::mana::ManaCost;
 use engine::types::zones::Zone;
 
 /// P0 casts a textless filler creature spell of mana value `spell_mv`; P1 answers with the real counterspell
-/// `counter_name` (printed text `counter_oracle`, printed cost `counter_cost`) through the production cast path.
+/// `counter` through the production cast path.
 fn counter_flow(
-    counter_name: &str,
-    counter_oracle: &str,
-    counter_cost: &str,
+    counter: &Printed,
     spell_mv: u32,
     hand_for_p1: impl Fn(&mut engine::game::scenario::GameScenario),
 ) -> (GameRunner, WaitingFor, ObjectId) {
     let mut sc = scenario();
     sc.with_mana_pool(P0, mana_for(&[], spell_mv as usize));
-    sc.with_mana_pool(P1, mana_for(&[counter_cost], 0));
+    sc.with_mana_pool(P1, mana_for(&[counter.cost], 0));
     add_counter_holder(&mut sc);
     sc.with_library_top(P1, &["Island", "Island", "Island"]);
     let target = {
@@ -32,16 +30,13 @@ fn counter_flow(
         b.id()
     };
     hand_for_p1(&mut sc);
-    let counter = sc
-        .add_spell_to_hand_from_oracle(P1, counter_name, true, counter_oracle)
-        .with_mana_cost(cost(counter_cost))
-        .id();
+    let counter_id = add_spell(&mut sc, P1, counter);
     let mut runner = sc.build();
     cast_spell(&mut runner, target);
     runner
         .act(GameAction::PassPriority)
         .expect("P0 passes priority");
-    cast_spell(&mut runner, counter);
+    cast_spell(&mut runner, counter_id);
     let w = drain(&mut runner);
     (runner, w, target)
 }
@@ -49,13 +44,7 @@ fn counter_flow(
 // ---- Reject Imperfection: "If that spell's mana value was 3 or less, proliferate." (CR 701.34a, CR 608.2h) ----
 
 fn ri(mv: u32) -> (GameRunner, WaitingFor, ObjectId) {
-    counter_flow(
-        "Reject Imperfection",
-        REJECT_IMPERFECTION,
-        REJECT_IMPERFECTION_COST,
-        mv,
-        |_| {},
-    )
+    counter_flow(&REJECT_IMPERFECTION, mv, |_| {})
 }
 
 #[test]
@@ -104,17 +93,11 @@ fn p3s2a_reject_imperfection_mv5_does_not_proliferate() {
 /// stack, 0 elsewhere). Returns (mana value on the stack, mana value in the graveyard, final waiting state).
 fn ri_ballista(x: u32) -> (u32, u32, WaitingFor) {
     let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[WALKING_BALLISTA_COST], 2 * x as usize));
-    sc.with_mana_pool(P1, mana_for(&[REJECT_IMPERFECTION_COST], 0));
+    sc.with_mana_pool(P0, mana_for(&[WALKING_BALLISTA.cost], 2 * x as usize));
+    sc.with_mana_pool(P1, mana_for(&[REJECT_IMPERFECTION.cost], 0));
     add_counter_holder(&mut sc);
-    let ballista = sc
-        .add_creature_to_hand_from_oracle(P0, "Walking Ballista", 0, 0, WALKING_BALLISTA)
-        .with_mana_cost(cost(WALKING_BALLISTA_COST))
-        .id();
-    let ri = sc
-        .add_spell_to_hand_from_oracle(P1, "Reject Imperfection", true, REJECT_IMPERFECTION)
-        .with_mana_cost(cost(REJECT_IMPERFECTION_COST))
-        .id();
+    let ballista = add_creature_in_hand(&mut sc, P0, &WALKING_BALLISTA);
+    let ri = add_spell(&mut sc, P1, &REJECT_IMPERFECTION);
     let mut r = sc.build();
     cast_spell(&mut r, ballista);
     choose_x_if_asked(&mut r, x);
@@ -171,13 +154,7 @@ fn p3s2a_reject_imperfection_ballista_x1_proliferates() {
 // ---- Sound the Trumpets: "If that spell's mana value was 2 or less, recruit." (CR 701.70a) ----
 
 fn trumpets(mv: u32) -> (GameRunner, WaitingFor, ObjectId) {
-    counter_flow(
-        "Sound the Trumpets",
-        SOUND_THE_TRUMPETS,
-        SOUND_THE_TRUMPETS_COST,
-        mv,
-        |_| {},
-    )
+    counter_flow(&SOUND_THE_TRUMPETS, mv, |_| {})
 }
 
 #[test]
@@ -222,19 +199,13 @@ fn p3s2a_sound_the_trumpets_mv3_suppresses_the_whole_recruit() {
 
 /// CR 701.70a: recruit = draw, discard, then a 1/1 white Human Soldier token iff a nonland card was discarded.
 fn recruit_discarding(land: bool) -> usize {
-    let (mut r, mut w, _t) = counter_flow(
-        "Sound the Trumpets",
-        SOUND_THE_TRUMPETS,
-        SOUND_THE_TRUMPETS_COST,
-        2,
-        |sc| {
-            if land {
-                sc.add_land_to_hand(P1, "Held Land");
-            } else {
-                sc.add_creature_to_hand(P1, "Held Bear", 2, 2);
-            }
-        },
-    );
+    let (mut r, mut w, _t) = counter_flow(&SOUND_THE_TRUMPETS, 2, |sc| {
+        if land {
+            sc.add_land_to_hand(P1, "Held Land");
+        } else {
+            sc.add_creature_to_hand(P1, "Held Bear", 2, 2);
+        }
+    });
     assert!(
         matches!(w, WaitingFor::DiscardChoice { .. }),
         "reach guard: discard decision offered, got {w:?}"
@@ -280,50 +251,32 @@ fn p3s2a_sound_the_trumpets_land_discard_makes_no_token() {
 
 // ---- Carnivorous Canopy / Vindictive Triumph: destroy / exile a battlefield permanent ----
 
-fn bf_flow(
-    name: &str,
-    oracle: &str,
-    printed_cost: &str,
-    mvn: u32,
-    configure: impl Fn(&mut engine::game::scenario::CardBuilder<'_>),
-) -> (GameRunner, ObjectId, WaitingFor) {
+/// P0 casts the real `spell` at P1's real printed `victim` (a flier, an artifact) through the production cast path.
+fn bf_flow(spell: &Printed, victim: &Printed) -> (GameRunner, ObjectId, WaitingFor) {
     let mut sc = scenario();
-    sc.with_mana_pool(P0, mana_for(&[printed_cost], 0));
+    sc.with_mana_pool(P0, mana_for(&[spell.cost], 0));
     add_counter_holder(&mut sc);
-    let victim = {
-        let mut b = sc.add_creature(P1, "Filler Victim", 2, 2);
-        b.with_mana_cost(ManaCost::generic(mvn));
-        configure(&mut b);
-        b.id()
+    let victim = if victim.type_line.contains("Creature") {
+        add_creature_on_battlefield(&mut sc, P1, victim)
+    } else {
+        add_noncreature_permanent(&mut sc, P1, victim)
     };
-    let spell = sc
-        .add_spell_to_hand_from_oracle(P0, name, name == "Vindictive Triumph", oracle)
-        .with_mana_cost(cost(printed_cost))
-        .id();
+    let spell = add_spell(&mut sc, P0, spell);
     let mut runner = sc.build();
     let out = runner.cast(spell).target_object(victim).resolve();
     let w = out.final_waiting_for().clone();
     (runner, victim, w)
 }
 
-fn canopy(mvn: u32, indestructible: bool) -> (GameRunner, ObjectId, WaitingFor) {
-    bf_flow(
-        "Carnivorous Canopy",
-        CARNIVOROUS_CANOPY,
-        CARNIVOROUS_CANOPY_COST,
-        mvn,
-        |b| {
-            b.flying();
-            if indestructible {
-                b.indestructible();
-            }
-        },
-    )
+/// Carnivorous Canopy at a printed target: Angelic Wall (flying, MV 2), Serra Angel (flying, MV 5) or Darksteel
+/// Ingot (indestructible artifact, MV 3).
+fn canopy(victim: &Printed) -> (GameRunner, ObjectId, WaitingFor) {
+    bf_flow(&CARNIVOROUS_CANOPY, victim)
 }
 
 #[test]
 fn p3s2a_canopy_mv2_destroys_then_proliferates() {
-    let (r, v, w) = canopy(2, false);
+    let (r, v, w) = canopy(&ANGELIC_WALL);
     assert_eq!(
         zone(r.state(), v),
         Zone::Graveyard,
@@ -337,7 +290,7 @@ fn p3s2a_canopy_mv2_destroys_then_proliferates() {
 
 #[test]
 fn p3s2a_canopy_mv5_destroys_without_proliferate() {
-    let (r, v, w) = canopy(5, false);
+    let (r, v, w) = canopy(&SERRA_ANGEL);
     assert_eq!(
         zone(r.state(), v),
         Zone::Graveyard,
@@ -350,11 +303,11 @@ fn p3s2a_canopy_mv5_destroys_without_proliferate() {
     );
 }
 
-/// CR 608.2h: the destroy does not happen (indestructible), the permanent is still where it was expected to be,
-/// so its current information (MV 2) answers "was 3 or less": the proliferate still happens.
+/// CR 608.2h: the destroy does not happen (Darksteel Ingot is indestructible), the permanent is still where it was
+/// expected to be, so its current information (MV 3) answers "was 3 or less": the proliferate still happens.
 #[test]
 fn p3s2a_canopy_indestructible_target_is_read_live() {
-    let (r, v, w) = canopy(2, true);
+    let (r, v, w) = canopy(&DARKSTEEL_INGOT);
     assert_eq!(
         zone(r.state(), v),
         Zone::Battlefield,
@@ -362,23 +315,17 @@ fn p3s2a_canopy_indestructible_target_is_read_live() {
     );
     assert!(
         is_proliferate(&w),
-        "current MV 2 <= 3: proliferate, got {w:?}"
+        "current MV 3 <= 3: proliferate, got {w:?}"
     );
 }
 
-fn triumph(mvn: u32) -> (GameRunner, ObjectId, WaitingFor) {
-    bf_flow(
-        "Vindictive Triumph",
-        VINDICTIVE_TRIUMPH,
-        VINDICTIVE_TRIUMPH_COST,
-        mvn,
-        |_| {},
-    )
+fn triumph(victim: &Printed) -> (GameRunner, ObjectId, WaitingFor) {
+    bf_flow(&VINDICTIVE_TRIUMPH, victim)
 }
 
 #[test]
 fn p3s2a_triumph_mv2_returns_tapped_under_casters_control() {
-    let (r, v, _w) = triumph(2);
+    let (r, v, _w) = triumph(&ANGELIC_WALL);
     let o = &r.state().objects[&v];
     assert_eq!(
         o.zone,
@@ -391,7 +338,7 @@ fn p3s2a_triumph_mv2_returns_tapped_under_casters_control() {
 
 #[test]
 fn p3s2a_triumph_mv5_stays_exiled() {
-    let (r, v, _w) = triumph(5);
+    let (r, v, _w) = triumph(&SERRA_ANGEL);
     assert_eq!(
         zone(r.state(), v),
         Zone::Exile,
@@ -408,16 +355,10 @@ fn p3s2a_triumph_ballista_x_is_zero_on_the_battlefield_so_it_returns() {
     let mut sc = scenario();
     sc.with_mana_pool(
         P0,
-        mana_for(&[WALKING_BALLISTA_COST, VINDICTIVE_TRIUMPH_COST], 4),
+        mana_for(&[WALKING_BALLISTA.cost, VINDICTIVE_TRIUMPH.cost], 4),
     );
-    let ballista = sc
-        .add_creature_to_hand_from_oracle(P0, "Walking Ballista", 0, 0, WALKING_BALLISTA)
-        .with_mana_cost(cost(WALKING_BALLISTA_COST))
-        .id();
-    let triumph = sc
-        .add_spell_to_hand_from_oracle(P0, "Vindictive Triumph", true, VINDICTIVE_TRIUMPH)
-        .with_mana_cost(cost(VINDICTIVE_TRIUMPH_COST))
-        .id();
+    let ballista = add_creature_in_hand(&mut sc, P0, &WALKING_BALLISTA);
+    let triumph = add_spell(&mut sc, P0, &VINDICTIVE_TRIUMPH);
     let mut r = sc.build();
     cast_spell(&mut r, ballista);
     choose_x_if_asked(&mut r, 2);

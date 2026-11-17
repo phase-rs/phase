@@ -3369,7 +3369,68 @@ fn bind_possessive_it(ctx: &ParseContext, gated_instruction: &str) -> ItsReferen
             Some(TargetFilter::Controller)
             | Some(TargetFilter::Player)
             | Some(TargetFilter::Any) => ItsReferent::Source,
-            _ => ItsReferent::CostPaid,
+            None
+            | Some(
+                TargetFilter::None
+                | TargetFilter::SourceController
+                | TargetFilter::ControllerAndControlledPermanents { .. }
+                | TargetFilter::Opponent
+                | TargetFilter::SelfRef
+                | TargetFilter::GrantingObject { .. }
+                | TargetFilter::SourceOrPaired
+                | TargetFilter::Typed(_)
+                | TargetFilter::Not { .. }
+                | TargetFilter::Or { .. }
+                | TargetFilter::And { .. }
+                | TargetFilter::StackAbility { .. }
+                | TargetFilter::StackSpell
+                | TargetFilter::CastingSpell
+                | TargetFilter::SpecificObject { .. }
+                | TargetFilter::SpecificPlayer { .. }
+                | TargetFilter::PlayerWhoChoseLabel { .. }
+                | TargetFilter::PlayerMatching { .. }
+                | TargetFilter::Neighbor { .. }
+                | TargetFilter::ScopedPlayer
+                | TargetFilter::AttachedTo
+                | TargetFilter::LastCreated
+                | TargetFilter::LastRevealed
+                | TargetFilter::LastZoneChanged
+                | TargetFilter::CostPaidObject
+                | TargetFilter::AmassedArmy
+                | TargetFilter::ChosenCard
+                | TargetFilter::TrackedSet { .. }
+                | TargetFilter::TrackedSetFiltered { .. }
+                | TargetFilter::ChoiceAssignment { .. }
+                | TargetFilter::ExiledBySource
+                | TargetFilter::ExiledCardByIndex { .. }
+                | TargetFilter::TriggeringSpellController
+                | TargetFilter::TriggeringSpellOwner
+                | TargetFilter::TriggeringPlayer
+                | TargetFilter::TriggeringSource
+                | TargetFilter::AttackedPlayerOrPlaneswalker
+                | TargetFilter::EventTarget
+                | TargetFilter::TriggeringSourceController
+                | TargetFilter::EventTargetController
+                | TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
+                | TargetFilter::DeclaredPlayer { .. }
+                | TargetFilter::ParentTargetController
+                | TargetFilter::ParentTargetOwner
+                | TargetFilter::AffectedObjectOwner
+                | TargetFilter::SourceChosenPlayer
+                | TargetFilter::OriginalController
+                | TargetFilter::OriginalSource
+                | TargetFilter::PostReplacementSourceController
+                | TargetFilter::PostReplacementDamageSource
+                | TargetFilter::PostReplacementDamageTarget
+                | TargetFilter::PostReplacementDamageTargetOwner
+                | TargetFilter::DefendingPlayer
+                | TargetFilter::HasChosenName
+                | TargetFilter::ChosenDamageSource { .. }
+                | TargetFilter::Named { .. }
+                | TargetFilter::Owner
+                | TargetFilter::AllPlayers,
+            ) => ItsReferent::CostPaid,
         }
     }
 }
@@ -3426,7 +3487,7 @@ fn lower_referent_clause(clause: ReferentClause, subject: ObjectScope) -> Abilit
             stat,
             comparator,
             value,
-            ..
+            from_x: _,
         } => stat_threshold_filter(stat, comparator, value),
     };
     maybe_negate(referent_condition(filter, use_lki, subject, None), negated)
@@ -3479,7 +3540,20 @@ fn parse_referent_noun_mana_value_condition_text(
     // hazard — a node declaring its own target can still gate on the event spell.
     let route = match subject {
         ObjectScope::Target => LeadingConditionRoute::TargetPtThreshold,
-        _ => LeadingConditionRoute::General,
+        ObjectScope::Source
+        | ObjectScope::Recipient
+        | ObjectScope::EventSource
+        | ObjectScope::CostPaidObject
+        | ObjectScope::Anaphoric
+        | ObjectScope::Demonstrative
+        | ObjectScope::AmassedArmy
+        | ObjectScope::EventTarget
+        | ObjectScope::OtherRevealedCard
+        | ObjectScope::OwnedLinkedExileCard
+        | ObjectScope::BatchSource
+        | ObjectScope::ChainRootTarget
+        | ObjectScope::GrantingObject
+        | ObjectScope::SpecificObject { .. } => LeadingConditionRoute::General,
     };
     Some((lower_referent_clause(clause, subject), route))
 }
@@ -14455,7 +14529,7 @@ mod tests {
                     filter: TargetFilter::Typed(filter),
                     use_lki: false,
                     subject_slot: None,
-                    ..
+                    subject: ObjectScope::Target
                 } if filter.type_filters.iter().any(
                     |f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Dragon"))
                 )
@@ -15866,7 +15940,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
-            ..
+            subject: ObjectScope::Target,
         }) = cond
         else {
             panic!("expected TargetMatchesFilter, got {cond:?}");
@@ -15915,7 +15989,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
-            ..
+            subject: ObjectScope::Target,
         }) = cond
         else {
             panic!("expected TargetMatchesFilter, got {cond:?}");
@@ -16147,7 +16221,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
-            ..
+            subject: ObjectScope::Target,
         } = inner.as_ref()
         else {
             panic!("expected TargetMatchesFilter inside ConditionInstead, got {inner:?}");
@@ -16179,7 +16253,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
-            ..
+            subject: ObjectScope::Target,
         }) = cond
         else {
             panic!("expected TargetMatchesFilter, got {cond:?}");
@@ -16361,7 +16435,7 @@ mod tests {
             filter,
             use_lki,
             subject_slot,
-            ..
+            subject: ObjectScope::Target,
         } = inner.as_ref()
         else {
             panic!("expected TargetMatchesFilter inside ConditionInstead, got {inner:?}");
@@ -17503,7 +17577,7 @@ mod tests {
                 filter: TargetFilter::Typed(tf),
                 use_lki,
                 subject_slot,
-                ..
+                subject: ObjectScope::Target,
             } => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
                 assert_eq!(tf.controller, Some(ControllerRef::You));
@@ -17987,7 +18061,11 @@ mod referent_owner_tests {
                     parse_target_pt_threshold_condition_text(clause)
                 }
                 ReferentSurface::Supertype => parse_target_supertype_condition_text(clause),
-                _ => continue,
+                ReferentSurface::ManaValueFixed
+                | ReferentSurface::ManaValueDynamic
+                | ReferentSurface::NonbasicLand
+                | ReferentSurface::ItsStat
+                | ReferentSurface::NounManaValue => continue,
             };
             assert_eq!(entry, Some(expected), "{card}: router entry for {clause:?}");
         }
@@ -18265,8 +18343,9 @@ mod referent_owner_tests {
     }
 
     /// Constructor occurrences of `AbilityCondition::TargetMatchesFilter {` in production code:
-    /// a brace body that is not a pattern (`..`, `_` binding) and is not followed by `=>`,
-    /// `|`, `=` or `if` (a pattern position). Returns the text before each, to name its fn.
+    /// a brace body that is not a pattern (`..`, `_` binding), is not followed by `=>`, `|`, `=` or
+    /// `if` (a pattern position) and does not open a destructuring `let`. Returns the text before
+    /// each, to name its fn.
     fn constructors(source: &str) -> Vec<String> {
         let needle = "AbilityCondition::TargetMatchesFilter {";
         // Comment lines name the variant in prose; they construct nothing.
@@ -18296,7 +18375,15 @@ mod referent_owner_tests {
                 .iter()
                 .collect();
             let after = after.trim_start();
-            let pattern = body.contains("..") // allow-noncombinator: source-reading test instrument, not Oracle parsing
+            // A destructuring `let` / `if let` / `while let` names every field explicitly (no `..`) and
+            // binds with `=` only after the pattern, so nothing before the needle on its line assigns.
+            let line_prefix = text[..start].rsplit('\n').next().unwrap_or("").trim_start();
+            let destructuring_let = ["let ", "if let ", "while let "]
+                .iter()
+                .any(|kw| line_prefix.starts_with(kw)) // allow-noncombinator: source-reading test instrument, not Oracle parsing
+                && !line_prefix.contains('=');
+            let pattern = destructuring_let
+                || body.contains("..") // allow-noncombinator: source-reading test instrument, not Oracle parsing
                 || body.contains(": _") // allow-noncombinator: source-reading test instrument, not Oracle parsing
                 || after.starts_with("=>") // allow-noncombinator: source-reading test instrument, not Oracle parsing
                 || after.starts_with('|')
@@ -18320,6 +18407,12 @@ mod referent_owner_tests {
             }
             fn reader(c: &AbilityCondition) -> bool {
                 matches!(c, AbilityCondition::TargetMatchesFilter { filter, .. })
+            }
+            fn exhaustive_reader(c: &AbilityCondition) -> bool {
+                let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki: false, subject_slot: None, subject: ObjectScope::Target }) = c else {
+                    return false;
+                };
+                filter.is_none()
             }
             // AbilityCondition::TargetMatchesFilter { filter, use_lki, subject_slot, subject }
             #[cfg(test)]

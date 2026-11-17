@@ -3391,7 +3391,12 @@ pub(crate) fn extract_source_from_event(
         // CR 707.10: a copy of a spell is a spell on the stack but is not cast; "that spell"
         // in a "whenever you cast or copy" trigger (Prismari Apprentice, Deekah, Fractal
         // Theorist) names the copy, with its own characteristics and the value of X.
-        GameEvent::SpellCopied { object_id, .. } => Some(*object_id),
+        GameEvent::SpellCopied {
+            card_id: _,
+            controller: _,
+            object_id,
+            original_id: _,
+        } => Some(*object_id),
         GameEvent::DamageDealt { source_id, .. } => Some(*source_id),
         GameEvent::AbilityActivated { source_id, .. } => Some(*source_id),
         GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
