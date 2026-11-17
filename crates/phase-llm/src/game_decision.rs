@@ -57,7 +57,7 @@ struct ThreadUpdateParts {
     /// The numbered option list, exactly as the full prompt carries it.
     options: String,
     /// The seat's difficulty-driven history window, which also bounds how much
-    /// of what happened since its last answer a continue may carry.
+    /// of what happened since its last answer a continue shows entry by entry.
     history: HistoryBudget,
     /// The game of the match a message thread for this decision belongs to, or
     /// `None` for a decision that belongs to no seat's game: one between games
@@ -90,20 +90,28 @@ impl GameDecisionRequest {
     }
 
     /// The one user message that continues a seat's message thread with this
-    /// decision, or `None` when a continue cannot carry everything since the
-    /// seat's last answer.
+    /// decision, or `None` when the log handed over no longer reaches back to
+    /// the seat's last answer.
     ///
     /// `since` is the newest log entry the thread has already been shown (see
-    /// [`crate::game_thread`]). The message carries every timeline entry
-    /// logged after it, the live position and the options, fenced exactly as
-    /// the full prompt fences them, with the engine-issued option domain
-    /// stated outside the fence. The reply contract is not repeated: it is in
-    /// the system prompt the thread was created with.
+    /// [`crate::game_thread`]). The message carries what was logged after it
+    /// (below), the live position and the options, fenced exactly as the full
+    /// prompt fences them, with the engine-issued option domain stated outside
+    /// the fence. The reply contract is not repeated: it is in the system
+    /// prompt the thread was created with.
     ///
-    /// When the log handed over no longer reaches back past `since`, or more was
-    /// logged than the seat's history window shows, a continue would have to
-    /// drop some of it, where the full request summarizes it per turn; `None`
-    /// tells the caller to start a new thread instead.
+    /// The newest entries, as many as the seat's history window shows, are
+    /// carried entry by entry. Any older ones, which a round of turns at a
+    /// multiplayer table easily logs between two of one seat's decisions, are
+    /// carried as one line of key events per turn, the way the full request
+    /// summarizes earlier turns ([`push_since_last_decision`]). Starting over
+    /// would lose the thread and carry no more: the full request summarizes
+    /// completed turn cycles the same way, and of the turn cycle in progress
+    /// keeps only the newest window of entries and drops the rest.
+    ///
+    /// When the log handed over no longer reaches back past `since`, a
+    /// continue would lose events without a trace; `None` tells the caller to
+    /// start a new thread instead.
     pub fn thread_update(&self, history: &[GameLogEntry], since: Option<u32>) -> Option<String> {
         // The client numbers its log from 0 and hands over only its newest
         // entries, so the log must still reach back to the first entry the
@@ -121,11 +129,12 @@ impl GameDecisionRequest {
             return None;
         }
         let unseen = unseen_timeline_entries(history, since);
-        if unseen.len() > self.update.history.current_cycle_entries {
-            return None;
-        }
         let mut data = String::new();
-        push_since_last_decision(&mut data, &unseen);
+        push_since_last_decision(
+            &mut data,
+            &unseen,
+            self.update.history.current_cycle_entries,
+        );
         data.push('\n');
         data.push_str(&self.update.live_position);
         data.push_str("\n\n");
@@ -2480,7 +2489,7 @@ mod tests {
         .unwrap();
         let update = request
             .thread_update(&history, Some(0))
-            .expect("two new entries fit the window");
+            .expect("the log reaches back to entry 1");
 
         assert!(update.starts_with(UNTRUSTED_DATA_BEGIN), "{update}");
         assert_eq!(update.matches(UNTRUSTED_DATA_END).count(), 1, "{update}");
@@ -2504,10 +2513,11 @@ mod tests {
         assert!(outside.contains("Choose exactly one option by its number."));
     }
 
-    /// More was logged since the last answer than the seat's window shows: a
-    /// continue would drop the oldest of it, so none is built.
+    /// More was logged since the last answer than the seat's window shows:
+    /// the continue is still built, with the window entry by entry and the
+    /// oldest entry in its turn's line of key events, marked as continued.
     #[test]
-    fn a_thread_update_never_drops_what_happened_since_the_last_answer() {
+    fn a_thread_update_past_the_window_folds_the_oldest_into_its_turn_line() {
         let window = history_budget(AiDifficulty::Medium).current_cycle_entries;
         let history: Vec<GameLogEntry> = (0..=window as u32)
             .map(|seq| logged(seq, &format!("event {seq}"), LogCategory::Stack))
@@ -2520,10 +2530,35 @@ mod tests {
             &history,
         )
         .unwrap();
-        // The full window fits...
-        assert!(request.thread_update(&history, Some(0)).is_some());
-        // ...one entry more does not.
-        assert_eq!(request.thread_update(&history, None), None);
+        let newest = format!("T3 PreCombatMain: event {window}\n");
+
+        // The full window, entry by entry.
+        let fits = request.thread_update(&history, Some(0)).unwrap();
+        assert!(fits.contains("T3 PreCombatMain: event 1\n"), "{fits}");
+        assert!(fits.contains(&newest), "{fits}");
+        assert!(
+            !fits.contains("SINCE YOUR LAST DECISION, EARLIER"),
+            "{fits}"
+        );
+
+        // One entry more: the oldest moves into its turn's line.
+        let overflows = request.thread_update(&history, None).unwrap();
+        assert!(
+            overflows.contains(
+                "--- SINCE YOUR LAST DECISION, EARLIER (key events, one line per turn) ---\n\
+                 T3 (Turn 3, continued below): event 0\n"
+            ),
+            "{overflows}"
+        );
+        assert!(
+            !overflows.contains("T3 PreCombatMain: event 0\n"),
+            "{overflows}"
+        );
+        assert!(
+            overflows.contains("T3 PreCombatMain: event 1\n"),
+            "{overflows}"
+        );
+        assert!(overflows.contains(&newest), "{overflows}");
     }
 
     /// The client hands over only its newest log entries. When they no longer

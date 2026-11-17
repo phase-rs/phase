@@ -3312,6 +3312,9 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 
     // CR 613.1b: recompute layer-2 control now the effect is gone, then emit the
     // loss event for every object whose controller actually reverted.
+    // CR 603.2c: the occurrences this cleanup publishes, as positions in the
+    // action's event buffer.
+    let reversion_start = events.len();
     if let Some(boundary) = control_revert_boundary {
         // CR 514.2: the members' pre-revert evidence was fixed above, before
         // the prune; read it now, then publish against the reverted board.
@@ -3322,9 +3325,6 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
             })
             .collect();
         super::layers::flush_layers(state);
-        // CR 603.2c: the occurrences this reversion publishes, as positions in
-        // the action's event buffer.
-        let reversion_start = events.len();
         let mut seen_reverting = HashSet::new();
         for (object_id, member) in control_reverting.into_iter().zip(members) {
             if !seen_reverting.insert(object_id) {
@@ -3342,7 +3342,14 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
                 new_controller,
             );
         }
-
+    }
+    // CR 514.2 + CR 613.1b + CR 603.2: the control changes the layer pass
+    // derived and no instruction published — a "for as long as" control
+    // duration that lapsed because the reversion returned its source (Rubinia
+    // Soulsinger), or one derived earlier in the turn — are published with the
+    // reversion, so CR 514.3a settles their abilities in this cleanup step.
+    super::layers::publish_layer_control_changes(state, events);
+    if events.len() > reversion_start {
         // CR 603.2 + CR 603.10d + CR 603.7: the reversion triggers its
         // abilities as it happens. The printed lose-side abilities come from the
         // watchers its boundary latched before the prune above. The printed
@@ -5904,6 +5911,10 @@ card into your hand at the beginning of your next end step.";
         );
         crate::game::layers::flush_layers(state);
         assert_eq!(state.objects[&kharn].controller, P0);
+        // The steal itself was published (and its own trigger handled) by the
+        // instruction this direct install stands in for; only the reversion
+        // is under test.
+        state.layer_control_changes.clear();
         let starting_turn = state.turn_number;
 
         let mut events = Vec::new();

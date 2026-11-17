@@ -284,6 +284,76 @@ impl<'de, K: Ord + Deserialize<'de>, V: Deserialize<'de>> Deserialize<'de> for L
     }
 }
 
+/// [`LazyBoxedMap`]'s list counterpart, for action-scoped working memory that
+/// is empty at every action boundary: `None` while empty, collapsed back to
+/// `None` whenever it empties, so it costs one pointer on `GameState`'s stack
+/// frame and an empty clone allocates nothing.
+// The box is the point (the `game_state_size` budget).
+#[allow(clippy::box_collection)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct LazyBoxedVec<T>(Option<Box<Vec<T>>>);
+
+impl<T> Default for LazyBoxedVec<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<T> LazyBoxedVec<T> {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.as_slice().iter()
+    }
+
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        match self.0.as_deref_mut() {
+            Some(list) => list.iter_mut(),
+            None => [].iter_mut(),
+        }
+    }
+
+    pub fn push(&mut self, value: T) {
+        self.0.get_or_insert_with(Box::default).push(value);
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        let list = self.0.as_mut().expect("remove from an empty LazyBoxedVec");
+        let removed = list.remove(index);
+        if list.is_empty() {
+            self.0 = None;
+        }
+        removed
+    }
+
+    pub fn swap_remove(&mut self, index: usize) -> T {
+        let list = self
+            .0
+            .as_mut()
+            .expect("swap_remove from an empty LazyBoxedVec");
+        let removed = list.swap_remove(index);
+        if list.is_empty() {
+            self.0 = None;
+        }
+        removed
+    }
+
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    /// Empties the list, returning what it held.
+    pub fn take(&mut self) -> Vec<T> {
+        self.0.take().map_or_else(Vec::new, |list| *list)
+    }
+}
+
 fn nonzero_delta_magnitude(delta: i32) -> Result<u32, ResolvedPlayerEditReplayInvariantError> {
     (delta != 0)
         .then_some(delta.unsigned_abs())
@@ -4259,13 +4329,18 @@ pub struct PendingRepeatIteration {
     pub iterated_counter_kinds: Vec<crate::types::counter::CounterType>,
     pub next_iteration: usize,
     pub total_iterations: usize,
-    /// CR 405.3 + CR 707.10: set on a loop that puts copies of several spells
-    /// on the stack as one batch. `Some(n)`: the controller has already fixed
-    /// the order of `tracked_members[..n]`, and picks the spell for iteration
-    /// `n` before it runs (`WaitingFor::SpellCopyOrderChoice`). `None` for
-    /// every other loop.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub copy_order_fixed: Option<usize>,
+    /// CR 608.2f + CR 405.3: set on a loop whose iterations pause for player
+    /// input, so its controller orders them — a batch of copies of several
+    /// spells (CR 707.10), or a per-member instruction loop that pauses on an
+    /// unless payment. `Some(n)`: the controller has already fixed the order of
+    /// `tracked_members[..n]`, and picks the member for iteration `n` before it
+    /// runs (`WaitingFor::MemberOrderChoice`). `None` for every other loop.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "copy_order_fixed"
+    )]
+    pub order_fixed: Option<usize>,
 }
 
 /// CR 705.2: The controller-relevant result of the most recent coin flip
@@ -12296,6 +12371,13 @@ pub enum ManaAbilityResume {
         /// mana ability mid-payment.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
+        /// CR 118.12a: The object the unless-gated effect acts on (the revealed
+        /// card a "for each of those cards" loop is deciding — Sword-Point
+        /// Diplomacy — or the spell a Mana Leak would counter), so the payer can
+        /// tell what their payment prevents. Display-only; `None` when the
+        /// effect names no object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        affected_object: Option<ObjectId>,
         /// CR 702.24a: compact repeated draw count carried across the pause.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         repeat: Option<u32>,
@@ -19467,6 +19549,25 @@ impl CastOpponentChoicePurpose {
     }
 }
 
+/// CR 608.2f: what a [`WaitingFor::MemberOrderChoice`] prompt orders. A
+/// member-driven loop pauses for player input either because it puts a copy of
+/// each member spell on the stack, or because each member's instruction itself
+/// pauses (an unless payment). The prompt names the process so the choice can
+/// word itself without the client inferring it from the effect.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemberOrderPurpose {
+    /// CR 405.3 + CR 707.10: a batch of spell copies; the chosen spell supplies
+    /// the copy that goes on the stack next. Also the wire default, because a
+    /// frame saved before instruction loops joined this prompt could only have
+    /// ordered copies.
+    #[default]
+    SpellCopies,
+    /// CR 608.2f: one instruction repeated over a published population, whose
+    /// iterations pause for player input; the chosen member's instruction runs
+    /// next.
+    InstructionLoop,
+}
+
 // clippy::large_enum_variant: Intentional. `WaitingFor` is stored inline in
 // `GameState`; the stack budget that matters is the `GameState` ceiling in
 // `types/game_state_size.rs`, and this enum's inline size is already inside
@@ -20389,17 +20490,23 @@ pub enum WaitingFor {
         choices: Vec<ObjectId>,
         count: u32,
     },
-    /// CR 405.3 + CR 707.10: an effect that puts copies of several spells on
-    /// the stack at once ("copy each of those spells twice" — Finale of
-    /// Promise) lets their controller choose the copies' relative order. Asked
-    /// one copy at a time: `choices` are the distinct spells that still have a
-    /// copy to make, and the chosen spell's next copy goes on the stack next,
-    /// above the copies already made. Raised only while two or more spells
+    /// CR 608.2f + CR 405.3: a member-driven resolution loop whose iterations
+    /// pause for player input is performed in the order its controller chooses.
+    /// Asked one member at a time: `choices` are the members whose iteration has
+    /// not run yet, and the chosen member's iteration runs next. A batch of spell
+    /// copies (CR 707.10) picks which spell's copy goes on the stack next
+    /// (`SpellCopies`); an instruction loop that pauses per member (Sword-Point
+    /// Diplomacy's "for each of those cards, put that card into your hand unless
+    /// any opponent pays 3 life", CR 608.2f + CR 118.12a) picks which member is
+    /// handled next (`InstructionLoop`). Raised only while two or more members
     /// remain; the answer is a single-object `SelectCards`.
-    SpellCopyOrderChoice {
+    MemberOrderChoice {
         player: PlayerId,
         source_id: ObjectId,
         choices: Vec<ObjectId>,
+        /// What the ordered members are, for the prompt's wording.
+        #[serde(default)]
+        purpose: MemberOrderPurpose,
     },
     /// CR 701.55a: Player chooses one branch while facing a villainous choice,
     /// or another inline resolution-time "choose A or B" effect.
@@ -21349,6 +21456,13 @@ pub enum WaitingFor {
         /// effect. Empty for ordinary single-payer unless-costs (Mana Leak).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         remaining: Vec<PlayerId>,
+        /// CR 118.12a: The object the unless-gated effect acts on (the revealed
+        /// card a "for each of those cards" loop is deciding — Sword-Point
+        /// Diplomacy — or the spell a Mana Leak would counter), so the payer can
+        /// tell what their payment prevents. Display-only; `None` when the
+        /// effect names no object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        affected_object: Option<ObjectId>,
     },
     /// CR 118.12a: Player must choose **which** sub-cost to pay from a
     /// disjunctive ("unless they X or Y") unless-cost. Once a sub-cost is
@@ -21387,6 +21501,13 @@ pub enum WaitingFor {
         /// unless-payments.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         chosen: Vec<AbilityCost>,
+        /// CR 118.12a: The object the unless-gated effect acts on (the revealed
+        /// card a "for each of those cards" loop is deciding — Sword-Point
+        /// Diplomacy — or the spell a Mana Leak would counter), so the payer can
+        /// tell what their payment prevents. Display-only; `None` when the
+        /// effect names no object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        affected_object: Option<ObjectId>,
     },
     /// CR 702.21a: Player must choose a card to discard as ward cost payment.
     WardDiscardChoice {
@@ -23047,7 +23168,7 @@ impl WaitingFor {
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
             WaitingFor::BeholdChoice { .. } => "BeholdChoice",
             WaitingFor::EmpowerJaceChoice { .. } => "EmpowerJaceChoice",
-            WaitingFor::SpellCopyOrderChoice { .. } => "SpellCopyOrderChoice",
+            WaitingFor::MemberOrderChoice { .. } => "MemberOrderChoice",
             WaitingFor::ChooseOneOfBranch { .. } => "ChooseOneOfBranch",
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
@@ -23219,7 +23340,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { player, .. }
             | WaitingFor::BeholdChoice { player, .. }
             | WaitingFor::EmpowerJaceChoice { player, .. }
-            | WaitingFor::SpellCopyOrderChoice { player, .. }
+            | WaitingFor::MemberOrderChoice { player, .. }
             | WaitingFor::ChooseOneOfBranch { player, .. }
             | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }
@@ -23574,7 +23695,7 @@ impl WaitingFor {
             | WaitingFor::ReplacementChoice { .. }
             | WaitingFor::EntryControllerChoice { .. }
             | WaitingFor::OrderTriggers { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
             | WaitingFor::CopyTargetChoice { .. }
             | WaitingFor::ExploreChoice { .. }
             | WaitingFor::ReturnAsAuraTarget { .. }
@@ -23810,7 +23931,7 @@ impl WaitingFor {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
@@ -28536,7 +28657,24 @@ declare_game_state! {
     /// The next `control_change_observations` key.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub next_control_change_observation_id: u64,
-
+    /// CR 613.1b + CR 603.2: control changes a full layer evaluation derived
+    /// that no instruction announced, in the order they were derived, waiting
+    /// to be published into an action's event buffer
+    /// (`layers::publish_layer_control_changes`). Working memory: drained at
+    /// the action-return boundary (`engine::finalize_action_rules_state`) and
+    /// empty there, so it is neither serialized nor compared, and a position
+    /// holding an entry is not loop-comparable (`is_loop_comparable`). Lazily
+    /// boxed: empty at every boundary (`game_state_size.rs`).
+    #[serde(skip)]
+    pub layer_control_changes: LazyBoxedVec<crate::types::events::QueuedControlChange>,
+    /// CR 613.1b: control changes an instruction has published ahead of the
+    /// layer pass that realizes them, as (exact incarnation, new controller).
+    /// The next full pass's controller diff consumes a matching entry instead
+    /// of queueing the change a second time, and clears the rest. Working
+    /// memory: every writer installs a control effect, which marks the layers
+    /// Full, so the boundary flush always clears it. Lazily boxed, as above.
+    #[serde(skip)]
+    pub announced_control_changes: LazyBoxedVec<(ObjectIncarnationRef, PlayerId)>,
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the most recent
     /// `Effect::ChangeZoneAll` resolution. Read by `QuantityRef::ExiledFromHandThisResolution`
     /// for "draws a card for each card exiled from their hand this way" patterns
@@ -30726,7 +30864,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
-        | WaitingFor::SpellCopyOrderChoice { .. }
+        | WaitingFor::MemberOrderChoice { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
         | WaitingFor::EffectZoneChoice { .. }
@@ -35491,8 +35629,9 @@ impl GameState {
     }
 
     /// Records one published control change's observation and returns the
-    /// evidence its event carries. Written only by
-    /// `gain_control::publish_controller_changed`.
+    /// evidence its event carries. Written by
+    /// `gain_control::publish_controller_changed` and by the layer pass's
+    /// controller diff (`layers::queue_derived_control_changes`).
     pub(crate) fn record_control_change_observation(
         &mut self,
         observation: crate::types::events::ControlChangeObservation,
@@ -37450,6 +37589,8 @@ impl GameState {
             next_control_change_capture_id: 0,
             control_change_observations: LazyBoxedMap::default(),
             next_control_change_observation_id: 0,
+            layer_control_changes: LazyBoxedVec::default(),
+            announced_control_changes: LazyBoxedVec::default(),
             exiled_from_hand_this_resolution: 0,
             monarch: None,
             city_blessing: HashSet::new(),
@@ -41012,6 +41153,13 @@ impl GameState {
             pending_attack_trigger_events: _,
             // The hero-event batch is likewise excluded by `is_loop_comparable`.
             pending_hero_event: _,
+            // NOT CARRIED AT A SAMPLE — layer-derived control changes awaiting
+            // publication (an event that names an incarnation) and announced ones
+            // awaiting their realizing pass (bare incarnation pins). Working memory,
+            // empty at every action-return boundary; `is_loop_comparable` requires
+            // both empty, so no sampled position holds an unranked pin.
+            layer_control_changes: _,
+            announced_control_changes: _,
             // NOT AT A SAMPLE — each carries `ObjectIncarnationRef` and is compared, but it
             // is non-empty only while `waiting_for` is that search's own non-Priority
             // prompt; every loop sample is taken at `WaitingFor::Priority`, so it cannot be
@@ -41512,6 +41660,11 @@ impl GameState {
             && self.deferred_entry_events.is_empty()
             && self.unsettled_entry_batch_events.is_empty()
             && self.pending_attack_trigger_events.is_empty()
+            // CR 603.2: a derived control change not yet published, or an announced
+            // one not yet realized, is work in progress (`layer_control_changes`,
+            // `announced_control_changes`).
+            && self.layer_control_changes.is_empty()
+            && self.announced_control_changes.is_empty()
             && self
                 .combat
                 .as_ref()
@@ -41695,6 +41848,11 @@ impl GameState {
         self.current_trigger_events.iter_mut().for_each(&mut *f);
         for events in self.stack_trigger_event_batches.values_mut() {
             events.iter_mut().for_each(&mut *f);
+        }
+        // CR 603.2: a layer-derived control change awaiting publication carries
+        // the event its observation is named by.
+        for queued in self.layer_control_changes.iter_mut() {
+            f(&mut queued.event);
         }
         // CR 117.3d + CR 117.4: a stack-resolution session fences each triggered
         // entry with its captured trigger event.
@@ -42900,6 +43058,11 @@ fn _gamestate_partition_is_total(s: &GameState) {
         next_control_change_capture_id: _,
         control_change_observations: _,
         next_control_change_observation_id: _,
+        // EXCLUDED from `impl PartialEq for GameState`: action-scoped working memory,
+        // empty at every action-return boundary (a debug assertion there), and a
+        // non-empty position is not loop-comparable (`is_loop_comparable`).
+        layer_control_changes: _,
+        announced_control_changes: _,
         exiled_from_hand_this_resolution: _,
         monarch: _,
         city_blessing: _,
@@ -59295,6 +59458,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                     }),
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
                     repeat: None,
                 },
                 cost_move_resume: None,
@@ -60971,6 +61135,189 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             !loop_states_equal(&ordinary, &delayed),
             "ordinary and delayed stack-trigger firings must not share a loop identity"
         );
+    }
+
+    /// A settled Priority sample holding Khârn's lose-control trigger on the
+    /// stack, fired by a layer-derived control change (P1's Control Magic).
+    fn layer_derived_control_change_sample() -> GameState {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        use crate::types::ability::{TargetFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaCost;
+        use crate::types::phase::Phase;
+        const KHARN: &str = "Berzerker \u{2014} Kh\u{e2}rn the Betrayer attacks or blocks \
+            each combat if able.\nSigil of Corruption \u{2014} When you lose control of \
+            Kh\u{e2}rn the Betrayer, draw two cards.\nThe Betrayer \u{2014} If damage would \
+            be dealt to Kh\u{e2}rn the Betrayer, prevent that damage and an opponent of your \
+            choice gains control of it.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Lib 1", "Lib 2", "Lib 3"]);
+        let kharn = scenario
+            .add_creature_from_oracle(P0, "Kh\u{e2}rn the Betrayer", 5, 1, KHARN)
+            .as_legendary()
+            .id();
+        let magic = scenario
+            .add_artifact_to_hand_from_oracle(
+                P1,
+                "Control Magic",
+                "Enchant creature\nYou control enchanted creature.",
+            )
+            .with_subtypes(vec!["Aura"])
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        {
+            let obj = runner.state_mut().objects.get_mut(&magic).unwrap();
+            obj.card_types.core_types = vec![CoreType::Enchantment];
+            obj.base_card_types = obj.card_types.clone();
+            let enchant = Keyword::Enchant(TargetFilter::Typed(TypedFilter::creature()));
+            obj.keywords.push(enchant.clone());
+            obj.base_keywords.push(enchant);
+            let state = runner.state_mut();
+            state.active_player = P1;
+            state.priority_player = P1;
+            state.waiting_for = WaitingFor::Priority { player: P1 };
+        }
+        runner.cast(magic).target_object(kharn).commit();
+        for _ in 0..4 {
+            if runner
+                .state()
+                .stack
+                .iter()
+                .all(|entry| entry.source_id != magic)
+            {
+                break;
+            }
+            runner
+                .act(crate::types::actions::GameAction::PassPriority)
+                .expect("passing priority");
+        }
+        let state = runner.state().clone();
+        assert_eq!(
+            state.objects[&kharn].controller, P1,
+            "REACH: Control Magic took Khârn"
+        );
+        assert!(
+            matches!(
+                &state.stack.back().map(|entry| &entry.kind),
+                Some(StackEntryKind::TriggeredAbility {
+                    trigger_event: Some(GameEvent::ControllerChanged {
+                        evidence: crate::types::events::ControlChangeEvidence::Observed(_),
+                        ..
+                    }),
+                    ..
+                })
+            ),
+            "REACH: Khârn's trigger carries the layer-derived event"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        state
+    }
+
+    /// The same position with every control-change observation re-keyed
+    /// `offset` higher, as if earlier changes had minted more ids.
+    fn with_shifted_observation_ids(state: &GameState, offset: u64) -> GameState {
+        let mut shifted = state.clone();
+        let mut moved = Vec::new();
+        shifted.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::ControllerChanged {
+                evidence: crate::types::events::ControlChangeEvidence::Observed(id),
+                ..
+            } = event
+            {
+                moved.push(*id);
+                *id += offset;
+            }
+        });
+        for id in moved {
+            let observation = state
+                .control_change_observation(crate::types::events::ControlChangeEvidence::Observed(
+                    id,
+                ))
+                .expect("every held id names an observation")
+                .clone();
+            shifted
+                .control_change_observations
+                .insert(id + offset, observation);
+        }
+        shifted.next_control_change_observation_id += offset;
+        shifted
+    }
+
+    /// N1 (CR 104.4b): a position holding a layer-derived control-change event
+    /// compares equal to the same position reached with a different
+    /// observation-id allocation history.
+    #[test]
+    fn layer_derived_control_change_sample_is_allocation_history_independent() {
+        let sample = layer_derived_control_change_sample();
+        let shifted = with_shifted_observation_ids(&sample, 7);
+        assert_ne!(
+            serde_json::to_value(&sample).unwrap(),
+            serde_json::to_value(&shifted).unwrap(),
+            "REACH: the raw positions differ by allocation history"
+        );
+        assert!(loop_states_equal(&sample, &shifted));
+        assert!(loop_states_equal(
+            &sample.normalize_for_loop(),
+            &shifted.normalize_for_loop()
+        ));
+    }
+
+    /// N2 (CR 104.4b): normalizing that position is idempotent.
+    #[test]
+    fn layer_derived_control_change_sample_normalization_is_idempotent() {
+        let once = layer_derived_control_change_sample().normalize_for_loop();
+        let twice = once.normalize_for_loop();
+        assert_eq!(
+            serde_json::to_value(&once).unwrap(),
+            serde_json::to_value(&twice).unwrap()
+        );
+        assert!(loop_states_equal(&once, &twice));
+    }
+
+    /// N3 (CR 104.4b): an unpublished layer-derived change, or an announced one
+    /// not yet realized, is work in progress, so the position is not
+    /// loop-comparable.
+    #[test]
+    fn pending_control_change_working_memory_is_not_loop_comparable() {
+        let sample = layer_derived_control_change_sample();
+        assert!(
+            sample.is_loop_comparable(),
+            "REACH: the settled sample compares"
+        );
+        let subject = {
+            use crate::game::game_object::ObjectIncarnationRefExt;
+            sample
+                .objects
+                .iter()
+                .find(|(_, obj)| obj.name == "Kh\u{e2}rn the Betrayer")
+                .map(|(_, obj)| ObjectIncarnationRef::from_object(obj))
+                .expect("Khârn is on the board")
+        };
+
+        let mut queued = sample.clone();
+        queued
+            .layer_control_changes
+            .push(crate::types::events::QueuedControlChange {
+                subject,
+                event: GameEvent::ControllerChanged {
+                    object_id: subject.object_id,
+                    old_controller: PlayerId(1),
+                    new_controller: PlayerId(0),
+                    evidence: crate::types::events::ControlChangeEvidence::Unrecorded,
+                },
+            });
+        assert!(!queued.is_loop_comparable());
+        assert!(!loop_states_equal(&queued, &sample));
+
+        let mut announced = sample.clone();
+        announced
+            .announced_control_changes
+            .push((subject, PlayerId(0)));
+        assert!(!announced.is_loop_comparable());
+        assert!(!loop_states_equal(&announced, &sample));
     }
 
     #[test]
@@ -67698,7 +68045,7 @@ mod restored_exact_attack_authority_tests {
                     iterated_counter_kinds: vec![],
                     next_iteration: 0,
                     total_iterations: 1,
-                    copy_order_fixed: None,
+                    order_fixed: None,
                 }),
                 1 => ResolutionFrame::RepeatUntil(PendingRepeatUntil {
                     ability: node.clone(),
@@ -67991,6 +68338,7 @@ mod restored_exact_attack_authority_tests {
                             trigger_event: trigger_event.clone(),
                             effect_description: None,
                             remaining: vec![],
+                            affected_object: None,
                             repeat: None,
                         },
                     ))),
@@ -68598,6 +68946,7 @@ mod restored_exact_attack_authority_tests {
             trigger_event: trigger_event.clone(),
             effect_description: None,
             remaining: vec![],
+            affected_object: None,
             repeat: None,
         };
         let transaction =

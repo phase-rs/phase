@@ -1488,7 +1488,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
@@ -4600,22 +4600,23 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
-            WaitingFor::SpellCopyOrderChoice {
+            WaitingFor::MemberOrderChoice {
                 player, choices, ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            // CR 405.3 + CR 707.10: the chosen spell supplies the batch's next
-            // copy, above the copies already on the stack.
-            let [spell] = chosen.as_slice() else {
+            // CR 608.2f + CR 405.3: the chosen member supplies the loop's next
+            // iteration — the next copy for a spell-copy batch, or the next
+            // per-member instruction.
+            let [member] = chosen.as_slice() else {
                 return Err(EngineError::InvalidAction(format!(
-                    "Choose exactly one spell to copy next, got {}",
+                    "Choose exactly one member to process next, got {}",
                     chosen.len()
                 )));
             };
-            if !choices.contains(spell) || !effects::order_next_spell_copy(state, *spell) {
+            if !choices.contains(member) || !effects::order_next_member(state, *member) {
                 return Err(EngineError::InvalidAction(
-                    "That spell has no copy left to make".to_string(),
+                    "That member has no iteration left to run".to_string(),
                 ));
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))

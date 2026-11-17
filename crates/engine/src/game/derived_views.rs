@@ -10767,6 +10767,7 @@ mod tests {
             effect_description: None,
             remaining: Vec::new(),
             repeat,
+            affected_object: None,
         };
         for (count, repeat, expected) in [
             (QuantityExpr::Fixed { value: 1 }, None, (1, 1)),
