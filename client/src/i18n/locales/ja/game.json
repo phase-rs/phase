@@ -152,7 +152,8 @@
     "loading": "{{name}}を読み込み中",
     "unimplemented": "未実装: {{mechanics}}",
     "dfc": "両面カード",
-    "tapped": "タップ状態"
+    "tapped": "タップ状態",
+    "reloadArt": "タップしてイラストを再読み込み"
   },
   "preview": {
     "holdCtrlBack": "Ctrlを押して裏面を表示",

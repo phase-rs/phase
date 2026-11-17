@@ -51,6 +51,12 @@ interface CardImageProps {
    * to load. If omitted, the component looks it up via the engine card database.
    */
   oracleText?: string;
+  /**
+   * Offers "Tap to reload art" on the fallback tile. Opt-in, because the tile
+   * must own its taps: the card-choice modals render this inside a `<button>`,
+   * and on a phone the battlefield tile's tap belongs to the game.
+   */
+  offerArtReload?: boolean;
 }
 
 export function CardImage({
@@ -72,6 +78,7 @@ export function CardImage({
   ownerPrinting,
   ownerPrintedRef,
   oracleText,
+  offerArtReload = false,
 }: CardImageProps) {
   const { t } = useTranslation("game");
   // A face-down permanent shows the marker token for the ability that turned it
@@ -79,7 +86,7 @@ export function CardImage({
   // Ixidron class, which has no printing) the lookup is skipped entirely and the
   // generic card back is rendered exactly as before.
   const faceDownMarker = faceDownMarkerRef(faceDown, faceDownCause);
-  const { src, isLoading, rungs, advanceFailedSource } = useCardImage(faceDown ? "" : cardName, {
+  const { src, isLoading, rungs, advanceFailedSource, reload } = useCardImage(faceDown ? "" : cardName, {
     size,
     faceIndex,
     isToken: faceDown ? faceDownMarker !== null : isToken,
@@ -138,6 +145,7 @@ export function CardImage({
           oracleText={resolvedOracleText}
           className={baseClasses}
           style={borderStyle ?? { border: "1px solid #4b5563" }}
+          onReload={offerArtReload ? reload : undefined}
         />
       ) : (
         <img

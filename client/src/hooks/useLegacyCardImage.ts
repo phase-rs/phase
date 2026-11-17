@@ -90,6 +90,12 @@ interface UseCardImageResult {
   source?: CardImageSource | null;
   rungs?: ImageRungs;
   advanceFailedSource?(failedSrc: string): void;
+  /**
+   * Discards this card's cached art, failed sources included, and resolves it
+   * again, for every surface showing the card. Only the player's tap calls it:
+   * a failed image is never retried on its own. Absent without an oracle id.
+   */
+  reload?(): void;
 }
 
 export interface UseCardBackImageResult {
@@ -165,6 +171,12 @@ const resolvedPresentationCache = new BoundedCache<string, ResolvedPresentationC
 const stablePresentationCache = new BoundedCache<string, string>(PRESENTATION_CACHE_LIMIT);
 let globalArtInvalidationGeneration = 0;
 const cardArtInvalidationGenerations = new BoundedCache<string, number>(PRESENTATION_CACHE_LIMIT);
+// The player's reloads per card (#11008). A printings fetch invalidates a card
+// too, but never moves this count, so the owner overlay, which keys on it,
+// restarts only for a reload. Unbounded on purpose: a count evicted back to 0
+// could rebuild a key whose cached failure predates the reload. It holds one
+// number per card the player has reloaded.
+const cardArtReloadCounts = new Map<string, number>();
 
 function dispatchArtCacheEvent(detail?: string): void {
   if (detail === undefined) {
@@ -179,6 +191,17 @@ function dispatchArtCacheEvent(detail?: string): void {
   artCacheEvents.dispatchEvent(detail === undefined
     ? new Event("update")
     : new CustomEvent("update", { detail }));
+}
+
+/**
+ * The player's tap to reload one card's art. It counts the reload for the owner
+ * overlay, then sends the per-card invalidation a finished printings fetch
+ * sends, which moves the card's request keys and drops its cached
+ * presentations, failed sources included.
+ */
+function reloadCardArt(oracleId: string): void {
+  cardArtReloadCounts.set(oracleId, (cardArtReloadCounts.get(oracleId) ?? 0) + 1);
+  dispatchArtCacheEvent(oracleId);
 }
 
 function cacheResolvedPresentation(
@@ -475,6 +498,38 @@ export function useLocaleArt(): string {
   }, [language]);
 
   return localeArtCacheKey(language);
+}
+
+/**
+ * One card's art reloads, for art resolved outside `useCardImage`'s own caches
+ * (the owner-printing overlay). `count` moves only when the player reloads the
+ * card, so a key built on it drops that cache's failed sources then and at no
+ * other time. The caller re-renders when the card is invalidated. `reload`
+ * reloads the card for every surface showing it. An empty oracle id subscribes
+ * to nothing and has no reload.
+ */
+export function useCardArtReload(oracleId: string) {
+  const [, rerenderForReload] = useState(0);
+
+  useEffect(() => {
+    if (!oracleId) return undefined;
+    const handler = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== oracleId) return;
+      rerenderForReload((tick) => tick + 1);
+    };
+    artCacheEvents.addEventListener("update", handler);
+    return () => artCacheEvents.removeEventListener("update", handler);
+  }, [oracleId]);
+
+  const reload = useMemo(
+    () => (oracleId ? () => reloadCardArt(oracleId) : undefined),
+    [oracleId],
+  );
+
+  return {
+    count: cardArtReloadCounts.get(oracleId) ?? 0,
+    reload,
+  } as const;
 }
 
 function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): void {
@@ -888,6 +943,15 @@ export function useCardImage(
     artCacheEvents.addEventListener("update", handler);
     return () => artCacheEvents.removeEventListener("update", handler);
   }, []);
+
+  // A reload moves this oracle id's invalidation generation, so the request key
+  // changes and the new request starts with no failed sources. A token or
+  // unmapped name has no oracle id to scope it, and its missing art may not
+  // exist at all (#6156), so it offers no reload.
+  const reload = useMemo(
+    () => (resolvedOracleId ? () => reloadCardArt(resolvedOracleId) : undefined),
+    [resolvedOracleId],
+  );
 
   useEffect(() => visualPackRepository.subscribe(() => {
     setRepositoryRevision(visualPackRepository.currentRevision());
@@ -1344,7 +1408,7 @@ export function useCardImage(
     if (requestChanged) {
       return {
         src: null, isLoading: true, isRotated: false, isFlip: false,
-        source: null, advanceFailedSource,
+        source: null, advanceFailedSource, reload,
       };
     }
     const cachedPresentation = resolvedPresentationCache.get(requestKey);
@@ -1358,12 +1422,13 @@ export function useCardImage(
         source: cachedSource,
         rungs: cachedSource?.kind === "fallback" ? undefined : cachedSource?.rungs,
         advanceFailedSource,
+        reload,
       };
     }
     const presentationSeed = stablePresentationCache.get(presentationKey) ?? null;
     return {
       src: presentationSeed, isLoading: true, isRotated: false, isFlip: false,
-      source: null, advanceFailedSource,
+      source: null, advanceFailedSource, reload,
     };
   }
 
@@ -1375,6 +1440,7 @@ export function useCardImage(
     source: activeSource,
     rungs: activeSource?.kind === "fallback" ? undefined : activeSource?.rungs,
     advanceFailedSource,
+    reload,
   };
 }
 

@@ -152,7 +152,8 @@
     "loading": "Loading {{name}}",
     "unimplemented": "Unimplemented: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Tapped"
+    "tapped": "Tapped",
+    "reloadArt": "Tap to reload art"
   },
   "preview": {
     "holdCtrlBack": "Hold Ctrl for back face",

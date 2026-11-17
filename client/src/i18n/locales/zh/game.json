@@ -454,6 +454,7 @@
     "dfc": "双面牌",
     "faceDownName": "面朝下的牌",
     "loading": "正在加载{{name}}",
+    "reloadArt": "点击重新加载卡图",
     "tapped": "已横置",
     "unimplemented": "未实现：{{mechanics}}"
   },

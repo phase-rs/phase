@@ -62,6 +62,7 @@ type CardPreviewArt =
       isFlip: boolean;
       rungs?: ImageRungs;
       advanceFailedSource?(failedSrc: string): void;
+      reload?(): void;
     };
 
 let lastPointerPosition: { x: number; y: number } | null = null;
@@ -470,6 +471,7 @@ function CardPreviewInner({
         isFlip: activeImage.isFlip,
         rungs: activeImage.rungs,
         advanceFailedSource: activeImage.advanceFailedSource,
+        reload: activeImage.reload,
       };
   const activeRotated = activeArt.kind === "face" && activeArt.isRotated;
   const activeImageSrc = activeArt.kind === "face" ? activeArt.src : null;
@@ -477,6 +479,19 @@ function CardPreviewInner({
   const displayName = showOtherFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
   const handPreview = handOrigin != null && !position && !dockSide;
+  // The mobile preview's artless tile shows the card's rules text, so the card
+  // stays readable while its art is missing. As in `CardImage`, the lookup waits
+  // until the tile shows, and it goes through `lookupName`, which is null for a
+  // face the preview may not reveal. A token carries its own rules text.
+  const showsMobileArtFallback = isMobile
+    && !handPreview
+    && activeArt.kind === "face"
+    && !activeArt.isLoading
+    && !activeArt.src;
+  const artFallbackCard = useEngineCardData(showsMobileArtFallback && !isToken ? lookupName : null);
+  const artFallbackRulesText = isToken
+    ? obj?.token_rules_text
+    : artFallbackCard?.oracle_text ?? undefined;
   const infoPanelHeight = showCardPreviewFooter && showInfoPanel ? 120 : 0;
   const portraitPreviewWidth =
     typeof window === "undefined"
@@ -785,6 +800,7 @@ function CardPreviewInner({
       <MobilePreviewOverlay
         cardName={cardName}
         art={activeArt}
+        rulesText={artFallbackRulesText}
         onDismiss={onDismiss ?? dismissPreview}
         layout={mobileLayout ?? "modal"}
         report={reportContext}
@@ -934,6 +950,7 @@ const MOBILE_ACTION_PILL_CLASS = [
 function MobilePreviewOverlay({
   cardName,
   art,
+  rulesText,
   onDismiss,
   layout = "modal",
   report,
@@ -944,6 +961,9 @@ function MobilePreviewOverlay({
    *  `useCardImage` with raw `printed_ref` fields is exactly the mobile
    *  hidden-information bypass the PR 7551 review flagged. */
   art: CardPreviewArt;
+  /** Rules text for the artless tile, resolved by the parent for the same
+   *  reason: the overlay never looks a card up itself. */
+  rulesText?: string;
   onDismiss: () => void;
   layout?: "modal" | "compact";
   /** In-game report context; absent in the deck builder. Only the full modal
@@ -1002,6 +1022,7 @@ function MobilePreviewOverlay({
         ) : showArtFallback ? (
           <CardArtFallback
             name={cardName}
+            oracleText={rulesText}
             className="pointer-events-auto aspect-[5/7] max-h-[60vh] max-w-[68vw] w-[68vw] rounded-xl border border-white/15 shadow-2xl"
           />
         ) : !src ? (
@@ -1056,7 +1077,14 @@ function MobilePreviewOverlay({
           {art.kind === "back" ? (
             <CardBackFallback className="absolute inset-0 h-full w-full" />
           ) : showArtFallback ? (
-            <CardArtFallback name={cardName} className="absolute inset-0 h-full w-full" />
+            // The reload lives here, not on the compact peek: that layout
+            // dismisses on the pointerdown before a button's click lands.
+            <CardArtFallback
+              name={cardName}
+              oracleText={rulesText}
+              className="absolute inset-0 h-full w-full"
+              onReload={art.kind === "face" ? art.reload : undefined}
+            />
           ) : !src ? (
             // Still resolving: a skeleton, not the artless tile.
             <div className="absolute inset-0 animate-pulse bg-gray-700" />

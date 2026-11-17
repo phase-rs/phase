@@ -57,7 +57,12 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   // does. Without a marker the card back is rendered exactly as before.
   const faceDownMarker = faceDownMarkerRef(obj?.face_down ?? false, obj?.face_down_cause);
   const imageIsToken = renderCardBack ? faceDownMarker !== null : isToken;
-  const { src: cardSrc, isLoading: cardLoading, advanceFailedSource } = useCardImage(renderCardBack ? "" : imageLookup.name, {
+  const {
+    src: cardSrc,
+    isLoading: cardLoading,
+    advanceFailedSource,
+    reload,
+  } = useCardImage(renderCardBack ? "" : imageLookup.name, {
     size: imageIsToken ? "normal" : "art_crop",
     faceIndex: imageLookup.faceIndex,
     isToken: renderCardBack ? faceDownMarker !== null : isToken,
@@ -87,6 +92,12 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   const src = cardSrc;
   const isLoading = renderCardBack ? false : cardLoading;
+  // The tile offers its own art reload only on a desktop-sized screen, where
+  // battlefield rows keep it at least 80px tall, so its art box fits the 44px
+  // button (the smaller overflow-strip and split-overview tiles clip it). A
+  // phone's tile is the permanent's tap target and too short for the button;
+  // there the long-press preview carries the reload.
+  const offersArtReload = !isMobile && !isCompactHeight;
   // CR 712 vs CR 710: `back_face != null` is NOT "has a second face" — a
   // Kamigawa flip card stores its alternative half in the same slot and has no
   // face 1 to inspect. Use the engine-provided layout discriminant.
@@ -206,7 +217,12 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
                   className="absolute inset-0 w-full h-full object-cover"
                 />
               ) : (
-                <CardArtFallback name={cardName} variant="artCrop" className="absolute inset-0 w-full h-full" />
+                <CardArtFallback
+                  name={cardName}
+                  variant="artCrop"
+                  className="absolute inset-0 w-full h-full"
+                  onReload={offersArtReload ? reload : undefined}
+                />
               )}
 
               <div className="absolute inset-x-0 bottom-0 h-6 bg-gradient-to-t from-black/50 to-transparent pointer-events-none" />

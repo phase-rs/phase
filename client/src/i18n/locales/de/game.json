@@ -152,7 +152,8 @@
     "loading": "{{name}} wird geladen",
     "unimplemented": "Nicht implementiert: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Getappt"
+    "tapped": "Getappt",
+    "reloadArt": "Zum Neuladen des Bilds tippen"
   },
   "preview": {
     "holdCtrlBack": "Strg halten für Rückseite",

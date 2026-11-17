@@ -483,6 +483,27 @@ describe("owner printing non-gating overlay", () => {
     expect(remount.result.current.src).toBe("/viewer.jpg");
   });
 
+  // #11008: the owner ladder keeps its own failed sources, so a reload must
+  // reach its cache too, not only the normal hook's.
+  it("offers an exhausted owner ladder a reload that loads its first source again", async () => {
+    const env = await setup();
+    env.installPrinting(P, "/viewer.jpg");
+    env.installPrinting(O1, "/owner-a.jpg");
+    const hook = renderHook(() => env.useCardImage("Alpha", { oracleId: A, ownerPrinting: owner }));
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+    act(() => hook.result.current.advanceFailedSource?.("/owner-a.jpg"));
+    await waitFor(() => expect(hook.result.current.source?.kind).toBe("remote"));
+    act(() => hook.result.current.advanceFailedSource?.("https://img.example/11111111-1111-4111-8111-111111111111-front.jpg"));
+    expect(hook.result.current).toMatchObject({ src: null, isLoading: false, source: { kind: "fallback" } });
+
+    // The exhaustion holds on its own; only the reload starts the ladder over.
+    await settle();
+    expect(hook.result.current.src).toBeNull();
+    act(() => hook.result.current.reload?.());
+    await waitFor(() => expect(hook.result.current.src).toBe("/owner-a.jpg"));
+    expect(hook.result.current.source?.kind).toBe("installed");
+  });
+
   it.each([false, true])("discards stale repository completions before publication, cache, and remote continuation; unmount=%s", async (unmount) => {
     const env = await setup();
     env.installPrinting(P, "/viewer.jpg");

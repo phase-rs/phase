@@ -152,7 +152,8 @@
     "loading": "Wczytywanie {{name}}",
     "unimplemented": "Niezaimplementowane: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Obrócona"
+    "tapped": "Obrócona",
+    "reloadArt": "Dotknij, aby ponownie wczytać ilustrację"
   },
   "preview": {
     "holdCtrlBack": "Przytrzymaj Ctrl, aby zobaczyć tylną stronę",

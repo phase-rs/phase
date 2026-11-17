@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { useTranslation } from "react-i18next";
 
 import { RichLabel } from "../mana/RichLabel.tsx";
 
@@ -24,25 +25,32 @@ export interface CardArtFallbackProps {
    * name out of the box. Defaults to `fullCard`.
    */
   variant?: CardArtFallbackVariant;
+  /**
+   * Offers a "Tap to reload art" button that loads the art again. Pass it only
+   * where the tile owns its taps: the button can't sit inside another button,
+   * and on a phone's battlefield tile it would take the tap meant for the game.
+   */
+  onReload?: () => void;
 }
 
 /**
  * Deliberate text tile shown when a card/token has no renderable art — either
  * because art resolution produced no src (issue #6156: tokens with no official
  * paper printing, e.g. Kibo, Uktabi Prince's Banana) or because the resolved
- * image failed to load.
+ * image failed to load. A failed load is remembered, so the tile can offer a
+ * one-tap reload (#11008); it never retries on its own.
  *
  * Shared by the two board renderers: `CardImage` (full-card board and modals)
  * and `ArtCropCard` (the *default* battlefield renderer) route both their "no
  * art" and "broken art" cases here, so an artless permanent stays identifiable
  * by name wherever it appears rather than rendering as a blank/black square,
- * and the two renders cannot drift apart.
+ * and the two renders cannot drift apart. The mobile preview uses it too.
  *
- * `CardPreview` deliberately keeps its own placeholder: the hover preview is
- * an order of magnitude larger and centres a single name at `text-sm`, which
- * this tile's top-aligned heading would not reproduce. It mirrors the `role`
- * and `aria-label` here so assistive tech announces an artless card the same
- * way in both places.
+ * The desktop `CardPreview` deliberately keeps its own placeholder: the hover
+ * preview is an order of magnitude larger and centres a single name at
+ * `text-sm`, which this tile's top-aligned heading would not reproduce. It
+ * mirrors the `role` and `aria-label` here so assistive tech announces an
+ * artless card the same way in both places.
  */
 export function CardArtFallback({
   name,
@@ -50,28 +58,64 @@ export function CardArtFallback({
   className,
   style,
   variant = "fullCard",
+  onReload,
 }: CardArtFallbackProps) {
+  const { t } = useTranslation("game");
   const isArtCrop = variant === "artCrop";
+  // A battlefield art crop has room for a 44px button or the name, not both,
+  // and the tile's frame header already shows the name. The label stays for
+  // assistive tech.
+  const hidesName = isArtCrop && onReload != null;
+
   return (
     <div
       className={`${className} bg-gray-800 shadow-md overflow-hidden flex flex-col ${isArtCrop ? "justify-center p-1" : "p-2"}`}
       style={style}
-      role="img"
-      aria-label={name}
     >
+      {/* The image role sits on the text alone: an `img` hides whatever it
+          contains from assistive tech, and the reload button must stay
+          reachable. */}
       <div
-        className={
-          isArtCrop
-            ? "text-[9px] font-semibold text-gray-100 leading-tight text-center break-words"
-            : "text-xs font-semibold text-gray-100 mb-1 truncate"
-        }
+        role="img"
+        aria-label={name}
+        className={hidesName
+          ? "sr-only"
+          : `flex min-h-0 flex-1 flex-col overflow-hidden ${isArtCrop ? "justify-center" : ""}`}
       >
-        {name}
-      </div>
-      {!isArtCrop && oracleText && (
-        <div className="text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden">
-          <RichLabel text={oracleText} size="xs" />
+        <div
+          className={
+            isArtCrop
+              ? "text-[9px] font-semibold text-gray-100 leading-tight text-center break-words"
+              : "text-xs font-semibold text-gray-100 mb-1 truncate"
+          }
+        >
+          {name}
         </div>
+        {!isArtCrop && oracleText && (
+          <div className="text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden">
+            <RichLabel text={oracleText} size="xs" />
+          </div>
+        )}
+      </div>
+      {onReload && (
+        // `min-h-11` keeps the touch target at least 44px tall. The surface
+        // around the tile (a permanent, a preview) acts on the same tap, so the
+        // button stops both its pointerdown and its click.
+        <button
+          type="button"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onReload();
+          }}
+          className={[
+            "min-h-11 w-full shrink-0 rounded-md bg-black/40 px-2 font-semibold leading-tight",
+            "text-gray-100 ring-1 ring-white/20 hover:bg-black/60",
+            isArtCrop ? "text-[10px]" : "mt-1 text-xs",
+          ].join(" ")}
+        >
+          {t("card.reloadArt")}
+        </button>
       )}
     </div>
   );

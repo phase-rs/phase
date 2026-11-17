@@ -152,7 +152,8 @@
     "loading": "Chargement de {{name}}",
     "unimplemented": "Non implémenté : {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Engagé"
+    "tapped": "Engagé",
+    "reloadArt": "Toucher pour recharger l'illustration"
   },
   "preview": {
     "holdCtrlBack": "Maintenez Ctrl pour la face arrière",

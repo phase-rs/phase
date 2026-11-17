@@ -152,7 +152,8 @@
     "loading": "Carregando {{name}}",
     "unimplemented": "Não implementado: {{mechanics}}",
     "dfc": "DFC",
-    "tapped": "Virada"
+    "tapped": "Virada",
+    "reloadArt": "Toque para recarregar a ilustração"
   },
   "preview": {
     "holdCtrlBack": "Segure Ctrl para a face traseira",

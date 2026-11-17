@@ -11,7 +11,11 @@ import type { CardImageSource, ImageRungs } from "../services/visualPacks/types.
 import { getEffectiveOffline, useEffectiveOffline } from "../stores/connectivityStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import { nextImageSourceIndex } from "./imageSourceLadder.ts";
-import { BoundedCache, useCardImage as useLegacyCardImage } from "./useLegacyCardImage.ts";
+import {
+  BoundedCache,
+  useCardArtReload,
+  useCardImage as useLegacyCardImage,
+} from "./useLegacyCardImage.ts";
 
 export { BoundedCache, useCardBackImage, useLocaleArt } from "./useLegacyCardImage.ts";
 export type { SourcePrinting, UseCardBackImageResult } from "./useLegacyCardImage.ts";
@@ -274,6 +278,10 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): I
   const offline = useEffectiveOffline();
   const language = usePreferencesStore((state) => eligible && enabled ? state.language : "en");
   const oracleId = options?.ownerPrintedRef?.oracle_id ?? options?.oracleId;
+  // The owner art's cache keeps its own failed sources, so its key carries the
+  // card's reload count: a reload of this card, from any surface, starts a fresh
+  // owner session instead of replaying the cached failure.
+  const ownerArt = useCardArtReload(eligible && enabled ? oracleId ?? "" : "");
   let input: OwnerInput | null = null;
   if (eligible && enabled && oracleId) {
     const setCode = owner.set_code.toLowerCase();
@@ -282,11 +290,23 @@ export function useCardImage(cardName: string, options?: UseCardImageOptions): I
     const faceIndex = options?.faceIndex ?? 0;
     const size = options?.size ?? "normal";
     input = {
-      key: JSON.stringify([cardName, oracleId, faceName, faceIndex, setCode, collectorNumber, size, language, offline]),
+      key: JSON.stringify([
+        cardName,
+        oracleId,
+        faceName,
+        faceIndex,
+        setCode,
+        collectorNumber,
+        size,
+        language,
+        offline,
+        ownerArt.count,
+      ]),
       cardName, oracleId, faceName,
       faceIndex, setCode, collectorNumber, size, language, offline,
     };
   }
   const overlay = useOwnerCardImageOverlay(input);
-  return overlay ?? normal;
+  if (!overlay) return normal;
+  return { ...overlay, reload: ownerArt.reload };
 }
