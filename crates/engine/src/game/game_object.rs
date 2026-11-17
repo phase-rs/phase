@@ -4543,10 +4543,7 @@ impl GameObject {
     /// `SourceChosenPlayer` controller-ref / player-scope for CDAs such as
     /// Sewer Nemesis and Skyshroud War Beast.
     pub fn chosen_player(&self) -> Option<PlayerId> {
-        self.chosen_attributes.iter().find_map(|a| match a {
-            ChosenAttribute::Player(p) => Some(*p),
-            _ => None,
-        })
+        chosen_player_in(&self.chosen_attributes)
     }
 
     /// CR 111.1 + CR 707.10 + CR 707.12a: Whether this object is "represented by
@@ -4744,6 +4741,15 @@ fn is_initial_next_trigger_base_set_instance(value: &u64) -> bool {
 
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// CR 607.2d: the persisted chosen player in a set of chosen attributes, live
+/// or last-known. The single reader behind [`GameObject::chosen_player`].
+pub(crate) fn chosen_player_in(attributes: &[ChosenAttribute]) -> Option<PlayerId> {
+    attributes.iter().find_map(|attribute| match attribute {
+        ChosenAttribute::Player(player) => Some(*player),
+        _ => None,
+    })
 }
 
 /// CR 607.2d + CR 608.2c: Resolve "the chosen player" from the source's
