@@ -169,6 +169,19 @@
 //! application slot (`combat_one_shot_applications`, now the ledger's
 //! `applications`) dropped. That is under the unchanged 16,384 ceiling.
 //!
+//! `GameState` re-measured on x86_64-unknown-linux-gnu while semantically porting
+//! the as-enters dice/counters branch (72ae22642) onto main through da2af2bca5,
+//! including canonical placement and component delivery (#10636), at 15,840 B.
+//! Measured with the isolated `-Zprint-type-sizes` command above. The merged
+//! parked-entry and pre-entry bookkeeping remains under the calibrated ceiling:
+//! 15,840.next_multiple_of(256) + 256 = 16,384, so the ceiling is unchanged.
+//!
+//! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-19`) at
+//! 15,936 B when the two-phase damage batch merged main through `206116c5`:
+//! the branch's boxed `damage_batch_ledger` and `damage_event_losses` unioned
+//! with the as-enters dice/counters bookkeeping (#10433) above. That is under
+//! the unchanged 16,384 ceiling.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!

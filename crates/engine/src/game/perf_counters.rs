@@ -67,6 +67,49 @@ pub struct PerfCounterSnapshot {
     pub sba_empty_battlefield_short_circuits: u64,
 }
 
+/// Work at the copy-entry view seam, separate from AI baseline counters.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopyEntryWorkCounters {
+    pub full_state_board_builds: u64,
+    pub membership_probes: u64,
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static COPY_ENTRY_WORK_COUNTERS: Cell<CopyEntryWorkCounters> = const {
+        Cell::new(CopyEntryWorkCounters { full_state_board_builds: 0, membership_probes: 0 })
+    };
+}
+
+#[cfg(feature = "test-support")]
+pub fn copy_entry_work_snapshot() -> CopyEntryWorkCounters {
+    COPY_ENTRY_WORK_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn reset_copy_entry_work_counters() {
+    COPY_ENTRY_WORK_COUNTERS.with(|cell| cell.set(CopyEntryWorkCounters::default()));
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn record_pre_entry_board_build() {
+    COPY_ENTRY_WORK_COUNTERS.with(|cell| {
+        let mut value = cell.get();
+        value.full_state_board_builds += 1;
+        cell.set(value);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn record_copy_entrant_membership_probe() {
+    COPY_ENTRY_WORK_COUNTERS.with(|cell| {
+        let mut value = cell.get();
+        value.membership_probes += 1;
+        cell.set(value);
+    });
+}
+
 /// Test-only cache-use counters for the homogeneous target-selection walk.
 ///
 /// Kept separate from [`PerfCounterSnapshot`], whose serialized field set powers
@@ -251,6 +294,18 @@ pub struct StackBulkCounters {
 pub struct TriggerIndexCounters {
     /// Calls to `TriggerIndex::rebuild_from_battlefield`.
     pub full_rebuilds: u64,
+}
+
+/// Test-only counters for the CR 613.8a-c Layer 2 control selector
+/// (`layers::apply_control_effects_in_dependency_order`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that
+/// struct's serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControlDependencyCounters {
+    /// Effect pairs the cheap rejection could not rule out, each of which
+    /// cloned the state to preview the provider.
+    pub previews: u64,
 }
 
 /// Test-only count of `stack_reach::stack_entry_node_reach` calls for an entry with
@@ -704,6 +759,10 @@ thread_local! {
     #[cfg(feature = "test-support")]
     static STACK_REACH_COUNTERS: Cell<StackReachCounters> = const {
         Cell::new(StackReachCounters { entry_reaches: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static CONTROL_DEPENDENCY_COUNTERS: Cell<ControlDependencyCounters> = const {
+        Cell::new(ControlDependencyCounters { previews: 0 })
     };
     #[cfg(feature = "test-support")]
     static CAST_UNDO_RECORD_COUNTERS: Cell<CastUndoRecordCounters> = const {
@@ -1536,6 +1595,8 @@ pub fn reset() {
     #[cfg(feature = "test-support")]
     STACK_REACH_COUNTERS.with(|counters| counters.set(StackReachCounters::default()));
     #[cfg(feature = "test-support")]
+    CONTROL_DEPENDENCY_COUNTERS.with(|counters| counters.set(ControlDependencyCounters::default()));
+    #[cfg(feature = "test-support")]
     CAST_UNDO_RECORD_COUNTERS.with(|counters| counters.set(CastUndoRecordCounters::default()));
 }
 
@@ -1592,6 +1653,21 @@ pub fn record_stack_entry_reach() {
 #[cfg(feature = "test-support")]
 pub fn stack_reach_snapshot() -> StackReachCounters {
     STACK_REACH_COUNTERS.with(Cell::get)
+}
+
+/// One Layer 2 control-dependency preview (a state clone).
+#[cfg(feature = "test-support")]
+pub fn record_control_dependency_preview() {
+    CONTROL_DEPENDENCY_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.previews += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn control_dependency_snapshot() -> ControlDependencyCounters {
+    CONTROL_DEPENDENCY_COUNTERS.with(Cell::get)
 }
 
 #[cfg(feature = "test-support")]

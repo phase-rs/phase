@@ -55,7 +55,6 @@ function CombatTaxContent({ data }: { data: CombatTaxPayment["data"] }) {
       title={title}
       subtitle={subtitle}
       size="md"
-      scrollable
     >
       <div className="flex flex-col gap-3 px-3 py-3 lg:px-5 lg:py-5">
         {/* Per-creature breakdown */}

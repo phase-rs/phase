@@ -155,7 +155,20 @@ expression: "&ir"
                             "type": "Mandatory"
                           },
                           "valid_card": {
-                            "type": "SelfRef"
+                            "type": "And",
+                            "filters": [
+                              {
+                                "type": "SelfRef"
+                              },
+                              {
+                                "type": "Typed",
+                                "type_filters": [
+                                  "Creature"
+                                ],
+                                "controller": null,
+                                "properties": []
+                              }
+                            ]
                           },
                           "description": null,
                           "condition": null,

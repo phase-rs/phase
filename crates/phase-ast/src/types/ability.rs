@@ -20,8 +20,8 @@ use super::counter::{CounterMatch, CounterType};
 use super::event_kinds::{ActivatedAbilityKind, BendingType, ClashResult, PlayerActionKind};
 use super::game_state_kinds::{DistributionUnit, RetargetScope, TargetSelectionConstraint};
 use super::identifiers::{
-    EpicEffectId, ExtraPhaseId, ObjectId, ObjectIncarnationRef, ReplacementContinuationId,
-    TrackedSetId,
+    EpicEffectId, ExtraPhaseId, ExtraTurnId, ObjectId, ObjectIncarnationRef,
+    ReplacementContinuationId, TrackedSetId,
 };
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{
@@ -6435,6 +6435,17 @@ pub enum DelayedTriggerCondition {
         phase: Phase,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entry: Option<ExtraPhaseId>,
+    },
+    /// CR 603.7a + CR 500.7: "at the beginning of that turn's end step" — names
+    /// the extra turn the preceding instruction of the same resolution granted,
+    /// and fires when its step `phase` begins during that turn, never during
+    /// another turn of the same player. The parser emits `turn: None` (the
+    /// anaphor); `effects::delayed_trigger::resolve` binds it to the granted
+    /// turn's `ExtraTurnId`, or creates no trigger if no turn was granted.
+    AtBeginningOfGrantedTurn {
+        phase: Phase,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<ExtraTurnId>,
     },
     /// "when [object] leaves the battlefield"
     WhenLeavesPlay {

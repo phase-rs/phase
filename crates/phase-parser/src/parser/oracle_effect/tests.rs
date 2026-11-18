@@ -40976,6 +40976,87 @@ fn resolve_it_pronoun_any_subject() {
     assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
 }
 
+/// CR 608.2c + CR 706.2: `condition_compares_only_event_amount` holds for a
+/// comparison of the triggering event's amount with a constant, on either side,
+/// and for nothing else: another quantity, a wrapped event amount, a constant
+/// against a constant, and every non-comparison condition (including a negated
+/// or conjoined event-amount check) name no event amount alone.
+#[test]
+fn condition_compares_only_event_amount_names_a_bare_event_amount_comparison() {
+    let amount = || QuantityExpr::Ref {
+        qty: QuantityRef::EventContextAmount,
+    };
+    let fixed = |value| QuantityExpr::Fixed { value };
+    let check = |lhs, rhs| AbilityCondition::QuantityCheck {
+        lhs,
+        comparator: Comparator::GE,
+        rhs,
+    };
+    assert!(condition_compares_only_event_amount(&check(
+        amount(),
+        fixed(4)
+    )));
+    assert!(condition_compares_only_event_amount(&check(
+        fixed(4),
+        amount()
+    )));
+    assert!(condition_compares_only_event_amount(&check(
+        amount(),
+        amount()
+    )));
+
+    assert!(!condition_compares_only_event_amount(&check(
+        fixed(1),
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::Controller,
+            },
+        },
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        amount(),
+        QuantityExpr::Ref {
+            qty: QuantityRef::CountersOn {
+                scope: ObjectScope::Source,
+                counter_type: None,
+            },
+        }
+    )));
+    assert!(!condition_compares_only_event_amount(&check(
+        QuantityExpr::Offset {
+            inner: Box::new(amount()),
+            offset: 1,
+        },
+        fixed(4)
+    )));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::Not {
+            condition: Box::new(check(amount(), fixed(4))),
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::And {
+            conditions: vec![check(amount(), fixed(4))],
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::PreviousEffectAmount {
+            comparator: Comparator::LE,
+            rhs: fixed(3),
+            channel: crate::types::ability::DamageChannel::Total,
+        }
+    ));
+    assert!(!condition_compares_only_event_amount(
+        &AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        }
+    ));
+}
+
 /// Issue #6507 (CR 122.1): `condition_refs_source_object` must
 /// recognize a source-scoped counter-threshold `QuantityCheck` ("if there are
 /// no mining counters on this land") as source-referential — that gate is what
@@ -101100,6 +101181,70 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
     }
 }
 
+/// CR 608.2c: building block for the generic "if you can't" strict-fail
+/// class. A compound clause's nested "and" remainder resolves as its own
+/// nodes, so `def_chain_is_zone_ledger_invisible` certifies a chain only when
+/// every nested node's effect is ledger-invisible and no node carries a cost,
+/// an "unless" payment, an else branch or modes. Hand-built chains reach the
+/// walk whatever shape the chunker gives a printed line.
+#[test]
+fn def_chain_is_zone_ledger_invisible_walks_the_nested_compound_chain() {
+    let tap = || {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SetTapState {
+                target: TargetFilter::SelfRef,
+                scope: EffectScope::Single,
+                state: TapStateChange::Tap,
+            },
+        )
+    };
+    let put_counter = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: CounterType::Stun,
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::SelfRef,
+        },
+    );
+    let sacrifice = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Sacrifice {
+            target: TargetFilter::SelfRef,
+            count: QuantityExpr::Fixed { value: 1 },
+            min_count: 0,
+        },
+    );
+
+    assert!(
+        def_chain_is_zone_ledger_invisible(&tap().sub_ability(put_counter.clone())),
+        "tap → put a counter: every node's success is ledger-invisible"
+    );
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&tap().sub_ability(sacrifice)),
+        "tap → sacrifice: the nested sacrifice writes the ledger"
+    );
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&tap().cost(AbilityCost::Tap)),
+        "a node with a cost is not certified"
+    );
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&tap().unless_pay(UnlessPayModifier {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            payer: TargetFilter::Controller,
+        })),
+        "a node with an \"unless\" payment is not certified"
+    );
+    let mut with_else = tap();
+    with_else.else_ability = Some(Box::new(put_counter));
+    assert!(
+        !def_chain_is_zone_ledger_invisible(&with_else),
+        "a node with an else branch is not certified"
+    );
+}
+
 #[test]
 fn reviving_vapors_keeps_one_in_hand_and_puts_the_rest_into_the_graveyard() {
     // Verbatim Oracle text (Scryfall). CR 608.2c: three instructions of one
@@ -104009,6 +104154,255 @@ fn unless_damage_that_much_binds_to_primary_damage_amount() {
     assert_eq!(
         alternative_amount, primary_amount,
         "the alternative's amount must share the primary damage quantity"
+    );
+}
+
+/// CR 608.2c + CR 614.1a: each printed mass-damage face of "[noun] dealt damage
+/// this way would die this turn, exile it instead" lowers to a head `DamageAll`
+/// whose sub-ability carries the die-exile replacement bound to the set the
+/// damage clause published (`TrackedSet{TrackedSetId(0)}`), not the `Any` route
+/// (which reads declared targets an each-creature spell does not have).
+/// CR 109.2 + CR 614.1: the carried replacement's `valid_card` is the subject's
+/// own card-type noun conjoined with the carrier (`creature_gated`: "a creature
+/// dealt damage this way"), or the bare carrier (Underworld Fires' "a permanent
+/// dealt damage this way", CR 110.1).
+/// SHAPE test: runtime behaviour is pinned by
+/// `tests/integration/anger_of_the_gods_die_exile.rs`.
+fn assert_mass_damage_die_exile_shape(
+    oracle: &str,
+    name: &str,
+    types: &[&str],
+    keywords: &[&str],
+    expected_valid_card: &TargetFilter,
+) -> Vec<AbilityDefinition> {
+    use crate::types::replacements::ReplacementEvent;
+    let parsed = parse_oracle_text(
+        oracle,
+        name,
+        &keywords.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+        &types.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+        &[],
+    );
+    assert!(
+        !parsed
+            .abilities
+            .iter()
+            .any(crate::parser::oracle::has_unimplemented),
+        "{name}: no clause may be left unimplemented: {:?}",
+        parsed.abilities
+    );
+    let head = &parsed.abilities[0];
+    assert!(
+        matches!(&*head.effect, Effect::DamageAll { .. }),
+        "{name}: head must be DamageAll, got {:?}",
+        head.effect
+    );
+    let rider = head.sub_ability.as_ref().unwrap_or_else(|| {
+        panic!("{name}: the die-exile rider must absorb into the damage clause")
+    });
+    let Effect::AddTargetReplacement {
+        replacement,
+        target,
+    } = &*rider.effect
+    else {
+        panic!(
+            "{name}: expected AddTargetReplacement rider, got {:?}",
+            rider.effect
+        );
+    };
+    assert_eq!(
+        *target,
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0)
+        },
+        "{name}: the anaphor names the damaged set, not a declared target"
+    );
+    assert_eq!(replacement.event, ReplacementEvent::Moved);
+    assert_eq!(
+        replacement.valid_card.as_ref(),
+        Some(expected_valid_card),
+        "{name}: the rider's carried valid_card"
+    );
+    assert_eq!(
+        replacement.destination_zone,
+        Some(crate::types::zones::Zone::Graveyard)
+    );
+    assert_eq!(replacement.expiry, Some(RestrictionExpiry::EndOfTurn));
+    assert!(replacement.consume_on_apply);
+    assert!(
+        rider.sub_ability.is_none(),
+        "{name}: the rider ends the chain"
+    );
+    parsed.abilities
+}
+
+/// CR 109.2: `And[SelfRef, Typed(creature)]`, the carried `valid_card` of a rider
+/// whose subject is "a creature dealt damage ...".
+fn creature_gated_die_exile_valid_card() -> TargetFilter {
+    TargetFilter::And {
+        filters: vec![
+            TargetFilter::SelfRef,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)),
+        ],
+    }
+}
+
+#[test]
+fn die_exile_rider_after_mass_damage_binds_the_damaged_set() {
+    let creature_gated = creature_gated_die_exile_valid_card();
+    // Verbatim Oracle text (MTGJSON 5.3.0+20261116).
+    assert_mass_damage_die_exile_shape(
+        "Anger of the Gods deals 3 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.",
+        "Anger of the Gods",
+        &["Sorcery"],
+        &[],
+        &creature_gated,
+    );
+    assert_mass_damage_die_exile_shape(
+        "Crush the Weak deals 2 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.\nForetell {R} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)",
+        "Crush the Weak",
+        &["Sorcery"],
+        &["Foretell"],
+        &creature_gated,
+    );
+    assert_mass_damage_die_exile_shape(
+        "Yamabushi's Storm deals 1 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.",
+        "Yamabushi's Storm",
+        &["Sorcery"],
+        &[],
+        &creature_gated,
+    );
+    assert_mass_damage_die_exile_shape(
+        "Underworld Fires deals 1 damage to each creature and each planeswalker. If a permanent dealt damage this way would die this turn, exile it instead.",
+        "Underworld Fires",
+        &["Sorcery"],
+        &[],
+        &TargetFilter::SelfRef,
+    );
+    // Gallifrey Falls // No More: the left half's text, parsed as its own face.
+    assert_mass_damage_die_exile_shape(
+        "Gallifrey Falls deals 4 damage to each creature. If a creature dealt damage this way would die this turn, exile it instead.\nFuse (You may cast one or both halves of this card from your hand.)",
+        "Gallifrey Falls",
+        &["Instant"],
+        &["Fuse"],
+        &creature_gated,
+    );
+    let draconic = assert_mass_damage_die_exile_shape(
+        "As an additional cost to cast this spell, exile an instant or sorcery card from your graveyard.\nDraconic Intervention deals X damage to each non-Dragon creature, where X is the exiled card's mana value. If a creature dealt damage this way would die this turn, exile it instead.\nExile Draconic Intervention.",
+        "Draconic Intervention",
+        &["Sorcery"],
+        &[],
+        &creature_gated,
+    );
+    assert!(
+        draconic.len() >= 2,
+        "the trailing 'Exile Draconic Intervention.' line stays its own ability"
+    );
+}
+
+/// The `valid_card` of the die-exile rider a damage-spell chain carries, found
+/// down the sub-ability chain; `None` if the chain has no rider.
+fn die_exile_rider_valid_card(oracle: &str) -> Option<TargetFilter> {
+    let mut cursor = Some(parse_effect_chain(oracle, AbilityKind::Spell));
+    while let Some(def) = cursor {
+        if let Effect::AddTargetReplacement { replacement, .. } = &*def.effect {
+            return replacement.valid_card.clone();
+        }
+        cursor = def.sub_ability.map(|sub| *sub);
+    }
+    None
+}
+
+/// CR 109.2 + CR 110.1 + CR 608.2b + CR 614.1: the rider carries the card-type noun
+/// of its printed subject on every route. SHAPE test: runtime behaviour is pinned by
+/// `tests/integration/anger_of_the_gods_die_exile.rs` (Liliana of the Veil under
+/// Anger of the Gods and Touch of the Void).
+#[test]
+fn die_exile_rider_carries_the_subjects_card_type_noun() {
+    let creature_gated = creature_gated_die_exile_valid_card();
+    // Verbatim Oracle text (MTGJSON 5.3.0+20261116). "a creature dealt damage this
+    // way" after a single-target "any target" clause keeps the `Any` route but still
+    // names creatures only.
+    for oracle in [
+        "Touch of the Void deals 3 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+        "Pillar of Flame deals 2 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+    ] {
+        assert_eq!(
+            die_exile_rider_valid_card(oracle),
+            Some(creature_gated.clone()),
+            "{oracle}"
+        );
+    }
+    // No type restriction: "a permanent" (CR 110.1) and a declared-target subject,
+    // whose type target legality already enforces (CR 608.2b). Each still parses to
+    // a rider, so the `SelfRef` below is not a dropped rider.
+    for oracle in [
+        "Spikefield Hazard deals 1 damage to any target. If a permanent dealt damage this way would die this turn, exile it instead.",
+        "Lava Coil deals 4 damage to target creature. If that creature would die this turn, exile it instead.",
+    ] {
+        assert_eq!(
+            die_exile_rider_valid_card(oracle),
+            Some(TargetFilter::SelfRef),
+            "{oracle}"
+        );
+    }
+    // The "~" spelling of the same anaphors. Torch the Tower prints the permanent
+    // form ("If a permanent dealt damage by Torch the Tower would die this turn,
+    // exile it instead."). No printed card reaches the creature form through this
+    // detector; the nearest, Kumano, Master Yamabushi ("If a creature dealt damage
+    // by Kumano this turn would die, exile it instead."), uses a different word
+    // order this detector rejects. It shares the noun grammar, so it is pinned here.
+    assert_eq!(
+        try_parse_die_exile_rider(
+            "if a creature dealt damage by ~ would die this turn, exile it instead.",
+            AbilityKind::Spell
+        )
+        .and_then(|def| match &*def.effect {
+            Effect::AddTargetReplacement { replacement, .. } => replacement.valid_card.clone(),
+            _ => None,
+        }),
+        Some(creature_gated)
+    );
+    assert_eq!(
+        try_parse_die_exile_rider(
+            "if a permanent dealt damage by ~ would die this turn, exile it instead.",
+            AbilityKind::Spell
+        )
+        .and_then(|def| match &*def.effect {
+            Effect::AddTargetReplacement { replacement, .. } => replacement.valid_card.clone(),
+            _ => None,
+        }),
+        Some(TargetFilter::SelfRef)
+    );
+}
+
+/// Scope boundary, NOT a correctness claim: a SINGLE-target damage clause keeps
+/// the `Any` route (its declared target is the recipient). That rider installs
+/// regardless of whether damage was dealt, a pre-existing defect tracked as
+/// phase-rs/phase#10965; this pin flips when that issue lands. Reach-guard: the
+/// head is `DealDamage` and the rider exists.
+#[test]
+fn die_exile_rider_after_single_target_damage_keeps_any_route() {
+    let def = parse_effect_chain(
+        "Pillar of Flame deals 2 damage to any target. If a creature dealt damage this way would die this turn, exile it instead.",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(&*def.effect, Effect::DealDamage { .. }),
+        "head must be DealDamage, got {:?}",
+        def.effect
+    );
+    let rider = def.sub_ability.as_ref().expect("die-exile rider");
+    assert!(
+        matches!(
+            &*rider.effect,
+            Effect::AddTargetReplacement {
+                target: TargetFilter::Any,
+                ..
+            }
+        ),
+        "single-target riders keep Any (#10965), got {:?}",
+        rider.effect
     );
 }
 
