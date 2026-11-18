@@ -200,9 +200,10 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         TriggerMode::SpellCast | TriggerMode::SpellCastOrCopy | TriggerMode::SpellCopy => {
             push(TriggerEventKey::SpellCast(narrow));
         }
+        // CR 603.2 + CR 603.3b: an observer of another ability triggering.
+        TriggerMode::AbilityTriggered { .. } => push(TriggerEventKey::AbilityTriggered),
         TriggerMode::AbilityCast
         | TriggerMode::AbilityResolves
-        | TriggerMode::AbilityTriggered
         | TriggerMode::SpellAbilityCast
         | TriggerMode::SpellAbilityCopy
         | TriggerMode::AbilityActivated
@@ -475,8 +476,8 @@ pub(crate) fn keys_from_trigger_def(def: &TriggerDefinition) -> (Keys, bool) {
         // matcher dispatch returns `None` for them. Skip entirely — neither
         // a key nor unclassified routing.
         TriggerMode::StateCondition => return (SmallVec::new(), false),
-        // CR 904.9: resolved by the scan hook
-        // (`archenemy::resolve_pending_as_set_in_motion_choices`), never
+        // CR 904.9: choices are made by the scheme action (the precombat-main arm,
+        // `archenemy::resolve_pending_as_set_in_motion_choices`), never
         // through event-driven dispatch. Neither a key nor unclassified.
         TriggerMode::AsSetInMotion => return (SmallVec::new(), false),
         // No matcher registered; never fires through events.
@@ -509,7 +510,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         | GameEvent::PhysicalContestStarted { .. }
         | GameEvent::PhysicalContestResolved { .. } => {}
         GameEvent::TurnStarted { .. } => push(TriggerEventKey::TurnStarted),
-        GameEvent::PhaseChanged { phase } => push(TriggerEventKey::BeginningOfPhase(*phase)),
+        GameEvent::PhaseChanged { phase } | GameEvent::PhaseChangedFor { phase, .. } => push(TriggerEventKey::BeginningOfPhase(*phase)),
         GameEvent::PriorityPassed { .. } => {}
         GameEvent::StickerPlaced { .. } => {}
         GameEvent::CreatureExerted { .. } => push(TriggerEventKey::Exerted),
@@ -549,6 +550,8 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         }
         GameEvent::XValueChosen { .. } => {}
         GameEvent::AbilityActivated { .. } => push(TriggerEventKey::AbilityOrCopyActivated),
+        // CR 603.2 + CR 603.3b: a triggered ability triggered.
+        GameEvent::AbilityTriggered { .. } => push(TriggerEventKey::AbilityTriggered),
         GameEvent::ZoneChanged {
             from,
             to,
@@ -653,7 +656,9 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::CreatureDestroyed { .. } => push(TriggerEventKey::Destroyed),
         GameEvent::PermanentSacrificed { .. } => push(TriggerEventKey::Sacrificed),
         GameEvent::EffectResolved { kind, .. } => keys_from_effect_kind(*kind, &mut push),
-        GameEvent::Unattached { .. } => push(TriggerEventKey::AttachmentChanged),
+        GameEvent::Attached { .. } | GameEvent::Unattached { .. } => {
+            push(TriggerEventKey::AttachmentChanged)
+        }
         // CR 116.2c + CR 116.1: no printed trigger condition matches "a
         // continuous effect ended". The special action doesn't use the stack, and
         // any consequential board change (a Licid reverting to a creature and
@@ -665,7 +670,7 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
         GameEvent::BlockersDeclared { .. } => push(TriggerEventKey::Blocks),
         // CR 509.3c: an effect-driven "becomes blocked" is a Blocks-key event so
         // "whenever ~ becomes blocked" triggers are indexed for it.
-        GameEvent::AttackerBecameBlockedByEffect { .. } => push(TriggerEventKey::Blocks),
+        GameEvent::AttackerBecameBlocked { .. } => push(TriggerEventKey::Blocks),
         GameEvent::AttackerBecameBlockedByFilteredBlocker { .. } => push(TriggerEventKey::Blocks),
         GameEvent::CombatTaxPaid { .. } | GameEvent::CombatTaxDeclined { .. } => {}
         GameEvent::BecomesTarget { .. } => push(TriggerEventKey::BecomesTarget),
@@ -788,11 +793,6 @@ pub(crate) fn keys_from_event(event: &GameEvent, state: &GameState) -> Keys {
 /// matcher in `trigger_matchers.rs` emit keys; all others are no-ops.
 fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey)) {
     match kind {
-        // Production EffectResolved matchers — see `trigger_matchers.rs` lines
-        // 1896, 2072, 2126, 2172, 2198, 2234, 2261, 2313, 2338.
-        EffectKind::Attach | EffectKind::AttachAll | EffectKind::Equip => {
-            push(TriggerEventKey::AttachmentChanged);
-        }
         EffectKind::Reveal => push(TriggerEventKey::Revealed),
         EffectKind::GainControl | EffectKind::GainControlAll => {
             push(TriggerEventKey::ChangesController)
@@ -805,17 +805,21 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         EffectKind::Renown => push(TriggerEventKey::Renowned),
         EffectKind::Monstrosity => push(TriggerEventKey::BecomesMonstrous),
         EffectKind::ManifestDread => push(TriggerEventKey::ManifestDreadResolved),
-        EffectKind::DayTimeChange => push(TriggerEventKey::DayNightChanged),
         EffectKind::PutSticker | EffectKind::ApplySticker => {}
         // All other variants: not dispatched on by any production
         // EffectResolved matcher (verified against `trigger_matchers.rs` 1-3216).
         // Explicit `&[]`-equivalent arms — a future contributor who adds a
         // new EffectResolved-dispatching matcher will force this match to be
         // re-classified.
-        EffectKind::StartYourEngines
+        EffectKind::DayTimeChange
+        | EffectKind::Attach
+        | EffectKind::AttachAll
+        | EffectKind::Equip
+        | EffectKind::StartYourEngines
         | EffectKind::ChangeSpeed
         | EffectKind::DealDamage
         | EffectKind::ApplyPostReplacementDamage
+        | EffectKind::ResumeDamageBatch
         | EffectKind::EachDealsDamageEqualToPower
         | EffectKind::EachSourceDealsDamage
         | EffectKind::Draw
@@ -1018,7 +1022,7 @@ fn keys_from_effect_kind(kind: EffectKind, push: &mut impl FnMut(TriggerEventKey
         | EffectKind::GiveControl
         | EffectKind::RemoveFromCombat
         // CR 509.3c: the "becomes blocked" trigger from an effect-block is keyed
-        // off the `AttackerBecameBlockedByEffect` GameEvent (see the event→key
+        // off the `AttackerBecameBlocked` GameEvent (see the event→key
         // map above), not off `EffectResolved`, so this kind emits no key here.
         | EffectKind::BecomeBlocked
         | EffectKind::Conjure
@@ -1216,6 +1220,20 @@ pub fn ensure_ready(state: &mut GameState) {
     }
 }
 
+/// CR 603.2: whether the trigger index holds any source under `key`. A phased-out or
+/// stale entry is not filtered here, so a caller may only use the answer as an
+/// over-approximation. Reads only the keyed bucket: `unclassified` holds objects
+/// whose definitions could not be keyed or that carry a synthetic keyword trigger,
+/// and a definition whose mode maps to `key` is always in that key's bucket.
+pub(crate) fn has_keyed_trigger_source(state: &mut GameState, key: &TriggerEventKey) -> bool {
+    ensure_ready(state);
+    state
+        .trigger_index
+        .by_key
+        .get(key)
+        .is_some_and(|bucket| !bucket.is_empty())
+}
+
 /// CR 603.2: Public consult helper. Returns the union of buckets the event
 /// keys hit, plus the `unclassified` bucket. Caller dedups against the
 /// per-event `registered_this_event` set as usual.
@@ -1380,6 +1398,47 @@ mod tests {
         let (keys, route) = keys_from_trigger_def(&def);
         assert!(keys.contains(&TriggerEventKey::EnterBattlefield(Some(CoreType::Creature))));
         assert!(!route);
+    }
+
+    /// CR 603.2 + CR 603.3b: each printed observer shape registers under
+    /// `AbilityTriggered` and never in `unclassified`, so the keyed bucket is
+    /// exactly the set of observers (`has_keyed_trigger_source`'s premise).
+    #[test]
+    fn ability_triggered_shapes_key_only_their_own_bucket() {
+        use crate::types::statics::TriggerCause;
+        use crate::types::triggers::CausedAbilitySource;
+        for (cause, source) in [
+            (
+                TriggerCause::CreatureAttacking,
+                CausedAbilitySource::CausingObject,
+            ),
+            (
+                TriggerCause::EntersBattlefield { core_types: vec![] },
+                CausedAbilitySource::CausingObject,
+            ),
+            (
+                TriggerCause::EntersBattlefield { core_types: vec![] },
+                CausedAbilitySource::Any,
+            ),
+        ] {
+            let def = TriggerDefinition::new(TriggerMode::AbilityTriggered { cause, source })
+                .valid_card(TargetFilter::Typed(TypedFilter::creature()));
+            let (keys, route) = keys_from_trigger_def(&def);
+            assert_eq!(keys.as_slice(), [TriggerEventKey::AbilityTriggered]);
+            assert!(!route);
+        }
+        let event = GameEvent::AbilityTriggered {
+            stack_entry: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            origin: crate::types::events::TriggeredAbilityOrigin::SourceAbility,
+            causes: Vec::new(),
+        };
+        let state = GameState::new_two_player(42);
+        assert_eq!(
+            keys_from_event(&event, &state).as_slice(),
+            [TriggerEventKey::AbilityTriggered]
+        );
     }
 
     #[test]

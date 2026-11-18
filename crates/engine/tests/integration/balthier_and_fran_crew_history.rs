@@ -573,6 +573,11 @@ fn balthier_triggers_for_its_current_controller_after_a_control_change() {
     let balthier = add_balthier(&mut s, P0, "Balthier and Fran");
     let vehicle = add_vehicle(&mut s, P0, "Test Vehicle", PLAIN_VEHICLE, 3, 3);
     let thief = s.add_creature(P1, "Thief", 1, 1).id();
+    // CR 118.3 + CR 608.2d: fund P1 (Balthier's controller at the {1}{R}{G}
+    // offer) so the fixed-mana feasibility gate presents the prompt.
+    s.add_basic_land(P1, ManaColor::Green);
+    s.add_basic_land(P1, ManaColor::Green);
+    s.add_basic_land(P1, ManaColor::Red);
     let mut r = s.build();
 
     crew(&mut r, vehicle, &[balthier]);
@@ -609,6 +614,12 @@ fn only_the_crewing_object_triggers_not_a_same_text_twin() {
     let balthier = add_balthier(&mut s, P0, "Balthier and Fran");
     let twin = add_balthier(&mut s, P0, "Balthier Twin");
     let vehicle = add_vehicle(&mut s, P0, "Test Vehicle", PLAIN_VEHICLE, 3, 3);
+    // CR 118.3 + CR 608.2d: fund P0 (the payer of the {1}{R}{G} offer) so the
+    // fixed-mana feasibility gate presents the crewing object's prompt. The
+    // twin never crewed, so funding cannot prompt it.
+    s.add_basic_land(P0, ManaColor::Green);
+    s.add_basic_land(P0, ManaColor::Green);
+    s.add_basic_land(P0, ManaColor::Red);
     let mut r = s.build();
 
     crew(&mut r, vehicle, &[balthier]);

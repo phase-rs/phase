@@ -35,7 +35,7 @@ import type {
 } from "./generated/interaction";
 import { SubmissionSlot } from "./submissionSlot";
 import { AdapterError, AdapterErrorCode, EMPTY_LEGAL_ACTIONS, actionRejectionError, isActionRejection, isCustomGameFormat, nextSnapshotSeq } from "./types";
-import type { BracketDeckRequest, BracketEstimate, CommanderBracketTier } from "../types/bracketEstimate";
+import type { ComboDeclaration, CommanderBracketTier } from "../types/bracketEstimate";
 import {
   HandshakeError,
   openPhaseSocket,
@@ -80,7 +80,8 @@ import type { WireFormat } from "../network/wireEnvelope";
 
 /** Deck data format matching server protocol. */
 export interface DeckData {
-  bracket_tier?: CommanderBracketTier;
+  bracket_tier?: CommanderBracketTier | null;
+  combo_declaration?: ComboDeclaration;
   /** The owner's explicit printing choices; display-only. Omitted when empty. */
   printings?: DeckPrinting[];
   main_deck: string[];
@@ -1083,6 +1084,12 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 22 — Tournament deck submission: a new `SubmitTournamentDeck` client message
+ *      (carries a DeckData) and a `deck_submitted` readiness flag on
+ *      PlayerSummary. Both additive; MIN_SUPPORTED stays 2. The deck is private
+ *      and never projected. Mirrored in types.ts (ClientMessage + PlayerSummary).
+ * 21 — DeckData/PlayerDeckList gain an optional name-keyed printings sidecar
+ *      (owner-chosen printings, display-only), merged from main. Additive.
  * 19 — Prospective: no lobby variant or field changes shape in this bump.
  *      Moved ahead of the `PlanechaseCommander` GameFormat variant — see
  *      LOBBY_PROTOCOL_VERSION's own `/// 19` entry in
@@ -3289,14 +3296,6 @@ export class WebSocketAdapter implements EngineAdapter {
     throw new AdapterError(
       AdapterErrorCode.WASM_ERROR,
       "Undo not supported in multiplayer",
-      false,
-    );
-  }
-
-  estimateBracket(_deck: BracketDeckRequest): Promise<BracketEstimate | null> {
-    throw new AdapterError(
-      AdapterErrorCode.BRACKET_ESTIMATION_UNSUPPORTED,
-      "Bracket estimation is a local feature; not available in WebSocket sessions.",
       false,
     );
   }

@@ -36,6 +36,8 @@ function candidate(id: string, bracket: AiDeckCandidate["bracket"]): AiDeckCandi
     coveragePct: 100,
     archetype: null,
     bracket,
+    declaredBracket: bracket,
+    comboDeclaration: { kind: "undeclared" },
   };
 }
 

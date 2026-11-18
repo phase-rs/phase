@@ -8,7 +8,7 @@
 //! less" fell through to the generic cost-modifier path and emitted a filterless,
 //! conditionless reducer — discounting EVERY spell the controller cast. The fix
 //! parameterizes the ordinal seam so "second" lowers to
-//! `SpellsCastThisTurn(you) == 1`, applied here through the real cost pipeline
+//! `SpellsCast(you) == 1`, applied here through the real cost pipeline
 //! (`collect_battlefield_cost_modifiers` → `evaluate_cost_mod_static_condition`).
 //!
 //! This test drives `GameScenario` → `cast().resolve()` and measures the mana
@@ -61,7 +61,7 @@ fn second_spell_ordinal_reduction_discounts_only_the_second_cast() {
         ));
     }
 
-    // Cast 1 (first spell this turn): gate is `SpellsCastThisTurn == 1`, but zero
+    // Cast 1 (first spell this turn): gate is `SpellsCast == 1`, but zero
     // spells have been cast, so NO discount — pays full {2}.
     let before1 = runner.state().players[0].mana_pool.total();
     runner.cast(s1).resolve();

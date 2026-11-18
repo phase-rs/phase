@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { FormatConfig } from "../../adapter/types";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
 import type { ParsedDeck } from "../../services/deckParser";
+import { UNDECLARED_COMBO } from "../../types/bracketEstimate";
 import { buildLocalAiDeckList } from "../GameProvider";
 
 const candidate = (id: string, name: string, card: string): AiDeckCandidate => ({
@@ -14,9 +15,12 @@ const candidate = (id: string, name: string, card: string): AiDeckCandidate => (
   coveragePct: null,
   archetype: null,
   bracket: null,
+  declaredBracket: null,
+  comboDeclaration: UNDECLARED_COMBO,
 });
 
-vi.mock("../../services/aiDeckCatalog", () => ({
+vi.mock("../../services/aiDeckCatalog", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../services/aiDeckCatalog")>(),
   buildLegalAiDeckCatalog: vi.fn(async () => ({
     candidates: [
       candidate("deck-a", "Deck A", "Plains"),
@@ -45,6 +49,7 @@ describe("buildLocalAiDeckList Horde branch", () => {
       hordeConfig(),
       undefined,
       null,
+      UNDECLARED_COMBO,
       { type: "Default" },
       [],
     );
@@ -64,6 +69,7 @@ describe("buildLocalAiDeckList Horde branch", () => {
       hordeConfig(["SarumanHorde"]),
       undefined,
       null,
+      UNDECLARED_COMBO,
       { type: "Default" },
       [],
     );
@@ -83,6 +89,7 @@ describe("buildLocalAiDeckList Horde branch", () => {
       hordeConfig(),
       undefined,
       null,
+      UNDECLARED_COMBO,
       { type: "Default" },
       [],
     );

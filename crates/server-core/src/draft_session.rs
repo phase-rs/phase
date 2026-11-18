@@ -6,6 +6,7 @@ use draft_core::types::{
     PackDistribution, PairingStatus,
 };
 use draft_core::view::DraftPlayerView;
+use engine::database::ComboTable;
 use engine::types::player::PlayerId;
 use rand::Rng;
 use tracing::{info, warn};
@@ -768,6 +769,7 @@ impl DraftSessionManager {
         draft_code: &str,
         game_mgr: &mut SessionManager,
         db: &std::sync::Arc<engine::database::CardDatabase>,
+        combos: &ComboTable,
         round: u8,
     ) -> Result<Vec<DraftMatchSpawn>, String> {
         let session = self
@@ -803,7 +805,7 @@ impl DraftSessionManager {
                             seat, pairing.match_id
                         )
                     })?;
-                    deck_payload_from_submission(db, submission)
+                    deck_payload_from_submission(db, combos, submission)
                 })
                 .collect();
             let decks = match deck_payloads {
@@ -948,6 +950,7 @@ pub struct DraftMatchPlayer {
 
 fn deck_payload_from_submission(
     db: &engine::database::CardDatabase,
+    combos: &ComboTable,
     submission: &DraftDeckSubmission,
 ) -> Result<engine::game::deck_loading::PlayerDeckPayload, String> {
     let deck = DeckData {
@@ -979,7 +982,7 @@ fn deck_payload_from_submission(
         printings: submission.printings.clone(),
         ..Default::default()
     };
-    deck_resolve::resolve_deck(db, &deck)
+    deck_resolve::resolve_deck(db, combos, &deck)
 }
 
 impl Default for DraftSessionManager {
@@ -1570,7 +1573,7 @@ mod tests {
     ) -> Vec<String> {
         let mut games = SessionManager::new();
         let spawns = mgr
-            .spawn_match_games_for_round(code, &mut games, db, round)
+            .spawn_match_games_for_round(code, &mut games, db, &ComboTable::default(), round)
             .unwrap();
         let (spawn, player) = spawns
             .iter()
@@ -1724,7 +1727,7 @@ mod tests {
             }
             let mut games = SessionManager::new();
             let spawns = restored
-                .spawn_match_games_for_round(&code, &mut games, &db, 1)
+                .spawn_match_games_for_round(&code, &mut games, &db, &ComboTable::default(), 1)
                 .unwrap();
             assert_eq!(spawns.len(), 4, "every complete pairing starts a real game");
             for spawn in spawns {
@@ -2826,6 +2829,7 @@ mod tests {
                 &code,
                 &mut game_mgr,
                 &std::sync::Arc::new(CardDatabase::default()),
+                &ComboTable::default(),
                 1,
             )
             .expect("missing deck submissions should skip only the incomplete pairing");

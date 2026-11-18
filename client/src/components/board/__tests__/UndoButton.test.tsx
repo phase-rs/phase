@@ -13,7 +13,7 @@ describe("UndoButton", () => {
 
   it("renders when single-player history exists", () => {
     useGameStore.setState({
-      stateHistory: [buildGameState()],
+      stateHistory: [{ state: buildGameState(), logSeq: 0 }],
       gameMode: "ai",
     });
 
@@ -34,7 +34,7 @@ describe("UndoButton", () => {
     // Multiplayer state is authoritative and shared — a client-side rewind
     // would desync, so the affordance must stay hidden regardless of history.
     useGameStore.setState({
-      stateHistory: [buildGameState()],
+      stateHistory: [{ state: buildGameState(), logSeq: 0 }],
       gameMode: "online",
     });
 

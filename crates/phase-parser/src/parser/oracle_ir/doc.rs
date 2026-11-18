@@ -1275,7 +1275,7 @@ fn stamp_effect_printed_slot(effect: &mut Effect, slot: usize, kind: PrintedItem
         Effect::StartYourEngines { .. } => {}
         Effect::ChangeSpeed { .. } => {}
         Effect::DealDamage { .. } => {}
-        Effect::ApplyPostReplacementDamage { .. } => {}
+        Effect::ApplyPostReplacementDamage { .. } | Effect::ResumeDamageBatch { .. } => {}
         Effect::EachDealsDamageEqualToPower { .. } => {}
         Effect::EachSourceDealsDamage { .. } => {}
         Effect::Draw { .. } => {}

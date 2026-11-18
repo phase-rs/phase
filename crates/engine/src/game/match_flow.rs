@@ -181,8 +181,8 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
 
     // `PlayerDeckPayload`'s deck fields are plain `Vec<DeckEntry>` — deref
     // the Arc then deep-clone so the payload owns its own vec.
-    // Propagate `bracket_tier` so the pool rebuilt by `load_next_game_decks`
-    // in the next game carries the same declared tier as the current game.
+    // Propagate both bracket inputs and the printings record so the pool rebuilt by
+    // `load_next_game_decks` in the next game retains the same reconciled effective tier.
     //
     // Seats >= 2 are AI players (e.g., cEDH 4-player Bo3). Collect their pools
     // so `bracket_tier = Cedh` is not silently dropped between games.
@@ -215,6 +215,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                         .unwrap_or_default(),
                     signature_spell: (*p.current_signature_spell).clone(),
                     bracket_tier: p.bracket_tier,
+                    estimated_bracket_tier: p.estimated_bracket_tier,
                     printings: Vec::new(),
                     printing_entry_names: Vec::new(),
                 },
@@ -237,6 +238,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 sticker_sheets: state.players[0].sticker_sheets.clone(),
                 signature_spell: (*p0.current_signature_spell).clone(),
                 bracket_tier: p0.bracket_tier,
+                estimated_bracket_tier: p0.estimated_bracket_tier,
                 printings: Vec::new(),
                 printing_entry_names: Vec::new(),
             },
@@ -255,6 +257,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 sticker_sheets: state.players[1].sticker_sheets.clone(),
                 signature_spell: (*p1.current_signature_spell).clone(),
                 bracket_tier: p1.bracket_tier,
+                estimated_bracket_tier: p1.estimated_bracket_tier,
                 printings: Vec::new(),
                 printing_entry_names: Vec::new(),
             },
@@ -753,6 +756,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -1257,8 +1261,8 @@ mod tests {
     }
 
     /// CR 732.2a opt-in persistence across the ENGINE between-games rebuild. A Bo3 match
-    /// created with the detector On (projected onto `loop_detection` by `set_match_config`)
-    /// must KEEP it On after `restart_between_games_with_starting_player` builds a fresh
+    /// created with the detector Interactive (projected onto `loop_detection` by
+    /// `set_match_config`) must KEEP it Interactive after `restart_between_games_with_starting_player` builds a fresh
     /// `GameState::new` for game 2. This guards the engine `match_flow` rebuild — distinct
     /// from the server-core `rebuild_pregame_state` path — which a raw `match_config = …`
     /// assignment silently drops, because a fresh `GameState::new` defaults the runtime
@@ -1266,7 +1270,7 @@ mod tests {
     ///
     /// REVERT-FAIL: change the rebuild back to `next_state.match_config = state.match_config;`
     /// ⇒ `next_state.loop_detection` stays at the `GameState::new` default Off and the
-    /// post-restart `On` assertion fails (the opt-in vanishes for game 2/3 of the match).
+    /// post-restart `Interactive` assertion fails (the opt-in vanishes for game 2/3 of the match).
     #[test]
     fn bo3_restart_preserves_loop_detection_opt_in() {
         use crate::types::game_state::LoopDetectionMode;
@@ -1275,10 +1279,10 @@ mod tests {
         let mut state = GameState::new_two_player(17);
         state.set_match_config(MatchConfig {
             match_type: MatchType::Bo3,
-            loop_detection: LoopDetectionMode::On,
+            loop_detection: LoopDetectionMode::Interactive,
         });
         // Creation-time projection holds for game 1.
-        assert_eq!(state.loop_detection, LoopDetectionMode::On);
+        assert_eq!(state.loop_detection, LoopDetectionMode::Interactive);
 
         let payload = DeckPayload {
             player: PlayerDeckPayload {
@@ -1352,10 +1356,13 @@ mod tests {
         // ...and the detector opt-in survived the fresh-state rebuild.
         assert_eq!(
             state.loop_detection,
-            LoopDetectionMode::On,
+            LoopDetectionMode::Interactive,
             "detector opt-in must persist across the engine between-games rebuild"
         );
-        assert_eq!(state.match_config.loop_detection, LoopDetectionMode::On);
+        assert_eq!(
+            state.match_config.loop_detection,
+            LoopDetectionMode::Interactive
+        );
     }
 
     /// Debug capability must survive the ENGINE between-games rebuild, exactly
@@ -1569,19 +1576,19 @@ mod tests {
         state.deck_pools = vec![
             PlayerDeckPool {
                 player: PlayerId(0),
-                bracket_tier: CommanderBracketTier::Core,
+                bracket_tier: Some(CommanderBracketTier::Core),
                 current_main: std::sync::Arc::new(vec![entry("P0", 1)]),
                 ..Default::default()
             },
             PlayerDeckPool {
                 player: PlayerId(1),
-                bracket_tier: CommanderBracketTier::Optimized,
+                bracket_tier: Some(CommanderBracketTier::Optimized),
                 current_main: std::sync::Arc::new(vec![entry("P1", 1)]),
                 ..Default::default()
             },
             PlayerDeckPool {
                 player: PlayerId(2),
-                bracket_tier: CommanderBracketTier::Cedh,
+                bracket_tier: Some(CommanderBracketTier::Cedh),
                 current_main: std::sync::Arc::new(vec![entry("AI", 1)]),
                 ..Default::default()
             },
@@ -1592,7 +1599,7 @@ mod tests {
 
         assert_eq!(
             payload.player.bracket_tier,
-            CommanderBracketTier::Core,
+            Some(CommanderBracketTier::Core),
             "player seat bracket_tier must round-trip"
         );
         assert!(
@@ -1601,7 +1608,7 @@ mod tests {
         );
         assert_eq!(
             payload.opponent.bracket_tier,
-            CommanderBracketTier::Optimized,
+            Some(CommanderBracketTier::Optimized),
             "opponent seat bracket_tier must round-trip"
         );
         assert_eq!(
@@ -1611,8 +1618,49 @@ mod tests {
         );
         assert_eq!(
             payload.ai_decks[0].bracket_tier,
-            CommanderBracketTier::Cedh,
+            Some(CommanderBracketTier::Cedh),
             "AI seat bracket_tier (Cedh) must be propagated — not silently dropped"
+        );
+    }
+
+    #[test]
+    fn deck_payload_from_current_pools_propagates_estimated_bracket_tier() {
+        use crate::game::bracket_estimate::CommanderBracketTier;
+        use crate::types::game_state::PlayerDeckPool;
+
+        let mut state = GameState::new_two_player(42);
+        state.deck_pools = vec![
+            PlayerDeckPool {
+                player: PlayerId(0),
+                estimated_bracket_tier: Some(CommanderBracketTier::Upgraded),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(1),
+                estimated_bracket_tier: Some(CommanderBracketTier::Optimized),
+                ..Default::default()
+            },
+            PlayerDeckPool {
+                player: PlayerId(2),
+                estimated_bracket_tier: Some(CommanderBracketTier::Core),
+                ..Default::default()
+            },
+        ];
+
+        let payload = deck_payload_from_current_pools(&state)
+            .expect("deck_payload_from_current_pools must succeed with three pools");
+
+        assert_eq!(
+            payload.player.estimated_bracket_tier,
+            Some(CommanderBracketTier::Upgraded)
+        );
+        assert_eq!(
+            payload.opponent.estimated_bracket_tier,
+            Some(CommanderBracketTier::Optimized)
+        );
+        assert_eq!(
+            payload.ai_decks[0].estimated_bracket_tier,
+            Some(CommanderBracketTier::Core)
         );
     }
 

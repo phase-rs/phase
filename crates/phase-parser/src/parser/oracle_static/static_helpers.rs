@@ -5,6 +5,7 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use crate::types::ability::PlayerScope;
+use crate::types::ability::TurnWindow;
 
 /// CR 113.6 + CR 201.2: Recognize the "sources with the chosen name" / "cards with
 /// the chosen name" subject phrase and map it to `TargetFilter::HasChosenName`.
@@ -852,7 +853,7 @@ pub(crate) fn try_parse_cost_modification(
             .parse(count_lower.as_str())
             .ok()
             .map(|(_, qty)| qty);
-        named_like_spell
+        let count = named_like_spell
             .or(population_union)
             .or_else(|| super::oracle_quantity::parse_for_each_clause(count_text))
             .or_else(|| {
@@ -872,6 +873,16 @@ pub(crate) fn try_parse_cost_modification(
                 }
             })
             .or_else(|| {
+                // CR 122.1 + CR 601.2f: a counter-kind census ("kind of
+                // counter on it", "different kind of counter on it", "of the
+                // kinds of counters on it") reaching this fallback is one every
+                // census reader above declined — its object has no binding on
+                // this route — and is never a type phrase. Reading it as one
+                // would count every object; decline the whole modification so
+                // the line stays an honest gap instead.
+                if super::oracle_quantity::names_counter_kind_quantifier(after_for_each.lower) {
+                    return None;
+                }
                 let (count_filter, remainder) = parse_type_phrase_folding(count_text);
                 // CR 601.2f: an unconstrained filter means the type phrase
                 // recognized nothing; counting every object would invent a
@@ -883,7 +894,10 @@ pub(crate) fn try_parse_cost_modification(
                 .then_some(QuantityRef::ObjectCount {
                     filter: count_filter,
                 })
-            })
+            });
+        // A "for each" the readers above could not count leaves no reduction
+        // to state: decline rather than fall back to a flat {N}.
+        Some(count?)
     } else {
         None
     };
@@ -1247,13 +1261,14 @@ pub(crate) fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCon
     }
     Some(StaticCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: if filter == TargetFilter::Any {
                     None
                 } else {
                     Some(filter)
                 },
+                window: TurnWindow::ThisTurn,
             },
         },
         comparator: Comparator::GE,
@@ -1844,6 +1859,12 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
         // Digital-only Alchemy (no CR entry): same scoped-subject rebind as
         // the monarch arm above.
         StaticCondition::HasBoon { player } => {
+            if matches!(player, PlayerScope::ScopedPlayer) {
+                *player = antecedent.clone();
+            }
+        }
+        // CR 122.1f + CR 109.5: same scoped-subject rebind as the monarch arm.
+        StaticCondition::PlayerIsPoisoned { player } => {
             if matches!(player, PlayerScope::ScopedPlayer) {
                 *player = antecedent.clone();
             }

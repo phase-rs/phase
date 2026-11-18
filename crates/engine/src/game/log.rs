@@ -398,6 +398,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::CardCopyCreated { .. }
         | GameEvent::ObjectConjured { .. } => LogImportance::Essential,
         GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::AbilityActivated { .. }
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::KeywordAbilityActivated { .. }
@@ -461,6 +462,7 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::BecomesPlotted { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         // CR 714.2: bookkeeping the engine publishes so meta-triggers can
         // observe a chapter ability finishing; the chapter's own effects carry
@@ -470,9 +472,10 @@ fn importance(event: &GameEvent) -> LogImportance {
         | GameEvent::ResolutionHalted { .. }
         | GameEvent::ObjectIntensified { .. }
         | GameEvent::Evolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         | GameEvent::ContinuousEffectEnded { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
@@ -570,7 +573,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::KeywordAbilityActivated { .. }
         | GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CombatTaxPaid { .. }
         | GameEvent::CombatTaxDeclined { .. }
@@ -606,6 +609,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. }
         | GameEvent::Mutated { .. }
         | GameEvent::Augmented { .. }
@@ -630,6 +634,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::BecomesPlotted { .. }
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         // CR 714.2: neither good nor bad news on its own — the drain or token
         // the observing trigger produces is what carries tone.
@@ -646,6 +651,7 @@ fn tone(event: &GameEvent) -> LogTone {
         | GameEvent::CounterRemoved { .. }
         | GameEvent::ControllerChanged { .. }
         | GameEvent::EffectResolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::BecomesTarget { .. }
@@ -741,8 +747,11 @@ fn should_exclude_event(event: &GameEvent) -> bool {
             ..
         } => true,
         // StackPushed/StackResolved are low-signal bookkeeping —
-        // the meaningful info is in SpellCast/AbilityActivated and EffectResolved
-        GameEvent::StackPushed { .. } | GameEvent::StackResolved { .. } => true,
+        // the meaningful info is in SpellCast/AbilityActivated and EffectResolved.
+        // AbilityTriggered is the observer-matcher bookkeeping beside StackPushed.
+        GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
+        | GameEvent::StackResolved { .. } => true,
         // ReplacementApplied is engine bookkeeping. The resulting life,
         // counter, zone, or damage event carries the player-facing outcome.
         GameEvent::ReplacementApplied { .. } => true,
@@ -951,6 +960,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::TurnStarted { .. }
         | GameEvent::ExtraTurnCreated { .. }
         | GameEvent::PhaseChanged { .. }
+        | GameEvent::PhaseChangedFor { .. }
         | GameEvent::PriorityPassed { .. } => LogCategory::Turn,
 
         GameEvent::SpellCast { .. }
@@ -959,6 +969,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::NinjutsuActivated { .. }
         | GameEvent::KeywordAbilityActivated { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         // CR 714.2: a chapter ability finishing resolution is a stack event.
         | GameEvent::SagaChapterAbilityResolved { .. }
@@ -966,7 +977,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::AttackersDeclared { .. }
         | GameEvent::BlockersDeclared { .. }
-        | GameEvent::AttackerBecameBlockedByEffect { .. }
+        | GameEvent::AttackerBecameBlocked { .. }
         | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
         | GameEvent::CreatureExerted { .. }
         | GameEvent::CreatureEnlisted { .. }
@@ -1047,6 +1058,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         GameEvent::CardCopyCreated { .. } => LogCategory::Token,
 
         GameEvent::EffectResolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         // CR 116.2c: a special action that ends a continuous effect is an
         // effect-level state change, grouped with the other effect events.
@@ -1136,7 +1148,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_seg(state, *player_id),
         ],
 
-        GameEvent::PhaseChanged { phase } => {
+        GameEvent::PhaseChanged { phase } | GameEvent::PhaseChangedFor { phase, .. } => {
             vec![text(phase_label(*phase))]
         }
 
@@ -1292,6 +1304,10 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![card_seg(state, *object_id), text(" added to stack")]
         }
 
+        GameEvent::AbilityTriggered { source_id, .. } => {
+            vec![card_seg(state, *source_id), text("'s ability triggered")]
+        }
+
         GameEvent::StackResolved { object_id } => {
             vec![card_seg(state, *object_id), text(" resolves")]
         }
@@ -1309,6 +1325,21 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             text(" counters "),
             card_seg(state, *object_id),
         ],
+
+        GameEvent::Attached {
+            attachment_id,
+            target,
+        } => {
+            let mut segments = vec![
+                card_seg(state, *attachment_id),
+                text(" becomes attached to "),
+            ];
+            match target {
+                TargetRef::Object(object_id) => segments.push(card_seg(state, *object_id)),
+                TargetRef::Player(player_id) => segments.push(player_seg(state, *player_id)),
+            }
+            segments
+        }
 
         GameEvent::Unattached {
             attachment_id,
@@ -1590,7 +1621,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         }
 
         // CR 509.1h + CR 509.3c: an effect first made the attacker become blocked.
-        GameEvent::AttackerBecameBlockedByEffect { attacker } => {
+        GameEvent::AttackerBecameBlocked { attacker, .. } => {
             vec![card_seg(state, *attacker), text(" becomes blocked")]
         }
 
@@ -1724,6 +1755,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             object_id,
             counter_type,
             count,
+            ..
         } => vec![
             exact_u32_segment(*count),
             text(" "),
@@ -1831,7 +1863,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             num(*level as i32),
         ],
 
-        GameEvent::DayNightChanged { new_state } => {
+        GameEvent::DayNightChanged { new_state, .. } => {
             vec![text("Day/Night changed to "), text(new_state)]
         }
 
@@ -1920,7 +1952,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             vec![player_seg(state, *player_id), text(" commits a crime")]
         }
 
-        GameEvent::PlayerLost { player_id } => {
+        GameEvent::PlayerLost { player_id, .. } => {
             vec![player_seg(state, *player_id), text(" loses the game")]
         }
 
@@ -1984,6 +2016,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_id,
             sides,
             result,
+            ..
         } => match result {
             // CR 706: a numeric die roll renders its face value.
             Some(r) => vec![
@@ -3341,6 +3374,9 @@ mod tests {
             GameEvent::GameOver { winner: None },
             GameEvent::PlayerLost {
                 player_id: PlayerId(0),
+                reasons: std::collections::BTreeSet::from([
+                    crate::types::events::LossReason::LifeTotal,
+                ]),
             },
             GameEvent::PlayerEliminated {
                 player_id: PlayerId(0),
@@ -3352,6 +3388,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 20,
                 result: Some(17),
+                pre_entry_source: None,
             },
             GameEvent::StartingPlayerContest {
                 rounds: vec![crate::types::events::ContestRound {
@@ -3372,6 +3409,7 @@ mod tests {
             },
             GameEvent::DayNightChanged {
                 new_state: "Day".to_string(),
+                previous: None,
             },
             GameEvent::TokenCreated {
                 object_id: ObjectId(1),
@@ -4230,6 +4268,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count,
+            instruction_lead: None,
         };
         let segments = format_segments(&removed(1 << 31), &state);
         assert_eq!(segments[0], LogSegment::Text("2147483648".into()));
@@ -4285,6 +4324,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count: 3,
+            instruction_lead: None,
         };
         let segments = format_segments(&three, &state);
         assert_eq!(segments[0], LogSegment::Number(3));
@@ -4293,6 +4333,7 @@ mod counter_count_log_tests {
             object_id: id,
             counter_type: charge(),
             count: 1,
+            instruction_lead: None,
         };
         assert_eq!(
             format_segments(&one, &state)[3],

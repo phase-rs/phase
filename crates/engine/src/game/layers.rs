@@ -2217,6 +2217,12 @@ fn condition_uses_recipient_context(condition: &StaticCondition) -> bool {
         StaticCondition::HasBoon { player } => {
             matches!(player, PlayerScope::RecipientController)
         }
+        // CR 122.1f: the poison predicate's subject binds to the recipient's
+        // controller under "that creature's controller is poisoned" — the
+        // same recipient-anchored rule as the monarch arm above.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            matches!(player, PlayerScope::RecipientController)
+        }
         // CR 105.2 + CR 611.3a: "Enchanted creature gets +3/+3 unless IT shares a
         // color…" — the color check is on the recipient (the enchanted creature),
         // not the Aura source, so it must route through the recipient-eval path.
@@ -2325,6 +2331,9 @@ fn static_condition_uses_object_population(condition: &StaticCondition) -> bool 
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2491,6 +2500,9 @@ fn static_condition_characteristic_reads_at(
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2628,6 +2640,9 @@ fn entered_object_perturbs_static_condition(
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -2872,7 +2887,7 @@ fn evaluate_condition_inner(
         // CR 102.1: "during your turn" means the turn of the static's source
         // controller — never the caster. Most call sites pass the source's
         // controller as `controller`, but the cost-modification resolver passes
-        // the *caster* (so caster-relative conditions like SpellsCastThisTurn
+        // the *caster* (so caster-relative conditions like SpellsCast
         // resolve correctly), which would invert this turn check for an
         // opponent-affecting tax (Tithe Taker: "During your turn, spells your
         // opponents cast cost {1} more"). Bind to the source permanent's
@@ -3230,6 +3245,15 @@ fn evaluate_condition_inner(
         StaticCondition::HasBoon { player } => {
             designation_player(state, player, controller, source_id, context)
                 .is_some_and(|player| eval_has_boon(state, player))
+        }
+        // CR 122.1f + CR 810.10a: "player is poisoned" reads the scoped
+        // player's poison total; in Two-Headed Giant a player is poisoned
+        // through their team's shared total, matching every other poison read.
+        // The subject resolves through the same authority as the monarch
+        // identity, so an unanswerable subject reads false (fail closed).
+        StaticCondition::PlayerIsPoisoned { player } => {
+            designation_player(state, player, controller, source_id, context)
+                .is_some_and(|player| crate::game::players::team_poison_total(state, player) >= 1)
         }
         // CR 726.3: True when the controller has the initiative.
         StaticCondition::IsInitiative => eval_is_initiative(state, controller),
@@ -3780,6 +3804,21 @@ fn evaluate_all_layers(state: &mut GameState, retirement_owner: StateDurationRet
         .into_iter()
         .filter_map(|id| state.objects.get(&id).map(|o| (id, o.controller)))
         .collect();
+    // CR 603.10d: the immediately-before authority of every control change this
+    // pass derives is the board as it stands now, the last settled one. It is
+    // captured only when a control-change trigger could read it (CR 603.10: a
+    // gain-side one reads the observation its watchers are latched on);
+    // otherwise a derived change carries `Unrecorded` evidence, which nothing
+    // would read.
+    let control_capture = (!prev_controllers.is_empty()
+        && (super::triggers::look_back_control_change_listener_exists(state)
+            || super::triggers::gain_control_change_listener_exists(state)))
+    .then(|| {
+        super::effects::gain_control::capture_control_change_instruction(
+            state,
+            prev_controllers.iter().map(|(id, _)| *id),
+        )
+    });
 
     // CR 611.2b + CR 613.1: derive before ending durations. Every repeat
     // removes at least one stored effect, so convergence is monotone. Keep the
@@ -3790,7 +3829,13 @@ fn evaluate_all_layers(state: &mut GameState, retirement_owner: StateDurationRet
             break bf_ids;
         }
     };
-    finish_layer_evaluation(state, bf_ids, prev_controllers, retirement_owner);
+    finish_layer_evaluation(
+        state,
+        bf_ids,
+        prev_controllers,
+        control_capture,
+        retirement_owner,
+    );
 }
 
 fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
@@ -4058,6 +4103,15 @@ fn derive_layer_characteristics(state: &mut GameState) -> Vec<ObjectId> {
                     &mut zone_cache,
                     &mut started_effect_sets,
                 );
+            } else if *layer == Layer::Control {
+                apply_control_effects_in_dependency_order(
+                    state,
+                    &layer_effects,
+                    None,
+                    &mut abilities_suppressed,
+                    &mut zone_cache,
+                    &mut started_effect_sets,
+                );
             } else {
                 let ordered = if layer.has_dependency_ordering() {
                     order_with_dependencies(&layer_effects, state)
@@ -4309,6 +4363,7 @@ fn finish_layer_evaluation(
     state: &mut GameState,
     bf_ids: Vec<ObjectId>,
     prev_controllers: Vec<(ObjectId, PlayerId)>,
+    control_capture: Option<Arc<crate::types::events::ControlChangeInstructionCapture>>,
     retirement_owner: StateDurationRetirementOwner,
 ) {
     // CR 613.11: Rule-changing continuous effects are applied after object
@@ -4330,14 +4385,17 @@ fn finish_layer_evaluation(
     // the sole responsibility of `turns::start_next_turn` for the active
     // player's permanents.
     let mut controller_changed: Vec<ObjectId> = Vec::new();
+    let mut derived_changes: Vec<(ObjectId, PlayerId, PlayerId)> = Vec::new();
     for (id, prev) in prev_controllers {
         if let Some(obj) = state.objects.get_mut(&id) {
             if obj.controller != prev {
                 obj.summoning_sick = true;
                 controller_changed.push(id);
+                derived_changes.push((id, prev, obj.controller));
             }
         }
     }
+    queue_derived_control_changes(state, &derived_changes, control_capture.as_deref());
 
     // CR 506.4 + CR 613.1b: the same settled delta removes each changed
     // permanent from combat. Any removed role (attacking or blocking) can change
@@ -4432,6 +4490,97 @@ fn finish_layer_evaluation(
     // (Clean / EnteredObjects / Full).
     crate::game::effects::attach::refresh_protection_start_attachment_snapshots(state);
     state.layers_dirty = LayersDirty::Clean;
+}
+
+/// CR 613.1b + CR 603.2: queue every control change this full pass derived
+/// (`derived`: object, controller before the pass, controller after it) for
+/// publication as a `ControllerChanged`, unless an instruction already
+/// published it ahead of this pass (`GameState::announced_control_changes`),
+/// in which case its announcement is consumed instead. The ledger is cleared
+/// afterwards: an announcement this pass did not realize was overridden.
+///
+/// CR 603.10d: each queued change records the observation of its subject on
+/// the board before this pass (`capture`), so a look-back trigger reads that
+/// board. Without a capture, or once the subject is a new object (CR 400.7),
+/// the event carries `Unrecorded` evidence.
+///
+/// CR 603.10 + CR 113.7a: the observation also latches the gain-side watchers
+/// on the board this pass settled, immediately after the change. The change is
+/// published at a later drain, after which its watcher (the changed permanent
+/// itself, for "when you gain control of ~") may already have left; its
+/// trigger is collected from this latch, not from that later board. CR 603.2d:
+/// the trigger-doubling statics on that same board are latched with them, so
+/// the trigger is counted as of the event too.
+fn queue_derived_control_changes(
+    state: &mut GameState,
+    derived: &[(ObjectId, PlayerId, PlayerId)],
+    capture: Option<&crate::types::events::ControlChangeInstructionCapture>,
+) {
+    let mut gain_latch = None;
+    for &(object_id, old_controller, new_controller) in derived {
+        let Some(subject) = state
+            .objects
+            .get(&object_id)
+            .map(ObjectIncarnationRef::from_object)
+        else {
+            continue;
+        };
+        if let Some(position) = state
+            .announced_control_changes
+            .iter()
+            .position(|announced| *announced == (subject, new_controller))
+        {
+            state.announced_control_changes.swap_remove(position);
+            continue;
+        }
+        let evidence = match capture
+            .and_then(|capture| capture.observation_for(object_id))
+            .filter(|observation| observation.subject.identity == subject)
+        {
+            Some(mut observation) => {
+                let (watchers, doublers) = gain_latch.get_or_insert_with(|| {
+                    (
+                        Arc::new(super::triggers::latch_control_change_watchers(
+                            state,
+                            crate::types::triggers::ControlChangeSide::Gains,
+                        )),
+                        Arc::new(super::triggers::active_trigger_doublers(state)),
+                    )
+                });
+                observation.gain_watchers = Some(Arc::clone(watchers));
+                observation.gain_doublers = Arc::clone(doublers);
+                state.record_control_change_observation(observation)
+            }
+            None => crate::types::events::ControlChangeEvidence::Unrecorded,
+        };
+        state
+            .layer_control_changes
+            .push(crate::types::events::QueuedControlChange {
+                subject,
+                event: crate::types::events::GameEvent::ControllerChanged {
+                    object_id,
+                    old_controller,
+                    new_controller,
+                    evidence,
+                },
+            });
+    }
+    state.announced_control_changes.clear();
+}
+
+/// CR 603.2 + CR 613.1b: settle the board, then publish every control change a
+/// full layer evaluation derived and no instruction published, into `events`,
+/// in the order they were derived. Returns how many events it appended; the
+/// caller collects their triggers.
+pub(crate) fn publish_layer_control_changes(
+    state: &mut GameState,
+    events: &mut Vec<crate::types::events::GameEvent>,
+) -> usize {
+    flush_layers(state);
+    let queued = state.layer_control_changes.take();
+    let published = queued.len();
+    events.extend(queued.into_iter().map(|queued| queued.event));
+    published
 }
 
 /// CR 506.4 + CR 733: retire the incoming attacked relations of each exact
@@ -4762,6 +4911,7 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -4797,13 +4947,13 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::EventContextAmount
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
@@ -4835,7 +4985,6 @@ fn quantity_ref_reads_zone(qty: &QuantityRef, zone: Zone) -> bool {
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
         | QuantityRef::ManaSpentToCast { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::TimesCostPaidThisResolution
         | QuantityRef::TokensCreatedThisTurn { .. }
@@ -5065,7 +5214,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         // per-turn accumulators track life lost / gained this turn.
         QuantityRef::LifeTotal { .. }
         | QuantityRef::LifeAboveStarting
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::LifeGainedThisTurn { .. } => true,
         // `StartingLifeTotal` is a format constant (CR 119.1), NOT a live read —
         // a life change never moves it. Classified with the payload-free leaves
@@ -5099,7 +5248,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
 
         // Optional-`TargetFilter` variants route through the `Option`.
         QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. } => {
@@ -5158,6 +5307,7 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         QuantityRef::HandSize { .. }
         | QuantityRef::GraveyardSize { .. }
         | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::StartingDeckSize { .. }
         | QuantityRef::TriggeringDiscoverValue
         | QuantityRef::TriggeringScryLookCount
         | QuantityRef::TriggeringScryBottomCount
@@ -5206,7 +5356,6 @@ fn quantity_ref_reads_life(qty: &QuantityRef) -> bool {
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
         | QuantityRef::DungeonsCompleted
@@ -5403,6 +5552,7 @@ fn filter_prop_reads_life(prop: &FilterProp) -> bool {
         | FilterProp::ZoneChangedThisTurn { .. }
         | FilterProp::AttackedThisTurn { .. }
         | FilterProp::BlockedThisTurn
+        | FilterProp::FoughtThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::CountersPutOnThisTurn { .. }
         | FilterProp::FaceDown
@@ -5478,6 +5628,7 @@ fn target_filter_reads_life_total(filter: &TargetFilter) -> bool {
         | TargetFilter::AmassedArmy
         | TargetFilter::ChosenCard
         | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ChoiceAssignment { .. }
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
@@ -5562,6 +5713,9 @@ fn static_condition_reads_life(condition: &StaticCondition) -> bool {
         | StaticCondition::SourceIsBlocked
         | StaticCondition::IsMonarch { .. }
         | StaticCondition::HasBoon { .. }
+        // CR 122.1f: poison counters are player state, never a layer-writable
+        // object characteristic or a board population.
+        | StaticCondition::PlayerIsPoisoned { .. }
         | StaticCondition::IsInitiative
         | StaticCondition::NoMonarch
         | StaticCondition::HasCityBlessing
@@ -7502,6 +7656,15 @@ fn apply_layers_incremental(
             let layer_effects: Vec<&ActiveContinuousEffect> = layer_bucket.iter().collect();
             if *layer == Layer::Ability && layer_effects.iter().any(|e| is_referenced_grant(e)) {
                 apply_ability_effects_with_referenced_grants(
+                    state,
+                    &layer_effects,
+                    Some(&recipient_ids),
+                    &mut abilities_suppressed,
+                    &mut zone_cache,
+                    &mut started_effect_sets,
+                );
+            } else if *layer == Layer::Control {
+                apply_control_effects_in_dependency_order(
                     state,
                     &layer_effects,
                     Some(&recipient_ids),
@@ -9581,13 +9744,19 @@ fn gather_transient_continuous_effects_with(
             // `iter_cast_free_permission_source_ids`, giving one grant two
             // sources. CR 701.15b: `Goaded` is likewise a designation, not
             // an ability on the recipient; combat reads the live TCE directly.
+            // CR 611.2c + CR 613.11: a resolved `CantBeTargeted` rule effect
+            // (Vines of Vastwood, Veilstone Amulet) is read directly off the TCE by
+            // `static_abilities::transient_cant_be_targeted_prohibits`, so it is
+            // not an ability on the recipient and "loses all abilities" cannot
+            // clear it.
             if matches!(
                 modification,
                 ContinuousModification::AddStaticMode {
                     mode: StaticMode::MayLookAtFaceDown
                         | StaticMode::ReduceAbilityCost { .. }
                         | StaticMode::CastFromHandFree { .. }
-                        | StaticMode::Goaded,
+                        | StaticMode::Goaded
+                        | StaticMode::CantBeTargeted { .. },
                 }
             ) {
                 continue;
@@ -10632,7 +10801,10 @@ fn referenced_grant_depends_on(
         )
 }
 
-fn referenced_parent_affected_set(
+/// CR 613.8a: the set of objects `effect` would apply to if it applied now,
+/// observed on a scratch copy through the ordinary apply path (conditions,
+/// suppression, retained CR 613.6 sets and `restrict_to` included).
+fn previewed_affected_set(
     state: &GameState,
     parent: &ActiveContinuousEffect,
     restrict_to: Option<&BTreeSet<ObjectId>>,
@@ -10678,7 +10850,7 @@ fn referenced_parent_depends_on(
         &mut scratch_zones,
         &mut scratch_started,
     );
-    let after = referenced_parent_affected_set(
+    let after = previewed_affected_set(
         &scratch,
         parent,
         restrict_to,
@@ -10816,7 +10988,7 @@ fn apply_ability_effects_with_referenced_grants(
                             });
                             if has_parent_sensitive_reader {
                                 let before = before_parent_sets[i].get_or_insert_with(|| {
-                                    referenced_parent_affected_set(
+                                    previewed_affected_set(
                                         state,
                                         parent,
                                         restrict_to,
@@ -10841,6 +11013,196 @@ fn apply_ability_effects_with_referenced_grants(
                         depends_on(&pending[i], &pending[j], state)
                     };
                     if dependent {
+                        edges[i].push(j);
+                    }
+                }
+            }
+            select_next_effect(&edges)
+        };
+        let selected = pending.remove(next);
+        apply_continuous_effect_filtered(
+            state,
+            &selected,
+            restrict_to,
+            abilities_suppressed,
+            zone_cache,
+            started_effect_sets,
+        );
+    }
+}
+
+/// What one Layer 2 control effect would do if it applied now: the objects it
+/// would affect and the player it would give control of them to.
+#[derive(PartialEq, Eq)]
+struct ControlEffectOutput {
+    affected: Vec<ObjectId>,
+    controller: PlayerId,
+}
+
+fn control_effect_output(
+    state: &GameState,
+    effect: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &HashSet<ObjectId>,
+    started_effect_sets: &StartedContinuousEffectSets,
+) -> ControlEffectOutput {
+    ControlEffectOutput {
+        affected: previewed_affected_set(
+            state,
+            effect,
+            restrict_to,
+            abilities_suppressed,
+            started_effect_sets,
+        ),
+        controller: active_effect_condition_controller(state, effect),
+    }
+}
+
+/// CR 613.8a(b) + CR 109.5: `provider` provably cannot change what `dependent`
+/// does. Layer 2 writes only controllers, so `provider` can change `dependent`
+/// only through a controller `dependent` reads: one its affected filter or
+/// condition reads, or the controller of `dependent`'s own source, which a
+/// static's "you" names. A resolved effect's "you" was fixed when it resolved (CR 109.5), so for
+/// a transient only the filter and condition remain. For the source, the gate
+/// asks the provider's own affected set (CR 613.6: its retained set once it
+/// started; CR 613.1b: otherwise its affected filter under the same context the
+/// apply path uses, which only narrows it), so a provider on another object in
+/// an Aura chain is rejected. Answers before any clone.
+fn control_provider_cannot_change(
+    state: &GameState,
+    dependent: &ActiveContinuousEffect,
+    provider: &ActiveContinuousEffect,
+    started_effect_sets: &StartedContinuousEffectSets,
+) -> bool {
+    let reads = target_filter_characteristic_reads(&dependent.affected_filter).union(
+        dependent
+            .condition
+            .as_ref()
+            .map(static_condition_characteristic_reads)
+            .unwrap_or(CharacteristicKinds::EMPTY),
+    );
+    if reads.intersects(CharacteristicKinds::CONTROLLER) {
+        return false;
+    }
+    if dependent.transient_id.is_some() {
+        return true;
+    }
+    match continuous_effect_group_key(state, provider).and_then(|key| started_effect_sets.get(&key))
+    {
+        Some(retained) => !retained.contains(&dependent.source_id),
+        None => {
+            let ctx = FilterContext::from_source_with_controller(
+                provider.source_id,
+                active_effect_condition_controller(state, provider),
+            );
+            !matches_target_filter(state, dependent.source_id, &provider.affected_filter, &ctx)
+        }
+    }
+}
+
+/// CR 613.8a(b): applying `provider` now would change what `dependent` does.
+fn control_effect_depends_on(
+    state: &GameState,
+    dependent: &ActiveContinuousEffect,
+    provider: &ActiveContinuousEffect,
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &HashSet<ObjectId>,
+    started_effect_sets: &StartedContinuousEffectSets,
+    before: &ControlEffectOutput,
+) -> bool {
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_control_dependency_preview();
+    let mut scratch = state.clone();
+    let mut scratch_suppressed = abilities_suppressed.clone();
+    let mut scratch_started = started_effect_sets.clone();
+    let mut scratch_zones = LayerZoneObjectCache::default();
+    apply_continuous_effect_filtered(
+        &mut scratch,
+        provider,
+        restrict_to,
+        &mut scratch_suppressed,
+        &mut scratch_zones,
+        &mut scratch_started,
+    );
+    *before
+        != control_effect_output(
+            &scratch,
+            dependent,
+            restrict_to,
+            &scratch_suppressed,
+            &scratch_started,
+        )
+}
+
+/// CR 613.1b + CR 109.5 + CR 613.8a-c: apply the Layer 2 (control-changing)
+/// effects one at a time. A static control effect gives control to the current
+/// controller of the object it's on (CR 109.5), so it depends on an effect that
+/// would change that object's controller (CR 613.8a), and waits until just
+/// after it (CR 613.8b): Word of Seizing on Control Magic applies before Control
+/// Magic's own effect. Loops apply in timestamp order (CR 613.8b).
+///
+/// Dependency is read literally: "would applying the other effect change this
+/// one" is asked of the state as it stands at that point in the evaluation, and
+/// asked again after each effect applies (CR 613.8c), never as a fixed point
+/// over the whole bucket. So P1's Confiscate on P1's own Control Magic changes
+/// nothing about Control Magic before P0's Word of Seizing (on that Confiscate)
+/// applies, so Control Magic is independent and applies first by timestamp.
+/// Confiscate already depends on Word, since applying Word changes whom
+/// Confiscate gives Control Magic to, so Word applies before it. The Layer 6
+/// referenced-grant selector reads the rule the same way.
+fn apply_control_effects_in_dependency_order(
+    state: &mut GameState,
+    effects: &[&ActiveContinuousEffect],
+    restrict_to: Option<&BTreeSet<ObjectId>>,
+    abilities_suppressed: &mut HashSet<ObjectId>,
+    zone_cache: &mut LayerZoneObjectCache,
+    started_effect_sets: &mut StartedContinuousEffectSets,
+) {
+    let mut pending = order_by_timestamp(effects);
+    while !pending.is_empty() {
+        let next = {
+            let mut edges = vec![Vec::new(); pending.len()];
+            let mut before: Vec<Option<ControlEffectOutput>> = std::iter::repeat_with(|| None)
+                .take(pending.len())
+                .collect();
+            for (i, dependent) in pending.iter().enumerate() {
+                for (j, provider) in pending.iter().enumerate() {
+                    // CR 613.8a: only distinct effects of the same CDA class
+                    // can depend on each other.
+                    if i == j
+                        || dependent.characteristic_defining != provider.characteristic_defining
+                        || continuous_effect_group_key(state, dependent)
+                            .zip(continuous_effect_group_key(state, provider))
+                            .is_some_and(|(dependent_key, provider_key)| {
+                                dependent_key == provider_key
+                            })
+                        || control_provider_cannot_change(
+                            state,
+                            dependent,
+                            provider,
+                            started_effect_sets,
+                        )
+                    {
+                        continue;
+                    }
+                    let before = before[i].get_or_insert_with(|| {
+                        control_effect_output(
+                            state,
+                            dependent,
+                            restrict_to,
+                            abilities_suppressed,
+                            started_effect_sets,
+                        )
+                    });
+                    if control_effect_depends_on(
+                        state,
+                        dependent,
+                        provider,
+                        restrict_to,
+                        abilities_suppressed,
+                        started_effect_sets,
+                        before,
+                    ) {
                         edges[i].push(j);
                     }
                 }
@@ -11103,7 +11465,6 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 ///
 /// Mirrors `static_mode_uses_chosen_color`.
 fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::StaticMode) -> bool {
-    use crate::types::statics::StaticMode;
     match mode {
         StaticMode::MustBeBlockedByAll {
             blockers: Some(filter),
@@ -11451,33 +11812,19 @@ fn grant_keyword_instance(
     effect: &ActiveContinuousEffect,
     keyword_output_index: usize,
 ) {
-    // Three-way grant policy:
-    // CR 702.164b: summing keywords (Toxic) accumulate even when an
-    // identical instance is already present (granted Toxic 1 on
-    // printed Toxic 1 -> total 2).
-    // CR 613.7: single-authoritative-value keywords (Crew/Saddle/Enchant,
-    // see `overrides_same_kind_on_grant`) replace any earlier same-kind
-    // instance so a "first match" reader never sees a stale value.
-    // All other parameterized keywords keep deduping identical instances
-    // per CR 702.16g (Protection A+B are separate abilities;
-    // Ward/Annihilator each apply independently). `evaluate_layers` resets
+    // Shared grant policy (`Keyword::grant_policy`): Toxic-style keywords
+    // accumulate, Crew/Saddle/Enchant replace earlier same-variant entries, and
+    // every other keyword keeps distinct values while dropping an exact
+    // duplicate. The battlefield keeps the earlier duplicate so first-match
+    // readers of `obj.keywords` are unchanged. `evaluate_layers` resets
     // `obj.keywords = obj.base_keywords.clone()` each pass, so this never
     // accumulates unbounded across re-evaluations.
-    if resolved_keyword.instances_must_coexist() {
-        obj.keywords.push(resolved_keyword.clone());
-    } else if resolved_keyword.overrides_same_kind_on_grant() {
-        // CR 613.7: this grant is a single-authoritative-value keyword — the
-        // most recently applied instance (this one, since modifications are
-        // applied in ascending timestamp order, see `order_by_timestamp`)
-        // replaces any earlier same-discriminant instance (printed or a prior
-        // grant) rather than coexisting with it. Grant replacement remains
-        // variant-scoped; generic removal uses its own family-aware relation.
-        obj.keywords
-            .retain(|k| std::mem::discriminant(k) != std::mem::discriminant(&resolved_keyword));
-        obj.keywords.push(resolved_keyword.clone());
-    } else if !obj.keywords.contains(&resolved_keyword) {
-        obj.keywords.push(resolved_keyword.clone());
-    }
+    super::keywords::grant_keyword_instance_into(
+        &mut obj.keywords,
+        resolved_keyword.clone(),
+        |keyword| keyword,
+        super::keywords::RedundantGrant::KeepEarlier,
+    );
     for (companion_index, trigger) in KeywordTriggerInstaller::triggers_for(&resolved_keyword)
         .into_iter()
         .enumerate()
@@ -12264,13 +12611,17 @@ fn apply_continuous_effect_filtered(
         None
     };
 
-    // CR 613.1b: For Layer 2 ChangeController, the new controller is the effect's
-    // own `controller` field — set authoritatively by the effect that queued the
-    // continuous modification (e.g. gain_control passes `ability.controller`,
-    // exchange_control passes the swapped controller per slot). Reading it from
-    // `state.objects.get(effect.source_id).controller` would be wrong for any
-    // case where source ≠ recipient (e.g. Switcheroo: both transient effects
-    // share one source, but each slot needs the opposite controller).
+    // CR 613.1b + CR 109.5: the player a Layer 2 `ChangeController` gives
+    // control to is the player "you" names for this effect. A resolved
+    // spell's or ability's transient keeps the controller it was created with
+    // (gain_control passes the chosen recipient, exchange_control the swapped
+    // controller per slot, so Switcheroo's two slots sharing one source still
+    // get opposite controllers). A static ability ("You control enchanted
+    // creature.") names the CURRENT controller of the object it's on, which an
+    // earlier Layer 2 effect of this same pass may have changed (Word of Seizing
+    // on Control Magic). `active_effect_condition_controller` is the single
+    // authority for that split.
+    let control_recipient = active_effect_condition_controller(state, effect);
 
     // Pre-compute dynamic P/T values (avoids borrow conflict in the loop).
     //
@@ -12964,11 +13315,9 @@ fn apply_continuous_effect_filtered(
             | ContinuousModification::AssignNoCombatDamage => unreachable!(
                 "combat-damage assignment rule modifications are applied after layer evaluation"
             ),
-            // CR 613.1b: Change controller to the effect's own controller field.
-            // See pre-loop comment for why we trust effect.controller (single
-            // authority) rather than re-deriving from the source object.
+            // CR 613.1b + CR 109.5: see `control_recipient` before the loop.
             ContinuousModification::ChangeController => {
-                obj.controller = effect.controller;
+                obj.controller = control_recipient;
             }
             // CR 305.7: Setting a land's subtype removes all old land subtypes
             // (CR 205.3i) and all abilities generated from its rules text. Non-land
@@ -13377,11 +13726,33 @@ pub(crate) fn compute_current_copiable_values(
     state: &GameState,
     object_id: ObjectId,
 ) -> Option<CopiableValues> {
+    compute_copiable_values_where(state, object_id, |_| true)
+}
+
+/// CR 613.2a + CR 613.7 + CR 730.2a: copiable values at the merge effect's own
+/// position in layer 1a: every earlier copy effect, none after it or the merge itself.
+pub(crate) fn compute_copiable_values_preceding(
+    state: &GameState,
+    object_id: ObjectId,
+    merge_effect_id: u64,
+    merge_timestamp: u64,
+) -> Option<CopiableValues> {
+    compute_copiable_values_where(state, object_id, |effect| {
+        effect.timestamp < merge_timestamp && effect.transient_id != Some(merge_effect_id)
+    })
+}
+
+fn compute_copiable_values_where(
+    state: &GameState,
+    object_id: ObjectId,
+    include: impl Fn(&ActiveContinuousEffect) -> bool,
+) -> Option<CopiableValues> {
     let obj = state.objects.get(&object_id)?;
     let mut values = intrinsic_copiable_values(obj);
     let mut copy_effects: Vec<ActiveContinuousEffect> =
         gather_active_effects_for_layer(state, Layer::Copy)
             .into_iter()
+            .filter(|effect| include(effect))
             .filter(|effect| {
                 let condition_controller = active_effect_condition_controller(state, effect);
                 matches_target_filter(
@@ -13849,6 +14220,7 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction, BasicLandType,
         CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChosenAttribute,
@@ -30445,7 +30817,12 @@ mod tests {
         let before_elimination = granted_trigger_ref(&state, recipient);
 
         let mut events = Vec::new();
-        eliminate_player(&mut state, PlayerId(1), &mut events);
+        eliminate_player(
+            &mut state,
+            PlayerId(1),
+            crate::types::events::LossReason::Conceded,
+            &mut events,
+        );
         flush_layers(&mut state);
 
         assert!(
@@ -32761,7 +33138,10 @@ mod tests {
             vec![StaticDefinition::new(StaticMode::IgnoreHexproof)].into();
         let b = make_creature(&mut state, "CantBeTargeted Source", 1, 1, PlayerId(0));
         state.objects.get_mut(&b).unwrap().static_definitions =
-            vec![StaticDefinition::new(StaticMode::CantBeTargeted)].into();
+            vec![StaticDefinition::new(StaticMode::CantBeTargeted {
+                who: crate::types::statics::ProhibitionScope::AllPlayers,
+            })]
+            .into();
         // Phased-out permanent carrying a Shroud static — CR 702.26b excludes it from
         // game_functioning_statics, so its kind must NOT appear in presence.
         let phased = make_creature(&mut state, "Phased Shroud Source", 1, 1, PlayerId(0));
@@ -32935,14 +33315,19 @@ mod tests {
             player: PlayerScope::Controller
         }));
         assert!(quantity_ref_reads_life(&QuantityRef::LifeAboveStarting));
-        assert!(quantity_ref_reads_life(&QuantityRef::LifeLostThisTurn {
-            player: PlayerScope::Controller
+        assert!(quantity_ref_reads_life(&QuantityRef::LifeLost {
+            player: PlayerScope::Controller,
+            window: TurnWindow::ThisTurn,
         }));
         assert!(quantity_ref_reads_life(&QuantityRef::LifeGainedThisTurn {
             player: PlayerScope::Controller
         }));
         // CR 119.1: a format constant, not a live read.
         assert!(!quantity_ref_reads_life(&QuantityRef::StartingLifeTotal {
+            player: PlayerScope::Controller,
+        }));
+        // Starting deck size is a latched constant like StartingLifeTotal.
+        assert!(!quantity_ref_reads_life(&QuantityRef::StartingDeckSize {
             player: PlayerScope::Controller,
         }));
         // A non-life player scalar.
@@ -32990,6 +33375,7 @@ mod tests {
                 kind: DamageKindFilter::Any,
                 source: Some(Box::new(life_filter.clone())),
                 min_sources: 1,
+                relation: crate::types::ability::PlayerRelation::Opponent,
             }
         ));
         // CR 120.1: the damage-recipient scope routes through the same player
@@ -34292,6 +34678,64 @@ mod state_duration_retirement_recording_tests {
     use crate::types::identifiers::{CardId, ObjectIncarnationRef};
     use crate::types::phase::Phase;
     use crate::types::resolved_commands::{ResolvedContinuousEffectEdit, ResolvedRulesCommand};
+
+    /// R1 (CR 603.10d + CR 613.1b): a control change a full pass derives with no
+    /// instruction waits in `layer_control_changes` with its observation, and
+    /// the release authority keeps that observation while the queue names it.
+    #[test]
+    fn queued_layer_control_change_keeps_its_observation_across_release() {
+        use crate::game::scenario::P1;
+        use crate::types::events::{ControlChangeEvidence, GameEvent};
+        const KHARN: &str = "Berzerker \u{2014} Kh\u{e2}rn the Betrayer attacks or blocks \
+            each combat if able.\nSigil of Corruption \u{2014} When you lose control of \
+            Kh\u{e2}rn the Betrayer, draw two cards.\nThe Betrayer \u{2014} If damage would \
+            be dealt to Kh\u{e2}rn the Betrayer, prevent that damage and an opponent of your \
+            choice gains control of it.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let kharn = scenario
+            .add_creature_from_oracle(P0, "Kh\u{e2}rn the Betrayer", 5, 1, KHARN)
+            .as_legendary()
+            .id();
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.add_transient_continuous_effect(
+            kharn,
+            P1,
+            Duration::Permanent,
+            TargetFilter::SpecificObject { id: kharn },
+            vec![ContinuousModification::ChangeController],
+            None,
+        );
+        mark_layers_full(state);
+        flush_layers(state);
+        assert_eq!(
+            state.objects[&kharn].controller, P1,
+            "REACH: the pass derived it"
+        );
+        let [queued] = state.layer_control_changes.as_slice() else {
+            panic!(
+                "exactly one queued change: {:?}",
+                state.layer_control_changes
+            );
+        };
+        let GameEvent::ControllerChanged {
+            object_id,
+            evidence: ControlChangeEvidence::Observed(id),
+            ..
+        } = queued.event
+        else {
+            panic!("an observed control change: {:?}", queued.event);
+        };
+        assert_eq!(object_id, kharn);
+        assert!(state.control_change_observations.get(&id).is_some());
+
+        state.release_unreferenced_control_change_observations();
+        assert!(
+            state.control_change_observations.get(&id).is_some(),
+            "the queued event keeps its observation"
+        );
+    }
 
     /// CR 611.2b + CR 702.26f: both state-duration families — a `ForAsLongAs`
     /// condition and a host-bound reading — journal their exact retirement at

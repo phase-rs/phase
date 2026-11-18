@@ -6,8 +6,8 @@ use std::sync::Arc;
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
-use crate::database::CardDatabase;
-use crate::game::bracket_estimate::CommanderBracketTier;
+use crate::database::{CardDatabase, ComboTable};
+use crate::game::bracket_estimate::{estimate_bracket, ComboDeclaration, CommanderBracketTier};
 use crate::starter_decks::DeckData;
 use crate::types::card::{CardFace, Rarity, TokenImageRef};
 use crate::types::card_printing::{
@@ -130,11 +130,16 @@ pub struct PlayerDeckPayload {
     /// the Oathbreaker. Empty for all non-Oathbreaker formats.
     #[serde(default)]
     pub signature_spell: Vec<DeckEntry>,
-    /// The declared bracket tier for this player's deck. Defaults to `Core`
-    /// so that existing serialized payloads and test fixtures that omit the
-    /// field continue to deserialize correctly.
+    /// The bracket this player's deck owner declared. `None` means undeclared,
+    /// and is what payloads and fixtures that omit the field deserialize to.
     #[serde(default)]
-    pub bracket_tier: CommanderBracketTier,
+    pub bracket_tier: Option<CommanderBracketTier>,
+    /// The estimator's bracket floor. `None` means no estimate was taken, such as
+    /// for a deck without a commander, a pre-phase payload, or a test fixture.
+    /// AI code must never read `bracket_tier` directly; it reads the reconciled
+    /// effective tier from the resulting [`crate::types::game_state::PlayerDeckPool`].
+    #[serde(default)]
+    pub estimated_bracket_tier: Option<CommanderBracketTier>,
     /// Normalized owner choices, display-only (CR 203.1 + CR 206.1).
     /// Resolvers, and between games `rebind_retained_printings`, bind these to the
     /// payload's entries before database-free loading.
@@ -192,14 +197,18 @@ pub struct PlayerDeckList {
     /// Oathbreaker RC: the signature spell card name. Empty for all non-Oathbreaker formats.
     #[serde(default)]
     pub signature_spell: Vec<String>,
-    /// Declared bracket tier for this player's deck. Defaults to `Core` for
-    /// backward-compatible deserialization (payloads that predate this field
-    /// omit it, which `#[serde(default)]` handles transparently).
+    /// The bracket this player's deck owner declared. `None` means undeclared,
+    /// and is what payloads that predate this field deserialize to.
     #[serde(default)]
-    pub bracket_tier: CommanderBracketTier,
+    pub bracket_tier: Option<CommanderBracketTier>,
+    /// The deck owner's answer to the two-card-infinite-combo barometer. Defaults to
+    /// `Undeclared` when omitted — every payload that predates this field is unanswered,
+    /// which is deliberately NOT the same as a declared absence.
+    #[serde(default)]
+    pub combo_declaration: ComboDeclaration,
     /// The owner's explicit printing choices for this list's cards, keyed by
-    /// section and name. Display-only (CR 203.1 + CR 206.1). Absent from the wire
-    /// when empty; decoded by `deserialize_deck_printings`.
+    /// section and name. Display-only (CR 203.1 + CR 206.1). Absent from the wire when
+    /// empty; decoded by `deserialize_deck_printings`.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -226,6 +235,7 @@ impl From<DeckData> for PlayerDeckList {
             sticker_sheets,
             signature_spell,
             bracket_tier,
+            combo_declaration,
             printings,
         } = deck;
         Self {
@@ -240,6 +250,7 @@ impl From<DeckData> for PlayerDeckList {
             sticker_sheets,
             signature_spell,
             bracket_tier,
+            combo_declaration,
             printings,
         }
     }
@@ -259,6 +270,7 @@ impl From<PlayerDeckList> for DeckData {
             sticker_sheets,
             signature_spell,
             bracket_tier,
+            combo_declaration,
             printings,
         } = list;
         Self {
@@ -273,6 +285,7 @@ impl From<PlayerDeckList> for DeckData {
             sticker_sheets,
             signature_spell,
             bracket_tier,
+            combo_declaration,
             printings,
         }
     }
@@ -587,13 +600,27 @@ pub(crate) fn rebind_retained_printings(
 /// Resolve a single player's deck list (name-only) into a `PlayerDeckPayload`
 /// using a `CardDatabase` for lookup. Unresolvable names are silently skipped.
 ///
-/// The `bracket_tier` is taken from `list.bracket_tier` — `PlayerDeckList`
-/// already carries the declared tier, so there is no separate parameter to
-/// keep in sync. Callers that need a specific tier set it on the
-/// `PlayerDeckList` before calling.
+/// The `bracket_tier` is taken from `list.bracket_tier`, while the estimator's
+/// floor is computed from the complete `PlayerDeckList`. Callers that need a
+/// specific declared tier set it on the list before calling.
 ///
 /// Printing choices are normalized and bound to resolved entries.
-pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> PlayerDeckPayload {
+pub fn resolve_player_deck_list(
+    db: &CardDatabase,
+    combos: &ComboTable,
+    list: &PlayerDeckList,
+) -> PlayerDeckPayload {
+    resolve_seat_deck_list(db, combos, list, "player")
+}
+
+/// `resolve_player_deck_list` with the seat label the estimator's trace carries.
+fn resolve_seat_deck_list(
+    db: &CardDatabase,
+    combos: &ComboTable,
+    list: &PlayerDeckList,
+    seat: &str,
+) -> PlayerDeckPayload {
+    let estimated_bracket_tier = estimate_tier_for_seat(db, combos, list, seat);
     let mut payload = PlayerDeckPayload {
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
@@ -606,6 +633,7 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
         sticker_sheets: list.sticker_sheets.clone(),
         signature_spell: resolve_names(db, &list.signature_spell),
         bracket_tier: list.bracket_tier,
+        estimated_bracket_tier,
         printings: list.printings.clone(),
         printing_entry_names: Vec::new(),
     };
@@ -613,23 +641,40 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
     payload
 }
 
+fn estimate_tier_for_seat(
+    db: &CardDatabase,
+    combos: &ComboTable,
+    list: &PlayerDeckList,
+    seat: &str,
+) -> Option<CommanderBracketTier> {
+    let estimated = estimate_bracket(list, db, combos).map(|estimate| estimate.tier);
+    tracing::debug!(
+        seat,
+        declared_tier = ?list.bracket_tier,
+        estimated_tier = ?estimated,
+        combo_coverage = ?combos.coverage(),
+        "resolved Commander bracket estimate"
+    );
+    estimated
+}
+
 /// Resolve a DeckList (name-only) into a DeckPayload (full CardFace objects)
 /// using a CardDatabase for lookup. Unresolvable names are silently skipped.
 ///
-/// Each seat (player, opponent and every AI deck) resolves through
-/// `resolve_player_deck_list`, preserving each seat's `bracket_tier` and
-/// normalizing its printing choices against that seat's resolved entries.
-/// Callers that populate the tier before calling this
-/// function receive correctly-tiered payloads. Old payloads that omit the field
-/// deserialize with `CommanderBracketTier::Core` (the `default`).
-pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
+/// Each seat (player, opponent and every AI deck) resolves through the same
+/// per-seat path, preserving its `bracket_tier`, computing the estimator's floor
+/// from the complete `PlayerDeckList`, and normalizing its printing choices
+/// against that seat's resolved entries. Old payloads that omit either bracket
+/// field deserialize with `None`.
+pub fn resolve_deck_list(db: &CardDatabase, combos: &ComboTable, list: &DeckList) -> DeckPayload {
     DeckPayload {
-        player: resolve_player_deck_list(db, &list.player),
-        opponent: resolve_player_deck_list(db, &list.opponent),
+        player: resolve_seat_deck_list(db, combos, &list.player, "player"),
+        opponent: resolve_seat_deck_list(db, combos, &list.opponent, "opponent"),
         ai_decks: list
             .ai_decks
             .iter()
-            .map(|deck| resolve_player_deck_list(db, deck))
+            .enumerate()
+            .map(|(index, deck)| resolve_seat_deck_list(db, combos, deck, &format!("ai_{index}")))
             .collect(),
         // ai_difficulties is carried through from the DeckList so the caller's
         // per-seat difficulty annotations survive resolution.
@@ -829,7 +874,8 @@ fn main_deck_only_payload(main_deck: Vec<DeckEntry>) -> PlayerDeckPayload {
         contraption_deck: Vec::new(),
         sticker_sheets: Vec::new(),
         signature_spell: Vec::new(),
-        bracket_tier: CommanderBracketTier::default(),
+        bracket_tier: None,
+        estimated_bracket_tier: None,
         // Synthetic decks have no submitted printing choices or bindings.
         printings: Vec::new(),
         printing_entry_names: Vec::new(),
@@ -1969,6 +2015,7 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
             registered_scheme_deck: std::sync::Arc::clone(&p0_scheme),
             current_scheme_deck: p0_scheme,
             bracket_tier: payload.player.bracket_tier,
+            estimated_bracket_tier: payload.player.estimated_bracket_tier,
             printings: records.record_for(PlayerId(0), &payload.player),
         });
     let (p1_side_entries, p1_comp_entries) =
@@ -1997,6 +2044,7 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
             registered_scheme_deck: std::sync::Arc::clone(&p1_scheme),
             current_scheme_deck: p1_scheme,
             bracket_tier: payload.opponent.bracket_tier,
+            estimated_bracket_tier: payload.opponent.estimated_bracket_tier,
             printings: records.record_for(PlayerId(1), &payload.opponent),
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
@@ -2027,6 +2075,7 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
                 registered_scheme_deck: std::sync::Arc::clone(&scheme),
                 current_scheme_deck: scheme,
                 bracket_tier: ai_deck.bracket_tier,
+                estimated_bracket_tier: ai_deck.estimated_bracket_tier,
                 printings: records.record_for(player_id, ai_deck),
             });
     }
@@ -2296,6 +2345,43 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
             &mut state.scheme_deck,
             state.rng.draw(RandomDraw::Placement),
         );
+    }
+
+    // CR 103.2a: latch each seat's submitted starting-deck size — the netted
+    // library plus the placed command-zone decklist cards (commanders when the
+    // format seats them, Oathbreaker signature spells), single-counted by
+    // construction through `net_command_zone` (a copy netted out of the
+    // library is counted exactly once, in the command zone). Sideboards,
+    // companions, planar / scheme / attraction / contraption decks, and emblems
+    // are NOT starting-deck cards (CR 103.2a / CR 702.139b) and are excluded.
+    // `Player::starting_deck_size` never changes mid-game: Whtz's "had"
+    // reads this snapshot, not the live library.
+    // Boundary: engine-replaced libraries (Horde challenge decks) keep the
+    // submitted-placeholder count — no starting-deck reader exists for those
+    // seats, so the latch is inert there rather than silently redefined.
+    let starting_size = |deck: &PlayerDeckPayload| -> u32 {
+        let main: u32 = netted_main_deck(deck).iter().map(|entry| entry.count).sum();
+        let mut placed_zone = 0u32;
+        if place_commanders {
+            placed_zone += deck.commander.iter().map(|entry| entry.count).sum::<u32>();
+        }
+        if oathbreaker {
+            placed_zone += deck
+                .signature_spell
+                .iter()
+                .map(|entry| entry.count)
+                .sum::<u32>();
+        }
+        main.saturating_add(placed_zone)
+    };
+    for (seat, deck) in std::iter::once(&payload.player)
+        .chain(std::iter::once(&payload.opponent))
+        .chain(&payload.ai_decks)
+        .enumerate()
+    {
+        if let Some(player) = state.players.get_mut(seat) {
+            player.starting_deck_size = starting_size(deck);
+        }
     }
 
     // Shuffle each player's library and supplementary decks.
@@ -2763,6 +2849,17 @@ mod tests {
 
     use super::super::printed_cards::derive_colors_from_mana_cost;
 
+    #[test]
+    fn player_deck_payload_without_estimated_bracket_tier_defaults_to_none() {
+        let mut json = serde_json::to_value(PlayerDeckPayload::default()).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("estimated_bracket_tier");
+
+        let payload: PlayerDeckPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(payload.estimated_bracket_tier, None);
+    }
+
     fn make_creature_face() -> CardFace {
         CardFace {
             name: "Grizzly Bears".to_string(),
@@ -2810,6 +2907,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -2863,6 +2961,7 @@ mod tests {
             is_commander: false,
             is_oathbreaker: false,
             deck_copy_limit: None,
+            deck_size_override: None,
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
@@ -3049,6 +3148,130 @@ mod tests {
         assert_eq!(state.players[0].library.len(), 6); // 4 + 2
         assert_eq!(state.players[1].library.len(), 3);
         assert_eq!(state.objects.len(), 9); // 6 + 3
+    }
+
+    fn whtz_face() -> CardFace {
+        let mut face = make_creature_face();
+        face.name = "Whtz, the Bibliophile".to_string();
+        face.oracle_text = Some(
+            "Rulebreaker — A deck with this commander has no maximum deck size.\n{3}, {T}: You draw a card and gain 1 life. This ability costs {3} less to activate if you had 200 or more cards in your starting deck.".to_string(),
+        );
+        face
+    }
+
+    fn filler_face(name: &str) -> CardFace {
+        let mut face = make_instant_face();
+        face.name = name.to_string();
+        face.oracle_text = None;
+        face
+    }
+
+    /// CR 103.2a: the latch counts the submitted starting deck once —
+    /// netted library plus the placed commander, single-counted by
+    /// construction. P0 lists Whtz in the main (198 others + Whtz) and in the
+    /// command zone: raw slots sum to 200, the latch nets to 199. P1's main
+    /// holds 199 Whtz-distinct cards plus Whtz: raw slots sum to 201, the
+    /// latch nets to 200. Sideboards and companions never count.
+    #[test]
+    fn starting_deck_size_latches_netted_commander_deck_counts() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::commander(), 2, 42);
+        let whtz = || DeckEntry {
+            card: whtz_face(),
+            count: 1,
+        };
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: {
+                    let mut main = vec![whtz()];
+                    for i in 0..198 {
+                        main.push(DeckEntry {
+                            card: filler_face(&format!("Filler P0 {i}")),
+                            count: 1,
+                        });
+                    }
+                    main
+                },
+                commander: vec![whtz()],
+                sideboard: vec![DeckEntry {
+                    card: filler_face("Sideboard P0"),
+                    count: 15,
+                }],
+                companion: vec![DeckEntry {
+                    card: filler_face("Companion P0"),
+                    count: 1,
+                }],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: {
+                    let mut main = vec![whtz()];
+                    for i in 0..199 {
+                        main.push(DeckEntry {
+                            card: filler_face(&format!("Filler P1 {i}")),
+                            count: 1,
+                        });
+                    }
+                    main
+                },
+                commander: vec![whtz()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        // Placed counts prove the single-count construction.
+        assert_eq!(state.players[0].library.len(), 198);
+        assert_eq!(state.players[1].library.len(), 199);
+        assert_eq!(state.players[0].starting_deck_size, 199);
+        assert_eq!(state.players[1].starting_deck_size, 200);
+    }
+
+    /// The Oathbreaker signature spell counts exactly once —
+    /// a copy listed in both the main and the signature-spell slot nets to
+    /// its single command-zone placement.
+    #[test]
+    fn starting_deck_size_counts_oathbreaker_signature_spell_once() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::oathbreaker(), 2, 42);
+        let sig = || DeckEntry {
+            card: filler_face("Signature Spell"),
+            count: 1,
+        };
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: {
+                    let mut main = vec![sig()];
+                    for i in 0..59 {
+                        main.push(DeckEntry {
+                            card: filler_face(&format!("Filler {i}")),
+                            count: 1,
+                        });
+                    }
+                    main
+                },
+                commander: vec![DeckEntry {
+                    card: filler_face("Oathbreaker"),
+                    count: 1,
+                }],
+                signature_spell: vec![sig()],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: filler_face("Opp"),
+                    count: 3,
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        // 60 listed main - 1 netted signature double + 1 commander + 1 signature.
+        assert_eq!(state.players[0].library.len(), 59);
+        assert_eq!(state.players[0].starting_deck_size, 61);
     }
 
     /// A minimal card database containing only the five snow basic lands, so a
@@ -3940,7 +4163,7 @@ mod tests {
             ..Default::default()
         };
 
-        let payload = resolve_deck_list(&db, &list);
+        let payload = resolve_deck_list(&db, &ComboTable::default(), &list);
         assert_eq!(payload.player.commander.len(), 1);
         assert_eq!(
             payload.player.commander[0].card.name,

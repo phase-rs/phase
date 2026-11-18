@@ -95,10 +95,12 @@ pub(crate) fn begin_offer(
     payment_mode: CastPaymentMode,
     player: PlayerId,
     eligible: Vec<ObjectId>,
+    alternative_cost_keyword: Option<crate::types::keywords::Keyword>,
 ) -> WaitingFor {
     let mut pending = PendingCast::new(object_id, card_id, ability, mana_cost);
     pending.base_cost = Some(base_mana_cost);
     pending.casting_variant = casting_variant;
+    pending.alternative_cost_keyword = alternative_cost_keyword;
     pending.casting_permission_index = casting_permission_index;
     pending.cast_timing_permission = cast_timing_permission;
     pending.distribute = distribute;

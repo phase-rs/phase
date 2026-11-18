@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use engine::ai_support::{
@@ -12,8 +12,9 @@ use engine::ai_support::{
     end_continuous_effect_offers, legal_actions_for_viewer, legal_actions_full, AiDecisionContract,
     AiProposalApplication,
 };
+use engine::analysis::deck_signals::{deck_signals, DeckSignals};
 use engine::database::legality::{any_ai_difficulty_is_cedh, validate_cedh_bracket};
-use engine::database::{CardDatabase, CardSearchQuery};
+use engine::database::{CardDatabase, CardSearchQuery, ComboTable};
 #[cfg(test)]
 use engine::game::engine::apply;
 use engine::game::engine::{
@@ -36,14 +37,14 @@ use engine::game::deck_validation::{draft_set_concessions_for, evaluate_deck_for
 use engine::game::visibility::HandDisclosure;
 use engine::game::CardDbRehydrationFinalization;
 use engine::game::{
-    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket,
+    can_pair_commanders, companion_candidates, deck_copy_limit_for, estimate_bracket_for_request,
     evaluate_deck_compatibility, filter_events_for_viewer, filter_state_for_viewer,
     is_brawl_commander_eligible, is_commander_eligible, is_freeform_commander_eligible,
     is_tiny_leader_eligible, load_and_hydrate_decks, max_deck_copies,
     rehydrate_game_from_card_db_with_finalization, resolve_deck_list,
     signature_spell_selection_policy, start_game, start_game_with_starting_player,
-    validate_name_deck_for_format_full, BracketEstimate, DeckCompatibilityRequest, DeckList,
-    PlayerDeckList, ReplayPlayer,
+    validate_name_deck_for_format_full, BracketEstimate, BracketEstimateRequest,
+    DeckCompatibilityRequest, DeckList, PlayerDeckList, ReplayPlayer,
 };
 use engine::types::actions::{DebugAction, DebugCardCreationKind};
 use engine::types::card_printing::{deserialize_deck_printings, validate_deck_printings_bounds};
@@ -70,6 +71,10 @@ use engine::game::resolve_player_deck_list;
 use engine::starter_decks;
 use phase_ai::choose_action_with_session_diagnostic;
 use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
+use phase_ai::pod_selection::{
+    select_pod, AiDeckCandidate, PodAssignment, PodConstraint, PodSeatOccupant, PodSelectionError,
+    PodSelectionRequest, TierEnforcement, TierSet,
+};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx, SeatMutation, SeatState};
 
 /// Enrich local diagnostic receipts with names already known to the engine.
@@ -310,15 +315,26 @@ fn decode_persisted_seat_state(json: &str) -> Result<SeatState, String> {
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
-fn parse_initialize_format_config(
-    decoded: Result<FormatConfig, String>,
-) -> Result<FormatConfig, serde_json::Value> {
+fn parse_initialize_config<T>(
+    decoded: Result<T, String>,
+    what: &str,
+) -> Result<T, serde_json::Value> {
     decoded.map_err(|error| {
         serde_json::json!({
             "error": true,
-            "reasons": [format!("Format config deserialization failed: {error}")],
+            "reasons": [format!("{what} deserialization failed: {error}")],
         })
     })
+}
+
+/// An absent match config is the default; one that fails to decode is refused.
+fn initialize_match_config(
+    decoded: Option<Result<MatchConfig, String>>,
+) -> Result<MatchConfig, serde_json::Value> {
+    decoded.map_or_else(
+        || Ok(MatchConfig::default()),
+        |decoded| parse_initialize_config(decoded, "Match config"),
+    )
 }
 
 #[cfg(test)]
@@ -618,7 +634,7 @@ mod external_format_config_tests {
         let decoded = serde_json::from_value::<FormatConfig>(malformed_js_config)
             .map_err(|error| error.to_string());
 
-        let error = parse_initialize_format_config(decoded)
+        let error = parse_initialize_config(decoded, "Format config")
             .expect_err("malformed JS config must not fall back to Standard");
 
         assert_eq!(error["error"], true);
@@ -626,6 +642,50 @@ mod external_format_config_tests {
             .as_str()
             .expect("error reason is a string")
             .contains("Format config deserialization failed"));
+    }
+
+    #[test]
+    fn undecodable_initialize_match_config_is_refused_not_defaulted() {
+        let decode = |json: serde_json::Value| {
+            serde_json::from_value::<MatchConfig>(json).map_err(|error| error.to_string())
+        };
+
+        let error = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo3",
+            "loop_detection": { "type": "Bogus" },
+        }))))
+        .expect_err("an undecodable match config must not fall back to the default");
+        assert_eq!(error["error"], true);
+        assert!(error["reasons"][0]
+            .as_str()
+            .expect("error reason is a string")
+            .contains("Match config deserialization failed"));
+
+        let decoded = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo3",
+            "loop_detection": { "type": "Interactive" },
+        }))))
+        .expect("a decodable match config passes through");
+        assert_eq!(decoded.match_type, MatchType::Bo3);
+        assert_eq!(
+            decoded.loop_detection,
+            engine::types::game_state::LoopDetectionMode::Interactive
+        );
+
+        assert_eq!(
+            initialize_match_config(None).expect("an absent match config is the default"),
+            MatchConfig::default()
+        );
+
+        let legacy = initialize_match_config(Some(decode(serde_json::json!({
+            "match_type": "Bo1",
+            "loop_detection": { "type": "On" },
+        }))))
+        .expect("a stored legacy `On` match config still loads");
+        assert_eq!(
+            legacy.loop_detection,
+            engine::types::game_state::LoopDetectionMode::Interactive
+        );
     }
 
     #[test]
@@ -750,6 +810,12 @@ thread_local! {
     /// Cell::take() + Cell::set() has no borrow guard, making it panic-resilient.
     static GAME_STATE: Cell<Option<GameState>> = const { Cell::new(None) };
     static CARD_DB: RefCell<Option<std::sync::Arc<CardDatabase>>> = const { RefCell::new(None) };
+    /// Deliberately NOT a field on `CardDatabase`: the combo table is external,
+    /// unlicensed, separately dated community data with its own refresh cadence.
+    /// Keeping it out of the card pool keeps the provenance boundary visible in
+    /// the type system instead of inside a struct that everything already trusts.
+    static COMBO_TABLE: RefCell<Option<std::sync::Arc<ComboTable>>> =
+        const { RefCell::new(None) };
     /// When set, this engine is claimed by a multiplayer host session. The
     /// engine claims it itself, in the same call that installs the game
     /// (`initialize_multiplayer_host_game`, `resume_multiplayer_host_state`),
@@ -836,6 +902,17 @@ fn with_hosted_takeback<R>(f: impl FnOnce(&mut HostedTakeback) -> R) -> Option<R
         let result = f(&mut hosted);
         cell.set(Some(hosted));
         Some(result)
+    })
+}
+
+/// Runs a resolver against the loaded combo artifact. Browsers that have not
+/// loaded the optional artifact use an explicit unmeasured table, so bracket
+/// estimates remain honest about the unavailable combo floors.
+fn with_combo_table<R>(f: impl FnOnce(&ComboTable) -> R) -> R {
+    COMBO_TABLE.with(|cell| {
+        let combos = cell.borrow();
+        let unmeasured = ComboTable::default();
+        f(combos.as_deref().unwrap_or(&unmeasured))
     })
 }
 
@@ -1328,6 +1405,20 @@ pub fn load_card_database(json_str: &str) -> Result<u32, JsValue> {
     Ok(count)
 }
 
+/// Load the combo table (combo-table.json). Optional: with no table loaded the
+/// estimator reports `ComboCoverage::Unmeasured` and no combo floor can fire.
+#[wasm_bindgen]
+pub fn load_combo_table(json_str: &str) -> Result<u32, JsValue> {
+    let table = ComboTable::from_json_str(json_str)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse combo table: {e}")))?;
+    let count = u32::try_from(table.len())
+        .map_err(|_| JsValue::from_str("Combo table contains more than u32::MAX entries"))?;
+    COMBO_TABLE.with(|cell| {
+        *cell.borrow_mut() = Some(std::sync::Arc::new(table));
+    });
+    Ok(count)
+}
+
 /// Build the bounded card corpus for parallel AI scoring workers. The live
 /// main engine remains the only authority that owns the full card database.
 #[wasm_bindgen]
@@ -1705,7 +1796,7 @@ pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
             commander: Vec::new(),
             ..Default::default()
         };
-        let payload = resolve_player_deck_list(db, &list);
+        let payload = with_combo_table(|combos| resolve_player_deck_list(db, combos, &list));
         let profile = DeckProfile::analyze(&payload.main_deck);
         Ok(to_js(&DeckProfileResult::from(&profile)))
     })
@@ -1981,24 +2072,252 @@ pub fn companion_candidates_js(request: JsValue) -> Result<JsValue, JsValue> {
     })
 }
 
-/// Estimates a Commander deck's bracket without touching `GAME_STATE`.
-/// Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
-/// deck has no commander or the card database is not loaded.
+/// Estimates a Commander deck's bracket and reconciles an optional declared
+/// tier without touching `GAME_STATE`. Reads `CARD_DB` for bracket signals.
+/// Returns `null` (via serde) when the deck has no commander or the card
+/// database is not loaded.
 #[wasm_bindgen]
-pub fn estimate_bracket_for_deck(deck_js: JsValue) -> Result<JsValue, JsError> {
-    let deck: PlayerDeckList = serde_wasm_bindgen::from_value(deck_js)
-        .map_err(|e| JsError::new(&format!("invalid deck: {e}")))?;
-    let result = estimate_bracket_inner(&deck);
+pub fn estimate_bracket_for_deck(request_js: JsValue) -> Result<JsValue, JsError> {
+    let request: BracketEstimateRequest = serde_wasm_bindgen::from_value(request_js)
+        .map_err(|e| JsError::new(&format!("invalid bracket estimate request: {e}")))?;
+    let result = estimate_bracket_inner(&request);
     Ok(to_js(&result))
 }
 
-/// Pure helper, exposed for native-side tests. Reads `CARD_DB` thread-local.
-fn estimate_bracket_inner(deck: &PlayerDeckList) -> Option<BracketEstimate> {
+/// Pure helper, exposed for native-side tests. Reads the card and combo table
+/// thread-locals.
+fn estimate_bracket_inner(request: &BracketEstimateRequest) -> Option<BracketEstimate> {
     CARD_DB.with(|cell| {
         let db = cell.borrow();
         let db = db.as_ref()?;
-        estimate_bracket(deck, db)
+        with_combo_table(|combos| estimate_bracket_for_request(request, db, combos))
     })
+}
+
+const COMMANDER_BRACKET_TIERS: [engine::game::bracket_estimate::CommanderBracketTier; 5] = [
+    engine::game::bracket_estimate::CommanderBracketTier::Exhibition,
+    engine::game::bracket_estimate::CommanderBracketTier::Core,
+    engine::game::bracket_estimate::CommanderBracketTier::Upgraded,
+    engine::game::bracket_estimate::CommanderBracketTier::Optimized,
+    engine::game::bracket_estimate::CommanderBracketTier::Cedh,
+];
+
+fn commander_bracket_tier_key(
+    tier: engine::game::bracket_estimate::CommanderBracketTier,
+) -> &'static str {
+    use engine::game::bracket_estimate::CommanderBracketTier;
+
+    match tier {
+        CommanderBracketTier::Exhibition => "exhibition",
+        CommanderBracketTier::Core => "core",
+        CommanderBracketTier::Upgraded => "upgraded",
+        CommanderBracketTier::Optimized => "optimized",
+        CommanderBracketTier::Cedh => "cedh",
+    }
+}
+
+fn bracket_difficulty_table() -> BTreeMap<&'static str, AiDifficulty> {
+    COMMANDER_BRACKET_TIERS
+        .into_iter()
+        .map(|tier| {
+            (
+                commander_bracket_tier_key(tier),
+                AiDifficulty::for_bracket(tier),
+            )
+        })
+        .collect()
+}
+
+/// Returns the engine-authored default AI rung for every Commander bracket.
+#[wasm_bindgen(js_name = getBracketDifficultyTable)]
+pub fn get_bracket_difficulty_table() -> Result<JsValue, JsError> {
+    Ok(to_js(&bracket_difficulty_table()))
+}
+
+/// WASM request DTO. JavaScript numbers exactly represent integers only through
+/// 2^53 - 1; callers must keep `seed` in that exact-integer range. The bridge
+/// follows the existing game-initialization convention and converts with
+/// `as u64` at the transport boundary.
+#[derive(Debug, Deserialize)]
+struct PodSelectionRequestDto {
+    allowed: TierSet,
+    prefer: Option<engine::game::bracket_estimate::CommanderBracketTier>,
+    enforcement: TierEnforcement,
+    seats: u8,
+    constraints: Vec<PodConstraint>,
+    coverage_floor_pct: u8,
+    archetype: Option<DeckArchetype>,
+    seed: f64,
+    #[serde(default)]
+    occupied: Vec<PodSeatOccupant>,
+}
+
+impl From<PodSelectionRequestDto> for PodSelectionRequest {
+    fn from(request: PodSelectionRequestDto) -> Self {
+        PodSelectionRequest::new(
+            request.allowed,
+            request.prefer,
+            request.enforcement,
+            request.seats,
+            request.constraints,
+            request.coverage_floor_pct,
+            request.archetype,
+            request.seed as u64,
+        )
+        .with_occupied(request.occupied)
+    }
+}
+
+/// Typed result sum returned by `selectAiPod`: success serializes as
+/// `{ "ok": PodAssignment }`, while selection failures serialize as
+/// `{ "err": PodSelectionError }`. A missing card database returns `null`.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SelectAiPodResult {
+    Ok(PodAssignment),
+    Err(PodSelectionError),
+}
+
+#[wasm_bindgen(js_name = selectAiPod)]
+pub fn select_ai_pod(candidates_js: JsValue, request_js: JsValue) -> Result<JsValue, JsError> {
+    let candidates: Vec<AiDeckCandidate> = serde_wasm_bindgen::from_value(candidates_js)
+        .map_err(|error| JsError::new(&format!("invalid AI pod candidates: {error}")))?;
+    let request: PodSelectionRequestDto = serde_wasm_bindgen::from_value(request_js)
+        .map_err(|error| JsError::new(&format!("invalid AI pod request: {error}")))?;
+    Ok(to_js(&select_ai_pod_inner(&candidates, &request.into())))
+}
+
+fn select_ai_pod_inner(
+    candidates: &[AiDeckCandidate],
+    request: &PodSelectionRequest,
+) -> Option<SelectAiPodResult> {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let db = db.as_ref()?;
+        Some(match select_pod(candidates, request, db) {
+            Ok(assignment) => SelectAiPodResult::Ok(assignment),
+            Err(error) => SelectAiPodResult::Err(error),
+        })
+    })
+}
+
+/// Structural deck signals. Pure and stateless; reads `CARD_DB` without
+/// touching `GAME_STATE`. Returns `null` (via serde) when the deck has no
+/// commander or the card database is not loaded.
+#[wasm_bindgen]
+pub fn deck_signals_for_deck(deck_js: JsValue) -> Result<JsValue, JsError> {
+    let deck: PlayerDeckList = serde_wasm_bindgen::from_value(deck_js)
+        .map_err(|e| JsError::new(&format!("invalid deck: {e}")))?;
+    let result = deck_signals_inner(&deck);
+    Ok(to_js(&result))
+}
+
+/// Pure helper for native-side tests. Reads the `CARD_DB` thread-local.
+fn deck_signals_inner(deck: &PlayerDeckList) -> Option<DeckSignals> {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let db = db.as_ref()?;
+        deck_signals(deck, db)
+    })
+}
+
+#[cfg(test)]
+mod ai_pod_export_tests {
+    use super::*;
+    use engine::game::bracket_estimate::CommanderBracketTier;
+    use engine::types::card::CardFace;
+    use engine::types::card_type::{CardType, CoreType, Supertype};
+    use engine::types::mana::ManaColor;
+    use phase_ai::pod_selection::{PodConstraint, SeatAttribute};
+
+    fn synthetic_db() -> CardDatabase {
+        let faces = [
+            ("White Commander", ManaColor::White),
+            ("Blue Commander", ManaColor::Blue),
+            ("Black Commander", ManaColor::Black),
+        ];
+        let entries = faces
+            .into_iter()
+            .map(|(name, color)| {
+                let face = CardFace {
+                    name: name.to_string(),
+                    card_type: CardType {
+                        supertypes: vec![Supertype::Legendary],
+                        core_types: vec![CoreType::Creature],
+                        subtypes: Vec::new(),
+                    },
+                    color_identity: vec![color],
+                    ..CardFace::default()
+                };
+                (name.to_lowercase(), serde_json::to_value(face).unwrap())
+            })
+            .collect::<BTreeMap<_, _>>();
+        CardDatabase::from_json_str(&serde_json::to_string(&entries).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn get_bracket_difficulty_table_lists_every_tier() {
+        let table = bracket_difficulty_table();
+        assert_eq!(COMMANDER_BRACKET_TIERS.len(), 5);
+        assert_eq!(table.len(), COMMANDER_BRACKET_TIERS.len());
+        assert_eq!(table["exhibition"], AiDifficulty::Easy);
+        assert_eq!(table["core"], AiDifficulty::Medium);
+        assert_eq!(table["upgraded"], AiDifficulty::Hard);
+        assert_eq!(table["optimized"], AiDifficulty::VeryHard);
+        assert_eq!(table["cedh"], AiDifficulty::CEDH);
+        for tier in COMMANDER_BRACKET_TIERS {
+            let key = match tier {
+                CommanderBracketTier::Exhibition => "exhibition",
+                CommanderBracketTier::Core => "core",
+                CommanderBracketTier::Upgraded => "upgraded",
+                CommanderBracketTier::Optimized => "optimized",
+                CommanderBracketTier::Cedh => "cedh",
+            };
+            assert!(table.contains_key(key));
+        }
+    }
+
+    #[test]
+    fn select_ai_pod_inner_returns_a_pod_over_a_synthetic_db() {
+        CARD_DB.with(|cell| *cell.borrow_mut() = Some(Arc::new(synthetic_db())));
+        let candidates = ["White Commander", "Blue Commander", "Black Commander"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, commander)| AiDeckCandidate {
+                id: format!("deck-{index}"),
+                commander: vec![commander.to_string()],
+                label: None,
+                coverage_pct: None,
+                archetype: None,
+            })
+            .collect::<Vec<_>>();
+        let request = PodSelectionRequest::new(
+            TierSet::default(),
+            None,
+            TierEnforcement::Advisory,
+            2,
+            vec![
+                PodConstraint::Distinct(SeatAttribute::Deck),
+                PodConstraint::Distinct(SeatAttribute::Commander),
+                PodConstraint::Distinct(SeatAttribute::ColorIdentity),
+            ],
+            0,
+            None,
+            61_11,
+        );
+
+        let Some(SelectAiPodResult::Ok(assignment)) = select_ai_pod_inner(&candidates, &request)
+        else {
+            panic!("synthetic candidates should produce a pod")
+        };
+        assert_eq!(assignment.seats.len(), 2);
+        assert_ne!(
+            assignment.seats[0].candidate_id,
+            assignment.seats[1].candidate_id
+        );
+
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
 }
 
 /// Which client-side session is installing this game. Selects the
@@ -2070,7 +2389,8 @@ fn occupied_refusal(reason: &str) -> JsValue {
 /// Initialize a new game for local (single-player / AI) play.
 /// Accepts deck_data as a DeckList (name-only) or null/undefined for empty libraries.
 /// format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
-/// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined.
+/// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined; an
+/// undecodable one is refused with `{error, reasons}`.
 /// player_count: number of players — defaults to 2 if not provided.
 /// first_player: 0 = human plays first (CR 103.1), 1 = opponent plays first, None = random.
 /// Names are resolved against the card database loaded via load_card_database().
@@ -2307,11 +2627,14 @@ fn initialize_game_impl(
             serde_wasm_bindgen::from_value::<serde_json::Value>(format_config_js)
                 .map_err(|error| error.to_string())
         });
-    let match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
-        serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
-            .unwrap_or_else(|_| MatchConfig::default())
-    } else {
-        MatchConfig::default()
+    let match_config = match initialize_match_config(
+        (!match_config_js.is_null() && !match_config_js.is_undefined()).then(|| {
+            serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
+                .map_err(|error| error.to_string())
+        }),
+    ) {
+        Ok(config) => config,
+        Err(error) => return to_js(&error),
     };
     match initialize_game_inner(
         deck_data,
@@ -2346,8 +2669,9 @@ fn initialize_game_inner(
     // default must be chosen FOR this seat count (see
     // `resolve_and_validate_initialize_format_config`).
     let decoded_format_config = match format_config {
-        Some(config) => Some(parse_initialize_format_config(
+        Some(config) => Some(parse_initialize_config(
             config.and_then(decode_initialize_format_config),
+            "Format config",
         )?),
         None => None,
     };
@@ -2447,7 +2771,7 @@ fn initialize_game_inner(
             // `deck_pools.is_empty()`-style invariants below — and the
             // per-player library check at game start — will surface it as
             // a hard error instead of a silently-wrong-format game.
-            let payload = resolve_deck_list(db, &deck_list);
+            let payload = with_combo_table(|combos| resolve_deck_list(db, combos, &deck_list));
 
             load_and_hydrate_decks(&mut state, &payload, Some(&**db));
             state.all_card_names = db.card_names().into();
@@ -2476,7 +2800,7 @@ fn initialize_game_inner(
             let cedh_error: Option<Vec<String>> = CARD_DB.with(|cell| {
                 let borrow = cell.borrow();
                 let db = borrow.as_ref().expect("CARD_DB presence checked above");
-                let payload = resolve_deck_list(db, &deck_list);
+                let payload = with_combo_table(|combos| resolve_deck_list(db, combos, &deck_list));
                 let all_decks: Vec<_> = std::iter::once(&payload.player)
                     .chain(std::iter::once(&payload.opponent))
                     .chain(payload.ai_decks.iter())
@@ -5831,7 +6155,7 @@ mod restored_card_db_requirements_tests {
         });
         load_and_hydrate_decks(
             runner.state_mut(),
-            &resolve_deck_list(&database, &forest_decks()),
+            &resolve_deck_list(&database, &ComboTable::default(), &forest_decks()),
             Some(&*database),
         );
         engine::game::install_card_db(runner.state_mut(), Arc::clone(&database));
@@ -6128,17 +6452,105 @@ mod restored_card_db_requirements_tests {
 
     /// A routing probe, apart from the hand-back sequence: during the turn
     /// Mindslaver hands to P2, P1's decision asked as P1's own seat, which the
-    /// controller never does, is still P2's to make (CR 723.5) and goes out
-    /// with no thread.
+    /// controller never does, is P2's to make (CR 723.5), so P1 is asked
+    /// nothing. The refused build leaves P1's thread as it was.
     #[test]
-    fn a_decision_mindslaver_controls_asked_as_its_owners_seat_uses_no_thread() {
+    fn a_decision_mindslaver_controls_asked_as_its_owners_seat_builds_no_request() {
         use engine::game::scenario::P1;
         let mut log = Vec::new();
         reach_the_turn_mindslaver_controls(&mut log);
 
-        let as_owner = build_llm_decision(P1, &log);
-        assert_eq!(thread_of(&as_owner), serde_json::Value::Null, "{as_owner}");
-        assert!(as_owner["threadTurn"].is_null(), "{as_owner}");
+        let history = serde_json::to_string(&log).expect("the log serializes");
+        let as_owner = build_llm_decision_request_inner(
+            "Medium",
+            P1.0,
+            THREADED_ENDPOINT,
+            &history,
+            0,
+            in_step(0),
+        )
+        .expect("the build runs");
+        assert_eq!(as_owner, serde_json::Value::Null);
+        assert!(
+            has_open_llm_thread(P1),
+            "a refused build leaves the owner's thread open"
+        );
+
+        clear_game_state();
+    }
+
+    /// Issue #10999: a seat is asked only a decision it may make. While P1
+    /// holds priority, P0 has none, so a build for P0 returns no request
+    /// instead of P1's decision rendered from P1's view, P1's hand included.
+    #[test]
+    fn a_build_for_a_seat_with_no_decision_returns_no_request() {
+        let asked = PlayerId(0);
+        let acting = PlayerId(1);
+        install_llm_decision(acting);
+
+        let built = build_llm_decision_request_inner(
+            "Medium",
+            asked.0,
+            THREADED_ENDPOINT,
+            "[]",
+            0,
+            in_step(0),
+        )
+        .expect("the build runs");
+        assert_eq!(built, serde_json::Value::Null);
+
+        // Reach guard: asked as the seat that holds it, the decision builds.
+        build_llm_decision(acting, &[]);
+
+        clear_game_state();
+    }
+
+    /// Issue #10939 under CR 723.1 + CR 723.4 + CR 723.5, on the printed card: during the
+    /// turn Mindslaver hands to P2, P2 casts P1's Lightning Bolt for P1, and
+    /// the target choice is P1's decision, asked as P2. Its options name each
+    /// target as P1's board does: P1 is "You" in both, every other seat is
+    /// named by number.
+    #[test]
+    fn the_targets_of_a_decision_mindslaver_controls_are_named_as_its_owners_board_names_them() {
+        use engine::game::scenario::P1;
+        let p2 = PlayerId(2);
+        let mut log = Vec::new();
+        reach_the_turn_mindslaver_controls(&mut log);
+
+        assert_eq!(authorized_seat(), p2);
+        let (bolt, card_id) = with_state(|state| {
+            let bolt = state.players[usize::from(P1.0)]
+                .hand
+                .iter()
+                .copied()
+                .find(|id| state.objects[id].name == "Lightning Bolt")
+                .expect("P1 holds its Lightning Bolt");
+            (bolt, state.objects[&bolt].card_id)
+        })
+        .expect("the game is installed");
+        submit_logged(
+            &mut log,
+            p2,
+            GameAction::CastSpell {
+                object_id: bolt,
+                card_id,
+                targets: vec![],
+                payment_mode: Default::default(),
+            },
+        );
+
+        let delegated = build_llm_decision(p2, &log);
+        let body = delegated["request"]["body"]
+            .as_str()
+            .expect("a request body");
+        assert!(body.contains("You are Player 1."), "{body}");
+        for option in [
+            "Choose Target (Target: Player 0)",
+            "Choose Target (Target: You)",
+            "Choose Target (Target: Player 2)",
+        ] {
+            assert!(body.contains(option), "{option}\n{body}");
+        }
 
         clear_game_state();
     }
@@ -7228,7 +7640,7 @@ mod legacy_pending_cast_timing_restore_tests {
         let before = pool(&restored);
         let mut runner = GameRunner::from_state(restored);
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("P0 kicks Gnarlid Colony");
         assert!(
             matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
@@ -7408,10 +7820,15 @@ mod legacy_pending_cast_timing_restore_tests {
         };
         match &restored.waiting_for {
             WaitingFor::OptionalCostChoice {
-                cost:
-                    AdditionalCost::Choice(AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }),
+                cost: AdditionalCost::Choice(costs),
                 ..
-            } => assert_eq!((alt, cost), (&wubrg, &printed)),
+            } => {
+                let (alt, cost) = match costs.as_slice() {
+                    [AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }] => (alt, cost),
+                    other => panic!("expected Fist of Suns' mana alternatives, got {other:?}"),
+                };
+                assert_eq!((alt, cost), (&wubrg, &printed))
+            }
             other => panic!("expected Fist of Suns' offer, got {other:?}"),
         }
         assert_eq!(pending_route(&restored), Some(CastTimingRoute::Permission));
@@ -7422,7 +7839,7 @@ mod legacy_pending_cast_timing_restore_tests {
 
         let mut runner = GameRunner::from_state(restored);
         runner
-            .act(GameAction::DecideOptionalCost { pay: true })
+            .act(GameAction::DecideOptionalCost { index: 0 })
             .expect("P0 accepts Fist of Suns' cost");
         assert!(
             matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
@@ -8233,7 +8650,7 @@ pub fn load_replay_for_playback(json_str: &str) -> Result<u32, JsValue> {
     let player = CARD_DB
         .with(|cell| {
             let db = cell.borrow();
-            ReplayPlayer::load(log, db.as_ref())
+            with_combo_table(|combos| ReplayPlayer::load(log, db.as_ref(), combos))
         })
         .map_err(|e| JsValue::from_str(&format!("Engine error: {e}")))?;
     let len = player.len();
@@ -8751,7 +9168,14 @@ fn build_llm_decision_request_inner(
         engine::game::layers::flush_layers(state);
         let semantic_owner = ai_semantic_owner(state, PlayerId(player_id));
         let contract = AiDecisionContract::issue(state, semantic_owner);
-        if contract.candidates.is_empty() {
+        // Only the seat the engine authorizes to submit this decision is asked
+        // it: its owner, or the owner's controller (CR 723.5). For any other
+        // seat, `ai_semantic_owner` names whoever is acting, so without this a
+        // seat with no decision to make would get the acting player's
+        // decision, rendered from that player's view, hand included. Refused
+        // before the standing pass and the thread memory are consulted, so a
+        // refused build changes nothing.
+        if contract.authorized_actor != PlayerId(player_id) || contract.candidates.is_empty() {
             return serde_json::Value::Null;
         }
         let is_standing_pass = LLM_DECISION_MEMORY.with(|cell| {
@@ -9198,9 +9622,8 @@ pub fn apply_seat_mutation(state_json: &str, mutation_json: &str) -> Result<JsVa
             // against `CARD_DB` when the game actually starts, so resolving
             // here would be wasted work and would force a name-vs-resolved
             // shape coercion at every JS boundary. Every field, the declared
-            // bracket tier (so a cEDH seat's declaration survives the round-trip)
-            // and the printings sidecar included, is carried by the engine's
-            // conversion.
+            // bracket tier, the combo-barometer answer and the printings sidecar
+            // included, is carried by the engine's conversion.
             Ok(PlayerDeckList::from(deck_data))
         }
     }
@@ -9238,15 +9661,95 @@ pub fn project_seat_view(state_json: &str) -> Result<JsValue, JsValue> {
 }
 
 #[cfg(test)]
-mod bracket_estimate_tests {
+mod deck_signals_tests {
     use super::*;
-    use engine::database::{BracketLists, CardDatabase};
-    use engine::game::bracket_estimate::CommanderBracketTier;
-    use engine::game::deck_loading::PlayerDeckList;
+    use engine::analysis::deck_signals::DeckSignalKind;
+
+    fn db_with_counterspell() -> CardDatabase {
+        CardDatabase::from_json_str(
+            r#"{
+                "counterspell": {
+                    "name": "Counterspell",
+                    "mana_cost": { "type": "Cost", "shards": ["Blue", "Blue"], "generic": 0 },
+                    "card_type": { "supertypes": [], "core_types": ["Instant"], "subtypes": [] },
+                    "power": null,
+                    "toughness": null,
+                    "loyalty": null,
+                    "defense": null,
+                    "oracle_text": "Counter target spell.",
+                    "abilities": [{
+                        "kind": "Spell",
+                        "effect": {
+                            "type": "Counter",
+                            "target": { "type": "StackSpell" }
+                        },
+                        "cost": null,
+                        "sub_ability": null,
+                        "duration": null,
+                        "description": "Counter target spell.",
+                        "target_prompt": null,
+                        "condition": null,
+                        "optional_targeting": false,
+                        "optional": false,
+                        "forward_result": false
+                    }],
+                    "triggers": [],
+                    "static_abilities": [],
+                    "replacements": [],
+                    "keywords": []
+                }
+            }"#,
+        )
+        .expect("counterspell database parses")
+    }
 
     #[test]
-    fn estimate_bracket_inner_returns_b3_for_one_game_changer() {
-        let db = CardDatabase::from_json_str(
+    fn deck_signals_inner_returns_none_with_no_db() {
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        let deck = PlayerDeckList {
+            commander: vec!["Counterspell".into()],
+            ..Default::default()
+        };
+
+        assert!(deck_signals_inner(&deck).is_none());
+    }
+
+    #[test]
+    fn deck_signals_inner_counts_a_counterspell() {
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_counterspell()));
+        });
+        let deck = PlayerDeckList {
+            commander: vec!["Counterspell".into()],
+            ..Default::default()
+        };
+
+        let signals = deck_signals_inner(&deck).expect("signals present");
+
+        assert_eq!(signals.readings[&DeckSignalKind::Counterspells].count, 1);
+        assert_eq!(
+            signals.readings[&DeckSignalKind::Counterspells].contributing,
+            ["Counterspell"]
+        );
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+mod bracket_estimate_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    use engine::database::{
+        BracketLists, CardDatabase, ComboCoverage, ComboEntry, ComboFilterCounts, ComboOmission,
+        ComboOutcome, ComboPiece, ComboPieceZone, ComboProvenance, ComboRelevance, ComboResource,
+        ComboSetup, ComboTableDoc,
+    };
+    use engine::game::bracket_estimate::{BracketAxis, CommanderBracketTier, DeclarationVerdict};
+    use engine::game::deck_loading::PlayerDeckList;
+
+    fn db_with_one_game_changer() -> CardDatabase {
+        CardDatabase::from_json_str(
             r#"{
                 "smothering tithe": {
                     "name": "Smothering Tithe",
@@ -9272,7 +9775,65 @@ mod bracket_estimate_tests {
             }"#,
         )
         .unwrap()
-        .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap());
+        .with_bracket_lists(BracketLists::from_json_str(r#"{"version":"t"}"#).unwrap())
+    }
+
+    fn reset_bracket_thread_locals() {
+        CARD_DB.with(|cell| *cell.borrow_mut() = None);
+        COMBO_TABLE.with(|cell| *cell.borrow_mut() = None);
+    }
+
+    fn one_row_combo_table_json() -> String {
+        let piece = |name: &str| ComboPiece {
+            key: name.to_lowercase(),
+            display: name.to_owned(),
+            zone: ComboPieceZone::Anywhere,
+        };
+        serde_json::to_string(&ComboTableDoc {
+            provenance: ComboProvenance {
+                snapshot_date: "2026-09-27".to_owned(),
+                table_version: "wasm-test-v1".to_owned(),
+                attribution: "Commander Spellbook test fixture".to_owned(),
+                card_pool_version: "wasm-test-pool".to_owned(),
+                filtered: ComboFilterCounts {
+                    kept: 1,
+                    ..ComboFilterCounts::default()
+                },
+                omitted: vec![
+                    ComboOmission::PrerequisiteText,
+                    ComboOmission::ResultText,
+                    ComboOmission::UnmodeledResultClasses,
+                ],
+            },
+            entries: vec![ComboEntry {
+                pieces: [piece("Devoted Druid"), piece("Vizier of Remedies")],
+                relevance: ComboRelevance::Standalone,
+                setup: ComboSetup::AsPrinted,
+                mana_value_needed: 2,
+                assemble_cost: 6,
+                popularity: 1,
+                outcomes: BTreeSet::from([ComboOutcome::Unbounded(ComboResource::Mana)]),
+                axes: BTreeSet::new(),
+            }],
+        })
+        .expect("combo table fixture serializes")
+    }
+
+    fn combo_request() -> BracketEstimateRequest {
+        BracketEstimateRequest {
+            deck: PlayerDeckList {
+                commander: vec!["Test Commander".into()],
+                main_deck: vec!["Devoted Druid".into(), "Vizier of Remedies".into()],
+                ..Default::default()
+            },
+            declared_tier: None,
+        }
+    }
+
+    #[test]
+    fn estimate_bracket_inner_returns_b3_for_one_game_changer() {
+        reset_bracket_thread_locals();
+        let db = db_with_one_game_changer();
         CARD_DB.with(|c| *c.borrow_mut() = Some(std::sync::Arc::new(db)));
 
         let deck = PlayerDeckList {
@@ -9281,24 +9842,121 @@ mod bracket_estimate_tests {
             sideboard: vec![],
             ..Default::default()
         };
-        let result = estimate_bracket_inner(&deck);
+        let request = BracketEstimateRequest {
+            deck,
+            declared_tier: None,
+        };
+        let result = estimate_bracket_inner(&request);
         let est = result.expect("estimate present");
         assert_eq!(est.tier, CommanderBracketTier::Upgraded);
 
         // Reset to avoid leaking state to other tests in this module.
-        CARD_DB.with(|c| *c.borrow_mut() = None);
+        reset_bracket_thread_locals();
     }
 
     #[test]
     fn estimate_bracket_inner_returns_none_with_no_db() {
-        CARD_DB.with(|c| *c.borrow_mut() = None);
+        reset_bracket_thread_locals();
         let deck = PlayerDeckList {
             commander: vec!["Cmdr".into()],
             main_deck: vec!["Forest".into()],
             sideboard: vec![],
             ..Default::default()
         };
-        assert!(estimate_bracket_inner(&deck).is_none());
+        let request = BracketEstimateRequest {
+            deck,
+            declared_tier: None,
+        };
+        assert!(estimate_bracket_inner(&request).is_none());
+    }
+
+    #[test]
+    fn estimate_bracket_inner_reconciles_declared_tier() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+        let request = BracketEstimateRequest {
+            deck: PlayerDeckList {
+                commander: vec!["Atraxa, Praetors' Voice".into()],
+                main_deck: vec!["Smothering Tithe".into()],
+                ..Default::default()
+            },
+            declared_tier: Some(CommanderBracketTier::Core),
+        };
+
+        let estimate = estimate_bracket_inner(&request).expect("estimate present");
+        assert_eq!(
+            estimate.declaration,
+            Some(DeclarationVerdict::BelowFloor {
+                floor: CommanderBracketTier::Upgraded,
+                raised_by: vec![BracketAxis::GameChangers],
+                raised_by_combo_floor: None,
+            })
+        );
+
+        reset_bracket_thread_locals();
+    }
+
+    #[test]
+    fn estimate_bracket_inner_reports_unmeasured_without_a_combo_table() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+
+        let estimate = estimate_bracket_inner(&combo_request()).expect("estimate present");
+        assert_eq!(estimate.combo_coverage, ComboCoverage::Unmeasured);
+
+        reset_bracket_thread_locals();
+    }
+
+    #[test]
+    fn load_combo_table_makes_estimate_bracket_inner_measured() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+
+        let count = load_combo_table(&one_row_combo_table_json()).expect("combo table loads");
+        assert_eq!(count, 1);
+        let estimate = estimate_bracket_inner(&combo_request()).expect("estimate present");
+        assert_eq!(estimate.combo_coverage, ComboCoverage::Measured);
+        assert_eq!(estimate.combos.len(), 1);
+
+        reset_bracket_thread_locals();
+    }
+
+    #[test]
+    fn resolve_player_deck_list_uses_the_loaded_combo_table() {
+        reset_bracket_thread_locals();
+        CARD_DB.with(|cell| {
+            *cell.borrow_mut() = Some(std::sync::Arc::new(db_with_one_game_changer()))
+        });
+        let list = combo_request().deck;
+
+        let unmeasured = CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            let db = db.as_ref().expect("card database loaded");
+            with_combo_table(|combos| resolve_player_deck_list(db, combos, &list))
+        });
+        assert_eq!(
+            unmeasured.estimated_bracket_tier,
+            Some(CommanderBracketTier::Core)
+        );
+
+        load_combo_table(&one_row_combo_table_json()).expect("combo table loads");
+        let measured = CARD_DB.with(|cell| {
+            let db = cell.borrow();
+            let db = db.as_ref().expect("card database loaded");
+            with_combo_table(|combos| resolve_player_deck_list(db, combos, &list))
+        });
+        assert_eq!(
+            measured.estimated_bracket_tier,
+            Some(CommanderBracketTier::Optimized)
+        );
+
+        reset_bracket_thread_locals();
     }
 }
 
@@ -12429,7 +13087,7 @@ mod deck_list_seat_validation_tests {
         let decoded: Result<FormatConfig, String> =
             serde_json::from_value(serde_json::to_value(config).unwrap())
                 .map_err(|error| error.to_string());
-        let decoded = parse_initialize_format_config(decoded)
+        let decoded = parse_initialize_config(decoded, "Format config")
             .map_err(|envelope| envelope["reasons"][0].as_str().unwrap().to_string())?;
         resolve_initialize_format_config(Some(decoded), 2, draft_session_min_deck_size)
     }

@@ -700,7 +700,7 @@ fn mirror_match_noncreature_vehicle_copy_stays_unblocked_and_expires_at_end_of_c
     assert!(
         !copy_events.iter().any(|event| matches!(
             event,
-            GameEvent::AttackerBecameBlockedByEffect { .. }
+            GameEvent::AttackerBecameBlocked { .. }
                 | GameEvent::AttackerBecameBlockedByFilteredBlocker { .. }
                 | GameEvent::BlockersDeclared { .. }
         )),

@@ -30,7 +30,7 @@ import type {
 import { refreshServerDirectory, type DirectorySource } from "../../services/serverDirectory";
 import type { HostSeed } from "../../pages/multiplayerPageState";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
-import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { submitCandidateSeatDeck, useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
   cedhSeatProblem,
   pickAiSeatDecks,
@@ -54,8 +54,7 @@ import {
 } from "../../services/customFormats";
 import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
-import { captureSubmissionArtPreferences, submitParsedDeck } from "../../services/deckSubmission";
-import { bracketToEngineTier } from "../../types/bracketEstimate";
+import { captureSubmissionArtPreferences } from "../../services/deckSubmission";
 import { AiDeckPicker } from "../menu/AiDeckPicker";
 import { RandomPoolTree } from "../menu/RandomPoolTree";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -888,7 +887,7 @@ export function HostSetup({
       deckId: requestedDeckIds[i],
       deck: {
         type: "DeckList" as const,
-        data: { ...await submitParsedDeck(picks[i].deck, snapshot), bracket_tier: bracketToEngineTier(picks[i].bracket) },
+        data: await submitCandidateSeatDeck(picks[i], snapshot),
       },
     })));
   };
@@ -1281,6 +1280,7 @@ export function HostSetup({
                 id="host-setup-cmd-dmg"
                 value={formatConfig.commander_damage_threshold ?? 21}
                 min={1}
+                max={255}
                 onCommit={(threshold) =>
                   setLocalFormatConfig((prev) => ({
                     ...prev,

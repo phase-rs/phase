@@ -350,7 +350,7 @@ pub(crate) fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option
     // Wild-Magic Sorcerer, Current Curriculum). Reuses the same
     // `parse_nth_qualified_spell_filter` grammar + `nth_qualified_spell_condition`
     // gate as the paired cost-modifier consumer, so the qualifying spell filter,
-    // cast-origin restriction, and `SpellsCastThisTurn == 0` gate are all preserved
+    // cast-origin restriction, and `SpellsCast == 0` gate are all preserved
     // instead of collapsing to "every spell you cast". `None` falls through to
     // the ordinary patterns below, preserving the gateless static.
     if let Some(def) = nth_qualified_spell_grant(
@@ -2012,21 +2012,6 @@ pub(crate) fn push_grant_clause_modifications(
 
     if let Some(kw) = map_keyword(part_trimmed) {
         modifications.push(ContinuousModification::AddKeyword { keyword: kw });
-        return;
-    }
-
-    // CR 702.18a / 702.11a: a descriptive "can't be the target [of ...]" grant is
-    // Shroud (blanket) or Hexproof (opponents only). Emit the keyword so the
-    // existing targeting checks apply the correct controller scope, rather than a
-    // scope-less rule static.
-    if let Some(scope) =
-        crate::parser::oracle_keyword::classify_cant_be_targeted(part_lower.as_str())
-    {
-        let keyword = match scope {
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => Keyword::Shroud,
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => Keyword::Hexproof,
-        };
-        modifications.push(ContinuousModification::AddKeyword { keyword });
         return;
     }
 

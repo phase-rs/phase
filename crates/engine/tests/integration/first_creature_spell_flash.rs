@@ -667,7 +667,7 @@ fn radagast_leaves_primal_prayers_energy_cost_optional() {
 
     let mut paid_energy = GameRunner::from_state(runner.state().clone());
     runner
-        .act(GameAction::DecideOptionalCost { pay: false })
+        .act(GameAction::DecideOptionalCost { index: 1 })
         .expect("P0 pays the reduced mana cost");
     assert!(on_stack(&runner, bears));
     assert!(matches!(
@@ -678,7 +678,7 @@ fn radagast_leaves_primal_prayers_energy_cost_optional() {
     assert_eq!(pool(&runner, P0), before - 1);
 
     paid_energy
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("P0 pays {E}");
     assert!(on_stack(&paid_energy, bears));
     assert!(matches!(
@@ -942,9 +942,13 @@ fn primal_prayers_is_offered_for_a_prototyped_spell() {
     };
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice {
-            cost: AdditionalCost::Choice(alt, AbilityCost::Mana { cost }),
+            cost: AdditionalCost::Choice(costs),
             ..
         } => {
+            let (alt, cost) = match costs.as_slice() {
+                [alt, AbilityCost::Mana { cost }] => (alt, cost),
+                other => panic!("expected energy-vs-mana choice, got {other:?}"),
+            };
             assert_eq!(
                 alt,
                 &AbilityCost::PayEnergy {
@@ -956,7 +960,7 @@ fn primal_prayers_is_offered_for_a_prototyped_spell() {
         other => panic!("expected Primal Prayers' offer, got {other:?}"),
     }
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("P0 pays {E}");
     assert_priority(&runner);
     assert_prototyped_through_prayers(&runner, fleshgorger);
@@ -1031,14 +1035,19 @@ fn fist_of_suns_is_offered_for_an_adventure() {
     };
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice {
-            cost:
-                AdditionalCost::Choice(AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }),
+            cost: AdditionalCost::Choice(costs),
             ..
-        } => assert_eq!((alt, cost), (&wubrg, &stomp)),
+        } => {
+            let (alt, cost) = match costs.as_slice() {
+                [AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }] => (alt, cost),
+                other => panic!("expected alternative-vs-printed mana choice, got {other:?}"),
+            };
+            assert_eq!((alt, cost), (&wubrg, &stomp))
+        }
         other => panic!("expected Fist of Suns' offer, got {other:?}"),
     }
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("P0 accepts Fist of Suns' cost");
     finish_paying(&mut runner);
     assert!(on_stack(&runner, giant));
@@ -1201,14 +1210,19 @@ fn uba_mask_cast_is_offered_tlincalli_hunters_cost() {
     };
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice {
-            cost:
-                AdditionalCost::Choice(AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }),
+            cost: AdditionalCost::Choice(costs),
             ..
-        } => assert_eq!((alt, cost), (&ManaCost::generic(0), &printed)),
+        } => {
+            let (alt, cost) = match costs.as_slice() {
+                [AbilityCost::Mana { cost: alt }, AbilityCost::Mana { cost }] => (alt, cost),
+                other => panic!("expected alternative-vs-printed mana choice, got {other:?}"),
+            };
+            assert_eq!((alt, cost), (&ManaCost::generic(0), &printed))
+        }
         other => panic!("expected Tlincalli Hunter's offer, got {other:?}"),
     }
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("P0 pays {0}");
     assert_priority(&runner);
     assert!(on_stack(&runner, bears));
@@ -1347,7 +1361,9 @@ fn resolve_targeting(runner: &mut GameRunner, target: ObjectId, pay: bool) {
             WaitingFor::Priority { .. } | WaitingFor::ManaPayment { .. } => {
                 GameAction::PassPriority
             }
-            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost { pay },
+            WaitingFor::OptionalCostChoice { .. } => GameAction::DecideOptionalCost {
+                index: if pay { 0 } else { 1 },
+            },
             WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(target)),
             },
@@ -1442,7 +1458,7 @@ fn kick_and_resolve(runner: &mut GameRunner, gnarlid: ObjectId) {
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay: true })
+        .act(GameAction::DecideOptionalCost { index: 0 })
         .expect("P0 kicks Gnarlid Colony");
     assert_priority(runner);
     assert!(on_stack(runner, gnarlid));
@@ -1464,18 +1480,20 @@ fn answer_prayers_offer(runner: &mut GameRunner, pay: bool) {
         matches!(
             &runner.state().waiting_for,
             WaitingFor::OptionalCostChoice {
-                cost: AdditionalCost::Choice(
-                    AbilityCost::PayEnergy { .. },
-                    AbilityCost::Mana { .. }
-                ),
+                cost: AdditionalCost::Choice(costs),
                 ..
-            }
+            } if matches!(
+                costs.as_slice(),
+                [AbilityCost::PayEnergy { .. }, AbilityCost::Mana { .. }]
+            )
         ),
         "{:?}",
         runner.state().waiting_for
     );
     runner
-        .act(GameAction::DecideOptionalCost { pay })
+        .act(GameAction::DecideOptionalCost {
+            index: if pay { 0 } else { 1 },
+        })
         .expect("P0 answers Primal Prayers' offer");
 }
 
@@ -1485,7 +1503,9 @@ fn answer_prayers_offer(runner: &mut GameRunner, pay: bool) {
 fn primal_prayers_upkeep_cast_is_kicked_for_only_the_kicker_cost() {
     let (mut runner, gnarlid) = prayers_and_gnarlid(Phase::Upkeep, 3);
     assert!(cast(&mut runner, gnarlid));
-    assert_eq!(energy(&runner), 1);
+    // CR 601.2b + CR 601.2h: the kicker is declared before costs are paid, so
+    // the {E} is still unpaid at the kicker prompt.
+    assert_eq!(energy(&runner), 2);
     kick_and_resolve(&mut runner, gnarlid);
     assert_eq!(energy(&runner), 1);
 }
