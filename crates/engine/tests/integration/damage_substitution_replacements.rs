@@ -502,7 +502,7 @@ fn resolved(events: &[GameEvent], kind: EffectKind) -> bool {
 }
 
 /// CR 104.3e + CR 104.2b: each player who lost, with the reasons recorded, in player order.
-fn player_losses(events: &[GameEvent]) -> Vec<(PlayerId, BTreeSet<LossReason>)> {
+pub(super) fn player_losses(events: &[GameEvent]) -> Vec<(PlayerId, BTreeSet<LossReason>)> {
     let mut losses: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -3810,7 +3810,7 @@ fn a_rider_draw_with_a_declined_replacement_finishes_before_the_spell_does() {
 }
 
 /// Temper with its printed {X}{1}{W}, and the mana to pay for it.
-fn temper(scenario: &mut GameScenario) -> ObjectId {
+pub(super) fn temper(scenario: &mut GameScenario) -> ObjectId {
     let id = scenario
         .add_spell_to_hand_from_oracle(P0, "Temper", true, TEMPER)
         .with_mana_cost(ManaCost::Cost {
@@ -3827,7 +3827,7 @@ fn temper(scenario: &mut GameScenario) -> ObjectId {
     id
 }
 
-fn cast_temper_at_one(runner: &mut GameRunner, temper: ObjectId, target: ObjectId) {
+pub(super) fn cast_temper_at_one(runner: &mut GameRunner, temper: ObjectId, target: ObjectId) {
     let action = cast_action(runner, temper);
     runner.act(action).expect("cast Temper");
     let mut target = Some(object_target(target));

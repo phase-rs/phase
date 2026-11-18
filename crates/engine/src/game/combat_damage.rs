@@ -2195,7 +2195,8 @@ pub(crate) fn apply_combat_damage(
         replacement: None,
         phase_c_remnant: None,
     };
-    let pass = replacement::CombatDamageReplacementPass::new(proposed_events);
+    // CR 608.2f + CR 700.1: the pass reads the printed guards once, as the batch opens.
+    let pass = replacement::CombatDamageReplacementPass::new(state, proposed_events);
     run_combat_damage_replacements(state, record, entries, pass, None)
 }
 
@@ -2236,7 +2237,9 @@ fn run_combat_damage_replacements(
             // and reinstalled on resume. CR 615.8: the one-shot application
             // ledger is parked with it, so a "next time" shield that already
             // applied to an earlier portion still covers the source's portions
-            // proposed after the pause. The tally is sorted so a parked state
+            // proposed after the pause, and the printed guards' reading the pass
+            // opened with is parked too, so every later portion meets that one
+            // reading (CR 608.2f). The tally is sorted so a parked state
             // serializes identically however the map iterated.
             let mut prevention_tally: Vec<_> = pass.tally.into_iter().collect();
             prevention_tally.sort_unstable();
@@ -2245,6 +2248,7 @@ fn run_combat_damage_replacements(
                 entries,
                 resolved: pass.resolved,
                 one_shot_applications: pass.one_shot_applications,
+                settled_guards: pass.settled_guards,
             });
             state.waiting_for = (*waiting_for).clone();
             let events = record.batch_events.clone();
@@ -2276,6 +2280,7 @@ fn resume_combat_damage_replacements(
             .into_iter()
             .collect(),
         one_shot_applications: parked.one_shot_applications,
+        settled_guards: parked.settled_guards,
     };
     run_combat_damage_replacements(state, record, parked.entries, pass, Some(resume))
 }

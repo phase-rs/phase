@@ -15675,8 +15675,8 @@ fn abandon_combat_rider_pause(
 /// prevented amount (continuous all-damage and one-shot prevention riders).
 ///
 /// The batch's ledger (`GameState::damage_batch_ledger`) is installed on every entry with the
-/// pass's one-shot applications and a fresh guard reading (CR 608.2f), and the applications move
-/// back into the pass on every exit.
+/// pass's one-shot applications and the guard reading the pass took when it was created
+/// (CR 608.2f), and both move back into the pass on every exit.
 pub(crate) fn replace_combat_damage_batch(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
@@ -15689,15 +15689,14 @@ pub(crate) fn replace_combat_damage_batch(
     let restore_tally = state.combat_prevention_tally.take();
     state.combat_prevention_tally = Some(std::mem::take(&mut pass.tally));
     // CR 510.2 + CR 700.1 + CR 615.8 + CR 608.2f: the batch's ledger is installed on every entry:
-    // the one-shot applications travel with the pass exactly like the tally, so a parked batch
-    // resumes with the applications its earlier portions recorded, and the printed guards are
-    // read fresh for this entry.
-    let settled_guards = read_damage_guards(state);
+    // the one-shot applications and the printed guards' reading travel with the pass exactly like
+    // the tally, so a parked batch resumes with the applications its earlier portions recorded and
+    // under the reading it opened with.
     let restore_ledger = state
         .damage_batch_ledger
         .replace(Box::new(DamageBatchLedger {
             applications: std::mem::take(&mut pass.one_shot_applications),
-            settled_guards,
+            settled_guards: std::mem::take(&mut pass.settled_guards),
             paused_rider: None,
             held_riders: None,
             split_portions: Vec::new(),
@@ -15911,11 +15910,10 @@ pub(crate) fn replace_combat_damage_batch(
 
     pass.tally = state.combat_prevention_tally.take().unwrap_or_default();
     state.combat_prevention_tally = restore_tally;
-    pass.one_shot_applications = state
-        .damage_batch_ledger
-        .take()
-        .map(|ledger| ledger.applications)
-        .unwrap_or_default();
+    if let Some(ledger) = state.damage_batch_ledger.take() {
+        pass.one_shot_applications = ledger.applications;
+        pass.settled_guards = ledger.settled_guards;
+    }
     state.damage_batch_ledger = restore_ledger;
     outcome
 }
@@ -16086,16 +16084,23 @@ pub(crate) struct CombatDamageReplacementPass {
     /// CR 615.8: successful one-shot applications so far (installed as
     /// `DamageBatchLedger::applications` while the pass runs).
     pub(crate) one_shot_applications: Vec<(AppliedReplacementKey, ObjectId)>,
+    /// CR 608.2f + CR 700.1: the printed "while" guards, read once when the pass is created and
+    /// installed as `DamageBatchLedger::settled_guards` on every entry, so a batch that parks
+    /// resumes under the reading it opened with. Undergrowth Champion ruling: "its prevention
+    /// effect will apply once to all that damage."
+    pub(crate) settled_guards: Vec<SettledDamageGuard>,
 }
 
 impl CombatDamageReplacementPass {
-    /// A pass over `events`, every leg not yet proposed.
-    pub(crate) fn new(events: impl IntoIterator<Item = ProposedEvent>) -> Self {
+    /// A pass over `events`, every leg not yet proposed, under the guard reading of `state` as
+    /// the batch opens (CR 608.2f).
+    pub(crate) fn new(state: &GameState, events: impl IntoIterator<Item = ProposedEvent>) -> Self {
         Self {
             resolved: events
                 .into_iter()
                 .map(PendingCombatLegProgress::Unstarted)
                 .collect(),
+            settled_guards: read_damage_guards(state),
             ..Self::default()
         }
     }
@@ -32187,7 +32192,7 @@ mod tests {
 
         let mut events = Vec::new();
         let batch_recorded = record_proposed_events(|| {
-            let mut pass = CombatDamageReplacementPass::new([damage.clone()]);
+            let mut pass = CombatDamageReplacementPass::new(&state, [damage.clone()]);
             let _ = replace_combat_damage_batch(&mut state, &mut events, &mut pass, None);
         });
         assert!(

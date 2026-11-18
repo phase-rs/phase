@@ -23077,6 +23077,12 @@ pub struct PendingCombatDamageReplacement {
     /// existed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub one_shot_applications: Vec<(AppliedReplacementKey, ObjectId)>,
+    /// CR 608.2f + CR 700.1: what the printed "while" guards read when the batch opened. Every
+    /// portion of the batch meets that one reading, including the portions proposed after the
+    /// pause (Undergrowth Champion ruling: "its prevention effect will apply once to all that
+    /// damage"). Absent from saves written before it existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settled_guards: Vec<crate::types::ability::SettledDamageGuard>,
 }
 
 /// CR 616.1 + CR 616.1g + CR 101.4: where one proposed damage leg of a parked

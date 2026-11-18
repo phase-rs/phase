@@ -14,7 +14,7 @@
 //! dealt damage from multiple sources at the same time (for example, if it's blocked by multiple
 //! creatures), its prevention effect will apply once to all that damage." So the guard is read once
 //! when a simultaneous batch opens (CR 510.2, CR 608.2f), and every portion of the batch meets that
-//! reading.
+//! reading. The reading survives an order prompt inside combat damage, and a save and load at it.
 //!
 //! A rider's pause inside a combat damage batch is settled before the batch moves on, at the
 //! per-portion drain and at the aggregate drain after it (CR 510.2). Combat damage can't pause for
@@ -38,7 +38,7 @@ use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::counter::CounterType;
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, LossReason};
 use engine::types::game_state::{
     CastPaymentMode, CombatDamageAssignmentMode, GameState, ReplacementActionScope, WaitingFor,
 };
@@ -46,6 +46,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::resolution::ResolutionFrame;
 use engine::types::zones::Zone;
 
 use super::rules::run_combat;
@@ -582,6 +583,212 @@ fn undergrowth_champion_double_blocked_reads_its_guard_once() {
 
     assert_settled(&runner);
     assert_shielded_once(&runner, champion);
+}
+
+const ANGRATHS_MARAUDERS: &str = "If a source you control would deal damage to a permanent or player, it deals double that damage to that permanent or player instead.";
+/// Fencing Ace (1/1): "Double strike (This creature deals both first-strike and regular combat
+/// damage.)" The bare keyword line is the harness's keyword-hint idiom.
+const FENCING_ACE: &str = "Double strike";
+
+/// A save and load of the whole game at a prompt the combat damage batch parked on.
+fn reload_at_the_combat_park(runner: &mut GameRunner) {
+    assert!(
+        runner
+            .state()
+            .pending_combat_lifelink
+            .as_ref()
+            .is_some_and(|record| record.replacement.is_some()),
+        "the prompt is the parked combat batch's"
+    );
+    let json = serde_json::to_string(runner.state()).expect("serialize at the pause");
+    *runner.state_mut() = serde_json::from_str::<GameState>(&json).expect("deserialize");
+}
+
+/// CR 510.2 + CR 608.2f + CR 700.1: a combat batch parked on an order prompt keeps the guard
+/// reading it opened with, in memory and through a save and load between the answers. Undergrowth
+/// Champion ("If damage would be dealt to this creature while it has a +1/+1 counter on it,
+/// prevent that damage and remove a +1/+1 counter from this creature.") attacks with one counter,
+/// and P1's Angrath's Marauders ("If a source you control would deal damage to a permanent or
+/// player, it deals double that damage to that permanent or player instead.") and Grizzly Bears
+/// block it. Each blocker's damage meets the Champion's shield and the Marauders' doubling, an
+/// order P0 chooses (CR 616.1). Its ruling: "its prevention effect will apply once to all that
+/// damage", so both portions are prevented whichever applies first (CR 616.1f: the doubled damage
+/// still meets the shield), one counter is removed, and the Champion survives.
+#[test]
+fn undergrowth_champion_keeps_its_reading_across_both_orders_of_a_double_block() {
+    for round_trip in [false, true] {
+        for champion_first in [true, false] {
+            let mut scenario = main_phase();
+            let champion = undergrowth_champion(&mut scenario, P0, 1);
+            let marauders = scenario
+                .add_creature_from_oracle(P1, "Angrath's Marauders", 4, 4, ANGRATHS_MARAUDERS)
+                .id();
+            let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+            let mut runner = scenario.build();
+            let mut answer = preferring(vec![if champion_first { champion } else { marauders }]);
+            let mut asked = 0;
+
+            let combat = fight_driving(
+                &mut runner,
+                &[champion],
+                &[(marauders, champion), (bears, champion)],
+                |runner| {
+                    asked += 1;
+                    if round_trip && asked == 2 {
+                        reload_at_the_combat_park(runner);
+                    }
+                    answer(runner.state())
+                },
+            );
+
+            let label = format!("round trip {round_trip}, champion first {champion_first}");
+            assert_batch_settled(&runner);
+            let object = &runner.state().objects[&champion];
+            assert_eq!(object.zone, Zone::Battlefield, "{label}");
+            assert_eq!(object.damage_marked, 0, "{label}");
+            assert!(
+                damage_dealt_to(&combat.events, champion).is_empty(),
+                "{label}"
+            );
+            // Reach guards: both portions were asked of P0, each with both effects offered, the
+            // one counter paid for the batch, and the Champion's own damage was dealt.
+            assert_eq!(combat.prompts.len(), 2, "{label}: {:?}", combat.prompts);
+            assert_eq!(combat.choosers, vec![P0, P0], "{label}");
+            for prompt in &combat.prompts {
+                assert_eq!(offered(prompt), offered(&[champion, marauders]), "{label}");
+            }
+            assert_eq!(plus_counters(&runner, champion), 0, "{label}");
+            assert!(
+                combat.events.iter().any(|e| matches!(
+                    e,
+                    GameEvent::DamageDealt { source_id, .. } if *source_id == champion
+                )),
+                "{label}"
+            );
+        }
+    }
+}
+
+/// CR 608.2f + CR 700.1 + CR 611.3a: a combat batch that parks keeps the guard reading it opened
+/// with, in memory and through a save and load at the second prompt. Undergrowth Champion with no
+/// counter attacks and two Grizzly Bears block it; it assigns its 2 to the first (CR 510.1c). P0
+/// cast Temper at X = 1 ("Prevent the next X damage that would be dealt to target creature this
+/// turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.") at the
+/// Champion, and controls two Hardened Scales and Doubling Season.
+///
+/// The batch opens with the Champion's guard ("while it has a +1/+1 counter on it") false, so its
+/// shield applies to none of the 4 damage (its ruling: "its prevention effect will apply once to
+/// all that damage"). Temper prevents 1, and its counter meets the three effects: P0 orders them,
+/// two prompts (CR 616.1, CR 616.1f). Hardened Scales twice gives ((1+1)+1)×2 = 6; Hardened
+/// Scales then Doubling Season (1+1)×2+1 = 5. The Bears' other 3 is dealt to the Champion even
+/// though it has counters by then, because the batch read the guard before they were put.
+#[test]
+fn undergrowth_champion_keeps_its_batch_reading_across_a_combat_park() {
+    for round_trip in [false, true] {
+        for (second_scales, expected) in [(true, 6), (false, 5)] {
+            let mut scenario = main_phase();
+            let champion = undergrowth_champion(&mut scenario, P0, 0);
+            let first_bear = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+            let second_bear = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+            let scales_a = scenario
+                .add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES)
+                .id();
+            let scales_b = scenario
+                .add_enchantment_from_oracle(P0, "Hardened Scales", HARDENED_SCALES)
+                .id();
+            let season = scenario
+                .add_enchantment_from_oracle(P0, "Doubling Season", DOUBLING_SEASON)
+                .id();
+            let temper = super::damage_substitution_replacements::temper(&mut scenario);
+            let mut runner = scenario.build();
+            super::damage_substitution_replacements::cast_temper_at_one(
+                &mut runner,
+                temper,
+                champion,
+            );
+            let mut answer = preferring(vec![
+                scales_a,
+                if second_scales { scales_b } else { season },
+            ]);
+            let mut asked = 0;
+
+            let combat = fight_driving(
+                &mut runner,
+                &[champion],
+                &[(first_bear, champion), (second_bear, champion)],
+                |runner| {
+                    asked += 1;
+                    if round_trip && asked == 2 {
+                        // The second prompt is answered on a reloaded game: the parked record
+                        // carries the batch's reading.
+                        reload_at_the_combat_park(runner);
+                    }
+                    answer(runner.state())
+                },
+            );
+
+            let label = format!("round trip {round_trip}, second Scales {second_scales}");
+            assert_batch_settled(&runner);
+            assert_eq!(
+                runner.state().objects[&champion].damage_marked,
+                3,
+                "{label}"
+            );
+            assert!(
+                combat
+                    .prompts
+                    .iter()
+                    .all(|prompt| !prompt.contains(&champion)),
+                "{label}: the Champion's shield is never offered"
+            );
+            assert_eq!(combat.prompts.len(), 2, "{label}: {:?}", combat.prompts);
+            assert_eq!(combat.choosers, vec![P0, P0], "{label}");
+            assert_eq!(
+                offered(&combat.prompts[0]),
+                offered(&[scales_a, scales_b, season]),
+                "{label}"
+            );
+            // Reach guard: Temper applied, and its counters made the live guard true.
+            assert_eq!(prevented(&combat.events), 1, "{label}");
+            assert_eq!(plus_counters(&runner, champion), expected, "{label}");
+            assert_eq!(
+                runner.state().objects[&champion].zone,
+                Zone::Battlefield,
+                "{label}"
+            );
+        }
+    }
+}
+
+/// CR 510.4 + CR 510.2: each combat damage step is its own batch, so a step's reading is not
+/// carried past it. Undergrowth Champion with one counter attacks and P1's Fencing Ace ("Double
+/// strike") blocks it. The first-strike step's 1 is prevented and removes the counter; the
+/// regular step's batch opens with no counter, so its 1 is dealt.
+#[test]
+fn a_later_combat_damage_step_reads_the_guard_afresh() {
+    let mut scenario = main_phase();
+    let champion = undergrowth_champion(&mut scenario, P0, 1);
+    let ace = creature_with_keywords(
+        &mut scenario,
+        P1,
+        "Fencing Ace",
+        (1, 1),
+        &["Double strike"],
+        FENCING_ACE,
+    );
+    let mut runner = scenario.build();
+
+    let combat = fight(&mut runner, &[champion], &[(ace, champion)], None);
+
+    assert_batch_settled(&runner);
+    assert_eq!(damage_dealt_to(&combat.events, champion), vec![1]);
+    assert_eq!(runner.state().objects[&champion].damage_marked, 1);
+    // Reach guards: the first-strike portion was prevented and took the counter, and the
+    // Champion's regular damage killed the Ace.
+    assert_eq!(prevented(&combat.events), 1);
+    assert_eq!(plus_counters(&runner, champion), 0);
+    assert_eq!(runner.state().objects[&ace].zone, Zone::Graveyard);
+    assert!(combat.prompts.is_empty());
 }
 
 /// CR 608.2f: one spell's damage from several sources to one creature is one simultaneous batch,
@@ -2216,6 +2423,807 @@ fn a_cast_outfitted_jouster_is_shielded_by_its_conjured_equipment() {
 }
 
 // ---------------------------------------------------------------------------
+// A wither or infect leg whose -1/-1 counters meet two counter modifiers pauses inside the batch
+// (CR 120.3d, CR 616.1). Its remainder (the damage event and record) is the counter stash's, the
+// batch's rest is the parked batch's, and the instruction's later instructions are the tail's.
+// ---------------------------------------------------------------------------
+
+/// Sickle Ripper (2/1): "Wither (This deals damage to creatures in the form of -1/-1 counters.)"
+/// The bare keyword line is the harness's keyword-hint idiom, as in `wither_counter_pause_resume`.
+const SICKLE_RIPPER: &str = "Wither";
+const WINDING_CONSTRICTOR: &str = "If one or more counters would be put on an artifact or creature you control, that many plus one of each of those kinds of counters are put on that permanent instead.\nIf you would get one or more counters, you get that many plus one of each of those kinds of counters instead.";
+const VIZIER_OF_REMEDIES: &str = "If one or more -1/-1 counters would be put on a creature you control, that many -1/-1 counters minus one are put on it instead.";
+const DARKSTEEL_COLOSSUS: &str = "Trample (This creature can deal excess combat damage to the player or planeswalker it's attacking.)\nIndestructible (Damage and effects that say \"destroy\" don't destroy this creature.)\nIf Darksteel Colossus would be put into a graveyard from anywhere, reveal Darksteel Colossus and shuffle it into its owner's library instead.";
+const BASILISK_COLLAR: &str = "Equipped creature has deathtouch and lifelink. (Any amount of damage it deals to a creature is enough to destroy it. Damage dealt by this creature also causes you to gain that much life.)\nEquip {2} ({2}: Attach to target creature you control. Equip only as a sorcery.)";
+const LIFELINK_AURA: &str = "Enchant creature\nEnchanted creature has lifelink. (Damage dealt by the creature also causes its controller to gain that much life.)";
+const PRIZEFIGHT: &str = "Target creature you control fights target creature you don't control. (Each deals damage equal to its power to the other.)\nCreate a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+
+/// The counter modifier that joins Winding Constrictor on a wither fight's board.
+#[derive(Clone, Copy, Debug)]
+enum CounterModifier {
+    DoublingSeason,
+    VizierOfRemedies,
+}
+
+/// A fight's board: Darksteel Colossus under `colossus_side`, Sickle Ripper under the other
+/// player, and Winding Constrictor (with `second`, when given) under the Colossus's controller,
+/// so the Ripper's -1/-1 counters on the Colossus meet both, an order that player chooses
+/// (CR 616.1).
+struct WitherFight {
+    scenario: GameScenario,
+    colossus: ObjectId,
+    ripper: ObjectId,
+    constrictor: ObjectId,
+    second: Option<ObjectId>,
+}
+
+fn wither_fight(colossus_side: PlayerId, second: Option<CounterModifier>) -> WitherFight {
+    let mut scenario = main_phase();
+    let ripper_side = if colossus_side == P0 { P1 } else { P0 };
+    let colossus = creature_with_keywords(
+        &mut scenario,
+        colossus_side,
+        "Darksteel Colossus",
+        (11, 11),
+        &["Trample", "Indestructible"],
+        DARKSTEEL_COLOSSUS,
+    );
+    let ripper = creature_with_keywords(
+        &mut scenario,
+        ripper_side,
+        "Sickle Ripper",
+        (2, 1),
+        &["Wither"],
+        SICKLE_RIPPER,
+    );
+    let constrictor = winding_constrictor(&mut scenario, colossus_side);
+    let second = second.map(|modifier| match modifier {
+        CounterModifier::DoublingSeason => scenario
+            .add_enchantment_from_oracle(colossus_side, "Doubling Season", DOUBLING_SEASON)
+            .id(),
+        CounterModifier::VizierOfRemedies => vizier_of_remedies(&mut scenario, colossus_side),
+    });
+    WitherFight {
+        scenario,
+        colossus,
+        ripper,
+        constrictor,
+        second,
+    }
+}
+
+fn winding_constrictor(scenario: &mut GameScenario, owner: PlayerId) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(owner, "Winding Constrictor", 2, 3, WINDING_CONSTRICTOR)
+        .id()
+}
+
+fn vizier_of_remedies(scenario: &mut GameScenario, owner: PlayerId) -> ObjectId {
+    scenario
+        .add_creature_from_oracle(owner, "Vizier of Remedies", 2, 1, VIZIER_OF_REMEDIES)
+        .id()
+}
+
+/// The Lifelink Aura, controlled by `owner`; the caller attaches it after the build.
+fn lifelink_aura(scenario: &mut GameScenario, owner: PlayerId) -> ObjectId {
+    scenario
+        .add_enchantment_from_oracle(owner, "Lifelink", LIFELINK_AURA)
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["Enchant"], LIFELINK_AURA)
+        .id()
+}
+
+fn minus_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Minus1Minus1)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// The amounts of the CR 120.1 records `source` dealt to `target` this turn.
+fn damage_records(runner: &GameRunner, source: ObjectId, target: ObjectId) -> Vec<u32> {
+    runner
+        .state()
+        .damage_dealt_this_turn
+        .iter()
+        .filter(|record| record.source_id == source && record.target == TargetRef::Object(target))
+        .map(|record| record.amount)
+        .collect()
+}
+
+/// How many CR 120.1 records `source` has this turn, to any recipient.
+fn records_from(runner: &GameRunner, source: ObjectId) -> usize {
+    runner
+        .state()
+        .damage_dealt_this_turn
+        .iter()
+        .filter(|record| record.source_id == source)
+        .count()
+}
+
+/// Each `DamageDealt` from `source` to `target`: its position in `events` and its amount.
+fn dealt(events: &[GameEvent], source: ObjectId, target: ObjectId) -> Vec<(usize, u32)> {
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, e)| match e {
+            GameEvent::DamageDealt {
+                source_id,
+                target: TargetRef::Object(to),
+                amount,
+                ..
+            } if *source_id == source && *to == target => Some((index, *amount)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The positions of each `EffectResolved` of `kind` in `events`.
+fn resolutions_of(events: &[GameEvent], kind: EffectKind) -> Vec<usize> {
+    events
+        .iter()
+        .enumerate()
+        .filter(
+            |(_, e)| matches!(e, GameEvent::EffectResolved { kind: found, .. } if *found == kind),
+        )
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// A save and load of the whole game.
+fn save_and_load(runner: &mut GameRunner) {
+    let json = serde_json::to_string(runner.state()).expect("serialize at the pause");
+    *runner.state_mut() = serde_json::from_str::<GameState>(&json).expect("deserialize");
+}
+
+/// The open prompt is a CR 616.1 order asked of `chooser`, offering exactly `sources`.
+fn assert_order_prompt(runner: &GameRunner, chooser: PlayerId, sources: &[ObjectId], label: &str) {
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "{label}: expected a replacement prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*player, chooser, "{label}");
+    let offered_sources: Vec<ObjectId> = candidates.iter().map(|c| c.source_id).collect();
+    assert_eq!(offered(&offered_sources), offered(sources), "{label}");
+}
+
+/// CR 120.3d + CR 616.1: a noncombat batch paused on a leg's counter order. The leg's remainder
+/// waits in the noncombat counter stash, and the batch's rest in its `ResumeDamageBatch` carrier,
+/// which holds `replaced` portions already through replacement (the paused leg is not one).
+fn assert_paused_in_the_batch(runner: &GameRunner, replaced: usize, label: &str) {
+    let state = runner.state();
+    assert!(
+        state
+            .pending_damage_post_counter
+            .as_ref()
+            .is_some_and(|stash| !stash.is_combat),
+        "{label}: the leg's remainder is stashed"
+    );
+    let carried = state.resolution_stack.iter().find_map(|frame| match frame {
+        ResolutionFrame::AbilityContinuation(frame) => match &frame.pending.chain.effect {
+            Effect::ResumeDamageBatch { replaced, .. } => Some(replaced.len()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert_eq!(carried, Some(replaced), "{label}: the batch's carrier");
+}
+
+/// CR 120.3d + CR 702.80a + CR 616.1 + CR 701.14a + CR 608.2c: a wither leg of a fight that
+/// pauses for its -1/-1 counter order completes exactly once, before the batch's later portion,
+/// and the batch completes once. Pit Fight: "Target creature you control fights another target
+/// creature. (Each deals damage equal to its power to the other.)" Darksteel Colossus (11/11,
+/// indestructible) fights Sickle Ripper ("Wither (This deals damage to creatures in the form of
+/// -1/-1 counters.)"), and the Colossus's controller controls Winding Constrictor ("If one or more
+/// counters would be put on an artifact or creature you control, that many plus one of each of
+/// those kinds of counters are put on that permanent instead.") and Doubling Season ("If an
+/// effect would put one or more counters on a permanent you control, it puts twice that many of
+/// those counters on that permanent instead."). The Ripper's 2 meets both, an order that player
+/// chooses (CR 616.1; CR 614.16 admits the fight's placement): Constrictor first (2+1)×2 = 6,
+/// Doubling Season first 2×2+1 = 5.
+///
+/// With the Colossus on P0's side the Ripper's leg is delivered first and the Colossus's 11 waits
+/// in the parked batch; on P1's side the Colossus's 11 is dealt before the pause. Without Doubling
+/// Season nothing pauses: 2+1 = 3.
+#[test]
+fn a_wither_fight_leg_paused_on_its_counters_completes_once() {
+    for (colossus_side, replaced_at_the_pause) in [(P0, 1), (P1, 0)] {
+        for round_trip in [false, true] {
+            for (constrictor_first, expected) in [(true, 6), (false, 5)] {
+                let label = format!(
+                    "Colossus {colossus_side:?}, round trip {round_trip}, Constrictor first {constrictor_first}"
+                );
+                let WitherFight {
+                    mut scenario,
+                    colossus,
+                    ripper,
+                    constrictor,
+                    second,
+                } = wither_fight(colossus_side, Some(CounterModifier::DoublingSeason));
+                let season = second.expect("Doubling Season");
+                let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+                let mut runner = scenario.build();
+                // P0's creature is the first target.
+                let targets = if colossus_side == P0 {
+                    vec![TargetRef::Object(colossus), TargetRef::Object(ripper)]
+                } else {
+                    vec![TargetRef::Object(ripper), TargetRef::Object(colossus)]
+                };
+
+                let mut events = cast(&mut runner, pit_fight, targets);
+                assert_order_prompt(&runner, colossus_side, &[constrictor, season], &label);
+                assert_paused_in_the_batch(&runner, replaced_at_the_pause, &label);
+                assert!(dealt(&events, ripper, colossus).is_empty(), "{label}");
+                if round_trip {
+                    save_and_load(&mut runner);
+                }
+                let answered_at = events.len();
+                answer_one(
+                    &mut runner,
+                    Pick::From(if constrictor_first {
+                        constrictor
+                    } else {
+                        season
+                    }),
+                    colossus,
+                    &mut events,
+                );
+
+                let ripper_leg = dealt(&events, ripper, colossus);
+                let colossus_leg = dealt(&events, colossus, ripper);
+                assert_eq!(
+                    ripper_leg
+                        .iter()
+                        .map(|(_, amount)| *amount)
+                        .collect::<Vec<_>>(),
+                    vec![2],
+                    "{label}: the paused leg's damage is dealt once"
+                );
+                assert_settled(&runner);
+                assert!(runner.state().resolution_stack.is_empty(), "{label}");
+                assert!(
+                    runner.state().pending_damage_post_counter.is_none(),
+                    "{label}"
+                );
+                assert_eq!(minus_counters(&runner, colossus), expected, "{label}");
+                assert!(
+                    ripper_leg[0].0 >= answered_at,
+                    "{label}: dealt after the answer"
+                );
+                assert_eq!(
+                    colossus_leg
+                        .iter()
+                        .map(|(_, amount)| *amount)
+                        .collect::<Vec<_>>(),
+                    vec![11],
+                    "{label}"
+                );
+                if colossus_side == P0 {
+                    assert!(
+                        ripper_leg[0].0 < colossus_leg[0].0,
+                        "{label}: the paused leg completes before the batch's later portion"
+                    );
+                }
+                assert_eq!(
+                    damage_records(&runner, ripper, colossus),
+                    vec![2],
+                    "{label}"
+                );
+                assert_eq!(
+                    damage_records(&runner, colossus, ripper),
+                    vec![11],
+                    "{label}"
+                );
+                assert_eq!(records_from(&runner, ripper), 1, "{label}");
+                assert_eq!(records_from(&runner, colossus), 1, "{label}");
+                let fights = resolutions_of(&events, EffectKind::Fight);
+                assert_eq!(fights.len(), 1, "{label}");
+                assert!(
+                    fights[0] > ripper_leg[0].0 && fights[0] > colossus_leg[0].0,
+                    "{label}: the fight completes after both legs"
+                );
+                assert_eq!(
+                    runner.state().objects[&ripper].zone,
+                    Zone::Graveyard,
+                    "{label}"
+                );
+                assert_eq!(
+                    runner.state().objects[&pit_fight].zone,
+                    Zone::Graveyard,
+                    "{label}"
+                );
+            }
+        }
+    }
+
+    // Parity: Winding Constrictor alone asks nothing, and the legs complete the same way.
+    for colossus_side in [P0, P1] {
+        let label = format!("Constrictor alone, Colossus {colossus_side:?}");
+        let WitherFight {
+            mut scenario,
+            colossus,
+            ripper,
+            ..
+        } = wither_fight(colossus_side, None);
+        let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+        let mut runner = scenario.build();
+        let targets = if colossus_side == P0 {
+            vec![TargetRef::Object(colossus), TargetRef::Object(ripper)]
+        } else {
+            vec![TargetRef::Object(ripper), TargetRef::Object(colossus)]
+        };
+
+        let events = cast(&mut runner, pit_fight, targets);
+
+        assert_settled(&runner);
+        assert!(runner.state().resolution_stack.is_empty(), "{label}");
+        assert_eq!(minus_counters(&runner, colossus), 3, "{label}");
+        let ripper_leg = dealt(&events, ripper, colossus);
+        let colossus_leg = dealt(&events, colossus, ripper);
+        assert_eq!(ripper_leg.len(), 1, "{label}");
+        assert_eq!(ripper_leg[0].1, 2, "{label}");
+        assert_eq!(colossus_leg.len(), 1, "{label}");
+        assert_eq!(colossus_leg[0].1, 11, "{label}");
+        assert_eq!(
+            damage_records(&runner, ripper, colossus),
+            vec![2],
+            "{label}"
+        );
+        assert_eq!(
+            damage_records(&runner, colossus, ripper),
+            vec![11],
+            "{label}"
+        );
+        let fights = resolutions_of(&events, EffectKind::Fight);
+        assert_eq!(fights.len(), 1, "{label}");
+        assert!(
+            fights[0] > ripper_leg[0].0 && fights[0] > colossus_leg[0].0,
+            "{label}"
+        );
+    }
+}
+
+/// A wither fight whose Ripper wears P1's Basilisk Collar under P1's Nefarious Lich and Laboratory
+/// Maniac, with P1's library empty. P0's Darksteel Colossus is P0's first target.
+struct LichFight {
+    runner: GameRunner,
+    colossus: ObjectId,
+    ripper: ObjectId,
+    constrictor: ObjectId,
+    season: Option<ObjectId>,
+    lich: ObjectId,
+    maniac: ObjectId,
+    pit_fight: ObjectId,
+}
+
+fn lich_fight(season: bool) -> LichFight {
+    let WitherFight {
+        mut scenario,
+        colossus,
+        ripper,
+        constrictor,
+        second,
+    } = wither_fight(P0, season.then_some(CounterModifier::DoublingSeason));
+    let collar = equipment_of(&mut scenario, P1, "Basilisk Collar", BASILISK_COLLAR);
+    let lich = scenario
+        .add_enchantment_from_oracle(P1, "Nefarious Lich", NEFARIOUS_LICH)
+        .id();
+    let maniac = scenario
+        .add_creature_from_oracle(P1, "Laboratory Maniac", 2, 2, LABORATORY_MANIAC)
+        .id();
+    let pit_fight = spell(&mut scenario, "Pit Fight", PIT_FIGHT, true);
+    let mut runner = scenario.build();
+    attach_to(runner.state_mut(), collar, ripper);
+    assert!(runner.state().players[1].library.is_empty());
+    LichFight {
+        runner,
+        colossus,
+        ripper,
+        constrictor,
+        season: second,
+        lich,
+        maniac,
+        pit_fight,
+    }
+}
+
+/// CR 104.2b + CR 702.15b + CR 120.3, with the batch's CR 104.4a + CR 614.6 + CR 120.4: P1 won the
+/// game through the Ripper's lifelink gain, and that win settled with the fight's event, after the
+/// Colossus's 11. `answered_at` is where the counter order was answered, if it was asked.
+fn assert_the_lifelink_win_waited_for_the_fight(
+    fight: &LichFight,
+    events: &[GameEvent],
+    counters: u32,
+    answered_at: Option<usize>,
+    label: &str,
+) {
+    let LichFight {
+        runner,
+        colossus,
+        ripper,
+        lich,
+        maniac,
+        ..
+    } = fight;
+    let (colossus, ripper) = (*colossus, *ripper);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(P1) }
+        ),
+        "{label}: {:?}",
+        runner.state().waiting_for
+    );
+    let overs: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e, GameEvent::GameOver { .. }))
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(overs.len(), 1, "{label}");
+    let over = overs[0];
+    assert!(
+        matches!(events[over], GameEvent::GameOver { winner: Some(P1) }),
+        "{label}"
+    );
+    let colossus_leg = dealt(events, colossus, ripper);
+    assert_eq!(colossus_leg.len(), 1, "{label}");
+    assert_eq!(colossus_leg[0].1, 11, "{label}");
+    assert!(
+        colossus_leg[0].0 < over,
+        "{label}: the Colossus's 11 is part of the fight's event, so it is dealt before the win settles"
+    );
+    // CR 104.2b: P1's win makes P0 lose.
+    assert_eq!(
+        super::damage_substitution_replacements::player_losses(events),
+        vec![(
+            P0,
+            std::collections::BTreeSet::from([LossReason::OpponentWon])
+        )],
+        "{label}"
+    );
+    assert_nothing_after_the_game_ended(runner, events);
+    // CR 104.1: the game ended as the batch settled, so the instruction never completes.
+    assert!(
+        resolutions_of(events, EffectKind::Fight).is_empty(),
+        "{label}"
+    );
+    // Reach guards: the Ripper's 2 was dealt (after the answer, if one was asked), its gain became
+    // the Lich's draw and the draw Laboratory Maniac's win, and the -1/-1 counters were put once.
+    let ripper_leg = dealt(events, ripper, colossus);
+    assert_eq!(ripper_leg.len(), 1, "{label}");
+    assert_eq!(ripper_leg[0].1, 2, "{label}");
+    assert!(ripper_leg[0].0 < over, "{label}");
+    if let Some(answered_at) = answered_at {
+        assert!(ripper_leg[0].0 >= answered_at, "{label}");
+    }
+    for (source, kind) in [(*lich, "GainLife"), (*maniac, "Draw")] {
+        assert!(
+            events[..over].iter().any(|e| matches!(
+                e,
+                GameEvent::ReplacementApplied { source_id, event_type }
+                    if *source_id == source && event_type == kind
+            )),
+            "{label}: {kind} was not replaced before the game ended"
+        );
+    }
+    // The Colossus's counters are read from their placement: P0's loss takes its objects out of
+    // the game (CR 800.4a), and counters don't survive that (CR 122.2).
+    let placements: Vec<(usize, u32)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, e)| match e {
+            GameEvent::CounterAdded {
+                object_id,
+                counter_type: CounterType::Minus1Minus1,
+                count,
+                ..
+            } if *object_id == colossus => Some((index, *count)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(placements.len(), 1, "{label}: {placements:?}");
+    assert_eq!(placements[0].1, counters, "{label}");
+    assert!(placements[0].0 < over, "{label}");
+}
+
+/// CR 104.2b + CR 702.15b + CR 120.3 + CR 701.14a: a win an effect states during a paused wither
+/// leg's remainder is recorded with the fight's event and settles after the fight's remaining
+/// damage (the batch's CR 104.4a + CR 614.6 + CR 120.4). P0's Darksteel Colossus fights P1's
+/// Sickle Ripper, which wears Basilisk Collar ("Equipped creature has deathtouch and lifelink.");
+/// P1 controls Nefarious Lich ("If you would gain life, draw that many cards instead.") and
+/// Laboratory Maniac ("If you would draw a card while your library has no cards in it, you win
+/// the game instead.") with an empty library. P0 orders the Ripper's counters on the Colossus
+/// (Winding Constrictor, Doubling Season). Answering deals the Ripper's 2, whose gain of 2 becomes
+/// two draws and the first draw P1's win, while the batch is parked; the Colossus's 11 to the
+/// Ripper is part of the same fight event, so it is dealt before the win settles with the event.
+#[test]
+fn a_wither_fight_legs_lifelink_win_waits_for_the_rest_of_the_fight() {
+    for round_trip in [false, true] {
+        for (constrictor_first, counters) in [(true, 6), (false, 5)] {
+            let label = format!("round trip {round_trip}, Constrictor first {constrictor_first}");
+            let mut fight = lich_fight(true);
+            let season = fight.season.expect("Doubling Season");
+            let targets = vec![
+                TargetRef::Object(fight.colossus),
+                TargetRef::Object(fight.ripper),
+            ];
+            let mut events = cast(&mut fight.runner, fight.pit_fight, targets);
+            assert_order_prompt(&fight.runner, P0, &[fight.constrictor, season], &label);
+            assert_paused_in_the_batch(&fight.runner, 1, &label);
+            if round_trip {
+                save_and_load(&mut fight.runner);
+            }
+            let answered_at = events.len();
+            answer_one(
+                &mut fight.runner,
+                Pick::From(if constrictor_first {
+                    fight.constrictor
+                } else {
+                    season
+                }),
+                fight.colossus,
+                &mut events,
+            );
+
+            assert_the_lifelink_win_waited_for_the_fight(
+                &fight,
+                &events,
+                counters,
+                Some(answered_at),
+                &label,
+            );
+        }
+    }
+}
+
+/// [`a_wither_fight_legs_lifelink_win_waits_for_the_rest_of_the_fight`] with Winding Constrictor
+/// alone: nothing pauses, 2+1 = 3 counters, and the win still waits for the Colossus's 11.
+#[test]
+fn a_wither_fight_legs_lifelink_win_waits_for_the_rest_of_the_fight_without_a_pause() {
+    let mut fight = lich_fight(false);
+    let targets = vec![
+        TargetRef::Object(fight.colossus),
+        TargetRef::Object(fight.ripper),
+    ];
+    let events = cast(&mut fight.runner, fight.pit_fight, targets);
+    assert_the_lifelink_win_waited_for_the_fight(&fight, &events, 3, None, "no pause");
+}
+
+/// CR 608.2c + CR 111.10a: the instruction after a fight runs once, after the paused leg's
+/// remainder and the batch's completion. Prizefight: "Target creature you control fights target
+/// creature you don't control. (Each deals damage equal to its power to the other.)\nCreate a
+/// Treasure token." P0's Darksteel Colossus fights P1's Sickle Ripper, and P0 orders the Ripper's
+/// counters on the Colossus: Winding Constrictor and Vizier of Remedies ("If one or more -1/-1
+/// counters would be put on a creature you control, that many -1/-1 counters minus one are put on
+/// it instead."). Constrictor first 3−1 = 2, Vizier first 1+1 = 2. One Treasure, after the fight.
+#[test]
+fn a_fights_later_instruction_runs_once_after_a_paused_wither_leg() {
+    for round_trip in [false, true] {
+        for constrictor_first in [true, false] {
+            let label = format!("round trip {round_trip}, Constrictor first {constrictor_first}");
+            let WitherFight {
+                mut scenario,
+                colossus,
+                ripper,
+                constrictor,
+                second,
+            } = wither_fight(P0, Some(CounterModifier::VizierOfRemedies));
+            let vizier = second.expect("Vizier of Remedies");
+            let prizefight = spell(&mut scenario, "Prizefight", PRIZEFIGHT, true);
+            let mut runner = scenario.build();
+
+            let mut events = cast(
+                &mut runner,
+                prizefight,
+                vec![TargetRef::Object(colossus), TargetRef::Object(ripper)],
+            );
+            assert_order_prompt(&runner, P0, &[constrictor, vizier], &label);
+            assert_paused_in_the_batch(&runner, 1, &label);
+            if round_trip {
+                save_and_load(&mut runner);
+            }
+            answer_one(
+                &mut runner,
+                Pick::From(if constrictor_first {
+                    constrictor
+                } else {
+                    vizier
+                }),
+                colossus,
+                &mut events,
+            );
+
+            assert_settled(&runner);
+            assert!(runner.state().resolution_stack.is_empty(), "{label}");
+            let treasures: Vec<(usize, ObjectId)> = events
+                .iter()
+                .enumerate()
+                .filter_map(|(index, e)| match e {
+                    GameEvent::TokenCreated {
+                        object_id, name, ..
+                    } if name == "Treasure" => Some((index, *object_id)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(treasures.len(), 1, "{label}: {treasures:?}");
+            assert_eq!(
+                runner.state().objects[&treasures[0].1].controller,
+                P0,
+                "{label}"
+            );
+            let fights = resolutions_of(&events, EffectKind::Fight);
+            assert_eq!(fights.len(), 1, "{label}");
+            assert!(
+                fights[0] < treasures[0].0,
+                "{label}: the Treasure comes after the fight"
+            );
+            let ripper_leg = dealt(&events, ripper, colossus);
+            let colossus_leg = dealt(&events, colossus, ripper);
+            assert_eq!(ripper_leg.len(), 1, "{label}");
+            assert_eq!(colossus_leg.len(), 1, "{label}");
+            assert!(
+                ripper_leg[0].0 < fights[0] && colossus_leg[0].0 < fights[0],
+                "{label}"
+            );
+            let p0_treasures = runner
+                .state()
+                .objects
+                .values()
+                .filter(|object| {
+                    object.zone == Zone::Battlefield
+                        && object.controller == P0
+                        && object.name == "Treasure"
+                })
+                .count();
+            assert_eq!(p0_treasures, 1, "{label}");
+            assert_eq!(minus_counters(&runner, colossus), 2, "{label}");
+            assert_eq!(
+                runner.state().objects[&prizefight].zone,
+                Zone::Graveyard,
+                "{label}"
+            );
+        }
+    }
+}
+
+/// CR 510.2 + CR 120.3d + CR 616.1 + CR 702.15b: a combat wither leg that pauses on its counter
+/// order after the batch was parked and resumed in its replacement pass completes once, and the
+/// batch completes once. The board of
+/// [`undergrowth_champion_keeps_its_reading_across_both_orders_of_a_double_block`], plus P0's
+/// Sickle Ripper attacking, enchanted by P0's Lifelink ("Enchanted creature has lifelink."), and
+/// blocked by P1's Winding Constrictor; P1 also controls Vizier of Remedies. P0 answers the two
+/// Champion prompts with the Champion's shield. The Ripper's 2 then meets the Constrictor's and
+/// the Vizier's effects, an order P1 chooses: Constrictor first 3−1 = 2, Vizier first 1+1 = 2.
+/// The gain is the damage dealt, 2, once, after that answer: P0 at 22. The Constrictor's 2,
+/// doubled by Angrath's Marauders, kills the Ripper.
+#[test]
+fn a_wither_leg_pauses_on_its_counters_inside_a_resumed_combat_batch() {
+    for round_trip in [false, true] {
+        for constrictor_first in [true, false] {
+            let label = format!("round trip {round_trip}, Constrictor first {constrictor_first}");
+            let mut scenario = main_phase();
+            let champion = undergrowth_champion(&mut scenario, P0, 1);
+            let marauders = scenario
+                .add_creature_from_oracle(P1, "Angrath's Marauders", 4, 4, ANGRATHS_MARAUDERS)
+                .id();
+            let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+            let ripper = creature_with_keywords(
+                &mut scenario,
+                P0,
+                "Sickle Ripper",
+                (2, 1),
+                &["Wither"],
+                SICKLE_RIPPER,
+            );
+            let aura = lifelink_aura(&mut scenario, P0);
+            let constrictor = winding_constrictor(&mut scenario, P1);
+            let vizier = vizier_of_remedies(&mut scenario, P1);
+            let mut runner = scenario.build();
+            attach_to(runner.state_mut(), aura, ripper);
+            let mut answer = preferring(vec![
+                champion,
+                if constrictor_first {
+                    constrictor
+                } else {
+                    vizier
+                },
+            ]);
+            let mut asked = 0;
+
+            let combat = fight_driving(
+                &mut runner,
+                &[champion, ripper],
+                &[
+                    (marauders, champion),
+                    (bears, champion),
+                    (constrictor, ripper),
+                ],
+                |runner| {
+                    asked += 1;
+                    if asked == 3 {
+                        // The leg's remainder waits in the combat counter stash, and the batch's
+                        // rest in its Phase C remnant; nothing of the leg has happened yet.
+                        let state = runner.state();
+                        assert!(state
+                            .pending_damage_post_counter
+                            .as_ref()
+                            .is_some_and(|stash| stash.is_combat));
+                        assert!(state
+                            .pending_combat_lifelink
+                            .as_ref()
+                            .is_some_and(|record| record.phase_c_remnant.is_some()));
+                        assert!(damage_records(runner, ripper, constrictor).is_empty());
+                        assert_eq!(runner.state().players[0].life, 20);
+                    }
+                    if round_trip && asked == 2 {
+                        reload_at_the_combat_park(runner);
+                    }
+                    if round_trip && asked == 3 {
+                        save_and_load(runner);
+                    }
+                    answer(runner.state())
+                },
+            );
+
+            assert_batch_settled(&runner);
+            assert_eq!(
+                runner.state().objects[&constrictor].zone,
+                Zone::Battlefield,
+                "{label}"
+            );
+            assert_eq!(minus_counters(&runner, constrictor), 2, "{label}");
+            let ripper_leg = dealt(&combat.events, ripper, constrictor);
+            assert_eq!(ripper_leg.len(), 1, "{label}");
+            assert_eq!(ripper_leg[0].1, 2, "{label}");
+            assert_eq!(
+                damage_records(&runner, ripper, constrictor),
+                vec![2],
+                "{label}"
+            );
+            assert_eq!(records_from(&runner, ripper), 1, "{label}");
+            let gains: Vec<i32> = combat
+                .events
+                .iter()
+                .filter_map(|e| match e {
+                    GameEvent::LifeChanged {
+                        player_id, amount, ..
+                    } if *player_id == P0 => Some(*amount),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(gains, vec![2], "{label}");
+            assert_eq!(runner.state().players[0].life, 22, "{label}");
+            assert_eq!(combat.choosers, vec![P0, P0, P1], "{label}");
+            assert_eq!(
+                offered(&combat.prompts[2]),
+                offered(&[constrictor, vizier]),
+                "{label}"
+            );
+            assert_eq!(
+                runner.state().objects[&ripper].zone,
+                Zone::Graveyard,
+                "{label}"
+            );
+            let object = &runner.state().objects[&champion];
+            assert_eq!(object.zone, Zone::Battlefield, "{label}");
+            assert_eq!(object.damage_marked, 0, "{label}");
+            assert!(
+                damage_dealt_to(&combat.events, champion).is_empty(),
+                "{label}"
+            );
+            assert_eq!(plus_counters(&runner, champion), 0, "{label}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Rider pauses inside a combat batch (CR 510.2, CR 616.1; Command Zone #140)
 // ---------------------------------------------------------------------------
 
@@ -2328,10 +3336,11 @@ pub(super) fn faithmender_and_leyline(scenario: &mut GameScenario) -> ObjectId {
 }
 
 /// What one combat showed: its events, and the candidate sources of each CR 616.1 prompt it
-/// answered.
+/// answered, with the player each was asked of.
 pub(super) struct Combat {
     pub(super) events: Vec<GameEvent>,
     pub(super) prompts: Vec<Vec<ObjectId>>,
+    pub(super) choosers: Vec<PlayerId>,
 }
 
 /// Drive one combat from the precombat main phase to the end of combat: P0 attacks P1 with
@@ -2367,9 +3376,21 @@ pub(super) fn fight_answering(
     blocks: &[(ObjectId, ObjectId)],
     mut answer: impl FnMut(&GameState) -> GameAction,
 ) -> Combat {
+    fight_driving(runner, attackers, blocks, |runner| answer(runner.state()))
+}
+
+/// [`fight_answering`], with `answer` given the runner itself, so a row can inspect or replace
+/// the state at a prompt (a save and load) before it answers.
+pub(super) fn fight_driving(
+    runner: &mut GameRunner,
+    attackers: &[ObjectId],
+    blocks: &[(ObjectId, ObjectId)],
+    mut answer: impl FnMut(&mut GameRunner) -> GameAction,
+) -> Combat {
     let mut combat = Combat {
         events: Vec::new(),
         prompts: Vec::new(),
+        choosers: Vec::new(),
     };
     let (mut attacked, mut blocked) = (false, false);
     for _ in 0..400 {
@@ -2379,11 +3400,11 @@ pub(super) fn fight_answering(
         {
             return combat;
         }
-        let action = match &state.waiting_for {
-            WaitingFor::Priority { .. } => GameAction::PassPriority,
-            WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+        let turn_action = match &state.waiting_for {
+            WaitingFor::Priority { .. } => Some(GameAction::PassPriority),
+            WaitingFor::OrderTriggers { triggers, .. } => Some(GameAction::OrderTriggers {
                 order: (0..triggers.len()).collect(),
-            },
+            }),
             WaitingFor::DeclareAttackers { .. } => {
                 let attacks = if attacked {
                     Vec::new()
@@ -2394,15 +3415,15 @@ pub(super) fn fight_answering(
                         .collect()
                 };
                 attacked = true;
-                GameAction::DeclareAttackers {
+                Some(GameAction::DeclareAttackers {
                     attacks,
                     bands: vec![],
-                }
+                })
             }
             WaitingFor::DeclareBlockers { .. } => {
                 let assignments = if blocked { Vec::new() } else { blocks.to_vec() };
                 blocked = true;
-                GameAction::DeclareBlockers { assignments }
+                Some(GameAction::DeclareBlockers { assignments })
             }
             WaitingFor::AssignCombatDamage {
                 blockers,
@@ -2424,22 +3445,26 @@ pub(super) fn fight_answering(
                 if let Some(last) = assignments.last_mut() {
                     last.1 += remaining;
                 }
-                GameAction::AssignCombatDamage {
+                Some(GameAction::AssignCombatDamage {
                     mode: CombatDamageAssignmentMode::Normal,
                     assignments,
                     trample_damage: 0,
                     controller_damage: 0,
-                }
+                })
             }
-            WaitingFor::ReplacementChoice { candidates, .. } => {
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
                 combat
                     .prompts
                     .push(candidates.iter().map(|c| c.source_id).collect());
-                answer(state)
+                combat.choosers.push(*player);
+                None
             }
             // Any other prompt the combat raises (a zone choice, a named choice) is `answer`'s.
-            _ => answer(state),
+            _ => None,
         };
+        let action = turn_action.unwrap_or_else(|| answer(runner));
         combat
             .events
             .extend(runner.act(action).expect("combat action").events);
