@@ -153,7 +153,7 @@
     "unimplemented": "Não implementado: {{mechanics}}",
     "dfc": "DFC",
     "tapped": "Virada",
-    "reloadArt": "Toque para recarregar a ilustração"
+    "reloadArt": "Toque para recarregar a arte"
   },
   "preview": {
     "holdCtrlBack": "Segure Ctrl para a face traseira",
@@ -163,7 +163,7 @@
     "report": "Relatar um problema",
     "reported": "Relatado ✓",
     "reportNotSent": "Não enviado",
-    "reloadArt": "Recarregar ilustração",
+    "reloadArt": "Recarregar arte",
     "altParsedAbilities": "Alt: habilidades processadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análise do Motor",

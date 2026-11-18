@@ -23,6 +23,8 @@ export type { SourcePrinting, UseCardBackImageResult } from "./useLegacyCardImag
 
 type LegacyOptions = NonNullable<Parameters<typeof useLegacyCardImage>[1]>;
 type ImageResult = ReturnType<typeof useLegacyCardImage>;
+/** What `useCardImage` returns: the registry's oracle id stays internal. */
+type CardImageResult = Omit<ImageResult, "failedArtOracleId">;
 
 type UseCardImageOptions = LegacyOptions & {
   ownerPrinting?: CardPrinting | null;
@@ -283,7 +285,7 @@ function useOwnerCardImageOverlay(input: OwnerInput | null, reload: (() => void)
  * blank it or add a loading flag. Owner admission requires identity delivered with
  * its carrier (`ownerPrintedRef`, or the caller's `oracleId`); never a name lookup.
  */
-export function useCardImage(cardName: string, options?: UseCardImageOptions): ImageResult {
+export function useCardImage(cardName: string, options?: UseCardImageOptions): CardImageResult {
   let legacyOptions: Parameters<typeof useLegacyCardImage>[1] = options;
   if (options && ("ownerPrinting" in options || "ownerPrintedRef" in options || "showOwnerPrintings" in options)) {
     const { ownerPrinting: _owner, ownerPrintedRef: _ref, showOwnerPrintings: _show, ...ordinary } = options;

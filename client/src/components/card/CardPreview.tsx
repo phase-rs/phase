@@ -970,8 +970,9 @@ const MOBILE_ACTION_PILL_CLASS = [
 
 /**
  * Mobile/tablet: card anchored right (landscape) or center (portrait), whole
- * card visible. Its actions (Flip, Report) sit in a strip beside the card, left
- * of it in landscape and below it in portrait, so they never cover the card.
+ * card visible. Its actions (Flip, Reload art, Report) sit in a strip beside the
+ * card, left of it in landscape and below it in portrait, so they never cover
+ * the card.
  */
 function MobilePreviewOverlay({
   cardName,
