@@ -9404,20 +9404,38 @@ fn parse_graveyard_redirect_replacement(
     // - `origin == Some(None)` = explicit "from anywhere" → all zones except Graveyard
     // - `origin == Some(Some(zone))` = explicit "from <zone>" → only that zone
     // - `origin == None` = no "from" clause → default (battlefield/command)
+    //
+    // CR 113.6b + Rest in Peace ruling: `active_zones` gates the object that HOSTS
+    // the ability. The antecedent's "from" clause describes the object MOVING to the
+    // graveyard. These are the same object for printed self-replacements (Darksteel
+    // Colossus, Nexus of Fate), but NOT for printed replacements affecting other
+    // objects (Rest in Peace, Leyline of the Void). For the latter, the host's
+    // default functioning zones (battlefield/command) are preserved, and the named
+    // origin is applied only to the affected-card filter (done above at lines
+    // 9297-9300 via `constrain_filter_to_origin_zone`).
+    let is_self_replacement = graveyard_replacement_subject_is_self_referential(subject);
     if let Some(inner) = origin {
-        match inner {
-            None => {
-                // "from anywhere" — functions from all zones except Graveyard
-                def = def.active_zones(crate::types::zones::Zone::ALL.iter()
-                    .copied()
-                    .filter(|z| *z != crate::types::zones::Zone::Graveyard)
-                    .collect());
-            }
-            Some(zone) => {
-                // "from <specific zone>" — functions only from that zone
-                def = def.active_zones(vec![zone]);
+        if is_self_replacement {
+            match inner {
+                None => {
+                    // "from anywhere" — functions from all zones except Graveyard
+                    def = def.active_zones(
+                        crate::types::zones::Zone::ALL
+                            .iter()
+                            .copied()
+                            .filter(|z| *z != crate::types::zones::Zone::Graveyard)
+                            .collect(),
+                    );
+                }
+                Some(zone) => {
+                    // "from <specific zone>" — functions only from that zone
+                    def = def.active_zones(vec![zone]);
+                }
             }
         }
+        // For non-self replacements (Rest in Peace, etc.), preserve the host's
+        // default functioning zones. The origin is already applied to the affected-
+        // card filter via `constrain_filter_to_origin_zone` above.
     }
 
     // CR 514.2 + CR 611.2a + CR 604.2: stamp the stated antecedent window onto
@@ -21724,7 +21742,8 @@ mod tests {
         .expect("from-anywhere shuffle-back must parse");
 
         // Verify active_zones is set to all zones except Graveyard
-        let expected_zones: Vec<Zone> = Zone::ALL.iter()
+        let expected_zones: Vec<Zone> = Zone::ALL
+            .iter()
             .copied()
             .filter(|z| *z != Zone::Graveyard)
             .collect();
@@ -21746,7 +21765,8 @@ mod tests {
 
         // Verify active_zones is set to only Battlefield
         assert_eq!(
-            def.active_zones, vec![Zone::Battlefield],
+            def.active_zones,
+            vec![Zone::Battlefield],
             "from the battlefield must set active_zones to only Battlefield"
         );
     }
@@ -21763,7 +21783,8 @@ mod tests {
 
         // Verify active_zones is set to only Library
         assert_eq!(
-            def.active_zones, vec![Zone::Library],
+            def.active_zones,
+            vec![Zone::Library],
             "from a library must set active_zones to only Library"
         );
     }
