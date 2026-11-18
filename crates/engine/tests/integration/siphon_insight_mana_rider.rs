@@ -612,37 +612,57 @@ fn colorless_requirement_case(
         payment_mode: mode,
     });
     if mode == CastPaymentMode::Manual && cast.is_ok() {
-        // Pin one black mana to the {C} pip: the pin gate and the client's
-        // remaining-cost view read the same typed permission. Matter Reshaper's
-        // two generic mana remain payable from the other Swamps.
+        // Pin mana one unit at a time. The remaining-cost view applies the
+        // first two black pips to Matter Reshaper's generic cost, leaving {C};
+        // only the third pip exercises Vizier's any-type permission.
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::ManaPayment { .. }
         ));
-        runner
-            .act(GameAction::ActivateAbility {
-                source_id: lands[0],
-                ability_index: 0,
-                payment_mode: CastPaymentMode::Auto,
-            })
-            .expect("a Swamp taps for {B}");
-        let pip_id = runner.state().players[0]
-            .mana_pool
-            .unit_at(0)
-            .unwrap()
-            .pip_id;
-        runner
-            .act(GameAction::SpendPoolMana { pip_id })
-            .expect("black mana may be pinned to {C} under any type");
-        assert_eq!(
-            derive_views(runner.state(), Some(P0)).pending_payment_remaining,
-            Some(if creature {
-                ManaCost::generic(2)
+        let pips_to_pin = if creature { 3 } else { 1 };
+        for (index, land) in lands.iter().take(pips_to_pin).enumerate() {
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: *land,
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
+                })
+                .expect("a Swamp taps for {B}");
+            let pip_id = runner.state().players[0]
+                .mana_pool
+                .units()
+                .find(|unit| unit.source_id == *land)
+                .expect("this Swamp's black mana is in the pool")
+                .pip_id;
+            runner
+                .act(GameAction::SpendPoolMana { pip_id })
+                .expect("black mana is eligible for this spell's cost");
+
+            let expected_remaining = if creature {
+                match index {
+                    0 => ManaCost::Cost {
+                        shards: vec![ManaCostShard::Colorless],
+                        generic: 1,
+                    },
+                    1 => ManaCost::Cost {
+                        shards: vec![ManaCostShard::Colorless],
+                        generic: 0,
+                    },
+                    _ => ManaCost::NoCost,
+                }
             } else {
                 ManaCost::NoCost
-            }),
-            "the pinned black mana covers the {{C}} pip"
-        );
+            };
+            assert_eq!(
+                derive_views(runner.state(), Some(P0)).pending_payment_remaining,
+                Some(expected_remaining),
+                if creature {
+                    "the first two black pips pay generic mana before the third pays {C}"
+                } else {
+                    "the pinned black mana covers the {C} pip"
+                }
+            );
+        }
         runner
             .act(GameAction::PassPriority)
             .expect("the pinned payment finishes the cast");

@@ -15,7 +15,7 @@ use engine::types::ability::{
     TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{PersistedGameState, WaitingFor};
+use engine::types::game_state::{PersistedGameState, StackEntryKind, WaitingFor};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
@@ -1074,8 +1074,9 @@ fn next_of_kin_singleton_uses_the_selected_origin_for_replacement() {
     }
 }
 
-/// CR 608.2c: empty populations complete, a singleton resolves immediately,
-/// and multiple candidates open a real card choice through the public action.
+/// CR 608.2c + CR 608.2d: impossible empty populations complete without a
+/// choice, a singleton resolves immediately, and multiple candidates open a
+/// real card choice through the public action.
 #[test]
 fn next_of_kin_empty_singleton_and_multiple_candidates_schedule_correctly() {
     let mut empty_scenario = GameScenario::new();
@@ -1103,10 +1104,14 @@ fn next_of_kin_empty_singleton_and_multiple_candidates_schedule_correctly() {
         &mut death_events,
     );
     process_triggers(empty_runner.state_mut(), &death_events);
+    assert_eq!(empty_runner.state().stack.len(), 1);
+    assert!(matches!(
+        &empty_runner.state().stack[0].kind,
+        StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == empty_aura
+    ));
     let mut empty_observations = DrainObservations::default();
     let empty_consumed =
         drain_priority_preferring_observed(&mut empty_runner, &[], &mut empty_observations);
-    assert!(empty_observations.saw_optional, "the dies trigger resolved");
     assert!(!empty_consumed && empty_observations.zone_choices.is_empty());
     assert!(matches!(
         empty_runner.state().waiting_for,
@@ -1114,6 +1119,11 @@ fn next_of_kin_empty_singleton_and_multiple_candidates_schedule_correctly() {
     ));
     assert!(empty_runner.state().stack.is_empty());
     assert!(empty_runner.state().delayed_triggers.is_empty());
+    assert_eq!(
+        empty_runner.state().objects[&empty_host].zone,
+        Zone::Graveyard,
+        "the enchanted creature is outside Next of Kin's eligible origins"
+    );
     assert_eq!(
         empty_runner.state().objects[&empty_aura].zone,
         Zone::Graveyard
@@ -1383,13 +1393,14 @@ fn next_of_kin_ignores_a_creature_outside_hand_and_command() {
     let mut events = Vec::new();
     engine::game::zones::move_to_zone(runner.state_mut(), host, Zone::Graveyard, &mut events);
     process_triggers(runner.state_mut(), &events);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(matches!(
+        &runner.state().stack[0].kind,
+        StackEntryKind::TriggeredAbility { source_id, .. } if *source_id == aura
+    ));
     let mut observations = DrainObservations::default();
     let consumed_choice = drain_priority_preferring_observed(&mut runner, &[], &mut observations);
 
-    assert!(
-        observations.saw_optional,
-        "the dies trigger must reach its \"you may\" prompt before the no-legal-card assertion"
-    );
     assert!(
         !consumed_choice && observations.zone_choices.is_empty(),
         "an empty legal population completes without a card-choice prompt"
