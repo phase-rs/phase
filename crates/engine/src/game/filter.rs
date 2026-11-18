@@ -3445,7 +3445,7 @@ fn quantity_ref_contains_input(
             slot_context,
         ),
         QuantityRef::ZoneCardCount { filter, .. }
-        | QuantityRef::SpellsCastThisTurn { filter, .. }
+        | QuantityRef::SpellsCast { filter, .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { filter, .. }
         | QuantityRef::AttackedThisTurn { filter, .. }
         | QuantityRef::SpellsCastThisGame { filter, .. } => filter.as_ref().is_some_and(|inner| {
@@ -3533,7 +3533,7 @@ fn quantity_ref_contains_input(
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::PreviousEffectAmount { .. }
         | QuantityRef::PreviousEffectCount
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
@@ -3555,7 +3555,6 @@ fn quantity_ref_contains_input(
         | QuantityRef::NotedNumber
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::CardsDiscardedThisTurn { .. }
         | QuantityRef::PlayerActionsThisTurn { .. }
         | QuantityRef::DungeonsCompleted
@@ -9492,7 +9491,7 @@ fn spell_object_matches_property(
         // check is identity-only (`object_id != source_id`); two distinct
         // copies of the same card are NOT "the same" object. Live cost-modifier
         // callers pass `Some(spell.id)`. The turn-history "another" path now
-        // lives in `game::quantity` (the `SpellsCastThisTurn` own-cast
+        // lives in `game::quantity` (the `SpellsCast` own-cast
         // exclusion arm), which reads `SpellCastRecord.spell_object_id`
         // provenance directly; snapshot-record callers that reach THIS helper
         // still pass `spell_object_id: None` and fail-closed here.
@@ -13776,6 +13775,7 @@ fn player_matches_target_filter_with(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::TurnWindow;
     use crate::types::ability::{
         filter_contains_filter_prop, filter_prop_contains, player_filter_contains,
         retarget_chosen_card_type_to_creature_type, AbilityDefinition, AbilityKind,
@@ -23953,10 +23953,11 @@ mod tests {
                     FilterProp::Cmc {
                         comparator: Comparator::LE,
                         value: QuantityExpr::Ref {
-                            qty: QuantityRef::LifeLostThisTurn {
+                            qty: QuantityRef::LifeLost {
                                 player: PlayerScope::Opponent {
                                     aggregate: AggregateFunction::Sum,
                                 },
+                                window: TurnWindow::ThisTurn,
                             },
                         },
                     },
