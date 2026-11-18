@@ -1555,7 +1555,6 @@
     },
     "search": {
       "title": "Cerca nel grimorio",
-      "instructionWithTitle": "{{title}} • {{instruction}}",
       "subtitleExact_one": "Scegli {{count}} carta",
       "subtitleExact_other": "Scegli {{count}} carte",
       "subtitleUpTo_one": "Scegli fino a {{count}} carta",
@@ -2026,7 +2025,8 @@
     "scrollLeft": "Scorri a sinistra",
     "scrollRight": "Scorri a destra",
     "confirm": "Conferma",
-    "cancel": "Annulla"
+    "cancel": "Annulla",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Avventura",
@@ -2595,6 +2595,9 @@
     "partitionSubtitle": "Separa le tue creature in due pile. {{chooser}} ne sceglierà una.",
     "partitionSubtitleRemaining_one": "Separa le tue creature in due pile. {{chooser}} ne sceglierà una. ({{count}} altro giocatore dopo di te)",
     "partitionSubtitleRemaining_other": "Separa le tue creature in due pile. {{chooser}} ne sceglierà una. ({{count}} altri giocatori dopo di te)",
+    "partitionInstruction": "{{chooser}} ne sceglie una",
+    "partitionInstructionRemaining_one": "{{chooser}} ne sceglie una ({{count}} altro giocatore dopo di te)",
+    "partitionInstructionRemaining_other": "{{chooser}} ne sceglie una ({{count}} altri giocatori dopo di te)",
     "pileALabel": "Pila A:",
     "pileBLabel": "Pila B:",
     "pileAria": "{{name}} — pila {{pile}}",

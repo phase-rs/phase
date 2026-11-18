@@ -762,19 +762,24 @@ select.select-dark option {
     container-type: size;
   }
 }
-/* Card choices on a phone. Below lg, ChoiceCards draws a choice's cards (Search
-   Library, the effect-zone prompts) in this grid instead of a strip: the overlay
-   fills the screen there, and a sideways strip leaves the cards small. The cards
-   fill the width and the grid scrolls down. Columns are at least 10rem, a width
-   at which a card's rules text still reads on a phone: most phones show two
-   columns held upright and three to five turned sideways. Each card sits in a cell
-   ChoiceCards renders, an inline-size container, so 100cqw resolves at the card
-   to its cell's width: the card fills its column and its height follows the 5:7
-   card. The cell is the grid's own element, never the card's markup. */
+/* Card choices on a phone. Below lg, where the overlay fills the screen and a
+   sideways strip leaves the cards small, ChoiceCardGrid draws a choice's cards
+   (Search Library, the effect-zone prompts, separating into piles) in this grid,
+   which fills the width and scrolls down. React picks the grid only below lg, so
+   these rules need no media query, and a grid that is drawn is always sized.
+
+   Columns are at least 10rem, a width at which a card's rules text still reads
+   on a phone, but never so wide that fewer than two fit: every phone held
+   upright shows two (a little under 10rem each on the narrowest), and phones
+   turned sideways show three to five.
+   Each card sits in a cell ChoiceCardGrid renders, an inline-size container, so
+   100cqw resolves at the card to its cell's width: the card fills its column
+   and its height follows the 5:7 card. The cell is the grid's own element, so
+   the sizing never reaches into a card's markup. */
 .card-choice-grid {
   display: grid;
   grid-auto-rows: min-content;
-  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(10rem, calc(50% - 0.25rem)), 1fr));
   gap: 0.5rem;
 }
 .card-choice-grid-cell {

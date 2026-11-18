@@ -707,8 +707,9 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
         showSort={false}
         showQuery
       />
-      <ChoiceCards>
-        {visibleCards.map((id, index) => {
+      <ChoiceCards
+        cards={visibleCards}
+        renderCard={(id, entry) => {
           const obj = objects[id];
           if (!obj) return null;
           const selectedIndex = selectedOrder.indexOf(id);
@@ -716,7 +717,6 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
           const isSelectable = selectableCards.has(id);
           return (
             <motion.button
-              key={id}
               disabled={!isSelectable}
               className={`relative shrink-0 rounded-lg transition ${
                 isSelected
@@ -725,13 +725,12 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
                     ? "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
                     : "cursor-not-allowed opacity-40 grayscale"
               }`}
-              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              {...entry}
               animate={{
                 opacity: isSelected ? 1 : isSelectable ? 0.7 : 0.4,
                 y: 0,
                 scale: 1,
               }}
-              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
               whileHover={isSelectable ? { scale: 1.05, y: -6 } : undefined}
               onClick={() => isSelectable && toggleSelect(id)}
               {...hoverProps(id)}
@@ -752,8 +751,8 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
               )}
             </motion.button>
           );
-        })}
-      </ChoiceCards>
+        }}
+      />
     </div>
   );
 
@@ -765,7 +764,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
   if (isCompactHeight) {
     return (
       <ChoiceOverlay
-        title={t("cardChoice.search.instructionWithTitle", {
+        title={t("choiceOverlay.titleWithInstruction", {
           title: t("cardChoice.search.title"),
           instruction: subtitle,
         })}
@@ -1490,8 +1489,9 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const actionLabel = declineLabel ?? orderLabel ?? countLabel;
 
   const body = (
-    <ChoiceCards>
-      {data.cards.map((id, index) => {
+    <ChoiceCards
+      cards={data.cards}
+      renderCard={(id, entry) => {
         const obj = objects[id];
         if (!obj) return null;
         const isSelected = selected.has(id);
@@ -1504,15 +1504,13 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
             : t(EFFECT_ZONE_BADGE_KEYS[mode]);
         return (
           <motion.button
-            key={id}
             className={`relative rounded-lg transition ${
               isSelected
                 ? `z-10 ring-2 ${visualClasses.ring}`
                 : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
             }`}
-            initial={{ opacity: 0, y: 60, scale: 0.85 }}
+            {...entry}
             animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
-            transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
             whileHover={{ scale: 1.05, y: -6 }}
             onClick={() => toggleSelect(id)}
             {...hoverProps(id)}
@@ -1535,8 +1533,8 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
             )}
           </motion.button>
         );
-      })}
-    </ChoiceCards>
+      }}
+    />
   );
 
   // On a short screen (a landscape phone) every line of chrome takes height

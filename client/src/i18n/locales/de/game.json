@@ -1555,7 +1555,6 @@
     },
     "search": {
       "title": "Bibliothek durchsuchen",
-      "instructionWithTitle": "{{title}} • {{instruction}}",
       "subtitleExact_one": "Wähle {{count}} Karte",
       "subtitleExact_other": "Wähle {{count}} Karten",
       "subtitleUpTo_one": "Wähle bis zu {{count}} Karte",
@@ -2026,7 +2025,8 @@
     "scrollLeft": "Nach links scrollen",
     "scrollRight": "Nach rechts scrollen",
     "confirm": "Bestätigen",
-    "cancel": "Abbrechen"
+    "cancel": "Abbrechen",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Abenteuer",
@@ -2595,6 +2595,9 @@
     "partitionSubtitle": "Teile deine Kreaturen in zwei Stapel auf. {{chooser}} wird einen wählen.",
     "partitionSubtitleRemaining_one": "Teile deine Kreaturen in zwei Stapel auf. {{chooser}} wird einen wählen. ({{count}} weiterer Spieler nach dir)",
     "partitionSubtitleRemaining_other": "Teile deine Kreaturen in zwei Stapel auf. {{chooser}} wird einen wählen. ({{count}} weitere Spieler nach dir)",
+    "partitionInstruction": "{{chooser}} wählt einen",
+    "partitionInstructionRemaining_one": "{{chooser}} wählt einen ({{count}} weiterer Spieler nach dir)",
+    "partitionInstructionRemaining_other": "{{chooser}} wählt einen ({{count}} weitere Spieler nach dir)",
     "pileALabel": "Stapel A:",
     "pileBLabel": "Stapel B:",
     "pileAria": "{{name}} — Stapel {{pile}}",

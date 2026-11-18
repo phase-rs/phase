@@ -1555,7 +1555,6 @@
     },
     "search": {
       "title": "Przeszukaj bibliotekę",
-      "instructionWithTitle": "{{title}} • {{instruction}}",
       "subtitleExact_one": "Wybierz {{count}} kartę",
       "subtitleExact_other": "Wybierz {{count}} kart",
       "subtitleUpTo_one": "Wybierz do {{count}} karty",
@@ -2026,7 +2025,8 @@
     "scrollLeft": "Przewiń w lewo",
     "scrollRight": "Przewiń w prawo",
     "confirm": "Potwierdź",
-    "cancel": "Anuluj"
+    "cancel": "Anuluj",
+    "titleWithInstruction": "{{title}} • {{instruction}}"
   },
   "adventureCast": {
     "eyebrow": "Adventure",
@@ -2595,6 +2595,9 @@
     "partitionSubtitle": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden.",
     "partitionSubtitleRemaining_one": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden. ({{count}} gracz więcej po tobie)",
     "partitionSubtitleRemaining_other": "Rozdziel swoje stwory na dwa stosy. {{chooser}} wybierze jeden. ({{count}} graczy więcej po tobie)",
+    "partitionInstruction": "{{chooser}} wybiera jeden",
+    "partitionInstructionRemaining_one": "{{chooser}} wybiera jeden ({{count}} gracz więcej po tobie)",
+    "partitionInstructionRemaining_other": "{{chooser}} wybiera jeden ({{count}} graczy więcej po tobie)",
     "pileALabel": "Stos A:",
     "pileBLabel": "Stos B:",
     "pileAria": "{{name}} — stos {{pile}}",

@@ -12,7 +12,7 @@ import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts"
 import { gameStateFactory } from "../../../test/factories/gameStateFactory.ts";
 import { setGameStoreForTest } from "../../../test/helpers/gameStoreHelpers.ts";
 import { CardChoiceModal } from "../CardChoiceModal.tsx";
-import { ChoiceHeaderConfirm } from "../ChoiceOverlay.tsx";
+import { ChoiceCards, ChoiceHeaderConfirm, type ChoiceCardEntry } from "../ChoiceOverlay.tsx";
 
 // Issue #11063: on a landscape phone (about 390 CSS px tall) the Search Library
 // prompt and the effect-zone prompts ("Choose 1 card to exile", put on top or
@@ -88,7 +88,7 @@ type EffectZoneCase = {
   confirm: string;
 };
 
-// The effect-zone modes the card strip draws. The header line treats every mode
+// The effect-zone modes the card choice draws. The header line treats every mode
 // alike, so this does not list them all: a sacrifice or an untap is usually
 // chosen on the board instead, and the strip's other sacrifice-mode prompts
 // (a Blight) still use sacrifice wording. The return case keeps today's
@@ -172,7 +172,7 @@ function setViewport(viewport: Viewport) {
   Object.defineProperty(window, "innerHeight", { configurable: true, writable: true, value: viewport.height });
 }
 
-/** The declarations of the stylesheet's one top-level rule whose selector is exactly `selector`. */
+/** The declarations of the stylesheet's one rule whose selector is exactly `selector`. */
 function declarationsOf(selector: string): Map<string, string> {
   const css = STYLESHEET.replace(/\/\*[\s\S]*?\*\//g, "");
   const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter((rule) => rule[1].trim() === selector);
@@ -232,7 +232,7 @@ function expectInGrid(name: string) {
   expect(cell).toHaveClass("card-choice-grid-cell");
   expect(cell!.parentElement).toHaveClass("card-choice-grid");
   // The grid scrolls down within the overlay body.
-  expect(cell!.parentElement!.parentElement).toHaveClass("min-h-0", "flex-1", "overflow-y-auto");
+  expect(cell!.parentElement!.parentElement).toHaveClass("min-h-0", "flex-1", "overflow-y-auto", "overflow-x-hidden");
   expect(document.querySelector(".card-choice-strip")).toBeNull();
 }
 
@@ -305,7 +305,8 @@ describe("Search Library on a landscape phone", () => {
 
     const filter = screen.getByRole("searchbox", { name: "Filter cards by name" });
     expect(overlayHeader()).not.toContainElement(filter);
-    expect(document.querySelector(".card-choice-grid")).not.toContainElement(filter);
+    // Outside the scroller, so the filter stays in view while the cards scroll.
+    expect(document.querySelector(".card-choice-grid")!.parentElement).not.toContainElement(filter);
     // Positive guard: the card the filter hides is drawn before it.
     expect(screen.getByLabelText(/Hotel/)).toBeInTheDocument();
     fireEvent.change(filter, { target: { value: "India" } });
@@ -434,18 +435,150 @@ describe("Search Library and the effect-zone prompts on a phone held upright", (
     expect(within(overlayHeader()).queryByRole("button")).toBeNull();
     expect(screen.getAllByRole("button", { name: "Confirm" })).toHaveLength(1);
   });
+
+  it("draw an effect-zone prompt's cards in the phone's grid under the full header", () => {
+    showPrompt(tableState().effectZoneChoice({ player: 0, cards: GRAVEYARD_IDS, count: 1 }).build());
+
+    expectInGrid("Cosmo");
+    expect(within(overlayHeader()).getByText("Game Choice")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Exile" })).toBeInTheDocument();
+    expect(within(overlayHeader()).queryByRole("button")).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Exile (0/1)" })).toHaveLength(1);
+  });
+});
+
+describe("a short desktop window", () => {
+  beforeEach(() => {
+    setViewport({ width: 1280, height: 390 });
+  });
+
+  it("draws the one header line over the desktop strip", () => {
+    showPrompt(tableState().searchChoice({ player: 0, cards: LIBRARY_IDS, count: 1 }).build());
+
+    expectOneHeaderLine("Search Library • Choose 1 card", "Confirm");
+    expectInStrip("Hotel");
+  });
 });
 
 describe("the phone's card grid", () => {
-  it("sizes each card from its own cell, so the cards fill columns of at least 10rem", () => {
+  beforeEach(() => {
+    setViewport(LANDSCAPE_PHONE);
+  });
+
+  it("sizes each card from its own cell, in columns of at least 10rem but never fewer than two", () => {
     expect(declarationsOf(".card-choice-grid").get("grid-template-columns")).toBe(
-      "repeat(auto-fill, minmax(10rem, 1fr))",
+      "repeat(auto-fill, minmax(min(10rem, calc(50% - 0.25rem)), 1fr))",
     );
 
     const cell = declarationsOf(".card-choice-grid-cell");
     expect(cell.get("container-type")).toBe("inline-size");
     expect(cell.get("--card-w")).toBe("100cqw");
     expect(cell.get("--card-h")).toBe("calc(var(--card-w) * 7 / 5)");
+  });
+
+  it("fades its bottom edge while more cards lie below, and its top edge once scrolled", () => {
+    showPrompt(tableState().searchChoice({ player: 0, cards: LIBRARY_IDS, count: 1 }).build());
+    const scroller = document.querySelector(".card-choice-grid")!.parentElement!;
+    // The fades follow the scroller, inside the wrapper it fills.
+    const [topFade, bottomFade] = Array.from(scroller.parentElement!.children).slice(1);
+    // Positive guard: happy-dom lays nothing out, so nothing overflows yet and both fades are hidden.
+    expect(topFade).toHaveClass("opacity-0");
+    expect(bottomFade).toHaveClass("opacity-0");
+
+    // happy-dom has no layout, so give the scroller a tall content and a short window onto it.
+    Object.defineProperty(scroller, "scrollHeight", { configurable: true, value: 900 });
+    Object.defineProperty(scroller, "clientHeight", { configurable: true, value: 300 });
+    fireEvent.scroll(scroller);
+    expect(topFade).toHaveClass("opacity-0");
+    expect(bottomFade).toHaveClass("opacity-100");
+
+    Object.defineProperty(scroller, "scrollTop", { configurable: true, value: 600 });
+    fireEvent.scroll(scroller);
+    expect(topFade).toHaveClass("opacity-100");
+    expect(bottomFade).toHaveClass("opacity-0");
+  });
+});
+
+describe("ChoiceCards", () => {
+  /** Draws each card as a button, except card 2, which has nothing to draw. */
+  function renderTestCard(id: number, _entry: ChoiceCardEntry) {
+    return id === 2 ? null : <button type="button">{`Card ${id}`}</button>;
+  }
+
+  /** The entry the last render handed card `id`, from the render callback's calls. */
+  function lastEntryFor(calls: Array<[number, ChoiceCardEntry]>, id: number): ChoiceCardEntry {
+    const callsForCard = calls.filter(([calledId]) => calledId === id);
+    expect(callsForCard.length, `card ${id} was drawn`).toBeGreaterThan(0);
+    return callsForCard[callsForCard.length - 1][1];
+  }
+
+  function turnTo(viewport: Viewport) {
+    act(() => {
+      setViewport(viewport);
+      window.dispatchEvent(new Event("resize"));
+    });
+  }
+
+  it("staggers the strip's entrance on a desktop, and skips a card with nothing to draw", () => {
+    setViewport(DESKTOP);
+    const renderCard = vi.fn(renderTestCard);
+    render(<ChoiceCards cards={[1, 2, 3]} renderCard={renderCard} />);
+
+    expect(document.querySelector(".card-choice-strip")).not.toBeNull();
+    expect(screen.getAllByRole("button", { name: /^Card / })).toHaveLength(2);
+    const third = lastEntryFor(renderCard.mock.calls, 3);
+    expect(third.initial).toEqual({ opacity: 0, y: 60, scale: 0.85 });
+    expect(third.transition).toEqual({ delay: expect.closeTo(0.26), duration: 0.35 });
+  });
+
+  it("gives the phone's grid a quick entrance with no stagger, and no cell to a card with nothing to draw", () => {
+    setViewport(LANDSCAPE_PHONE);
+    const renderCard = vi.fn(renderTestCard);
+    render(<ChoiceCards cards={[1, 2, 3]} renderCard={renderCard} />);
+
+    expect(document.querySelectorAll(".card-choice-grid-cell")).toHaveLength(2);
+    const third = lastEntryFor(renderCard.mock.calls, 3);
+    expect(third.initial).toEqual({ opacity: 0, y: 24, scale: 0.9 });
+    expect(third.transition).toEqual({ duration: 0.18 });
+  });
+
+  it("never hands the strip its staggered entrance once the window has crossed lg", () => {
+    setViewport(LANDSCAPE_PHONE);
+    const renderCard = vi.fn(renderTestCard);
+    render(<ChoiceCards cards={[1, 2, 3]} renderCard={renderCard} />);
+    // Positive guard: the prompt opened in the phone's grid.
+    expect(document.querySelector(".card-choice-grid")).not.toBeNull();
+    const callsBeforeTurn = renderCard.mock.calls.length;
+
+    turnTo(DESKTOP);
+
+    // The strip is drawn now, and every entry its cards were handed since the
+    // turn, the first render's included, skips the entrance and its delays.
+    // A switch noticed one render late would hand the first render the stagger.
+    expect(document.querySelector(".card-choice-strip")).not.toBeNull();
+    const entriesSinceTurn = renderCard.mock.calls
+      .slice(callsBeforeTurn)
+      .filter(([id]) => id === 3)
+      .map(([, entry]) => entry);
+    expect(entriesSinceTurn.length).toBeGreaterThan(0);
+    for (const entry of entriesSinceTurn) {
+      expect(entry.initial).toBe(false);
+      expect(entry.transition).toEqual({ duration: 0.35 });
+    }
+  });
+
+  it("keeps the strip's skipped entrance after crossing lg and back", () => {
+    setViewport(DESKTOP);
+    const renderCard = vi.fn(renderTestCard);
+    render(<ChoiceCards cards={[1, 2, 3]} renderCard={renderCard} />);
+    // Positive guard: the strip opened with its staggered entrance.
+    expect(lastEntryFor(renderCard.mock.calls, 3).initial).not.toBe(false);
+
+    turnTo(LANDSCAPE_PHONE);
+    turnTo(DESKTOP);
+
+    expect(document.querySelector(".card-choice-strip")).not.toBeNull();
+    expect(lastEntryFor(renderCard.mock.calls, 3).initial).toBe(false);
   });
 });
 
