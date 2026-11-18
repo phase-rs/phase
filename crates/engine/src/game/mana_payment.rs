@@ -537,10 +537,14 @@ pub(crate) fn select_convoke_taps(
         .iter()
         .copied()
         .filter(|id| {
-            state
-                .objects
-                .get(id)
-                .is_some_and(|o| o.is_convoke_eligible(player))
+            state.objects.get(id).is_some_and(|o| {
+                crate::game::casting::tap_payment_eligible(
+                    state,
+                    o,
+                    player,
+                    crate::types::game_state::ConvokeMode::Convoke,
+                )
+            })
         })
         // CR 701.26a + CR 508.1f: a "can't become tapped" creature can't convoke.
         .filter(|id| !crate::game::restrictions::object_cant_tap(state, *id))
