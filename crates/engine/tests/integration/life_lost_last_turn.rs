@@ -3,22 +3,23 @@
 
 use engine::game::game_object::GameObject;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
+use engine::types::ability::{
+    AggregateFunction, Comparator, PlayerScope, QuantityExpr, QuantityRef, TargetRef,
+    TriggerCondition, TurnWindow,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::events::GameEvent;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
-use engine::types::{ObjectId, PlayerId};
+use engine::types::{ObjectId, PlayerId, TriggerMode};
 
 const P2: PlayerId = PlayerId(2);
 
 // Verbatim Scryfall Oracle text, including both of Paladin's abilities.
-const FIRST_RESPONSE: &str =
-    "At the beginning of each upkeep, if you lost life last turn, create a 1/1 white Soldier creature token.";
+const FIRST_RESPONSE: &str = "At the beginning of each upkeep, if you lost life last turn, create a 1/1 white Soldier creature token.";
 const PALADIN: &str = "At the beginning of each upkeep, if you lost life last turn, put a +1/+1 counter on this creature.\nWhen this creature dies, you gain life equal to its toughness.";
 const FEAST: &str = "At the beginning of each upkeep, if an opponent lost life last turn, put a +1/+1 counter on target creature you control.";
 const BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
@@ -85,6 +86,33 @@ fn assert_card<'a>(
 fn assert_noncreature(card: &GameObject) {
     assert!(card.card_types.subtypes.is_empty());
     assert_eq!((card.power, card.toughness), (None, None));
+}
+
+// SHAPE (CR 603.4): assert the fully parsed, printed upkeep trigger, not
+// just the guard fragment. The legacy condition would give the same result
+// in free-for-all tests but would not use the team-aware opponent aggregate.
+fn assert_last_turn_guard(card: &GameObject, player: PlayerScope) {
+    let mut upkeeps = card.base_trigger_definitions.iter().filter(|trigger| {
+        trigger.mode == TriggerMode::Phase && trigger.phase == Some(Phase::Upkeep)
+    });
+    let guard = upkeeps.next().expect("printed upkeep trigger");
+    assert!(upkeeps.next().is_none(), "one printed upkeep trigger");
+    assert_eq!(
+        guard.condition,
+        Some(TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::LifeLost {
+                    player,
+                    window: TurnWindow::LastTurn,
+                },
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }),
+        "{}",
+        card.name,
+    );
+    assert!(!card.has_unimplemented_mechanics(), "{}", card.name);
 }
 
 fn assert_bear(runner: &GameRunner, id: ObjectId, controller: PlayerId) {
@@ -293,6 +321,9 @@ fn first_response_and_paladin_use_the_controllers_gross_loss_last_turn() {
     assert_idle(&runner);
     assert_soldiers(&runner, 1);
     assert_eq!(plus_counters(&runner, paladin), 1);
+    for id in [first, paladin] {
+        assert_last_turn_guard(&runner.state().objects[&id], PlayerScope::Controller);
+    }
 
     // CR 603.4: a turn with no loss must overwrite the older loss.
     next_upkeep(&mut runner, P0);
@@ -318,26 +349,19 @@ fn first_response_and_paladin_use_the_controllers_gross_loss_last_turn() {
     // CR 704.5g and CR 700.4: Bolt kills Paladin as a state-based action.
     // CR 608.2h: the untargeted dies trigger needs its last battlefield toughness.
     assert_instant(&runner, lethal, "Lightning Bolt", ManaCostShard::Red);
-    let outcome = runner.cast(lethal).target_object(paladin).resolve();
-    outcome.assert_zone(&[lethal, paladin], Zone::Graveyard);
-    let death_triggers = outcome
-        .events()
-        .iter()
-        .filter(|event| {
-            matches!(
-                event,
-                GameEvent::AbilityTriggered {
-                    stack_entry: Some(_),
-                    source_id,
-                    controller: P0,
-                    ..
-                } if *source_id == paladin
-            )
-        })
-        .count();
-    assert_eq!(death_triggers, 1, "Paladin's dies ability triggered once");
-    outcome.assert_life_delta(P0, 2);
-    outcome.assert_life_delta(P1, 0);
+    let (p0_before, p1_before) = (runner.life(P0), runner.life(P1));
+    let mut cast = runner.cast(lethal).target_object(paladin).commit();
+    assert_eq!(cast.state().stack.len(), 1);
+    for _ in 0..2 {
+        cast.act(GameAction::PassPriority).unwrap();
+    }
+    assert_eq!(runner.state().objects[&lethal].zone, Zone::Graveyard);
+    assert_eq!(runner.state().objects[&paladin].zone, Zone::Graveyard);
+    assert_triggers(&runner, &[paladin]);
+    assert_eq!(runner.life(P0), p0_before);
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.life(P0), p0_before + 2);
+    assert_eq!(runner.life(P1), p1_before);
     assert_idle(&runner);
 }
 
@@ -424,6 +448,12 @@ fn feast_counts_either_opponent_but_not_its_controller_or_an_older_turn() {
     damage_player(&mut runner, hit_p1, P1);
     next_upkeep(&mut runner, P2);
     resolve_feast(&mut runner, feast, first, second);
+    assert_last_turn_guard(
+        &runner.state().objects[&feast],
+        PlayerScope::Opponent {
+            aggregate: AggregateFunction::Sum,
+        },
+    );
 
     next_upkeep(&mut runner, P0);
     assert_idle(&runner); // P1's loss is now two turns old.
