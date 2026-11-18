@@ -53,6 +53,7 @@ mod room_door_lock_unlock;
 mod room_unlock_pre_spend_choice;
 mod roots_of_wisdom_if_you_cant_draw;
 mod roughshod_mentor_green_trample_grant;
+mod rug_of_smothering_cast_history;
 mod run_for_your_life_escape;
 mod runadi_behemoth_caller_etb_counters;
 mod runaway_steam_kin_fewer_than_counters;

@@ -14550,6 +14550,7 @@ fn collect_battlefield_cost_modifiers(
                     source_controller,
                     bf_id,
                     spell_id,
+                    caster,
                 )
                 .max(0) as u32
             } else {
