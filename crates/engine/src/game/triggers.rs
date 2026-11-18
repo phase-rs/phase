@@ -16954,6 +16954,7 @@ pub(crate) struct HypotheticalBindings {
     pub(crate) targets: HypotheticalTargets,
     pub(crate) optional_outcome: HypotheticalOptionalOutcome,
     pub(crate) ledger: HypotheticalLedger,
+    pub(crate) tracked_set: HypotheticalTrackedSet,
 }
 
 impl HypotheticalBindings {
@@ -16963,6 +16964,7 @@ impl HypotheticalBindings {
         targets: HypotheticalTargets::Unchosen,
         optional_outcome: HypotheticalOptionalOutcome::EitherWay,
         ledger: HypotheticalLedger::Live,
+        tracked_set: HypotheticalTrackedSet::Unpublished,
     };
 }
 
@@ -17002,6 +17004,23 @@ pub(crate) enum HypotheticalLedger {
     /// bookkeeping (`could_produce::resolution_entry_state`), so it reads
     /// exactly what the resolution would read.
     Projected,
+}
+
+/// Whether the newest tracked set, the set a "for each ... this way" count
+/// reads (`QuantityRef::TrackedSetSize`, `FilteredTrackedSetSize`), was
+/// published by an earlier instruction of the resolution being read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HypotheticalTrackedSet {
+    /// CR 608.2c: the newest tracked set in state is whatever an unrelated
+    /// earlier resolution left behind, or nothing, so a count over it is
+    /// admitted.
+    Unpublished,
+    /// CR 608.2c + CR 701.20a: the node's parent, a non-optional reveal or
+    /// look of the same resolution, published the set as the newest tracked
+    /// set exactly as the resolution would
+    /// (`could_produce::performed_hand_off`), and every seat may see its
+    /// members.
+    EstablishedByEarlierInstruction,
 }
 
 /// CR 603.4 + CR 106.7: does this gate read a binding that `reader` resolves
@@ -17612,6 +17631,26 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef, reader: BindingReader) -> bo
                     || filter_binding_diverges(filter, reader)
             }
         },
+        // CR 608.2c + CR 701.20a: the newest tracked set ("for each nonland
+        // card revealed this way"). At fire time it is whatever an unrelated
+        // earlier resolution left behind. A hypothetical node reads it as the
+        // resolution does once its parent, a non-optional reveal or look of the
+        // same resolution, published it while every seat may see its members
+        // (`could_produce::performed_hand_off`); a filtered count also needs its
+        // member filter decided, like every other population.
+        QuantityRef::TrackedSetSize => match reader {
+            BindingReader::DelayedTriggerFireTime => true,
+            BindingReader::HypotheticalResolution(bindings) => {
+                bindings.tracked_set == HypotheticalTrackedSet::Unpublished
+            }
+        },
+        QuantityRef::FilteredTrackedSetSize { filter, .. } => match reader {
+            BindingReader::DelayedTriggerFireTime => true,
+            BindingReader::HypotheticalResolution(bindings) => {
+                bindings.tracked_set == HypotheticalTrackedSet::Unpublished
+                    || filter_binding_diverges(filter, reader)
+            }
+        },
         // ---- RESOLUTION-SCOPED, payload-free or target-bound: always diverges ----
         //
         // CR 115.1: reads the resolving ability's declared PLAYER target, which
@@ -17621,11 +17660,9 @@ fn quantity_ref_binding_diverges(qty: &QuantityRef, reader: BindingReader) -> bo
         // CR 107.3a: `X` comes from the resolving ability's `chosen_x`, which is
         // `None` at fire time.
         | QuantityRef::Variable { .. }
-        // CR 608.2c: chain-local tracked sets and per-resolution tallies. Each is
-        // established BY a resolution; at fire time these read whatever an
-        // unrelated earlier resolution left in the ledger (or nothing at all).
-        | QuantityRef::TrackedSetSize
-        | QuantityRef::FilteredTrackedSetSize { .. }
+        // CR 608.2c: per-resolution tallies. Each is established BY a resolution;
+        // at fire time these read whatever an unrelated earlier resolution left
+        // in the ledger (or nothing at all).
         | QuantityRef::ExiledFromHandThisResolution
         | QuantityRef::NameStickerLetterCount {
             stickers: NameStickerSet::ThatSticker,
@@ -17735,8 +17772,10 @@ fn card_type_set_source_binding_diverges(
                     // CR 106.7 + CR 607.2a: the persistent link store is state.
                     BindingReader::HypotheticalResolution(_) => false,
                 },
-                // CR 608.2i: the resolution-scoped population `TrackedSetSize`
-                // is declined for.
+                // CR 608.2i: a resolution-scoped tracked set, declined for every
+                // reader. Only `QuantityRef::TrackedSetSize` and
+                // `FilteredTrackedSetSize` read the hypothetical walker's
+                // `tracked_set` axis.
                 CardTypeSetSource::TrackedSet { .. } => true,
                 // CR 608.2c + CR 115.1: a targeted-objects population IS the
                 // canonical slot filter's referent (ability-bound targets,
@@ -17844,8 +17883,10 @@ pub(crate) fn filter_binding_diverges(filter: &TargetFilter, reader: BindingRead
         | TargetFilter::LastZoneChanged
         // CR 603.7 + CR 608.2c: chain-local tracked sets, including the
         // `TrackedSetId(0)` "most recent set" sentinel, whose resolution ladder
-        // prefers the ACTIVE resolution chain. Declined for the same reason
-        // `CardTypeSetSource::TrackedSet` and `QuantityRef::TrackedSetSize` are.
+        // prefers the ACTIVE resolution chain. Declined for every reader, as
+        // `CardTypeSetSource::TrackedSet` is; only `QuantityRef::TrackedSetSize`
+        // and `FilteredTrackedSetSize` read the hypothetical walker's
+        // `tracked_set` axis.
         // The inner filter of the `Filtered` form needs no recursion: set
         // membership already diverges, so the conjunction does.
         | TargetFilter::TrackedSet { .. }
@@ -18375,7 +18416,7 @@ fn count_scope_binding_diverges(scope: &crate::types::ability::CountScope) -> bo
 /// require the resolving `ResolvedAbility` and are resolved by
 /// `choose_one_of::choosing_players` instead; that is precisely the fire-time
 /// gap this classifier exists to catch.
-fn player_filter_binding_diverges(player: &PlayerFilter, reader: BindingReader) -> bool {
+pub(crate) fn player_filter_binding_diverges(player: &PlayerFilter, reader: BindingReader) -> bool {
     match player {
         PlayerFilter::AllExcept { exclude, .. } => player_filter_binding_diverges(exclude, reader),
         PlayerFilter::AnyOf { filters } => filters
@@ -32997,6 +33038,7 @@ pub mod tests {
             targets: HypotheticalTargets::EstablishedByEarlierInstruction,
             optional_outcome: HypotheticalOptionalOutcome::NotPerformed,
             ledger: HypotheticalLedger::Projected,
+            tracked_set: HypotheticalTrackedSet::EstablishedByEarlierInstruction,
         };
         fn readers<Verdict>(
             read: impl Fn(BindingReader) -> Verdict,
@@ -33399,13 +33441,14 @@ pub mod tests {
         // The split arms: leaves a hypothetical node decides once its own
         // resolution has bound the one axis each reads. Each row is
         // `(leaf, axis, classifier)`. Every row reads `(true, true, false)`,
-        // and under the three single-axis bindings exactly its own axis
+        // and under the four single-axis bindings exactly its own axis
         // answers `false` — so a leaf keyed on the wrong axis fails here.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         enum Axis {
             Targets,
             OptionalOutcome,
             Ledger,
+            TrackedSet,
         }
         fn only(axis: Axis) -> HypotheticalBindings {
             match axis {
@@ -33419,6 +33462,10 @@ pub mod tests {
                 },
                 Axis::Ledger => HypotheticalBindings {
                     ledger: HypotheticalLedger::Projected,
+                    ..HypotheticalBindings::NONE
+                },
+                Axis::TrackedSet => HypotheticalBindings {
+                    tracked_set: HypotheticalTrackedSet::EstablishedByEarlierInstruction,
                     ..HypotheticalBindings::NONE
                 },
             }
@@ -33563,6 +33610,20 @@ pub mod tests {
                 Axis::Targets,
                 count_leaf(controlled_by(ControllerRef::ParentTargetOwner)),
             ),
+            (
+                "TrackedSetSize",
+                Axis::TrackedSet,
+                quantity_leaf(QuantityRef::TrackedSetSize),
+            ),
+            (
+                "FilteredTrackedSetSize { creature }",
+                Axis::TrackedSet,
+                quantity_leaf(QuantityRef::FilteredTrackedSetSize {
+                    filter: Box::new(TargetFilter::Typed(TypedFilter::creature())),
+                    caused_by: None,
+                    destination: None,
+                }),
+            ),
         ];
         for (leaf, axis, diverges) in &split_rows {
             assert_eq!(
@@ -33570,7 +33631,12 @@ pub mod tests {
                 (true, true, false),
                 "{leaf}: (fire time, hypothetical, hypothetical bound)"
             );
-            for bound_axis in [Axis::Targets, Axis::OptionalOutcome, Axis::Ledger] {
+            for bound_axis in [
+                Axis::Targets,
+                Axis::OptionalOutcome,
+                Axis::Ledger,
+                Axis::TrackedSet,
+            ] {
                 assert_eq!(
                     diverges(BindingReader::HypotheticalResolution(only(bound_axis))),
                     bound_axis != *axis,
@@ -33578,6 +33644,17 @@ pub mod tests {
                 );
             }
         }
+
+        // CR 608.2c: a filtered tracked-set count whose member filter no reader
+        // can decide stays admitted even below an established publication.
+        assert_eq!(
+            quantity(QuantityRef::FilteredTrackedSetSize {
+                filter: Box::new(TargetFilter::LastRevealed),
+                caused_by: None,
+                destination: None,
+            }),
+            (true, true, true)
+        );
 
         // Mana spent to cast: the scope axis's remaining arm (`TriggeringSpell`
         // is in the delta table, `AbilityTarget` among the split rows).

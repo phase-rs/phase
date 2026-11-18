@@ -35,11 +35,17 @@
 //!   ([`HypotheticalBindings`]): the ability's per-turn use ledgers, projected
 //!   through the resolution's own entry bookkeeping
 //!   ([`resolution_entry_state`]); the objects an earlier instruction looks at or
-//!   reveals and hands on ([`bind_child`]), but only while every seat may see
-//!   them; and the "if you do" outcome of a "you may" instruction whose own gate
-//!   was false. Those are evaluated exactly as the resolution evaluates them.
+//!   reveals and hands on ([`bind_child`]), and the tracked set an earlier
+//!   non-optional reveal or look publishes for a later "for each ... this way"
+//!   count, both only while every seat may see them; and the "if you do"
+//!   outcome of a "you may" instruction whose own gate was false. Those are
+//!   evaluated exactly as the resolution evaluates them.
 //! - **How much** (CR 106.5 + CR 106.7's last sentence): an instruction that
-//!   would add no mana contributes nothing (Gaea's Cradle with no creatures).
+//!   would add no mana contributes nothing (Gaea's Cradle with no creatures),
+//!   and so does a repeated instruction whose count state fixes at zero
+//!   (CR 608.2c: it is performed that many times; Selvala, Explorer Returned
+//!   when no nonland card is revealed). A repeat count the ability's own
+//!   activation or resolution fixes is admitted.
 //! - **Replacements** (CR 614.1a + CR 616.1): each type is mapped through
 //!   `replacement::hypothetical_produced_mana_types`, in every order. Every
 //!   production of a {T} mana ability's resolution is "tapped for mana"
@@ -72,8 +78,8 @@ use super::effects::{
     condition_depends_on_result_object, count_top_level_resolution,
     effect_writes_last_revealed_ids, evaluate_condition, false_gate_escape,
     inherited_parent_occurrences, inject_last_revealed_targets, instead_declined_continuation,
-    instead_swap_applies, is_instead_override, published_revealed_ids, receives_last_revealed,
-    should_propagate_parent_targets, InsteadDeclined,
+    instead_swap_applies, is_instead_override, publish_fresh_tracked_set, published_revealed_ids,
+    receives_last_revealed, should_propagate_parent_targets, InsteadDeclined,
 };
 use super::filter::{matches_target_filter, FilterContext};
 use super::game_object::GameObject;
@@ -89,7 +95,7 @@ use super::triggers::{
     build_triggered_ability_from_context, check_trigger_condition_with_source,
     filter_binding_diverges, gate_binding_diverges, quantity_expr_binding_diverges,
     trigger_source_context_for_latch, BindingReader, HypotheticalBindings, HypotheticalLedger,
-    HypotheticalOptionalOutcome, HypotheticalTargets,
+    HypotheticalOptionalOutcome, HypotheticalTargets, HypotheticalTrackedSet,
 };
 use super::visibility::revealed_to_every_seat;
 use crate::types::ability::{
@@ -372,8 +378,11 @@ fn solve(state: &GameState, roots: &[ObjectId]) -> Solution {
         for production in hypothetical_productions(state, object_id) {
             match production.reading {
                 // The replacement lookup reads this outer `state`, never a walk
-                // frame's scratch copy: a scratch differs only in the use ledgers
-                // and `last_revealed_ids`, which no replacement reads.
+                // frame's scratch copy: a scratch differs in the use ledgers and
+                // the publications; no `ProduceMana` replacement gate reads those
+                // (their gates read type, supertype and controller: every printed
+                // `ProduceMana` replacement in `card-data.json` is
+                // `valid_card`-only).
                 ProductionReading::Direct(options) => {
                     for mana_type in options {
                         node.seed = node.seed.union(produced_types(
@@ -664,8 +673,9 @@ fn read_triggered_abilities(
 #[derive(Clone, Copy)]
 struct Frame<'a> {
     /// The state the node reads: the query's state, or a scratch copy carrying
-    /// what the resolution has published by then (its projected use ledgers,
-    /// the objects an earlier instruction looked at).
+    /// what the resolution has done by then (its projected use ledgers, the
+    /// objects an earlier instruction looked at and the tracked set its
+    /// publication established).
     state: &'a GameState,
     /// What the hypothetical resolution has established for the node.
     bindings: HypotheticalBindings,
@@ -719,8 +729,10 @@ enum ParentOutcome {
 
 /// A child node as the runtime would hand it off, with what it carries.
 struct BoundChild<'s, 'n> {
-    /// The state the child's subtree reads: its parent's, or a scratch copy
-    /// with `last_revealed_ids` as the parent's handler would have left it.
+    /// The state the child's subtree reads: its parent's, or a scratch copy as
+    /// the parent would have left it: `last_revealed_ids` and, below a public
+    /// non-optional `RevealTop` or `Dig`, the fresh tracked set its handler
+    /// publishes (CR 608.2c).
     state: Cow<'s, GameState>,
     node: Cow<'n, ResolvedAbility>,
     bindings: HypotheticalBindings,
@@ -741,9 +753,18 @@ impl BoundChild<'_, '_> {
     }
 }
 
-/// What a hand-off gives a child: the state its subtree reads and, when the
-/// child is bound, the objects handed to it.
-type HandOff<'s> = (Cow<'s, GameState>, Option<Vec<TargetRef>>);
+/// What a hand-off gives a child.
+struct HandOff<'s> {
+    /// The state its subtree reads.
+    state: Cow<'s, GameState>,
+    /// The objects handed to it, when it is bound.
+    targets: Option<Vec<TargetRef>>,
+    /// CR 608.2c + CR 701.20a: whether its parent, a non-optional reveal or
+    /// look, established the newest tracked set in `state`. Only the
+    /// hand-off directly below such a parent establishes it; every other
+    /// hand-off gives `Unpublished` (one hop).
+    tracked_set: HypotheticalTrackedSet,
+}
 
 /// CR 608.2c: `child` as the runtime would hand it off from `parent`, with the
 /// bindings it carries.
@@ -765,7 +786,11 @@ fn bind_child<'s, 'n>(
         (ParentOutcome::Performed, true) => HypotheticalOptionalOutcome::EitherWay,
         (_, false) => frame.bindings.optional_outcome,
     };
-    let (state, handed) = match parent_outcome {
+    let HandOff {
+        state,
+        targets: handed,
+        tracked_set,
+    } = match parent_outcome {
         ParentOutcome::Performed => performed_hand_off(frame, parent, child),
         ParentOutcome::Skipped => skipped_hand_off(frame, parent, child),
     };
@@ -789,6 +814,7 @@ fn bind_child<'s, 'n>(
             targets,
             optional_outcome,
             ledger: frame.bindings.ledger,
+            tracked_set,
         },
         tap_state: frame.tap_state,
     }
@@ -808,18 +834,68 @@ fn bind_child<'s, 'n>(
 /// seat may see it ([`identity_is_public_now`]). Every other case — a parent
 /// that publishes a set state does not fix, a child whose subtree adds no
 /// mana — leaves the child unbound, today's reading.
+///
+/// The objects are decided by [`object_hand_off`]. After them, a
+/// non-optional reveal or look whose publication every seat may see also
+/// establishes that publication as the newest tracked set (CR 701.20a).
 fn performed_hand_off<'s>(
     frame: &Frame<'s>,
     parent: &ResolvedAbility,
     child: &ResolvedAbility,
 ) -> HandOff<'s> {
-    let unbound = || (Cow::Borrowed(frame.state), None);
     // A subtree that adds no mana cannot change the answer, so it is walked
     // unbound without paying for a scratch state.
     if !child.targets.is_empty() || !chain_carries_mana(child) {
-        return unbound();
+        return HandOff {
+            state: Cow::Borrowed(frame.state),
+            targets: None,
+            tracked_set: HypotheticalTrackedSet::Unpublished,
+        };
     }
-    let Some(published) = published_revealed_ids(frame.state, parent, frame.reader()) else {
+    let publication = published_revealed_ids(frame.state, parent, frame.reader());
+    let non_empty = publication.clone().filter(|ids| !ids.is_empty());
+    let (mut state, targets) = object_hand_off(frame, parent, child, non_empty);
+    // CR 608.2c + CR 701.20a: a non-optional `RevealTop` or `Dig` parent's
+    // handler always publishes its reveal or look as the newest tracked set
+    // before its child runs, so a later "for each ... revealed this way"
+    // count reads exactly that set while every seat may see it. A targeted
+    // `Reveal` records `last_revealed_ids` only, and a declined "you may"
+    // publishes nothing, so neither establishes a tracked set.
+    let establishes =
+        !parent.optional && matches!(parent.effect, Effect::RevealTop { .. } | Effect::Dig { .. });
+    let public = publication.filter(|ids| {
+        establishes
+            && (ids.is_empty() || {
+                let continuous = continuously_revealed_cards(frame.state);
+                ids.iter()
+                    .all(|id| identity_is_public_now(frame.state, &continuous, *id))
+            })
+    });
+    let tracked_set = match public {
+        Some(ids) => {
+            publish_fresh_tracked_set(state.to_mut(), ids);
+            HypotheticalTrackedSet::EstablishedByEarlierInstruction
+        }
+        None => HypotheticalTrackedSet::Unpublished,
+    };
+    HandOff {
+        state,
+        targets,
+        tracked_set,
+    }
+}
+
+/// CR 608.2c + CR 701.20e: the objects half of [`performed_hand_off`]:
+/// the state `child`'s subtree reads and the objects handed to it, given
+/// `published`, the parent's non-empty publication.
+fn object_hand_off<'s>(
+    frame: &Frame<'s>,
+    parent: &ResolvedAbility,
+    child: &ResolvedAbility,
+    published: Option<Vec<ObjectId>>,
+) -> (Cow<'s, GameState>, Option<Vec<TargetRef>>) {
+    let unbound = || (Cow::Borrowed(frame.state), None);
+    let Some(published) = published else {
         // A parent that writes `last_revealed_ids` with a set state does not fix
         // (a choice-keeping Dig, `RevealUntil`, `Clash`, an unbound `Reveal`, an
         // empty library) leaves the runtime's hand-off unknown.
@@ -955,7 +1031,12 @@ fn skipped_hand_off<'s>(
         && chain_carries_mana(child)
         && should_propagate_parent_targets(parent, child))
     .then(|| parent.targets.clone());
-    (Cow::Borrowed(frame.state), handed)
+    // CR 608.2c: the parent's effect never ran, so it published no tracked set.
+    HandOff {
+        state: Cow::Borrowed(frame.state),
+        targets: handed,
+        tracked_set: HypotheticalTrackedSet::Unpublished,
+    }
 }
 
 /// Whether resolving `node` could reach an `Effect::Mana` — in its own effect
@@ -1042,9 +1123,11 @@ fn walk_chain(
 /// `scope_prunes_nested_ability` draws); a gate the resolution itself fixes is
 /// read both ways; any other gate is evaluated now by `evaluate_condition`.
 /// Step 3, the node's effect: every `Effect::Mana` it performs, "you may"
-/// included (declining is a choice). Step 4, the next link, handed off as the
-/// runtime hands it ([`bind_child`]): a not-swapped "instead" sub continues as
-/// `instead_declined_continuation` selects, anything else as itself.
+/// included (declining is a choice), unless the node repeats its effect a
+/// number of times state fixes at zero (`repeat_for`, CR 608.2c). Step 4, the
+/// next link, handed off as the runtime hands it ([`bind_child`]): a
+/// not-swapped "instead" sub continues as `instead_declined_continuation`
+/// selects, anything else as itself.
 fn walk_performed(
     frame: &Frame<'_>,
     node: &ResolvedAbility,
@@ -1062,10 +1145,23 @@ fn walk_performed(
         }
     }
 
-    let _ = visit_own_resolution_effects(&node.effect, &mut |effect| {
-        push_production(frame, node, effect, productions);
-        ControlFlow::Continue(())
+    // CR 608.2c + CR 106.7: a repeated instruction ("for each nonland card
+    // revealed this way, add {G}") is performed as many times as its count,
+    // read as the runtime's repeat loop reads it
+    // (`quantity::resolve_quantity_with_targets`, clamped at zero). A count
+    // state fixes at zero performs none of the node's own effect, so it adds
+    // no mana; a count the ability's own activation or resolution fixes is
+    // admitted. The hand-off to the next link is unchanged.
+    let performs_own_effect = node.repeat_for.as_ref().is_none_or(|count| {
+        quantity_expr_binding_diverges(count, frame.reader())
+            || super::quantity::resolve_quantity_with_targets(frame.state, count, node) > 0
     });
+    if performs_own_effect {
+        let _ = visit_own_resolution_effects(&node.effect, &mut |effect| {
+            push_production(frame, node, effect, productions);
+            ControlFlow::Continue(())
+        });
+    }
 
     let Some(sub) = node.sub_ability.as_deref() else {
         return;

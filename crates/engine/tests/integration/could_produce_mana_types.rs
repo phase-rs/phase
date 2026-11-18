@@ -16,13 +16,14 @@
 //! opponent controls could produce colorless mana"; and it "takes into account
 //! any applicable replacement effects".
 
+use engine::game::derived::continuously_revealed_cards;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{AbilityKind, Effect};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::parse_counter_type;
-use engine::types::events::ManaTapState;
+use engine::types::events::{GameEvent, ManaTapState};
 use engine::types::game_state::{
     CastPaymentMode, ExileLink, ExileLinkKind, GameState, ManaChoicePrompt, PayCostKind,
     StackEntryKind, WaitingFor,
@@ -1049,4 +1050,277 @@ fn sacrificed_magus_of_the_vineyard_under_contamination_keeps_its_triggered_gree
     let mut reading = squandered_reading(runner.state(), squandered, magus);
     reading.sort();
     assert_eq!(reading, vec![ManaType::Black, ManaType::Green]);
+}
+
+// ---- A repeated mana instruction and the set a reveal publishes (CR 608.2c + CR 701.20a) ----
+
+// Verbatim Oracle text (MTGJSON), reminder text omitted.
+const SELVALA_EXPLORER_RETURNED: &str = "Parley — {T}: Each player reveals the top card of their \
+     library. For each nonland card revealed this way, add {G} and you gain 1 life. Then each \
+     player draws a card.";
+
+/// What a Selvala board puts on top of one player's library.
+#[derive(Clone, Copy)]
+enum LibraryTop {
+    Land,
+    Nonland,
+}
+
+/// A Selvala board's runner and the objects its rows read.
+struct SelvalaBoard {
+    runner: GameRunner,
+    squandered: ObjectId,
+    reflecting_pool: ObjectId,
+    selvala: ObjectId,
+    /// The staged library tops, in the order `tops` named them.
+    tops: Vec<ObjectId>,
+}
+
+/// Squandered Resources, Reflecting Pool, Ashaya, Soul of the Wild and
+/// Contamination beside P0's Selvala, Explorer Returned, with a Courser of
+/// Kruphix for each player in `coursers` and each `(player, top)` of `tops`
+/// on top of that player's library; a player `tops` does not name keeps an
+/// empty library.
+fn selvala_board(coursers: &[PlayerId], tops: &[(PlayerId, LibraryTop)]) -> SelvalaBoard {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    let reflecting_pool = scenario
+        .add_land_from_oracle(P0, "Reflecting Pool", REFLECTING_POOL)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
+    for &player in coursers {
+        scenario.add_creature_from_oracle(player, "Courser of Kruphix", 2, 4, COURSER_OF_KRUPHIX);
+    }
+    let selvala = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Selvala, Explorer Returned",
+            2,
+            4,
+            SELVALA_EXPLORER_RETURNED,
+        )
+        .id();
+    let staged_tops: Vec<ObjectId> = tops
+        .iter()
+        .map(|&(player, top)| match top {
+            LibraryTop::Land => scenario.add_land_to_library_top(player, "Land Top").id(),
+            LibraryTop::Nonland => scenario
+                .add_spell_to_library_top(player, "Nonland Top", false)
+                .id(),
+        })
+        .collect();
+    let mut runner = scenario.build();
+    flush(&mut runner);
+    assert_is_land(&runner, selvala);
+    let parley = runner.state().objects[&selvala]
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .expect("reach-guard: Selvala has its Parley ability");
+    let repeated = parley
+        .sub_ability
+        .as_deref()
+        .expect("reach-guard: Parley goes on after its reveal");
+    assert!(
+        matches!(*repeated.effect, Effect::Mana { .. }) && repeated.repeat_for.is_some(),
+        "reach-guard: Selvala's Parley carries the repeated {{G}}"
+    );
+    SelvalaBoard {
+        runner,
+        squandered,
+        reflecting_pool,
+        selvala,
+        tops: staged_tops,
+    }
+}
+
+/// F4-1 (CR 608.2c + CR 106.7 + CR 106.12b): over two empty libraries Selvala,
+/// Explorer Returned's Parley reveals nothing, so "for each nonland card
+/// revealed this way, add {G}" is performed zero times and could add no mana.
+/// Its Forest ability (from Ashaya) is tapped for mana, so under Contamination
+/// the sacrificed Selvala could produce only {B}. Paired positive: F4-4.
+#[test]
+fn sacrificed_selvala_over_empty_libraries_offers_only_black() {
+    let board = selvala_board(&[], &[]);
+    let state = board.runner.state();
+    assert!(
+        state.library_of(P0).is_empty() && state.library_of(P1).is_empty(),
+        "reach-guard: both libraries are empty"
+    );
+    assert_eq!(
+        squandered_reading(state, board.squandered, board.selvala),
+        vec![ManaType::Black]
+    );
+}
+
+/// F4-2 (CR 608.2c + CR 701.20a + CR 401.5): with a Courser of Kruphix for
+/// each player, both library tops are revealed to every seat, and both are
+/// land cards. Parley's reveal would show exactly those cards, so its count of
+/// nonland cards revealed this way is zero and Selvala, Explorer Returned
+/// could produce only the {B} Contamination makes of its Forest ability.
+/// Paired positive: F4-4.
+#[test]
+fn sacrificed_selvala_over_public_land_tops_offers_only_black() {
+    let board = selvala_board(&[P0, P1], &[(P0, LibraryTop::Land), (P1, LibraryTop::Land)]);
+    let state = board.runner.state();
+    let continuous = continuously_revealed_cards(state);
+    for top in &board.tops {
+        assert!(
+            state.objects[top]
+                .card_types
+                .core_types
+                .contains(&CoreType::Land),
+            "reach-guard: each library top is a land card"
+        );
+        assert!(
+            continuous.contains(top),
+            "reach-guard: each library top is revealed by its owner's Courser"
+        );
+    }
+    assert_eq!(
+        squandered_reading(state, board.squandered, board.selvala),
+        vec![ManaType::Black]
+    );
+}
+
+/// F4-3 (CR 400.2 + CR 401.2 + CR 608.2c): a library top no Courser of
+/// Kruphix reveals is hidden, so Parley's reveal is not known to every seat
+/// and its count is not read: Selvala, Explorer Returned's {G} stays admitted
+/// beside its {B}, both with no Courser and with only P0's Courser (P0's top
+/// public, P1's hidden). Fixed sibling: F4-2, the same land tops made public.
+#[test]
+fn sacrificed_selvala_over_hidden_tops_offers_green() {
+    let cases: [(&[PlayerId], bool); 2] = [(&[], false), (&[P0], true)];
+    for (coursers, p0_revealed) in cases {
+        let board = selvala_board(coursers, &[(P0, LibraryTop::Land), (P1, LibraryTop::Land)]);
+        let state = board.runner.state();
+        let continuous = continuously_revealed_cards(state);
+        assert_eq!(
+            continuous.contains(&board.tops[0]),
+            p0_revealed,
+            "reach-guard: P0's top is revealed exactly when P0 has a Courser"
+        );
+        assert!(
+            !continuous.contains(&board.tops[1]),
+            "reach-guard: P1's top is never revealed"
+        );
+        let mut reading = squandered_reading(state, board.squandered, board.selvala);
+        reading.sort();
+        assert_eq!(
+            reading,
+            vec![ManaType::Black, ManaType::Green],
+            "Coursers: {coursers:?}"
+        );
+    }
+}
+
+/// F4-4 (CR 608.2c + CR 701.20a): with a Courser of Kruphix for each player
+/// and a nonland card on top of P0's library, Parley's reveal would show one
+/// nonland card, so "for each nonland card revealed this way, add {G}" is
+/// performed once. Parley is not a mana ability, so its {G} is not tapped for
+/// mana (CR 106.12) and Contamination leaves it {G}, beside the {B} it makes
+/// of Selvala, Explorer Returned's Forest ability.
+#[test]
+fn sacrificed_selvala_over_a_public_nonland_top_offers_green() {
+    let board = selvala_board(
+        &[P0, P1],
+        &[(P0, LibraryTop::Nonland), (P1, LibraryTop::Land)],
+    );
+    let state = board.runner.state();
+    let continuous = continuously_revealed_cards(state);
+    assert!(
+        board.tops.iter().all(|top| continuous.contains(top)),
+        "reach-guard: both library tops are revealed"
+    );
+    assert!(
+        !state.objects[&board.tops[0]]
+            .card_types
+            .core_types
+            .contains(&CoreType::Land),
+        "reach-guard: P0's top is a nonland card"
+    );
+    let mut reading = squandered_reading(state, board.squandered, board.selvala);
+    reading.sort();
+    assert_eq!(reading, vec![ManaType::Black, ManaType::Green]);
+}
+
+/// F4-5 (CR 106.7 + CR 106.12b): Reflecting Pool reads every land P0 controls,
+/// Selvala, Explorer Returned among them (a Forest under Ashaya). Over two
+/// empty libraries Parley's {G} is performed zero times, so each of those
+/// lands could produce only {B} under Contamination and the Pool offers that
+/// one type without a prompt.
+#[test]
+fn reflecting_pool_reads_selvala_over_empty_libraries_as_black() {
+    let mut board = selvala_board(&[], &[]);
+    let state = board.runner.state();
+    assert!(
+        state.library_of(P0).is_empty() && state.library_of(P1).is_empty(),
+        "reach-guard: both libraries are empty"
+    );
+    let pool_land = &state.objects[&board.reflecting_pool];
+    assert!(
+        pool_land.controller == P0 && pool_land.card_types.core_types.contains(&CoreType::Land),
+        "reach-guard: the Pool is a land P0 controls"
+    );
+    assert_eq!(
+        tap_for_mana(&mut board.runner, board.reflecting_pool),
+        Produced::Pool(vec![ManaType::Black])
+    );
+}
+
+/// F4-6 (CR 608.2c + CR 701.20a): Selvala, Explorer Returned's real
+/// resolution. Parley reveals each player's top card; both are land cards, so
+/// "for each nonland card revealed this way, add {G} and you gain 1 life" is
+/// performed zero times: no {G} and no life. Paired positive:
+/// `issue_841_selvala_explorer_returned.rs`, where one nonland reveal adds one
+/// {G} and 1 life.
+#[test]
+fn selvala_revealing_only_lands_adds_no_green() {
+    let mut scenario = new_scenario();
+    let selvala = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Selvala, Explorer Returned",
+            2,
+            4,
+            SELVALA_EXPLORER_RETURNED,
+        )
+        .id();
+    let p0_top = scenario.add_land_to_library_top(P0, "Land Top").id();
+    let p1_top = scenario.add_land_to_library_top(P1, "Land Top").id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let outcome = runner.activate(selvala, 0).resolve();
+    for (player, top) in [(P0, p0_top), (P1, p1_top)] {
+        assert!(
+            outcome.events().iter().any(|event| matches!(
+                event,
+                GameEvent::CardsRevealed { player: revealer, card_ids, .. }
+                    if *revealer == player && *card_ids == [top]
+            )),
+            "reach-guard: {player:?} revealed the top card of their library"
+        );
+    }
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    let controller = &state.players[P0.0 as usize];
+    assert_eq!(
+        controller.mana_pool.count_color(ManaType::Green),
+        0,
+        "no {{G}} for zero nonland cards revealed"
+    );
+    assert_eq!(
+        controller.life, life_before,
+        "no life for zero nonland cards revealed"
+    );
+    assert!(state.stack.is_empty(), "the stack is empty");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "the resolution completed and priority returned"
+    );
 }

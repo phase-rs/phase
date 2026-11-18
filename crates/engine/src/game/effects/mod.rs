@@ -13204,12 +13204,20 @@ pub(crate) fn effect_writes_last_revealed_ids(effect: &Effect) -> bool {
 }
 
 /// CR 701.20a + CR 701.20e + CR 608.2c: the objects resolving `node` would
-/// publish to `last_revealed_ids`, computed by the same selection its handler
-/// performs, or `None` when that set is not fixed by state alone for `reader`.
+/// publish, computed by the same selection its handler performs, or `None`
+/// when that set is not fixed by state alone for `reader`.
 ///
-/// `None` covers a set fixed by a player choice, a random or iterative
-/// process, a target the reader has not bound, or a count or library owner
-/// the reader cannot resolve the way the resolution would. Only members of
+/// A publisher writes its result to `last_revealed_ids`, and a reveal or a
+/// pure look also makes it the newest tracked set. `None` covers a set fixed
+/// by a player choice, a random or iterative process, a target the reader
+/// has not bound, or a count, library owner or scope the reader cannot
+/// resolve the way the resolution would. A `RevealTop` publishes even an
+/// empty reveal, as its handler does, so `Some(vec![])` is a fixed
+/// publication; one scoped to several players ("each player reveals the
+/// top card of their library") publishes every seat's reveal in seat
+/// order, the set the clause publishes for a later "this way" count (its
+/// `last_revealed_ids` ends as the last seat's). A `Dig` or `Reveal` that
+/// would publish nothing answers `None`. Only members of
 /// [`effect_writes_last_revealed_ids`] publish; every other effect answers
 /// `None`.
 pub(crate) fn published_revealed_ids(
@@ -13218,7 +13226,8 @@ pub(crate) fn published_revealed_ids(
     reader: crate::game::triggers::BindingReader,
 ) -> Option<Vec<ObjectId>> {
     use crate::game::triggers::{
-        filter_binding_diverges, quantity_expr_binding_diverges, BindingReader, HypotheticalTargets,
+        filter_binding_diverges, player_filter_binding_diverges, quantity_expr_binding_diverges,
+        BindingReader, HypotheticalTargets,
     };
 
     let targets = match reader {
@@ -13243,6 +13252,38 @@ pub(crate) fn published_revealed_ids(
             && !filter_binding_diverges(filter, reader)
     };
 
+    // CR 701.20a + CR 608.2c: a reveal publishes even when it shows nothing
+    // (an empty library, or no player): `reveal_top::resolve` publishes the
+    // empty result, so an empty reveal is a fixed publication.
+    if let Effect::RevealTop { player, .. } = &node.effect {
+        let Some(scope) = &node.player_scope else {
+            if !library_owner_is_fixed(player) {
+                return None;
+            }
+            return reveal_top::revealed_cards(state, node).map(|selection| selection.into_cards());
+        };
+        // CR 101.4 + CR 608.2c: "each player reveals the top card of their
+        // library" runs once per scoped seat, in the order the `player_scope`
+        // driver of `resolve_chain_body` runs them, each seat bound by
+        // `bind_scoped_seat`, and the clause publishes every seat's revealed
+        // cards as one set (`publish_player_scope_clause_results`). The seats
+        // are named only when the reader can name the scope's members, and a
+        // seat's library owner only when the seat binding fixes it
+        // (`ScopedPlayer`) or the reader can.
+        let owner_is_fixed =
+            matches!(player, TargetFilter::ScopedPlayer) || library_owner_is_fixed(player);
+        if player_filter_binding_diverges(scope, reader) || !owner_is_fixed {
+            return None;
+        }
+        let apnap = crate::game::players::apnap_order(state);
+        let mut revealed = Vec::new();
+        for seat in player_scope_members(state, scope, node, apnap) {
+            let seat_node = bind_scoped_seat(node, node.controller, seat);
+            revealed.extend(reveal_top::revealed_cards(state, &seat_node)?.into_cards());
+        }
+        return Some(revealed);
+    }
+
     let published = match &node.effect {
         Effect::Dig {
             player,
@@ -13263,12 +13304,6 @@ pub(crate) fn published_revealed_ids(
             dig::looked_cards(state, node)
                 .filter(|look| look.publishes_revealed)
                 .map(|look| look.cards)
-        }
-        Effect::RevealTop { player, .. } => {
-            if !library_owner_is_fixed(player) {
-                return None;
-            }
-            reveal_top::revealed_cards(state, node).map(|selection| selection.into_cards())
         }
         // CR 701.20a: a targeted reveal shows exactly the objects it was
         // handed, which only an earlier instruction of this resolution can
@@ -38281,11 +38316,13 @@ mod tests {
     /// U-p (CR 701.20a + CR 701.20e + CR 608.2c): `published_revealed_ids` names
     /// exactly what each publisher's handler would write to
     /// `last_revealed_ids`, and only when state alone fixes it for the reader.
+    /// A `RevealTop` publishes an empty reveal and, scoped, every seat's reveal;
+    /// a `Dig` that looks at nothing publishes nothing.
     #[test]
     fn published_revealed_ids_follows_each_publishers_selection() {
         use crate::game::triggers::{BindingReader, HypotheticalBindings, HypotheticalTargets};
         use crate::types::ability::{
-            DigRestOrder, DigRestRemainder, DigSource, RevealUntilDisposition,
+            DigRestOrder, DigRestRemainder, DigSource, PlayerFilter, RevealUntilDisposition,
         };
 
         let unchosen = BindingReader::HypotheticalResolution(HypotheticalBindings::NONE);
@@ -38365,6 +38402,16 @@ mod tests {
         };
         let reveal_top = |player: TargetFilter| Effect::RevealTop { player, count: 1 };
         let player = |id: u8| TargetRef::Player(PlayerId(id));
+        let scoped = |scope: PlayerFilter| {
+            let mut ability = node(reveal_top(TargetFilter::ScopedPlayer), vec![]);
+            ability.player_scope = Some(scope);
+            ability
+        };
+        assert_eq!(
+            crate::game::players::apnap_order(&state),
+            vec![PlayerId(0), PlayerId(1)],
+            "reach-guard: P0 is active, so P0 reveals first"
+        );
 
         let rows: Vec<(&str, ResolvedAbility, BindingReader, Option<Vec<ObjectId>>)> = vec![
             (
@@ -38424,6 +38471,24 @@ mod tests {
             (
                 "RevealTop, two target players, unchosen",
                 node(reveal_top(TargetFilter::Player), vec![player(0), player(1)]),
+                unchosen,
+                None,
+            ),
+            (
+                "RevealTop, each player",
+                scoped(PlayerFilter::All),
+                unchosen,
+                Some(vec![own[0], theirs[0]]),
+            ),
+            (
+                "RevealTop, scoped to the triggering player",
+                scoped(PlayerFilter::TriggeringPlayer),
+                unchosen,
+                None,
+            ),
+            (
+                "RevealTop, scoped player without a scope",
+                node(reveal_top(TargetFilter::ScopedPlayer), vec![]),
                 unchosen,
                 None,
             ),
@@ -38493,6 +38558,36 @@ mod tests {
                     "{label}: only a publisher publishes"
                 );
             }
+        }
+
+        let empty = GameState::new_two_player(42);
+        assert!(
+            empty.library_of(PlayerId(0)).is_empty() && empty.library_of(PlayerId(1)).is_empty(),
+            "reach-guard: both libraries are empty"
+        );
+        let empty_rows: Vec<(&str, ResolvedAbility, Option<Vec<ObjectId>>)> = vec![
+            (
+                "RevealTop, controller, empty library",
+                node(reveal_top(TargetFilter::Controller), vec![]),
+                Some(vec![]),
+            ),
+            (
+                "RevealTop, each player, empty libraries",
+                scoped(PlayerFilter::All),
+                Some(vec![]),
+            ),
+            (
+                "Dig keep 0, look, empty library",
+                node(dig(Some(0), false, DigSource::Library), vec![]),
+                None,
+            ),
+        ];
+        for (label, ability, expected) in empty_rows {
+            assert_eq!(
+                published_revealed_ids(&empty, &ability, unchosen),
+                expected,
+                "{label}"
+            );
         }
     }
 
