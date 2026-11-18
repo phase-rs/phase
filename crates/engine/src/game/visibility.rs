@@ -13296,6 +13296,7 @@ mod tests {
                         trigger_events: Vec::new(),
                         trigger_match_count: None,
                         return_result_occurrence: None,
+                        replacement_action: None,
                     }),
                     selected: vec![ObjectIncarnationRef::from_object(&state.objects[&hidden])],
                 },

@@ -322,7 +322,8 @@ fn stamp_controller_controlled_as_cast(
                 source_id,
             ) > 0
         })
-        .collect();
+        .collect::<Vec<_>>()
+        .into();
 }
 
 fn collect_controller_controlled_as_cast_filters(
@@ -23767,6 +23768,7 @@ mod tests {
                     trigger_events: Vec::new(),
                     trigger_match_count: None,
                     return_result_occurrence: None,
+                    replacement_action: None,
                 }),
                 selected,
             },
@@ -25434,7 +25436,10 @@ mod tests {
 
         stamp_controller_controlled_as_cast(&state, &mut ability, PlayerId(0), source_id);
 
-        assert_eq!(ability.context.controller_controlled_as_cast, vec![filter]);
+        assert_eq!(
+            ability.context.controller_controlled_as_cast.as_slice(),
+            [filter]
+        );
     }
 
     #[test]
