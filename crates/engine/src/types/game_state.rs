@@ -10218,6 +10218,15 @@ pub enum DeferredSpellSacrifice {
     All { filter: TargetFilter },
 }
 
+/// CR 601.2b + CR 601.2h: a spell tap cost selected before the spell's targets
+/// and tapped at the payment commit. `cost` is the tap cost being paid; the
+/// commit revalidates the selection against it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeferredSpellTap {
+    pub object_ids: Vec<ObjectId>,
+    pub cost: AbilityCost,
+}
+
 impl DeferredSpellSacrifice {
     pub fn selected_object(&self) -> Option<ObjectId> {
         match self {
@@ -10640,6 +10649,12 @@ pub struct PendingCast {
     /// payment commit so mana abilities can be activated first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_sacrificed_permanents: Vec<DeferredSpellSacrifice>,
+    /// CR 601.2b + CR 601.2h: Permanents selected, before this spell's targets
+    /// were chosen, to pay one of its tap costs (conspire, teamwork). They are
+    /// tapped at the payment commit, after the mana-ability window, and are
+    /// held for that payment until then (`holds_tap_reservation`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_tapped_permanents: Vec<DeferredSpellTap>,
     /// CR 118.3a: Player-directed pin hints recorded during
     /// `WaitingFor::ManaPayment`. Each id names a pool `ManaUnit` the caster
     /// prefers to spend first; pins are priority hints, not removals — the unit
@@ -11699,6 +11714,7 @@ impl PendingCast {
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,
@@ -11766,6 +11782,31 @@ impl PendingCast {
         if self.activation_ability_index.is_some() {
             self.activation_cost_committed = true;
         }
+    }
+
+    /// CR 601.2h: whether `id` is held for this spell's deferred tap cost. A
+    /// held permanent can't pay another part of that cost, and automatic
+    /// payment won't tap it for mana; the player may (CR 601.2g) if it is
+    /// untapped again by the commit. The single membership test behind
+    /// `restrictions::payment_tap_reserved`.
+    pub fn holds_tap_reservation(&self, id: ObjectId) -> bool {
+        self.deferred_tap_ids().any(|held| held == id)
+    }
+
+    /// Every permanent held for this spell's deferred tap costs.
+    pub fn deferred_tap_ids(&self) -> impl Iterator<Item = ObjectId> + '_ {
+        self.deferred_tapped_permanents
+            .iter()
+            .flat_map(|tap| tap.object_ids.iter().copied())
+    }
+
+    /// CR 601.2g + CR 601.2h: whether a non-mana cost selected earlier is paid
+    /// at the commit, after the mana-ability window: a deferred sacrifice,
+    /// hand discard or tap.
+    pub(crate) fn has_commit_time_costs(&self) -> bool {
+        !self.deferred_sacrificed_permanents.is_empty()
+            || self.deferred_hand_discard_cost.is_some()
+            || !self.deferred_tapped_permanents.is_empty()
     }
 }
 
@@ -63020,6 +63061,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
                 convoked_creatures: Vec::new(),
                 delved_cards: Vec::new(),
                 deferred_sacrificed_permanents: Vec::new(),
+                deferred_tapped_permanents: Vec::new(),
                 pinned_pool_units: Vec::new(),
                 cancel_restore_prepared_source: None,
                 payment_mode: CastPaymentMode::Auto,
@@ -63670,6 +63712,7 @@ Go for the Goal! — {3}, {T}: Until end of turn, target creature gains \"Whenev
             convoked_creatures: Vec::new(),
             delved_cards: Vec::new(),
             deferred_sacrificed_permanents: Vec::new(),
+            deferred_tapped_permanents: Vec::new(),
             pinned_pool_units: Vec::new(),
             cancel_restore_prepared_source: None,
             payment_mode: CastPaymentMode::Auto,

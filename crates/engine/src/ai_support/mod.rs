@@ -18,6 +18,7 @@ use crate::game::ability_utils::{choose_target_for_ability, TargetSelectionAdvan
 use crate::game::casting;
 use crate::game::layers;
 use crate::game::mana_abilities;
+use crate::game::mana_abilities::ManaActivationPurpose;
 use crate::game::mana_sources;
 use crate::game::priority::{standing_priority_pass, StandingPriorityPass};
 use crate::game::restrictions;
@@ -254,7 +255,12 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
             state.is_delve_selectable(*player, *object_id) && *mana_type == ManaType::Colorless
         }
         ConvokeMode::Convoke => {
-            if !obj.is_convoke_eligible(*player) {
+            if !crate::game::casting::tap_payment_eligible(
+                state,
+                obj,
+                *player,
+                ConvokeMode::Convoke,
+            ) {
                 return false;
             }
             if let Some(color) = mana_sources::mana_type_to_color(*mana_type) {
@@ -276,12 +282,13 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
             // CR 701.67a: a waterbend tap pays one generic mana of the cost, so
             // it pays colorless only and is legal only while generic mana is
             // left for a tap to pay.
-            obj.is_waterbend_eligible(*player)
+            crate::game::casting::tap_payment_eligible(state, obj, *player, ConvokeMode::Waterbend)
                 && *mana_type == ManaType::Colorless
                 && crate::game::casting::waterbend_taps_remaining(state, *player) > 0
         }
         ConvokeMode::Improvise => {
-            obj.is_improvise_eligible(*player) && *mana_type == ManaType::Colorless
+            crate::game::casting::tap_payment_eligible(state, obj, *player, ConvokeMode::Improvise)
+                && *mana_type == ManaType::Colorless
         }
     }
 }
@@ -1390,9 +1397,10 @@ fn tap_land_action_would_queue_non_mana_trigger(
 
 fn grouped_mana_requires_priority(state: &GameState, player: PlayerId) -> bool {
     let aura_sources = mana_sources::taps_for_mana_trigger_sources(state);
-    let mana_activation_gates = mana_abilities::ManaActivationGates::compute(state);
+    let mana_activation_gates =
+        mana_abilities::ManaActivationGates::compute_for(state, ManaActivationPurpose::Explicit);
 
-    mana_sources::activatable_mana_actions_for_player(state, player)
+    mana_sources::mana_actions_for_player(state, player, ManaActivationPurpose::Explicit)
         .iter()
         .any(|action| match action {
             GameAction::TapLandForMana { selection } => {
@@ -3047,7 +3055,8 @@ fn activatable_object_mana_actions(state: &GameState) -> Vec<GameAction> {
         return Vec::new();
     };
 
-    mana_sources::activatable_mana_actions_for_player(state, player)
+    // The grouped map is what the frontend offers the player (CR 605.3a).
+    mana_sources::mana_actions_for_player(state, player, ManaActivationPurpose::Explicit)
 }
 
 #[cfg(test)]
