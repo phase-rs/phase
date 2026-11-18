@@ -83,17 +83,17 @@ function getViewportSize() {
 }
 
 /**
- * The top edge, in viewport pixels, of the action rail where it lies under the
- * stack panel, or null where it does not: it sits beside the panel, or no rail
- * or no panel is on screen.
+ * The top edge, in viewport pixels, of the action rail where it overlaps the
+ * stack panel sideways, or null where it does not: it sits to one side of the
+ * panel, or no rail or no panel is on screen.
  *
  * The rail holds Resolve and Resolve All on a layer below the panel, so the
  * panel ends above the rail instead of covering it (#11119). Both are Flex
  * Layout widgets the player can drag, so both are measured where they are on
  * screen, the rail found by its zone as the Flex Layout overlay finds widgets.
- * The rail lies under the panel where the two overlap sideways: in landscape
- * the rail sits in the bottom-right corner, clear of a left-docked panel, and
- * in portrait it spans the whole width.
+ * Sideways, the rail can lie under the panel only where the two overlap: in
+ * landscape the rail sits in the bottom-right corner, clear of a left-docked
+ * panel, and on a narrow portrait screen it spans the whole width.
  *
  * It measures after every render of StackDisplay, which renders for whatever
  * moves the panel sideways in the layout: its dock side, its width and the
@@ -157,7 +157,7 @@ interface StackPileScrollerProps {
 
 /**
  * The panel's body under its header, which scrolls the pile when the panel is
- * too short for all of it (#11119), and clips it as before when it fits.
+ * too short for all of it (#11119), and clips it when it fits.
  *
  * It shows the end of the pile, where the entry that resolves next is drawn,
  * whenever that entry or the pile's height changes. When only the room
@@ -203,6 +203,7 @@ function StackPileScroller({ nextToResolveId, pileHeight, scrollEnd, children }:
       ref={scrollerRef}
       layoutScroll
       data-testid="stack-pile-scroller"
+      data-stack-pile-scroller
       className={`relative min-h-0 flex-1 ${overflowClassName}`}
     >
       {children}
@@ -249,7 +250,8 @@ export function StackDisplay({
   const targetingPromptTopPx = useTargetingPromptStore((s) => s.topPx);
   const targetingPromptBottomPx = useTargetingPromptStore((s) => s.bottomPx);
   // The panel's Flex Layout anchor, found from the first box inside it, and
-  // where the action rail starts under it; see the bottom limit below.
+  // where an action rail overlapping it sideways starts; see the bottom limit
+  // below.
   const [panelAnchor, setPanelAnchor] = useState<HTMLElement | null>(null);
   const attachPanel = useCallback((container: HTMLDivElement | null) => {
     setPanelAnchor(container?.closest<HTMLElement>(`[data-flex-zone="${STACK_PANEL_ZONE}"]`) ?? null);
@@ -351,30 +353,34 @@ export function StackDisplay({
   // Collapse slides the panel out toward its docked edge: right dock → positive
   // x (off the right), left dock → negative x (off the left).
   const collapsedX = dockedLeft ? -collapsedOffset : collapsedOffset;
-  // The lowest the panel's bottom may reach: the gap above the top of an
-  // action rail under the panel, which holds Resolve and Resolve All on a
-  // layer below it (#11119), or the bottom viewport inset where that is
-  // higher. A rail starting so near the top that not even the panel's header
-  // fits above it cannot be cleared, so the inset bounds the panel then. As
-  // for the prompt check below, a Flex Layout drag of the panel itself still
-  // applies on top of the result.
-  const viewportBottomLimitPx = viewport.height - VERTICAL_VIEWPORT_INSET;
-  const railBottomLimitPx = actionRailTopPx === null ? null : actionRailTopPx - ACTION_RAIL_GAP;
-  const panelBottomLimitPx =
-    railBottomLimitPx !== null && railBottomLimitPx - VERTICAL_VIEWPORT_INSET >= MIN_PANEL_HEIGHT
-      ? Math.min(viewportBottomLimitPx, railBottomLimitPx)
-      : viewportBottomLimitPx;
   // Resolve the fractional anchor to an explicit pixel top. The panel centres
-  // on `topFraction`, held up so its bottom keeps to the limit above. The top
+  // on `topFraction`, held up so its bottom keeps to a bottom limit. The top
   // inset is a floor that wins over both: when the pile is taller than the
   // room (deep stacks / short windows) the held-up top edge would slide above
   // y=0 and clip the header controls, so the panel pins at the floor (header
   // stays visible) and its height is capped below instead.
-  const preferredTopPx = Math.min(
-    viewport.height * topFraction - fullPanelHeight / 2,
-    panelBottomLimitPx - fullPanelHeight,
+  const centredTopPx = viewport.height * topFraction - fullPanelHeight / 2;
+  const viewportBottomLimitPx = viewport.height - VERTICAL_VIEWPORT_INSET;
+  const railFreeTopPx = Math.max(
+    VERTICAL_VIEWPORT_INSET,
+    Math.min(centredTopPx, viewportBottomLimitPx - fullPanelHeight),
   );
-  const viewportTopPx = Math.max(VERTICAL_VIEWPORT_INSET, preferredTopPx);
+  // The bottom limit is the window's bottom inset, or the gap above the top of
+  // an action rail under the panel, which holds Resolve and Resolve All on a
+  // layer below it (#11119). A rail overlapping the panel sideways is under it
+  // when it starts below the header of the panel as the inset alone places
+  // it; one beside or above that header (Flex Layout can move the rail there)
+  // leaves the panel as it is. As for the prompt check below, a Flex Layout
+  // drag of the panel itself still applies on top of the result.
+  const railBottomLimitPx = actionRailTopPx === null ? null : actionRailTopPx - ACTION_RAIL_GAP;
+  const panelBottomLimitPx =
+    railBottomLimitPx !== null && railBottomLimitPx >= railFreeTopPx + MIN_PANEL_HEIGHT
+      ? Math.min(viewportBottomLimitPx, railBottomLimitPx)
+      : viewportBottomLimitPx;
+  const viewportTopPx = Math.max(
+    VERTICAL_VIEWPORT_INSET,
+    Math.min(centredTopPx, panelBottomLimitPx - fullPanelHeight),
+  );
   // A targeting prompt renders on a layer above this panel
   // (`GAME_Z_LAYER.dialogHost`) and stays there, so the panel keeps its header
   // clear of the prompt instead (#11004). Covered, the header's controls can be

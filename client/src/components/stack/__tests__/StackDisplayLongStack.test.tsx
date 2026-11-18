@@ -4,7 +4,6 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import type { StackEntryDisplay } from "../../../adapter/types.ts";
 import { StackDisplay } from "../StackDisplay.tsx";
-import { getArcPath } from "../../targeting/arcPath.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
@@ -63,12 +62,16 @@ const SHORT_PANEL_TOP = VIEWPORT_HEIGHT * 0.43 - SHORT_PANEL_HEIGHT / 2;
 // Resolve and Resolve All, and its span: the bottom-right corner in
 // landscape, the whole width in portrait.
 const RAIL_TOP = 300;
+const RAIL_HEIGHT = 78;
 const CORNER_RAIL = { left: 520, right: 832 };
 const FULL_WIDTH_RAIL = { left: 12, right: 832 };
 // The target of the arc test: the opponent's HUD.
 const OPPONENT_HUD_RECT = new DOMRect(380, 8, 120, 48);
 // Long enough for the arcs to measure, then stop after ten still frames.
 const ARC_SETTLE_MS = 16 * 20;
+// Entries are drawn 600px from the left, 112px wide.
+const ENTRY_LEFT = 600;
+const ENTRY_CENTRE_X = ENTRY_LEFT + 112 / 2;
 
 const originalViewport = { width: window.innerWidth, height: window.innerHeight };
 const resizeObservers: ControlledResizeObserver[] = [];
@@ -137,15 +140,20 @@ function pileScrollEnd() {
   return Math.max(0, pileBottom(scroller) - scroller.clientHeight);
 }
 
-/** Where an entry is drawn on screen: under the header and the pile's top
- *  padding at its stagger, moved up by however far the pile is scrolled. */
-function stackEntryRect(entry: HTMLElement) {
+/** Where the pile scroller's band starts on screen: under the panel's top
+ *  border and its header. */
+function pileBandTop() {
   const anchor = screen.queryByTestId("stack-panel-anchor");
-  const scroller = screen.queryByTestId("stack-pile-scroller");
   const panelTopPx = anchor ? Number.parseFloat(anchor.style.top) : 0;
-  const top = panelTopPx + BORDER_HEIGHT / 2 + HEADER_HEIGHT + PADDING_Y
-    + Number.parseFloat(entry.style.top) - (scroller?.scrollTop ?? 0);
-  return new DOMRect(600, top, 112, FLOOR_CARD_HEIGHT);
+  return panelTopPx + BORDER_HEIGHT / 2 + HEADER_HEIGHT;
+}
+
+/** Where an entry is drawn on screen: under the pile's top padding at its
+ *  stagger, moved up by however far the pile is scrolled. */
+function stackEntryRect(entry: HTMLElement) {
+  const scroller = screen.queryByTestId("stack-pile-scroller");
+  const top = pileBandTop() + PADDING_Y + Number.parseFloat(entry.style.top) - (scroller?.scrollTop ?? 0);
+  return new DOMRect(ENTRY_LEFT, top, 112, FLOOR_CARD_HEIGHT);
 }
 
 /** Where the panel's anchor is across the screen: against its dock edge,
@@ -162,23 +170,21 @@ function panelAnchorRect(anchor: HTMLElement) {
 
 /**
  * The layout happy-dom cannot compute, read from the live DOM: where the rail,
- * the panel's anchor, the entries and the opponent's HUD are; the pile
- * scroller's room (the panel's height inside its border, under the header);
- * and its scroll height, which takes in the pile's box and every entry's card,
- * an entry still animating out included.
+ * the panel's anchor, the pile scroller's band, the entries and the
+ * opponent's HUD are; the scroller's room (the panel's height inside its
+ * border, under the header); and its scroll height, which takes in the
+ * pile's box and every entry's card, an entry still animating out included.
  */
 function mockLayout() {
   const originalRect = HTMLElement.prototype.getBoundingClientRect;
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     if (this.dataset.flexZone === "actionRail") {
-      return new DOMRect(
-        railSpan.left,
-        railTopPx,
-        railSpan.right - railSpan.left,
-        VIEWPORT_HEIGHT - VIEWPORT_INSET - railTopPx,
-      );
+      return new DOMRect(railSpan.left, railTopPx, railSpan.right - railSpan.left, RAIL_HEIGHT);
     }
     if (this.dataset.flexZone === "stackPanel") return panelAnchorRect(this);
+    if (this.hasAttribute("data-stack-pile-scroller")) {
+      return new DOMRect(0, pileBandTop(), VIEWPORT_WIDTH, this.clientHeight);
+    }
     if (this.hasAttribute("data-stack-entry")) return stackEntryRect(this);
     if (this.hasAttribute("data-player-hud")) return OPPONENT_HUD_RECT;
     return originalRect.call(this);
@@ -260,6 +266,12 @@ function expectInView(entryId: number, cardHeight: number) {
 
 function expectScrolledToEnd() {
   expect(pileScroller().scrollTop).toBe(pileScrollEnd());
+}
+
+/** Where the drawn target arc starts. */
+function arcStart() {
+  const [, x, y] = (document.querySelector("path[marker-end]")?.getAttribute("d") ?? "").split(" ");
+  return { x: Number(x), y: Number(y) };
 }
 
 describe("StackDisplay with a stack taller than its room", () => {
@@ -364,18 +376,21 @@ describe("StackDisplay with a stack taller than its room", () => {
       expect(panelTop()).toBe(RAIL_TOP - RAIL_GAP - SHORT_PANEL_HEIGHT);
     });
 
-    // A rail must leave the panel's 38px header (inside its border) room
-    // between the 12px top inset and the gap above the rail: a rail starting
-    // at 58px leaves exactly that, and one at 57px cannot be cleared.
+    // At 844x700 the two-entry panel centres at 164.5px, and its header (38px
+    // with the border) ends at 202.5px. A rail starting the 8px gap or more
+    // below that is under the panel; one starting higher, which Flex Layout
+    // can move it to, sits beside or above the header and leaves the panel be.
     it.each([
-      ["58px, leaving room for the header", 58, HEADER_HEIGHT + BORDER_HEIGHT],
-      ["57px, too near the top to clear", 57, DEEP_INSET_HEIGHT],
-    ] as const)("with a rail under it starting at %s, sizes a deep panel accordingly", (_case, railTop, height) => {
+      ["100px, above the panel", 100, 164.5, SHORT_PANEL_HEIGHT],
+      ["210px, beside its header", 210, 164.5, SHORT_PANEL_HEIGHT],
+      ["211px, below its header", 211, VIEWPORT_INSET, 211 - RAIL_GAP - VIEWPORT_INSET],
+    ] as const)("with a rail starting at %s, places a short panel accordingly", (_case, railTop, top, height) => {
+      setViewport(VIEWPORT_WIDTH, 700);
       railTopPx = railTop;
-      seed(DEEP_STACK);
+      seed(SHORT_STACK);
       render(board());
 
-      expect(panelTop()).toBe(VIEWPORT_INSET);
+      expect(panelTop()).toBeCloseTo(top);
       expect(panelHeight()).toBe(height);
     });
 
@@ -609,40 +624,38 @@ describe("StackDisplay with a stack taller than its room", () => {
       expect(element).toBe(scroller);
     });
 
-    it("redraws a target arc from its entry when the pile scrolls", () => {
+    it("draws a target arc from the part of its entry the pile shows, following the scroll", () => {
       vi.useFakeTimers();
+      // The oldest entry targets the opponent. At the pile's end it is
+      // scrolled out above the pile's band, which runs from 49px to 291px.
       seed(DEEP_STACK, {
-        [String(NEXT_TO_RESOLVE_ID)]: {
+        "100": {
           source_name: "Test Trigger",
           kind_label: "Triggered Ability",
           targets: [{ target: { Player: 1 }, label: "Opponent" }],
         },
       });
       render(board());
-
-      const centre = (rect: DOMRect) => ({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
-      const expectedArc = () => getArcPath(
-        centre(stackEntryRect(stackEntry(NEXT_TO_RESOLVE_ID))),
-        centre(OPPONENT_HUD_RECT),
-      );
-      const drawnArc = () => document.querySelector("path[marker-end]")?.getAttribute("d");
-      act(() => {
+      const settle = () => act(() => {
         vi.advanceTimersByTime(ARC_SETTLE_MS);
       });
-      const arcAtEnd = drawnArc();
-      expect(arcAtEnd).toBe(expectedArc());
+      settle();
+      expect(arcStart()).toEqual({ x: ENTRY_CENTRE_X, y: 49 });
 
-      // The arcs have stopped measuring. The player scrolls the pile up to its
-      // oldest entries, which carries the entry down the screen.
+      // The arcs have stopped measuring. The player scrolls up, and the lower
+      // part of the entry's card shows, from 49px to 179px.
       const scroller = pileScroller();
-      scroller.scrollTop = 0;
+      scroller.scrollTop = 40;
       fireEvent.scroll(scroller);
-      act(() => {
-        vi.advanceTimersByTime(ARC_SETTLE_MS);
-      });
+      settle();
+      expect(arcStart()).toEqual({ x: ENTRY_CENTRE_X, y: 114 });
 
-      expect(drawnArc()).toBe(expectedArc());
-      expect(drawnArc()).not.toBe(arcAtEnd);
+      // Scrolled back down a little, less of it shows, from 49px to 139px: its
+      // visible part keeps its top edge and only gets shorter.
+      scroller.scrollTop = 80;
+      fireEvent.scroll(scroller);
+      settle();
+      expect(arcStart()).toEqual({ x: ENTRY_CENTRE_X, y: 94 });
     });
   });
 });

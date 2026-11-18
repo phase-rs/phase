@@ -144,6 +144,22 @@ export function StackTargetArcs({
 
 // ── RAF position polling (specialized for heterogeneous selectors) ───────
 
+/**
+ * The part of an element that is on show. A stack entry the panel's pile has
+ * scrolled partly or wholly out of view (#11119) is cut to the pile's visible
+ * band, so its arc starts from what shows of it, or from the band's nearest
+ * edge, rather than from behind the header or over the board.
+ */
+function visibleRect(element: Element): DOMRect {
+  const rect = element.getBoundingClientRect();
+  const pile = element.closest("[data-stack-pile-scroller]");
+  if (!pile) return rect;
+  const band = pile.getBoundingClientRect();
+  const top = Math.min(Math.max(rect.top, band.top), band.bottom);
+  const bottom = Math.max(Math.min(rect.bottom, band.bottom), band.top);
+  return new DOMRect(rect.left, top, rect.width, bottom - top);
+}
+
 function useStackArcPositions(arcs: ArcDatum[]): Map<string, ArcPosition> {
   const [positions, setPositions] = useState<Map<string, ArcPosition>>(new Map());
   const prevRectsRef = useRef<Map<string, DOMRect>>(new Map());
@@ -169,14 +185,15 @@ function useStackArcPositions(arcs: ArcDatum[]): Map<string, ArcPosition> {
           if (currentRects.has(selector)) continue;
           const el = document.querySelector(selector);
           if (!el) continue;
-          const rect = el.getBoundingClientRect();
+          const rect = visibleRect(el);
           currentRects.set(selector, rect);
           const prev = prevRectsRef.current.get(selector);
           if (
             !prev ||
             Math.abs(prev.left - rect.left) > 0.5 ||
             Math.abs(prev.top - rect.top) > 0.5 ||
-            Math.abs(prev.width - rect.width) > 0.5
+            Math.abs(prev.width - rect.width) > 0.5 ||
+            Math.abs(prev.height - rect.height) > 0.5
           ) {
             changed = true;
           }
