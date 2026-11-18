@@ -28,11 +28,21 @@ pub fn suggested_creature_types(
     };
     let legal: BTreeSet<&str> = legal_options.iter().map(String::as_str).collect();
     let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+    // CR 702.139a: revealing a companion moves it out of the pool onto the
+    // player record, so read the revealed card there; an unrevealed one is
+    // still in `current_companion`.
+    let revealed_companion = state
+        .players
+        .iter()
+        .find(|candidate| candidate.id == player)
+        .and_then(|candidate| candidate.companion.as_ref())
+        .map(|companion| &companion.card);
     let deck = pool
         .current_main
         .iter()
         .chain(pool.current_commander.iter())
         .chain(pool.current_companion.iter())
+        .chain(revealed_companion)
         .chain(pool.current_signature_spell.iter())
         .map(|entry| (&entry.card, entry.count));
     let brought_in = state

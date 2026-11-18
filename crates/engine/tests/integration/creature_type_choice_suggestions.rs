@@ -407,3 +407,110 @@ fn explicit_killer_options_keep_oracle_order_and_no_suggestion() {
     ));
     assert!(runner.state().stack.is_empty());
 }
+
+fn typed_face(name: &str, core: CoreType, subtypes: &[&str], mv: u32) -> CardFace {
+    CardFace {
+        name: name.to_string(),
+        mana_cost: engine::types::mana::ManaCost::Cost {
+            shards: vec![],
+            generic: mv,
+        },
+        card_type: CardType {
+            supertypes: vec![],
+            core_types: vec![core],
+            subtypes: subtypes.iter().map(|subtype| subtype.to_string()).collect(),
+        },
+        ..Default::default()
+    }
+}
+
+/// CR 702.139a: a companion revealed through the production pregame
+/// declaration leaves the registered pool for the player record; its creature
+/// types must still be counted, exactly once. CR 100.4b + CR 400.11a: a
+/// declined Limited companion becomes an ordinary sideboard card, which is not
+/// counted unless brought into the game.
+#[test]
+fn pregame_companion_declaration_keeps_its_creature_types_counted_once() {
+    use engine::game::deck_loading::{load_deck_into_state, DeckPayload, PlayerDeckPayload};
+    use engine::game::{apply, start_game_with_starting_player};
+    use engine::types::format::FormatConfig;
+    use engine::types::game_state::{
+        CompanionChoiceSource, CompanionDeclaration, CompanionRevealChoice,
+    };
+    use engine::types::keywords::{CompanionCondition, Keyword};
+
+    let lurrus = DeckEntry {
+        card: CardFace {
+            keywords: vec![Keyword::Companion(
+                CompanionCondition::MaxPermanentManaValue(2),
+            )],
+            ..typed_face(
+                "Lurrus of the Dream-Den",
+                CoreType::Creature,
+                &["Cat", "Nightmare"],
+                3,
+            )
+        },
+        count: 1,
+    };
+    let mut main_deck = vec![DeckEntry {
+        card: typed_face("Plains", CoreType::Land, &["Plains"], 0),
+        count: 17,
+    }];
+    main_deck.extend((0..23).map(|i| DeckEntry {
+        card: typed_face(&format!("Villager {i}"), CoreType::Creature, &["Human"], 2),
+        count: 1,
+    }));
+    let legal: Vec<String> = ["Bear", "Cat", "Human", "Nightmare"]
+        .map(str::to_string)
+        .to_vec();
+    let reveal = CompanionDeclaration::Reveal(CompanionRevealChoice {
+        name: "Lurrus of the Dream-Den".to_string(),
+        source: CompanionChoiceSource::Dedicated,
+    });
+    let with_lurrus = ["Human", "Cat", "Nightmare"].map(str::to_string).to_vec();
+    let without_lurrus = vec!["Human".to_string()];
+    for (label, declaration, expected) in [
+        ("revealed", reveal, with_lurrus),
+        ("declined", CompanionDeclaration::Decline, without_lurrus),
+    ] {
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: main_deck.clone(),
+                companion: vec![lurrus.clone()],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: main_deck.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut state = GameState::new(FormatConfig::limited(), 2, 42);
+        load_deck_into_state(&mut state, &payload);
+        let start = start_game_with_starting_player(&mut state, P0);
+        state.waiting_for = start.waiting_for;
+        assert!(
+            matches!(
+                state.waiting_for,
+                WaitingFor::CompanionReveal { player: P0, .. }
+            ),
+            "{label}: the dedicated Lurrus is offered"
+        );
+        apply(
+            &mut state,
+            P0,
+            GameAction::DeclareCompanion {
+                choice: declaration,
+            },
+        )
+        .unwrap_or_else(|e| panic!("{label}: companion declaration failed: {e}"));
+        let revealed = state.players[0].companion.is_some();
+        assert_eq!(revealed, label == "revealed", "{label}");
+        assert_eq!(
+            choose::suggested_creature_types(&state, P0, &legal),
+            expected,
+            "{label}"
+        );
+    }
+}

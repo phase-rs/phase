@@ -95,9 +95,18 @@ describe("NamedChoiceModal", () => {
       setup(["Elf"]);
       expect(screen.getByRole("textbox")).toBeInTheDocument();
       cleanup();
-      render(<NamedChoiceModal data={{ ...data, options: options.slice(0, 12) }} />);
+      const short = options.slice(0, 12);
+      render(<NamedChoiceModal data={{ ...data, options: short }} />);
       expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
-      expect(labels()).toEqual(["Elf"]);
+      // Without a search box every legal option stays on screen.
+      expect(labels()).toEqual(short);
+      const unsuggested = short.find((option) => option !== "Elf")!;
+      fireEvent.click(screen.getByRole("button", { name: unsuggested }));
+      fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+      expect(dispatchMock).toHaveBeenCalledWith({
+        type: "ChooseOption",
+        data: { choice: unsuggested },
+      });
     });
 
     it("preserves the engine's explicit Oracle option order", () => {
