@@ -457,19 +457,27 @@ fn pregame_companion_declaration_keeps_its_creature_types_counted_once() {
         card: typed_face("Plains", CoreType::Land, &["Plains"], 0),
         count: 17,
     }];
-    main_deck.extend((0..23).map(|i| DeckEntry {
+    main_deck.extend((0..22).map(|i| DeckEntry {
         card: typed_face(&format!("Villager {i}"), CoreType::Creature, &["Human"], 2),
         count: 1,
     }));
-    let legal: Vec<String> = ["Bear", "Cat", "Human", "Nightmare"]
+    // One Bat ties a once-counted Lurrus and sorts before Cat, so counting
+    // the companion twice would put Cat ahead of Bat.
+    main_deck.push(DeckEntry {
+        card: typed_face("Night Flyer", CoreType::Creature, &["Bat"], 2),
+        count: 1,
+    });
+    let legal: Vec<String> = ["Bat", "Bear", "Cat", "Human", "Nightmare"]
         .map(str::to_string)
         .to_vec();
     let reveal = CompanionDeclaration::Reveal(CompanionRevealChoice {
         name: "Lurrus of the Dream-Den".to_string(),
         source: CompanionChoiceSource::Dedicated,
     });
-    let with_lurrus = ["Human", "Cat", "Nightmare"].map(str::to_string).to_vec();
-    let without_lurrus = vec!["Human".to_string()];
+    let with_lurrus = ["Human", "Bat", "Cat", "Nightmare"]
+        .map(str::to_string)
+        .to_vec();
+    let without_lurrus = ["Human", "Bat"].map(str::to_string).to_vec();
     for (label, declaration, expected) in [
         ("revealed", reveal, with_lurrus),
         ("declined", CompanionDeclaration::Decline, without_lurrus),
