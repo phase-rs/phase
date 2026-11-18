@@ -2254,6 +2254,7 @@ mod tests {
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::parser::oracle_ir::diagnostic::OracleDiagnostic;
+    use engine::types::ability::TurnWindow;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AdditionalCost, BounceSelection, CardTypeSetSource,
         CastPermissionConstraint, CastingPermission, CastingRestriction, Comparator, CountScope,
@@ -2348,9 +2349,10 @@ mod tests {
 
     fn spells_cast_this_turn() -> QuantityExpr {
         QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         }
     }
@@ -3121,9 +3123,10 @@ mod tests {
     fn zero_cast_dynamic_object_option_and_permission_consumers_are_paired() {
         let (mut state, congregate) = funded_zero_congregate_state();
         let history = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         let option_spell = create_object(
@@ -3735,9 +3738,10 @@ mod tests {
                 AbilityKind::Spell,
                 Effect::Draw {
                     count: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     target: TargetFilter::Controller,
@@ -3764,9 +3768,10 @@ mod tests {
     fn spell_count_after_this_cast() -> QuantityExpr {
         QuantityExpr::Difference {
             left: Box::new(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: None,
+                    window: TurnWindow::ThisTurn,
                 },
             }),
             right: Box::new(QuantityExpr::Fixed { value: 1 }),
@@ -4267,9 +4272,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::Draw {
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: TargetFilter::Controller,
@@ -4423,9 +4429,10 @@ mod tests {
             .push(CastingRestriction::RequiresCondition {
                 condition: Some(ParsedCondition::QuantityComparison {
                     lhs: QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn {
+                        qty: QuantityRef::SpellsCast {
                             scope: CountScope::Controller,
                             filter: None,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     comparator: Comparator::GE,
@@ -4588,9 +4595,10 @@ mod tests {
 
         let hook = add_battlefield_trigger(state, 91_004, TriggerMode::Attacks);
         let cast_count = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         {
@@ -4846,9 +4854,10 @@ mod tests {
         state.priority_player = P0;
         state.waiting_for = WaitingFor::Priority { player: P0 };
         let spell_count = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery))),
+                window: TurnWindow::ThisTurn,
             },
         };
         let object = state
@@ -5442,7 +5451,7 @@ mod tests {
         let mut static_definition = StaticDefinition::new(StaticMode::CantBeBlocked);
         static_definition.condition = Some(StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn {
+                qty: QuantityRef::SpellsCast {
                     scope: CountScope::Controller,
                     filter: Some(TargetFilter::Or {
                         filters: vec![
@@ -5450,6 +5459,7 @@ mod tests {
                             TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                         ],
                     }),
+                    window: TurnWindow::ThisTurn,
                 },
             },
             comparator: Comparator::GE,
@@ -5511,9 +5521,10 @@ mod tests {
                 .condition(
                     engine::types::ability::ReplacementCondition::OnlyIfQuantity {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::SpellsCastThisTurn {
+                            qty: QuantityRef::SpellsCast {
                                 scope: CountScope::Controller,
                                 filter: None,
+                                window: TurnWindow::ThisTurn,
                             },
                         },
                         comparator: Comparator::GE,
@@ -5577,9 +5588,10 @@ mod tests {
             AbilityKind::Spell,
             Effect::DealDamage {
                 amount: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn {
+                    qty: QuantityRef::SpellsCast {
                         scope: CountScope::Controller,
                         filter: None,
+                        window: TurnWindow::ThisTurn,
                     },
                 },
                 target: TargetFilter::Typed(TypedFilter::creature()),
@@ -5620,7 +5632,7 @@ mod tests {
                 shards: vec![ManaCostShard::Blue],
             },
             spell_filter: None,
-            dynamic_count: Some(QuantityRef::SpellsCastThisTurn {
+            dynamic_count: Some(QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: Some(TargetFilter::Or {
                     filters: vec![
@@ -5628,6 +5640,7 @@ mod tests {
                         TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
                     ],
                 }),
+                window: TurnWindow::ThisTurn,
             }),
             reach: engine::types::statics::CostReductionReach::SpillsToGeneric,
         })
@@ -6940,9 +6953,10 @@ mod tests {
             },
         };
         let spell_ledger = QuantityExpr::Ref {
-            qty: QuantityRef::SpellsCastThisTurn {
+            qty: QuantityRef::SpellsCast {
                 scope: CountScope::Controller,
                 filter: None,
+                window: TurnWindow::ThisTurn,
             },
         };
         for amount in [nested_filter_x, spell_ledger] {

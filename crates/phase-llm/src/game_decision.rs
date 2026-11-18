@@ -2,9 +2,12 @@
 //!
 //! The model never authors an action. It is shown the engine-issued candidate
 //! domain — the same `AiDecisionContract` the heuristic AI selects from — and
-//! returns an INDEX into it. Everything the engine already enforces about AI
-//! actions (contract issuance, authority binding, re-validation on submit) is
-//! untouched, so an LLM seat cannot reach an action a heuristic seat could not.
+//! returns an INDEX into it. A combat declaration a chat model composes
+//! instead: it is shown each attack or block the engine's prompt lists and
+//! returns the indices of those it declares (`combat_declaration`).
+//! Everything the engine already enforces about AI actions (contract issuance,
+//! authority binding, re-validation on submit) is untouched, so an LLM seat
+//! cannot reach an action a heuristic seat could not.
 
 use engine::ai_support::AiDecisionContract;
 use engine::database::CardDatabase;
@@ -17,14 +20,16 @@ use engine::types::match_config::MatchPhase;
 use engine::types::player::PlayerId;
 use phase_ai::config::AiDifficulty;
 
+use crate::combat_declaration::ComposedDeclaration;
 use crate::error::{LlmError, LlmResult};
 use crate::fingerprint::fingerprint_of;
 use crate::format_guidance::game_format_brief;
 use crate::prompt::{
     decode_choice, difficulty_brief, history_budget, numbered_options, option_domain_statement,
-    option_value, untrusted_block, DecisionFrame, LlmPrompt, RESPONSE_CONTRACT,
+    option_value, untrusted_block, DecisionFrame, LlmPrompt, GAME_RESPONSE_CONTRACT,
     UNTRUSTED_DATA_DECLARATION,
 };
+use crate::provider::WireProtocol;
 use crate::render::action::{describe_action, describe_waiting_for, primary_object_name};
 use crate::render::game::{render_board, GameRenderOptions};
 use crate::render::history::{
@@ -40,6 +45,10 @@ pub struct GameDecisionRequest {
     /// to [`select_action`] so a decision that moved on is refused instead of
     /// misapplied.
     pub fingerprint: String,
+    /// How many options the chat prompt numbers. For a combat declaration
+    /// these are the empty declaration, when the engine accepts it, followed
+    /// by its pairs; a System One question is asked over the frame's options,
+    /// the engine's candidates.
     pub option_count: usize,
     /// The parts of this decision a message-thread continue is rendered from.
     update: ThreadUpdateParts,
@@ -56,6 +65,9 @@ struct ThreadUpdateParts {
     live_position: String,
     /// The numbered option list, exactly as the full prompt carries it.
     options: String,
+    /// How the model answers those options, as the full prompt states it
+    /// outside the data block.
+    instruction: &'static str,
     /// The seat the position is rendered for, so the history a continue
     /// carries names each player as the position does.
     viewer: PlayerId,
@@ -143,19 +155,26 @@ impl GameDecisionRequest {
         data.push_str(&self.update.live_position);
         data.push_str("\n\n");
         data.push_str(&self.update.options);
-        Some(decision_message(&data, self.option_count))
+        Some(decision_message(
+            &data,
+            self.option_count,
+            self.update.instruction,
+        ))
     }
 }
 
 /// The user message for one decision: the fenced data block, then the
 /// engine-authored option domain and instruction outside it.
-fn decision_message(data: &str, option_count: usize) -> String {
+fn decision_message(data: &str, option_count: usize, instruction: &str) -> String {
     format!(
-        "{}\n\n--- DECISION ---\n{}\nChoose exactly one option by its number.\n",
+        "{}\n\n--- DECISION ---\n{}\n{instruction}\n",
         untrusted_block(data),
         option_domain_statement(option_count),
     )
 }
+
+/// The instruction of a decision answered with one option.
+const ONE_OPTION_INSTRUCTION: &str = "Choose exactly one option by its number.";
 
 /// Difficulties below this see the board without Oracle text. They are meant to
 /// misplay in the way a new player misplays — off the board, not off exact card
@@ -189,8 +208,95 @@ const MANA_GUIDANCE: &str = "MANA: every untapped mana source you control counts
      you make a stronger play, holding back only the sources you need for something else \
      this turn.";
 
-/// Render the option domain exactly once, so the prompt the model reads and the
-/// fingerprint that guards it are derived from the same strings.
+/// A decision's options, rendered once, so the prompt the model reads, the
+/// fingerprint that guards it and the binding of its reply all read the same
+/// strings.
+#[derive(Debug)]
+struct DecisionOptions {
+    /// One line per engine-issued candidate, in contract order. A System One
+    /// question is put over these for every decision.
+    candidates: Vec<String>,
+    /// The combat declaration a chat model composes, pair by pair, instead of
+    /// choosing one of the candidates, when the decision is one.
+    declaration: Option<ComposedDeclaration>,
+}
+
+impl DecisionOptions {
+    /// The options of `contract`'s decision in `state`, named from `visible`,
+    /// the state filtered for the contract's semantic owner.
+    fn new(state: &GameState, visible: &GameState, contract: &AiDecisionContract) -> Self {
+        let viewer = contract.semantic_owner;
+        Self {
+            candidates: candidate_lines(visible, viewer, contract),
+            declaration: ComposedDeclaration::pending(state, visible, viewer),
+        }
+    }
+
+    /// The options a chat prompt numbers.
+    fn chat_lines(&self) -> &[String] {
+        self.declaration
+            .as_ref()
+            .map_or(self.candidates.as_slice(), ComposedDeclaration::lines)
+    }
+
+    /// Whether the decision leaves one answer, so it is not put to a model.
+    fn is_forced(&self, state: &GameState, contract: &AiDecisionContract) -> bool {
+        match &self.declaration {
+            Some(declaration) => declaration.is_forced(state, &contract.candidates),
+            None => self.candidates.len() < 2,
+        }
+    }
+
+    /// How a chat model answers [`Self::chat_lines`], stated outside the data
+    /// block.
+    fn chat_instruction(&self) -> &'static str {
+        self.declaration
+            .as_ref()
+            .map_or(ONE_OPTION_INSTRUCTION, ComposedDeclaration::instruction)
+    }
+
+    /// The fingerprint of every option line this decision can be answered
+    /// over: the candidates a System One reply names, and a declaration's
+    /// pairs a chat reply names. Without a declaration it is taken over the
+    /// candidates alone.
+    fn fingerprint(&self, contract: &AiDecisionContract) -> String {
+        let revision = contract.state_revision.to_string();
+        let owner = contract.semantic_owner.0.to_string();
+        let actor = contract.authorized_actor.0.to_string();
+        // The marker keeps the boundary between the two lists in the hash.
+        let declaration = self.declaration.iter().flat_map(|declaration| {
+            std::iter::once("declaration").chain(declaration.lines().iter().map(String::as_str))
+        });
+        fingerprint_of(
+            [revision.as_str(), owner.as_str(), actor.as_str()]
+                .into_iter()
+                .chain(self.candidates.iter().map(String::as_str))
+                .chain(declaration),
+        )
+    }
+
+    /// Bind a chat completion to the action it selects: one candidate, or the
+    /// declaration composed from every pair it names.
+    fn choose_chat(
+        &self,
+        state: &GameState,
+        contract: &AiDecisionContract,
+        completion_text: &str,
+    ) -> LlmResult<LlmActionSelection> {
+        let Some(declaration) = &self.declaration else {
+            return choose_candidate(contract, completion_text);
+        };
+        let option_count = declaration.lines().len();
+        // A declaration is answered with every option it declares.
+        let choice = decode_choice(completion_text, option_count, option_count)?;
+        Ok(LlmActionSelection {
+            action: declaration.bind(state, &choice.indices)?,
+            reasoning: choice.reasoning,
+        })
+    }
+}
+
+/// One line per engine-issued candidate.
 ///
 /// Labels carry card names and payload strings, so they are sanitized HERE
 /// rather than at the format site: doing it here is what keeps the fingerprint
@@ -203,7 +309,7 @@ const MANA_GUIDANCE: &str = "MANA: every untapped mana source you control counts
 /// makes the decision (CR 723.5), but the board, and so the options, are still
 /// the controlled seat's: what that seat may see is visible to its controller
 /// too (CR 723.4), and its objects keep their normal controllers (CR 723.3).
-fn option_lines(
+fn candidate_lines(
     visible: &GameState,
     viewer: PlayerId,
     contract: &AiDecisionContract,
@@ -224,22 +330,8 @@ fn option_lines(
 
 /// The fingerprint of a contract's option domain.
 pub fn decision_fingerprint(state: &GameState, contract: &AiDecisionContract) -> String {
-    let viewer = contract.semantic_owner;
-    let visible = filter_state_for_viewer(state, viewer);
-    options_fingerprint(contract, &option_lines(&visible, viewer, contract))
-}
-
-/// The fingerprint of a contract's option domain, over the option lines
-/// already rendered for it.
-fn options_fingerprint(contract: &AiDecisionContract, lines: &[String]) -> String {
-    let revision = contract.state_revision.to_string();
-    let owner = contract.semantic_owner.0.to_string();
-    let actor = contract.authorized_actor.0.to_string();
-    fingerprint_of(
-        [revision.as_str(), owner.as_str(), actor.as_str()]
-            .into_iter()
-            .chain(lines.iter().map(String::as_str)),
-    )
+    let visible = filter_state_for_viewer(state, contract.semantic_owner);
+    DecisionOptions::new(state, &visible, contract).fingerprint(contract)
 }
 
 /// The fingerprint of the viewer-visible information state at the time of a decision.
@@ -345,9 +437,16 @@ pub fn information_fingerprint(state: &GameState, contract: &AiDecisionContract)
         }
     }
 
-    let options = option_lines(&visible, viewer, contract);
-    for opt in &options {
+    let options = DecisionOptions::new(state, &visible, contract);
+    for opt in &options.candidates {
         parts.push(format!("opt:{opt}"));
+    }
+    for pair in options
+        .declaration
+        .iter()
+        .flat_map(ComposedDeclaration::lines)
+    {
+        parts.push(format!("declare:{pair}"));
     }
 
     fingerprint_of(parts.iter().map(String::as_str))
@@ -436,8 +535,8 @@ pub fn build_game_decision_prompt(
     // the board and the options are both rendered from this one state, as
     // this one seat, so an option names its target in the board's words.
     let visible = filter_state_for_viewer(state, viewer);
-    let options = option_lines(&visible, viewer, contract);
-    if options.is_empty() {
+    let options = DecisionOptions::new(state, &visible, contract);
+    if options.candidates.is_empty() {
         return Err(LlmError::UndecodableChoice {
             detail: "the engine issued no candidate actions".to_string(),
         });
@@ -446,7 +545,14 @@ pub fn build_game_decision_prompt(
     // legal option spends a round trip and a prompt's worth of tokens to learn
     // nothing; the caller takes it through the heuristic path instead, which
     // `UnsupportedDecision` already means and does not count as a failure.
-    if options.len() == 1 {
+    //
+    // A combat declaration is judged by its composed options, not by the
+    // engine's candidates alone, which sample the legal declarations and can
+    // leave one unsampled (a block beside one a requirement forces); see
+    // `ComposedDeclaration::is_forced`. A System One provider, asked over the
+    // candidates, refuses a question with fewer than two itself
+    // (`wire::system_one_request`).
+    if options.is_forced(state, contract) {
         return Err(LlmError::UnsupportedDecision {
             detail: "only one legal option; there is nothing to decide".to_string(),
         });
@@ -493,8 +599,9 @@ pub fn build_game_decision_prompt(
          available to you right now, each with a description. Outside the block, the \
          message states how many options exist and which numbers are valid; that \
          statement is authoritative and complete. Every valid number is a legal \
-         option, and no other number is. Choose exactly one by its number.\n\n{}",
-        UNTRUSTED_DATA_DECLARATION, RESPONSE_CONTRACT,
+         option, and no other number is. Choose exactly one by its number, unless \
+         the message tells you to choose a list of options.\n\n{}",
+        UNTRUSTED_DATA_DECLARATION, GAME_RESPONSE_CONTRACT,
     );
 
     // Every rendered value is DATA — the position, the pending prompt, and each
@@ -508,21 +615,24 @@ pub fn build_game_decision_prompt(
         describe_waiting_for(&visible.waiting_for),
     );
     let position = format!("{board}\n{waiting_for}");
-    let options_section = numbered_options("YOUR LEGAL OPTIONS", &options);
+    let chat_options = options.chat_lines();
+    let options_section = numbered_options("YOUR LEGAL OPTIONS", chat_options);
     let data = format!("{position}\n\n{options_section}");
 
-    let user = decision_message(&data, options.len());
+    let user = decision_message(&data, chat_options.len(), options.chat_instruction());
 
+    // A typed Choice names one criterion, so a System One provider is always
+    // asked over the engine's candidates, a combat declaration included.
     let frame = DecisionFrame {
         brief,
         position,
         instruction: "Choose the one legal option that is best for you right now.".to_string(),
-        options: options.clone(),
+        options: options.candidates.clone(),
     };
 
     Ok(GameDecisionRequest {
-        fingerprint: options_fingerprint(contract, &options),
-        option_count: options.len(),
+        fingerprint: options.fingerprint(contract),
+        option_count: chat_options.len(),
         prompt: LlmPrompt {
             system,
             user,
@@ -531,6 +641,7 @@ pub fn build_game_decision_prompt(
         update: ThreadUpdateParts {
             live_position: format!("{live_board}\n{waiting_for}"),
             options: options_section,
+            instruction: options.chat_instruction(),
             viewer,
             history: render.history,
             // CR 723.5: a decision another player makes for this seat, while
@@ -546,23 +657,46 @@ pub fn build_game_decision_prompt(
 ///
 /// The one response-consuming authority for a game decision. The decision is
 /// re-checked against the fingerprint first, then the reply is read against the
-/// option lines this decision issues, so a System One answer can only name
-/// criteria the engine actually offered, and only then is the selected index
-/// bound to a candidate, as [`select_action`] binds one. The fingerprint and
-/// the reply are both read against the one set of option lines rendered here.
+/// option lines its provider was asked over, so a System One answer can only
+/// name criteria the engine actually offered, and only then is it bound to an
+/// action: a System One answer to one candidate, a chat reply as
+/// [`select_action`] binds one. The fingerprint and the reply are both read
+/// against the one set of option lines rendered here.
 pub fn select_action_from_response(
     state: &GameState,
     contract: &AiDecisionContract,
     expected_fingerprint: &str,
     reply: LlmReply<'_>,
 ) -> LlmResult<LlmActionSelection> {
-    let viewer = contract.semantic_owner;
-    let options = option_lines(&filter_state_for_viewer(state, viewer), viewer, contract);
-    if options_fingerprint(contract, &options) != expected_fingerprint {
+    let visible = filter_state_for_viewer(state, contract.semantic_owner);
+    let options = DecisionOptions::new(state, &visible, contract);
+    if options.fingerprint(contract) != expected_fingerprint {
         return Err(LlmError::StaleDecision);
     }
-    let completion = completion_from_response(reply.provider, reply.status, reply.body, &options)?;
-    choose_candidate(contract, &completion)
+    match reply.provider.wire() {
+        // A System One question is put over the candidates, and its answer
+        // ranks them; the head is the one it chose.
+        WireProtocol::SystemOneRelay => {
+            let completion = completion_from_response(
+                reply.provider,
+                reply.status,
+                reply.body,
+                &options.candidates,
+            )?;
+            choose_candidate(contract, &completion)
+        }
+        WireProtocol::OpenAiChat
+        | WireProtocol::AnthropicMessages
+        | WireProtocol::GeminiGenerateContent => {
+            let completion = completion_from_response(
+                reply.provider,
+                reply.status,
+                reply.body,
+                options.chat_lines(),
+            )?;
+            options.choose_chat(state, contract, &completion)
+        }
+    }
 }
 
 /// The action an LLM reply selects, plus the model's stated reason.
@@ -572,21 +706,27 @@ pub struct LlmActionSelection {
     pub reasoning: Option<String>,
 }
 
-/// Bind a completion back to an engine action.
+/// Bind a chat completion back to an engine action.
+///
+/// A chat completion only: a System One answer names one of the engine's
+/// candidates, and only [`select_action_from_response`] reads one.
 ///
 /// Refuses on any mismatch rather than approximating: a moved-on decision, an
-/// out-of-range index, or an undecodable reply all surface as errors so the
-/// caller falls back to the heuristic AI.
+/// out-of-range index, an undecodable reply, or a combat declaration the
+/// engine does not accept as chosen all surface as errors so the caller falls
+/// back to the heuristic AI.
 pub fn select_action(
     state: &GameState,
     contract: &AiDecisionContract,
     expected_fingerprint: &str,
     completion_text: &str,
 ) -> LlmResult<LlmActionSelection> {
-    if decision_fingerprint(state, contract) != expected_fingerprint {
+    let visible = filter_state_for_viewer(state, contract.semantic_owner);
+    let options = DecisionOptions::new(state, &visible, contract);
+    if options.fingerprint(contract) != expected_fingerprint {
         return Err(LlmError::StaleDecision);
     }
-    choose_candidate(contract, completion_text)
+    options.choose_chat(state, contract, completion_text)
 }
 
 /// The candidate a completion names, once its decision is known to be current.
@@ -1602,7 +1742,7 @@ mod tests {
         actions.push(GameAction::PassPriority);
         let contract = contract(actions);
         let viewer = contract.semantic_owner;
-        let lines = option_lines(&filter_state_for_viewer(state, viewer), viewer, &contract);
+        let lines = candidate_lines(&filter_state_for_viewer(state, viewer), viewer, &contract);
         assert!(
             lines
                 .iter()

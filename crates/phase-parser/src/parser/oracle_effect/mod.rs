@@ -121,6 +121,7 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
+use crate::types::ability::TurnWindow;
 use crate::types::ability::{
     effect_has_stack_target_declaration, effect_owns_resolution_zone_choice,
     effect_parent_ref_slot_count, effect_requires_parent_target_object,
@@ -6612,7 +6613,7 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
 ///
 /// The static-line authority (`parse_static_line`) already lowers the entire
 /// `ModifyCost` payload (color-disjunction `spell_filter`, dynamic-X
-/// `LifeLostThisTurn`/`LifeGainedThisTurn` `dynamic_count`); we delegate to it
+/// `LifeLost`/`LifeGainedThisTurn` `dynamic_count`); we delegate to it
 /// rather than re-implementing cost-modifier parsing. The resulting static is
 /// then granted onto the resolving source for one turn via `GrantStaticAbility`
 /// on `SelfRef` (mirroring `try_parse_combat_tax_effect_clause`), so layer-6
@@ -9603,8 +9604,9 @@ fn parse_life_lost_villainous_choice_chooser(input: &str) -> OracleResult<'_, Pl
         input,
         PlayerFilter::PlayerAttribute {
             relation,
-            attr: Box::new(QuantityRef::LifeLostThisTurn {
+            attr: Box::new(QuantityRef::LifeLost {
                 player: PlayerScope::ScopedPlayer,
+                window: TurnWindow::ThisTurn,
             }),
             comparator: Comparator::GE,
             value: Box::new(QuantityExpr::Fixed { value: threshold }),
@@ -16943,14 +16945,14 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         // instruction set, not a chain-local effect result; the object-scoped
         // form reads the object's stickers.
         | QuantityRef::NameStickerLetterCount { .. }
-        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::LifeLost { .. }
         | QuantityRef::PartySize { .. }
         | QuantityRef::UnspentMana { .. }
         | QuantityRef::Speed { .. }
         | QuantityRef::AttachmentsOnLeavingObject { .. }
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
-        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCast { .. }
         | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
@@ -16973,7 +16975,6 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::AttackedThisTurn { .. }
         | QuantityRef::DescendedThisTurn
         | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-        | QuantityRef::SpellsCastLastTurn
         | QuantityRef::SpellsCastThisGame { .. }
         | QuantityRef::CounterAddedThisTurn { .. }
         | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -25938,7 +25939,7 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::ExiledFromHandThisResolution
             | QuantityRef::PreviousEffectAmount { .. }
             | QuantityRef::PreviousEffectCount
-            | QuantityRef::LifeLostThisTurn { .. }
+            | QuantityRef::LifeLost { .. }
             | QuantityRef::PartySize { .. }
             | QuantityRef::UnspentMana { .. }
             | QuantityRef::Speed { .. }
@@ -25947,7 +25948,7 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::AttachmentsOnLeavingObject { .. }
             | QuantityRef::EventContextSourceCostX
             | QuantityRef::EventContextSourceModesChosen
-            | QuantityRef::SpellsCastThisTurn { .. }
+            | QuantityRef::SpellsCast { .. }
             | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::SacrificedThisTurn { .. }
@@ -25970,7 +25971,6 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::AttackedThisTurn { .. }
             | QuantityRef::DescendedThisTurn
             | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
-            | QuantityRef::SpellsCastLastTurn
             | QuantityRef::SpellsCastThisGame { .. }
             | QuantityRef::CounterAddedThisTurn { .. }
             | QuantityRef::CardsDiscardedThisTurn { .. }
@@ -44377,7 +44377,7 @@ fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
         QuantityExpr::Ref { qty } => match qty {
             QuantityRef::LifeTotal { player }
             | QuantityRef::HandSize { player }
-            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeLost { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::PartySize { player }
                 if *player == PlayerScope::Controller =>
@@ -44625,11 +44625,17 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
             // purely targeted clause (Blitzwing — no `player_scope`) never
             // reaches this walker, so its `Target` survives to read the
             // targeted opponent's own life lost.
-            QuantityRef::LifeLostThisTurn {
+            //
+            // CR 500: the rebuild carries the window across the rebind; a literal
+            // `ThisTurn` would silently reset a last-turn payload to this turn.
+            QuantityRef::LifeLost {
                 player: PlayerScope::Target,
+                window,
             } => {
-                *qty = QuantityRef::LifeLostThisTurn {
+                let window = *window;
+                *qty = QuantityRef::LifeLost {
                     player: PlayerScope::ScopedPlayer,
+                    window,
                 }
             }
             // CR 115.1 + CR 601.2c: rebind only anaphoric counts ("their …").
@@ -44812,7 +44818,7 @@ pub(crate) fn rewrite_player_quantity_refs_to_source_chosen(def: &mut AbilityDef
         match qty {
             QuantityRef::LifeTotal { player }
             | QuantityRef::HandSize { player }
-            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeLost { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::PartySize { player }
                 if matches!(
@@ -44867,7 +44873,7 @@ pub(crate) fn rewrite_event_player_quantity_refs_to_scoped(def: &mut AbilityDefi
         match qty {
             QuantityRef::LifeTotal { player }
             | QuantityRef::HandSize { player }
-            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeLost { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::PartySize { player }
                 if *player == PlayerScope::Target =>
@@ -44937,7 +44943,7 @@ pub(crate) fn rewrite_event_anchored_zone_counts_to_scoped(def: &mut AbilityDefi
             | QuantityRef::HandSize { player }
             | QuantityRef::GraveyardSize { player }
             | QuantityRef::StartingLifeTotal { player }
-            | QuantityRef::LifeLostThisTurn { player }
+            | QuantityRef::LifeLost { player, .. }
             | QuantityRef::LifeGainedThisTurn { player }
             | QuantityRef::PartySize { player }
                 if *player == PlayerScope::Target =>

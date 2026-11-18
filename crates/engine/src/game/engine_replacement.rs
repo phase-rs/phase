@@ -4592,6 +4592,7 @@ pub(crate) fn is_entry_event_of(event: &GameEvent, source_id: ObjectId) -> bool 
         | GameEvent::PlayerPhasedOut { .. }
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }
@@ -4760,6 +4761,7 @@ fn parked_event_holds(parked: &GameEvent, event: &GameEvent) -> bool {
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::LandPlayed { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }
@@ -5205,6 +5207,7 @@ fn parked_entry_is_of_incarnation(event: &GameEvent, entrant: ObjectIncarnationR
             | GameEvent::PlayerPhasedIn { .. }
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
+            | GameEvent::AbilityTriggered { .. }
             | GameEvent::StackResolved { .. }
             | GameEvent::Discarded { .. }
             | GameEvent::Milled { .. }
@@ -5688,6 +5691,7 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
             | GameEvent::PlayerPhasedIn { .. }
             | GameEvent::LandPlayed { .. }
             | GameEvent::StackPushed { .. }
+            | GameEvent::AbilityTriggered { .. }
             | GameEvent::StackResolved { .. }
             | GameEvent::Discarded { .. }
             | GameEvent::Milled { .. }
@@ -5853,6 +5857,7 @@ fn parked_entrant_left_the_game(state: &GameState, event: &GameEvent) -> bool {
         | GameEvent::PlayerPhasedOut { .. }
         | GameEvent::PlayerPhasedIn { .. }
         | GameEvent::StackPushed { .. }
+        | GameEvent::AbilityTriggered { .. }
         | GameEvent::StackResolved { .. }
         | GameEvent::Discarded { .. }
         | GameEvent::Milled { .. }

@@ -36,7 +36,6 @@ function seedClickModeCase() {
       gameState,
       waitingFor: gameState.waiting_for,
       dispatch: vi.fn().mockResolvedValue([]),
-      undo: vi.fn(),
       stateHistory: [],
     });
   });
@@ -78,7 +77,6 @@ describe("useKeyboardShortcuts", () => {
         gameState,
         waitingFor: gameState.waiting_for,
         dispatch,
-        undo: vi.fn(),
         stateHistory: [],
       });
     });
@@ -104,7 +102,6 @@ describe("useKeyboardShortcuts", () => {
         gameState,
         waitingFor: gameState.waiting_for,
         dispatch,
-        undo: vi.fn(),
         stateHistory: [],
       });
     });
@@ -129,7 +126,6 @@ describe("useKeyboardShortcuts", () => {
         gameState,
         waitingFor: gameState.waiting_for,
         dispatch,
-        undo: vi.fn(),
         stateHistory: [],
       });
     });
@@ -178,7 +174,6 @@ describe("useKeyboardShortcuts", () => {
         legalActions: [{ type: "PassPriority" }],
         manaPaymentShortcutActions: shortcutActions,
         dispatch,
-        undo: vi.fn(),
         stateHistory: [],
       });
     });

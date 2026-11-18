@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::types::ability::TurnWindow;
 pub(crate) use crate::types::ability::{
     effect_owns_resolution_zone_choice, effect_refs_parent_target,
     effect_requires_parent_target_object, filter_refs_parent_or_event_subject,
@@ -769,6 +770,22 @@ pub(crate) fn player_control_count_compares(
     )
 }
 
+/// Whether `attr` is a spell-count attr that [`candidate_player_scalar`] can
+/// read off a candidate `Player` (the unfiltered last-turn snapshot). The single
+/// predicate shared by the reader arm and by `coverage`'s nested-attr
+/// classifier, so a spell attr the reader fails closed on can never be
+/// classified supported.
+pub(crate) fn candidate_scalar_reads_spell_attr(attr: &QuantityRef) -> bool {
+    matches!(
+        attr,
+        QuantityRef::SpellsCast {
+            filter: None,
+            window: TurnWindow::LastTurn,
+            ..
+        }
+    )
+}
+
 /// CR 402.1 / 119.1 / 119.3 / 122.1f: Read scalar `attr` for one
 /// candidate player DIRECTLY off the candidate `Player` (NOT via the
 /// controller-scoped `resolve_quantity`), so `PlayerFilter::PlayerAttribute`
@@ -782,8 +799,24 @@ pub(crate) fn candidate_player_scalar(p: &Player, attr: &QuantityRef) -> Option<
     match attr {
         // CR 402.1: cards in the candidate's hand.
         QuantityRef::HandSize { .. } => Some(usize_to_i32_saturating(p.hand.len())),
-        // CR 119.3: life lost this turn is tracked per candidate player.
-        QuantityRef::LifeLostThisTurn { .. } => Some(u32_to_i32_saturating(p.life_lost_this_turn)),
+        // CR 119.3: life lost is tracked per candidate player; the window picks
+        // the live this-turn counter or the snapshot latched at the turn
+        // boundary (CR 500), so a last-turn attr never reads this turn.
+        QuantityRef::LifeLost { window, .. } => Some(u32_to_i32_saturating(match window {
+            TurnWindow::ThisTurn => p.life_lost_this_turn,
+            TurnWindow::LastTurn => p.life_lost_last_turn,
+        })),
+        // CR 601.2i + CR 603.4: spells the candidate cast during the previous
+        // turn, read from the per-player snapshot latched at the turn boundary
+        // ("a player cast two or more spells last turn"). Gated by
+        // `candidate_scalar_reads_spell_attr`: every other spell attr (a
+        // filtered last-turn count, any this-turn count) has no per-candidate
+        // reader and falls to `None`, failing the candidate closed.
+        QuantityRef::SpellsCast {
+            filter: None,
+            window: TurnWindow::LastTurn,
+            ..
+        } => Some(u32_to_i32_saturating(p.spells_cast_last_turn)),
         // CR 119.3: life gained this turn is tracked per candidate player — the
         // gained-direction sibling of the arm above, read by the all-players
         // "for each player who gained life this turn" population.
@@ -35290,9 +35323,10 @@ mod tests {
                         scope: crate::types::ability::CountScope::Controller,
                         card_types: vec![],
                     },
-                    QuantityRef::SpellsCastThisTurn {
+                    QuantityRef::SpellsCast {
                         filter: Some(filter.clone()),
                         scope: crate::types::ability::CountScope::Controller,
+                        window: TurnWindow::ThisTurn,
                     },
                     QuantityRef::SpellsCastBeforeTriggeringSpell {
                         filter: Some(filter.clone()),
@@ -36357,8 +36391,9 @@ mod tests {
                 QuantityRef::StartingLifeTotal {
                     player: player.clone(),
                 },
-                QuantityRef::LifeLostThisTurn {
+                QuantityRef::LifeLost {
                     player: player.clone(),
+                    window: TurnWindow::ThisTurn,
                 },
                 QuantityRef::PartySize {
                     player: player.clone(),
@@ -66308,8 +66343,9 @@ mod tests {
         assert_eq!(
             candidate_player_scalar(
                 p,
-                &QuantityRef::LifeLostThisTurn {
-                    player: PlayerScope::ScopedPlayer
+                &QuantityRef::LifeLost {
+                    player: PlayerScope::ScopedPlayer,
+                    window: TurnWindow::ThisTurn,
                 }
             ),
             Some(3)
@@ -75919,6 +75955,71 @@ mod saturating_amount_tests {
             Some(i32::MAX)
         );
         assert_eq!(excess(&fight, &[damage(5, 2)]), Some(2));
+    }
+}
+
+#[cfg(test)]
+mod last_turn_candidate_scalar_tests {
+    use super::*;
+    use crate::types::ability::{CountScope, TypedFilter};
+    use crate::types::game_state::GameState;
+
+    fn spells(filter: Option<TargetFilter>, window: TurnWindow) -> QuantityRef {
+        QuantityRef::SpellsCast {
+            scope: CountScope::ScopedPlayer,
+            filter,
+            window,
+        }
+    }
+
+    /// CR 601.2i + CR 603.4: the per-candidate reader behind
+    /// `PlayerFilter::PlayerAttribute` answers the unfiltered last-turn spell count off each
+    /// candidate's own snapshot (Gatstaf Howler: "a player cast two or more spells last turn")
+    /// and fails closed (`None`) for every spell attr it cannot answer: a last-turn count with a
+    /// spell filter (no per-spell data survives the turn boundary) and any this-turn count.
+    #[test]
+    fn candidate_reads_each_players_last_turn_spell_snapshot_and_fails_closed_otherwise() {
+        let mut state = GameState::new_two_player(3);
+        state.players[0].spells_cast_last_turn = 2;
+        state.players[1].spells_cast_last_turn = 0;
+        let attr = spells(None, TurnWindow::LastTurn);
+        assert_eq!(candidate_player_scalar(&state.players[0], &attr), Some(2));
+        assert_eq!(candidate_player_scalar(&state.players[1], &attr), Some(0));
+        assert!(candidate_scalar_reads_spell_attr(&attr));
+        for unreadable in [
+            spells(
+                Some(TargetFilter::Typed(TypedFilter::creature())),
+                TurnWindow::LastTurn,
+            ),
+            spells(None, TurnWindow::ThisTurn),
+        ] {
+            assert_eq!(
+                candidate_player_scalar(&state.players[0], &unreadable),
+                None
+            );
+            assert!(!candidate_scalar_reads_spell_attr(&unreadable));
+        }
+    }
+
+    /// CR 500 + CR 119.3: a last-turn life attr reads the snapshot latched at the turn boundary,
+    /// never the this-turn counter (a `{ .. }` wildcard would read this turn for either window).
+    #[test]
+    fn candidate_life_lost_attr_reads_the_window_it_names() {
+        let mut state = GameState::new_two_player(3);
+        state.players[0].life_lost_this_turn = 3;
+        state.players[0].life_lost_last_turn = 7;
+        let life = |window| QuantityRef::LifeLost {
+            player: PlayerScope::ScopedPlayer,
+            window,
+        };
+        assert_eq!(
+            candidate_player_scalar(&state.players[0], &life(TurnWindow::ThisTurn)),
+            Some(3)
+        );
+        assert_eq!(
+            candidate_player_scalar(&state.players[0], &life(TurnWindow::LastTurn)),
+            Some(7)
+        );
     }
 }
 

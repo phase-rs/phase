@@ -4712,22 +4712,41 @@ fn parse_hand_reveal_target_and_card_filter(
 
     // CR 107.1c + CR 701.20a: "any number of [type] cards in your hand" lets the
     // player choose which matching cards (zero or more) to reveal; "all [type]
-    // cards" keeps the historical single post-reveal choice.
-    if let Ok((after_quantifier, cardinality)) = alt((
+    // cards" / "each [type] card" keep the historical single post-reveal choice.
+    if let Ok((after_quantifier, (cardinality, noun_marker, noun_in, noun_from))) = alt((
         value(
-            ObjectSelectionCardinality::AnyNumber,
+            (
+                ObjectSelectionCardinality::AnyNumber,
+                " cards",
+                " cards in ",
+                " cards from ",
+            ),
             tag::<_, _, OracleError<'_>>("any number of "),
         ),
-        value(ObjectSelectionCardinality::SINGLE, tag("all ")),
+        value(
+            (
+                ObjectSelectionCardinality::SINGLE,
+                " cards",
+                " cards in ",
+                " cards from ",
+            ),
+            tag("all "),
+        ),
+        value(
+            (
+                ObjectSelectionCardinality::SINGLE,
+                " card",
+                " card in ",
+                " card from ",
+            ),
+            tag("each "),
+        ),
     ))
     .parse(after_reveal_lower)
     {
         let Ok((hand_phrase, descriptor)) = terminated(
-            take_until::<_, _, OracleError<'_>>(" cards"),
-            alt((
-                tag::<_, _, OracleError<'_>>(" cards in "),
-                tag(" cards from "),
-            )),
+            take_until::<_, _, OracleError<'_>>(noun_marker),
+            alt((tag::<_, _, OracleError<'_>>(noun_in), tag(noun_from))),
         )
         .parse(after_quantifier) else {
             return (TargetFilter::Any, TargetFilter::None, cardinality);
@@ -4741,7 +4760,9 @@ fn parse_hand_reveal_target_and_card_filter(
         let singular = format!("{} card", descriptor.trim());
         let (filter, rem) =
             parse_type_phrase_folding_with_ctx(&singular, &mut ctx.clone_player_antecedents());
-        if rem.trim().is_empty() && matches!(filter, TargetFilter::Typed(_)) {
+        if rem.trim().is_empty()
+            && matches!(filter, TargetFilter::Typed(_) | TargetFilter::Or { .. })
+        {
             return (target, filter, cardinality);
         }
         return (target, TargetFilter::None, cardinality);
@@ -20156,6 +20177,7 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::TurnWindow;
 
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::counter::CounterType;
@@ -22619,10 +22641,10 @@ mod tests {
                     matches!(
                         amount,
                         QuantityExpr::Ref {
-                            qty: crate::types::ability::QuantityRef::LifeLostThisTurn { .. }
+                            qty: crate::types::ability::QuantityRef::LifeLost { .. }
                         }
                     ),
-                    "Expected LifeLostThisTurn, got {amount:?}"
+                    "Expected LifeLost, got {amount:?}"
                 );
             }
             other => panic!("Expected GainLife, got {other:?}"),
@@ -24088,7 +24110,7 @@ mod tests {
     /// CR 115.1 + CR 119.3: Astarion (Feed mode) — "loses life equal to the
     /// amount of life they lost this turn." The third-person "they" anaphor in a
     /// targeted life-change refers to the effect's player target, so it maps to
-    /// `LifeLostThisTurn { Target }` (NOT `Controller` like the "you" form). The
+    /// `LifeLost { Target }` (NOT `Controller` like the "you" form). The
     /// maintainer's shared `parse_life_lost_ref` "amount of … they lost" tag is
     /// unreachable behind its own prefix strip, so this targeted-context
     /// recognizer is what resurrects the Feed mode.
@@ -24105,8 +24127,9 @@ mod tests {
                 NumericImperativeAst::LoseLife { amount } => assert_eq!(
                     amount,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::LifeLostThisTurn {
+                        qty: QuantityRef::LifeLost {
                             player: PlayerScope::Target,
+                            window: TurnWindow::ThisTurn,
                         },
                     },
                     "{text:?} must be Target-scoped",
@@ -30933,11 +30956,11 @@ mod tests {
             "draw a card for each spell you've cast this turn from anywhere other than your hand";
         match parse_numeric_imperative_ast(text, text) {
             Some(NumericImperativeAst::Draw { count, .. }) => {
-                // Must resolve to the SpellsCastThisTurn ref carrying the cast-origin
+                // Must resolve to the SpellsCast ref carrying the cast-origin
                 // filter, not a Fixed(1) draw.
                 match count {
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn { filter, .. },
+                        qty: QuantityRef::SpellsCast { filter, .. },
                     } => {
                         let filter = filter.expect("cast-origin filter must be present");
                         assert!(
@@ -30946,7 +30969,7 @@ mod tests {
                             "draw count must carry the cast-origin Not(InZone(Hand)) filter, got {filter:?}"
                         );
                     }
-                    other => panic!("expected SpellsCastThisTurn ref, got {other:?}"),
+                    other => panic!("expected SpellsCast ref, got {other:?}"),
                 }
             }
             other => panic!("expected Draw imperative, got {other:?}"),
@@ -31575,6 +31598,89 @@ mod tests {
                 assert_eq!(scope, crate::types::ability::CountScope::Controller);
             }
             other => panic!("expected ZoneCardCount, got {other:?}"),
+        }
+    }
+
+    /// CR 701.20a: "reveals each nonland card in their hand" (Thought Rattle)
+    /// is a whole-hand reveal restricted to a typed filter, not an unfiltered one.
+    #[test]
+    fn parse_hand_reveal_each_filtered_card() {
+        for input in [
+            "reveals each nonland card in their hand",
+            "reveals each nonland card from their hand",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+            let Some(HandRevealImperativeAst::RevealAll {
+                card_filter,
+                cardinality,
+                ..
+            }) = result
+            else {
+                panic!("{input}: expected RevealAll, got {result:?}");
+            };
+            assert_eq!(cardinality, ObjectSelectionCardinality::SINGLE);
+            assert!(
+                matches!(card_filter, TargetFilter::Typed(_)),
+                "{input}: expected typed nonland filter, got {card_filter:?}"
+            );
+        }
+    }
+
+    /// CR 701.20a: "reveals all nonland cards in their hand" (Thought Partition, Juggernaut Peddler)
+    /// and "reveals all creature and land cards in their hand" (Boareskyr Tollkeeper)
+    /// retain the typed filter.
+    #[test]
+    fn parse_hand_reveal_all_filtered_cards() {
+        for input in [
+            "reveals all nonland cards in their hand",
+            "reveals all nonland cards from their hand",
+            "reveals all creature and land cards in their hand",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+            let Some(HandRevealImperativeAst::RevealAll {
+                card_filter,
+                cardinality,
+                ..
+            }) = result
+            else {
+                panic!("{input}: expected RevealAll, got {result:?}");
+            };
+            assert_eq!(cardinality, ObjectSelectionCardinality::SINGLE);
+            assert!(
+                matches!(
+                    card_filter,
+                    TargetFilter::Typed(_) | TargetFilter::Or { .. }
+                ),
+                "{input}: expected typed or disjunctive filter, got {card_filter:?}"
+            );
+        }
+    }
+
+    /// CR 107.1c + CR 701.20a: "any number of" preserves ObjectSelectionCardinality::AnyNumber
+    /// and the typed filter.
+    #[test]
+    fn parse_hand_reveal_any_number_filtered_cards() {
+        for input in [
+            "reveals any number of creature cards from their hand",
+            "reveals any number of nonland cards in their hand",
+        ] {
+            let lower = input.to_lowercase();
+            let result = parse_hand_reveal_ast(input, &lower, &mut ParseContext::default());
+            let Some(HandRevealImperativeAst::RevealAll {
+                card_filter,
+                cardinality,
+                ..
+            }) = result
+            else {
+                panic!("{input}: expected RevealAll, got {result:?}");
+            };
+            assert_eq!(cardinality, ObjectSelectionCardinality::AnyNumber);
+            assert!(
+                matches!(card_filter, TargetFilter::Typed(_)),
+                "{input}: expected typed filter, got {card_filter:?}"
+            );
         }
     }
 

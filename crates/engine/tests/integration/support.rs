@@ -88,8 +88,10 @@ fn fixture_path() -> PathBuf {
 fn load_fixture(path: &Path) -> CardDatabase {
     let file = File::open(path).expect("fixture should open");
     let reader = BufReader::new(file);
-    let decoder = GzDecoder::new(reader);
-    CardDatabase::from_export_reader(decoder).expect("fixture should load")
+    CardDatabase::from_compressed_export_cached(reader, |gz| {
+        std::io::read_to_string(GzDecoder::new(gz))
+    })
+    .expect("fixture should load")
 }
 
 /// Returns the shared, process-wide card database, loading it on first use.
