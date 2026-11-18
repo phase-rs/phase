@@ -2006,6 +2006,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
             player_id,
             sides,
             result,
+            ..
         } => match result {
             // CR 706: a numeric die roll renders its face value.
             Some(r) => vec![
@@ -3377,6 +3378,7 @@ mod tests {
                 player_id: PlayerId(0),
                 sides: 20,
                 result: Some(17),
+                pre_entry_source: None,
             },
             GameEvent::StartingPlayerContest {
                 rounds: vec![crate::types::events::ContestRound {

@@ -1815,6 +1815,10 @@
       "title": "Ordenar las copias",
       "subtitle": "Elige el hechizo cuya copia se pone a continuación en la pila"
     },
+    "memberOrder": {
+      "title": "Ordena las cartas",
+      "subtitle": "Elige qué carta se procesa a continuación"
+    },
     "collectEvidence": {
       "title": "Recabar pruebas",
       "subtitle": "Exilia cartas de tu cementerio con un valor de maná total de {{minimum}} o mayor"

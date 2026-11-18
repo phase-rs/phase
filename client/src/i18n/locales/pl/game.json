@@ -1815,6 +1815,10 @@
       "title": "Ustal kolejność kopii",
       "subtitle": "Wybierz czar, którego kopia trafi teraz na stos"
     },
+    "memberOrder": {
+      "title": "Ustal kolejność kart",
+      "subtitle": "Wybierz kartę, która zostanie rozpatrzona jako następna"
+    },
     "collectEvidence": {
       "title": "Zbierz dowody",
       "subtitle": "Wygnaj karty ze swojego cmentarza o łącznej wartości many {{minimum}} lub większej"

@@ -19,13 +19,14 @@
 //! and the control below exists precisely to catch a regression back into that vacuum.
 
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::AbilityTag;
+use engine::types::ability::{AbilityTag, Effect, ResolvedAbility};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{StackEntryKind, WaitingFor};
+use engine::types::game_state::{PendingRepeatIteration, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 fn add_mana(runner: &mut engine::game::scenario::GameRunner, ty: ManaType, count: usize) {
@@ -642,6 +643,61 @@ fn announced_source_x_is_save_compatible() {
         "CR 107.3a/107.3d: a mid-activation save written under the OLD field name must still load \
          its announced X. Without `#[serde(alias = \"activated_ability_x\")]` the unknown key is \
          SILENTLY IGNORED and this reads None — a live X lost on load, with no error."
+    );
+}
+
+/// CR 608.2f + CR 405.3: a save written with the pre-rename field
+/// `copy_order_fixed` (v0.127.0) must still load its ordering state.
+/// The field was renamed to `order_fixed` in the engine; without
+/// `#[serde(alias = "copy_order_fixed")]` the old key is silently ignored
+/// and the restored loop loses the controller's fixed order choices — the
+/// subsequent `MemberOrderChoice` prompts are never emitted.
+#[test]
+fn pending_repeat_iteration_order_fixed_loads_old_copy_order_fixed_key() {
+    // Build a minimal PendingRepeatIteration with a live order_fixed value.
+    let ability = ResolvedAbility::new(Effect::NoOp, vec![], ObjectId(0), PlayerId(0));
+    let iter = PendingRepeatIteration {
+        ability: Box::new(ability),
+        tracked_members: vec![ObjectId(1), ObjectId(2)],
+        iterated_counter_kinds: vec![],
+        next_iteration: 1,
+        total_iterations: 2,
+        order_fixed: Some(1),
+    };
+
+    // (1) NEW SHAPE: round-trips with the current key.
+    let new_shape = serde_json::to_value(&iter).expect("serialize");
+    assert!(
+        new_shape.get("order_fixed").is_some(),
+        "a live order_fixed must be persisted"
+    );
+    let reloaded: PendingRepeatIteration = serde_json::from_value(new_shape).expect("deserialize");
+    assert_eq!(
+        reloaded.order_fixed,
+        Some(1),
+        "order_fixed must round-trip through a save"
+    );
+
+    // (2) OLD SHAPE: the pre-rename key must still bind via #[serde(alias)].
+    let mut pre_rename = serde_json::to_value(&iter).expect("serialize");
+    let carried = pre_rename
+        .as_object_mut()
+        .expect("PendingRepeatIteration serializes as a JSON object")
+        .remove("order_fixed")
+        .expect("the live order_fixed was just set, so the key must be present");
+    pre_rename
+        .as_object_mut()
+        .expect("PendingRepeatIteration serializes as a JSON object")
+        .insert("copy_order_fixed".to_string(), carried);
+
+    let reloaded: PendingRepeatIteration = serde_json::from_value(pre_rename)
+        .expect("a pre-rename save must still deserialize (no deny_unknown_fields)");
+    assert_eq!(
+        reloaded.order_fixed,
+        Some(1),
+        "CR 608.2f: a save written under the OLD field name copy_order_fixed must still load \
+         its fixed order. Without #[serde(alias = \"copy_order_fixed\")] the unknown key is \
+         SILENTLY IGNORED and this reads None — the controller's ordering choices lost on load."
     );
 }
 

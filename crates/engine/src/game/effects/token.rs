@@ -70,6 +70,14 @@ pub(crate) struct TokenAbilityMaterialization {
     pub back_face: Option<BackFaceData>,
     pub rules_text: Option<String>,
     pub unparsed_rules_text_lines: Vec<String>,
+    /// CR 111.3 + CR 111.10: catalog-derived extras that are semantically new
+    /// beside the predefined payload (e.g. Gingerbrute's `{1}` unblockable
+    /// rider beside the predefined Food ability). Carried as a nested
+    /// `CatalogRulesText`-sourced sub-payload — typed provenance, not a flag —
+    /// so the existing with-clause suppress guard in
+    /// `apply_token_ability_materialization` applies to the extras unchanged.
+    /// `None` when the catalog contributes nothing new.
+    pub merged_extras: Option<Box<TokenAbilityMaterialization>>,
 }
 
 impl TokenAbilityMaterialization {
@@ -84,6 +92,7 @@ impl TokenAbilityMaterialization {
             back_face: None,
             rules_text: None,
             unparsed_rules_text_lines: Vec::new(),
+            merged_extras: None,
         }
     }
 
@@ -100,19 +109,234 @@ impl TokenAbilityMaterialization {
 /// CR 111.3 + CR 111.10: Materialize the intrinsic ability payload a token
 /// receives from its predefined subtype/name or, if that contributes nothing,
 /// from the linked catalog token rules text.
+///
+/// When both contribute, the catalog path contributes only what is NOT
+/// semantically present in the predefined payload (compared with the
+/// `*_semantically_equal` predicates below, never card-specific): both sources
+/// describe the same printed ability, and granting it from each would create
+/// two separately-activatable instances (CR 113.2c) the printed token does not
+/// have. The extras ride a nested `CatalogRulesText`-sourced
+/// sub-payload so the with-clause suppress guard applies to them unchanged;
+/// folding extras into the top-level payload is forbidden because it would
+/// bypass that guard.
+///
+/// The gate probe (`predefined_catalog_merge_gate_probe_prints_per_preset_verdicts`)
+/// governs which subtypes merge: kinds whose catalog parses carry abilities the
+/// hand-built predefined payloads model differently (Map explore-as-TargetOnly,
+/// Lander search composition, Junk runtime-bound permission ids, Shard scry-draw
+/// composition, Jace/Role-aura riders) keep today's predefined-only short-circuit
+/// byte-for-byte — merging there would ship a duplicate second ability.
+const MERGE_SCOPED_OUT_SUBTYPES: &[&str] = &["Jace", "Role", "Map", "Lander", "Junk", "Shard"];
+
 pub(crate) fn materialize_token_ability_payload(
     name: &str,
     subtypes: &[String],
     preset: Option<&crate::game::token_presets::TokenPreset>,
 ) -> TokenAbilityMaterialization {
     let predefined = materialize_predefined_token_payload(name, subtypes);
-    if predefined.has_functional_payload() {
+    if !predefined.has_functional_payload() {
+        return preset.map_or_else(
+            TokenAbilityMaterialization::none,
+            materialize_catalog_token_payload,
+        );
+    }
+    let Some(preset) = preset else {
+        return predefined;
+    };
+    if subtypes
+        .iter()
+        .any(|subtype| MERGE_SCOPED_OUT_SUBTYPES.contains(&subtype.as_str()))
+    {
         return predefined;
     }
-    preset.map_or_else(
-        TokenAbilityMaterialization::none,
-        materialize_catalog_token_payload,
-    )
+    let catalog = materialize_catalog_token_payload(preset);
+    if !catalog.has_functional_payload() {
+        return predefined;
+    }
+    let mut merged = predefined;
+    let mut extras = TokenAbilityMaterialization::none();
+    extras.source = TokenAbilitySource::CatalogRulesText;
+    if merged.rules_text.is_none() {
+        // Display only: the predefined path had no text of its own.
+        extras.rules_text = catalog.rules_text.clone();
+    }
+    for ability in &catalog.abilities {
+        // CR 111.3: a catalog line that defines no ability (reminder text like
+        // "(This token's mana cost is {1}.)", which `classify_quoted_inner`
+        // lowers to a granted ability carrying `Effect::Unimplemented`) is not
+        // a real ability and must never ride extras — otherwise the token gains
+        // a phantom ability slot no printed ability backs (Gingerbrute would
+        // materialize 3 abilities instead of 2). The line stays a parser gap,
+        // not a granted ability.
+        if matches!(*ability.effect, Effect::Unimplemented { .. }) {
+            continue;
+        }
+        let known = merged
+            .abilities
+            .iter()
+            .chain(extras.abilities.iter())
+            .any(|known| ability_semantically_equal(known, ability));
+        if !known {
+            extras.abilities.push(ability.clone());
+        }
+    }
+    for trigger in &catalog.trigger_definitions {
+        let known = merged
+            .trigger_definitions
+            .iter()
+            .chain(extras.trigger_definitions.iter())
+            .any(|known| trigger_semantically_equal(known, trigger));
+        if !known {
+            extras.trigger_definitions.push(trigger.clone());
+        }
+    }
+    for static_def in &catalog.static_definitions {
+        let known = merged
+            .static_definitions
+            .iter()
+            .chain(extras.static_definitions.iter())
+            .any(|known| static_semantically_equal(known, static_def));
+        if !known {
+            extras.static_definitions.push(static_def.clone());
+        }
+    }
+    for keyword in &catalog.keywords {
+        let known = merged
+            .keywords
+            .iter()
+            .chain(extras.keywords.iter()) // allow-raw-authority: static keyword-list merge, no game object
+            .any(|known| known == keyword)
+            || preset.body.keywords.contains(keyword); // allow-raw-authority: static catalog-body keyword comparison
+        if !known {
+            extras.keywords.push(keyword.clone());
+        }
+    }
+    for modification in &catalog.modifications {
+        let known = merged
+            .modifications
+            .iter()
+            .chain(extras.modifications.iter())
+            .any(|known| {
+                modification_semantically_equal(known, modification, &merged, &extras, preset)
+            });
+        if !known {
+            extras.modifications.push(modification.clone());
+        }
+    }
+    extras.unparsed_rules_text_lines = catalog.unparsed_rules_text_lines;
+    if extras.has_functional_payload() {
+        merged.merged_extras = Some(Box::new(extras));
+    }
+    // Coverage accounting reads the top-level unparsed lines: the old
+    // predefined short-circuit returned none here, so the merge keeps none —
+    // the catalog's residual lines stay inside the extras sub-payload where
+    // the apply path (which never reads unparsed lines) and coverage (which
+    // never looks inside extras) both treat them exactly as before.
+    merged
+}
+
+/// CR 111.3: two ability definitions are the same ability when every semantic
+/// field agrees. Engine-built abilities carry `description: None` while
+/// catalog-parsed ones carry the parsed line text (and likewise
+/// `target_prompt`), so those two display-only fields are blanked before the
+/// structural comparison — naive `==` never fires across the two provenances.
+fn ability_semantically_equal(a: &AbilityDefinition, b: &AbilityDefinition) -> bool {
+    let mut a = a.clone();
+    let mut b = b.clone();
+    a.description = None;
+    a.target_prompt = None;
+    b.description = None;
+    b.target_prompt = None;
+    a == b
+}
+
+/// CR 111.3: same normalize-then-compare treatment for triggers. `description`
+/// is the only display-only field on `TriggerDefinition`; a nested `execute`
+/// ability is normalized with the ability predicate by the same rule.
+fn trigger_semantically_equal(a: &TriggerDefinition, b: &TriggerDefinition) -> bool {
+    let mut a = a.clone();
+    let mut b = b.clone();
+    a.description = None;
+    b.description = None;
+    match (&mut a.execute, &mut b.execute) {
+        (Some(a_execute), Some(b_execute)) => {
+            let mut a_normalized = a_execute.as_ref().clone();
+            let mut b_normalized = b_execute.as_ref().clone();
+            a_normalized.description = None;
+            a_normalized.target_prompt = None;
+            b_normalized.description = None;
+            b_normalized.target_prompt = None;
+            a.execute = Some(Box::new(a_normalized));
+            b.execute = Some(Box::new(b_normalized));
+        }
+        (None, None) => {}
+        _ => return false,
+    }
+    a == b
+}
+
+/// CR 111.3: same normalize-then-compare treatment for statics. `description`
+/// is display-only; a nested granted trigger/ability inside `modifications`
+/// is normalized with the trigger/ability predicate by the same rule.
+fn static_semantically_equal(a: &StaticDefinition, b: &StaticDefinition) -> bool {
+    let mut a = a.clone();
+    let mut b = b.clone();
+    a.description = None;
+    b.description = None;
+    normalize_static_modifications(&mut a);
+    normalize_static_modifications(&mut b);
+    a == b
+}
+
+fn normalize_static_modifications(def: &mut StaticDefinition) {
+    for modification in &mut def.modifications {
+        match modification {
+            ContinuousModification::GrantAbility { definition } => {
+                definition.description = None;
+                definition.target_prompt = None;
+            }
+            ContinuousModification::GrantTrigger { trigger } => {
+                trigger.description = None;
+                if let Some(execute) = trigger.execute.as_mut() {
+                    execute.description = None;
+                    execute.target_prompt = None;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// CR 111.3: modification-level semantic equality for the residual catalog
+/// `modifications` vec (the materializer already routes `GrantTrigger`,
+/// `AddKeyword`, and `GrantAbility` into their own vecs; this covers the
+/// remainder defensively). A granted ability recurses into the ability
+/// predicate; a granted keyword is a duplicate when the predefined payload,
+/// the preset body, or the already-accepted extras carry it; every other
+/// variant compares structurally.
+fn modification_semantically_equal(
+    known: &ContinuousModification,
+    candidate: &ContinuousModification,
+    predefined: &TokenAbilityMaterialization,
+    extras: &TokenAbilityMaterialization,
+    preset: &crate::game::token_presets::TokenPreset,
+) -> bool {
+    match (known, candidate) {
+        (
+            ContinuousModification::GrantAbility {
+                definition: known_def,
+            },
+            ContinuousModification::GrantAbility {
+                definition: candidate_def,
+            },
+        ) => ability_semantically_equal(known_def, candidate_def),
+        (_, ContinuousModification::AddKeyword { keyword }) => {
+            predefined.keywords.contains(keyword) // allow-raw-authority: pure payload-data comparison for semantic equality
+                || extras.keywords.contains(keyword) // allow-raw-authority: pure payload-data comparison for semantic equality
+                || preset.body.keywords.contains(keyword) // allow-raw-authority: pure catalog-body data comparison for semantic equality
+        }
+        _ => known == candidate,
+    }
 }
 
 fn materialize_predefined_token_payload(
@@ -1293,7 +1517,6 @@ fn drive_token_event_delivery(
     } else {
         pause_event
     };
-
     // CR 111.1 + CR 614.12: the held owner's tokens are published for the delivery
     // (`deliver_with_held_copy_owner`). The window closes before the owner is re-parked,
     // at whichever exit the delivery took, so the re-park reads the frame and the order
@@ -2117,6 +2340,27 @@ pub(crate) fn materialize_token_spec_body(
         object.keywords = ch.keywords.clone();
         object.base_keywords = ch.keywords.clone();
     }
+    // CR 111.11 + CR 202.3: a named token created as a copy of a card carries
+    // that card's mana cost (Gingerbrute's `{1}`, read from its catalog
+    // reminder). A cost is a characteristic (CR 111.3), not a granted ability,
+    // so this installs independent of the `has_attrs`/inject suppress guards
+    // above. `base_mana_cost` rides along so the layers reset keeps the MV
+    // after `evaluate_layers`. Covers resolve + replay with zero drift: both
+    // call sites pass the recorded `token_image_ref` through this function,
+    // and the copy seam (`materialize_token_copy_body`) is untouched — CR 707.2
+    // copies carry the source's cost through the copiable values.
+    if let Some(cost) = object
+        .token_image_ref
+        .as_ref()
+        .and_then(|image_ref| {
+            crate::game::token_presets::known_token_preset_by_id(&image_ref.preset_id)
+        })
+        .and_then(|preset| preset.rules_text.as_deref())
+        .and_then(crate::game::token_presets::catalog_token_mana_cost)
+    {
+        object.mana_cost = cost.clone();
+        object.base_mana_cost = cost;
+    }
     // CR 400.7 + CR 302.6: Tokens enter the battlefield as new objects
     // and must run the same ETB-state reset as any other permanent
     // (summoning sickness, echo, damage, loyalty-activated flags).
@@ -2367,7 +2611,6 @@ struct LiminalCopyTokenContinuation {
     owner: PlayerId,
     copy: Box<CopyTokenSpec>,
     enter_tapped: EtbTapState,
-    enter_with_counters: Vec<(CounterType, u32)>,
     remaining_count: u32,
 }
 
@@ -2384,7 +2627,6 @@ fn liminal_copy_token_continuation_for_event(
         owner: entry.object.projected().owner,
         copy,
         enter_tapped: entry.enter_tapped,
-        enter_with_counters: entry.enter_with_counters.clone(),
         remaining_count: entry.remaining_count,
     })
 }
@@ -2407,12 +2649,15 @@ fn continue_liminal_copy_token_batch(
         // handoff publishes the ledger and advances or consumes the owner.
         let copy_owner = state.active_copy_token().cloned();
         let initial_created_ids = state.last_created_token_ids.clone();
+        // CR 122.6a + CR 614.1c: a liminal batch is created with no creation
+        // counters, and a committed entrant's own scheduled counters (its roll,
+        // its tribute) were its alone, so the next token starts with none.
         let status = super::token_copy::apply_copy_token_after_replacement_with_created_ids(
             state,
             continuation.owner,
             *continuation.copy,
             continuation.enter_tapped,
-            continuation.enter_with_counters,
+            Vec::new(),
             continuation.remaining_count,
             initial_created_ids,
             events,
@@ -2520,7 +2765,6 @@ fn liminal_copy_token_continuation_post_action(
         owner: continuation.owner,
         copy: continuation.copy,
         enter_tapped: continuation.enter_tapped,
-        enter_with_counters: continuation.enter_with_counters,
         remaining_count: continuation.remaining_count,
     }
 }
@@ -2530,7 +2774,6 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
     owner: PlayerId,
     copy: Box<CopyTokenSpec>,
     enter_tapped: EtbTapState,
-    enter_with_counters: Vec<(CounterType, u32)>,
     remaining_count: u32,
     events: &mut Vec<GameEvent>,
 ) -> bool {
@@ -2540,7 +2783,6 @@ pub(crate) fn continue_liminal_copy_token_batch_after_counter_pause(
             owner,
             copy,
             enter_tapped,
-            enter_with_counters,
             remaining_count,
         }),
         events,
@@ -5541,7 +5783,7 @@ fn inject_resolved_token_abilities_inner(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let Some(materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
+    let Some(mut materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
         return;
     };
     if materialized.source == TokenAbilitySource::CatalogRulesText
@@ -5549,7 +5791,14 @@ fn inject_resolved_token_abilities_inner(
     {
         return;
     }
+    // Two separate apply calls, never folded: the extras carry
+    // `CatalogRulesText` provenance so the with-clause suppress guard sees
+    // them exactly as it saw the old catalog fallback.
+    let extras = materialized.merged_extras.take();
     apply_token_ability_materialization(state, obj_id, materialized, true);
+    if let Some(extras) = extras {
+        apply_token_ability_materialization(state, obj_id, *extras, true);
+    }
 }
 
 /// CR 111.3 + CR 111.4: Grant catalog `rules_text` when token creation resolved
@@ -5570,13 +5819,19 @@ fn inject_catalog_token_abilities_inner(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let Some(materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
+    let Some(mut materialized) = materialize_token_ability_payload_for_object(state, obj_id) else {
         return;
     };
     if materialized.source == TokenAbilitySource::CatalogRulesText
         && materialized.has_functional_payload()
     {
         apply_token_ability_materialization(state, obj_id, materialized, true);
+    } else if let Some(extras) = materialized.merged_extras.take() {
+        // Debug preset-spawn path: creation already installed the predefined
+        // payload, so only the semantically-new catalog extras are applied
+        // here (gaining e.g. Gingerbrute's rider for free), through the same
+        // suppress guard.
+        apply_token_ability_materialization(state, obj_id, *extras, true);
     }
 }
 
@@ -7706,6 +7961,425 @@ mod tests {
                 "{subtype} token loyalty ability {ability:?} lacks CR 606.3 timing"
             );
         }
+    }
+
+    /// CR 111.3 + CR 111.10 (exhaustive gate probe, G1+N1): for EVERY census
+    /// preset — nonempty `rules_text` whose body subtypes intersect the
+    /// predefined-effect key set (or Sculpture+Treasure) — compute the N1
+    /// conjunction over all five payload axes with the production functions
+    /// (`predefined_token_abilities` vs `materialize_catalog_token_payload`)
+    /// and print one recorded row per preset id. The row table, not prose,
+    /// governs the merge: a non-Gingerbrute preset printing `false` outside
+    /// Jace/Role-aura stops the merge for its kind instead of shipping a
+    /// duplicate.
+    #[test]
+    fn predefined_catalog_merge_gate_probe_prints_per_preset_verdicts() {
+        const GINGERBRUTE_PRESET_ID: &str = "c770e27a-6846-59be-82f0-b2b61dd95d9f";
+        const PREDEFINED_SUBTYPES: &[&str] = &[
+            "Treasure",
+            "Food",
+            "Gold",
+            "Clue",
+            "Blood",
+            "Powerstone",
+            "Map",
+            "Lander",
+            "Mutagen",
+            "Junk",
+            "Incubator",
+            "Shard",
+            "Heartwood",
+            "Jace",
+            "Role",
+        ];
+        let affected = |preset: &crate::game::token_presets::TokenPreset| -> bool {
+            let has_rules = preset
+                .rules_text
+                .as_deref()
+                .is_some_and(|text| !text.is_empty());
+            let subtypes: Vec<&str> = preset.body.subtypes.iter().map(String::as_str).collect();
+            has_rules
+                && (subtypes
+                    .iter()
+                    .any(|subtype| PREDEFINED_SUBTYPES.contains(subtype))
+                    || (subtypes.contains(&"Sculpture") && subtypes.contains(&"Treasure")))
+        };
+        let empty_extras = TokenAbilityMaterialization::none();
+        let mut rows = 0;
+        let mut required_failures = Vec::new();
+        let mut food_failures = Vec::new();
+        let mut heartwood_verdict = None;
+        let mut gingerbrute_verdict = None;
+        let mut gingerbrute_extras = 0;
+        let mut jace_role_false = Vec::new();
+        for preset in crate::game::token_presets::known_token_presets() {
+            if !affected(preset) {
+                continue;
+            }
+            rows += 1;
+            let predefined = materialize_predefined_token_payload(
+                &preset.body.display_name,
+                &preset.body.subtypes,
+            );
+            assert!(
+                predefined.has_functional_payload(),
+                "census preset {} must carry a predefined payload",
+                preset.id
+            );
+            let catalog = materialize_catalog_token_payload(preset);
+            let abil = catalog.abilities.iter().all(|candidate| {
+                predefined
+                    .abilities
+                    .iter()
+                    .any(|known| ability_semantically_equal(known, candidate))
+            });
+            let trig = catalog.trigger_definitions.iter().all(|candidate| {
+                predefined
+                    .trigger_definitions
+                    .iter()
+                    .any(|known| trigger_semantically_equal(known, candidate))
+            });
+            let stat = catalog.static_definitions.iter().all(|candidate| {
+                predefined
+                    .static_definitions
+                    .iter()
+                    .any(|known| static_semantically_equal(known, candidate))
+            });
+            // allow-raw-authority: census test over static materialized payloads
+            let keyw = catalog.keywords.iter().all(|keyword| {
+                // allow-raw-authority: census test over static materialized payloads
+                predefined.keywords.contains(keyword) || preset.body.keywords.contains(keyword)
+            });
+            let mods = catalog.modifications.iter().all(|candidate| {
+                predefined.modifications.iter().any(|known| {
+                    modification_semantically_equal(
+                        known,
+                        candidate,
+                        &predefined,
+                        &empty_extras,
+                        preset,
+                    )
+                })
+            });
+            let verdict = abil && trig && stat && keyw && mods;
+            println!(
+                "merge-gate {} kinds={:?} abil={abil} trig={trig} stat={stat} keyw={keyw} mod={mods} => {verdict}",
+                preset.id, preset.body.subtypes,
+            );
+            let is_gingerbrute = preset.id == GINGERBRUTE_PRESET_ID;
+            let is_scoped = preset
+                .body
+                .subtypes
+                .iter()
+                .any(|subtype| MERGE_SCOPED_OUT_SUBTYPES.contains(&subtype.as_str()));
+            if preset.body.display_name == "Heartwood" {
+                heartwood_verdict = Some(verdict);
+            }
+            if is_gingerbrute {
+                gingerbrute_verdict = Some(verdict);
+                let merged = materialize_token_ability_payload(
+                    &preset.body.display_name,
+                    &preset.body.subtypes,
+                    Some(preset),
+                );
+                gingerbrute_extras = merged
+                    .merged_extras
+                    .as_ref()
+                    .map(|extras| {
+                        extras.abilities.len()
+                            + extras.trigger_definitions.len()
+                            + extras.static_definitions.len()
+                            + extras.keywords.len()
+                            + extras.modifications.len()
+                    })
+                    .unwrap_or(0);
+                // Probe-governed shape: exactly the rider rides extras.
+                assert_eq!(
+                    merged
+                        .merged_extras
+                        .as_ref()
+                        .map(|extras| extras.abilities.len()),
+                    Some(1),
+                    "Gingerbrute extras must be exactly the unblockable rider"
+                );
+            }
+            if preset.body.subtypes.iter().any(|subtype| subtype == "Food")
+                && !is_gingerbrute
+                && !verdict
+            {
+                food_failures.push(preset.id.clone());
+            }
+            if is_scoped {
+                // Scoped kinds keep today's predefined-only short-circuit: the
+                // production merge must contribute no extras for them, so no
+                // duplicate can ship even though the direct verdict is false.
+                if !verdict {
+                    let merged = materialize_token_ability_payload(
+                        &preset.body.display_name,
+                        &preset.body.subtypes,
+                        Some(preset),
+                    );
+                    let scoped_extras = merged
+                        .merged_extras
+                        .as_ref()
+                        .is_some_and(|extras| extras.has_functional_payload());
+                    assert!(
+                        !scoped_extras,
+                        "scoped preset {} must merge to no extras",
+                        preset.id
+                    );
+                    jace_role_false.push(preset.id.clone());
+                }
+            } else if !is_gingerbrute && !verdict {
+                required_failures.push(preset.id.clone());
+            }
+        }
+        println!("merge-gate total census rows: {rows}");
+        // B4 positive control: the Heartwood instrument must fire.
+        assert_eq!(
+            heartwood_verdict,
+            Some(true),
+            "Heartwood predefined must semantically equal its catalog parse"
+        );
+        // F2: every Food preset but Gingerbrute must dedupe to empty.
+        assert!(
+            food_failures.is_empty(),
+            "Food presets printing a merge verdict of false: {food_failures:?}"
+        );
+        // Gingerbrute is the fix's target, excluded from REQUIRED-true by
+        // construction: its catalog extras (the unblockable rider) are
+        // non-empty by design.
+        assert_eq!(
+            gingerbrute_verdict,
+            Some(false),
+            "Gingerbrute must carry non-deduping catalog extras"
+        );
+        assert!(
+            gingerbrute_extras > 0,
+            "Gingerbrute extras must be non-empty (the rider)"
+        );
+        // Scoped kinds (MERGE_SCOPED_OUT_SUBTYPES) are true-or-scope: a `false`
+        // here keeps today's predefined-only short-circuit rather than failing
+        // the gate — each such row above already asserted the production merge
+        // contributes no extras for it.
+        println!(
+            "merge-gate scoped-subtype false rows (scoped, not failures): {jace_role_false:?}"
+        );
+        assert!(
+            required_failures.is_empty(),
+            "REQUIRED-true presets printing a merge verdict of false: {required_failures:?}"
+        );
+    }
+
+    /// CR 111.3: a with-clause token (pre-existing `static_definitions`) keeps
+    /// today's predefined injection and skips only the NEW catalog extras.
+    #[test]
+    fn with_clause_token_keeps_predefined_and_skips_catalog_extras() {
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "c770e27a-6846-59be-82f0-b2b61dd95d9f",
+        )
+        .expect("Gingerbrute preset");
+        // Reach-guard: the extras below must be non-empty, or the suppression
+        // assertion is vacuous.
+        let materialized = materialize_token_ability_payload(
+            "Gingerbrute",
+            &["Food".to_string(), "Golem".to_string()],
+            Some(preset),
+        );
+        assert_eq!(materialized.source, TokenAbilitySource::Predefined);
+        assert!(
+            materialized
+                .merged_extras
+                .as_ref()
+                .is_some_and(|extras| !extras.abilities.is_empty()),
+            "Gingerbrute must carry rider extras for the suppression test to mean anything"
+        );
+
+        let mut state = GameState::new(crate::types::format::FormatConfig::standard(), 2, 42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Gingerbrute".to_string(),
+            Zone::Battlefield,
+        );
+        let with_clause_grant = StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .description("with-clause grant".to_string());
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.is_token = true;
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Food".to_string());
+            obj.card_types.subtypes.push("Golem".to_string());
+            obj.token_image_ref = preset.token_image_ref.clone();
+            Arc::make_mut(&mut obj.base_static_definitions).push(with_clause_grant.clone());
+            obj.static_definitions.push(with_clause_grant);
+        }
+        inject_resolved_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(
+            obj.base_abilities.len(),
+            1,
+            "with-clause Gingerbrute keeps exactly the predefined Food ability"
+        );
+        assert!(
+            matches!(
+                &*obj.base_abilities[0].effect,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
+            "the kept ability is the Food sacrifice ability, got {:?}",
+            obj.base_abilities[0].effect
+        );
+    }
+
+    /// CR 111.11 + CR 202.3 (F2): the shared materializer installs the catalog
+    /// reminder cost onto the token object AND its layer base, so the layers
+    /// reset preserves the MV. No image ref — or a preset with no reminder —
+    /// leaves both at the zero-cost default.
+    #[test]
+    fn materialize_token_spec_body_installs_catalog_mana_cost() {
+        use crate::types::mana::ManaCost;
+        use crate::types::proposed_event::TokenCharacteristics;
+
+        let preset = crate::game::token_presets::known_token_preset_by_id(
+            "c770e27a-6846-59be-82f0-b2b61dd95d9f",
+        )
+        .expect("Gingerbrute preset");
+        // Reach-guard: the reminder the install reads is really there — without
+        // it a None extractor and a vacuous install would both pass.
+        assert!(
+            preset
+                .rules_text
+                .as_deref()
+                .is_some_and(|text| text.contains("(This token's mana cost is {1}.)")),
+            "the Gingerbrute preset must carry its {{1}} cost reminder"
+        );
+        let spec = TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Gingerbrute".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![CoreType::Artifact, CoreType::Creature],
+                subtypes: vec!["Food".to_string(), "Golem".to_string()],
+                supertypes: vec![],
+                colors: vec![],
+                keywords: vec![Keyword::Haste],
+            },
+            script_name: "Gingerbrute".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
+            sacrifice_at: None,
+            source_id: ObjectId(3),
+            controller: PlayerId(0),
+            attach_to: TokenHostRequest::NotRequested,
+        };
+        let mut object = GameObject::new(
+            ObjectId(7),
+            CardId(0),
+            PlayerId(0),
+            "Gingerbrute".to_string(),
+            Zone::Battlefield,
+        );
+        materialize_token_spec_body(
+            &mut object,
+            &spec,
+            preset.token_image_ref.clone(),
+            1,
+            42,
+            false,
+        );
+        // THE DISCRIMINATOR. Reverting the F2 install leaves both at the
+        // zero-cost default and both assertions fail.
+        assert_eq!(
+            object.mana_cost,
+            ManaCost::generic(1),
+            "CR 111.11: the Gingerbrute token carries its card's {{1}} cost"
+        );
+        assert_eq!(
+            object.base_mana_cost,
+            ManaCost::generic(1),
+            "CR 202.3: the layer base carries the cost so the MV survives a layers pass"
+        );
+
+        // Hostile: no image ref means no catalog cost to install.
+        let mut unlinked = GameObject::new(
+            ObjectId(8),
+            CardId(0),
+            PlayerId(0),
+            "Gingerbrute".to_string(),
+            Zone::Battlefield,
+        );
+        materialize_token_spec_body(&mut unlinked, &spec, None, 1, 43, false);
+        assert_eq!(
+            unlinked.mana_cost,
+            ManaCost::zero(),
+            "no image ref installs no cost"
+        );
+        assert_eq!(
+            unlinked.base_mana_cost,
+            ManaCost::zero(),
+            "no image ref installs no layer-base cost"
+        );
+
+        // Hostile: a linked preset with no reminder (predefined Treasure)
+        // stays costless (CR 202.3a).
+        let treasure_preset = crate::game::token_presets::known_token_presets()
+            .iter()
+            .find(|preset| preset.body.display_name == "Treasure")
+            .expect("reach guard: a Treasure preset exists");
+        if let Some(text) = treasure_preset.rules_text.as_deref() {
+            assert!(
+                !text.contains("(This token's mana cost is "),
+                "reach guard: Treasure carries no cost reminder, got {text:?}"
+            );
+        }
+        let mut treasure = GameObject::new(
+            ObjectId(9),
+            CardId(0),
+            PlayerId(0),
+            "Treasure".to_string(),
+            Zone::Battlefield,
+        );
+        let mut treasure_spec = spec.clone();
+        treasure_spec.characteristics = TokenCharacteristics {
+            display_name: "Treasure".to_string(),
+            power: None,
+            toughness: None,
+            loyalty: None,
+            core_types: vec![CoreType::Artifact],
+            subtypes: vec!["Treasure".to_string()],
+            supertypes: vec![],
+            colors: vec![],
+            keywords: vec![],
+        };
+        materialize_token_spec_body(
+            &mut treasure,
+            &treasure_spec,
+            treasure_preset.token_image_ref.clone(),
+            1,
+            44,
+            false,
+        );
+        assert_eq!(
+            treasure.mana_cost,
+            ManaCost::zero(),
+            "a reminder-less preset installs no cost"
+        );
+        assert_eq!(
+            treasure.base_mana_cost,
+            ManaCost::zero(),
+            "a reminder-less preset installs no layer-base cost"
+        );
     }
 
     #[test]

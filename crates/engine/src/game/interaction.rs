@@ -59,9 +59,8 @@ use crate::types::interaction::{
     MAX_INTERACTION_LIST_LEN, MAX_SHORTCUT_PREVIEW_ELEMENTS,
 };
 use crate::types::mana::{
-    AbilityActivationScope, ManaColor, ManaCost, ManaPipId, ManaPool, ManaRestriction,
-    ManaSourceOutput, ManaSourceSelection, ManaType, SpecialAction, SpellCostCriterion,
-    ZoneSpendPolarity,
+    AbilityActivationScope, ManaColor, ManaCost, ManaPipId, ManaPool, ManaRestriction, ManaType,
+    SpecialAction, SpellCostCriterion, ZoneSpendPolarity,
 };
 use crate::types::match_config::DeckCardCount;
 use crate::types::player::PlayerId;
@@ -317,7 +316,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
-        | WaitingFor::SpellCopyOrderChoice { .. }
+        | WaitingFor::MemberOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -581,7 +580,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::RevealChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
-        | WaitingFor::SpellCopyOrderChoice { .. }
+        | WaitingFor::MemberOrderChoice { .. }
         | WaitingFor::DiscardChoice {
             unless_filter: Some(_),
             ..
@@ -5198,7 +5197,7 @@ fn selection_projection(
         | WaitingFor::OutsideGameChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
-        | WaitingFor::SpellCopyOrderChoice { .. }
+        | WaitingFor::MemberOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::LearnChoice { .. }
         | WaitingFor::ManifestDreadChoice { .. }
@@ -5989,44 +5988,19 @@ fn push_object_list(
     }
 }
 
-/// Label one mana action with the mana its own reducer would actually produce.
-/// `resolve` is the caller-supplied authority — the exact function the reducer
-/// for that action variant uses to revalidate the frozen selection — so a label
-/// can never be derived through a sibling surface's selection form. A stale or
-/// no-longer-legal selection resolves to no produced-mana surface, matching the
-/// reducer's own refusal to activate it.
+/// Label one mana action with the mana its own reducer would actually produce,
+/// as `mana_sources::produced_mana_for_action` resolves it through that
+/// reducer's own authority. A stale or no-longer-legal selection, and a
+/// deferred color choice, have no produced-mana surface.
 fn push_produced_mana_surfaces(
     surfaces: &mut Vec<InteractionPresentationSurface>,
     state: &GameState,
-    selection: &ManaSourceSelection,
-    resolve: fn(
-        &GameState,
-        PlayerId,
-        &ManaSourceSelection,
-    ) -> Result<mana_sources::ManaSourceOption, EngineError>,
+    action: &GameAction,
 ) {
-    let Some(player) = state
-        .objects
-        .get(&selection.source.object_id)
-        .map(|object| object.controller)
-    else {
+    let Some(produced) = mana_sources::produced_mana_for_action(state, action) else {
         return;
     };
-    let Ok(option) = resolve(state, player, selection) else {
-        return;
-    };
-    // CR 106.1a + CR 106.1b: A deferred activation has no selected type yet. The
-    // post-cost mana-choice resolver remains the authority for its output.
-    if matches!(
-        selection.output,
-        ManaSourceOutput::DeferredColorChoice { .. }
-    ) {
-        return;
-    }
-    for (index, unit) in mana_sources::live_mana_output_for_option(state, player, &option)
-        .into_iter()
-        .enumerate()
-    {
+    for (index, unit) in produced.into_iter().enumerate() {
         surfaces.push(InteractionPresentationSurface::Mana {
             role: InteractionRoleCode::ProducedMana,
             index: Some(index as u32),
@@ -6063,37 +6037,12 @@ fn project_action_payload(
         GameAction::ChooseEntryAttackTarget { target } => {
             push_attack_target_surface(surfaces, state, target, InteractionRoleCode::AttackTarget)
         }
-        // The two public mana-action surfaces carry deliberately different
-        // selection forms, so each must be labelled through the same authority
-        // that will execute it.
-        //
-        // `TapLandForMana` is minted by `activatable_mana_actions_for_player`
-        // from `ManaSourceOption::semantic_selection` — one *concrete* row per
-        // producible color — and is executed by `handle_tap_land_for_mana` via
-        // `live_land_mana_option_for_selection`.
-        //
-        // `ActivateManaSource` is minted from
-        // `activatable_mana_source_selections`, whose `manual_selection_for_option`
-        // intentionally collapses a flexible source to `Colorless` +
-        // `DeferredColorChoice` so the ordinary mana-choice resolver asks for the
-        // color, and is executed by `activate_mana_source_selection` via
-        // `live_mana_source_option_for_selection`.
-        //
-        // Resolving one through the other's authority can never match a flexible
-        // source, which silently produced an unlabelled action (issue #6944:
-        // City of Brass). Keep each arm paired with its own reducer's resolver.
-        GameAction::TapLandForMana { selection } => push_produced_mana_surfaces(
-            surfaces,
-            state,
-            selection,
-            mana_sources::live_land_mana_option_for_selection,
-        ),
-        GameAction::ActivateManaSource { selection } => push_produced_mana_surfaces(
-            surfaces,
-            state,
-            selection,
-            mana_sources::live_mana_source_option_for_selection,
-        ),
+        // Each mana action is labelled through the same authority that will
+        // execute it: `mana_sources::produced_mana_for_action` pairs each with
+        // its own reducer's resolver (issue #6944, City of Brass).
+        GameAction::TapLandForMana { .. } | GameAction::ActivateManaSource { .. } => {
+            push_produced_mana_surfaces(surfaces, state, action)
+        }
         GameAction::PlayLand { .. }
         | GameAction::Foretell { .. }
         | GameAction::UntapLandForMana { .. }

@@ -48,7 +48,7 @@ use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaSpellGrant};
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
-use crate::types::triggers::{ControlChangeSide, TriggerMode};
+use crate::types::triggers::TriggerMode;
 use crate::types::zones::{EtbTapState, Zone};
 use nom::branch::alt;
 use nom::bytes::complete::tag;
@@ -2687,6 +2687,9 @@ fn fmt_delayed_condition(cond: &DelayedTriggerCondition) -> String {
         DelayedTriggerCondition::AtBeginningOfAddedPhase { phase, .. } => {
             format!("at that added {}", fmt_phase(phase))
         }
+        DelayedTriggerCondition::AtBeginningOfGrantedTurn { phase, .. } => {
+            format!("at that granted turn's {}", fmt_phase(phase))
+        }
         DelayedTriggerCondition::WhenLeavesPlay { .. } => "when leaves play".into(),
         DelayedTriggerCondition::WhenDies { .. } => "when dies".into(),
         DelayedTriggerCondition::WhenLeavesPlayFiltered { filter } => {
@@ -5206,6 +5209,12 @@ fn fmt_trigger_condition(
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         TC::IsMonarch { .. } => "that player is monarch".into(),
+        // CR 122.1f + CR 508.5: keep the defending-player wording distinct so a
+        // gap string names the player the trigger actually tests.
+        TC::IsPoisoned {
+            player: PlayerScope::DefendingPlayer,
+        } => "defending player is poisoned".into(),
+        TC::IsPoisoned { .. } => "that player is poisoned".into(),
         TC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -5472,6 +5481,11 @@ fn fmt_static_condition(cond: &StaticCondition) -> String {
             player: PlayerScope::Controller,
         } => "is monarch".into(),
         SC::IsMonarch { .. } => "that player is monarch".into(),
+        // CR 122.1f: keep the subject wording parallel to `TC::IsPoisoned`.
+        SC::PlayerIsPoisoned {
+            player: PlayerScope::Controller,
+        } => "is poisoned".into(),
+        SC::PlayerIsPoisoned { .. } => "that player is poisoned".into(),
         SC::HasBoon {
             player: PlayerScope::Controller,
         } => "has a boon".into(),
@@ -8687,29 +8701,7 @@ fn trigger_mode_is_supported(
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
 ) -> bool {
     !matches!(mode, TriggerMode::Unknown(_))
-        && !trigger_mode_has_unpublished_event_source(mode)
         && (trigger_registry.contains_key(mode) || matches!(mode, TriggerMode::StateCondition))
-}
-
-/// CR 603.2 + CR 613.1b: a trigger mode whose matcher is registered but whose
-/// triggering event is not published for every way the game can produce it, so
-/// the printed ability would silently miss real occurrences. `Gains` of a
-/// `ChangesController` trigger fires on `GameEvent::ControllerChanged`, which
-/// spell/effect control changes publish but control the layer pass assigns or
-/// retires does not (CR 613.1b: Confiscate's "You control enchanted permanent",
-/// Control Magic, a lapsed `ForAsLongAs` duration): `layers.rs` only assigns
-/// `obj.controller` and diffs the settled controllers. Tracked upstream as
-/// phase-rs/phase#9903; lift this when static/layer control changes publish
-/// `ControllerChanged`. The `Loses` side is not charged here. The runtime
-/// matcher stays registered so the effect-driven control changes still fire it.
-fn trigger_mode_has_unpublished_event_source(mode: &TriggerMode) -> bool {
-    match mode {
-        TriggerMode::ChangesController { side } => match side {
-            ControlChangeSide::Gains => true,
-            ControlChangeSide::Loses => false,
-        },
-        _ => false,
-    }
 }
 
 /// CR 603.7 + CR 603.8: a delayed trigger fires only through an event matcher
@@ -8721,9 +8713,7 @@ fn delayed_trigger_mode_is_supported(
     mode: &TriggerMode,
     trigger_registry: &HashMap<TriggerMode, crate::game::triggers::TriggerMatcher>,
 ) -> bool {
-    !matches!(mode, TriggerMode::Unknown(_))
-        && !trigger_mode_has_unpublished_event_source(mode)
-        && trigger_registry.contains_key(mode)
+    !matches!(mode, TriggerMode::Unknown(_)) && trigger_registry.contains_key(mode)
 }
 
 /// CR 603.7: the trigger definitions a delayed trigger this effect creates is
@@ -8745,6 +8735,7 @@ fn delayed_trigger_definitions(effect: &Effect) -> Vec<&TriggerDefinition> {
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
+        | DelayedTriggerCondition::AtBeginningOfGrantedTurn { .. }
         | DelayedTriggerCondition::WhenLeavesPlay { .. }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { .. }
         | DelayedTriggerCondition::WhenDies { .. }
@@ -10071,7 +10062,6 @@ fn is_card_supported(
     for trig in &face.triggers {
         if matches!(&trig.mode, TriggerMode::Unknown(_))
             || !trigger_registry.contains_key(&trig.mode)
-            || trigger_mode_has_unpublished_event_source(&trig.mode)
         {
             return false;
         }
@@ -11185,6 +11175,7 @@ fn extract_trigger_condition_features(
         | TriggerCondition::CastSpellThisTurn { .. }
         | TriggerCondition::HasMaxSpeed
         | TriggerCondition::IsMonarch { .. }
+        | TriggerCondition::IsPoisoned { .. }
         | TriggerCondition::HasBoon { .. }
         | TriggerCondition::IsInitiative
         | TriggerCondition::NoMonarch
@@ -12004,6 +11995,15 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
             player: PlayerScope::Controller | PlayerScope::RecipientController,
         } => ("IsMonarch", Handled),
         StaticCondition::IsMonarch { .. } => ("IsMonarch", Unhandled),
+        // CR 122.1f: same subject rule as the monarch arm above — the layer
+        // evaluator binds the source ("you") and recipient ("that creature's
+        // controller") subjects, and rejects any other scope at the entry
+        // gate. The unbound arm keeps a DISTINCT key so mixed scopes on one
+        // card resolve by restriction rather than HashMap insertion order.
+        StaticCondition::PlayerIsPoisoned {
+            player: PlayerScope::Controller | PlayerScope::RecipientController,
+        } => ("PlayerIsPoisoned", Handled),
+        StaticCondition::PlayerIsPoisoned { .. } => ("PlayerIsPoisonedUnboundScope", Unhandled),
         // Digital-only Alchemy (no CR entry): same scope rule as the monarch
         // arm above — the layer evaluator binds both subjects. The unbound
         // arm keeps a DISTINCT key: same-key insert would let sibling order
@@ -18581,6 +18581,7 @@ mod tests {
             back_face: None,
             rules_text: None,
             unparsed_rules_text_lines: Vec::new(),
+            merged_extras: None,
         }
     }
 
@@ -27527,47 +27528,7 @@ mod attacked_referent_coverage_tests {
 #[cfg(test)]
 mod unpublished_event_source_tests {
     use super::*;
-
-    /// CR 603.2 + CR 613.1b: the gain side of `ChangesController` has a
-    /// registered matcher but no emitter for layer-2 control changes (#9903), so
-    /// the support authority must report it unsupported while the registered
-    /// `Loses` side and unrelated modes stay supported — for both the printed
-    /// and the delayed variant.
-    #[test]
-    fn gain_side_control_trigger_is_unsupported_until_layer_changes_publish_events() {
-        let registry = trigger_registry();
-        let gains = TriggerMode::ChangesController {
-            side: ControlChangeSide::Gains,
-        };
-        let loses = TriggerMode::ChangesController {
-            side: ControlChangeSide::Loses,
-        };
-
-        // Reach guard: the registry carries every key, so the `false` below is
-        // owed to the unpublished-event-source predicate, not a missing entry.
-        assert!(
-            registry.contains_key(&gains),
-            "Gains matcher stays registered"
-        );
-        assert!(registry.contains_key(&loses));
-        assert!(registry.contains_key(&TriggerMode::ChangesZone));
-        assert!(trigger_mode_has_unpublished_event_source(&gains));
-        assert!(!trigger_mode_has_unpublished_event_source(&loses));
-
-        assert!(!trigger_mode_is_supported(&gains, registry));
-        assert!(!delayed_trigger_mode_is_supported(&gains, registry));
-
-        for supported in [&loses, &TriggerMode::ChangesZone] {
-            assert!(
-                trigger_mode_is_supported(supported, registry),
-                "{supported:?}"
-            );
-            assert!(
-                delayed_trigger_mode_is_supported(supported, registry),
-                "{supported:?}"
-            );
-        }
-    }
+    use crate::types::triggers::ControlChangeSide;
 
     /// Parse a card through the production MTGJSON-to-face path
     /// (`build_oracle_face`), the same construction the parser tests use.
@@ -27613,15 +27574,12 @@ mod unpublished_event_source_tests {
             .any(|trig| trig.mode == TriggerMode::ChangesController { side })
     }
 
-    /// CR 603.2 + CR 613.1b: `is_card_supported` (the gate for
-    /// `audit_resolver_features` and `audit_semantic`) decides trigger support
-    /// inline rather than through `trigger_mode_is_supported`, so it needs the
-    /// unpublished-event-source check itself. Real parsed faces: Risky Move
-    /// (gain-side control trigger) is excluded from every support authority
-    /// and from both audits, while Duplicity (lose-side control trigger,
-    /// otherwise supported) stays in.
+    /// CR 603.2 + CR 613.1b: every control change a full layer evaluation
+    /// derives now publishes `ControllerChanged`, so a gain-side control trigger
+    /// is supported by every support authority and both audits (Risky Move),
+    /// like the lose side (Duplicity).
     #[test]
-    fn gain_side_control_trigger_face_is_excluded_from_every_support_authority() {
+    fn gain_side_control_trigger_face_is_supported_by_every_support_authority() {
         let risky = parsed_face(
             "Risky Move",
             "Enchantment",
@@ -27636,8 +27594,7 @@ mod unpublished_event_source_tests {
         );
 
         // Reach guards: each face parsed the control-change trigger it is the
-        // fixture for, and the control face is otherwise fully supported, so the
-        // verdicts below turn on the unpublished-event-source predicate alone.
+        // fixture for.
         assert!(
             has_control_trigger(&risky, ControlChangeSide::Gains),
             "Risky Move must parse a Gains ChangesController trigger: {:#?}",
@@ -27648,34 +27605,18 @@ mod unpublished_event_source_tests {
             "control face must parse a Loses ChangesController trigger: {:#?}",
             control.triggers
         );
-        assert!(
-            !has_control_trigger(&control, ControlChangeSide::Gains),
-            "control face must not carry a Gains trigger"
-        );
-        assert_eq!(
-            card_face_gaps(&control),
-            Vec::<String>::new(),
-            "control face must be fully supported"
-        );
 
         let trigger_registry = build_trigger_registry();
         let static_registry = build_static_registry();
-        assert!(
-            !is_card_supported(&risky, &trigger_registry, &static_registry),
-            "a face with a gain-side control trigger must not count as supported"
-        );
-        assert!(is_card_supported(
-            &control,
-            &trigger_registry,
-            &static_registry
-        ));
-        assert_eq!(
-            card_face_gaps(&risky),
-            vec!["Trigger:ChangesController { side: Gains }".to_string()]
-        );
+        for face in [&risky, &control] {
+            assert_eq!(card_face_gaps(face), Vec::<String>::new(), "{}", face.name);
+            assert!(
+                is_card_supported(face, &trigger_registry, &static_registry),
+                "{}",
+                face.name
+            );
+        }
 
-        // The public audits consume `is_card_supported`: of the two faces only
-        // the control one is audited.
         let mut export = serde_json::Map::new();
         for face in [&risky, &control] {
             export.insert(
@@ -27686,8 +27627,8 @@ mod unpublished_event_source_tests {
         let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
             .expect("test export should deserialize");
         assert_eq!(db.card_count(), 2, "both faces reach the audits");
-        assert_eq!(audit_resolver_features(&db).total_supported_audited, 1);
-        assert_eq!(audit_semantic(&db).total_supported_audited, 1);
+        assert_eq!(audit_resolver_features(&db).total_supported_audited, 2);
+        assert_eq!(audit_semantic(&db).total_supported_audited, 2);
     }
 
     /// CR 601.2c / CR 608.2d: a `TargetFilter::Player` or declared-target player

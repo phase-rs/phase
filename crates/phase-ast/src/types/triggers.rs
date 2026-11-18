@@ -88,11 +88,13 @@ pub enum TriggerEventKey {
     /// CR 613.1b: a permanent's controller changed — the `ControllerChanged`
     /// event published by the control-changing instruction handlers
     /// (`GainControl`, `ExchangeControl`, the cleanup reversion of an "until end
-    /// of turn" control effect).
-    /// NOTE: Control changes that publish no `ControllerChanged` event
-    /// (static / Aura control, a lapsed `ForAsLongAs` duration, CR 800.4a
-    /// elimination) do NOT flow through this bucket — they are not caught by
-    /// `TriggerMode::ChangesController` either (see `match_changes_controller`).
+    /// of turn" control effect) and by a full layer evaluation's controller diff
+    /// for control it derives without an instruction (static / Aura control, a
+    /// lapsed `ForAsLongAs` duration).
+    /// NOTE: this publishes every control change actually derived by a full
+    /// layer evaluation, without duplicating existing instruction publication.
+    /// It does not guarantee that every rules-required control transition is
+    /// derived; phase-rs/phase#10947 remains.
     ChangesController,
     /// CR 701.9: A player discarded a card.
     Discarded,

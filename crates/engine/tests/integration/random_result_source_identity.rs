@@ -316,6 +316,7 @@ impl Run {
                     player_id,
                     sides,
                     result,
+                    ..
                 } => Some((*player_id, *sides, *result)),
                 _ => None,
             })
@@ -3006,6 +3007,7 @@ fn public_coin_keep_continuation_fixture(
         player_id: P0,
         sides: 20,
         result: Some(7),
+        pre_entry_source: None,
     };
     let owned = ResolvingTriggerContext {
         event: Some(owned_event.clone()),
@@ -3068,6 +3070,7 @@ fn public_coin_keep_continuation_fixture(
         player_id: P1,
         sides: 20,
         result: Some(19),
+        pre_entry_source: None,
     };
     let caller = ResolvingTriggerContext {
         event: Some(caller_event.clone()),
@@ -3111,7 +3114,8 @@ fn public_coin_keep_action_preserves_the_die_result_settled_by_its_continuation(
         GameEvent::DieRolled {
             player_id: P0,
             sides: 1,
-            result: Some(1)
+            result: Some(1),
+            ..
         }
     )));
     assert!(result.events.iter().any(|event| matches!(
@@ -3193,6 +3197,7 @@ fn public_coin_keep_continuation_publishes_each_paused_survivor_then_the_aggrega
                         player_id: P0,
                         sides: 1,
                         result: Some(1),
+                        ..
                     }
                 ))
                 .count(),
@@ -3225,6 +3230,7 @@ fn public_coin_keep_continuation_publishes_each_paused_survivor_then_the_aggrega
                 player_id: P0,
                 sides: 1,
                 result: Some(value),
+                ..
             } => Some(*value),
             _ => None,
         })
