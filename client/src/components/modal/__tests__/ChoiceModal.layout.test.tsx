@@ -5,11 +5,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SHORT_LANDSCAPE_QUERY } from "../../../constants/ui.ts";
 import { ChoiceModal } from "../ChoiceModal.tsx";
 
-const cardImage = vi.hoisted(() => ({ isLoading: false }));
+const cardImage = vi.hoisted(() => ({ isLoading: false, src: null as string | null }));
 
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: vi.fn(() => ({
-    src: null,
+    src: cardImage.src,
     isLoading: cardImage.isLoading,
     isRotated: false,
     isFlip: false,
@@ -25,6 +25,7 @@ vi.mock("../../../hooks/useCardImage.ts", () => ({
 
 const CARD_NAME = "Rhystic Study";
 const HOLD_HINT = "Hold to see the full card";
+const CARD_ART = "https://cards.example/rhystic-study.jpg";
 const DEFAULT_SCREEN = { innerWidth: window.innerWidth, innerHeight: window.innerHeight };
 
 function choiceModal(props: Partial<ComponentProps<typeof ChoiceModal>> = {}) {
@@ -57,6 +58,7 @@ afterEach(() => {
   cleanup();
   Object.assign(window, DEFAULT_SCREEN);
   cardImage.isLoading = false;
+  cardImage.src = null;
 });
 
 describe("ChoiceModal layout", () => {
@@ -122,10 +124,14 @@ describe("ChoiceModal layout", () => {
     expect(actionRow).toHaveClass("grid", "grid-cols-2");
 
     cardImage.isLoading = false;
+    cardImage.src = CARD_ART;
     rerender(choiceModal({ layout: "columns" }));
 
-    // The art lands in the same card column, and nothing else moves.
-    expect(cardColumn).toContainElement(screen.getByRole("img", { name: CARD_NAME }));
+    // The art band lands at the top of the same card column, and nothing else moves.
+    const art = document.querySelector(`img[src="${CARD_ART}"]`);
+    expect(art).toBeInTheDocument();
+    expect(cardColumn.firstElementChild).toBe(art?.parentElement);
+    expect(screen.queryByRole("img", { name: CARD_NAME })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Yes" }).parentElement).toBe(actionRow);
   });
 

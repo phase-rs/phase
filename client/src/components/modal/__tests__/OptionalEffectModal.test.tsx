@@ -10,9 +10,11 @@ import {
 import { SHORT_LANDSCAPE_QUERY } from "../../../constants/ui.ts";
 import { OptionalEffectModalContent } from "../OptionalEffectModal.tsx";
 
+const cardImage = vi.hoisted(() => ({ src: null as string | null }));
+
 vi.mock("../../../hooks/useCardImage.ts", () => ({
   useCardImage: vi.fn(() => ({
-    src: null,
+    src: cardImage.src,
     isLoading: false,
     isRotated: false,
     isFlip: false,
@@ -54,6 +56,7 @@ function renderModal(waitingFor: OptionalEffectWaitingFor, objects?: GameState["
 
 afterEach(() => {
   cleanup();
+  cardImage.src = null;
 });
 
 describe("OptionalEffectModalContent", () => {
@@ -237,6 +240,7 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
   const REMEMBER_LABEL = "Don't ask again this game";
   const SAME_CARD_LABEL = "Use this choice for every copy of this card this game";
   const HOLD_HINT = "Hold to see the full card";
+  const RHYSTIC_STUDY_ART = "https://cards.example/rhystic-study.jpg";
 
   // Assignment, not `Object.defineProperty`: vitest's window accessors pass a
   // set on to happy-dom, whose `matchMedia` reads its own size. Redefining the
@@ -264,10 +268,15 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
     return renderModal(waitingFor, { [rhysticStudy.id]: rhysticStudy });
   }
 
-  function expectStacked() {
+  /** The loaded art: `CardTextboxPreview`'s `<img>` inside its band. */
+  function artImage() {
+    return document.querySelector<HTMLImageElement>(`img[src="${RHYSTIC_STUDY_ART}"]`);
+  }
+
+  function expectStacked(card: Element | null) {
     // Reach guard: the prompt has its card, so it is stacked by the screen,
     // not by the no-preview fallback.
-    expect(screen.getByRole("img", { name: "Rhystic Study" })).toBeInTheDocument();
+    expect(card).toBeInTheDocument();
     const yes = screen.getByRole("button", { name: "Yes" });
     const options = yes.parentElement as HTMLElement;
 
@@ -327,6 +336,44 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
     });
   });
 
+  // The test above renders the name-only placeholder that a card without art
+  // gets. Almost every card has art, which renders as an `<img>` inside an
+  // aspect-ratio band; that band is what the split exists to fit beside the
+  // actions on a 390px-tall screen.
+  it("puts the loaded card art in the left column, beside the actions and the remember toggles", () => {
+    cardImage.src = RHYSTIC_STUDY_ART;
+    setScreen(844, 390);
+
+    renderRhysticStudy();
+
+    const art = artImage();
+    // Reach guard: the art loaded, so this is the band, not the placeholder.
+    expect(art).toBeInTheDocument();
+    expect(screen.queryByRole("img", { name: "Rhystic Study" })).not.toBeInTheDocument();
+
+    const yes = screen.getByRole("button", { name: "Yes" });
+    const actionRow = yes.parentElement as HTMLElement;
+    const actionColumn = actionRow.parentElement as HTMLElement;
+    const columns = actionColumn.parentElement as HTMLElement;
+    const artColumn = columns.firstElementChild as HTMLElement;
+    const band = art?.parentElement as HTMLElement;
+
+    expect(screen.getByRole("dialog", { name: "Rhystic Study - Optional Effect" })).toHaveClass("max-w-3xl");
+    expect(columns).toHaveClass("grid", "grid-cols-2");
+    expect(Array.from(columns.children)).toEqual([artColumn, actionColumn]);
+    // The band sits in the art column itself, above the hint.
+    expect(band.parentElement).toBe(artColumn);
+    expect(artColumn.firstElementChild).toBe(band);
+    expect(artColumn).toContainElement(screen.getByText(HOLD_HINT));
+    expect(actionColumn).not.toContainElement(art);
+
+    expect(screen.getByRole("button", { name: "No" }).parentElement).toBe(actionRow);
+    expect(actionRow).toHaveClass("grid", "grid-cols-2");
+    expect(actionColumn).toContainElement(screen.getByLabelText(REMEMBER_LABEL));
+    expect(actionColumn).toContainElement(screen.getByLabelText(SAME_CARD_LABEL));
+    expect(artColumn).not.toContainElement(yes);
+  });
+
   it.each([
     ["a desktop screen", 1280, 800],
     ["a portrait phone", 390, 844],
@@ -338,7 +385,7 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
 
     renderRhysticStudy();
 
-    expectStacked();
+    expectStacked(screen.getByRole("img", { name: "Rhystic Study" }));
   });
 
   it("stays stacked on a short portrait window, so only landscape splits", () => {
@@ -349,15 +396,16 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
 
     renderRhysticStudy();
 
-    expectStacked();
+    expectStacked(screen.getByRole("img", { name: "Rhystic Study" }));
   });
 
-  it("follows the phone as it turns with the prompt open, keeping its nodes and focus", () => {
+  it("follows the phone as it turns with the prompt open, keeping its art and focus", () => {
+    cardImage.src = RHYSTIC_STUDY_ART;
     setScreen(390, 844);
     renderRhysticStudy();
-    expectStacked();
+    const art = artImage();
+    expectStacked(art);
     const yes = screen.getByRole("button", { name: "Yes" });
-    const card = screen.getByRole("img", { name: "Rhystic Study" });
     const dialog = screen.getByRole("dialog", { name: "Rhystic Study - Optional Effect" });
     yes.focus();
 
@@ -368,10 +416,14 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
 
     expect(dialog).toHaveClass("max-w-3xl");
     expect(yes.parentElement).toHaveClass("grid-cols-2");
+    // The art moved into the left column, beside the actions.
+    const columns = yes.parentElement?.parentElement?.parentElement as HTMLElement;
+    expect(columns).toHaveClass("grid-cols-2");
+    expect(columns.firstElementChild).toContainElement(art);
     // One element tree serves both layouts, so the turn keeps the buttons,
-    // the card and the focus instead of rebuilding them.
+    // the art and the focus instead of rebuilding them.
     expect(screen.getByRole("button", { name: "Yes" })).toBe(yes);
-    expect(screen.getByRole("img", { name: "Rhystic Study" })).toBe(card);
+    expect(artImage()).toBe(art);
     expect(yes).toHaveFocus();
 
     setScreen(390, 844);
@@ -379,9 +431,9 @@ describe("OptionalEffectModalContent on a short landscape screen", () => {
       window.dispatchEvent(new Event("resize"));
     });
 
-    expectStacked();
+    expectStacked(art);
     expect(screen.getByRole("button", { name: "Yes" })).toBe(yes);
-    expect(screen.getByRole("img", { name: "Rhystic Study" })).toBe(card);
+    expect(artImage()).toBe(art);
     expect(yes).toHaveFocus();
   });
 });
