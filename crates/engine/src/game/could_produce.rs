@@ -38,14 +38,26 @@
 //!   reveals and hands on ([`bind_child`]), and the tracked set an earlier
 //!   non-optional reveal or look publishes for a later "for each ... this way"
 //!   count, both only while every seat may see them; and the "if you do"
-//!   outcome of a "you may" instruction whose own gate was false. Those are
-//!   evaluated exactly as the resolution evaluates them.
+//!   outcome of a "you may" instruction whose own gate was false, or whose
+//!   decision-free effect the walker projects (read once performed and once
+//!   declined, CR 608.2d: Cheering Crowd's "that player may put a +1/+1
+//!   counter on this creature. If they do, they add {C} for each counter on
+//!   it."). Those are evaluated exactly as the resolution evaluates them.
 //! - **How much** (CR 106.5 + CR 106.7's last sentence): an instruction that
 //!   would add no mana contributes nothing (Gaea's Cradle with no creatures),
 //!   and so does a repeated instruction whose count state fixes at zero
 //!   (CR 608.2c: it is performed that many times; Selvala, Explorer Returned
 //!   when no nonland card is revealed). A repeat count the ability's own
-//!   activation or resolution fixes is admitted.
+//!   activation or resolution fixes is admitted. An amount or gate written
+//!   after a counter or life instruction that names no target
+//!   (`Effect::is_decision_free_state_instruction`) is read on the state that
+//!   instruction leaves (CR 608.2c): the instruction is performed on a scratch
+//!   copy by the runtime's own resolution, once per order its replacements
+//!   could apply in (CR 616.1), through
+//!   `mana_abilities::inline_preamble_outcomes` for a mana ability's preamble
+//!   and `mana_abilities::instruction_outcomes` for a later link. Empowered
+//!   Autogenerator counts the charge counter it places; under Solemnity that
+//!   counter is never placed, so the amount is the count already there.
 //! - **Replacements** (CR 614.1a + CR 616.1): each type is mapped through
 //!   `replacement::hypothetical_produced_mana_types`, in every order. Every
 //!   production of a {T} mana ability's resolution is "tapped for mana"
@@ -85,8 +97,8 @@ use super::filter::{matches_target_filter, FilterContext};
 use super::game_object::GameObject;
 use super::ledger::record_ability_activation;
 use super::mana_abilities::{
-    apply_condition_instead_mana_swap, condition_instead_mana_branch, is_mana_ability,
-    sacrifice_cost_choice,
+    ability_from_mana_production, apply_condition_instead_mana_swap, condition_instead_mana_branch,
+    inline_preamble_outcomes, instruction_outcomes, is_mana_ability, sacrifice_cost_choice,
 };
 use super::mana_sources::{has_tap_component, mana_options_from_production};
 use super::replacement::{hypothetical_produced_mana_types, produced_mana_may_be_replaced};
@@ -99,8 +111,9 @@ use super::triggers::{
 };
 use super::visibility::revealed_to_every_seat;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally, Effect, ManaProduction,
-    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef, TriggerDefinitionRef,
+    inline_mana_preamble, AbilityCondition, AbilityDefinition, AbilityKind, AbilityUseTally,
+    Effect, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    TriggerDefinitionRef,
 };
 use crate::types::ability_visit::visit_own_resolution_effects;
 use crate::types::card_type::CoreType;
@@ -378,11 +391,11 @@ fn solve(state: &GameState, roots: &[ObjectId]) -> Solution {
         for production in hypothetical_productions(state, object_id) {
             match production.reading {
                 // The replacement lookup reads this outer `state`, never a walk
-                // frame's scratch copy: a scratch differs in the use ledgers and
-                // the publications; no `ProduceMana` replacement gate reads those
-                // (their gates read type, supertype and controller: every printed
-                // `ProduceMana` replacement in `card-data.json` is
-                // `valid_card`-only).
+                // frame's scratch copy: a scratch differs in the use ledgers, the
+                // publications and the projected counter or life changes; no
+                // `ProduceMana` replacement gate reads those (their gates read
+                // type, supertype and controller: every printed `ProduceMana`
+                // replacement in `card-data.json` is `valid_card`-only).
                 ProductionReading::Direct(options) => {
                     for mana_type in options {
                         node.seed = node.seed.union(produced_types(
@@ -562,6 +575,15 @@ fn resolution_entry_state<'a>(
 /// `build_resolved_from_def` and decides its `ConditionInstead` sub with
 /// `apply_condition_instead_mana_swap` — mirrored here step for step. The root
 /// does not read its own `condition`, as `produce_mana_from_ability` does not.
+///
+/// CR 608.2c: a production that follows an inline preamble (Empowered
+/// Autogenerator's "Put a charge counter on this artifact.") is read on
+/// each state `mana_abilities::inline_preamble_outcomes` leaves: the
+/// authority the activation itself performs the preamble through before its
+/// prompt and production, with one state per order the preamble's
+/// replacements could apply in (CR 616.1). A preamble whose counter a
+/// replacement prevents (Solemnity) leaves the amount at the count already
+/// there, so with none that reading adds nothing (CR 106.5).
 fn read_mana_ability_root(
     state: &GameState,
     object: &GameObject,
@@ -581,7 +603,32 @@ fn read_mana_ability_root(
     // modifies every production made while that ability resolves, so the whole
     // resolution reads one tap state.
     let tap_state = ManaTapState::from_tap(has_tap_component(&definition.cost));
-    let frame = Frame::root(&entry_state, ledger, definition, tap_state);
+    if inline_mana_preamble(root).is_none() {
+        let frame = Frame::root(&entry_state, ledger, definition, tap_state);
+        read_mana_production(&frame, &unswapped, productions);
+        return;
+    }
+    let production = build_resolved_from_def(
+        &ability_from_mana_production(root),
+        object.id,
+        object.controller,
+    );
+    for after_preamble in inline_preamble_outcomes(&entry_state, object.id, object.controller, root)
+    {
+        let frame = Frame::root(&after_preamble, ledger, definition, tap_state);
+        read_mana_production(&frame, &production, productions);
+    }
+}
+
+/// CR 605.3b + CR 608.2c: the production half of [`read_mana_ability_root`],
+/// read on `frame`'s state: the root's `ConditionInstead` sub decided as
+/// `produce_mana_from_ability` decides it, the root's own effect, then the
+/// rest of the chain.
+fn read_mana_production(
+    frame: &Frame<'_>,
+    unswapped: &ResolvedAbility,
+    productions: &mut Vec<HypotheticalProduction>,
+) {
     let branches = match unswapped.sub_ability.as_deref() {
         // CR 608.2c + CR 106.7: a wrapped condition the resolution itself fixes
         // could go either way, so both branches are read.
@@ -593,15 +640,15 @@ fn read_mana_ability_root(
             ) =>
         {
             vec![
-                condition_instead_mana_branch(&unswapped, sub, true),
-                condition_instead_mana_branch(&unswapped, sub, false),
+                condition_instead_mana_branch(unswapped, sub, true),
+                condition_instead_mana_branch(unswapped, sub, false),
             ]
         }
-        _ => vec![apply_condition_instead_mana_swap(frame.state, &unswapped)],
+        _ => vec![apply_condition_instead_mana_swap(frame.state, unswapped)],
     };
     for branch in &branches {
         let _ = visit_own_resolution_effects(&branch.effect, &mut |effect| {
-            push_production(&frame, branch, effect, productions);
+            push_production(frame, branch, effect, productions);
             ControlFlow::Continue(())
         });
         // CR 605.3b: the rest of the chain resolves through
@@ -610,7 +657,7 @@ fn read_mana_ability_root(
         // the sub-chain root (`SpellContext::mana_tap_state`) for every link to
         // inherit.
         if let Some(sub) = branch.sub_ability.as_deref() {
-            walk_chain(&frame, sub, productions);
+            walk_chain(frame, sub, productions);
         }
     }
 }
@@ -674,6 +721,7 @@ fn read_triggered_abilities(
 struct Frame<'a> {
     /// The state the node reads: the query's state, or a scratch copy carrying
     /// what the resolution has done by then (its projected use ledgers, the
+    /// counters or life an earlier decision-free instruction changed, the
     /// objects an earlier instruction looked at and the tracked set its
     /// publication established).
     state: &'a GameState,
@@ -732,7 +780,8 @@ struct BoundChild<'s, 'n> {
     /// The state the child's subtree reads: its parent's, or a scratch copy as
     /// the parent would have left it: `last_revealed_ids` and, below a public
     /// non-optional `RevealTop` or `Dig`, the fresh tracked set its handler
-    /// publishes (CR 608.2c).
+    /// publishes; or the counters or life a decision-free parent changed
+    /// (CR 608.2c).
     state: Cow<'s, GameState>,
     node: Cow<'n, ResolvedAbility>,
     bindings: HypotheticalBindings,
@@ -766,26 +815,23 @@ struct HandOff<'s> {
     tracked_set: HypotheticalTrackedSet,
 }
 
-/// CR 608.2c: `child` as the runtime would hand it off from `parent`, with the
-/// bindings it carries.
+/// CR 608.2c: `child` as the runtime would hand it off from `parent`, once per
+/// state the parent could leave, each with the bindings it carries.
 ///
 /// Targets are bound exactly where the runtime hand-off is fixed by state and
 /// public to every seat ([`performed_hand_off`], [`skipped_hand_off`]); the
 /// ledger binding is inherited unchanged; and the "if you do" outcome becomes
 /// `NotPerformed` below a "you may" instruction whose own gate was false
-/// (CR 608.2c), and `EitherWay` again below one that was performed (CR 608.2d:
-/// the player chooses).
+/// (CR 608.2c), and, below one that was performed, `Performed` on each
+/// projected state plus `NotPerformed` on the unprojected state when the
+/// walker projects its decision-free effect (CR 608.2d: the two worlds are
+/// read separately), else `EitherWay` (CR 608.2d: the player chooses).
 fn bind_child<'s, 'n>(
     frame: &Frame<'s>,
     parent: &ResolvedAbility,
     parent_outcome: ParentOutcome,
     child: &'n ResolvedAbility,
-) -> BoundChild<'s, 'n> {
-    let optional_outcome = match (parent_outcome, parent.optional) {
-        (ParentOutcome::Skipped, true) => HypotheticalOptionalOutcome::NotPerformed,
-        (ParentOutcome::Performed, true) => HypotheticalOptionalOutcome::EitherWay,
-        (_, false) => frame.bindings.optional_outcome,
-    };
+) -> Vec<BoundChild<'s, 'n>> {
     let HandOff {
         state,
         targets: handed,
@@ -802,22 +848,74 @@ fn bind_child<'s, 'n>(
         }
         None => HypotheticalTargets::Unchosen,
     };
-    if let (ParentOutcome::Skipped, true) = (parent_outcome, parent.optional) {
-        // CR 608.2c: the skipped "you may" was not performed, so its "if you
-        // do" reads false and its "if you don't" reads true below it.
-        node.to_mut().set_optional_effect_performed_recursive(false);
-    }
-    BoundChild {
-        state,
-        node,
-        bindings: HypotheticalBindings {
-            targets,
-            optional_outcome,
-            ledger: frame.bindings.ledger,
-            tracked_set,
-        },
-        tap_state: frame.tap_state,
-    }
+    // CR 608.2c: a performed counter or life instruction that names no target
+    // changed state before its child runs (Empowered Autogenerator's charge
+    // counter, Cheering Crowd's +1/+1 counter), so the child reads each state
+    // the instruction could leave, in place of the hand-off's state, keeping its
+    // targets and tracked set. Such a parent publishes nothing, so that state is
+    // `frame.state`. A skipped parent never ran, and a subtree that adds no mana
+    // cannot change the answer.
+    let projects = matches!(parent_outcome, ParentOutcome::Performed)
+        && parent.effect.is_decision_free_state_instruction()
+        && parent.multi_target.is_none()
+        && parent.unless_pay.is_none()
+        && chain_carries_mana(child);
+    let worlds: Vec<(Cow<'s, GameState>, HypotheticalOptionalOutcome)> = if projects {
+        // CR 608.2d: a "you may" is read as two worlds, each decided.
+        let performed = if parent.optional {
+            HypotheticalOptionalOutcome::Performed
+        } else {
+            frame.bindings.optional_outcome
+        };
+        let mut worlds: Vec<_> = instruction_outcomes(&state, parent)
+            .into_iter()
+            .map(|after| (Cow::Owned(after), performed))
+            .collect();
+        if parent.optional {
+            worlds.push((state, HypotheticalOptionalOutcome::NotPerformed));
+        }
+        worlds
+    } else {
+        let optional_outcome = match (parent_outcome, parent.optional) {
+            (ParentOutcome::Skipped, true) => HypotheticalOptionalOutcome::NotPerformed,
+            (ParentOutcome::Performed, true) => HypotheticalOptionalOutcome::EitherWay,
+            (_, false) => frame.bindings.optional_outcome,
+        };
+        vec![(state, optional_outcome)]
+    };
+    worlds
+        .into_iter()
+        .map(|(state, optional_outcome)| {
+            let mut node = node.clone();
+            if parent.optional {
+                // CR 608.2c + CR 608.2d: a world that decides this "you may"
+                // stamps it on the child's subtree: performed, its "if you do"
+                // reads true and its "if you don't" false (Cheering Crowd's "If
+                // they do, they add {C} for each counter on it."); not performed
+                // (its own gate was false, or the declined world), the reverse.
+                match optional_outcome {
+                    HypotheticalOptionalOutcome::Performed => {
+                        node.to_mut().set_optional_effect_performed_recursive(true);
+                    }
+                    HypotheticalOptionalOutcome::NotPerformed => {
+                        node.to_mut().set_optional_effect_performed_recursive(false);
+                    }
+                    HypotheticalOptionalOutcome::EitherWay => {}
+                }
+            }
+            BoundChild {
+                state,
+                node,
+                bindings: HypotheticalBindings {
+                    targets,
+                    optional_outcome,
+                    ledger: frame.bindings.ledger,
+                    tracked_set,
+                },
+                tap_state: frame.tap_state,
+            }
+        })
+        .collect()
 }
 
 /// CR 608.2c + CR 701.20e: the hand-off after `parent`'s effect ran, mirroring
@@ -1176,7 +1274,9 @@ fn walk_performed(
     } else {
         sub
     };
-    bind_child(frame, node, ParentOutcome::Performed, next).walk(frame.cost_owner, productions);
+    for bound in bind_child(frame, node, ParentOutcome::Performed, next) {
+        bound.walk(frame.cost_owner, productions);
+    }
 }
 
 /// CR 608.2c: what the resolver runs after `node`'s gate was false — its
@@ -1192,7 +1292,9 @@ fn walk_false_gate_path(
             .filter(|sub| false_gate_escape(sub).is_some())
     });
     if let Some(next) = next {
-        bind_child(frame, node, ParentOutcome::Skipped, next).walk(frame.cost_owner, productions);
+        for bound in bind_child(frame, node, ParentOutcome::Skipped, next) {
+            bound.walk(frame.cost_owner, productions);
+        }
     }
 }
 

@@ -754,6 +754,67 @@ pub(super) fn inline_preamble_outcomes(
     settle_projected_replacements(scratch)
 }
 
+/// CR 608.2c + CR 616.1e + CR 616.1f: the states a resolution could be in
+/// just after it performs `instruction`, a counter or life instruction that
+/// names no target (`Effect::is_decision_free_state_instruction`), as one
+/// link of a stack-resolved or triggered chain: one state per order its
+/// competing replacements could apply in. The sibling of
+/// [`inline_preamble_outcomes`], which performs a mana ability's whole
+/// preamble under its activation's binding; a chain link has no such binding.
+/// Read by the CR 106.7 walker (`could_produce::bind_child`) before a later
+/// instruction reads the counters or life it changed (Cheering Crowd's "If
+/// they do, they add {C} for each counter on it."). Each state is a scratch
+/// clone; `state` is never mutated, no state-based action runs, as none runs
+/// mid-resolution, and each state's layers are re-derived (CR 613.1), as the
+/// runtime re-derives them before the next instruction reads.
+pub(super) fn instruction_outcomes(
+    state: &GameState,
+    instruction: &ResolvedAbility,
+) -> Vec<GameState> {
+    let mut scratch = state.clone();
+    // The projection answers its own ordering prompts and only those. Detach
+    // the enclosing cast, as `inline_preamble_outcomes` does, so answering one
+    // cannot resume that cast; and detach a replacement prompt the game is
+    // parked on (a display-time read while a player orders replacements), so
+    // `settle_projected_replacements` cannot answer it here: CR 616.1 gives
+    // that choice to its affected player, not to this projection.
+    scratch.pending_cast = None;
+    scratch.pending_replacement = None;
+    // Only the instruction itself: the caller has read its gate, reads its
+    // "you may" as two worlds, and walks what follows it.
+    let mut head = instruction.clone();
+    head.sub_ability = None;
+    head.else_ability = None;
+    head.condition = None;
+    head.optional = false;
+    let mut events = Vec::new();
+    // Depth 1: the instruction is performed mid-resolution, so the depth-0
+    // prelude must not run again. It would count the resolution a second
+    // time (`count_top_level_resolution`, after
+    // `could_produce::resolution_entry_state` counted it), clear the
+    // `last_revealed_ids` an earlier hand-off set, reseed the cost-removed
+    // count and clear the player-choice records.
+    if let Err(error) = super::effects::resolve_ability_chain(&mut scratch, &head, &mut events, 1) {
+        tracing::debug!(
+            ?error,
+            source = ?instruction.source_id,
+            "instruction_outcomes: the projected instruction failed; settling the state it left"
+        );
+    }
+    // CR 608.2c + CR 613.1: the runtime settles the layer system before the
+    // next instruction reads (`effects::resolve_chain_body` flushes before a
+    // chained sub resolves), so a later count that reads a characteristic sees
+    // the change: Molten-Core Maestro's "add an amount of {R} equal to this
+    // creature's power" counts the +1/+1 counter it just put.
+    settle_projected_replacements(scratch)
+        .into_iter()
+        .map(|mut settled| {
+            super::layers::flush_layers(&mut settled);
+            settled
+        })
+        .collect()
+}
+
 /// The part of a parked ordering prompt that decides what the rest of the
 /// chain can produce: the proposed event as modified so far (without which
 /// replacements already applied) and the multiset of replacements still to
@@ -18637,6 +18698,104 @@ mod tests {
             assert_eq!(
                 cursor.next_tapper, 0,
                 "a refused aggregate advance must not move the cursor"
+            );
+        }
+    }
+
+    /// P3-U2 (CR 616.1 + CR 608.2c): a display-time read can run while a player
+    /// orders replacements. Here P1 orders Hardened Scales and Doubling Season
+    /// for a +1/+1 counter on P1's Grizzly Bears, a choice CR 616.1 gives to P1.
+    /// Projecting Cheering Crowd's "that player may put a +1/+1 counter on this
+    /// creature." leaves that prompt unanswered: the Bears have no counter in
+    /// any state the projection returns. Paired positive: answering the prompt
+    /// puts 3 or 4 counters on them, by the order P1 chooses.
+    #[test]
+    fn instruction_outcomes_leaves_a_parked_replacement_prompt_unanswered() {
+        use crate::game::ability_utils::build_resolved_from_def;
+        use crate::game::scenario::P1;
+        use crate::types::ability::TargetRef;
+
+        // Verbatim Oracle text (MTGJSON). Grizzly Bears has no rules text.
+        const CHEERING_CROWD: &str = "At the beginning of each player's first main phase, that \
+             player may put a +1/+1 counter on this creature. If they do, they add {C} for each \
+             counter on it.";
+        const HARDENED_SCALES: &str = "If one or more +1/+1 counters would be put on a creature \
+             you control, that many plus one +1/+1 counters are put on it instead.";
+        const DOUBLING_SEASON: &str = "If an effect would create one or more tokens under your \
+             control, it creates twice that many of those tokens instead.\nIf an effect would put \
+             one or more counters on a permanent you control, it puts twice that many of those \
+             counters on that permanent instead.";
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(crate::types::phase::Phase::PreCombatMain);
+        let crowd = scenario
+            .add_creature_from_oracle(P0, "Cheering Crowd", 2, 2, CHEERING_CROWD)
+            .id();
+        scenario.add_enchantment_from_oracle(P1, "Hardened Scales", HARDENED_SCALES);
+        scenario.add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON);
+        let bears = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let mut runner = scenario.build();
+        // A +1/+1 counter instruction on the Bears parks P1's CR 616.1 ordering
+        // prompt.
+        let put_counter = ResolvedAbility::new(
+            Effect::PutCounter {
+                counter_type: CounterType::Plus1Plus1,
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(bears)],
+            bears,
+            P1,
+        );
+        crate::game::effects::resolve_ability_chain(
+            runner.state_mut(),
+            &put_counter,
+            &mut Vec::new(),
+            0,
+        )
+        .expect("reach-guard: the counter instruction resolves up to P1's ordering prompt");
+        let state = runner.state();
+        let counters_on_bears = |game_state: &GameState| {
+            game_state.objects[&bears]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0)
+        };
+        assert!(
+            state.pending_replacement.is_some()
+                && matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. })
+                && counters_on_bears(state) == 0,
+            "reach-guard: P1's ordering prompt is parked and no counter has landed"
+        );
+        // CR 616.1: Hardened Scales first gives (1 + 1) x 2 counters, Doubling
+        // Season first 1 x 2 + 1.
+        let mut answered: Vec<u32> = settle_projected_replacements(state.clone())
+            .iter()
+            .map(counters_on_bears)
+            .collect();
+        answered.sort_unstable();
+        assert_eq!(
+            answered,
+            vec![3, 4],
+            "reach-guard: answering P1's prompt puts counters on the Bears"
+        );
+        let execute = state.objects[&crowd].trigger_definitions[0]
+            .definition
+            .execute
+            .as_deref()
+            .expect("reach-guard: Cheering Crowd's trigger has an effect");
+        let instruction = build_resolved_from_def(execute, crowd, P0);
+        let outcomes = instruction_outcomes(state, &instruction);
+        assert!(
+            !outcomes.is_empty(),
+            "the projection returns the state its instruction leaves"
+        );
+        for outcome in &outcomes {
+            assert_eq!(
+                counters_on_bears(outcome),
+                0,
+                "CR 616.1: P1's ordering prompt is P1's to answer, not the projection's"
             );
         }
     }

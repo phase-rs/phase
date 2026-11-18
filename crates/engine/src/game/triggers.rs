@@ -16947,8 +16947,8 @@ pub(crate) enum BindingReader {
 /// of the same resolution, or the resolution's own entry bookkeeping, fixes
 /// from state.
 ///
-/// Each axis is a separate two-valued enum, so a classifier leaf names the one
-/// axis it depends on and a leaf on another axis cannot be satisfied by it.
+/// Each axis is a separate enum, so a classifier leaf names the one axis it
+/// depends on and a leaf on another axis cannot be satisfied by it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HypotheticalBindings {
     pub(crate) targets: HypotheticalTargets,
@@ -16988,9 +16988,13 @@ pub(crate) enum HypotheticalOptionalOutcome {
     /// CR 608.2d: the instruction is performable and the player chooses, so
     /// both outcomes are possible.
     EitherWay,
-    /// CR 608.2c: the instruction's own gate was false, so it was not
-    /// performed.
+    /// CR 608.2c + CR 608.2d: the instruction was not performed on this path:
+    /// its own gate was false, or the walker reads the declined world.
     NotPerformed,
+    /// CR 608.2d: the walker reads the world in which the 'you may'
+    /// instruction was performed (its effect changed state the continuation
+    /// reads); the node carries `optional_effect_performed = true`.
+    Performed,
 }
 
 /// Whether this printed ability's per-turn use ledgers were projected through
@@ -17160,6 +17164,9 @@ pub(crate) fn gate_binding_diverges(condition: &AbilityCondition, reader: Bindin
             // CR 608.2d: a performable "you may" is the player's choice, so both
             // outcomes; CR 608.2c: one whose own gate was false on this path was
             // not performed, and the walker stamps that outcome on the node.
+            // CR 608.2d: when the walker projects a performed 'you may', it reads
+            // the performed and the declined worlds separately (`Performed`,
+            // `NotPerformed`) and stamps each on its node, so neither diverges.
             BindingReader::HypotheticalResolution(bindings) => {
                 bindings.optional_outcome == HypotheticalOptionalOutcome::EitherWay
             }
@@ -33643,6 +33650,28 @@ pub mod tests {
                     "{leaf}: keyed on {axis:?}, read with only {bound_axis:?} bound"
                 );
             }
+        }
+
+        // CR 608.2c + CR 608.2d: Cheering Crowd's "If they do, they add {C} for each
+        // counter on it." is decided on each world the walker reads (the counter put,
+        // or declined) and read both ways only when the player still chooses.
+        let if_you_do = AbilityCondition::EffectOutcome {
+            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+        };
+        for (optional_outcome, diverges) in [
+            (HypotheticalOptionalOutcome::EitherWay, true),
+            (HypotheticalOptionalOutcome::NotPerformed, false),
+            (HypotheticalOptionalOutcome::Performed, false),
+        ] {
+            let bindings = HypotheticalBindings {
+                optional_outcome,
+                ..HypotheticalBindings::NONE
+            };
+            assert_eq!(
+                gate_binding_diverges(&if_you_do, BindingReader::HypotheticalResolution(bindings)),
+                diverges,
+                "{optional_outcome:?}"
+            );
         }
 
         // CR 608.2c: a filtered tracked-set count whose member filter no reader

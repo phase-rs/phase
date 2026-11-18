@@ -17,9 +17,13 @@
 //! any applicable replacement effects".
 
 use engine::game::derived::continuously_revealed_cards;
+use engine::game::effects::attach::attach_to;
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{AbilityKind, Effect};
+use engine::types::ability::{
+    inline_mana_preamble, is_mana_ability, AbilityCondition, AbilityKind, Effect,
+    EffectOutcomeSignal,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::parse_counter_type;
@@ -1323,4 +1327,396 @@ fn selvala_revealing_only_lands_adds_no_green() {
         matches!(state.waiting_for, WaitingFor::Priority { .. }),
         "the resolution completed and priority returned"
     );
+}
+
+// ---- Written-order state before a later mana amount (CR 608.2c) ----
+
+// Verbatim Oracle text (MTGJSON), reminder text omitted.
+const SOLEMNITY: &str = "Players can't get counters.\nCounters can't be put on artifacts, \
+     creatures, enchantments, or lands.";
+const CHEERING_CROWD: &str = "At the beginning of each player's first main phase, that player \
+     may put a +1/+1 counter on this creature. If they do, they add {C} for each counter on it.";
+const MOLTEN_CORE_MAESTRO: &str = "Menace\nOpus — Whenever you cast an instant or sorcery \
+     spell, put a +1/+1 counter on this creature. If five or more mana was spent to cast that \
+     spell, add an amount of {R} equal to this creature's power.";
+const WEAKNESS: &str = "Enchant creature\nEnchanted creature gets -2/-1.";
+
+/// An Empowered Autogenerator board's runner and the objects its rows read.
+struct AutogeneratorBoard {
+    runner: GameRunner,
+    squandered: ObjectId,
+    reflecting_pool: ObjectId,
+    autogenerator: ObjectId,
+}
+
+/// Squandered Resources, Reflecting Pool, March of the Machines and Ashaya,
+/// Soul of the Wild beside P0's Empowered Autogenerator ({4}) holding
+/// `charge_counters` charge counters, plus Solemnity when `solemnity`. March
+/// of the Machines makes the Autogenerator a creature and Ashaya makes it a
+/// Forest land (CR 613.8: Ashaya's effect depends on March's).
+fn autogenerator_board(charge_counters: u32, solemnity: bool) -> AutogeneratorBoard {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    let reflecting_pool = scenario
+        .add_land_from_oracle(P0, "Reflecting Pool", REFLECTING_POOL)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "March of the Machines", MARCH_OF_THE_MACHINES);
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    if solemnity {
+        scenario.add_enchantment_from_oracle(P0, "Solemnity", SOLEMNITY);
+    }
+    let autogenerator = scenario
+        .add_artifact_from_oracle(P0, "Empowered Autogenerator", EMPOWERED_AUTOGENERATOR)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 4,
+        })
+        .id();
+    scenario.with_counter(autogenerator, parse_counter_type("charge"), charge_counters);
+    let mut runner = scenario.build();
+    flush(&mut runner);
+    assert_is_land(&runner, autogenerator);
+    let object = &runner.state().objects[&autogenerator];
+    assert_eq!(
+        object
+            .counters
+            .get(&parse_counter_type("charge"))
+            .copied()
+            .unwrap_or(0),
+        charge_counters,
+        "reach-guard: the Autogenerator's initial charge counters"
+    );
+    assert!(
+        !object.tapped && !object.summoning_sick,
+        "reach-guard: the Autogenerator can tap for mana"
+    );
+    let printed = object
+        .abilities
+        .iter()
+        .find(|ability| ability.kind == AbilityKind::Activated)
+        .expect("reach-guard: the Autogenerator has its activated ability");
+    assert!(
+        is_mana_ability(printed) && inline_mana_preamble(printed).is_some(),
+        "reach-guard: its first activated ability is a mana ability whose production follows \
+         an inline counter instruction"
+    );
+    AutogeneratorBoard {
+        runner,
+        squandered,
+        reflecting_pool,
+        autogenerator,
+    }
+}
+
+/// A Cheering Crowd board's runner and the objects its rows read.
+struct CheeringCrowdBoard {
+    runner: GameRunner,
+    squandered: ObjectId,
+    crowd: ObjectId,
+}
+
+/// Squandered Resources and Ashaya, Soul of the Wild beside P0's Cheering
+/// Crowd with no counters, which Ashaya makes a Forest land, plus Solemnity
+/// when `solemnity`.
+fn cheering_crowd_board(solemnity: bool) -> CheeringCrowdBoard {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    if solemnity {
+        scenario.add_enchantment_from_oracle(P0, "Solemnity", SOLEMNITY);
+    }
+    let crowd = scenario
+        .add_creature_from_oracle(P0, "Cheering Crowd", 2, 2, CHEERING_CROWD)
+        .id();
+    let mut runner = scenario.build();
+    flush(&mut runner);
+    assert_is_land(&runner, crowd);
+    let object = &runner.state().objects[&crowd];
+    assert!(
+        object.counters.values().all(|count| *count == 0),
+        "reach-guard: Cheering Crowd has no counters"
+    );
+    assert_eq!(
+        object.trigger_definitions.len(),
+        1,
+        "reach-guard: Cheering Crowd carries its one triggered ability"
+    );
+    let execute = object.trigger_definitions[0]
+        .definition
+        .execute
+        .as_deref()
+        .expect("reach-guard: the trigger has an effect");
+    assert!(
+        execute.optional
+            && execute.effect.is_decision_free_state_instruction()
+            && execute.sub_ability.as_deref().is_some_and(|sub| {
+                matches!(*sub.effect, Effect::Mana { .. })
+                    && matches!(
+                        sub.condition,
+                        Some(AbilityCondition::EffectOutcome {
+                            signal: EffectOutcomeSignal::OptionalEffectPerformed,
+                        })
+                    )
+            }),
+        "reach-guard: \"that player may put a +1/+1 counter\" is an optional counter \
+         instruction followed by its mana, gated on \"If they do\""
+    );
+    CheeringCrowdBoard {
+        runner,
+        squandered,
+        crowd,
+    }
+}
+
+/// F1-1 (CR 608.2c + CR 106.7): Empowered Autogenerator's mana ability puts a
+/// charge counter on it before "Add X mana of any one color, where X is the
+/// number of charge counters on this artifact.", so with no charge counter X is
+/// one and it could produce every color. March of the Machines and Ashaya, Soul
+/// of the Wild make it a Forest land, so its Forest ability adds {G} too.
+#[test]
+fn sacrificed_autogenerator_at_zero_charge_counters_offers_every_color() {
+    let board = autogenerator_board(0, false);
+    let mut reading =
+        squandered_reading(board.runner.state(), board.squandered, board.autogenerator);
+    reading.sort();
+    assert_eq!(
+        reading,
+        vec![
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ]
+    );
+}
+
+/// F1-2 (CR 608.2c + CR 106.7): with two charge counters the Autogenerator's X
+/// is three, and it could produce every color.
+#[test]
+fn sacrificed_autogenerator_with_charge_counters_offers_every_color() {
+    let board = autogenerator_board(2, false);
+    let mut reading =
+        squandered_reading(board.runner.state(), board.squandered, board.autogenerator);
+    reading.sort();
+    assert_eq!(
+        reading,
+        vec![
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ]
+    );
+}
+
+/// F1-3 (CR 608.2c + CR 106.5): under Solemnity ("Counters can't be put on
+/// artifacts, creatures, enchantments, or lands.") the Autogenerator's charge
+/// counter is never placed, so X stays at its initial count. With none, its
+/// mana ability adds no mana and only its Forest ability's {G} remains. Paired
+/// positives: without Solemnity the same board reads every color, and with
+/// Solemnity an Autogenerator holding two charge counters still reads every
+/// color.
+#[test]
+fn solemnity_keeps_a_zero_counter_autogenerator_from_producing() {
+    let board = autogenerator_board(0, false);
+    let mut reading =
+        squandered_reading(board.runner.state(), board.squandered, board.autogenerator);
+    reading.sort();
+    assert_eq!(
+        reading,
+        vec![
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ],
+        "reach-guard: without Solemnity the projected counter makes X one"
+    );
+
+    let board = autogenerator_board(2, true);
+    let mut reading =
+        squandered_reading(board.runner.state(), board.squandered, board.autogenerator);
+    reading.sort();
+    assert_eq!(
+        reading,
+        vec![
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ],
+        "reach-guard: under Solemnity the Autogenerator's production is still read, with X at two"
+    );
+
+    let board = autogenerator_board(0, true);
+    assert_eq!(
+        squandered_reading(board.runner.state(), board.squandered, board.autogenerator),
+        vec![ManaType::Green]
+    );
+}
+
+/// F1-4 (CR 106.7 + CR 608.2c): Reflecting Pool reads every land P0 controls,
+/// the Autogenerator among them, so with no charge counter or with two it
+/// offers every color.
+#[test]
+fn reflecting_pool_reads_an_autogenerator_at_zero_and_positive_counters() {
+    for charge_counters in [0, 2] {
+        let mut board = autogenerator_board(charge_counters, false);
+        let state = board.runner.state();
+        let pool_land = &state.objects[&board.reflecting_pool];
+        assert!(
+            pool_land.controller == P0 && pool_land.card_types.core_types.contains(&CoreType::Land),
+            "reach-guard: the Pool is a land P0 controls"
+        );
+        assert_eq!(
+            tap_for_mana(&mut board.runner, board.reflecting_pool),
+            Produced::Prompt(vec![
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ]),
+            "{charge_counters} charge counters"
+        );
+    }
+}
+
+/// F1-5 (CR 608.2c + CR 605.3b): the Autogenerator's real activation puts its
+/// charge counter on first and only then offers a color for X, so even with no
+/// charge counter it offers every color, with one counter on it at the prompt.
+/// The runtime reference for F1-1 and F1-2.
+#[test]
+fn tapping_a_forest_autogenerator_places_its_counter_before_offering_every_color() {
+    for charge_counters in [0, 2] {
+        let mut board = autogenerator_board(charge_counters, false);
+        assert_eq!(
+            tap_for_mana(&mut board.runner, board.autogenerator),
+            Produced::Prompt(vec![
+                ManaType::White,
+                ManaType::Blue,
+                ManaType::Black,
+                ManaType::Red,
+                ManaType::Green,
+            ])
+        );
+        assert_eq!(
+            board.runner.state().objects[&board.autogenerator]
+                .counters
+                .get(&parse_counter_type("charge"))
+                .copied()
+                .unwrap_or(0),
+            charge_counters + 1,
+            "CR 608.2c: the counter is placed before the color prompt"
+        );
+    }
+}
+
+/// F1-6 (CR 608.2c + CR 608.2d): Cheering Crowd's trigger is read as two
+/// worlds. If that player puts the +1/+1 counter, "they add {C} for each
+/// counter on it" counts it, so a Crowd with no counters could produce {C};
+/// declined, the trigger adds nothing. Ashaya, Soul of the Wild makes it a
+/// Forest land, so its Forest ability adds {G} too.
+#[test]
+fn sacrificed_cheering_crowd_offers_the_colorless_its_trigger_would_add() {
+    let board = cheering_crowd_board(false);
+    let mut reading = squandered_reading(board.runner.state(), board.squandered, board.crowd);
+    reading.sort();
+    assert_eq!(reading, vec![ManaType::Green, ManaType::Colorless]);
+}
+
+/// F1-7 (CR 608.2c + CR 608.2d): under Solemnity no counter can be put on
+/// Cheering Crowd (the Solemnity ruling: "If a resolving spell or ability says
+/// that a player may put counters on one of those objects, that player can't
+/// choose to do so."), so a Crowd with no counters has none for its trigger to
+/// count; it adds no {C} and only its Forest ability's {G} remains. Paired
+/// positive: the same board without Solemnity reads {C} too.
+#[test]
+fn solemnity_keeps_cheering_crowds_trigger_from_adding_colorless() {
+    let board = cheering_crowd_board(false);
+    let mut reading = squandered_reading(board.runner.state(), board.squandered, board.crowd);
+    reading.sort();
+    assert_eq!(
+        reading,
+        vec![ManaType::Green, ManaType::Colorless],
+        "reach-guard: without Solemnity the projected counter adds {{C}}"
+    );
+
+    let board = cheering_crowd_board(true);
+    assert_eq!(
+        squandered_reading(board.runner.state(), board.squandered, board.crowd),
+        vec![ManaType::Green]
+    );
+}
+
+/// F1-8 (CR 608.2c + CR 613.4c): Molten-Core Maestro's trigger puts a +1/+1
+/// counter on it before "add an amount of {R} equal to this creature's power"
+/// reads its power, so a Maestro that Weakness ("Enchanted creature gets
+/// -2/-1.") leaves at power 0 could produce {R}: the counter makes it 1/2. "If
+/// five or more mana was spent to cast that spell" names a spell a
+/// could-produce reader does not have, so that gate is read both ways. Ashaya,
+/// Soul of the Wild makes it a Forest land, so its Forest ability adds {G} too.
+#[test]
+fn sacrificed_weakened_molten_core_maestro_offers_the_red_its_trigger_would_add() {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    let maestro = scenario
+        .add_creature_from_oracle(P0, "Molten-Core Maestro", 2, 2, MOLTEN_CORE_MAESTRO)
+        .id();
+    let weakness = scenario
+        .add_enchantment_from_oracle(P0, "Weakness", WEAKNESS)
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let mut runner = scenario.build();
+    // CR 303.4: Weakness enchants the Maestro, through the engine's
+    // attachment authority.
+    attach_to(runner.state_mut(), weakness, maestro);
+    flush(&mut runner);
+    assert_is_land(&runner, maestro);
+    let object = &runner.state().objects[&maestro];
+    assert!(
+        object.attachments.contains(&weakness)
+            && object.power == Some(0)
+            && object.toughness == Some(1),
+        "reach-guard: Weakness (\"Enchanted creature gets -2/-1.\") leaves the 2/2 Maestro \
+         at 0/1"
+    );
+    assert!(
+        object.counters.values().all(|count| *count == 0),
+        "reach-guard: the Maestro has no counters"
+    );
+    assert_eq!(
+        object.trigger_definitions.len(),
+        1,
+        "reach-guard: the Maestro carries its one triggered ability"
+    );
+    let execute = object.trigger_definitions[0]
+        .definition
+        .execute
+        .as_deref()
+        .expect("reach-guard: the trigger has an effect");
+    assert!(
+        !execute.optional
+            && execute.effect.is_decision_free_state_instruction()
+            && execute
+                .sub_ability
+                .as_deref()
+                .is_some_and(|sub| matches!(*sub.effect, Effect::Mana { .. })),
+        "reach-guard: \"put a +1/+1 counter on this creature\" is a non-optional counter \
+         instruction followed by its mana"
+    );
+    let mut reading = squandered_reading(runner.state(), squandered, maestro);
+    reading.sort();
+    assert_eq!(reading, vec![ManaType::Red, ManaType::Green]);
 }

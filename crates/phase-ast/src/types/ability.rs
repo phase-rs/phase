@@ -31481,6 +31481,23 @@ impl Effect {
         )
     }
 
+    /// CR 608.2c + CR 115.6: whether this is a counter (CR 122.1) or
+    /// life-total (CR 119.3) instruction that names no target. The shared
+    /// shape authority for the instructions an activated mana ability performs
+    /// in written order before its production (`inline_mana_preamble`: Empowered
+    /// Autogenerator's "Put a charge counter on this artifact.") and for the
+    /// earlier instructions the CR 106.7 reader performs on a scratch state
+    /// before a later mana amount.
+    pub fn is_decision_free_state_instruction(&self) -> bool {
+        matches!(
+            self,
+            Effect::PutCounter { .. }
+                | Effect::RemoveCounter { .. }
+                | Effect::GainLife { .. }
+                | Effect::LoseLife { .. }
+        ) && extract_target_filter_from_effect(self).is_none()
+    }
+
     /// CR 608.2c: true for the structural "repeat this process" directive
     /// node (`RuntimeHandled { RepeatProcess }`).
     pub fn is_repeat_directive(&self) -> bool {
@@ -37415,18 +37432,10 @@ pub fn inline_mana_preamble(ability_def: &AbilityDefinition) -> Option<&AbilityD
         if matches!(node.effect.as_ref(), Effect::Mana { .. }) {
             return preceding.then_some(node);
         }
-        let choice_free = matches!(
-            node.effect.as_ref(),
-            Effect::PutCounter { .. }
-                | Effect::RemoveCounter { .. }
-                | Effect::GainLife { .. }
-                | Effect::LoseLife { .. }
-        );
-        if !choice_free
+        if !node.effect.is_decision_free_state_instruction()
             || node.condition.is_some()
             || node.optional
             || node.multi_target.is_some()
-            || extract_target_filter_from_effect(&node.effect).is_some()
         {
             return None;
         }
