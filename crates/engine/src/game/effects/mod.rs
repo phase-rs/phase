@@ -15123,6 +15123,27 @@ fn resolve_effect_node(
                 },
             })
         }
+        Effect::ChangeZone { .. } => {
+            let (result, progress) =
+                LegacyEffectBoundary::run(state, ability, |state, boundary| {
+                    let result = change_zone::resolve(state, ability, events)?;
+                    retire_empty_replacement_frames(state, boundary);
+                    Ok(result)
+                })?;
+            // CR 603.2c + CR 607.2a: Detention Sphere pattern — ChangeZone to Exile
+            // resolved the same-name mass exile continuation inline as one logical
+            // event, so transfer ownership of the tail to avoid resolving it again.
+            let tail = if change_zone::same_name_mass_exile_sub(ability).is_some() {
+                TailOwnership::Transferred
+            } else {
+                TailOwnership::Caller
+            };
+            Ok(EffectStep {
+                progress,
+                result,
+                tail,
+            })
+        }
         _ => {
             let (result, progress) =
                 LegacyEffectBoundary::run(state, ability, |state, boundary| {
@@ -26688,31 +26709,7 @@ fn resolve_chain_body(
                             ..
                         })
                     );
-                // CR 603.2c + CR 607.2a: Detention Sphere pattern — the targeted
-                // exile and same-name mass exile are resolved inline within the
-                // parent's logical zone-change group (see change_zone::resolve).
-                // Skip the sub_ability here to avoid double-resolution and
-                // duplicate trigger batches (e.g., Ketramose).
-                let is_detention_sphere_pattern = matches!(
-                    &ability.effect,
-                    Effect::ChangeZone {
-                        destination: Zone::Exile,
-                        ..
-                    }
-                ) && matches!(
-                    &sub.effect,
-                    Effect::ChangeZoneAll {
-                        destination: Zone::Exile,
-                        target,
-                        ..
-                    } if matches!(
-                        target,
-                        TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
-                    )
-                );
-                if is_detention_sphere_pattern {
-                    // Already resolved inline; do not resolve again.
-                } else if sub_outlives_false_parent_gate(sub)
+                if sub_outlives_false_parent_gate(sub)
                     || (sub.sub_link == SubAbilityLink::SequentialSibling
                         && (sub.condition.is_none() || is_ordinal_sequential_sibling))
                 {

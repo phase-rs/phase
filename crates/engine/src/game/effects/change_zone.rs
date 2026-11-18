@@ -8,8 +8,7 @@ use crate::game::zones;
 use crate::types::ability::{
     ControllerRef, Duration, Effect, EffectError, EffectKind, EffectResolutionResult, FilterProp,
     LibraryPosition, LibraryShuffleMode, OpponentMayScope, QuantityExpr, ResolvedAbility,
-    SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode, TypeFilter,
-    TypedFilter,
+    TargetChoiceTiming, TargetFilter, TargetRef, TargetSelectionMode, TypeFilter, TypedFilter,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -1185,383 +1184,34 @@ fn member_library_placement(
     }
 }
 
-/// CR 603.2c + CR 607.2a: Resolve a same-name mass exile (ChangeZoneAll with
-/// SameNameAsParentTarget) inline within an existing logical_zone_change_group.
-/// This combines the targeted exile and the mass exile into a single logical
-/// event for trigger batching purposes (e.g., Ketramose triggers once).
-fn resolve_same_name_mass_exile_inline(
-    state: &mut GameState,
-    ability: &ResolvedAbility,
-    events: &mut Vec<GameEvent>,
-    logical_zone_change_group: &mut crate::types::game_state::LogicalZoneChangeGroup,
-    logical_group_event_start: usize,
-) -> Result<(), EffectError> {
-    // Extract the ChangeZoneAll parameters
-    let Effect::ChangeZoneAll {
-        origin,
-        destination,
-        target,
-        enters_under,
-        enter_tapped,
-        enters_attacking,
-        enter_with_counters,
-        face_down_profile,
-        library_position,
-        library_shuffle,
-        random_order,
-    } = &ability.effect
-    else {
-        return Ok(());
-    };
-
-    // CR 610.3a / CR 610.3b: an "until" event that already occurred before this
-    // mass move's initial zone change means nothing moves and no return link is
-    // installed.
-    if crate::game::effects::change_zone::until_event_already_occurred(state, ability, events) {
-        state.last_effect_count = Some(0);
-        events.push(GameEvent::EffectResolved {
-            kind: crate::types::ability::EffectKind::from(&ability.effect),
-            source_id: ability.source_id,
-            subject: None,
-        });
-        return Ok(());
-    }
-
-    // CR 400.3 + CR 701.23: When the target filter encodes multiple zones via
-    // `InAnyZone`, scan their union; otherwise fall back to the explicit `origin`
-    // (or `Battlefield`). Single-zone filters (`InZone` alone) preserve legacy
-    // behavior — only the multi-zone shape opts into the union scan.
-    let origin_zones =
-        crate::game::effects::change_zone::change_zone_all_origin_zones(state, *origin, target);
-    let dest_zone = *destination;
-    let target_filter = target.clone();
-    let enter_tapped = *enter_tapped;
-    let enters_attacking = *enters_attacking;
-    // CR 122.1 + CR 122.1h: Resolve each `QuantityExpr` counter count
-    // to a concrete u32 once, mirroring the single-object `ChangeZone`
-    // arm. Every entering object receives these counters (e.g. a
-    // finality counter on Shilgengar's mass return).
-    let resolved_counters: Vec<(CounterType, u32)> = enter_with_counters
-        .iter()
-        .map(|(ct, qty)| {
-            let n = crate::game::quantity::resolve_quantity_with_targets(state, qty, ability).max(0)
-                as u32;
-            (ct.clone(), n)
-        })
-        .collect();
-    let enter_with_counters = resolved_counters;
-    let effect_library_position = library_position.clone();
-    let library_shuffle = *library_shuffle;
-    let random_order = *random_order;
-
-    // Resolve enters_under controller override
-    let enters_under_player = crate::game::effects::change_zone::resolve_enters_under_player(
-        state,
-        ability,
-        "ChangeZoneAll",
-        enters_under.as_ref(),
-    )?;
-
-    // Track exiled by source for ExileLink (CR 610.3)
-    let track_exiled_by_source = matches!(dest_zone, Zone::Exile);
-
-    // Evaluate the target filter to find matching objects
-    // For Detention Sphere, this is permanents on the battlefield with the same name
-    let filter_ctx = crate::game::filter::FilterContext::from_ability(ability);
-    let matching: Vec<ObjectId> = state
-        .objects
-        .iter()
-        .filter(|(&id, obj)| {
-            origin_zones.contains(&obj.zone)
-                && obj.is_card_population_member()
-                && crate::game::filter::matches_target_filter_for_zone(
-                    state,
-                    id,
-                    obj.zone,
-                    &target_filter,
-                    &filter_ctx,
-                )
-        })
-        .map(|(id, _)| *id)
-        .collect();
-
-    // CR 401.4: When multiple objects are placed at the same library position
-    // simultaneously and `random_order` is false, the owner arranges their
-    // relative order ("in any order" restates this default). Route through the
-    // shared `EffectZoneChoice` + `PutAtLibraryPosition` production path instead
-    // of silently picking an engine-default batch order.
-    if dest_zone == Zone::Library
-        && effect_library_position.is_some()
-        && !random_order
-        && matching.len() > 1
-    {
-        let owner_batches = group_object_ids_by_owner_apnap(state, &matching);
-        crate::game::effects::change_zone::open_owner_library_arrangement(
-            state,
-            owner_batches,
-            None,
-            ability.source_id,
-            effect_library_position
-                .clone()
-                .expect("library-order branch requires an explicit library position"),
-            track_exiled_by_source,
-            ability.duration.clone(),
-        );
-        return Ok(());
-    }
-
-    // CR 401.4: When placing objects on the bottom of a library "in a random
-    // order", randomize the processing order so the final bottom-to-top sequence
-    // is non-deterministic without shuffling the rest of the library. Top
-    // placement remains ordered because repeated insertion at index 0 already
-    // defines the final stack.
-    let mut matching = matching;
-    if random_order {
-        use rand::seq::SliceRandom;
-        matching.shuffle(state.rng.draw(RandomDraw::Placement));
-    }
-
-    // CR 614.12a + CR 614.13a: same pre-loop snapshot as the mass path, for a
-    // targeted multi-`ChangeZone` co-entry that brings in one or more devourers.
-    // Captured before any member enters so every co-arriver (and the devourers
-    // themselves) is excluded regardless of iteration order.
-    if dest_zone == Zone::Battlefield
-        && state.active_devour_eligible_snapshot().is_none()
-        && matching
-            .iter()
-            .any(|id| crate::game::engine_replacement::object_has_devour_replacement(state, *id))
-    {
-        state.push_devour_change_zone_snapshot(state.battlefield.iter().copied().collect());
-    }
-
-    let mut moved_count: i32 = 0;
-    for (i, obj_id) in matching.iter().enumerate() {
-        let obj_id = *obj_id;
-        // CR 400.3: Each object's actual current zone is the source zone for the
-        // move. Single-zone callers pass `origin_zones = [zone]`; multi-zone
-        // callers (e.g. "search graveyard, hand, and library") let each object's
-        // own zone drive the move so per-zone replacements/triggers fire correctly.
-        let per_object_origin = state
-            .objects
-            .get(&obj_id)
-            .map(|o| o.zone)
-            .unwrap_or(origin_zones[0]);
-
-        let anticipated_pause = crate::game::effects::change_zone::anticipated_zone_change_delivery(
-            state,
-            obj_id,
-            dest_zone,
-            ability.source_id,
-            ability.context.face_down_in_exile,
-        );
-        let delivery_start = events.len();
-        let stack_depth_before_zone_move = state.resolution_stack.capture_child_boundary();
-        match crate::game::zone_pipeline::execute_zone_move_with_terminal_and_controller(
-            state,
-            obj_id,
-            per_object_origin,
-            dest_zone,
-            ability.source_id,
-            ability.duration.as_ref(),
-            false,
-            enter_tapped,
-            enters_attacking,
-            enters_under_player,
-            &enter_with_counters,
-            face_down_profile.as_ref(),
-            ability.context.face_down_in_exile,
-            track_exiled_by_source,
-            effect_library_position.clone(),
-            None,
-            Some(ability.controller),
-            // CR 608.2c: the controller follows the instruction, so it performs the move.
-            Some(ability.controller),
-            events,
-        ) {
-            crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
-                logical_zone_change_group
-                    .record_delivery_completion(obj_id, completion)
-                    .expect("logical ChangeZoneAll member records its exact terminal outcome");
-                moved_count += 1;
-                // CR 400.7 + CR 608.2c: Track hand-origin exiles separately so
-                // QuantityRef::ExiledFromHandThisResolution can resolve "draws a
-                // card for each card exiled from their hand this way".
-                if per_object_origin == Zone::Hand && dest_zone == Zone::Exile {
-                    state.exiled_from_hand_this_resolution =
-                        state.exiled_from_hand_this_resolution.saturating_add(1);
-                }
-                // CR 610.3: Consume ExileLink after successfully moving the object,
-                // so check_exile_returns won't try to return it again.
-                if matches!(target_filter, TargetFilter::ExiledBySource) {
-                    state.exile_links.retain(|link| link.exiled_id != obj_id);
-                }
-            }
-            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsChoice(player) => {
-                let entry_target_choice = matches!(
-                    state.waiting_for,
-                    crate::types::game_state::WaitingFor::EntryAttackTargetChoice { .. }
-                );
-                // CR 614.12a + CR 614.13: a Devour as-enters sacrifice surfaced its
-                // own `EffectZoneChoice` (or a counter-pause replacement choice).
-                // Stash the unprocessed co-entering members so
-                // `drain_pending_change_zone_iteration` resumes the mass move after
-                // the player resolves this choice — without the stash, every member
-                // after the first NeedsChoice would be silently dropped (issue #535
-                // class). The drain owns the single trailing EffectResolved, so we do
-                // NOT emit it here (mirrors the targeted loop's contract).
-                //
-                // CR 708.2a + CR 708.3: carry the face-down profile through the
-                // resume carrier so resumed members of a face-down mass entry (the
-                // Cyber-Controller class) still enter face down — the drain's mover
-                // (`process_one_zone_move`) now reads it from the ctx.
-                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
-                    state,
-                    logical_zone_change_group,
-                    &events[logical_group_event_start..],
-                )
-                .expect("paused ChangeZoneAll retains its explicit delivery prefix");
-                state.push_change_zone_iteration_after_child(
-                    crate::types::game_state::PendingChangeZoneIteration {
-                        pending_return_result_producer: None,
-                        logical_zone_change_group: logical_zone_change_group.clone(),
-                        paused_current: (!entry_target_choice).then(|| {
-                            state
-                                .pending_zone_change_delivery_from_replacement()
-                                .or_else(|| {
-                                    anticipated_pause.map(|mut boundary| {
-                                        boundary.append_delivery_events(&events[delivery_start..]);
-                                        boundary
-                                    })
-                                })
-                                .expect("zone-change pause must retain its exact boundary")
-                        }),
-                        remaining: matching[i + 1..]
-                            .iter()
-                            .map(|id| crate::types::game_state::ChangeZoneMemberEntry {
-                                object_id: *id,
-                                enter_with_counters: Vec::new(),
-                                enter_tapped: EtbTapState::Unspecified,
-                                enters_attacking: false,
-                            })
-                            .collect(),
-                        source_id: ability.source_id,
-                        controller: ability.controller,
-                        origin: Some(per_object_origin),
-                        destination: dest_zone,
-                        enter_transformed: false,
-                        enters_under_player,
-                        duration: ability.duration.clone(),
-                        track_exiled_by_source,
-                        face_down_in_exile: ability.context.face_down_in_exile,
-                        moved_count: Some(moved_count),
-                        face_down_profile: face_down_profile.clone(),
-                        library_placement: effect_library_position.clone(),
-                        enter_attached_to: None,
-                        effect_kind: crate::types::ability::EffectKind::from(&ability.effect),
-                    },
-                    stack_depth_before_zone_move,
-                );
-                // CR 614.12a: park (don't clobber) — a Devour as-enters sacrifice
-                // may already have surfaced its own `EffectZoneChoice`.
-                crate::game::replacement::park_waiting_for(state, player);
-                // EffectResolved is emitted by the drain after the loop completes —
-                // do NOT emit here.
-                return Ok(());
-            }
-            crate::game::zone_pipeline::ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
-                // CR 303.4f: Aura attachment choice surfaced — same pause contract as NeedsChoice.
-                // The player is in state.waiting_for (ReturnAsAuraTarget variant).
-                let entry_target_choice = matches!(
-                    state.waiting_for,
-                    crate::types::game_state::WaitingFor::EntryAttackTargetChoice { .. }
-                );
-                crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
-                    state,
-                    logical_zone_change_group,
-                    &events[logical_group_event_start..],
-                )
-                .expect("paused ChangeZoneAll retains its explicit delivery prefix");
-                state.push_change_zone_iteration_after_child(
-                    crate::types::game_state::PendingChangeZoneIteration {
-                        pending_return_result_producer: None,
-                        logical_zone_change_group: logical_zone_change_group.clone(),
-                        paused_current: (!entry_target_choice).then(|| {
-                            state
-                                .pending_zone_change_delivery_from_replacement()
-                                .or_else(|| {
-                                    anticipated_pause.map(|mut boundary| {
-                                        boundary.append_delivery_events(&events[delivery_start..]);
-                                        boundary
-                                    })
-                                })
-                                .expect("zone-change pause must retain its exact boundary")
-                        }),
-                        remaining: matching[i + 1..]
-                            .iter()
-                            .map(|id| crate::types::game_state::ChangeZoneMemberEntry {
-                                object_id: *id,
-                                enter_with_counters: Vec::new(),
-                                enter_tapped: EtbTapState::Unspecified,
-                                enters_attacking: false,
-                            })
-                            .collect(),
-                        source_id: ability.source_id,
-                        controller: ability.controller,
-                        origin: Some(per_object_origin),
-                        destination: dest_zone,
-                        enter_transformed: false,
-                        enters_under_player,
-                        duration: ability.duration.clone(),
-                        track_exiled_by_source,
-                        face_down_in_exile: ability.context.face_down_in_exile,
-                        moved_count: Some(moved_count),
-                        face_down_profile: face_down_profile.clone(),
-                        library_placement: effect_library_position.clone(),
-                        enter_attached_to: None,
-                        effect_kind: crate::types::ability::EffectKind::from(&ability.effect),
-                    },
-                    stack_depth_before_zone_move,
-                );
-                // Park the waiting_for state (ReturnAsAuraTarget)
-                if let crate::types::game_state::WaitingFor::ReturnAsAuraTarget { player, .. } =
-                    state.waiting_for
-                {
-                    crate::game::replacement::park_waiting_for(state, player);
-                }
-                return Ok(());
-            }
+/// CR 603.2c + CR 607.2a: Detect the Detention Sphere pattern — a ChangeZone to
+/// Exile whose chained sub_ability is a ChangeZoneAll to Exile targeting
+/// permanents with `FilterProp::SameNameAsParentTarget`.
+pub(crate) fn same_name_mass_exile_sub(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    let sub = ability.sub_ability.as_deref()?;
+    let is_parent_exile = matches!(
+        &ability.effect,
+        Effect::ChangeZone {
+            destination: Zone::Exile,
+            ..
         }
+    );
+    let is_sub_same_name_exile = matches!(
+        &sub.effect,
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            target,
+            ..
+        } if matches!(
+            target,
+            TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
+        )
+    );
+    if is_parent_exile && is_sub_same_name_exile {
+        Some(sub)
+    } else {
+        None
     }
-
-    // CR 614.13a: targeted multi-ChangeZone co-entry completed without pausing —
-    // clear the pre-entry Devour snapshot (its lifetime = this entry event).
-    if state
-        .active_change_zone_frame()
-        .is_some_and(|frame| frame.pending.is_none())
-    {
-        let _ = state
-            .take_active_change_zone_frame()
-            .expect("completed ChangeZone owns the active frame");
-    }
-
-    // Note: We don't update state.last_effect_count here because the caller
-    // will add the moved_count to the parent's count.
-
-    // Collect triggers for the newly added events
-    crate::game::triggers::complete_logical_zone_trigger_collection(
-        state,
-        logical_zone_change_group,
-        &mut events[logical_group_event_start..],
-    )
-    .expect("completed ChangeZoneAll owns every terminal member outcome");
-
-    events.push(GameEvent::EffectResolved {
-        kind: crate::types::ability::EffectKind::from(&ability.effect),
-        source_id: ability.source_id,
-        subject: None,
-    });
-
-    Ok(())
 }
 
 pub fn resolve(
@@ -2266,20 +1916,59 @@ pub fn resolve(
     };
     let _ = owner_library; // routing handled by move_to_zone (CR 400.7)
 
+    // CR 603.2c + CR 607.2a: Detention Sphere pattern — "exile target [X] and all
+    // other permanents with the same name as that permanent". The targeted exile
+    // and the same-name mass exile form a single logical event.
+    // If this ChangeZone to Exile has a sub_ability that is a ChangeZoneAll to
+    // Exile with SameNameAsParentTarget, announce and deliver the target together
+    // with its same-name matches as one population through this logical zone-change
+    // group path.
+    let mut move_objects = targeted_objects.clone();
+    if let Some(sub) = same_name_mass_exile_sub(ability) {
+        if let Effect::ChangeZoneAll {
+            origin: sub_origin,
+            target: sub_target,
+            ..
+        } = &sub.effect
+        {
+            let origin_zones = change_zone_all_origin_zones(state, *sub_origin, sub_target);
+            let filter_ctx = crate::game::filter::FilterContext::from_ability(ability);
+            let mut matches: Vec<ObjectId> = state
+                .objects
+                .iter()
+                .filter(|(&id, obj)| {
+                    origin_zones.contains(&obj.zone)
+                        && obj.is_card_population_member()
+                        && !targeted_objects.contains(&id)
+                        && crate::game::filter::matches_target_filter_for_zone(
+                            state,
+                            id,
+                            obj.zone,
+                            sub_target,
+                            &filter_ctx,
+                        )
+                })
+                .map(|(&id, _)| id)
+                .collect();
+            matches.sort();
+            move_objects.extend(matches);
+        }
+    }
+
     // CR 614.12a + CR 614.13a: same pre-loop snapshot as the mass path, for a
     // targeted multi-`ChangeZone` co-entry that brings in one or more devourers.
     // Captured before any member enters so every co-arriver (and the devourers
     // themselves) is excluded regardless of iteration order.
     crate::game::engine_replacement::capture_pre_entry_snapshot_for_entry(
         state,
-        targeted_objects.iter().copied(),
+        move_objects.iter().copied(),
         dest_zone,
     );
 
     // CR 603.6a + CR 614.12: one event — every member's gates read the board
     // before any member moves.
     let members =
-        resolve_change_zone_member_entries(state, Some(ability), &entry_spec, &targeted_objects);
+        resolve_change_zone_member_entries(state, Some(ability), &entry_spec, &move_objects);
 
     // CR 608.2c: "that many" in a later instruction refers back to the number
     // of objects this targeted move actually relocated (e.g. Vengeful Regrowth:
@@ -2288,7 +1977,7 @@ pub fn resolve(
     // sub-ability's `QuantityRef::EventContextAmount` resolves correctly.
     let mut moved_count: i32 = 0;
     let mut logical_zone_change_group =
-        crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
+        crate::game::triggers::allocate_logical_zone_change_group(state, &move_objects);
     let logical_group_event_start = events.len();
     for (i, member) in members.iter().enumerate() {
         let obj_id = &member.object_id;
@@ -2477,102 +2166,11 @@ pub fn resolve(
             .expect("completed ChangeZone owns the active frame");
     }
 
-    // CR 603.2c + CR 607.2a: Detention Sphere pattern — the targeted exile and
-    // the same-name mass exile are a single logical event. If this ChangeZone
-    // to Exile has a SequentialSibling sub_ability that is a ChangeZoneAll to
-    // Exile with SameNameAsParentTarget, resolve it inline within this same
-    // logical_zone_change_group so triggers like Ketramose see one combined
-    // exile event instead of two separate ones.
-    let same_name_mass_exile_added = if let Some(sub) = ability.sub_ability.as_ref() {
-        // Check: parent is ChangeZone to Exile
-        let parent_is_exile = matches!(
-            &ability.effect,
-            Effect::ChangeZone {
-                destination: Zone::Exile,
-                ..
-            }
-        );
-        // Check: sub is SequentialSibling (separate sentence, always runs)
-        let sub_is_sequential = matches!(sub.sub_link, SubAbilityLink::SequentialSibling);
-        // Check: sub is ChangeZoneAll to Exile with SameNameAsParentTarget
-        let sub_is_same_name_mass_exile = matches!(
-            &sub.effect,
-            Effect::ChangeZoneAll {
-                destination: Zone::Exile,
-                target,
-                ..
-            } if matches!(
-                &target,
-                TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
-            )
-        );
-        if parent_is_exile && sub_is_sequential && sub_is_same_name_mass_exile {
-            // Resolve the sub_ability inline within this logical_zone_change_group
-            // We need to prepare the sub_ability with proper context and targets
-            let mut sub_prepared = sub.as_ref().clone();
-
-            // Apply parent chain context (copies SpellContext, etc.)
-            crate::game::effects::apply_parent_chain_context(
-                &mut sub_prepared,
-                ability,
-                None,
-                state,
-            );
-
-            // The sub_ability uses ParentTarget reference which should resolve to
-            // the targeted object(s) from this ChangeZone. Since we already have
-            // the targeted_objects, we need to ensure the sub_ability can find them.
-            // The sub_ability's target filter has SameNameAsParentTarget which
-            // reads the parent target's name at resolution time.
-            // We also need to set up the targets for the sub_ability - it should
-            // inherit the parent's targets so ParentTarget resolves correctly.
-            if sub_prepared.targets.is_empty() && !ability.targets.is_empty() {
-                sub_prepared.mirror_targets_from(ability);
-            }
-
-            // Resolve the ChangeZoneAll effect inline using the same logical_zone_change_group
-            // We call the internal resolver logic directly
-            let sub_events_before = events.len();
-            let _ = resolve_same_name_mass_exile_inline(
-                state,
-                &sub_prepared,
-                events,
-                &mut logical_zone_change_group,
-                logical_group_event_start,
-            );
-
-            // Update moved_count to include the mass exile objects for
-            // QuantityRef::EventContextAmount ("that many")
-            let additional_moved: i32 = events[sub_events_before..]
-                .iter()
-                .filter(|e| {
-                    matches!(
-                        e,
-                        GameEvent::ZoneChanged {
-                            to: Zone::Exile,
-                            ..
-                        }
-                    )
-                })
-                .count() as i32;
-            Some(additional_moved)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // CR 608.2c: record how many objects this targeted move relocated so a
-    // downstream sub-ability's `QuantityRef::EventContextAmount` ("that many")
-    // resolves to the actual count — mirrors the mass `resolve_all` tail and the
-    // single-object branches above. (The paused path defers this stamp to the
-    // drain, which owns the trailing `EffectResolved`.)
-    state.last_effect_count = Some(moved_count + same_name_mass_exile_added.unwrap_or(0));
-    // downstream sub-ability's `QuantityRef::EventContextAmount` ("that many")
-    // resolves to the actual count — mirrors the mass `resolve_all` tail and the
-    // single-object branches above. (The paused path defers this stamp to the
-    // drain, which owns the trailing `EffectResolved`.)
+    // CR 608.2c: record how many objects this move relocated so a downstream
+    // sub-ability's `QuantityRef::EventContextAmount` ("that many") resolves to
+    // the actual count — mirrors the mass `resolve_all` tail and the single-object
+    // branches above. (The paused path defers this stamp to the drain, which owns
+    // the trailing `EffectResolved`.)
     state.last_effect_count = Some(moved_count);
 
     // CR 603.10 + CR 611.2e + CR 608.2c: when a later "is/has" instruction of this resolution may

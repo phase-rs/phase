@@ -1271,3 +1271,253 @@ fn detention_sphere_exiles_same_named_permanents_and_returns_them_all() {
     assert_eq!(named_on_battlefield(runner.state(), P1, "Grizzly Bears"), 2);
     assert_eq!(named_on_battlefield(runner.state(), P0, "Grizzly Bears"), 1);
 }
+
+/// CR 603.2c + CR 603.10a: When Detention Sphere exiles a Dour Port-Mage and another
+/// Dour Port-Mage with the same name, both creatures leave the battlefield in the
+/// same logical zone-change group. Each Port-Mage looks back in time and sees the
+/// other leave, so their controller draws two cards (one per Port-Mage).
+#[test]
+fn detention_sphere_co_departure_draws_two_cards_for_two_dour_port_mages() {
+    const DOUR: &str =
+        "Whenever one or more other creatures you control leave the battlefield without dying, draw a card.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let mage1 = scenario
+        .add_creature_from_oracle(P1, "Dour Port-Mage", 1, 3, DOUR)
+        .id();
+    let mage2 = scenario
+        .add_creature_from_oracle(P1, "Dour Port-Mage", 1, 3, DOUR)
+        .id();
+    scenario.add_card_to_library_top(P1, "Island");
+    scenario.add_card_to_library_top(P1, "Island");
+
+    let sphere = scenario
+        .add_spell_to_hand(P0, "Detention Sphere", false)
+        .as_enchantment()
+        .from_oracle_text(DETENTION_SPHERE)
+        .with_mana_cost(free())
+        .id();
+
+    let mut runner = scenario.build();
+    let p1_hand_before = hand_size(runner.state(), P1);
+
+    let _ = runner.cast(sphere).commit();
+
+    let mut accepted = false;
+    for _ in 0..48 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(mage1)),
+                    })
+                    .expect("choose target mage");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                accepted = true;
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the exile");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("resolution halted at {other:?}"),
+        }
+    }
+
+    assert!(accepted, "exile choice must be offered");
+    assert_eq!(
+        runner.state().objects[&mage1].zone,
+        Zone::Exile,
+        "target Mage exiled"
+    );
+    assert_eq!(
+        runner.state().objects[&mage2].zone,
+        Zone::Exile,
+        "same-name Mage exiled"
+    );
+    // CR 603.10a: Both Mages leave in one simultaneous event. Each sees the other
+    // leave, so P1 draws 2 cards (one per Mage).
+    assert_eq!(
+        hand_size(runner.state(), P1),
+        p1_hand_before + 2,
+        "both Port-Mages observe the co-departure and trigger"
+    );
+}
+
+/// CR 603.2c: Detention Sphere's targeted exile and same-name mass exile form a
+/// single logical zone-change group. Triggers observing cards put into exile from
+/// the battlefield (Ketramose: "Whenever one or more cards are put into exile...")
+/// trigger only once each time the event occurs.
+#[test]
+fn detention_sphere_triggers_ketramose_only_once_for_mass_exile() {
+    const KETRAMOSE: &str =
+        "Whenever one or more cards are put into exile from graveyards and/or the battlefield during your turn, you draw a card and lose 1 life.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let _ketramose = scenario
+        .add_creature_from_oracle(P0, "Ketramose", 3, 3, KETRAMOSE)
+        .id();
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let twin = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    scenario.add_card_to_library_top(P0, "Island");
+    scenario.add_card_to_library_top(P0, "Island");
+
+    let sphere = scenario
+        .add_spell_to_hand(P0, "Detention Sphere", false)
+        .as_enchantment()
+        .from_oracle_text(DETENTION_SPHERE)
+        .with_mana_cost(free())
+        .id();
+
+    let mut runner = scenario.build();
+    let _ = runner.cast(sphere).commit();
+    let p0_hand_before = hand_size(runner.state(), P0);
+    let p0_life_before = runner.state().players[P0.0 as usize].life;
+
+    for _ in 0..48 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(victim)),
+                    })
+                    .expect("choose target");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept exile");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("resolution halted at {other:?}"),
+        }
+    }
+
+    assert_eq!(runner.state().objects[&victim].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&twin].zone, Zone::Exile);
+    // Ketramose triggers ONCE, so P0 draws 1 card and loses 1 life.
+    assert_eq!(
+        hand_size(runner.state(), P0),
+        p0_hand_before + 1,
+        "Ketramose must trigger exactly once for the single exile event"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].life,
+        p0_life_before - 1,
+        "Ketramose life loss must happen exactly once"
+    );
+}
+
+/// CR 113.7a + CR 201.2: An ability on the stack exists independently of its source.
+/// Detention Sphere's mass clause ("and all other permanents with the same name as
+/// that permanent") excludes the target permanent (`DistinctFrom(ParentTarget)`),
+/// not the source. If Detention Sphere is renamed while its ETB trigger is on the
+/// stack to match the target's name, the Sphere itself is exiled by the mass clause.
+#[test]
+fn detention_sphere_exiles_renamed_source_if_it_matches_target_name() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let victim = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let bystander = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+
+    let sphere = scenario
+        .add_spell_to_hand(P0, "Detention Sphere", false)
+        .as_enchantment()
+        .from_oracle_text(DETENTION_SPHERE)
+        .with_mana_cost(free())
+        .id();
+
+    let mut runner = scenario.build();
+    let victim_incarnation = runner.state().objects[&victim].incarnation;
+    let bystander_incarnation = runner.state().objects[&bystander].incarnation;
+    let _ = runner.cast(sphere).commit();
+
+    // Drive until target is selected and trigger is on stack
+    for _ in 0..48 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(victim)),
+                    })
+                    .expect("choose target");
+                break;
+            }
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("unexpected wait: {other:?}"),
+        }
+    }
+
+    let sphere_incarnation = runner.state().objects[&sphere].incarnation;
+
+    // Now Detention Sphere is on the battlefield. Rename it to "Grizzly Bears" while
+    // the ETB trigger is on the stack (simulating Mirrorform or a name-changing effect).
+    runner.state_mut().objects.get_mut(&sphere).unwrap().name = "Grizzly Bears".to_string();
+
+    // Now resolve the ETB trigger and subsequent LTB trigger
+    for _ in 0..48 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { .. } => {
+                drain_order_triggers_with_identity(runner.state_mut());
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept exile");
+            }
+            WaitingFor::TriggerTargetSelection { .. } => {
+                // The renamed Sphere was exiled, its LTB returned it, and the new
+                // Sphere on the battlefield is now prompting its ETB target.
+                break;
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            other => panic!("resolution halted at {other:?}"),
+        }
+    }
+
+    // CR 400.7: Both the victim and the renamed Sphere were exiled together,
+    // which immediately triggered the Sphere's LTB returning them both as new objects.
+    assert_ne!(
+        runner.state().objects[&victim].incarnation,
+        victim_incarnation,
+        "target Grizzly Bears changed incarnation (was exiled and returned by LTB)"
+    );
+    assert_ne!(
+        runner.state().objects[&sphere].incarnation,
+        sphere_incarnation,
+        "renamed Sphere changed incarnation (was exiled by mass clause and returned by LTB)"
+    );
+    assert_eq!(
+        runner.state().objects[&bystander].incarnation,
+        bystander_incarnation,
+        "bystander was never touched"
+    );
+    assert_eq!(
+        runner.state().objects[&sphere].name,
+        "Detention Sphere",
+        "re-entered Sphere has reset its name to printed text per CR 400.7"
+    );
+}
