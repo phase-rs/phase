@@ -1406,6 +1406,10 @@ fn collect_search_observer_triggers(
     let owned =
         super::announcement_triggers::take_inline_trigger_span(state, events, events_before_drain);
     let announced = owned.is_empty() && owned.end < events.len();
+    // CR 603.3 + CR 603.3b: a settled, un-owned as-enters entry is released into
+    // the same queue this collector fills, so the pipeline's drain places both
+    // together. Released first, so the queued-witness filter below sees it.
+    crate::game::engine_replacement::collect_settled_entry_continuation_triggers(state);
     let uncollected_events = super::triggers::filter_already_collected_trigger_events_from(
         state,
         &events[..owned.end],
@@ -1488,7 +1492,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseFromZoneChoice { .. }
             | WaitingFor::BeholdChoice { .. }
             | WaitingFor::EmpowerJaceChoice { .. }
-            | WaitingFor::SpellCopyOrderChoice { .. }
+            | WaitingFor::MemberOrderChoice { .. }
             | WaitingFor::ChooseOneOfBranch { .. }
             | WaitingFor::DiscardToHandSize { .. }
             | WaitingFor::ConniveDiscard { .. }
@@ -3267,6 +3271,7 @@ pub(super) fn handle_resolution_choice(
                     );
                     req.mods.enter_tapped = enter_tapped;
                     req.mods.enters_attacking = enters_attacking;
+                    let move_owner = crate::game::zone_pipeline::PausedMoveOwner::single(state);
                     match crate::game::zone_pipeline::move_object(state, req, events) {
                         crate::game::zone_pipeline::ZoneMoveResult::Done => {}
                         // CR 303.4f / CR 616.1: the accepted card's battlefield
@@ -3276,12 +3281,16 @@ pub(super) fn handle_resolution_choice(
                         // entry resolves — otherwise the misses strand (the
                         // early-`return` bug). `EffectResolved` was already emitted
                         // before this prompt, so the completion does not re-emit it.
+                        // CR 706.6 + CR 614.12a: a tied as-enters roll's ignore
+                        // choice is owned by the card's own frame, so the record
+                        // waits beneath the card's frames.
                         crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
                         | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
                             let mut clear_markers = misses.clone();
                             clear_markers.push(hit_card);
-                            crate::game::zone_pipeline::defer_completion_on_pause(
+                            crate::game::zone_pipeline::defer_completion_on_paused_move(
                                 state,
+                                move_owner,
                                 crate::types::game_state::BatchCompletion::RevealRestPile {
                                     delivery_stage:
                                         crate::types::game_state::DigDeliveryStage::Rest,
@@ -4600,22 +4609,23 @@ pub(super) fn handle_resolution_choice(
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (
-            WaitingFor::SpellCopyOrderChoice {
+            WaitingFor::MemberOrderChoice {
                 player, choices, ..
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
-            // CR 405.3 + CR 707.10: the chosen spell supplies the batch's next
-            // copy, above the copies already on the stack.
-            let [spell] = chosen.as_slice() else {
+            // CR 608.2f + CR 405.3: the chosen member supplies the loop's next
+            // iteration — the next copy for a spell-copy batch, or the next
+            // per-member instruction.
+            let [member] = chosen.as_slice() else {
                 return Err(EngineError::InvalidAction(format!(
-                    "Choose exactly one spell to copy next, got {}",
+                    "Choose exactly one member to process next, got {}",
                     chosen.len()
                 )));
             };
-            if !choices.contains(spell) || !effects::order_next_spell_copy(state, *spell) {
+            if !choices.contains(member) || !effects::order_next_member(state, *member) {
                 return Err(EngineError::InvalidAction(
-                    "That spell has no copy left to make".to_string(),
+                    "That member has no iteration left to run".to_string(),
                 ));
             }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
@@ -5352,10 +5362,11 @@ pub(super) fn handle_resolution_choice(
                     match crate::game::zone_pipeline::move_objects_simultaneously(
                         state, reqs, events,
                     ) {
-                        crate::game::zone_pipeline::BatchMoveResult::Done => {}
-                        crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
-                            crate::game::zone_pipeline::defer_completion_on_pause(
+                        crate::game::zone_pipeline::SimultaneousMoveResult::Done => {}
+                        crate::game::zone_pipeline::SimultaneousMoveResult::NeedsChoice(owner) => {
+                            crate::game::zone_pipeline::defer_completion_on_paused_move(
                                 state,
+                                crate::game::zone_pipeline::PausedMoveOwner::Batch(owner),
                                 crate::types::game_state::BatchCompletion::RevealRestPile {
                                     delivery_stage:
                                         crate::types::game_state::DigDeliveryStage::Rest,
@@ -6674,6 +6685,10 @@ pub(super) fn handle_resolution_choice(
             GameAction::ChooseBranch { index },
         ) => {
             set_priority(state, player);
+            // Computed before `branches` moves into the selection: the exact
+            // predicate the enters-counter capture keys on.
+            let replays_enters_counter_capture =
+                crate::game::engine_replacement::is_enters_counter_choice(&branches);
             effects::choose_one_of::resolve_branch(
                 state,
                 effects::choose_one_of::BranchSelection {
@@ -6700,14 +6715,18 @@ pub(super) fn handle_resolution_choice(
             // the chosen counter onto the still-entering permanent, replay the
             // deferred entry into the next priority's batch so ETB observers see
             // the counter as the permanent enters (pre-entry per CR 614.12a, not
-            // a post-entry counter add). For a normal (non-entry) `ChooseOneOf`,
-            // `deferred_entry_events` is empty, so this is a no-op — the
-            // disambiguator. This is safe because `deferred_entry_events` is
-            // populated ONLY by the ETB-replacement capture (sole production
-            // write-site), and `CopyTargetChoice` drains it via its own
-            // `handle_copy_target_choice` handler, so it is never non-empty during
-            // an unrelated `ChooseBranch`.
-            crate::game::engine_replacement::collect_deferred_entry_replay(state, source_id);
+            // a post-entry counter add).
+            //
+            // CR 614.12a: replay only the enters-with-your-choice-of-counter
+            // capture's park (`is_enters_counter_choice`, Denry Klin).
+            // `deferred_entry_events` is also written by the as-enters
+            // continuation bracket (`EntryContinuationParking`, CR 603.6d). A
+            // park for any other `ChooseOneOf` continuation is collected by its
+            // logical owner's resume or by the settled-entry release, not here,
+            // and so is another entrant's park, which this replay leaves alone.
+            if replays_enters_counter_capture {
+                crate::game::engine_replacement::collect_deferred_entry_replay(state, source_id);
+            }
             // CR 608.2c + CR 122.1: advance any paused resolution chain after the
             // branch resolves. This is the standard post-resolution step every
             // sibling choice handler runs. It no-ops when no `pending_continuation`
@@ -7920,7 +7939,10 @@ pub(super) fn handle_resolution_choice(
                     let mut logical_zone_change_group =
                         crate::game::triggers::allocate_logical_zone_change_group(
                             state,
-                            &chosen_ids,
+                            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                                &chosen_ids,
+                                dest_zone,
+                            ),
                         );
                     if let Some(marker) =
                         state
@@ -7964,6 +7986,9 @@ pub(super) fn handle_resolution_choice(
                         binding.as_ref(),
                         &entry_spec,
                         &chosen_ids,
+                    );
+                    let mut entrants = crate::game::zone_pipeline::SimultaneousEntrants::of(
+                        &logical_zone_change_group,
                     );
                     let logical_group_event_start = events.len();
                     for (i, member) in members.iter().enumerate() {
@@ -8018,14 +8043,14 @@ pub(super) fn handle_resolution_choice(
                                 ctx.face_down_in_exile,
                             );
                         let delivery_start = events.len();
-                        let stack_depth_before_zone_move =
-                            state.resolution_stack.capture_child_boundary();
+                        let member_child_boundary = state.resolution_stack.capture_child_boundary();
                         let owner = effects::change_zone::change_zone_member_owner(
                             logical_zone_change_group.logical_group_id,
                             anticipated_pause.as_ref(),
                         );
                         match effects::change_zone::process_one_zone_move_with_terminal(
                             state,
+                            &mut entrants,
                             &ctx,
                             member,
                             owner,
@@ -8064,7 +8089,7 @@ pub(super) fn handle_resolution_choice(
                                     &events[logical_group_event_start..],
                                 )
                                 .expect("paused EffectZoneChoice retains its explicit delivery prefix");
-                                state.push_change_zone_iteration(
+                                state.push_change_zone_iteration_after_child(
                                     crate::types::game_state::PendingChangeZoneIteration {
                                         library_reorder: None,
                                         pending_return_result_producer,
@@ -8109,6 +8134,7 @@ pub(super) fn handle_resolution_choice(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
+                                    member_child_boundary,
                                 );
                                 return Ok(action_result_outcome(
                                     events,
@@ -8186,13 +8212,23 @@ pub(super) fn handle_resolution_choice(
                                         enter_attached_to: None,
                                         effect_kind,
                                     },
-                                    stack_depth_before_zone_move,
+                                    member_child_boundary,
                                 );
-                                state.waiting_for =
-                                    super::replacement::replacement_choice_waiting_for(
-                                        choice_player,
-                                        state,
-                                    );
+                                // CR 706.6 + CR 614.12a: the selected member's
+                                // roll owns its keep/order prompt; its zone owner
+                                // waits below the complete child stack.
+                                let roll_owns_wait =
+                                    (matches!(state.waiting_for, WaitingFor::DieKeepChoice { .. })
+                                        && state.resolution_stack.active_die_roll().is_some())
+                                    || (state.pending_die_roll_instruction.is_some()
+                                        && matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }));
+                                if !roll_owns_wait {
+                                    state.waiting_for =
+                                        super::replacement::replacement_choice_waiting_for(
+                                            choice_player,
+                                            state,
+                                        );
+                                }
                                 return Ok(action_result_outcome(
                                     events,
                                     state.waiting_for.clone(),
@@ -8533,8 +8569,14 @@ pub(super) fn handle_resolution_choice(
                     let mut logical_zone_change_group =
                         crate::game::triggers::allocate_logical_zone_change_group(
                             state,
-                            &chosen_ids,
+                            &crate::types::game_state::ZoneChangeAnnouncement::all(
+                                &chosen_ids,
+                                dest_zone,
+                            ),
                         );
+                    let mut entrants = crate::game::zone_pipeline::SimultaneousEntrants::of(
+                        &logical_zone_change_group,
+                    );
                     let logical_group_event_start = events.len();
                     for (i, member) in members.iter().enumerate() {
                         let card_id = &member.object_id;
@@ -8555,6 +8597,7 @@ pub(super) fn handle_resolution_choice(
                         );
                         match effects::change_zone::process_one_zone_move_with_terminal(
                             state,
+                            &mut entrants,
                             &ctx,
                             member,
                             owner,
@@ -9115,10 +9158,11 @@ pub(super) fn handle_resolution_choice(
                 // trigger pause (OrderTriggers / DistributeAmong / target
                 // selection) that drain raised.
                 //
-                // Gated on `deferred_entry_events` being non-empty so a non-entry
+                // Gated on the park holding this permanent's entry so a non-entry
                 // persisted `NamedChoice` (Pithing Needle naming, Morophon type
-                // choice) takes the unchanged `else` path below — the no-op
-                // disambiguator that keeps the working path byte-for-byte intact.
+                // choice) takes the unchanged `else` path below, whatever another
+                // entrant has parked — the disambiguator that keeps the working
+                // path byte-for-byte intact.
                 // `last_named_choice` is left set across the helper's continuation
                 // drain (cleared after, mirroring the plain path) so any dependent
                 // continuation reads the answer.
@@ -9453,13 +9497,13 @@ pub(super) fn handle_resolution_choice(
                 })
                 .collect();
             match crate::game::zone_pipeline::move_objects_simultaneously(state, reqs, events) {
-                crate::game::zone_pipeline::BatchMoveResult::Done => {
+                crate::game::zone_pipeline::SimultaneousMoveResult::Done => {
                     ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
                         // CR 704.3 + CR 800.4j: the check that raised this choice can also have removed the active player.
                         player: super::engine::living_priority_seat(state),
                     })
                 }
-                crate::game::zone_pipeline::BatchMoveResult::NeedsChoice => {
+                crate::game::zone_pipeline::SimultaneousMoveResult::NeedsChoice(_) => {
                     ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
                 }
             }
@@ -10212,14 +10256,16 @@ fn route_kept_card_or_defer(
     if cx.destination == Zone::Library {
         req = req.at_library_position(LibraryPosition::Bottom);
     }
+    let move_owner = crate::game::zone_pipeline::PausedMoveOwner::single(state);
     match crate::game::zone_pipeline::move_object(state, req, events) {
         crate::game::zone_pipeline::ZoneMoveResult::Done => None,
         crate::game::zone_pipeline::ZoneMoveResult::NeedsChoice(_)
         | crate::game::zone_pipeline::ZoneMoveResult::NeedsAuraAttachmentChoice => {
             let mut clear_markers = cx.misses.to_vec();
             clear_markers.push(cx.hit_card);
-            crate::game::zone_pipeline::defer_completion_on_pause(
+            crate::game::zone_pipeline::defer_completion_on_paused_move(
                 state,
+                move_owner,
                 crate::types::game_state::BatchCompletion::RevealRestPile {
                     delivery_stage: crate::types::game_state::DigDeliveryStage::Rest,
                     player,
@@ -17360,8 +17406,10 @@ mod random_result_resolution_context_tests {
             state.library_of_mut(PlayerId(0)).push_back(card);
             state.revealed_cards.insert(card);
         }
-        let logical_zone_change_group =
-            crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[cards.hand]);
+        let logical_zone_change_group = crate::game::triggers::allocate_logical_zone_change_group(
+            &mut state,
+            &crate::types::game_state::ZoneChangeAnnouncement::all(&[cards.hand], Zone::Library),
+        );
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
             logical_zone_change_group,

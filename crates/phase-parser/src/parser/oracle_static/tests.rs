@@ -31913,7 +31913,9 @@ fn cant_be_blocked_fallback_arm_defers_unenforceable_payment_gate() {
 
 /// Chained Throatseeker's defending-player poison gate is preserved as an
 /// undecomposed unless rider until attack legality can evaluate the candidate
-/// defending player before attackers are committed.
+/// defending player before attackers are committed. CR 508.5 defines the
+/// defending player in the context of a specific attack, which does not exist
+/// at static-ability evaluation time.
 #[test]
 fn chained_throatseeker_defending_player_poisoned_preserved_not_decomposed() {
     let def = parse_static_line("This creature can't attack unless defending player is poisoned.")
@@ -31923,9 +31925,12 @@ fn chained_throatseeker_defending_player_poisoned_preserved_not_decomposed() {
         panic!("expected Not(Unrecognized), got {:?}", def.condition);
     };
     let StaticCondition::Unrecognized { text } = condition.as_ref() else {
-        panic!("expected preserved unrecognized rider, got {condition:?}");
+        panic!("expected Unrecognized, got {condition:?}");
     };
-    assert_eq!(text, "unless defending player is poisoned");
+    assert_eq!(
+        text, "unless defending player is poisoned",
+        "the unless rider must be preserved verbatim"
+    );
 }
 
 /// Arboria's turn-history rider is preserved in the AST, but not yet decomposed

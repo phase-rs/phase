@@ -921,6 +921,10 @@
       "subtitle": "选择其复制品将下一个进入堆叠的咒语",
       "title": "排列复制品顺序"
     },
+    "memberOrder": {
+      "title": "排列牌张顺序",
+      "subtitle": "选择下一张要处理的牌"
+    },
     "station": {
       "label": "蓄势",
       "labelWithCharge": "蓄势（+{{charge}}个充电指示物）",
@@ -2385,6 +2389,7 @@
     "parse": "解析",
     "ptDeltaFrom": "来自{{source}}的{{delta}}",
     "report": "报告问题",
+    "reportNotSent": "未发送",
     "reported": "已报告 ✓",
     "rulingCount_one": "{{count}}条规则释疑",
     "rulingCount_other": "{{count}}条规则释疑",

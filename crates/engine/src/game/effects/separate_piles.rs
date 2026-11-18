@@ -480,6 +480,8 @@ fn sub_effect_as_resolved(
     resolved.sub_link = def.sub_link;
     // CR 611.2e: carry the parser-stamped onset like every other def → resolved copy.
     resolved.entry_onset = def.entry_onset;
+    // CR 608.2c: carry the parser-stamped list-slot identity like `sub_link`.
+    resolved.instruction_join = def.instruction_join;
     resolved
 }
 

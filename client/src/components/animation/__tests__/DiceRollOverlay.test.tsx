@@ -17,6 +17,7 @@ vi.mock("../../../services/telemetryEvents", () => ({ reportBoundaryError }));
 
 import { DiceRollOverlay } from "../DiceRollOverlay";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore";
+import { usePreferencesStore } from "../../../stores/preferencesStore";
 import { useUiStore } from "../../../stores/uiStore";
 import type { DiceRollPayload } from "../../../stores/uiStore";
 
@@ -67,9 +68,29 @@ describe("DiceRollOverlay with an unavailable 3D chunk", () => {
     vi.restoreAllMocks();
     reportBoundaryError.mockClear();
     vi.useRealTimers();
-    useUiStore.setState({ diceRoll: null, diceRollQueue: [] });
+    useUiStore.getState().resetDiceRoll();
+    usePreferencesStore.setState({ animationSpeedMultiplier: 1 });
     useMultiplayerStore.setState({ playerNames: new Map() });
   });
+
+  it("counts static faces down from when they show, not from the landing timeout", async () => {
+    // At this speed each roll's countdown is 800 ms. A static face that never
+    // reported its landing would hold its roll for the 8 s landing timeout.
+    usePreferencesStore.setState({ animationSpeedMultiplier: 0.25 });
+    render(<DiceRollOverlay />);
+
+    await act(async () => {
+      useUiStore.getState().flashDiceRoll({ kind: "coin", playerId: 0, won: true, context: "ability" });
+      useUiStore.getState().flashDiceRoll({
+        kind: "die", context: "ability", sides: 20, rolls: [{ playerId: 0, value: 17 }],
+      });
+    });
+    await flushLazyImports();
+
+    expect(await screen.findByText(/you won the flip/i)).toBeInTheDocument();
+    await waitFor(() => expect(useUiStore.getState().diceRoll?.kind).toBe("die"), { timeout: 3000 });
+    await waitFor(() => expect(useUiStore.getState().diceRoll).toBeNull(), { timeout: 3000 });
+  }, 10_000);
 
   it("(d) renders the static die face instead of throwing when the Dice3D export is missing", async () => {
     const onEscape = vi.fn();

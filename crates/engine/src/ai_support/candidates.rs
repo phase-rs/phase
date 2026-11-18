@@ -1714,9 +1714,9 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
-        // CR 405.3 + CR 707.10: the next copy of a batch may be of any spell
-        // that still has copies to make; every offered spell is a legal pick.
-        WaitingFor::SpellCopyOrderChoice {
+        // CR 608.2f + CR 405.3: the next member of an ordered loop may be any
+        // member still awaiting an iteration; every offered member is legal.
+        WaitingFor::MemberOrderChoice {
             player, choices, ..
         } => choices
             .iter()

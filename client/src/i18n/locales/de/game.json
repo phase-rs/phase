@@ -161,6 +161,7 @@
     "flip": "Umdrehen",
     "report": "Problem melden",
     "reported": "Gemeldet ✓",
+    "reportNotSent": "Nicht gesendet",
     "altParsedAbilities": "Alt: eingelesene Fähigkeiten",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine-Parse",
@@ -1811,6 +1812,10 @@
     "spellCopyOrder": {
       "title": "Kopien ordnen",
       "subtitle": "Wähle den Zauberspruch, dessen Kopie als Nächstes auf den Stapel kommt"
+    },
+    "memberOrder": {
+      "title": "Karten sortieren",
+      "subtitle": "Wähle, welche Karte als Nächstes behandelt wird"
     },
     "collectEvidence": {
       "title": "Beweise sammeln",

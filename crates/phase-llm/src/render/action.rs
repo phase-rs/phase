@@ -15,23 +15,45 @@
 //! added there. The engine's target types — [`TargetRef`], [`AttackTarget`],
 //! [`AttachTarget`] and an announcement's [`AnnouncementSubject`] — are instead
 //! read back as those types, so their variant, not the field they sit in,
-//! decides whether an id is a player's or an object's.
+//! decides whether an id is a player's or an object's. A mana-source
+//! activation's [`ManaSourceSelection`] is read back the same way and named by
+//! the mana it makes, since most of its fields are the engine's matching key
+//! for the activation rather than facts about it.
+//!
+//! Some actions choose by position: an index into the source's abilities, or
+//! an index, a permutation or a side of the decision the engine is waiting on.
+//! For the actions [`ActionIds::field_ids`] lists, each position is named by the
+//! text the engine records for what sits there: the ability's own text, a
+//! mode's, a branch's, each trigger's or replacement effect's, the life totals
+//! a redistribution sets, a pile's objects, an outside-game card's name. That
+//! text is read, never rebuilt here. Where the pending decision is another one,
+//! or records no text for the position, the number stays.
+//!
+//! A few fields are the engine's bookkeeping and say nothing a reader can use;
+//! the walk leaves them out ([`INTERNAL_FIELDS`]).
 
 use std::collections::BTreeMap;
 
 use engine::analysis::decision_template::AnnouncementSubject;
 use engine::game::combat::AttackTarget;
 use engine::game::game_object::AttachTarget;
+use engine::game::mana_sources::produced_mana_for_action;
 use engine::types::ability::TargetRef;
-use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::actions::{GameAction, OutsideGameSelection};
+use engine::types::game_state::{
+    CopyTargetSlot, GameState, OutsideGameChoiceSource, PileSide, WaitingFor,
+};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{
+    ManaSourceOutput, ManaSourcePenalty, ManaSourceQuantity, ManaSourceSelection,
+};
 use engine::types::player::PlayerId;
+use phase_ai::cast_facts::effective_activated_ability;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::game::{object_label, seat_label};
-use super::text::one_line;
+use super::game::{mana_symbols, object_label, seat_label};
+use super::text::{mana_cost_text, one_line};
 
 /// Payload fields whose numeric values name a player rather than an object.
 /// An explicit list, not a heuristic: guessing wrong here would print
@@ -93,6 +115,16 @@ const ACTION_OBJECT_FIELDS: &[&str] = &[
     "target",
 ];
 
+/// Fields the walk leaves out, as bookkeeping that names nothing a reader can
+/// act on. A card id indexes the card database: the object the action works on
+/// is named beside it by its object id. A payment mode is how the engine pays a
+/// cost it has already judged affordable; the engine offers one mode per
+/// option, so the mode never tells two options apart.
+///
+/// A field the action itself names is kept: `LearnOption::Rummage` carries the
+/// card it discards, an object, under `card_id` (see [`ActionIds::field_ids`]).
+const INTERNAL_FIELDS: &[&str] = &["card_id", "payment_mode"];
+
 /// A one-line description of what `action` does, with the players and objects
 /// it refers to named as the seat `viewer` sees them.
 ///
@@ -146,7 +178,9 @@ pub fn describe_tagged(state: &GameState, value: &Value) -> String {
     }
 }
 
-/// `verb` followed by the payload's non-empty fields: `Verb (Field: value, ..)`.
+/// `verb` followed by the payload's non-empty fields, [`INTERNAL_FIELDS`] left
+/// out: `Verb (Field: value, ..)`. An absent value is left out too, unless
+/// `ids` says what its absence means ([`IdNames::absent`]).
 fn describe_payload(ids: &impl IdNames, verb: String, data: Option<&Value>) -> String {
     let Some(data) = data.and_then(Value::as_object) else {
         return verb;
@@ -158,13 +192,15 @@ fn describe_payload(ids: &impl IdNames, verb: String, data: Option<&Value>) -> S
     let ordered: BTreeMap<&String, &Value> = data.iter().collect();
     let details: Vec<String> = ordered
         .into_iter()
-        .filter(|(_, value)| !is_empty_value(value))
-        .map(|(field, value)| {
-            format!(
-                "{}: {}",
-                humanize_identifier(field),
-                render_value(ids, field, value)
-            )
+        .filter_map(|(field, value)| {
+            let rendered = if value.is_null() {
+                ids.absent(field)?
+            } else if is_empty_value(value) {
+                return None;
+            } else {
+                render_field(ids, field, value)?
+            };
+            Some(format!("{}: {rendered}", humanize_identifier(field)))
         })
         .collect();
 
@@ -237,12 +273,26 @@ fn is_empty_value(value: &Value) -> bool {
     }
 }
 
-/// Render one payload field: the players and objects it names as `ids` names
+/// Render one payload value: the players and objects it names as `ids` names
 /// them, everything else in a compact JSON-ish form.
 fn render_value(ids: &impl IdNames, field: &str, value: &Value) -> String {
-    if let Some(named) = ids.name(field, value) {
-        return named;
+    ids.name(field, value)
+        .unwrap_or_else(|| render_unnamed(ids, field, value))
+}
+
+/// Render one field of a payload, or of an object nested in one, as
+/// [`render_value`] does; `None` for one of the [`INTERNAL_FIELDS`] that `ids`
+/// does not name.
+fn render_field(ids: &impl IdNames, field: &str, value: &Value) -> Option<String> {
+    match ids.name(field, value) {
+        Some(named) => Some(named),
+        None if INTERNAL_FIELDS.contains(&field) => None,
+        None => Some(render_unnamed(ids, field, value)),
     }
+}
+
+/// A value `ids` does not name, by its JSON shape.
+fn render_unnamed(ids: &impl IdNames, field: &str, value: &Value) -> String {
     match value {
         Value::String(text) => humanize_identifier(text),
         Value::Bool(flag) => flag.to_string(),
@@ -255,12 +305,9 @@ fn render_value(ids: &impl IdNames, field: &str, value: &Value) -> String {
             .join(", "),
         Value::Object(fields) => fields
             .iter()
-            .map(|(key, item)| {
-                format!(
-                    "{} {}",
-                    humanize_identifier(key),
-                    render_value(ids, key, item)
-                )
+            .filter_map(|(key, item)| {
+                let rendered = render_field(ids, key, item)?;
+                Some(format!("{} {rendered}", humanize_identifier(key)))
             })
             .collect::<Vec<_>>()
             .join(", "),
@@ -276,6 +323,13 @@ trait IdNames {
     /// `value`, met under `field`, rendered as the players or objects it names,
     /// or `None` to let the walk render it and go on into it.
     fn name(&self, field: &str, value: &Value) -> Option<String>;
+
+    /// What an absent optional value (`null`) under one of a payload's own
+    /// fields means, or `None` to leave the field out, as the walk leaves out
+    /// every empty value.
+    fn absent(&self, _field: &str) -> Option<String> {
+        None
+    }
 }
 
 /// The board's naming, for the delayed-trigger conditions it describes: object
@@ -311,16 +365,43 @@ enum FieldIds {
     /// the objects the engine offers a voter by position so same-named
     /// candidates stay apart.
     VoteCandidates,
+    /// CR 605.3a: the one mana-source activation a mana action selects, named
+    /// by what it makes ([`ActionIds::mana_source`]).
+    ManaSource,
+    /// CR 602.1: an index into the activated object's abilities, named by that
+    /// ability's text ([`ActionIds::ability`]).
+    Ability,
+    /// CR 700.2: indices into the pending modal choice's modes, each named by
+    /// its recorded text and any additional cost ([`ActionIds::mode`]).
+    Modes,
+    /// CR 608.2d + CR 701.55a: an index into the pending choice's branches,
+    /// named by the engine's description of that branch.
+    Branch,
+    /// CR 603.3b: an order of the pending triggers, named by trigger in the
+    /// order they resolve ([`ActionIds::trigger_order`]).
+    TriggerOrder,
+    /// CR 616.1: an index into the pending choice's replacement effects, named
+    /// by the effect's source and text.
+    Replacement,
+    /// CR 119.7 + CR 119.8: an index into the pending redistributions, named
+    /// by the life total each one gives each player.
+    LifeRedistribution,
+    /// CR 700.3: the pile the chooser takes, named by its objects
+    /// ([`ActionIds::pile`]).
+    Pile,
+    /// CR 400.11: a card the pending choice offers from outside the game,
+    /// named by that choice's entry for it ([`ActionIds::outside_game_card`]).
+    OutsideGameCard,
 }
 
 /// An option label's naming: every player and object id `action`'s payload
-/// carries, and an object-pool vote's candidate index, as the seat `viewer`
-/// sees them in `state`, the viewer-filtered state the board is rendered from.
-/// A player is named by seat and an object by [`object_label`], whatever field
-/// carries it: an option is only as clear as the least clear object it names,
-/// and two same-named permanents the action could mean either of are as
-/// ambiguous whether they are its targets, the attackers it declares or the
-/// legend it keeps.
+/// carries, as the seat `viewer` sees them in `state`, the viewer-filtered
+/// state the board is rendered from, and each position [`Self::field_ids`]
+/// lists by what sits there. A player is named by seat and an object by
+/// [`object_label`], whatever field carries it: an option is only as clear as
+/// the least clear object it names, and two same-named permanents the action
+/// could mean either of are as ambiguous whether they are its targets, the
+/// attackers it declares or the legend it keeps.
 struct ActionIds<'a> {
     state: &'a GameState,
     viewer: PlayerId,
@@ -331,18 +412,37 @@ impl ActionIds<'_> {
     /// What the numbers in `field` of this action's payload name.
     fn field_ids(&self, field: &str) -> Option<FieldIds> {
         match (self.action, field) {
-            // The engine reuses three field names for different kinds of
+            // The engine reuses four field names for different kinds of
             // value, so for these the action decides. A block pairs each
             // blocker with the attacker it blocks, where a damage assignment
             // pairs a recipient with an amount; `LearnOption::Rummage` names
-            // the card it discards by object; and only `ReorderHand` orders
-            // objects rather than indices.
+            // the card it discards by object; only `ReorderHand` orders
+            // objects rather than indices; and a mana action's `selection` is
+            // a mana-source activation, not an object.
             (GameAction::DeclareBlockers { .. }, "assignments")
             | (GameAction::LearnDecision { .. }, "card_id")
             | (GameAction::ReorderHand { .. }, "order") => Some(FieldIds::Objects),
+            (
+                GameAction::TapLandForMana { .. } | GameAction::ActivateManaSource { .. },
+                "selection",
+            ) => Some(FieldIds::ManaSource),
             (_, "assignments") => Some(FieldIds::ObjectAmounts),
+            // Positions: an activated ability by its index on its source, and
+            // the rest by their place in the decision the engine is waiting on.
+            (GameAction::ActivateAbility { .. }, "ability_index") => Some(FieldIds::Ability),
             (GameAction::SubmitVoteCandidate { .. }, "candidate_index") => {
                 Some(FieldIds::VoteCandidates)
+            }
+            (GameAction::SelectModes { .. }, "indices") => Some(FieldIds::Modes),
+            (GameAction::ChooseBranch { .. }, "index") => Some(FieldIds::Branch),
+            (GameAction::OrderTriggers { .. }, "order") => Some(FieldIds::TriggerOrder),
+            (GameAction::ChooseReplacement { .. }, "index") => Some(FieldIds::Replacement),
+            (GameAction::SubmitLifeRedistribution { .. }, "option_index") => {
+                Some(FieldIds::LifeRedistribution)
+            }
+            (GameAction::ChoosePile { .. }, "pile") => Some(FieldIds::Pile),
+            (GameAction::ChooseOutsideGameCards { .. }, "selections") => {
+                Some(FieldIds::OutsideGameCard)
             }
             (_, field) if names_players(field) => Some(FieldIds::Players),
             (_, field) if names_objects(field) || ACTION_OBJECT_FIELDS.contains(&field) => {
@@ -376,6 +476,240 @@ impl ActionIds<'_> {
             .collect::<Option<Vec<String>>>()?;
         Some(rendered.join(", "))
     }
+
+    /// CR 605.3a + CR 106.6: a mana-source activation as what it does: which
+    /// of its source's abilities, the mana it makes, any penalty for
+    /// activating it, any restriction on spending that mana, and the source.
+    ///
+    /// `selection` is the engine's key for one live activation (`value` its
+    /// serialized form), and parts of it describe nothing: the source's
+    /// incarnation (CR 400.7), and `mana_type`, which is one representative
+    /// type of the output and, while the color is still to be chosen, an inert
+    /// colorless marker.
+    ///
+    /// CR 106.3: the mana is what the activation would add, read from the
+    /// engine's own authority, `mana_sources::produced_mana_for_action`, which
+    /// resolves the selection as the action's reducer does. That is every unit
+    /// (Lotus Field's `{R}{R}{R}`, Sol Ring's `{C}{C}`, a filter land's
+    /// `{W}{U}`), not the one type the selection names. A color still to be
+    /// chosen on activation is said to be. A concrete selection the engine no
+    /// longer resolves, or resolves to no mana, names no live activation, so
+    /// its yield is unknown and no mana is stated.
+    fn mana_source(&self, selection: &ManaSourceSelection, value: &Value) -> String {
+        let mana = match selection.output {
+            ManaSourceOutput::DeferredColorChoice {
+                quantity: ManaSourceQuantity::Fixed(amount),
+            } => Some(format!("{amount}, color chosen on activation")),
+            ManaSourceOutput::DeferredColorChoice {
+                quantity: ManaSourceQuantity::Variable,
+            } => Some("amount and color set on activation".to_string()),
+            ManaSourceOutput::Concrete(_) => produced_mana_for_action(self.state, self.action)
+                .filter(|produced| !produced.is_empty())
+                .map(|produced| mana_symbols(produced.iter().map(|unit| unit.mana_type))),
+        };
+        // The walk words the restrictions and the penalty as it words any
+        // other engine value.
+        let walked = |field: &str| {
+            value
+                .get(field)
+                .map(|item| render_value(self, field, item))
+                .unwrap_or_default()
+        };
+
+        let mut facts = Vec::new();
+        if let Some(index) = selection.ability_index {
+            facts.push(format!("Ability Index {index}"));
+        }
+        if let Some(mana) = mana {
+            facts.push(format!("Mana {mana}"));
+        }
+        if selection.penalty != ManaSourcePenalty::None {
+            facts.push(format!("Penalty {}", walked("penalty")));
+        }
+        if !selection.restrictions.is_empty() {
+            facts.push(format!("Restrictions {}", walked("restrictions")));
+        }
+        facts.push(format!(
+            "Source {}",
+            self.named(TargetRef::Object(selection.source.object_id))
+        ));
+        facts.join(", ")
+    }
+
+    /// The name of object `id` as it stands for `~` in its own rules text.
+    fn source_name(&self, id: ObjectId) -> Option<&str> {
+        self.state
+            .objects
+            .get(&id)
+            .map(|object| object.name.as_str())
+    }
+
+    /// CR 602.1: the activated ability this action activates, by the text the
+    /// engine records for it (`AbilityDefinition::description`). The ability
+    /// comes from `effective_activated_ability`, the AI's one reading of an
+    /// `ActivateAbility` candidate's index, which numbers the source's
+    /// abilities and then those granted to it at runtime, as the offer that
+    /// issued this action numbers them.
+    fn ability(&self) -> Option<String> {
+        let GameAction::ActivateAbility { source_id, .. } = self.action else {
+            return None;
+        };
+        let ability = effective_activated_ability(self.state, self.action)?;
+        let text = ability.description.as_deref()?;
+        Some(rules_text(text, self.source_name(*source_id)))
+    }
+
+    /// CR 700.2: the mode at `index` of the pending modal choice, by the
+    /// modal's own records: the mode's recorded text, then its additional cost
+    /// (CR 700.2h) or its pawprints (CR 700.2i) as a fact of its own, as the
+    /// engine's interaction labels give the text and the cost apart. A spell
+    /// and an activated or triggered ability have their own prompts, and both
+    /// carry the same modal record.
+    ///
+    /// The text is quoted as recorded, never rebuilt into a printed line. The
+    /// recorded text of a Spree mode leaves its cost out, and a Tiered mode's
+    /// keeps the label and cost its card prints before the effect, so for a
+    /// Tiered mode the cost beside the quote repeats one the quote shows.
+    fn mode(&self, index: usize) -> Option<String> {
+        let (modal, source_id) = match &self.state.waiting_for {
+            WaitingFor::ModeChoice {
+                modal,
+                pending_cast,
+                ..
+            } => (modal, pending_cast.object_id),
+            WaitingFor::AbilityModeChoice {
+                modal, source_id, ..
+            } => (modal, *source_id),
+            _ => return None,
+        };
+        let text = rules_text(
+            modal.mode_descriptions.get(index)?,
+            self.source_name(source_id),
+        );
+        Some(
+            match (modal.mode_costs.get(index), modal.mode_pawprints.get(index)) {
+                (Some(cost), _) => format!("{text} (additional cost {})", mana_cost_text(cost)),
+                (None, Some(pawprints)) => {
+                    format!(
+                        "{text} (pawprints {})",
+                        "{P}".repeat(usize::from(*pawprints))
+                    )
+                }
+                (None, None) => text,
+            },
+        )
+    }
+
+    /// CR 603.3b: the pending triggers in the order `order` puts them on the
+    /// stack, each by its source and text, named from the one that resolves
+    /// first. Each goes on top of the one placed before it (CR 405.2) and the
+    /// top resolves first (CR 405.5), so the last one placed resolves first.
+    fn trigger_order(&self, order: &[Value]) -> Option<String> {
+        let WaitingFor::OrderTriggers { triggers, .. } = &self.state.waiting_for else {
+            return None;
+        };
+        let placed = order
+            .iter()
+            .map(|index| triggers.get(usize::try_from(index.as_u64()?).ok()?))
+            .collect::<Option<Vec<_>>>()?;
+        let mut resolving = placed
+            .into_iter()
+            .rev()
+            .map(|trigger| sourced_text(&trigger.source_name, &trigger.description))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter();
+        let first = resolving.next()?;
+        Some(
+            resolving.fold(format!("{first} resolves first"), |sequence, next| {
+                format!("{sequence}, then {next}")
+            }),
+        )
+    }
+
+    /// CR 700.3: the pile `side` names in the pending pile choice, by its
+    /// objects as the board names them. A pile can hold no objects (CR 700.3d).
+    fn pile(&self, side: PileSide) -> Option<String> {
+        let WaitingFor::SeparatePilesChoice { current, .. } = &self.state.waiting_for else {
+            return None;
+        };
+        let (letter, pile) = match side {
+            PileSide::A => ("A", &current.pile_a),
+            PileSide::B => ("B", &current.pile_b),
+        };
+        let objects = if pile.is_empty() {
+            "empty".to_string()
+        } else {
+            pile.iter()
+                .map(|id| self.named(TargetRef::Object(*id)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        Some(format!("{letter}: {objects}"))
+    }
+
+    /// CR 400.11: one card brought in from outside the game, by the pending
+    /// choice's own entry for it and where it is: a sideboard slot (CR
+    /// 400.11a), a booster pack's slot (CR 400.11b) or the revealed companion
+    /// (CR 702.139a). A face-up exiled card (CR 406.3) is an object in the
+    /// game, named as the board names it.
+    fn outside_game_card(&self, selection: &OutsideGameSelection) -> Option<String> {
+        if let OutsideGameSelection::FaceUpExile { object_id } = selection {
+            return Some(self.named(TargetRef::Object(*object_id)));
+        }
+        let WaitingFor::OutsideGameChoice { choices, .. } = &self.state.waiting_for else {
+            return None;
+        };
+        // Matched on the entry's source alone, so a new source cannot compile
+        // without deciding how its card is named.
+        choices.iter().find_map(|entry| {
+            let place = match &entry.source {
+                OutsideGameChoiceSource::Sideboard {
+                    sideboard_index, ..
+                } => matches!(
+                    selection,
+                    OutsideGameSelection::Sideboard { sideboard_index: chosen }
+                        if chosen == sideboard_index
+                )
+                .then_some("sideboard"),
+                OutsideGameChoiceSource::BoosterPack { pack_slot, .. } => matches!(
+                    selection,
+                    OutsideGameSelection::BoosterPack { pack_slot: chosen } if chosen == pack_slot
+                )
+                .then_some("booster pack"),
+                OutsideGameChoiceSource::Companion { .. } => {
+                    matches!(selection, OutsideGameSelection::Companion).then_some("companion")
+                }
+                // An exiled card is an object in the game, already named by
+                // its object label above.
+                OutsideGameChoiceSource::FaceUpExile { .. } => None,
+            }?;
+            Some(format!("{} ({place})", one_line(&entry.name)))
+        })
+    }
+
+    /// `ChooseTarget` with no target, as the pending decision reads it. In a
+    /// copy's retarget walk it keeps the current target of the position being
+    /// answered (CR 707.10c). Everywhere else it chooses no target: it declines
+    /// an optional target (CR 115.6), or answers a choice with nothing to
+    /// choose.
+    fn no_target(&self) -> String {
+        if let WaitingFor::CopyRetarget {
+            target_slots,
+            current_slot,
+            ..
+        } = &self.state.waiting_for
+        {
+            if let Some(CopyTargetSlot {
+                current: Some(current),
+                can_keep: true,
+                ..
+            }) = target_slots.get(*current_slot)
+            {
+                return format!("keep the current target, {}", self.named(current.clone()));
+            }
+        }
+        "none".to_string()
+    }
 }
 
 impl IdNames for ActionIds<'_> {
@@ -383,6 +717,7 @@ impl IdNames for ActionIds<'_> {
         if let Some(target) = engine_target(value) {
             return Some(self.named(target));
         }
+        let index = || usize::try_from(value.as_u64()?).ok();
         // Matched on the field's kind alone, so a new kind cannot compile
         // without its arm. A value of another shape (a list, an absent
         // optional id, a nested value) returns `None` and the walk renders it:
@@ -402,12 +737,99 @@ impl IdNames for ActionIds<'_> {
                 else {
                     return None;
                 };
-                let index = usize::try_from(value.as_u64()?).ok()?;
-                let candidate = *candidate_objects.get(index)?;
+                let candidate = *candidate_objects.get(index()?)?;
                 Some(self.named(TargetRef::Object(candidate)))
+            }
+            FieldIds::ManaSource => {
+                let selection = ManaSourceSelection::deserialize(value).ok()?;
+                Some(self.mana_source(&selection, value))
+            }
+            // The index is the action's own `ability_index`, which
+            // `ActionIds::ability` reads off the action.
+            FieldIds::Ability => self.ability(),
+            FieldIds::Modes => self.mode(index()?),
+            FieldIds::Branch => {
+                let WaitingFor::ChooseOneOfBranch {
+                    branch_descriptions,
+                    source_id,
+                    ..
+                } = &self.state.waiting_for
+                else {
+                    return None;
+                };
+                let text = branch_descriptions.get(index()?)?;
+                Some(rules_text(text, self.source_name(*source_id)))
+            }
+            FieldIds::TriggerOrder => self.trigger_order(value.as_array()?),
+            FieldIds::Replacement => {
+                let WaitingFor::ReplacementChoice { candidates, .. } = &self.state.waiting_for
+                else {
+                    return None;
+                };
+                let candidate = candidates.get(index()?)?;
+                sourced_text(&candidate.source_name, &candidate.description)
+            }
+            FieldIds::LifeRedistribution => {
+                let WaitingFor::RedistributeLifeTotals { options, .. } = &self.state.waiting_for
+                else {
+                    return None;
+                };
+                let option = options.get(index()?)?;
+                let totals = option
+                    .assignment
+                    .iter()
+                    .map(|(player, life)| {
+                        format!("{} at {life} life", seat_label(*player, self.viewer))
+                    })
+                    .collect::<Vec<_>>();
+                Some(totals.join(", "))
+            }
+            FieldIds::Pile => self.pile(PileSide::deserialize(value).ok()?),
+            FieldIds::OutsideGameCard => {
+                self.outside_game_card(&OutsideGameSelection::deserialize(value).ok()?)
             }
         }
     }
+
+    fn absent(&self, field: &str) -> Option<String> {
+        match (self.action, field) {
+            (GameAction::ChooseTarget { .. }, "target") => Some(self.no_target()),
+            _ => None,
+        }
+    }
+}
+
+/// Rules text the engine records, quoted and on one line, with its
+/// self-reference token `~` read as `source_name`. CR 201.5: text that refers
+/// to the object it is on by name means that object; the engine writes that
+/// name as `~`, and the client prints it back the same way
+/// (`client/src/utils/description.ts`). Quoted because rules text has commas
+/// of its own and a label's fields are separated by commas.
+fn rules_text(text: &str, source_name: Option<&str>) -> String {
+    let named = match source_name {
+        Some(name) => text.replace('~', name),
+        None => text.to_string(),
+    };
+    format!("\"{}\"", one_line(&named))
+}
+
+/// A triggered ability or replacement effect by its source and its text, as
+/// the engine's summary of it records them: `Source ("text")`, or whichever of
+/// the two the summary records (a rule-based replacement option can have no
+/// source name). `None` when it records neither, so the label keeps the
+/// number.
+fn sourced_text(source_name: &str, description: &str) -> Option<String> {
+    let source = one_line(source_name);
+    if description.trim().is_empty() {
+        return (!source.is_empty()).then_some(source);
+    }
+    if source.is_empty() {
+        return Some(rules_text(description, None));
+    }
+    Some(format!(
+        "{source} ({})",
+        rules_text(description, Some(source_name))
+    ))
 }
 
 /// The player or object an engine target value names, read back as the
@@ -520,10 +942,29 @@ mod tests {
         let state = empty_state();
         let rendered = describe_action(&state, PlayerId(0), &action);
         assert_eq!(rendered, describe_action(&state, PlayerId(0), &action));
-        assert!(rendered.starts_with("Play Land ("), "{rendered}");
-        // `card_id` must NOT be resolved through the object table.
-        assert!(rendered.contains("Card ID: 3"), "{rendered}");
-        assert!(rendered.contains("Object ID: object #7"), "{rendered}");
+        // The card id is left out: it indexes the card database, not the
+        // object table, and the object id beside it names the card.
+        assert_eq!(rendered, "Play Land (Object ID: object #7)");
+    }
+
+    /// Issue #10997: a cast option printed the card database's id and the
+    /// engine's payment mode (`Card ID: 100, ..., Payment Mode: Type Auto`).
+    #[test]
+    fn a_cast_leaves_out_its_card_id_and_payment_mode() {
+        let board = board();
+        let cast = described(
+            &board,
+            GameAction::CastSpell {
+                object_id: board.bolt,
+                card_id: CardId(board.bolt.0),
+                targets: vec![],
+                payment_mode: Default::default(),
+            },
+        );
+        assert_eq!(
+            cast,
+            "Cast Spell (Object ID: Lightning Bolt (hand, owned by You))"
+        );
     }
 
     /// Every action on one object leads with that object's name — including
@@ -994,9 +1435,7 @@ mod tests {
                     payment_mode: Default::default(),
                 },
                 format!(
-                    "Cast Spell As Sneak (Card ID: {}, Creature To Return: {}, Hand Object: {}, \
-                     Payment Mode: Type Auto)",
-                    board.technique.0,
+                    "Cast Spell As Sneak (Creature To Return: {}, Hand Object: {})",
                     you("Grizzly Bears"),
                     in_hand("Karai's Technique")
                 ),
@@ -1042,7 +1481,8 @@ mod tests {
         for (action, expected) in cases {
             assert_eq!(described(&board, action), expected);
         }
-        // The engine reuses `order` for indices: those stay numbers.
+        // The engine reuses `order` for indices into a trigger ordering. With
+        // none pending, those stay numbers.
         assert_eq!(
             described(&board, GameAction::OrderTriggers { order: vec![1, 0] }),
             "Order Triggers (Order: 1, 0)"
@@ -1280,5 +1720,923 @@ mod tests {
             describe_tagged(&board.state, &condition),
             "At Next Phase For Player (Phase: End, Player: Player 0)"
         );
+    }
+
+    /// Issue #10997: a mana option printed the engine's whole selection
+    /// (`Atomic Combination none, Mana Type White, Output Data White, Type
+    /// Concrete, Penalty None, ..., Source Incarnation 2, ...`). The engine's
+    /// own land-tap action for a Plains now reads as the mana it makes.
+    #[test]
+    fn a_lands_mana_option_names_the_mana_it_makes() {
+        use engine::game::mana_sources::activatable_mana_actions_for_player;
+        use engine::game::scenario::GameScenario;
+        use engine::game::visibility::filter_state_for_viewer;
+        use engine::types::mana::ManaColor;
+        use engine::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_basic_land(VIEWER, ManaColor::White);
+        let runner = scenario.build();
+        let visible = filter_state_for_viewer(runner.state(), VIEWER);
+
+        let actions = activatable_mana_actions_for_player(runner.state(), VIEWER);
+        let [action @ GameAction::TapLandForMana { .. }] = actions.as_slice() else {
+            panic!("a Plains offers one land tap: {actions:?}");
+        };
+        let label = describe_action(&visible, VIEWER, action);
+        assert!(
+            label.starts_with("Tap Land For Mana (Selection: "),
+            "{label}"
+        );
+        assert!(label.contains("Mana {W},"), "{label}");
+        assert!(
+            label.contains("Source Plains (controlled by You)"),
+            "{label}"
+        );
+        for internal in [
+            "Incarnation",
+            "Mana Type",
+            "Output",
+            "Atomic Combination",
+            "Penalty",
+            "Taps For Mana",
+        ] {
+            assert!(!label.contains(internal), "{internal} in {label}");
+        }
+    }
+
+    /// CR 106.3: a mana option states every mana the activation adds. Lotus
+    /// Field's land tap for red named one `{R}`, the one type its selection
+    /// carries, though the engine adds three.
+    #[test]
+    fn a_mana_option_states_all_the_mana_it_adds() {
+        use engine::game::mana_sources::activatable_mana_actions_for_player;
+        use engine::game::scenario::GameScenario;
+        use engine::game::visibility::filter_state_for_viewer;
+        use engine::types::mana::ManaType;
+        use engine::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let lotus = scenario
+            .add_land_from_oracle(
+                VIEWER,
+                "Lotus Field",
+                "Hexproof\nThis land enters tapped.\nWhen this land enters, sacrifice two \
+                 lands.\n{T}: Add three mana of any one color.",
+            )
+            .id();
+        let runner = scenario.build();
+        let state = runner.state();
+        let visible = filter_state_for_viewer(state, VIEWER);
+        assert!(!state.objects[&lotus].tapped, "Lotus Field can be tapped");
+
+        // The engine's own land-tap actions for Lotus Field, one per color.
+        let labels: Vec<(ManaType, String)> = activatable_mana_actions_for_player(state, VIEWER)
+            .iter()
+            .filter_map(|action| match action {
+                GameAction::TapLandForMana { selection } => {
+                    let ManaSourceOutput::Concrete(color) = selection.output else {
+                        return None;
+                    };
+                    // Reach guard: the engine records the complete same-color activation.
+                    // Keep that source contract alongside the exact rendered-mana checks.
+                    assert_eq!(
+                        selection.atomic_combination,
+                        Some(vec![color; 3]),
+                        "{selection:?}"
+                    );
+                    Some((color, describe_action(&visible, VIEWER, action)))
+                }
+                _ => None,
+            })
+            .collect();
+        let red = labels
+            .iter()
+            .find(|(color, _)| *color == ManaType::Red)
+            .map(|(_, label)| label)
+            .unwrap_or_else(|| panic!("Lotus Field offers a red land tap: {labels:?}"));
+        assert!(red.starts_with("Tap Land For Mana (Selection: "), "{red}");
+        assert!(red.contains("Mana {R}{R}{R},"), "{red}");
+        assert!(
+            red.contains("Source Lotus Field (controlled by You)"),
+            "{red}"
+        );
+        // One row per color, each its own three mana.
+        assert_eq!(labels.len(), 5, "{labels:?}");
+        let distinct: std::collections::BTreeSet<&String> =
+            labels.iter().map(|(_, label)| label).collect();
+        assert_eq!(distinct.len(), 5, "{labels:?}");
+    }
+
+    /// The same authority reads an artifact's `ActivateManaSource`
+    /// activation: Sol Ring's option states both `{C}` it adds.
+    #[test]
+    fn a_mana_artifacts_option_states_all_the_mana_it_adds() {
+        use engine::game::mana_sources::activatable_mana_source_selections;
+        use engine::game::scenario::GameScenario;
+        use engine::game::visibility::filter_state_for_viewer;
+        use engine::types::mana::ManaType;
+        use engine::types::phase::Phase;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.add_artifact_from_oracle(VIEWER, "Sol Ring", "{T}: Add {C}{C}.");
+        let runner = scenario.build();
+        let visible = filter_state_for_viewer(runner.state(), VIEWER);
+
+        let selections = activatable_mana_source_selections(runner.state(), VIEWER);
+        let [selection] = selections.as_slice() else {
+            panic!("Sol Ring offers one activation: {selections:?}");
+        };
+        // Reach guard: a concrete selection, which the label reads through the
+        // engine's output rather than as a color still to be chosen. The
+        // planner records Sol Ring's two mana as one atomic combination row.
+        assert_eq!(
+            selection.output,
+            ManaSourceOutput::Concrete(ManaType::Colorless)
+        );
+        assert_eq!(
+            selection.atomic_combination,
+            Some(vec![ManaType::Colorless; 2])
+        );
+        let label = describe_action(
+            &visible,
+            VIEWER,
+            &GameAction::ActivateManaSource {
+                selection: selection.clone(),
+            },
+        );
+        assert!(label.contains("Mana {C}{C},"), "{label}");
+        assert!(
+            label.contains("Source Sol Ring (controlled by You)"),
+            "{label}"
+        );
+    }
+
+    /// While a source's color is still to be chosen, the engine marks the
+    /// selection's mana type colorless. The option says the color is chosen
+    /// on activation rather than calling the mana colorless.
+    #[test]
+    fn a_color_chosen_on_activation_is_never_called_colorless() {
+        use engine::game::mana_sources::activatable_mana_source_selections;
+        use engine::game::scenario::GameScenario;
+        use engine::game::visibility::filter_state_for_viewer;
+        use engine::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+            QuantityExpr,
+        };
+        use engine::types::mana::{ManaColor, ManaType};
+        use engine::types::phase::Phase;
+
+        // Manalith: "{T}: Add one mana of any color."
+        let any_color = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::AnyOneColor {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    color_options: ManaColor::ALL.to_vec(),
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Tap);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario
+            .add_creature(VIEWER, "Manalith", 0, 0)
+            .as_artifact()
+            .with_ability_definition(any_color);
+        let runner = scenario.build();
+        let visible = filter_state_for_viewer(runner.state(), VIEWER);
+
+        let selections = activatable_mana_source_selections(runner.state(), VIEWER);
+        let [selection] = selections.as_slice() else {
+            panic!("Manalith offers one activation: {selections:?}");
+        };
+        // Reach guard: the engine's selection is the deferred one this test is
+        // about, with its colorless marker.
+        assert!(
+            matches!(
+                selection.output,
+                ManaSourceOutput::DeferredColorChoice { .. }
+            ),
+            "{selection:?}"
+        );
+        assert_eq!(selection.mana_type, ManaType::Colorless);
+
+        let label = describe_action(
+            &visible,
+            VIEWER,
+            &GameAction::ActivateManaSource {
+                selection: selection.clone(),
+            },
+        );
+        assert!(
+            label.contains("Mana 1, color chosen on activation"),
+            "{label}"
+        );
+        assert!(
+            !label.contains("Colorless") && !label.contains("{C}"),
+            "{label}"
+        );
+    }
+
+    /// A painland's colored activation carries its damage, Cavern of Souls'
+    /// colored mana its spend restriction, and Selvala's an amount set on
+    /// activation; each option says so. These are manual activations whose
+    /// color is chosen on activation, so their selections carry everything
+    /// the label states.
+    #[test]
+    fn mana_options_state_their_penalty_and_restrictions() {
+        use engine::game::create_object;
+        use engine::types::identifiers::ObjectIncarnationRef;
+        use engine::types::mana::{ManaRestriction, ManaType};
+        use engine::types::zones::Zone;
+
+        let mut board = board();
+        let mut permanent = |name: &str| {
+            create_object(
+                &mut board.state,
+                CardId(80),
+                VIEWER,
+                name.to_string(),
+                Zone::Battlefield,
+            )
+        };
+        // "{T}: Add {W} or {U}. This land deals 1 damage to you."
+        let wastes = permanent("Adarkar Wastes");
+        // "{T}: Add one mana of any color. Spend this mana only to cast a
+        // creature spell of the chosen type, and that spell can't be
+        // countered."
+        let cavern = permanent("Cavern of Souls");
+        // "{G}, {T}: Add X mana in any combination of colors, where X is the
+        // greatest power among creatures you control."
+        let selvala = permanent("Selvala, Heart of the Wilds");
+        // Dark Depths has no mana ability, so no live activation matches a
+        // concrete selection of it.
+        let depths = permanent("Dark Depths");
+
+        let selection = |source: ObjectId, quantity: ManaSourceQuantity| ManaSourceSelection {
+            source: ObjectIncarnationRef::of(source, 2),
+            ability_index: Some(1),
+            mana_type: ManaType::Colorless,
+            output: ManaSourceOutput::DeferredColorChoice { quantity },
+            atomic_combination: None,
+            restrictions: Vec::new(),
+            penalty: ManaSourcePenalty::None,
+            taps_for_mana: Vec::new(),
+        };
+        let activated = |chosen: ManaSourceSelection| {
+            described(&board, GameAction::ActivateManaSource { selection: chosen })
+        };
+
+        let painful = ManaSourceSelection {
+            penalty: ManaSourcePenalty::DealsDamageOnResolution {
+                fixed_amount: Some(1),
+            },
+            ..selection(wastes, ManaSourceQuantity::Fixed(1))
+        };
+        assert_eq!(
+            activated(painful),
+            "Activate Mana Source (Selection: Ability Index 1, \
+             Mana 1, color chosen on activation, \
+             Penalty Deals Damage On Resolution Fixed Amount 1, \
+             Source Adarkar Wastes (controlled by You))"
+        );
+
+        let restricted = ManaSourceSelection {
+            restrictions: vec![ManaRestriction::OnlyForCreatureType("Angel".to_string())],
+            ..selection(cavern, ManaSourceQuantity::Fixed(1))
+        };
+        assert_eq!(
+            activated(restricted),
+            "Activate Mana Source (Selection: Ability Index 1, \
+             Mana 1, color chosen on activation, \
+             Restrictions Only For Creature Type Angel, \
+             Source Cavern of Souls (controlled by You))"
+        );
+
+        assert_eq!(
+            activated(selection(selvala, ManaSourceQuantity::Variable)),
+            "Activate Mana Source (Selection: Ability Index 1, \
+             Mana amount and color set on activation, \
+             Source Selvala, Heart of the Wilds (controlled by You))"
+        );
+
+        // A concrete selection no live activation matches has no known yield,
+        // and the option states no mana rather than the one type it names.
+        let stale = ManaSourceSelection {
+            mana_type: ManaType::Black,
+            output: ManaSourceOutput::Concrete(ManaType::Black),
+            ..selection(depths, ManaSourceQuantity::Fixed(1))
+        };
+        assert_eq!(
+            described(&board, GameAction::TapLandForMana { selection: stale }),
+            "Tap Land For Mana (Selection: Ability Index 1, \
+             Source Dark Depths (controlled by You))"
+        );
+    }
+
+    /// A position names what sits there only in the decision it indexes. With
+    /// that decision not pending, or an ability the engine records no text
+    /// for, the number is all the payload says, and the label keeps it.
+    #[test]
+    fn a_position_stays_a_number_outside_the_decision_it_indexes() {
+        use engine::types::game_state::PileSide;
+
+        let board = board();
+        let cases = [
+            (
+                GameAction::ChooseBranch { index: 1 },
+                "Choose Branch (Index: 1)",
+            ),
+            (
+                GameAction::SelectModes {
+                    indices: vec![0, 2],
+                },
+                "Select Modes (Indices: 0, 2)",
+            ),
+            (
+                GameAction::ChooseReplacement { index: 1 },
+                "Choose Replacement (Index: 1)",
+            ),
+            (
+                GameAction::SubmitLifeRedistribution { option_index: 0 },
+                "Submit Life Redistribution (Option Index: 0)",
+            ),
+            (
+                GameAction::ChoosePile { pile: PileSide::A },
+                "Choose Pile (Pile: Type A)",
+            ),
+            // Grizzly Bears has no activated abilities.
+            (
+                GameAction::ActivateAbility {
+                    source_id: board.bears,
+                    ability_index: 0,
+                    payment_mode: Default::default(),
+                },
+                "Activate Ability (Ability Index: 0, \
+                 Source ID: Grizzly Bears (controlled by You))",
+            ),
+        ];
+        for (action, expected) in cases {
+            assert_eq!(described(&board, action), expected);
+        }
+    }
+
+    /// CR 700.2h + CR 700.2i: a mode's additional cost (Spree, Tiered) or its
+    /// pawprints. Each mode option quotes the mode's text as the modal record
+    /// the pending choice carries records it, and gives the cost or the
+    /// pawprints after it; a mode chosen more than once is named each time.
+    /// Spree's recorded text leaves the cost out, and Tiered's keeps the label
+    /// and cost the card prints, so nothing is added to the quote.
+    #[test]
+    fn a_mode_option_names_its_text_and_its_cost() {
+        use engine::types::ability::{Effect, ModalChoice, ResolvedAbility};
+        use engine::types::game_state::PendingCast;
+        use engine::types::mana::{ManaCost, ManaCostShard};
+
+        /// The viewer casting `name`, at the choice of its modes.
+        fn cast(board: &mut Board, name: &str, modal: ModalChoice) {
+            let spell = engine::game::create_object(
+                &mut board.state,
+                CardId(70),
+                VIEWER,
+                name.to_string(),
+                engine::types::zones::Zone::Hand,
+            );
+            let ability = ResolvedAbility::new(Effect::NoOp, vec![], spell, VIEWER);
+            let pending = PendingCast::new(spell, CardId(70), ability, ManaCost::zero());
+            board.state.waiting_for = WaitingFor::ModeChoice {
+                player: VIEWER,
+                modal,
+                pending_cast: Box::new(pending),
+                unavailable_modes: Vec::new(),
+            };
+        }
+
+        let mut board = board();
+        let generic = |amount: u32| ManaCost::Cost {
+            shards: Vec::new(),
+            generic: amount,
+        };
+
+        // Final Showdown: "Spree / + {1} — All creatures lose all abilities
+        // until end of turn. / + {1} — Choose a creature you control. It gains
+        // indestructible until end of turn. / + {3}{W}{W} — Destroy all
+        // creatures."
+        cast(
+            &mut board,
+            "Final Showdown",
+            ModalChoice {
+                min_choices: 1,
+                max_choices: 3,
+                mode_count: 3,
+                mode_descriptions: vec![
+                    "All creatures lose all abilities until end of turn.".to_string(),
+                    "Choose a creature you control. It gains indestructible until end of turn."
+                        .to_string(),
+                    "Destroy all creatures.".to_string(),
+                ],
+                mode_costs: vec![
+                    generic(1),
+                    generic(1),
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::White, ManaCostShard::White],
+                        generic: 3,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            described(
+                &board,
+                GameAction::SelectModes {
+                    indices: vec![0, 2],
+                },
+            ),
+            "Select Modes (Indices: \"All creatures lose all abilities until end of turn.\" \
+             (additional cost {1}), \"Destroy all creatures.\" (additional cost {3}{W}{W}))"
+        );
+
+        // Cloud's Limit Break, as the parser records a Tiered card's modes:
+        // "Tiered (Choose one additional cost.) / • Cross-Slash — {0} — Destroy
+        // target tapped creature. / • Blade Beam — {1} — Destroy any number of
+        // target tapped creatures with different controllers. / • Omnislash —
+        // {3}{W} — Destroy all tapped creatures."
+        cast(
+            &mut board,
+            "Cloud's Limit Break",
+            ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 3,
+                mode_descriptions: vec![
+                    "Cross-Slash — {0} — Destroy target tapped creature.".to_string(),
+                    "Blade Beam — {1} — Destroy any number of target tapped creatures with \
+                     different controllers."
+                        .to_string(),
+                    "Omnislash — {3}{W} — Destroy all tapped creatures.".to_string(),
+                ],
+                mode_costs: vec![
+                    generic(0),
+                    generic(1),
+                    ManaCost::Cost {
+                        shards: vec![ManaCostShard::White],
+                        generic: 3,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            described(&board, GameAction::SelectModes { indices: vec![1] }),
+            "Select Modes (Indices: \"Blade Beam — {1} — Destroy any number of target tapped \
+             creatures with different controllers.\" (additional cost {1}))"
+        );
+        assert_eq!(
+            described(&board, GameAction::SelectModes { indices: vec![0] }),
+            "Select Modes (Indices: \"Cross-Slash — {0} — Destroy target tapped creature.\" \
+             (additional cost {0}))"
+        );
+
+        // Season of the Burrow: "Choose up to five {P} worth of modes. You may
+        // choose the same mode more than once. / {P} — Create a 1/1 white
+        // Rabbit creature token. / {P}{P} — Exile target nonland permanent. Its
+        // controller draws a card. / {P}{P}{P} — Return target permanent card
+        // with mana value 3 or less from your graveyard to the battlefield with
+        // an indestructible counter on it."
+        cast(
+            &mut board,
+            "Season of the Burrow",
+            ModalChoice {
+                max_choices: 5,
+                mode_count: 3,
+                mode_descriptions: vec![
+                    "Create a 1/1 white Rabbit creature token.".to_string(),
+                    "Exile target nonland permanent. Its controller draws a card.".to_string(),
+                    "Return target permanent card with mana value 3 or less from your \
+                     graveyard to the battlefield with an indestructible counter on it."
+                        .to_string(),
+                ],
+                allow_repeat_modes: true,
+                mode_pawprints: vec![1, 2, 3],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            described(
+                &board,
+                GameAction::SelectModes {
+                    indices: vec![0, 0, 1],
+                },
+            ),
+            "Select Modes (Indices: \"Create a 1/1 white Rabbit creature token.\" (pawprints \
+             {P}), \"Create a 1/1 white Rabbit creature token.\" (pawprints {P}), \"Exile \
+             target nonland permanent. Its controller draws a card.\" (pawprints {P}{P}))"
+        );
+    }
+
+    /// CR 700.2: a modal activated ability's modes come in a prompt of their
+    /// own, carrying the same modal record as a spell's. Cankerbloom: "{1},
+    /// Sacrifice this creature: Choose one — • Destroy target artifact. •
+    /// Destroy target enchantment. • Proliferate."
+    #[test]
+    fn a_modal_abilitys_mode_options_name_its_modes() {
+        use engine::types::ability::ModalChoice;
+
+        let mut board = board();
+        let cankerbloom = engine::game::create_object(
+            &mut board.state,
+            CardId(71),
+            VIEWER,
+            "Cankerbloom".to_string(),
+            engine::types::zones::Zone::Battlefield,
+        );
+        board.state.waiting_for = WaitingFor::AbilityModeChoice {
+            player: VIEWER,
+            modal: ModalChoice {
+                min_choices: 1,
+                max_choices: 1,
+                mode_count: 3,
+                mode_descriptions: vec![
+                    "Destroy target artifact.".to_string(),
+                    "Destroy target enchantment.".to_string(),
+                    "Proliferate.".to_string(),
+                ],
+                ..Default::default()
+            },
+            source_id: cankerbloom,
+            mode_abilities: Vec::new(),
+            is_activated: true,
+            ability_index: Some(0),
+            ability_cost: None,
+            activation_cost_snapshot: None,
+            activation_payment_mode: Default::default(),
+            unavailable_modes: Vec::new(),
+        };
+        let modes: Vec<String> = (0..3)
+            .map(|index| {
+                described(
+                    &board,
+                    GameAction::SelectModes {
+                        indices: vec![index],
+                    },
+                )
+            })
+            .collect();
+        assert_eq!(
+            modes,
+            [
+                "Select Modes (Indices: \"Destroy target artifact.\")",
+                "Select Modes (Indices: \"Destroy target enchantment.\")",
+                "Select Modes (Indices: \"Proliferate.\")",
+            ]
+        );
+    }
+
+    /// CR 616.1: the affected player chooses which replacement effect applies
+    /// first, and the engine offers them by index. A Lightning Bolt aimed at
+    /// the viewer meets Furnace of Rath ("If a source would deal damage to a
+    /// permanent or player, it deals double that damage to that permanent or
+    /// player instead.") and Benevolent Unicorn ("If a spell would deal damage
+    /// to a permanent or player, it deals that much damage minus 1 to that
+    /// permanent or player instead."). Each option names its effect by source
+    /// and text.
+    #[test]
+    fn a_replacement_option_names_the_effect_it_applies() {
+        use engine::types::game_state::ReplacementCandidateSummary;
+
+        let mut board = board();
+        let furnace = "If a source would deal damage to a permanent or player, it deals \
+                       double that damage to that permanent or player instead.";
+        let unicorn = "If a spell would deal damage to a permanent or player, it deals that \
+                       much damage minus 1 to that permanent or player instead.";
+        let mut candidate = |name: &str, description: &str| {
+            let source_id = engine::game::create_object(
+                &mut board.state,
+                CardId(72),
+                OPPONENT,
+                name.to_string(),
+                engine::types::zones::Zone::Battlefield,
+            );
+            ReplacementCandidateSummary {
+                source_id,
+                source_name: name.to_string(),
+                description: description.to_string(),
+            }
+        };
+        let candidates = vec![
+            candidate("Furnace of Rath", furnace),
+            candidate("Benevolent Unicorn", unicorn),
+        ];
+        board.state.waiting_for = WaitingFor::ReplacementChoice {
+            player: VIEWER,
+            candidate_count: candidates.len(),
+            candidates,
+            kind: Default::default(),
+            last_applied_decides: false,
+            remember_identity: None,
+        };
+        assert_eq!(
+            described(&board, GameAction::ChooseReplacement { index: 0 }),
+            format!("Choose Replacement (Index: Furnace of Rath (\"{furnace}\"))")
+        );
+        assert_eq!(
+            described(&board, GameAction::ChooseReplacement { index: 1 }),
+            format!("Choose Replacement (Index: Benevolent Unicorn (\"{unicorn}\"))")
+        );
+
+        // The rule-based option the engine adds beside optional found-card
+        // replacements carries no source name; it is named by its text alone.
+        let WaitingFor::ReplacementChoice { candidates, .. } = &mut board.state.waiting_for else {
+            unreachable!("the replacement choice set above");
+        };
+        candidates[1] = ReplacementCandidateSummary {
+            source_id: ObjectId(0),
+            source_name: String::new(),
+            description: "Use the original found-card destination".to_string(),
+        };
+        assert_eq!(
+            described(&board, GameAction::ChooseReplacement { index: 1 }),
+            "Choose Replacement (Index: \"Use the original found-card destination\")"
+        );
+    }
+
+    /// CR 119.7 + CR 119.8: Reverse the Sands ("Redistribute any number of
+    /// players' life totals.") offers each legal assignment by index. Each
+    /// option names the life total it gives each player, by seat.
+    #[test]
+    fn a_life_redistribution_option_names_the_totals_it_sets() {
+        use engine::types::game_state::LifeRedistributionOption;
+
+        let mut board = board();
+        board.state.waiting_for = WaitingFor::RedistributeLifeTotals {
+            player: VIEWER,
+            options: vec![
+                LifeRedistributionOption {
+                    assignment: vec![(VIEWER, 7), (OPPONENT, 31)],
+                },
+                LifeRedistributionOption {
+                    assignment: vec![(VIEWER, 31), (OPPONENT, 7)],
+                },
+            ],
+        };
+        assert_eq!(
+            described(
+                &board,
+                GameAction::SubmitLifeRedistribution { option_index: 0 }
+            ),
+            "Submit Life Redistribution (Option Index: You at 7 life, Player 1 at 31 life)"
+        );
+        assert_eq!(
+            described(
+                &board,
+                GameAction::SubmitLifeRedistribution { option_index: 1 }
+            ),
+            "Submit Life Redistribution (Option Index: You at 31 life, Player 1 at 7 life)"
+        );
+    }
+
+    /// CR 700.3: Make an Example ("Each opponent separates the creatures they
+    /// control into two piles. For each opponent, you choose one of their
+    /// piles. Each opponent sacrifices the creatures in their chosen pile.
+    /// (Piles can be empty.)"). The opponent put Serra Angel and Hill Giant in
+    /// one pile and left the other empty; each option names its pile's
+    /// creatures as the board does.
+    #[test]
+    fn a_pile_option_names_the_objects_in_its_pile() {
+        use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, PileSource};
+        use engine::types::game_state::{PileResult, PileSide};
+
+        let mut board = board();
+        board.state.waiting_for = WaitingFor::SeparatePilesChoice {
+            player: VIEWER,
+            pending: Default::default(),
+            current: PileResult {
+                subject: OPPONENT,
+                pile_a: [board.angel, board.giant].into_iter().collect(),
+                pile_b: Default::default(),
+            },
+            chosen_pile_effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+            unchosen_pile_effect: None,
+            source_id: board.bolt,
+            pile_source: PileSource::Battlefield,
+        };
+        assert_eq!(
+            described(&board, GameAction::ChoosePile { pile: PileSide::A }),
+            "Choose Pile (Pile: A: Serra Angel (controlled by Player 1), \
+             Hill Giant (controlled by Player 1))"
+        );
+        assert_eq!(
+            described(&board, GameAction::ChoosePile { pile: PileSide::B }),
+            "Choose Pile (Pile: B: empty)"
+        );
+    }
+
+    /// CR 400.11a + CR 406.3: Karn, the Great Creator's "−2: You may reveal an
+    /// artifact card you own from outside the game or choose a face-up artifact
+    /// card you own in exile." A sideboard card is offered by its slot, which
+    /// names no object, and a card in exile by its object. CR 400.11b: Booster
+    /// Tutor ("Open a sealed Magic booster pack, reveal the cards, and put one
+    /// of them into your hand.") offers a card by its slot in the opened pack.
+    /// CR 702.139a: Living Wish ("You may reveal a creature or land card you
+    /// own from outside the game and put it into your hand.") can offer the
+    /// revealed companion. Each option names the card it brings in and where it
+    /// is.
+    #[test]
+    fn an_outside_game_option_names_the_card_it_brings_in() {
+        use engine::types::actions::OutsideGameSelection;
+        use engine::types::card::CardFace;
+        use engine::types::game_state::{
+            OutsideGameChoiceEntry, OutsideGameChoiceSource, PackOrigin,
+        };
+        use engine::types::zones::Zone;
+
+        fn chosen(board: &Board, selection: OutsideGameSelection) -> String {
+            described(
+                board,
+                GameAction::ChooseOutsideGameCards {
+                    selections: vec![selection],
+                },
+            )
+        }
+        fn offered(board: &mut Board, entry: OutsideGameChoiceEntry) {
+            board.state.waiting_for = WaitingFor::OutsideGameChoice {
+                player: VIEWER,
+                source_id: board.bolt,
+                choices: vec![entry],
+                count: 1,
+                reveal: true,
+                up_to: true,
+                destination: Zone::Hand,
+            };
+        }
+
+        let mut board = board();
+        let exiled = engine::game::create_object(
+            &mut board.state,
+            CardId(73),
+            VIEWER,
+            "Sol Ring".to_string(),
+            Zone::Exile,
+        );
+        board.state.waiting_for = WaitingFor::OutsideGameChoice {
+            player: VIEWER,
+            source_id: board.bolt,
+            choices: vec![
+                OutsideGameChoiceEntry {
+                    source: OutsideGameChoiceSource::Sideboard {
+                        sideboard_index: 0,
+                        card: CardFace::default(),
+                    },
+                    count: 1,
+                    name: "Pithing Needle".to_string(),
+                },
+                OutsideGameChoiceEntry {
+                    source: OutsideGameChoiceSource::FaceUpExile { object_id: exiled },
+                    count: 1,
+                    name: "Sol Ring".to_string(),
+                },
+            ],
+            count: 1,
+            reveal: true,
+            up_to: true,
+            destination: Zone::Hand,
+        };
+        assert_eq!(
+            chosen(
+                &board,
+                OutsideGameSelection::Sideboard { sideboard_index: 0 }
+            ),
+            "Choose Outside Game Cards (Selections: Pithing Needle (sideboard))"
+        );
+        assert_eq!(
+            chosen(
+                &board,
+                OutsideGameSelection::FaceUpExile { object_id: exiled }
+            ),
+            "Choose Outside Game Cards (Selections: Sol Ring (exile, owned by You))"
+        );
+
+        offered(
+            &mut board,
+            OutsideGameChoiceEntry {
+                source: OutsideGameChoiceSource::BoosterPack {
+                    pack_slot: 4,
+                    origin: PackOrigin::Set("DSK".to_string()),
+                    card: Box::new(CardFace::default()),
+                },
+                count: 1,
+                name: "Fear of Missing Out".to_string(),
+            },
+        );
+        assert_eq!(
+            chosen(&board, OutsideGameSelection::BoosterPack { pack_slot: 4 }),
+            "Choose Outside Game Cards (Selections: Fear of Missing Out (booster pack))"
+        );
+
+        offered(
+            &mut board,
+            OutsideGameChoiceEntry {
+                source: OutsideGameChoiceSource::Companion {
+                    card: Box::new(CardFace::default()),
+                },
+                count: 1,
+                name: "Lurrus of the Dream-Den".to_string(),
+            },
+        );
+        assert_eq!(
+            chosen(&board, OutsideGameSelection::Companion),
+            "Choose Outside Game Cards (Selections: Lurrus of the Dream-Den (companion))"
+        );
+    }
+
+    /// Issue #10996: `ChooseTarget` with no target rendered as the bare verb
+    /// `Choose Target`. In a copy's retarget walk it keeps the current target
+    /// (CR 707.10c): Twincast ("Copy target instant or sorcery spell. You may
+    /// choose new targets for the copy.") copies a Lightning Bolt aimed at the
+    /// viewer's Grizzly Bears. Anywhere else it chooses no target: Brightmare's
+    /// "When this creature enters, tap up to one target creature. You gain
+    /// life equal to that creature's power." declines its optional target
+    /// (CR 115.6).
+    #[test]
+    fn choosing_no_target_says_what_it_does() {
+        use engine::types::ability::{EffectKind, TargetRef};
+        use engine::types::game_state::{
+            CopyChoiceMode, TargetSelectionProgress, TargetSelectionSlot,
+        };
+
+        let mut board = board();
+        let no_target = GameAction::ChooseTarget { target: None };
+        board.state.waiting_for = WaitingFor::CopyRetarget {
+            player: VIEWER,
+            controller: None,
+            copy_id: ObjectId(board.state.next_object_id),
+            target_slots: vec![CopyTargetSlot {
+                current: Some(TargetRef::Object(board.bears)),
+                legal_alternatives: vec![
+                    TargetRef::Object(board.angel),
+                    TargetRef::Player(OPPONENT),
+                ],
+                address: None,
+                can_keep: true,
+                can_decline: false,
+            }],
+            effect_kind: EffectKind::CopySpell,
+            effect_source_id: None,
+            current_slot: 0,
+            paradigm_remaining_offers: None,
+            mode: Some(CopyChoiceMode::Retarget),
+            picks: Some(Vec::new()),
+            can_keep_rest: true,
+            announcer_election: None,
+        };
+        assert_eq!(
+            described(&board, no_target.clone()),
+            "Choose Target (Target: keep the current target, Grizzly Bears (controlled by You))"
+        );
+
+        let brightmare = engine::game::create_object(
+            &mut board.state,
+            CardId(74),
+            VIEWER,
+            "Brightmare".to_string(),
+            engine::types::zones::Zone::Battlefield,
+        );
+        let creatures = vec![
+            TargetRef::Object(board.angel),
+            TargetRef::Object(board.giant),
+        ];
+        board.state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: VIEWER,
+            trigger_controller: None,
+            trigger_event: None,
+            trigger_events: Vec::new(),
+            target_slots: vec![TargetSelectionSlot {
+                legal_targets: creatures.clone(),
+                optional: true,
+                chooser: None,
+                effect_kind: EffectKind::Tap,
+                effect_detail: Default::default(),
+            }],
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: TargetSelectionProgress {
+                current_slot: 0,
+                selected_slots: Vec::new(),
+                current_legal_targets: creatures,
+            },
+            source_id: Some(brightmare),
+            description: None,
+        };
+        assert_eq!(described(&board, no_target), "Choose Target (Target: none)");
     }
 }

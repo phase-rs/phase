@@ -161,6 +161,7 @@
     "flip": "Flip",
     "report": "Report a problem",
     "reported": "Reported ✓",
+    "reportNotSent": "Not sent",
     "altParsedAbilities": "Alt: parsed abilities",
     "debugId": "ID: {{id}}",
     "engineParse": "Engine Parse",
@@ -1849,6 +1850,10 @@
     "spellCopyOrder": {
       "title": "Order the copies",
       "subtitle": "Choose the spell whose copy goes on the stack next"
+    },
+    "memberOrder": {
+      "title": "Order the cards",
+      "subtitle": "Choose which card is handled next"
     },
     "collectEvidence": {
       "title": "Collect Evidence",

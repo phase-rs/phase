@@ -125,6 +125,13 @@
 //! large rarely-populated field went inline, so the ceiling moves by the rule
 //! to 15,376.next_multiple_of(256) + 256 = 15,872.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc (`nightly-2026-04-19`) at
+//! 15,904 B when the layer pass's control-change working memory
+//! (`layer_control_changes`, `announced_control_changes`, two 24 B `Vec`s)
+//! met main's small fields since its base. Both lists are empty at every
+//! action boundary, so they are lazily boxed (`LazyBoxedVec`, 8 B each);
+//! `GameState` then measures 15,872 B, at the unchanged ceiling.
+//!
 //! `GameState` re-measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
 //! 15,904 B when the canonical library-placement branch merged main: its
 //! `ProposedEvent::ZoneChange::library_placement` held a 96 B
@@ -133,6 +140,28 @@
 //! (`pending_replacement`, `pending_liminal_entry_resume`). Only library moves
 //! carry a placement, so the field is boxed (`Option<Box<LibraryPosition>>`);
 //! `GameState` then measures 15,728 B, under the unchanged 15,872 ceiling.
+//!
+//! `GameState` re-measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
+//! 15,888 B when the counter-removal instruction-scope work (#10699) merged
+//! main through `ed6fd9ae`. Main alone measures 15,824 B; the branch adds two
+//! execution-local fields, `instruction_scopes` (`Vec<OpenInstruction>`, 24 B)
+//! and `last_closed_instruction` (`Option<ClosedInstruction>`, 32 B), and the
+//! union crosses 15,872 by 16 B. Neither field is a large rarely-populated
+//! one: `zones::within_instruction` writes both on every instruction scope,
+//! so boxing would put an allocation on that path. The ceiling moves by the
+//! rule to 15,888.next_multiple_of(256) + 256 = 16,384.
+//!
+//! `GameState` re-measured on aarch64-apple-darwin (`nightly-2026-04-19`) at
+//! 15,776 B when #10699 merged main through `e453af3d`, after the canonical
+//! library-placement entry above boxed `library_placement`. That is under the
+//! 16,384 ceiling, so the ceiling is unchanged.
+//!
+//! `GameState` re-measured on x86_64-unknown-linux-gnu while semantically porting
+//! the as-enters dice/counters branch (72ae22642) onto main through da2af2bca5,
+//! including canonical placement and component delivery (#10636), at 15,840 B.
+//! Measured with the isolated `-Zprint-type-sizes` command above. The merged
+//! parked-entry and pre-entry bookkeeping remains under the calibrated ceiling:
+//! 15,840.next_multiple_of(256) + 256 = 16,384, so the ceiling is unchanged.
 //!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
@@ -143,7 +172,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 15_872,
+        size_of::<crate::types::game_state::GameState>() <= 16_384,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

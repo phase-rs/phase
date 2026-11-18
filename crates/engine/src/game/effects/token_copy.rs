@@ -118,10 +118,45 @@ pub fn resolve(
     // (`compute_current_copiable_values`, which is zone-agnostic) — so such
     // a source in the graveyard is fine.
     //
+    // CR 109.4 + CR 115.1: `CopyTokenOf` may carry a *player* target in
+    // `ability.targets` — the `owner` slot for "target opponent creates a
+    // token that's a copy of it" (Wedding Ring). The copy *source* axis is
+    // object-only, so a context-ref source (`ParentTarget` / `None`) would
+    // otherwise see the owner player as a non-empty `ability.targets` and
+    // fail to fall back to the source object. Resolve against an
+    // object-only view so the two axes never cross-contaminate.
+    let object_only_ability;
+    let resolution_ability = if ability
+        .targets
+        .iter()
+        .any(|t| matches!(t, TargetRef::Player(_)))
+    {
+        let mut narrowed = ability.clone();
+        // An occurrence projection: object occurrences keep their pins.
+        let objects: Vec<usize> = narrowed
+            .targets
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| matches!(t, TargetRef::Object(_)))
+            .map(|(position, _)| position)
+            .collect();
+        narrowed.project_target_occurrences(&objects);
+        object_only_ability = narrowed;
+        &object_only_ability
+    } else {
+        ability
+    };
+
     // CR 608.2h + CR 707.2: "a copy of this creature" (`SelfRef`) reads its own
     // source through `copy_source`, which supplies the source's last-known
     // copiable values once it has left the zone the ability identified it in.
-    let copy_sources: Vec<CopySource> = if copies_own_source(&ability.effect) {
+    // An inferred own-source "copy of it" (`ParentTarget` / `None` with no
+    // propagated targets) reads the source the same way, so a departed source
+    // still supplies its last-known copiable values (Nacatl War-Pride ruling).
+    let reads_own_source = copies_own_source(&ability.effect)
+        || (source_filter.is_none()
+            && targeting::infers_own_source(state, resolution_ability, target_filter));
+    let copy_sources: Vec<CopySource> = if reads_own_source {
         copy_source(state, ability, CopySourceReferent::OwnSource)
             .into_iter()
             .collect()
@@ -186,41 +221,13 @@ pub fn resolve(
         } else {
             // CR 608.2c + 603.10a: Delegate to the unified 3-tier dispatch so
             // `None` / `ParentTarget` fall back to source only when
-            // `ability.targets` is empty. An own-source `SelfRef` never
-            // reaches this branch: it is read through `copy_source` above,
-            // which never reads `ability.targets`, so a chained
-            // `CopyTokenOf { target: SelfRef }` sub-ability cannot inherit the
-            // parent's targets via chain propagation in
-            // `effects::mod.rs::resolve_ability_chain` (issue #323 class).
-            //
-            // CR 109.4 + CR 115.1: `CopyTokenOf` may carry a *player* target in
-            // `ability.targets` — the `owner` slot for "target opponent creates a
-            // token that's a copy of it" (Wedding Ring). The copy *source* axis is
-            // object-only, so a context-ref source (`ParentTarget` / `None`) would
-            // otherwise see the owner player as a non-empty `ability.targets` and
-            // fail to fall back to the source object. Resolve against an
-            // object-only view so the two axes never cross-contaminate.
-            let object_only_ability;
-            let resolution_ability = if ability
-                .targets
-                .iter()
-                .any(|t| matches!(t, TargetRef::Player(_)))
-            {
-                let mut narrowed = ability.clone();
-                // An occurrence projection: object occurrences keep their pins.
-                let objects: Vec<usize> = narrowed
-                    .targets
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, t)| matches!(t, TargetRef::Object(_)))
-                    .map(|(position, _)| position)
-                    .collect();
-                narrowed.project_target_occurrences(&objects);
-                object_only_ability = narrowed;
-                &object_only_ability
-            } else {
-                ability
-            };
+            // `ability.targets` is empty. An own-source `SelfRef`, or an
+            // inferred own-source `ParentTarget` / `None`, never reaches this
+            // branch: it is read through `copy_source` above, which never reads
+            // `ability.targets`, so a chained `CopyTokenOf { target: SelfRef }`
+            // sub-ability cannot inherit the parent's targets via chain
+            // propagation in `effects::mod.rs::resolve_ability_chain` (issue
+            // #323 class).
             crate::game::effects::resolved_effect_object_ids(
                 state,
                 resolution_ability,
@@ -527,6 +534,22 @@ pub(crate) fn copies_own_source(effect: &Effect) -> bool {
     )
 }
 
+/// CR 104.4b + CR 608.2h: an inferred own-source "copy of it" (`ParentTarget` /
+/// `None`, no source filter) may read the source's last-known copiable values
+/// through `copy_source(OwnSource)`, so loop normalisation must keep them. A
+/// shape-level superset: retaining an entry another referent never reads is
+/// harmless.
+fn may_infer_own_copy_source(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::CopyTokenOf {
+            target: TargetFilter::ParentTarget | TargetFilter::None,
+            source_filter: None,
+            ..
+        }
+    )
+}
+
 /// CR 400.7 + CR 608.2h: the `CopyTokenOf` ability a keyword handler builds to
 /// copy its own source (Myriad, CR 702.116a; Encore, CR 702.141a). It carries
 /// the outer ability's captured source identity, so `copy_source` binds the
@@ -559,7 +582,7 @@ pub(crate) fn collect_own_copy_sources(
     ability: &ResolvedAbility,
     sources: &mut HashSet<ObjectIncarnationRef>,
 ) {
-    if copies_own_source(&ability.effect) {
+    if copies_own_source(&ability.effect) || may_infer_own_copy_source(&ability.effect) {
         sources.extend(captured_own_source(ability));
     }
     for (_, branch) in ability.child_links() {
@@ -598,6 +621,24 @@ pub(crate) fn drain_pending_copy_token_resolution(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 614.12a + CR 608.2c: retiring a member's as-enters roll can
+    // expose its copy owner before the priority boundary commits that liminal
+    // member. The owner still owes that entry and its batch, so neither its
+    // next batch nor its completed "those tokens" result may run yet. The
+    // entry's recorded producer distinguishes it from a nested copy owner.
+    let pending_entry_producer = match state.pending_liminal_entry_resume.as_ref() {
+        Some(PendingLiminalEntryResume::Token { source_id, .. }) => state
+            .liminal_entries
+            .get(source_id)
+            .map(|entry| entry.source_id),
+        Some(PendingLiminalEntryResume::Meld { .. }) | None => None,
+    };
+    if state
+        .active_copy_token()
+        .is_some_and(|owner| Some(owner.source_id) == pending_entry_producer)
+    {
+        return;
+    }
     // CR 603.6a + CR 603.3b: the inline liminal terminal also enters here.
     // Claim its entries before taking the owner or resuming a later instruction.
     let copy_owner = state.active_copy_token().cloned();
@@ -621,6 +662,16 @@ pub(crate) fn drain_pending_copy_token_resolution(
 }
 
 fn drain_copy_token_resolution(
+    state: &mut GameState,
+    pending: PendingCopyTokenResolution,
+    events: &mut Vec<GameEvent>,
+) {
+    crate::game::pre_entry_view::with_copy_owner_board(state, |state| {
+        drain_copy_token_resolution_on_board(state, pending, events);
+    });
+}
+
+fn drain_copy_token_resolution_on_board(
     state: &mut GameState,
     mut pending: PendingCopyTokenResolution,
     events: &mut Vec<GameEvent>,
@@ -837,33 +888,34 @@ pub(crate) fn copy_token_co_entrants(
                 crate::types::resolution::ResolutionFrame::CopyToken(owner) => {
                     Some(owner.created_ids.as_slice())
                 }
-                crate::types::resolution::ResolutionFrame::AbilityContinuation(_)
-                | crate::types::resolution::ResolutionFrame::RepeatFor(_)
-                | crate::types::resolution::ResolutionFrame::RepeatUntil(_)
-                | crate::types::resolution::ResolutionFrame::RepeatedOptionalPayment(_)
-                | crate::types::resolution::ResolutionFrame::ChangeZone(_)
-                | crate::types::resolution::ResolutionFrame::BatchDelivery(_)
-                | crate::types::resolution::ResolutionFrame::CounterMoves(_)
-                | crate::types::resolution::ResolutionFrame::CounterRemovals(_)
-                | crate::types::resolution::ResolutionFrame::CounterAdditions(_)
-                | crate::types::resolution::ResolutionFrame::DebugCardEntries(_)
-                | crate::types::resolution::ResolutionFrame::EachPlayerCopyChosen(_)
-                | crate::types::resolution::ResolutionFrame::ChooseOneOf(_)
-                | crate::types::resolution::ResolutionFrame::VoteBallot(_)
-                | crate::types::resolution::ResolutionFrame::PerPlayerZoneChoice(_)
-                | crate::types::resolution::ResolutionFrame::PerCategoryZoneChoice(_)
-                | crate::types::resolution::ResolutionFrame::OptionalEffect(_)
-                | crate::types::resolution::ResolutionFrame::CoinFlip(_)
-                | crate::types::resolution::ResolutionFrame::DieRoll(_)
-                | crate::types::resolution::ResolutionFrame::Proliferate(_)
-                | crate::types::resolution::ResolutionFrame::MultiDraw(_)
-                | crate::types::resolution::ResolutionFrame::Discard(_)
-                | crate::types::resolution::ResolutionFrame::ConniveReentry(_)
-                | crate::types::resolution::ResolutionFrame::LifeTotalAssignment(_)
-                | crate::types::resolution::ResolutionFrame::SpellResolution(_)
-                | crate::types::resolution::ResolutionFrame::MutateMerge(_)
-                | crate::types::resolution::ResolutionFrame::CipherEncode(_)
-                | crate::types::resolution::ResolutionFrame::PostReplacement(_) => None,
+                crate::types::resolution::ResolutionFrame::AbilityContinuation(..)
+                | crate::types::resolution::ResolutionFrame::RepeatFor(..)
+                | crate::types::resolution::ResolutionFrame::RepeatUntil(..)
+                | crate::types::resolution::ResolutionFrame::RepeatedOptionalPayment(..)
+                | crate::types::resolution::ResolutionFrame::ChangeZone(..)
+                | crate::types::resolution::ResolutionFrame::BatchDelivery(..)
+                | crate::types::resolution::ResolutionFrame::CounterMoves(..)
+                | crate::types::resolution::ResolutionFrame::CounterRemovals(..)
+                | crate::types::resolution::ResolutionFrame::CounterAdditions(..)
+                | crate::types::resolution::ResolutionFrame::DebugCardEntries(..)
+                | crate::types::resolution::ResolutionFrame::EachPlayerCopyChosen(..)
+                | crate::types::resolution::ResolutionFrame::ChooseOneOf(..)
+                | crate::types::resolution::ResolutionFrame::VoteBallot(..)
+                | crate::types::resolution::ResolutionFrame::PerPlayerZoneChoice(..)
+                | crate::types::resolution::ResolutionFrame::PerCategoryZoneChoice(..)
+                | crate::types::resolution::ResolutionFrame::OptionalEffect(..)
+                | crate::types::resolution::ResolutionFrame::CoinFlip(..)
+                | crate::types::resolution::ResolutionFrame::DieRoll(..)
+                | crate::types::resolution::ResolutionFrame::Proliferate(..)
+                | crate::types::resolution::ResolutionFrame::MultiDraw(..)
+                | crate::types::resolution::ResolutionFrame::Discard(..)
+                | crate::types::resolution::ResolutionFrame::ConniveReentry(..)
+                | crate::types::resolution::ResolutionFrame::LifeTotalAssignment(..)
+                | crate::types::resolution::ResolutionFrame::SpellResolution(..)
+                | crate::types::resolution::ResolutionFrame::MutateMerge(..)
+                | crate::types::resolution::ResolutionFrame::CipherEncode(..)
+                | crate::types::resolution::ResolutionFrame::EntryAttackSeat(..)
+                | crate::types::resolution::ResolutionFrame::PostReplacement(..) => None,
             })
             .last()
             .unwrap_or_default(),
@@ -872,6 +924,8 @@ pub(crate) fn copy_token_co_entrants(
     let mut seen: HashSet<ObjectId> = HashSet::with_capacity(capacity);
     let mut co_entrants: Vec<ObjectId> = Vec::with_capacity(capacity);
     for id in resolution.iter().chain(batch_prefix) {
+        #[cfg(feature = "test-support")]
+        crate::game::perf_counters::record_copy_entrant_membership_probe();
         if *id != entrant && seen.insert(*id) {
             co_entrants.push(*id);
         }
@@ -1028,6 +1082,31 @@ pub(crate) fn apply_copy_token_after_replacement(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
+    state: &mut GameState,
+    token_owner: crate::types::player::PlayerId,
+    copy: CopyTokenSpec,
+    enter_tapped: EtbTapState,
+    enter_with_counters: Vec<(crate::types::counter::CounterType, u32)>,
+    final_count: u32,
+    initial_created_ids: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> CopyTokenApplyStatus {
+    crate::game::pre_entry_view::with_copy_batch_board(state, |state| {
+        apply_copy_token_batch_on_board(
+            state,
+            token_owner,
+            copy,
+            enter_tapped,
+            enter_with_counters,
+            final_count,
+            initial_created_ids,
+            events,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_copy_token_batch_on_board(
     state: &mut GameState,
     token_owner: crate::types::player::PlayerId,
     copy: CopyTokenSpec,
@@ -1426,6 +1505,39 @@ pub(crate) fn apply_copy_token_after_replacement_with_created_ids(
         // controller) leaves the copied counters off; the loyalty and the creating
         // effect's own counters are not gated (see their split above). Same order
         // as the routing list, so counter replacements see the same sequence.
+        // CR 614.12 + CR 707.5: use the same resident-effect projection for a
+        // copied roll as for the copied counters on this placed-token route.
+        // The batch's shared pre-entry board serves this read, as it does the
+        // counters below; it is only projected when the body has a roll at all.
+        let rolls = entrant_body.as_ref().is_some_and(|body| {
+            let rollers: Vec<_> = body
+                .replacement_definitions
+                .iter_all()
+                .filter(|def| crate::game::replacement::replacement_rolls_as_it_enters(def))
+                .collect();
+            if rollers.is_empty() {
+                return false;
+            }
+            let mut absent = copy_token_co_entrants(state, token_id, &created_ids);
+            absent.push(token_id);
+            let board = entry_board.get_or_insert_with(|| {
+                crate::game::filter::TokenEntryBatchBoard::new(state, &absent)
+            });
+            board.refresh(state, &absent);
+            let projection =
+                crate::game::filter::BattlefieldEntrantProjection::token_on_pre_entry_board(
+                    std::borrow::Cow::Borrowed(board.board()),
+                    body,
+                );
+            rollers.into_iter().any(|def| {
+                projection
+                    .as_ref()
+                    .is_none_or(|projection| projection.retains_replacement(def))
+            })
+        });
+        if rolls {
+            super::record_runtime_unimplemented(state, token_id, "copied_as_enters_roll");
+        }
         let token_etb_counters: Vec<(crate::types::counter::CounterType, u32)> = {
             let projection = entrant_body
                 .as_ref()
@@ -6929,6 +7041,106 @@ mod tests {
         assert!(
             state.battlefield.contains(&squirrel),
             "the Squirrel survives the end step"
+        );
+    }
+
+    /// CR 104.4b + CR 608.2h: an inferred own-source "copy of it"
+    /// (`ParentTarget` / `None`, no source filter) may read its departed
+    /// source's last-known copiable values, so loop normalisation keeps them;
+    /// a filtered copy source never reads them and they are still pruned.
+    #[test]
+    fn normalize_for_loop_keeps_the_values_an_inferred_own_source_copy_reads() {
+        use crate::types::game_state::{loop_states_equal, StackEntry, StackEntryKind};
+        use crate::types::identifiers::CardId;
+
+        let source = ObjectId(5);
+        let captured = 7;
+        let state_with = |target: TargetFilter, source_filter: Option<TargetFilter>, name: &str| {
+            let mut state = GameState::new_two_player(7);
+            let values_object = create_object(
+                &mut state,
+                CardId(90),
+                PlayerId(0),
+                "Copy Source".to_string(),
+                Zone::Exile,
+            );
+            let mut values = crate::game::printed_cards::intrinsic_copiable_values(
+                &state.objects[&values_object],
+            );
+            values.name = name.to_string();
+            let mut ability = ResolvedAbility::new(
+                Effect::CopyTokenOf {
+                    target,
+                    owner: TargetFilter::Controller,
+                    source_filter,
+                    enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
+                    tapped: false,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    extra_keywords: vec![],
+                    additional_modifications: vec![],
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            );
+            ability.source_incarnation = Some(captured);
+            state.stack.push_back(StackEntry {
+                id: ObjectId(20),
+                source_id: source,
+                controller: PlayerId(0),
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            });
+            state
+                .lki_copiable_values_by_incarnation
+                .entry(source)
+                .or_default()
+                .insert(captured, values);
+            state
+        };
+        // Normalisation renames the retained incarnation keys, so read the values.
+        let retained = |state: &GameState| {
+            state
+                .normalize_for_loop()
+                .lki_copiable_values_by_incarnation
+                .get(&source)
+                .and_then(|history| history.values().next().map(|values| values.name.clone()))
+        };
+
+        for target in [TargetFilter::ParentTarget, TargetFilter::None] {
+            let departed = state_with(target.clone(), None, "Departed");
+            assert_eq!(
+                retained(&departed),
+                Some("Departed".to_string()),
+                "{target:?}: the captured incarnation's values survive"
+            );
+            let other = state_with(target.clone(), None, "Other");
+            assert!(
+                !loop_states_equal(&departed.normalize_for_loop(), &other.normalize_for_loop()),
+                "{target:?}: values the copy can read distinguish two loop states"
+            );
+        }
+
+        let filtered = state_with(
+            TargetFilter::ParentTarget,
+            Some(TargetFilter::Any),
+            "Departed",
+        );
+        assert_eq!(
+            retained(&filtered),
+            None,
+            "a filtered copy source never reads the own source's values"
         );
     }
 

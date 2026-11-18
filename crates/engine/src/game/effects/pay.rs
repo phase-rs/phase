@@ -5144,7 +5144,8 @@ mod tests {
             assert!(crate::game::effects::ability_chain_depends_on_missing_forward_result(&chain));
             assert!(
                 !crate::game::effects::effect_chain_depends_on_missing_forward_result(
-                    &chain.effect
+                    &chain.effect,
+                    crate::game::effects::MissingParentReferent::ForwardResult,
                 )
             );
 

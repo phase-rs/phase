@@ -19,7 +19,9 @@ use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_nom::target::controller_phrase_among;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
 use super::super::oracle_util::{contains_possessive, parse_count_expr, parse_subtype, TextPair};
-use super::imperative::CHOOSER_DOMAIN_CONTROLLERS;
+use super::imperative::{
+    parse_same_name_reference, parse_subject_hand_owner, CHOOSER_DOMAIN_CONTROLLERS,
+};
 use super::lower::WhereXBinding;
 use super::{apply_where_x_to_filter, release_iteration_destination, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
@@ -1366,18 +1368,26 @@ fn parse_put_all_back_in_any_order(lower: &str) -> bool {
         .is_ok()
 }
 
-fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
-    let (rest, _) = (
+/// CR 701.20e + CR 608.2c: "[you may] put[s] [up to] one of them/those cards
+/// [back] on top [of <library>]" after a look `Dig` — keep one looked-at card
+/// on top of the library it came from. Returns how many are kept and the
+/// remainder order. "You may" / "up to" make the keep optional; the bare
+/// verb is mandatory (Ashnod's Cylix: "puts one of them back on top of their
+/// library"). The third-person "puts" is the same instruction carried by a
+/// player subject ("Target player looks at …, puts …").
+fn parse_put_one_dig_card_on_top(lower: &str) -> Option<(PutCount, DigRestOrder)> {
+    let (rest, (may, up_to, _, _, _, _)) = (
         alt((
-            tag::<_, _, OracleError<'_>>("you may put "),
-            tag("may put "),
-            tag("put "),
+            value(true, tag::<_, _, OracleError<'_>>("you may put ")),
+            value(true, tag("may put ")),
+            value(false, tag("puts ")),
+            value(false, tag("put ")),
         )),
         opt(tag("up to ")),
         alt((tag("one of those cards"), tag("one of them"))),
         opt(tag(" back")),
-        tag(" "),
-        alt((tag("on top of your library"), tag("on top"))),
+        tag(" on top"),
+        opt(preceded(tag(" of "), parse_split_library_owner)),
     )
         .parse(lower.trim())
         .ok()?;
@@ -1392,12 +1402,22 @@ fn parse_put_one_dig_card_on_top(lower: &str) -> Option<DigRestOrder> {
     terminated(opt(tag::<_, _, OracleError<'_>>(".")), eof)
         .parse(rest)
         .ok()?;
-    Some(order.unwrap_or(DigRestOrder::Preserve))
+    let count = if may || up_to.is_some() {
+        PutCount::up(1)
+    } else {
+        PutCount::exactly(1)
+    };
+    Some((count, order.unwrap_or(DigRestOrder::Preserve)))
 }
 
+/// "exile[s] the rest" — the third-person verb is the same instruction carried
+/// by a player subject (Ashnod's Cylix: "…, then exiles the rest").
 fn parse_exile_rest_clause(lower: &str) -> bool {
     (
-        tag::<_, _, OracleError<'_>>("exile the rest"),
+        alt((
+            tag::<_, _, OracleError<'_>>("exile the rest"),
+            tag("exiles the rest"),
+        )),
         opt(tag(".")),
         eof,
     )
@@ -1976,7 +1996,13 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                         || loses_all_other_card_types_continuation
                         || shared_equal_to_quantity_conjunct
                         || inside_prefix_comma_and_continuation;
-                        if !suppress && starts_bare_and_clause(remainder_trimmed) {
+                        if !suppress
+                            && (starts_bare_and_clause(remainder_trimmed)
+                                || reveal_hand_continues_with_conjugated_verb(
+                                    &before_lower,
+                                    remainder_trimmed,
+                                ))
+                        {
                             push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                             current.clear();
                             compound_subject_each_sticky = false;
@@ -2289,27 +2315,30 @@ fn starts_anaphoric_subject(remainder_lower: &str) -> bool {
     .is_ok()
 }
 
+/// CR 701.20a + CR 608.2c: true when the clause so far ends in "<subject> reveals
+/// their hand" and the remainder is a subject-elided conjugated verb ("… and exiles
+/// all cards …", "… and discards a creature card at random"). The revealing player
+/// also performs that next instruction, so it is its own clause carrying that
+/// subject. The split and the carry share one classifier, so a bare imperative or a
+/// new subject ("… and you choose a nonland card from it") stays fused for the
+/// reveal's own continuation grammar.
+fn reveal_hand_continues_with_conjugated_verb(before_lower: &str, remainder_trimmed: &str) -> bool {
+    nom_primitives::scan_at_word_boundaries(before_lower, |input| {
+        all_consuming(preceded(
+            tag::<_, _, OracleError<'_>>("reveals "),
+            parse_subject_hand_owner,
+        ))
+        .parse(input)
+    })
+    .is_some()
+        && super::chunk_continues_anchored_subject(remainder_trimmed)
+}
+
 fn parse_search_exile_name_suffix(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
     let (rest, _) = take_until::<_, _, OracleError<'_>>("with ").parse(input)?;
     let (rest, _) = alt((
-        value((), tag::<_, _, OracleError<'_>>("with that name")),
+        parse_same_name_reference,
         value((), tag("with the chosen name")),
-        value(
-            (),
-            (
-                tag("with the same name as that "),
-                alt((
-                    tag("creature"),
-                    tag("permanent"),
-                    tag("planeswalker"),
-                    tag("artifact"),
-                    tag("enchantment"),
-                    tag("land"),
-                    tag("spell"),
-                    tag("card"),
-                )),
-            ),
-        ),
     ))
     .parse(rest)?;
     let (rest, _) = eof.parse(rest)?;
@@ -9758,18 +9787,16 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         // Dig — keep up to one looked-at card on top, leaving the remainder
         // for a following rest-placement clause.
         Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower).is_some() => {
+            let (quantity, rest_order) =
+                parse_put_one_dig_card_on_top(&lower).expect("continuation guard just matched");
             Some(ContinuationAst::DigFromAmong {
-                quantity: PutCount::up(1),
+                quantity,
                 filter: TargetFilter::Any,
                 destination: Some(Zone::Library),
-                rest_destination: matches!(
-                    parse_put_one_dig_card_on_top(&lower),
-                    Some(DigRestOrder::Random)
-                )
-                .then_some(Zone::Library),
+                rest_destination: matches!(rest_order, DigRestOrder::Random)
+                    .then_some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: parse_put_one_dig_card_on_top(&lower)
-                    .expect("continuation guard just matched"),
+                rest_order,
                 rest_library_position: None,
                 enters_under: None,
                 face_down_profile: None,
@@ -11688,6 +11715,39 @@ mod tests {
                 None,
                 "{declined:?}"
             );
+        }
+    }
+
+    /// CR 701.20a + CR 608.2c: a subject-elided conjugated verb after an own-hand
+    /// reveal is the revealing player's next instruction and splits off. A new
+    /// subject, a bare noun conjunct, or another player's hand stays fused for the
+    /// reveal's own continuation grammar.
+    #[test]
+    fn reveal_hand_splits_only_a_conjugated_conjunct() {
+        for (text, head, tail) in [
+            (
+                "that player reveals their hand and exiles all cards with that name from their hand and graveyard",
+                "that player reveals their hand",
+                "exiles all cards with that name from their hand and graveyard",
+            ),
+            (
+                "Target opponent reveals their hand and discards a creature card at random",
+                "Target opponent reveals their hand",
+                "discards a creature card at random",
+            ),
+        ] {
+            let chunks = split_clause_sequence(text);
+            assert_eq!(chunks.len(), 2, "{text}: {chunks:?}");
+            assert_eq!(chunks[0].text, head, "{text}");
+            assert_eq!(chunks[1].text, tail, "{text}");
+        }
+        for text in [
+            "target opponent reveals their hand and you choose a nonland card from it",
+            "Target player reveals their hand and the top card of their library",
+        ] {
+            let chunks = split_clause_sequence(text);
+            assert_eq!(chunks.len(), 1, "{text}: {chunks:?}");
+            assert_eq!(chunks[0].text, text);
         }
     }
 

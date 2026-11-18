@@ -9,9 +9,10 @@ use crate::types::identifiers::ObjectId;
 use crate::types::proposed_event::TokenCharacteristics;
 
 pub use crate::types::token_presets::{
-    known_token_body_by_name, known_token_body_by_name_for_source, known_token_preset_by_id,
-    known_token_presets, parse_overlay, serialize_catalog, PredefinedTokenKind, PresetFidelity,
-    TokenCategory, TokenPreset, TokenPtProvenance, TokenSourceRef,
+    catalog_token_mana_cost, known_token_body_by_name, known_token_body_by_name_for_source,
+    known_token_preset_by_id, known_token_presets, parse_overlay, serialize_catalog,
+    PredefinedTokenKind, PresetFidelity, TokenCategory, TokenPreset, TokenPtProvenance,
+    TokenSourceRef,
 };
 
 /// What `tokens-gen` did with one `known-tokens.overlay.toml` row.
@@ -385,12 +386,25 @@ fn role_normalized_display_name(name: &str) -> &str {
     name.strip_suffix(" Role").unwrap_or(name)
 }
 
+/// CR 111.4 + CR 111.11: The catalog names some named tokens with a trailing
+/// " Token" (`"Gingerbrute Token"`, `"Spirit Sorcerer Token"`) while the parser
+/// hands the engine the bare Oracle descriptor (`"Gingerbrute"`, CR 111.11).
+/// Reconcile the trailing " Token" — on top of the " Role" reconciliation above —
+/// so a bare-descriptor token body matches its suffixed catalog preset body.
+/// Non-suffixed names are unaffected; the accompanying subtype/type comparison
+/// still prevents a suffixed body from matching a non-suffixed preset.
+fn catalog_normalized_display_name(name: &str) -> &str {
+    let without_role = role_normalized_display_name(name);
+    without_role.strip_suffix(" Token").unwrap_or(without_role)
+}
+
 fn token_body_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
     token_body_identity_matches(a, b) && a.power == b.power && a.toughness == b.toughness
 }
 
 fn token_body_identity_matches(a: &TokenCharacteristics, b: &TokenCharacteristics) -> bool {
-    role_normalized_display_name(&a.display_name) == role_normalized_display_name(&b.display_name)
+    catalog_normalized_display_name(&a.display_name)
+        == catalog_normalized_display_name(&b.display_name)
         && sorted_debug(&a.core_types) == sorted_debug(&b.core_types)
         && sorted_strings(&a.subtypes) == sorted_strings(&b.subtypes)
         && sorted_debug(&a.supertypes) == sorted_debug(&b.supertypes)
@@ -1215,5 +1229,46 @@ mod tests {
                 row.body.display_name
             );
         }
+    }
+
+    /// CR 111.4 + CR 707.2a (F1): the parsed `Effect::Token` spec body for
+    /// `create a Gingerbrute token` (Oracle name `"Gingerbrute"`, 1/1,
+    /// Artifact Creature — Food Golem, colorless, haste) matches the
+    /// Gingerbrute catalog preset body (catalog name `"Gingerbrute Token"`)
+    /// through the `" Token"`-tolerant identity match, so creation links a
+    /// `token_image_ref` through the source-gated `find_token_ref_with_mode`
+    /// path. The RED integration test exercises this linkage end to end;
+    /// this probe pins the body-equality leg without the full runner.
+    #[test]
+    fn gingerbrute_parsed_spec_body_matches_its_catalog_preset() {
+        let preset = known_token_preset_by_id("c770e27a-6846-59be-82f0-b2b61dd95d9f")
+            .expect("Gingerbrute preset");
+        // The parsed spec body, built from the characteristics the parser
+        // fills (registry display name + catalog P/T-colors-keywords), not
+        // cloned from the preset — otherwise the assertion is circular.
+        let parsed_spec_body = TokenCharacteristics {
+            display_name: "Gingerbrute".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            loyalty: None,
+            core_types: vec![CoreType::Artifact, CoreType::Creature],
+            subtypes: vec!["Food".to_string(), "Golem".to_string()],
+            supertypes: Vec::new(),
+            colors: Vec::new(),
+            keywords: vec![Keyword::Haste],
+        };
+        assert!(
+            token_body_matches(&preset.body, &parsed_spec_body),
+            "the parsed Gingerbrute spec body must match its catalog preset"
+        );
+        // Paired negative: a body with different P/T does NOT match, so the
+        // probe above cannot pass on a vacuous comparator.
+        let mut wrong_pt = parsed_spec_body.clone();
+        wrong_pt.power = Some(2);
+        wrong_pt.toughness = Some(2);
+        assert!(
+            !token_body_matches(&preset.body, &wrong_pt),
+            "a 2/2 body must not match the 1/1 Gingerbrute preset"
+        );
     }
 }

@@ -45,6 +45,7 @@ const ABILITY_KEYS: &[&str] = &[
     "entry_onset",
     "iteration_kind_binding",
     "sibling_condition",
+    "instruction_join",
     "consumes_source",
     "is_mana_ability",
 ];

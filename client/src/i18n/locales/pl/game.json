@@ -161,6 +161,7 @@
     "flip": "Odwróć",
     "report": "Zgłoś problem",
     "reported": "Zgłoszono ✓",
+    "reportNotSent": "Nie wysłano",
     "altParsedAbilities": "Alt: przeanalizowane zdolności",
     "debugId": "ID: {{id}}",
     "engineParse": "Analiza silnika",
@@ -1811,6 +1812,10 @@
     "spellCopyOrder": {
       "title": "Ustal kolejność kopii",
       "subtitle": "Wybierz czar, którego kopia trafi teraz na stos"
+    },
+    "memberOrder": {
+      "title": "Ustal kolejność kart",
+      "subtitle": "Wybierz kartę, która zostanie rozpatrzona jako następna"
     },
     "collectEvidence": {
       "title": "Zbierz dowody",

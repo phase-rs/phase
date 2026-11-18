@@ -1641,6 +1641,118 @@ fn casts_sewerdreg_with_battlefield_activated_ability_and_duplicate_in_hand() {
     );
 }
 
+// ── Issue #9674: Activated abilities must not leak into cast assessment ──
+//
+// These tests verify that permanents with harmful activated/loyalty abilities
+// are still castable when those abilities currently have no legal targets.
+// The AI must not read the permanent's future abilities as the spell's effects.
+//
+// CR 113.6: A permanent's abilities usually function only while it is on the
+// battlefield, so its activated abilities are not effects of casting it.
+// CR 601.2c + CR 303.4a: An Aura spell chooses the target defined by its enchant ability.
+
+#[test]
+fn casts_dreadful_apathy_with_opposing_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Give AI plenty of mana (4 Plains = 4 white mana)
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::White);
+    }
+
+    // Opponent has a threatening creature (4/4) worth removing
+    scenario.add_creature(P1, "Opposing Threat", 4, 4);
+
+    let apathy = scenario
+        .add_enchantment_to_hand_from_oracle(
+            P0,
+            "Dreadful Apathy",
+            "Enchant creature\nEnchanted creature can't attack or block.\n{2}{W}: Exile enchanted creature.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .from_oracle_text_with_keywords(&["enchant"], "Enchant creature\nEnchanted creature can't attack or block.\n{2}{W}: Exile enchanted creature.")
+        // Printed cost {2}{W} — the four Plains above cover it.
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::White],
+            generic: 2,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let action = ai_choose(runner.state(), AiDifficulty::VeryHard);
+    assert_eq!(
+        action,
+        GameAction::CastSpell {
+            object_id: apathy,
+            card_id: runner.state().objects[&apathy].card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
+        "AI should cast Dreadful Apathy targeting opposing creature; activated ability must not cause rejection"
+    );
+}
+
+#[test]
+fn casts_royal_assassin_without_tapped_opposing_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..4 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+
+    // AI controls a tapped creature (only legal target for Royal Assassin's ability)
+    // but opponent has NO tapped creatures
+    let own_tapped = scenario.add_creature(P0, "Own Tapped Creature", 2, 2).id();
+    // Opponent has an untapped creature (not a legal target for "target tapped creature")
+    scenario.add_creature(P1, "Opposing Untapped Creature", 3, 3);
+
+    let assassin = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Royal Assassin",
+            1,
+            1,
+            "{T}: Destroy target tapped creature.",
+        )
+        // Printed cost {1}{B}{B} — the four Swamps above cover it.
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                engine::types::mana::ManaCostShard::Black,
+                engine::types::mana::ManaCostShard::Black,
+            ],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state.objects.get_mut(&own_tapped).unwrap().tapped = true;
+    }
+
+    let action = ai_choose(runner.state(), AiDifficulty::VeryHard);
+    assert_eq!(
+        action,
+        GameAction::CastSpell {
+            object_id: assassin,
+            card_id: runner.state().objects[&assassin].card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
+        "AI should cast Royal Assassin; its activated ability must not cause rejection when no tapped opposing creature exists"
+    );
+}
+
 // ── Evasion Awareness ────────────────────────────────────────────────────
 
 #[test]

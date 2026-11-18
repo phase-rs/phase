@@ -67,6 +67,49 @@ pub struct PerfCounterSnapshot {
     pub sba_empty_battlefield_short_circuits: u64,
 }
 
+/// Work at the copy-entry view seam, separate from AI baseline counters.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CopyEntryWorkCounters {
+    pub full_state_board_builds: u64,
+    pub membership_probes: u64,
+}
+
+#[cfg(feature = "test-support")]
+thread_local! {
+    static COPY_ENTRY_WORK_COUNTERS: Cell<CopyEntryWorkCounters> = const {
+        Cell::new(CopyEntryWorkCounters { full_state_board_builds: 0, membership_probes: 0 })
+    };
+}
+
+#[cfg(feature = "test-support")]
+pub fn copy_entry_work_snapshot() -> CopyEntryWorkCounters {
+    COPY_ENTRY_WORK_COUNTERS.with(Cell::get)
+}
+
+#[cfg(feature = "test-support")]
+pub fn reset_copy_entry_work_counters() {
+    COPY_ENTRY_WORK_COUNTERS.with(|cell| cell.set(CopyEntryWorkCounters::default()));
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn record_pre_entry_board_build() {
+    COPY_ENTRY_WORK_COUNTERS.with(|cell| {
+        let mut value = cell.get();
+        value.full_state_board_builds += 1;
+        cell.set(value);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) fn record_copy_entrant_membership_probe() {
+    COPY_ENTRY_WORK_COUNTERS.with(|cell| {
+        let mut value = cell.get();
+        value.membership_probes += 1;
+        cell.set(value);
+    });
+}
+
 /// Test-only cache-use counters for the homogeneous target-selection walk.
 ///
 /// Kept separate from [`PerfCounterSnapshot`], whose serialized field set powers
@@ -208,6 +251,27 @@ pub struct CoDepartureObserverCounters {
     pub observer_resolutions: u64,
 }
 
+/// Test-only work counters for the CR 603.10 departure-window arm of trigger
+/// collection (`triggers::ActionDepartures`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DepartureWindowCounters {
+    /// (earlier event, departed observer) pairs admitted past the departure
+    /// row and event-key gates, so the observer's latched context was matched.
+    pub context_resolutions: u64,
+    /// CR 608.2c + CR 603.10: (event, departed observer) pairs skipped because
+    /// the event belongs to the observer's own departing instruction and does
+    /// not look back in time, so the observer no longer existed after it.
+    pub in_instruction_cuts: u64,
+    /// Battlefield departures with no instruction lead: emitted outside any
+    /// instruction scope, or read by the departure-window arm without one.
+    /// The departure-window arm does not observe them (fail-closed). Counts
+    /// observations, not departures: one departure is counted once at emission
+    /// and again by every collection pass that reads it unstamped.
+    pub unstamped_departures: u64,
+}
+
 /// Test-only counters for the stack's bulk token executor
 /// (`stack::resolve_bulk_token_run`) and the post-action pipeline it elides.
 /// Kept out of [`PerfCounterSnapshot`] for the same reason as the counter sets
@@ -230,6 +294,18 @@ pub struct StackBulkCounters {
 pub struct TriggerIndexCounters {
     /// Calls to `TriggerIndex::rebuild_from_battlefield`.
     pub full_rebuilds: u64,
+}
+
+/// Test-only counters for the CR 613.8a-c Layer 2 control selector
+/// (`layers::apply_control_effects_in_dependency_order`). Kept out of
+/// [`PerfCounterSnapshot`] for the same reason as the counter sets above: that
+/// struct's serialized field set powers the AI performance baseline.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ControlDependencyCounters {
+    /// Effect pairs the cheap rejection could not rule out, each of which
+    /// cloned the state to preview the provider.
+    pub previews: u64,
 }
 
 /// Test-only count of `stack_reach::stack_entry_node_reach` calls for an entry with
@@ -662,6 +738,14 @@ thread_local! {
         })
     };
     #[cfg(feature = "test-support")]
+    static DEPARTURE_WINDOW_COUNTERS: Cell<DepartureWindowCounters> = const {
+        Cell::new(DepartureWindowCounters {
+            context_resolutions: 0,
+            in_instruction_cuts: 0,
+            unstamped_departures: 0,
+        })
+    };
+    #[cfg(feature = "test-support")]
     static STACK_BULK_COUNTERS: Cell<StackBulkCounters> = const {
         Cell::new(StackBulkCounters {
             bulk_entries: 0,
@@ -675,6 +759,10 @@ thread_local! {
     #[cfg(feature = "test-support")]
     static STACK_REACH_COUNTERS: Cell<StackReachCounters> = const {
         Cell::new(StackReachCounters { entry_reaches: 0 })
+    };
+    #[cfg(feature = "test-support")]
+    static CONTROL_DEPENDENCY_COUNTERS: Cell<ControlDependencyCounters> = const {
+        Cell::new(ControlDependencyCounters { previews: 0 })
     };
     #[cfg(feature = "test-support")]
     static CAST_UNDO_RECORD_COUNTERS: Cell<CastUndoRecordCounters> = const {
@@ -1286,6 +1374,43 @@ pub fn co_departure_observer_snapshot() -> CoDepartureObserverCounters {
     CO_DEPARTURE_OBSERVER_COUNTERS.with(Cell::get)
 }
 
+/// CR 603.10: one departed observer matched against an earlier event of its
+/// resolution's departure window.
+#[cfg(feature = "test-support")]
+pub fn record_departure_window_context_resolution() {
+    DEPARTURE_WINDOW_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.context_resolutions += 1;
+        cell.set(counters);
+    });
+}
+
+/// CR 608.2c + CR 603.10: one event of a departed observer's own instruction
+/// cut from its departure window.
+#[cfg(feature = "test-support")]
+pub fn record_departure_window_in_instruction_cut() {
+    DEPARTURE_WINDOW_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.in_instruction_cuts += 1;
+        cell.set(counters);
+    });
+}
+
+/// One battlefield departure without an instruction lead.
+#[cfg(feature = "test-support")]
+pub fn record_unstamped_departure() {
+    DEPARTURE_WINDOW_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        counters.unstamped_departures += 1;
+        cell.set(counters);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn departure_window_snapshot() -> DepartureWindowCounters {
+    DEPARTURE_WINDOW_COUNTERS.with(Cell::get)
+}
+
 #[cfg(feature = "test-support")]
 pub fn reset_prior_target_binding_counters() {
     PRIOR_TARGET_BINDING_COUNTERS
@@ -1462,11 +1587,15 @@ pub fn reset() {
     CO_DEPARTURE_OBSERVER_COUNTERS
         .with(|counters| counters.set(CoDepartureObserverCounters::default()));
     #[cfg(feature = "test-support")]
+    DEPARTURE_WINDOW_COUNTERS.with(|counters| counters.set(DepartureWindowCounters::default()));
+    #[cfg(feature = "test-support")]
     STACK_BULK_COUNTERS.with(|counters| counters.set(StackBulkCounters::default()));
     #[cfg(feature = "test-support")]
     TRIGGER_INDEX_COUNTERS.with(|counters| counters.set(TriggerIndexCounters::default()));
     #[cfg(feature = "test-support")]
     STACK_REACH_COUNTERS.with(|counters| counters.set(StackReachCounters::default()));
+    #[cfg(feature = "test-support")]
+    CONTROL_DEPENDENCY_COUNTERS.with(|counters| counters.set(ControlDependencyCounters::default()));
     #[cfg(feature = "test-support")]
     CAST_UNDO_RECORD_COUNTERS.with(|counters| counters.set(CastUndoRecordCounters::default()));
 }
@@ -1524,6 +1653,21 @@ pub fn record_stack_entry_reach() {
 #[cfg(feature = "test-support")]
 pub fn stack_reach_snapshot() -> StackReachCounters {
     STACK_REACH_COUNTERS.with(Cell::get)
+}
+
+/// One Layer 2 control-dependency preview (a state clone).
+#[cfg(feature = "test-support")]
+pub fn record_control_dependency_preview() {
+    CONTROL_DEPENDENCY_COUNTERS.with(|cell| {
+        let mut c = cell.get();
+        c.previews += 1;
+        cell.set(c);
+    });
+}
+
+#[cfg(feature = "test-support")]
+pub fn control_dependency_snapshot() -> ControlDependencyCounters {
+    CONTROL_DEPENDENCY_COUNTERS.with(Cell::get)
 }
 
 #[cfg(feature = "test-support")]

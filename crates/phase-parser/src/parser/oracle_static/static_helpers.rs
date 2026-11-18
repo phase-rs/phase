@@ -1861,6 +1861,12 @@ fn rebind_scoped_designation_anaphor(condition: &mut StaticCondition, antecedent
                 *player = antecedent.clone();
             }
         }
+        // CR 122.1f + CR 109.5: same scoped-subject rebind as the monarch arm.
+        StaticCondition::PlayerIsPoisoned { player } => {
+            if matches!(player, PlayerScope::ScopedPlayer) {
+                *player = antecedent.clone();
+            }
+        }
         // Only boolean structure carries nested static conditions. Quantities
         // and filters are separate scopes, so this clause does not rebind them.
         StaticCondition::DevotionGE { .. }

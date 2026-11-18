@@ -173,7 +173,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::BeholdChoice { .. }
         | WaitingFor::EmpowerJaceChoice { .. }
-        | WaitingFor::SpellCopyOrderChoice { .. }
+        | WaitingFor::MemberOrderChoice { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::ConniveDiscard { .. }
         | WaitingFor::DiscardChoice { .. }
@@ -1632,6 +1632,9 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // stack entry, continuation) holds a key.
     filtered.control_change_observations.clear();
     filtered.control_change_captures.clear();
+    // Engine working memory, empty at every action-return boundary.
+    filtered.layer_control_changes.clear();
+    filtered.announced_control_changes.clear();
     // Deferred life-cost owners can embed a complete PendingCast, including
     // hidden card and target context. The projected WaitingFor is the only
     // viewer-facing interaction surface.
@@ -1929,7 +1932,12 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         .pending_trigger_event_batch
         .iter_mut()
         .chain(filtered.pending_attack_trigger_events.iter_mut())
-        .chain(filtered.deferred_entry_events.iter_mut())
+        .chain(
+            filtered
+                .deferred_entry_events
+                .iter_mut()
+                .map(|parked| &mut parked.event),
+        )
         .chain(filtered.unsettled_entry_batch_events.iter_mut())
         .chain(
             filtered
@@ -1961,6 +1969,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     for event in filtered
         .deferred_entry_events
         .iter_mut()
+        .map(|parked| &mut parked.event)
         .chain(filtered.unsettled_entry_batch_events.iter_mut())
     {
         redact_hidden_zone_change_event(event, &held_entry_hidden_ids);
@@ -2128,6 +2137,15 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
     // entrant's projection carries its card_id/printed_ref, which other players may not see
     // (CR 708.5).
     filtered.battlefield_entry_observations.clear();
+    // CR 400.2 + CR 401.2 + CR 603.3: a held as-enters roll's trigger contexts are
+    // engine continuations that the settled release puts on the stack. They latch
+    // their sources' full contexts (cast payments, LKI names), so a card now hidden
+    // in a library or hand would be named through them. No client consumes them, so
+    // every audience's copy drops them. The parked entry stays, its event redacted
+    // above.
+    for parked in filtered.deferred_entry_events.iter_mut() {
+        parked.held_triggers.clear();
+    }
     redact_hidden_identity_side_tables(&mut filtered, &hidden_zone_change_ids);
 
     // Source-bound named choices carry complete source contexts in authoritative
@@ -4338,8 +4356,8 @@ fn redact_hidden_zone_change_event(event: &mut GameEvent, hidden_ids: &HashSet<O
 /// `SagaChapterAbilityResolved` events held as a stack or resolving entry's
 /// `trigger_event`, in `stack_trigger_event_batches`, `current_trigger_event(s)`,
 /// `pending_trigger_event_batch`, `pending_attack_trigger_events`,
-/// `consumed_before_priority_trigger_events`, `deferred_entry_events`,
-/// `unsettled_entry_batch_events`, a paused
+/// `consumed_before_priority_trigger_events`, `deferred_entry_events` (event; its
+/// `held_triggers` are cleared for every audience), `unsettled_entry_batch_events`, a paused
 /// player-scope sacrifice's `deferred_events`, the pending trigger's `trigger_event`, a
 /// deferred or ordering trigger context's `trigger_event` and `trigger_events`, the
 /// `trigger_event` of the `TriggerTargetSelection` (with its `trigger_events`),
@@ -4522,6 +4540,7 @@ fn redact_pending_mana_ability_payment(
     // key is engine authority — never shown to a viewer. The single
     // choke point: every owner call site routes through here.
     pending.announced_usage_key = None;
+    pending.selected_taps_for_mana.clear();
     // CR 400.2 + CR 613.1f: the activation-time definition snapshot is a
     // stamped clone like the TCE grant payloads — a mana ability a hidden-zone
     // provider donated (Thranduil holding a graveyard Elf's ability) names the
@@ -6312,8 +6331,12 @@ mod tests {
         });
         state.pending_trigger_event_batch = all_events.clone();
         state.pending_attack_trigger_events = all_events.clone();
-        state.deferred_entry_events = vec![event.clone()];
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            event.clone(),
+            None,
+        )];
         state.unsettled_entry_batch_events = vec![event.clone()];
+
         state.consumed_before_priority_trigger_events =
             vec![crate::game::triggers::ConsumedTriggerEventOccurrence {
                 event: event.clone(),
@@ -6577,7 +6600,6 @@ mod tests {
                     "pending_attack_trigger_events",
                     &state.pending_attack_trigger_events,
                 ),
-                ("deferred_entry_events", &state.deferred_entry_events),
                 (
                     "unsettled_entry_batch_events",
                     &state.unsettled_entry_batch_events,
@@ -6586,6 +6608,9 @@ mod tests {
                 for event in events {
                     push(label, &from_event(event));
                 }
+            }
+            for event in state.parked_entry_events() {
+                push("deferred_entry_events", &from_event(event));
             }
             for occurrence in &state.consumed_before_priority_trigger_events {
                 push(
@@ -6917,6 +6942,7 @@ mod tests {
                     trigger_event: Some(event.clone()),
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
                     repeat: None,
                 },
             ),
@@ -6930,6 +6956,7 @@ mod tests {
                     effect_description: None,
                     remaining_choices: Vec::new(),
                     chosen: Vec::new(),
+                    affected_object: None,
                 },
             ),
             (
@@ -7027,6 +7054,53 @@ mod tests {
                 assert_eq!(carried[1], payment[1], "{label}: pending_effect visible");
             }
         }
+
+        // U-H2. CR 400.2 + CR 401.2 + CR 603.3: a parked as-enters roll's held trigger
+        // contexts are engine continuations; every audience's projection drops them, the
+        // owner's included, and the parked entry stays. Seeded on a separate state so
+        // the assertions above are untouched.
+        let mut held_state = state.clone();
+        held_state.deferred_entry_events[0].held_triggers = vec![context()];
+        assert_eq!(
+            held_state.deferred_entry_events[0].held_triggers[0]
+                .pending
+                .ability
+                .trigger_source
+                .as_ref()
+                .map(|source| source.mana_spent_source_snapshots.clone()),
+            Some(payment.clone()),
+            "reach-guard: the held context names the hidden mana source"
+        );
+        for (audience, view) in [
+            (
+                "opponent",
+                filter_state_for_viewer(&held_state, opponent_id),
+            ),
+            ("spectator", filter_state_for_unseated_viewer(&held_state)),
+            ("owner", filter_state_for_viewer(&held_state, owner)),
+        ] {
+            assert_eq!(
+                view.deferred_entry_events.len(),
+                1,
+                "{audience}: the parked entry stays"
+            );
+            assert!(
+                view.deferred_entry_events[0].held_triggers.is_empty(),
+                "{audience}: the held contexts are dropped"
+            );
+            let wire = serde_json::to_value(&view).expect("the projection serializes");
+            assert!(
+                wire["deferred_entry_events"][0]
+                    .get("held_triggers")
+                    .is_none(),
+                "{audience}: no held_triggers key on the wire"
+            );
+        }
+        assert_eq!(
+            held_state.deferred_entry_events[0].held_triggers,
+            vec![context()],
+            "the authoritative state keeps its held contexts"
+        );
     }
 
     /// CR 406.3 + CR 406.3a: the three carriers whose copy-on-write pass first SELECTS what
@@ -7439,6 +7513,7 @@ mod tests {
             trigger_event: Some(fixture.event.clone()),
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
         pending.cost_move_resume = Some(ManaAbilityResume::EffectPayCost {
@@ -7505,6 +7580,7 @@ mod tests {
                     trigger_event: None,
                     effect_description: None,
                     remaining: Vec::new(),
+                    affected_object: None,
                     repeat: None,
                 }),
             ),
@@ -7520,6 +7596,7 @@ mod tests {
                     effect_description: None,
                     remaining_choices: Vec::new(),
                     chosen: Vec::new(),
+                    affected_object: None,
                 }),
             ),
             (
@@ -8514,6 +8591,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -8588,6 +8666,7 @@ mod tests {
             color_override: None,
             resume: ManaAbilityResume::Priority,
             cost_move_resume: None,
+            selected_taps_for_mana: Vec::new(),
             chosen_tappers: None,
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
@@ -8602,6 +8681,75 @@ mod tests {
             cost_removed_counters: None,
             batch_siblings: Vec::new(),
         })
+    }
+
+    #[test]
+    fn viewer_projection_omits_selected_mana_producers_in_nested_pending_activations() {
+        use crate::types::ability::{TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef};
+        let selected = crate::types::mana::TapsForManaSelection {
+            source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(910), 4),
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index: 1,
+            },
+            production_override: crate::types::game_state::ProductionOverride::SingleColor(
+                crate::types::mana::ManaType::Green,
+            ),
+        };
+        let mut parent = dummy_pending_mana_ability(PlayerId(0), ObjectId(911));
+        parent.selected_taps_for_mana.push(selected.clone());
+        let mut child = dummy_pending_mana_ability(PlayerId(0), ObjectId(912));
+        child
+            .selected_taps_for_mana
+            .push(crate::types::mana::TapsForManaSelection {
+                source: crate::types::identifiers::ObjectIncarnationRef::of(ObjectId(913), 7),
+                production_override: crate::types::game_state::ProductionOverride::SingleColor(
+                    crate::types::mana::ManaType::Blue,
+                ),
+                ..selected
+            });
+        assert_ne!(parent.selected_taps_for_mana, child.selected_taps_for_mana);
+        child.resume = ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability: parent,
+        };
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::ManaAbilityManaPayment {
+            player: PlayerId(0),
+            pending_mana_ability: child,
+        };
+        for viewer in [PlayerId(0), PlayerId(1)] {
+            let projected = filter_state_for_viewer(&state, viewer);
+            let WaitingFor::ManaAbilityManaPayment {
+                pending_mana_ability,
+                ..
+            } = &projected.waiting_for
+            else {
+                panic!("projection retains the existing public prompt");
+            };
+            assert!(pending_mana_ability.selected_taps_for_mana.is_empty());
+            let ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } = &pending_mana_ability.resume
+            else {
+                panic!("projection retains the parent shape");
+            };
+            assert!(pending_mana_ability.selected_taps_for_mana.is_empty());
+        }
+        let WaitingFor::ManaAbilityManaPayment {
+            pending_mana_ability,
+            ..
+        } = &state.waiting_for
+        else {
+            unreachable!()
+        };
+        assert_eq!(pending_mana_ability.selected_taps_for_mana.len(), 1);
+        let ManaAbilityResume::ManaAbilityManaPayment {
+            pending_mana_ability,
+        } = &pending_mana_ability.resume
+        else {
+            unreachable!()
+        };
+        assert_eq!(pending_mana_ability.selected_taps_for_mana.len(), 1);
     }
 
     #[test]
@@ -15894,6 +16042,52 @@ mod tests {
                 ..
             }
         ));
+
+        // U-H3. CR 400.2 + CR 401.2 + CR 603.3: a held as-enters roll context whose
+        // ability names the library card is dropped from every viewer's parked entry.
+        let roll = GameEvent::DieRolled {
+            player_id: PlayerId(0),
+            sides: 6,
+            result: Some(4),
+            pre_entry_source: Some(permanent),
+        };
+        let mut parked = crate::types::game_state::ParkedEntry::occurred(roll);
+        parked.held_triggers = vec![crate::game::triggers::PendingTriggerContext::single(
+            crate::game::triggers::PendingTrigger::ordinary(
+                ObjectId(900),
+                PlayerId(0),
+                None,
+                Box::new(with_context(library_card, &state)),
+                0,
+            ),
+        )];
+        state.deferred_entry_events.push(parked);
+        let authoritative = state.deferred_entry_events.clone();
+        assert_eq!(
+            authoritative[0].held_triggers[0]
+                .pending
+                .ability
+                .effect_context_object
+                .as_ref()
+                .map(|snapshot| snapshot.object_id),
+            Some(library_card),
+            "reach guard: the held context names the library card"
+        );
+        for (viewer, projected) in [
+            ("P0", filter_state_for_viewer(&state, PlayerId(0))),
+            ("P1", filter_state_for_viewer(&state, PlayerId(1))),
+            ("unseated", filter_state_for_unseated_viewer(&state)),
+        ] {
+            assert_eq!(projected.deferred_entry_events.len(), 1, "{viewer}");
+            assert!(
+                projected.deferred_entry_events[0].held_triggers.is_empty(),
+                "{viewer}: the held context is dropped"
+            );
+        }
+        assert_eq!(
+            state.deferred_entry_events, authoritative,
+            "the rules state keeps the held context"
+        );
     }
 
     fn exile_with_alt_cost_permission(

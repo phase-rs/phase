@@ -791,9 +791,16 @@ pub(crate) fn is_runtime_control_gated_replacement(def: &ReplacementDefinition) 
 /// target by an effect such as Torch the Tower or Obliterating Bolt. It is
 /// resolution-installed in the live replacement store, is not a copiable value,
 /// and ends when that object leaves the battlefield (CR 400.7).
+///
+/// CR 109.2: a rider whose printed subject names a card type ("a creature dealt
+/// damage this way") carries `And[SelfRef, Typed(..)]` rather than a bare
+/// `SelfRef`; either way `valid_card` names only the carrier.
 pub(crate) fn is_runtime_target_die_exile_replacement(def: &ReplacementDefinition) -> bool {
     def.event == ReplacementEvent::Moved
-        && matches!(def.valid_card, Some(TargetFilter::SelfRef))
+        && def
+            .valid_card
+            .as_ref()
+            .is_some_and(super::ability_rw::filter_is_self_scoped)
         && matches!(def.expiry, Some(RestrictionExpiry::EndOfTurn))
         && def.destination_zone == Some(Zone::Graveyard)
         && def.execute.as_deref().is_some_and(|execute| {
@@ -2302,7 +2309,63 @@ mod tests {
     use super::*;
     use crate::game::game_object::PrototypeFormState;
     use crate::types::ability::ChooseOneOfKind;
+    use crate::types::ability::{TypeFilter, TypedFilter};
     use crate::types::format::FormatConfig;
+
+    /// CR 614.1a + CR 400.7 + CR 707.2: the resolution-installed die-exile rider is
+    /// recognized by the carrier-scoped `valid_card` it carries, bare (a subject with
+    /// no card-type noun) or conjoined with the subject's type (CR 109.2). A `Moved`
+    /// rider whose `valid_card` has no `SelfRef` conjunct could match other objects,
+    /// so it is not the carrier-bound rider.
+    #[test]
+    fn runtime_die_exile_rider_is_recognized_by_a_carrier_scoped_valid_card() {
+        let rider = |valid_card: TargetFilter| {
+            let exile = AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::ChangeZone {
+                    actor: crate::types::ability::LibraryInstructionActor::Controller,
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Exile,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    library_shuffle: Default::default(),
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            );
+            let mut def = ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(valid_card)
+                .destination_zone(Zone::Graveyard)
+                .execute(exile);
+            def.expiry = Some(RestrictionExpiry::EndOfTurn);
+            def
+        };
+        let creature = || TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+        // Positive reach: both carrier-scoped shapes are the rider, so the predicate
+        // is live and the negative below is not vacuous.
+        assert!(is_runtime_target_die_exile_replacement(&rider(
+            TargetFilter::SelfRef
+        )));
+        assert!(is_runtime_target_die_exile_replacement(&rider(
+            TargetFilter::And {
+                filters: vec![TargetFilter::SelfRef, creature()],
+            }
+        )));
+        // A typed filter with no `SelfRef` conjunct is not carrier-scoped.
+        assert!(!is_runtime_target_die_exile_replacement(&rider(
+            TargetFilter::And {
+                filters: vec![creature()],
+            }
+        )));
+        assert!(!is_runtime_target_die_exile_replacement(&rider(creature())));
+    }
 
     /// Pre-PR saves persist Horde token-layout objects with default `Card`
     /// routing and no `printed_ref`, so the face reapply skips them and a

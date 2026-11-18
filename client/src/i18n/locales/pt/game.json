@@ -161,6 +161,7 @@
     "flip": "Virar",
     "report": "Relatar um problema",
     "reported": "Relatado ✓",
+    "reportNotSent": "Não enviado",
     "altParsedAbilities": "Alt: habilidades processadas",
     "debugId": "ID: {{id}}",
     "engineParse": "Análise do Motor",
@@ -1811,6 +1812,10 @@
     "spellCopyOrder": {
       "title": "Ordenar as cópias",
       "subtitle": "Escolha a mágica cuja cópia vai para a pilha em seguida"
+    },
+    "memberOrder": {
+      "title": "Ordene os cards",
+      "subtitle": "Escolha qual card é processado em seguida"
     },
     "collectEvidence": {
       "title": "Coletar Evidências",

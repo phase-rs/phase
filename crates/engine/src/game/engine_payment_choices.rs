@@ -847,6 +847,7 @@ pub(super) fn handle_unless_payment_choose_cost(
         effect_description,
         mut remaining_choices,
         mut chosen,
+        affected_object,
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -909,6 +910,7 @@ pub(super) fn handle_unless_payment_choose_cost(
                     effect_description,
                     remaining_choices,
                     chosen,
+                    affected_object,
                 };
                 return Ok(action_result(events, state.waiting_for.clone()));
             }
@@ -930,6 +932,7 @@ pub(super) fn handle_unless_payment_choose_cost(
                 // Disjunctive (`OneOf`) unless-costs are single-payer — the
                 // "any player" poll never co-occurs with a sub-cost choice.
                 remaining: Vec::new(),
+                affected_object,
                 repeat: None,
             };
             handle_unless_payment(state, next, true, events)
@@ -956,6 +959,7 @@ pub(super) fn handle_unless_payment_choose_cost(
                 trigger_event,
                 effect_description,
                 remaining: Vec::new(),
+                affected_object,
                 repeat: None,
             };
             handle_unless_payment(state, next, false, events)
@@ -1129,6 +1133,7 @@ fn set_player_scope_unless_payment_waiting_for(state: &mut GameState) {
         trigger_event: None,
         effect_description: None,
         remaining: Vec::new(),
+        affected_object: None,
         repeat: None,
     };
 }
@@ -1282,6 +1287,7 @@ pub(super) fn handle_unless_payment(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     } = waiting_for
     else {
@@ -2120,6 +2126,7 @@ pub(super) fn handle_unless_payment(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         post_action_event_start,
         events,
     )
@@ -2146,6 +2153,7 @@ fn finish_unless_payment(
     trigger_event: Option<GameEvent>,
     effect_description: Option<String>,
     remaining: Vec<PlayerId>,
+    affected_object: Option<ObjectId>,
     mut post_action_event_start: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
@@ -2180,6 +2188,7 @@ fn finish_unless_payment(
                 trigger_event: trigger_event.clone(),
                 effect_description: effect_description.clone(),
                 remaining: rest.to_vec(),
+                affected_object,
                 repeat: None,
             };
             return Ok(action_result(events, state.waiting_for.clone()));
@@ -2547,6 +2556,8 @@ pub(crate) fn payment_continuation_prompt(state: &GameState) -> Option<WaitingFo
         trigger_event: trigger_event.clone(),
         effect_description: effect_description.clone(),
         remaining: remaining.clone(),
+        // The choice to pay is already made; this continuation only finishes it.
+        affected_object: None,
     })
 }
 
@@ -2807,6 +2818,7 @@ pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
     trigger_event: Option<GameEvent>,
     effect_description: Option<String>,
     remaining: Vec<PlayerId>,
+    affected_object: Option<ObjectId>,
     repeat: Option<u32>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
@@ -2817,6 +2829,7 @@ pub(crate) fn continue_unless_payment_after_paid_mana_prefix(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     };
     let result = handle_unless_payment(state, waiting_for, true, events)?;
@@ -2965,6 +2978,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     } = waiting_for
     else {
@@ -2985,6 +2999,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
             trigger_event: trigger_event.clone(),
             effect_description: effect_description.clone(),
             remaining: remaining.clone(),
+            affected_object,
             repeat,
         },
         events,
@@ -3008,6 +3023,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     } = waiting_for
     else {
@@ -3024,6 +3040,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     })
 }
@@ -3044,6 +3061,7 @@ pub(super) fn handle_unless_payment_activate_ability(
         trigger_event,
         effect_description,
         remaining,
+        affected_object,
         repeat,
     } = waiting_for
     else {
@@ -3089,6 +3107,7 @@ pub(super) fn handle_unless_payment_activate_ability(
             trigger_event,
             effect_description,
             remaining,
+            affected_object,
             repeat,
         },
         None,
@@ -3879,6 +3898,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining,
+            affected_object: None,
             repeat: None,
         };
         state
@@ -4122,6 +4142,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
         crate::game::engine::apply_as_current(
             &mut state,
@@ -4214,6 +4235,7 @@ mod tests {
                         trigger_event: None,
                         effect_description: None,
                         remaining: vec![],
+                        affected_object: None,
                         repeat: None,
                     };
                     let result = payment_action(&mut state, pay);
@@ -4433,6 +4455,7 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
                 repeat: None,
             };
             payment_action(&mut state, pay);
@@ -4474,6 +4497,7 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
                 repeat: None,
             };
             payment_action(&mut state, true);
@@ -4546,6 +4570,7 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
                 repeat: None,
             };
             let mut events = payment_action(&mut state, true).events;
@@ -4652,6 +4677,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![],
+            affected_object: None,
             repeat: None,
         };
         let mut events = payment_action(&mut state, true).events;
@@ -4764,6 +4790,7 @@ mod tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: vec![],
+                affected_object: None,
                 repeat: None,
             };
             assert!(matches!(
@@ -6442,6 +6469,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
         (state, hand)
@@ -6551,6 +6579,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6578,6 +6607,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6697,6 +6727,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6756,6 +6787,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6793,6 +6825,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![PlayerId(1)],
+            affected_object: None,
             repeat: None,
         };
 
@@ -6841,6 +6874,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6868,6 +6902,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -6909,6 +6944,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         let mut events = Vec::new();
@@ -6947,6 +6983,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         let mut events = Vec::new();
@@ -6982,6 +7019,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         crate::game::engine::apply_as_current(
@@ -7013,6 +7051,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![],
             chosen: vec![],
+            affected_object: None,
         };
 
         crate::game::engine::apply_as_current(
@@ -7076,6 +7115,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![second_costs.clone()],
             chosen: vec![],
+            affected_object: None,
         };
 
         // First pick: index 0 (PayLife{3}). Expected post-state: still in
@@ -7227,6 +7267,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![oneof_wu.clone()],
             chosen: vec![],
+            affected_object: None,
         };
 
         // First pick: {W} (index 0). State remains UnlessPaymentChooseCost.
@@ -7307,6 +7348,7 @@ mod tests {
             effect_description: None,
             remaining_choices: vec![oneof_wu],
             chosen: vec![],
+            affected_object: None,
         };
 
         let mut events = Vec::new();
@@ -7375,6 +7417,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -7529,6 +7572,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -7576,6 +7620,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -7699,6 +7744,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -7758,6 +7804,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
@@ -7872,6 +7919,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![PlayerId(1)],
+            affected_object: None,
             repeat: None,
         };
 
@@ -7915,6 +7963,7 @@ mod tests {
             trigger_event: None,
             effect_description: None,
             remaining: vec![PlayerId(1)],
+            affected_object: None,
             repeat: None,
         };
 
@@ -8001,6 +8050,7 @@ mod tests {
                 effect_description: None,
                 remaining_choices: vec![vec![poison.clone(), life.clone()]],
                 chosen: vec![],
+                affected_object: None,
             };
             state
         };
@@ -8134,6 +8184,7 @@ mod dandan_read_sweep_tests {
             trigger_event: None,
             effect_description: None,
             remaining: Vec::new(),
+            affected_object: None,
             repeat: None,
         };
 
