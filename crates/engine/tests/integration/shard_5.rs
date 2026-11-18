@@ -146,6 +146,7 @@ mod slitherwisp_flash_spell_cast_trigger;
 mod sliver_overlord_activation_offer;
 mod slow_motion_upkeep_sacrifice_return;
 mod snow_mana_production;
+mod sol_advocate_eternal_teamwork;
 mod solar_tide_entwine_non_mana;
 mod solitude_up_to_one_exile_lifegain_rider;
 mod song_of_inspiration_target_set_aggregate;
