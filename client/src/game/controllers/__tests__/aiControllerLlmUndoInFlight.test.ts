@@ -116,10 +116,10 @@ const STALE_REFUSAL: AiLlmProposalResult = {
 };
 
 /**
- * A solo game against an LLM seat whose engine is a variable: `submitAction`,
- * `submitAiActionProposal` and `restoreState` change it as they are called, as
- * the real engine applies requests in call order, and every read sees it as it
- * stands, unless `holdSnapshots` is holding the reads.
+ * A solo game against an LLM seat whose engine is a variable its requests read
+ * and change. Like both engine transports, it answers requests one at a time,
+ * in the order they were made, so a request made while a restore runs is
+ * answered after it.
  */
 async function startGame(buildResult: LlmDecisionRequestResult = REQUEST) {
   const profileId = useLlmStore
@@ -128,7 +128,13 @@ async function startGame(buildResult: LlmDecisionRequestResult = REQUEST) {
   useLlmStore.getState().bindSeat(0, profileId);
 
   let live: GameState = HUMAN_TO_ACT;
-  let snapshotHold: Promise<void> | null = null;
+  let lastRequest: Promise<unknown> = Promise.resolve();
+  function inOrder<Answer>(request: () => Answer | Promise<Answer>): Promise<Answer> {
+    const answer = lastRequest.then(request);
+    lastRequest = answer.catch(() => undefined);
+    return answer;
+  }
+
   const buildLlmDecisionRequest = vi.fn<
     (
       difficulty: string,
@@ -138,20 +144,19 @@ async function startGame(buildResult: LlmDecisionRequestResult = REQUEST) {
       settingsRevision: number,
       clock: LlmClockReading,
     ) => Promise<LlmDecisionRequestResult>
-  >(async () => buildResult);
+  >(() => inOrder(() => buildResult));
   const adapter = buildEngineAdapterMock(HUMAN_TO_ACT, {
-    getState: vi.fn(async () => {
-      if (snapshotHold) await snapshotHold;
-      return live;
-    }),
-    exportPersistenceState: vi.fn(async () =>
-      JSON.stringify({ state: live, precast_shortcut_runtime: null }),
+    getState: vi.fn(() => inOrder(() => live)),
+    exportPersistenceState: vi.fn(() =>
+      inOrder(() => JSON.stringify({ state: live, precast_shortcut_runtime: null })),
     ),
-    restoreState: vi.fn((restored: PersistedGameState) => {
-      live = persistedGameStateView(restored);
-    }),
+    restoreState: vi.fn((restored: PersistedGameState) =>
+      inOrder(() => {
+        live = persistedGameStateView(restored);
+      }),
+    ),
     buildLlmDecisionRequest,
-    getAiActionProposalFromLlmResponse: vi.fn(async () => STALE_REFUSAL),
+    getAiActionProposalFromLlmResponse: vi.fn(() => inOrder(() => STALE_REFUSAL)),
   });
   useGameStore.setState({ adapter, gameMode: "ai", aiSeatIds: [AI_SEAT] });
   // The game so far, committed the way every action's log lines are.
@@ -161,34 +166,55 @@ async function startGame(buildResult: LlmDecisionRequestResult = REQUEST) {
 
   /** The human passes priority to the LLM seat: an undoable, checkpointed action. */
   const humanPasses = async () => {
-    adapter.submitAction.mockImplementationOnce(async () => {
-      live = AI_TO_ACT;
-      return { events: [], log_entries: [HUMAN_PASS] };
-    });
+    adapter.submitAction.mockImplementationOnce(() =>
+      inOrder(() => {
+        live = AI_TO_ACT;
+        return { events: [], log_entries: [HUMAN_PASS] };
+      }),
+    );
     await dispatchAction({ type: "PassPriority" }, HUMAN);
   };
   /** The LLM seat's play: Loran of the Third Path, which hands the human priority. */
   const loranResolves = (events: GameEvent[]) => {
-    adapter.submitAiActionProposal.mockImplementationOnce(async () => {
-      live = HUMAN_TO_ACT;
-      return { status: "applied", result: { events, log_entries: LORAN_PLAY } };
-    });
+    adapter.submitAiActionProposal.mockImplementationOnce(() =>
+      inOrder(() => {
+        live = HUMAN_TO_ACT;
+        return { status: "applied", result: { events, log_entries: LORAN_PLAY } };
+      }),
+    );
   };
-  /**
-   * Hold every snapshot read until the returned function lets them go: an
-   * undo pressed meanwhile has restored the engine but not yet committed.
-   */
-  const holdSnapshots = () => {
-    let release!: () => void;
-    snapshotHold = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    return () => {
-      snapshotHold = null;
-      release();
-    };
+  /** The next restore runs until the returned function finishes it. */
+  const restoresSlowly = () => {
+    let finish!: () => void;
+    adapter.restoreState.mockImplementationOnce((restored: PersistedGameState) =>
+      inOrder(
+        () =>
+          new Promise<void>((resolve) => {
+            finish = () => {
+              live = persistedGameStateView(restored);
+              resolve();
+            };
+          }),
+      ),
+    );
+    return () => finish();
   };
-  return { adapter, buildLlmDecisionRequest, humanPasses, loranResolves, holdSnapshots };
+  /** The next restore fails, leaving the engine as it was. */
+  const restoreFails = (error: Error) => {
+    adapter.restoreState.mockImplementationOnce(() =>
+      inOrder(() => {
+        throw error;
+      }),
+    );
+  };
+  return {
+    adapter,
+    buildLlmDecisionRequest,
+    humanPasses,
+    loranResolves,
+    restoresSlowly,
+    restoreFails,
+  };
 }
 
 /** Every controller a test starts, disposed after it whatever its outcome. */
@@ -276,18 +302,18 @@ describe("an LLM seat's decision when Undo is pressed", () => {
   });
 
   it("never counts a reply that arrives during an undo against the seat's provider", async () => {
-    const { adapter, humanPasses, holdSnapshots } = await startGame();
+    const { adapter, humanPasses, restoresSlowly } = await startGame();
     startController();
 
     // Three times over, the seat asks its provider, and the human undoes the
-    // pass while the reply is out. The reply lands after the restore and
-    // before the undo commits, where the engine would refuse it as stale.
+    // pass while the reply is out. The reply lands while the restore runs: the
+    // engine reads it after the restore, and would refuse it as stale.
     for (let round = 1; round <= 3; round += 1) {
       await humanPasses();
       await vi.advanceTimersByTimeAsync(0);
       expect(llmClientMock.executeLlmRequest).toHaveBeenCalledTimes(round);
 
-      const releaseSnapshots = holdSnapshots();
+      const finishRestore = restoresSlowly();
       const undoing = undoLastAction();
       await vi.advanceTimersByTimeAsync(0);
       expect(adapter.restoreState).toHaveBeenCalledTimes(round);
@@ -297,7 +323,7 @@ describe("an LLM seat's decision when Undo is pressed", () => {
       // The undo ended the decision, so its reply is never even read.
       expect(adapter.getAiActionProposalFromLlmResponse).not.toHaveBeenCalled();
 
-      releaseSnapshots();
+      finishRestore();
       await undoing;
       expect(useGameStore.getState().gameState).toEqual(HUMAN_TO_ACT);
     }
@@ -310,7 +336,7 @@ describe("an LLM seat's decision when Undo is pressed", () => {
   });
 
   it("builds nothing for a decision still waiting on the provider catalog when the undo restores", async () => {
-    const { buildLlmDecisionRequest, humanPasses, holdSnapshots } = await startGame();
+    const { buildLlmDecisionRequest, humanPasses, restoresSlowly } = await startGame();
     let catalogLoaded!: (catalog: LlmProviderCatalogEntry[]) => void;
     catalogMock.loadProviderCatalog.mockReturnValue(
       new Promise<LlmProviderCatalogEntry[]>((resolve) => {
@@ -324,22 +350,23 @@ describe("an LLM seat's decision when Undo is pressed", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(catalogMock.loadProviderCatalog).toHaveBeenCalledOnce();
 
-    // The undo restores the engine to the human's decision, but has not
-    // committed: the store still shows the seat's decision.
-    const releaseSnapshots = holdSnapshots();
+    // The undo is restoring the engine to the human's decision: the store
+    // still shows the seat's decision.
+    const finishRestore = restoresSlowly();
     const undoing = undoLastAction();
     await vi.advanceTimersByTimeAsync(0);
     expect(useGameStore.getState().gameState).toEqual(AI_TO_ACT);
     // No decision starts while the undo runs.
     expect(catalogMock.loadProviderCatalog).toHaveBeenCalledOnce();
 
-    // The catalog arrives. A build now would render the restored engine's
-    // decision, the human's, from the human's view.
+    // The catalog arrives. A build now would be answered after the restore,
+    // and render the restored engine's decision, the human's, from the human's
+    // view.
     catalogLoaded(CATALOG);
     await vi.advanceTimersByTimeAsync(0);
     expect(buildLlmDecisionRequest).not.toHaveBeenCalled();
 
-    releaseSnapshots();
+    finishRestore();
     await undoing;
     await vi.advanceTimersByTimeAsync(0);
     expect(useGameStore.getState().gameState).toEqual(HUMAN_TO_ACT);
@@ -347,8 +374,44 @@ describe("an LLM seat's decision when Undo is pressed", () => {
     expect(llmClientMock.executeLlmRequest).not.toHaveBeenCalled();
   });
 
-  it("asks the seat's decision again when the undo's restore fails", async () => {
+  it("starts no decision until the board is read again after a failed read", async () => {
     const { adapter, humanPasses } = await startGame();
+    startController();
+    await humanPasses();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(catalogMock.loadProviderCatalog).toHaveBeenCalledOnce();
+
+    // The restore succeeds; the read after it fails, and the read that
+    // re-syncs the board is held.
+    const read = adapter.getSnapshot.getMockImplementation()!;
+    adapter.getSnapshot.mockImplementationOnce(async () => {
+      await read();
+      throw new Error("snapshot failed");
+    });
+    let releaseResync!: () => void;
+    adapter.getSnapshot.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        releaseResync = resolve;
+      });
+      return read();
+    });
+    const undoing = undoLastAction();
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The engine holds the human's decision, and the store still shows the
+    // seat's: the undo is not over, and no decision starts.
+    expect(useGameStore.getState().gameState).toEqual(AI_TO_ACT);
+    expect(useGameStore.getState().pendingUndoId).not.toBeNull();
+    expect(catalogMock.loadProviderCatalog).toHaveBeenCalledOnce();
+
+    releaseResync();
+    await undoing;
+    expect(useGameStore.getState().gameState).toEqual(HUMAN_TO_ACT);
+    expect(useGameStore.getState().pendingUndoId).toBeNull();
+  });
+
+  it("asks the seat's decision again when the undo's restore fails", async () => {
+    const { humanPasses, restoreFails } = await startGame();
     startController();
     await humanPasses();
     await vi.advanceTimersByTimeAsync(0);
@@ -356,9 +419,9 @@ describe("an LLM seat's decision when Undo is pressed", () => {
 
     // The undo ends the decision under way, then fails: the engine, and the
     // seat's decision, stay as they were.
-    adapter.restoreState.mockImplementationOnce(() => Promise.reject(new Error("restore failed")));
+    restoreFails(new Error("restore failed"));
     await undoLastAction();
-    expect(useGameStore.getState().undoInFlight).toBe(false);
+    expect(useGameStore.getState().pendingUndoId).toBeNull();
     expect(useGameStore.getState().gameState).toEqual(AI_TO_ACT);
 
     await vi.advanceTimersByTimeAsync(0);

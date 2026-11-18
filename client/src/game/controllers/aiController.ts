@@ -513,12 +513,12 @@ export function createAIController(config: AIControllerConfig): AIController {
   function checkAndSchedule() {
     if (!active || pending) return;
 
-    const { gameState: state, undoInFlight } = useGameStore.getState();
+    const { gameState: state, pendingUndoId } = useGameStore.getState();
     // Nothing starts while an undo runs: until it commits, the store shows the
     // state being undone and the engine may already hold the restored one, so
     // a request built now could render another seat's decision. The store
     // subscription calls back here once the undo settles.
-    if (undoInFlight) return;
+    if (pendingUndoId !== null) return;
     if (!state?.waiting_for) return;
 
     const waitingFor = state.waiting_for;
@@ -832,7 +832,7 @@ export function createAIController(config: AIControllerConfig): AIController {
     let observedWaitingFor = initialStore.waitingFor;
     let observedFence = enginePromptFence(initialStore.gameState);
     let observedSessionGeneration = initialStore.gameSessionGeneration;
-    let observedUndoInFlight = initialStore.undoInFlight;
+    let observedPendingUndoId = initialStore.pendingUndoId;
     let observedActor = initialStore.gameState
       ? authorizedAiPlayer(initialStore.gameState.waiting_for, initialStore.gameState)
       : null;
@@ -853,11 +853,11 @@ export function createAIController(config: AIControllerConfig): AIController {
         // first await, so its reply, which the engine would refuse as stale,
         // is never read or counted against the seat's provider. One settling,
         // committed or failed, lets the seats decide again.
-        const undoChanged = store.undoInFlight !== observedUndoInFlight;
+        const undoChanged = store.pendingUndoId !== observedPendingUndoId;
         observedWaitingFor = store.waitingFor;
         observedFence = fence;
         observedSessionGeneration = store.gameSessionGeneration;
-        observedUndoInFlight = store.undoInFlight;
+        observedPendingUndoId = store.pendingUndoId;
         observedActor = actor;
 
         if (promptChanged || sessionChanged || undoChanged) {

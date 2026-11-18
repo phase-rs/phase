@@ -10,11 +10,11 @@ import { isAuthorityRemote, useGameStore } from "../../stores/gameStore.ts";
  */
 export function UndoButton() {
   const { t } = useTranslation("game");
-  const canUndo = useGameStore(
+  const showUndo = useGameStore(
     (s) => s.stateHistory.length > 0 && !isAuthorityRemote(s.gameMode),
   );
 
-  if (!canUndo) return null;
+  if (!showUndo) return null;
   return (
     <button
       onClick={() => void undoLastAction()}

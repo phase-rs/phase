@@ -324,7 +324,7 @@ describe("work in flight when Undo is pressed", () => {
     await firstUndo;
     expect(useGameStore.getState().gameState).toEqual(AFTER_FIRST_PASS);
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
-    expect(useGameStore.getState().undoInFlight).toBe(false);
+    expect(useGameStore.getState().pendingUndoId).toBeNull();
   });
 
   it("commits nothing when the game is torn down while the undo restores", async () => {
@@ -342,7 +342,7 @@ describe("work in flight when Undo is pressed", () => {
     await undoing;
     expect(useGameStore.getState().gameState).toBeNull();
     expect(useGameStore.getState().logHistory).toEqual([]);
-    expect(useGameStore.getState().undoInFlight).toBe(false);
+    expect(useGameStore.getState().pendingUndoId).toBeNull();
   });
 
   it("reports nothing when the game torn down mid-undo fails the restore", async () => {
@@ -380,16 +380,16 @@ describe("work in flight when Undo is pressed", () => {
     const secondRestore = secondGame.restoresSlowly();
     const secondUndo = undoLastAction();
     await vi.advanceTimersByTimeAsync(0);
-    expect(useGameStore.getState().undoInFlight).toBe(true);
+    expect(useGameStore.getState().pendingUndoId).not.toBeNull();
 
     // The first game's undo settles while the second's is still restoring.
     firstRestore.finish();
     await firstUndo;
-    expect(useGameStore.getState().undoInFlight).toBe(true);
+    expect(useGameStore.getState().pendingUndoId).not.toBeNull();
 
     secondRestore.finish();
     await secondUndo;
-    expect(useGameStore.getState().undoInFlight).toBe(false);
+    expect(useGameStore.getState().pendingUndoId).toBeNull();
   });
 
   it("shows the engine's own state and reports the error when the restore fails", async () => {
@@ -409,7 +409,7 @@ describe("work in flight when Undo is pressed", () => {
     await undoLastAction();
     expect(useGameStore.getState().gameState).toEqual(AFTER_SECOND_PASS);
     expect(useAppNotificationStore.getState().notification?.description).toBe("restore failed");
-    expect(useGameStore.getState().undoInFlight).toBe(false);
+    expect(useGameStore.getState().pendingUndoId).toBeNull();
 
     await vi.runAllTimersAsync();
     await secondPass;
@@ -460,15 +460,16 @@ describe("work in flight when Undo is pressed", () => {
     // The reload resumes from the saved game; until then nothing is rewound.
     expect(loggedLines()).toEqual([...EARLIER_LINES, "Player 1 passes for the first time"]);
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
-    expect(useGameStore.getState().undoInFlight).toBe(false);
+    expect(useGameStore.getState().pendingUndoId).toBeNull();
   });
 
-  it("leaves the history with the board a panic after the restore is rebuilt from", async () => {
+  it("hands a panic after the restore to the panic triage, and leaves the history alone", async () => {
     const { adapter, applies } = await startGame();
     applies(AFTER_FIRST_PASS, FIRST_PASS);
     await dispatchAction({ type: "PassPriority" }, HUMAN);
-    const panics: EngineLostEvent[] = [];
-    const stopListening = onNonFatalPanic((event) => panics.push(event));
+    const triaged: EngineLostEvent[] = [];
+    const stopNonFatal = onNonFatalPanic((event) => triaged.push(event));
+    const stopLost = onEngineLost((event) => triaged.push(event));
 
     const read = adapter.getSnapshot.getMockImplementation()!;
     adapter.getSnapshot.mockImplementationOnce(async () => {
@@ -476,16 +477,17 @@ describe("work in flight when Undo is pressed", () => {
       throw new AdapterError(AdapterErrorCode.ENGINE_PANIC, "engine panicked", false, "panicked at state.rs");
     });
     await undoLastAction();
-    stopListening();
+    stopNonFatal();
+    stopLost();
 
-    // The panic triage rebuilt the engine from the store's board, the undone
-    // one, so the undone pass's lines and checkpoint stay with it.
-    expect(panics).toEqual([{ reason: "undo-panic", panic: "panicked at state.rs" }]);
-    expect(adapter.restoreState).toHaveBeenCalledTimes(2);
+    // Whether the triage keeps the game going or asks for a reload, the store
+    // keeps the board it showed, and the history that goes with that board.
+    expect(triaged).toEqual([{ reason: "undo-panic", panic: "panicked at state.rs" }]);
+    expect(useAppNotificationStore.getState().notification).toBeNull();
     expect(useGameStore.getState().gameState).toEqual(AFTER_FIRST_PASS);
-    expect(await adapter.getState()).toEqual(AFTER_FIRST_PASS);
     expect(loggedLines()).toEqual([...EARLIER_LINES, "Player 1 passes for the first time"]);
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
+    expect(useGameStore.getState().pendingUndoId).toBeNull();
   });
 
   it("asks for a reload when the board cannot be read again after a failed restore", async () => {

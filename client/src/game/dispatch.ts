@@ -24,7 +24,6 @@ import {
   captureTrustedCheckpoint,
   isAuthorityRemote,
   nextGameSessionGeneration,
-  UndoSnapshotError,
   useGameStore,
   saveAuthoritativeGame,
   saveCheckpoints,
@@ -276,7 +275,7 @@ function sameBoundGameSession(
  * nor release a newer dispatch's mutex. That covers the action and remote
  * dispatch pipelines. `dispatchInteraction` also captures this generation and
  * its bound session, then checks both after each asynchronous boundary.
- * `restoreGameState` and the store's `undo` still commit without capturing the
+ * `restoreGameState` and `undoLastAction` still commit without capturing the
  * generation, so they remain unaffected by the bump and can write.
  * Queued work is *resolved*, not rejected: a caller
  * awaiting an action in an abandoned game has nothing to recover from and
@@ -1294,9 +1293,13 @@ export async function restoreGameState(
   return null;
 }
 
+/** Numbers each undo begun, across games, so an undo clears only its own `pendingUndoId`. */
+let latestUndoId = 0;
+
 /**
- * Undo the local player's last undoable action. The one entry point for the
- * Undo button and the Z shortcut.
+ * Undo back to the newest checkpoint on the undo ring: the local player's last
+ * undoable action, and anything still in flight after it. The one entry point
+ * for the Undo button and the Z shortcut, and the one owner of an undo.
  *
  * Like `restoreGameState`, the undo replaces the engine state wholesale, so it
  * abandons the dispatch pipeline's queued and in-flight work first. A play still
@@ -1304,55 +1307,117 @@ export async function restoreGameState(
  * rewound log, which the next LLM prompt is built from, and its checkpoint onto
  * the ring, where the next undo would redo it. Pressed while one of the
  * player's own undoable actions animates, the undo takes that action back too:
- * it never committed, and the restored checkpoint precedes it. Outside the
- * pipeline, the store's own `dispatch` needs no fence (see `undo`), and the AI
- * controller drops its decision when `undoInFlight` is set.
+ * it never committed, and the restored checkpoint precedes it. The store's own
+ * `dispatch` needs no fence: both engine transports answer in call order, so a
+ * store dispatch begun before the press commits before the undo does, and the
+ * undo's commit takes its log lines and checkpoint back. The AI controller
+ * drops its decision while `pendingUndoId` is set.
  *
- * Nothing is abandoned when `undo` would do nothing, so a press with nothing
- * to undo, or during an undo, leaves the work in flight alone.
+ * Nothing is abandoned when there is nothing to undo, or during an undo, so
+ * such a press leaves the work in flight alone. Nothing is rethrown: the Undo
+ * controls fire and forget.
  */
 export async function undoLastAction(): Promise<void> {
   const store = useGameStore.getState();
   if (!canUndo(store)) return;
-  const isSameGame = () => {
-    const current = useGameStore.getState();
-    return current.adapter === store.adapter && current.gameSessionGeneration === store.gameSessionGeneration;
+  const { adapter, stateHistory } = store;
+  const session: BoundGameSession = { adapter, generation: store.gameSessionGeneration };
+  const previous = stateHistory[stateHistory.length - 1];
+
+  // The restore rewinds the engine, not this store's log: drop every entry
+  // from the undone action on, a line logged during the restore included, so
+  // the log is read as it stands at the commit. `nextLogSeq` keeps counting, so
+  // a seq still names one entry only, for anything that remembers one (the log
+  // panel keys its rows by seq). The ring keeps step with the log: it is the
+  // ring this undo found, less the checkpoint it restores, so a checkpoint
+  // pushed during the restore goes too.
+  const commitRestoredBoard = (snapshot: EngineSnapshot) => {
+    const { commitEngineSnapshot, logHistory } = useGameStore.getState();
+    commitEngineSnapshot(snapshot, {
+      extraState: {
+        events: [],
+        logHistory: logHistory.filter((entry) => entry.seq < previous.logSeq),
+        stateHistory: stateHistory.slice(0, -1),
+        restoredStackAutomation: null,
+      },
+    });
   };
+
   abandonPendingDispatches();
+  // Before the first await: from the restore on, the engine may hold the
+  // restored state while the store still shows the one being undone.
+  latestUndoId += 1;
+  const undoId = latestUndoId;
+  useGameStore.setState({ pendingUndoId: undoId });
   try {
-    await store.undo();
-  } catch (err) {
-    // An undo whose game was torn down or replaced meanwhile has no board to
-    // repair, and its failure (a disposed worker) is no news to the player.
-    if (!isSameGame()) {
-      debugLog(`undo: failed after its game ended: ${err instanceof Error ? err.message : String(err)}`, "info");
+    try {
+      await adapter.restoreState(previous.state);
+    } catch (err) {
+      // The engine presumably holds what it held, abandoned work included.
+      await recoverFromFailedUndo(err, session, (snapshot) => {
+        useGameStore.getState().commitEngineSnapshot(snapshot);
+      });
       return;
     }
-    // Either the restore failed, which presumably left the engine as it was,
-    // abandoned work included, or the read after a successful restore failed,
-    // and the engine holds the restored game. The store committed neither.
-    const restored = err instanceof UndoSnapshotError ? err : null;
-    const failure = restored ? restored.readError : err;
-    // Recovery rebuilds the engine from the store's board, or reloads the
-    // game, so the store's history is left as it is, matching that board.
-    if (await recoverFromEngineFailure(failure, "undo")) return;
-    // Otherwise show the engine's own state, read again, so the board and every
-    // seat's next decision agree with it, with the rewound history when the
-    // restore succeeded. Abandoned work's log lines and checkpoint are lost, as
-    // under `restoreGameState`. Nothing is rethrown: the Undo controls fire and
-    // forget.
-    reportActionError(failure);
+    // Commit the snapshot's OWN state, not `previous`: post-restore the engine
+    // is the source of truth, and taking both halves from one snapshot is what
+    // keeps the pair coherent. Newest-by-construction, so it passes the gate.
+    let snapshot: EngineSnapshot;
     try {
-      const snapshot = await store.adapter.getSnapshot();
-      if (!isSameGame()) return;
-      useGameStore.getState().commitEngineSnapshot(snapshot, {
-        extraState: restored?.rewoundHistory(),
-      });
-    } catch (resyncErr) {
-      // The engine cannot be read, so the board cannot be shown as it is.
-      if (isSameGame() && !(await recoverFromEngineFailure(resyncErr, "undo-resync"))) {
-        notifyEngineLost("undo-resync");
-      }
+      snapshot = await adapter.getSnapshot();
+    } catch (err) {
+      // The engine holds the restored game, so the rewound history goes with
+      // its board, once that board can be read.
+      await recoverFromFailedUndo(err, session, commitRestoredBoard);
+      return;
+    }
+    // A game torn down or replaced while the undo ran is not the one it
+    // restored, and must not take its snapshot.
+    if (!isBoundGameSessionCurrent(session)) return;
+    commitRestoredBoard(snapshot);
+  } finally {
+    // Cleared once the undo is over, its board committed or its failure
+    // handled, and only by this undo: a newer game's undo may hold the field.
+    if (useGameStore.getState().pendingUndoId === undoId) {
+      useGameStore.setState({ pendingUndoId: null });
+    }
+  }
+}
+
+/**
+ * Handle an undo that failed with the store still showing the undone board.
+ * `commitBoard` commits the engine's board, with whatever history belongs to
+ * it.
+ *
+ * A panic or a lost engine goes to the recovery path, which leaves the store
+ * as it is: its board and its history still agree, and a reload resumes the
+ * saved game. Any other failure is reported, and the engine's board is read
+ * again and committed, so the board and every seat's next decision agree with
+ * the engine. Abandoned work's log lines and checkpoint are lost, as under
+ * `restoreGameState`.
+ */
+async function recoverFromFailedUndo(
+  err: unknown,
+  session: BoundGameSession,
+  commitBoard: (snapshot: EngineSnapshot) => void,
+): Promise<void> {
+  // An undo whose game was torn down or replaced meanwhile has no board to
+  // repair, and its failure (a disposed worker) is no news to the player. The
+  // console, not the game log, which by now belongs to another game.
+  if (!isBoundGameSessionCurrent(session)) {
+    console.info(`[undo] failed after its game ended: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  if (await recoverFromEngineFailure(err, "undo")) return;
+  reportActionError(err);
+  try {
+    const snapshot = await session.adapter.getSnapshot();
+    if (!isBoundGameSessionCurrent(session)) return;
+    commitBoard(snapshot);
+  } catch (resyncErr) {
+    // The engine cannot be read, so the board cannot be shown as it is.
+    if (isBoundGameSessionCurrent(session) && !(await recoverFromEngineFailure(resyncErr, "undo-resync"))) {
+      notifyEngineLost("undo-resync");
     }
   }
 }

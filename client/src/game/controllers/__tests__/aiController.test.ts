@@ -40,7 +40,7 @@ let storeState: {
     getAiTacticalActionProposal?: (difficulty: string, playerId: number) => Promise<AiActionProposal | null>;
   } | null;
   gameSessionGeneration: number;
-  undoInFlight: boolean;
+  pendingUndoId: number | null;
 };
 let storeSubscriber: (() => void) | null = null;
 let randomSpy: ReturnType<typeof vi.spyOn>;
@@ -105,7 +105,7 @@ beforeEach(() => {
     waitingFor: state.waiting_for,
     adapter: null,
     gameSessionGeneration: 1,
-    undoInFlight: false,
+    pendingUndoId: null,
   };
 });
 

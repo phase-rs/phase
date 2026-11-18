@@ -82,7 +82,6 @@ export function useKeyboardShortcuts({
         gameState,
         waitingFor,
         dispatch,
-        stateHistory,
         gameMode,
         manaPaymentShortcutActions,
         adapter,
@@ -149,14 +148,12 @@ export function useKeyboardShortcuts({
         case "z":
         case "Z":
           // Only plain Z (no Ctrl/Cmd modifier to avoid conflict with browser undo).
-          // Suppressed in multiplayer — the store's undo() already returns
-          // early in that mode, but gating the shortcut here also avoids
-          // swallowing the keystroke.
+          // Suppressed in multiplayer: undoLastAction() already does nothing
+          // in that mode, but gating the shortcut here also avoids swallowing
+          // the keystroke.
           if (!e.ctrlKey && !e.metaKey && !isAuthorityRemote(gameMode)) {
             e.preventDefault();
-            if (stateHistory.length > 0) {
-              void undoLastAction();
-            }
+            void undoLastAction();
           }
           break;
 
