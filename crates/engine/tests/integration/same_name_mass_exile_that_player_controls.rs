@@ -15,6 +15,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -77,6 +78,12 @@ battlefield under their owner's control.";
 const DEPUTY_OF_DETENTION: &str = "When this creature enters, exile target nonland permanent an \
 opponent controls and all other nonland permanents that player controls with the same name as \
 that permanent until this creature leaves the battlefield.";
+
+const ERADICATE: &str = "Exile target nonblack creature. Search its controller's graveyard, hand, and \
+library for all cards with the same name as that creature and exile them. Then that player shuffles.";
+
+const QUINTORIUS: &str = "Spirits you control get +1/+0.\nWhenever one or more cards leave your \
+graveyard, create a 3/2 red and white Spirit creature token.";
 
 fn free() -> ManaCost {
     ManaCost::Cost {
@@ -166,6 +173,16 @@ fn legions_end_spares_the_casters_same_name_creature() {
     let twin = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
     let mine = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
 
+    let hand_copy = scenario
+        .add_creature_to_hand(P1, "Grizzly Bears", 2, 2)
+        .id();
+    let gy_copy = scenario
+        .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+        .id();
+    let other_hand = scenario
+        .add_creature_to_hand(P1, "Runeclaw Bear", 2, 2)
+        .id();
+
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Legion's End", false, LEGIONS_END)
         .with_mana_cost(free())
@@ -182,6 +199,9 @@ fn legions_end_spares_the_casters_same_name_creature() {
     outcome.assert_zone(&[victim], Zone::Exile);
     // Reach guard: the mass conjunct exiled the opponent's other copy.
     outcome.assert_zone(&[twin], Zone::Exile);
+    // Trailing instruction: reveals hand and exiles all cards with that name from hand and graveyard.
+    outcome.assert_zone(&[hand_copy, gy_copy], Zone::Exile);
+    outcome.assert_zone(&[other_hand], Zone::Hand);
     assert!(
         on_battlefield(runner.state(), mine),
         "the caster's same-name creature must stay on the battlefield"
@@ -1187,6 +1207,9 @@ fn detention_sphere_exiles_same_named_permanents_and_returns_them_all() {
     );
 
     let mut runner = scenario.build();
+    let victim_incarnation = runner.state().objects[&victim].incarnation;
+    let twin_incarnation = runner.state().objects[&twin].incarnation;
+    let mine_incarnation = runner.state().objects[&mine].incarnation;
     let _ = runner.cast(sphere).commit();
     assert_eq!(
         runner.state().players[0].mana_pool.total(),
@@ -1270,6 +1293,33 @@ fn detention_sphere_exiles_same_named_permanents_and_returns_them_all() {
     ));
     assert_eq!(named_on_battlefield(runner.state(), P1, "Grizzly Bears"), 2);
     assert_eq!(named_on_battlefield(runner.state(), P0, "Grizzly Bears"), 1);
+    assert!(
+        on_battlefield(runner.state(), victim),
+        "victim returned to battlefield"
+    );
+    assert!(
+        on_battlefield(runner.state(), twin),
+        "twin returned to battlefield"
+    );
+    assert!(
+        on_battlefield(runner.state(), mine),
+        "mine returned to battlefield"
+    );
+    assert_ne!(
+        runner.state().objects[&victim].incarnation,
+        victim_incarnation,
+        "victim returned as new object"
+    );
+    assert_ne!(
+        runner.state().objects[&twin].incarnation,
+        twin_incarnation,
+        "twin returned as new object"
+    );
+    assert_ne!(
+        runner.state().objects[&mine].incarnation,
+        mine_incarnation,
+        "mine returned as new object"
+    );
 }
 
 /// CR 603.2c + CR 603.10a: When Detention Sphere exiles a Dour Port-Mage and another
@@ -1422,11 +1472,13 @@ fn detention_sphere_triggers_ketramose_only_once_for_mass_exile() {
     );
 }
 
-/// CR 113.7a + CR 201.2: An ability on the stack exists independently of its source.
+/// CR 113.7a + CR 201.2 + CR 707.2a: An ability on the stack exists independently of its source.
 /// Detention Sphere's mass clause ("and all other permanents with the same name as
 /// that permanent") excludes the target permanent (`DistinctFrom(ParentTarget)`),
-/// not the source. If Detention Sphere is renamed while its ETB trigger is on the
-/// stack to match the target's name, the Sphere itself is exiled by the mass clause.
+/// not the source. If Detention Sphere becomes a copy of the target creature while its ETB
+/// trigger is on the stack (via Mirrorform), it shares the target's name and is exiled
+/// by the mass clause. Because the copy effect replaced its rules text, it has no LTB
+/// trigger, and both cards remain in exile.
 #[test]
 fn detention_sphere_exiles_renamed_source_if_it_matches_target_name() {
     let mut scenario = GameScenario::new();
@@ -1439,6 +1491,13 @@ fn detention_sphere_exiles_renamed_source_if_it_matches_target_name() {
         .add_spell_to_hand(P0, "Detention Sphere", false)
         .as_enchantment()
         .from_oracle_text(DETENTION_SPHERE)
+        .with_mana_cost(free())
+        .id();
+
+    const MIRRORFORM: &str =
+        "Each nonland permanent you control becomes a copy of target non-Aura permanent.";
+    let mirrorform = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mirrorform", true, MIRRORFORM)
         .with_mana_cost(free())
         .id();
 
@@ -1470,11 +1529,11 @@ fn detention_sphere_exiles_renamed_source_if_it_matches_target_name() {
 
     let sphere_incarnation = runner.state().objects[&sphere].incarnation;
 
-    // Now Detention Sphere is on the battlefield. Rename it to "Grizzly Bears" while
-    // the ETB trigger is on the stack (simulating Mirrorform or a name-changing effect).
-    runner.state_mut().objects.get_mut(&sphere).unwrap().name = "Grizzly Bears".to_string();
+    // Now Detention Sphere is on the battlefield and its ETB trigger is on the stack.
+    // Cast Mirrorform in response, targeting Grizzly Bears (the victim).
+    let _ = runner.cast(mirrorform).target_object(victim).commit();
 
-    // Now resolve the ETB trigger and subsequent LTB trigger
+    // Resolve Mirrorform first, then resolve the ETB trigger
     for _ in 0..48 {
         match runner.state().waiting_for.clone() {
             WaitingFor::OrderTriggers { .. } => {
@@ -1485,11 +1544,6 @@ fn detention_sphere_exiles_renamed_source_if_it_matches_target_name() {
                     .act(GameAction::DecideOptionalEffect { accept: true })
                     .expect("accept exile");
             }
-            WaitingFor::TriggerTargetSelection { .. } => {
-                // The renamed Sphere was exiled, its LTB returned it, and the new
-                // Sphere on the battlefield is now prompting its ETB target.
-                break;
-            }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => {
                 runner.act(GameAction::PassPriority).expect("pass");
@@ -1498,38 +1552,92 @@ fn detention_sphere_exiles_renamed_source_if_it_matches_target_name() {
         }
     }
 
-    // CR 400.7: Both the victim and the renamed Sphere were exiled together,
-    // which immediately triggered the Sphere's LTB returning them both as new objects.
+    // CR 113.7a + CR 201.2 + CR 707.2a: Both victim and the copied Sphere were exiled together.
+    // Because Mirrorform made the Sphere a copy of Grizzly Bears, it lost its leaves-the-battlefield
+    // ability, so neither card returns. Both remain in exile.
     assert_ne!(
         runner.state().objects[&victim].incarnation,
         victim_incarnation,
-        "target Grizzly Bears changed incarnation (was exiled and returned by LTB)"
+        "target Grizzly Bears changed incarnation (moved to exile)"
     );
     assert_ne!(
         runner.state().objects[&sphere].incarnation,
         sphere_incarnation,
-        "renamed Sphere changed incarnation (was exiled by mass clause and returned by LTB)"
+        "copied Sphere changed incarnation (moved to exile)"
     );
-    // Both cards must be on the battlefield after the LTB trigger resolves.
-    // CR 603.2c + CR 607.2a: the mass exile and LTB return form a single logical event.
     assert_eq!(
         runner.state().objects[&victim].zone,
-        Zone::Battlefield,
-        "victim returned to battlefield by LTB trigger"
+        Zone::Exile,
+        "victim must remain in exile"
     );
     assert_eq!(
         runner.state().objects[&sphere].zone,
-        Zone::Battlefield,
-        "renamed Sphere returned to battlefield by LTB trigger"
+        Zone::Exile,
+        "copied Sphere must remain in exile"
     );
     assert_eq!(
         runner.state().objects[&bystander].incarnation,
         bystander_incarnation,
         "bystander was never touched"
     );
+    assert!(
+        on_battlefield(runner.state(), bystander),
+        "bystander stays on the battlefield"
+    );
+    assert!(runner.state().stack.is_empty());
+}
+
+/// CR 603.10a + CR 608.2c: Eradicate's search is a separate later instruction from its
+/// initial targeted exile, not a coordinated same-name conjunct. Multi-zone sweeps do not
+/// coalesce into the first exile event.
+/// When Eradicate targets Quintorius, Field Historian while another copy is in the graveyard,
+/// the battlefield Quintorius is already in exile when the graveyard copy leaves, so its
+/// lookback graveyard-leave trigger does not see the graveyard departure and produces no Spirit.
+/// Eradicate's trailing instruction then shuffles the library.
+#[test]
+fn eradicate_does_not_coalesce_with_graveyard_search_and_triggers_no_quintorius_spirit() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let quin_bf = scenario
+        .add_creature_from_oracle(P1, "Quintorius, Field Historian", 2, 4, QUINTORIUS)
+        .id();
+    let quin_gy = scenario
+        .add_creature_to_graveyard(P1, "Quintorius, Field Historian", 2, 4)
+        .from_oracle_text(QUINTORIUS)
+        .id();
+
+    let eradicate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Eradicate", false, ERADICATE)
+        .with_mana_cost(free())
+        .id();
+
+    let mut runner = scenario.build();
+    let outcome = runner.cast(eradicate).target_objects(&[quin_bf]).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Eradicate must resolve cleanly, got {:?}",
+        outcome.final_waiting_for()
+    );
+
+    outcome.assert_zone(&[quin_bf, quin_gy], Zone::Exile);
     assert_eq!(
-        runner.state().objects[&sphere].name,
-        "Detention Sphere",
-        "re-entered Sphere has reset its name to printed text per CR 400.7"
+        named_on_battlefield(runner.state(), P1, "Spirit"),
+        0,
+        "CR 603.10a: battlefield Quintorius is already in exile when graveyard copy leaves, so no Spirit triggers"
+    );
+    let shuffled = outcome.events().iter().any(|e| {
+        matches!(
+            e,
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } if *player_id == P1
+        )
+    });
+    assert!(
+        shuffled,
+        "Eradicate's trailing instruction must shuffle target player's library"
     );
 }

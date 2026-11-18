@@ -16,8 +16,9 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
-    PendingCounterPostAction, PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice,
-    PendingZoneChangeDelivery, WaitingFor, ZoneChangeAnnouncement, ZoneOpponentChooserPurpose,
+    PendingContinuation, PendingCounterPostAction, PendingMassLibraryOrderBatches,
+    PendingMassLibraryOrderChoice, PendingZoneChangeDelivery, WaitingFor, ZoneChangeAnnouncement,
+    ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1184,49 +1185,71 @@ fn member_library_placement(
     }
 }
 
-/// CR 603.2c + CR 607.2a: Detect the Detention Sphere pattern — a ChangeZone to
-/// Exile whose chained sub_ability is a ChangeZoneAll to Exile targeting
-/// permanents with `FilterProp::SameNameAsParentTarget`.
-/// Only coalesce when both parent and sub are battlefield-coordinated moves:
-/// the parent must be a typed filter with no explicit non-battlefield zones.
+/// CR 400.1 + CR 110.1: whether a change's population is battlefield-scoped —
+/// the filter carries no explicitly written zone constraint (`TargetFilter::population_zones()`
+/// is empty; "permanent" defaults to the battlefield), or names the battlefield
+/// alone. A population this move does not read from the battlefield cannot join
+/// a battlefield-coordinated joint group.
+fn battlefield_scoped_population(target: &TargetFilter) -> bool {
+    matches!(
+        target.population_zones().as_slice(),
+        [] | [Zone::Battlefield]
+    )
+}
+
+/// CR 603.2c + CR 607.2a: Detect the coordinated same-name mass-exile conjunct —
+/// a `ChangeZone` to Exile whose chained sub_ability is the same sentence's
+/// "and all other permanents with the same name as that permanent" mass exile
+/// (a `ChangeZoneAll` to Exile over `FilterProp::SameNameAsParentTarget`): the
+/// targeted move and the conjunct announce and settle as one logical event.
+///
+/// CR 608.2c: only compatible COORDINATED moves coalesce. Both moves must be
+/// battlefield-scoped ([`battlefield_scoped_population`], and no explicit
+/// non-battlefield origin) — the conjunct reads "all other permanents", a
+/// CR 110.1 battlefield population. A same-name instruction that scans other
+/// zones (Eradicate's "search its controller's graveyard, hand, and library for
+/// all cards with the same name … and exile them") is an independent later
+/// instruction, not the conjunct: it stays on the ordinary `ChangeZoneAll`
+/// path, where every member is read through its own origin zone, so its
+/// zone-exit triggers and its own trailing instruction (Eradicate's shuffle)
+/// keep the written order.
 pub(crate) fn same_name_mass_exile_sub(ability: &ResolvedAbility) -> Option<&ResolvedAbility> {
     let sub = ability.sub_ability.as_deref()?;
-    let parent_target = match &ability.effect {
+    let (parent_origin, parent_target) = match &ability.effect {
         Effect::ChangeZone {
             destination: Zone::Exile,
+            origin,
             target,
             ..
-        } => target,
+        } => (*origin, target),
         _ => return None,
     };
-    let is_sub_same_name_exile = matches!(
-        &sub.effect,
-        Effect::ChangeZoneAll {
-            destination: Zone::Exile,
-            target,
-            ..
-        } if matches!(
-            target,
-            TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
-        )
-    );
-    if !is_sub_same_name_exile {
+    if !battlefield_scoped_population(parent_target)
+        || parent_origin.is_some_and(|zone| zone != Zone::Battlefield)
+    {
         return None;
     }
-    // Restrict to compatible coordinated moves: parent must be a typed filter
-    // with no explicit non-battlefield zones (i.e., battlefield-only).
-    // This rejects multi-zone chains like Deadly Cover-Up's graveyard + hand/library.
-    let parent_is_battlefield_coordinated = matches!(
-        parent_target,
-        TargetFilter::Typed(tf) if tf.properties.iter().all(|p| {
-            !matches!(p, FilterProp::InAnyZone { .. } | FilterProp::InZone { .. })
-        })
-    );
-    if parent_is_battlefield_coordinated {
-        Some(sub)
-    } else {
-        None
+    let (sub_origin, sub_target) = match &sub.effect {
+        Effect::ChangeZoneAll {
+            destination: Zone::Exile,
+            origin,
+            target,
+            ..
+        } => (*origin, target),
+        _ => return None,
+    };
+    if !matches!(
+        sub_target,
+        TargetFilter::Typed(tf) if tf.properties.iter().any(|p| matches!(p, FilterProp::SameNameAsParentTarget))
+    ) {
+        return None;
     }
+    if !battlefield_scoped_population(sub_target)
+        || sub_origin.is_some_and(|zone| zone != Zone::Battlefield)
+    {
+        return None;
+    }
+    Some(sub)
 }
 
 pub fn resolve(
@@ -1951,9 +1974,6 @@ pub fn resolve(
     // with its same-name matches as one population through this logical zone-change
     // group path.
     let mut move_objects = targeted_objects.clone();
-    // Store the absorbed ChangeZoneAll's trailing sub_ability chain to schedule
-    // as a continuation after this resolution completes.
-    let mut absorbed_sub_chain = None;
     if let Some(sub) = same_name_mass_exile_sub(ability) {
         if let Effect::ChangeZoneAll {
             origin: sub_origin,
@@ -1982,8 +2002,24 @@ pub fn resolve(
                 .collect();
             matches.sort();
             move_objects.extend(matches);
-            // Preserve the absorbed node's sub_ability chain for continuation.
-            absorbed_sub_chain = sub.sub_ability.clone();
+            // CR 608.2c: the absorbed conjunct never runs as a chain step, but its
+            // own printed continuation ("Then that player reveals their hand and
+            // exiles all cards with that name …" — Legion's End; "That player
+            // investigates …" — Declaration in Stone) is a later instruction of this
+            // same resolution. Schedule it through the shared continuation authority:
+            // the head's targets and chain context bind the conjunct's own anaphora
+            // ("that player", "that name"). `drain_pending_continuation` resumes a
+            // pending change-zone iteration (CR 601.2h) BEFORE any parked
+            // continuation, so parking here keeps the written order on both the
+            // synchronous path and a mid-move paused group completion.
+            if let Some(trailing) = sub.sub_ability.as_deref() {
+                let mut tail = trailing.clone();
+                if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
+                    tail.mirror_targets_from(ability);
+                }
+                crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
+                state.park_ability_continuation(PendingContinuation::new(Box::new(tail), state));
+            }
         }
     }
 
@@ -2230,14 +2266,6 @@ pub fn resolve(
         collector,
     )
     .expect("completed ChangeZone owns every terminal member outcome");
-
-    // CR 603.2c + CR 607.2a: If we absorbed a ChangeZoneAll with a trailing
-    // sub_ability chain (e.g., Legion's End's hand/graveyard exile), schedule
-    // that chain as a continuation so later instructions still execute.
-    if let Some(chain) = absorbed_sub_chain {
-        let pending = crate::types::game_state::PendingContinuation::new(chain, state);
-        state.park_ability_continuation(pending);
-    }
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
