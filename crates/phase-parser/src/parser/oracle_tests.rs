@@ -32957,19 +32957,14 @@ fn unmodelled_attacked_player_predicate_fails_closed() {
 /// ATTACK, not the attacked player, so it must not become a `PlayerMatching`
 /// predicate. The Vast Scrier additionally proves a bare `attacks a player`
 /// clause with an "attacking that player" BODY keeps its plain event scope.
+/// (Akiri, Fearless Voyager's "you attack a player with ..." now fails closed as
+/// `Unknown`; see `you_attack_unrecognized_tail_fails_closed`.)
 #[test]
 fn attack_trigger_tails_that_are_not_player_predicates_are_untouched() {
     // Real cards carry their VERBATIM MTGJSON Oracle text; the one synthetic row
     // is named as such because it probes a grammar fragment (Goad's reminder
     // clause) rather than standing in for a printed card.
     for (name, text, keywords, subtypes) in [
-        (
-            "Akiri, Fearless Voyager",
-            "Whenever you attack a player with one or more equipped creatures, draw a card.\n\
-             {W}: You may unattach an Equipment from a creature you control. If you do, tap that creature and it gains indestructible until end of turn.",
-            &[][..],
-            &["Kor", "Warrior"][..],
-        ),
         (
             "Goad Reminder (synthetic grammar probe)",
             "Whenever ~ attacks a player other than you if able, draw a card.",
@@ -33211,9 +33206,9 @@ fn you_attack_trigger_binds_its_attacked_player_object() {
          its firings per attacked player"
     );
 
-    // A trailing qualifier is a different, unmodelled grammar. Declining leaves
-    // the pre-existing shape rather than claiming the CR 508.3e restriction
-    // while dropping the qualifier's meaning.
+    // CR 603.2: a trailing qualifier is a different, unmodelled grammar. It
+    // fails closed: the trigger is `Unknown`, never a bare `YouAttack` that
+    // would fire on every attack, and never the CR 508.3e object alone.
     let qualified = parse(
         "Whenever you attack a player with one or more equipped creatures, draw a card.",
         "Akiri, Fearless Voyager",
@@ -33221,25 +33216,10 @@ fn you_attack_trigger_binds_its_attacked_player_object() {
         &["Creature"],
         &[],
     );
-    // Positive reach-guard: `.all()` over an empty iterator is vacuously true,
-    // so a parse regression that drops the trigger entirely would pass the
-    // assertion below for the wrong reason.
-    let qualified_you_attack: Vec<_> = qualified
-        .triggers
-        .iter()
-        .filter(|t| t.mode == TriggerMode::YouAttack)
-        .collect();
+    assert_eq!(qualified.triggers.len(), 1, "reach guard: {qualified:#?}");
     assert!(
-        !qualified_you_attack.is_empty(),
-        "the qualified phrase must still produce a YouAttack trigger — an empty \
-         set would make the next assertion vacuous: {qualified:#?}"
-    );
-    assert!(
-        qualified_you_attack
-            .iter()
-            .all(|t| t.attack_target_filter.is_none()),
-        "a qualified attacked-player phrase must not be read as the bare \
-         CR 508.3e object: {qualified:#?}"
+        matches!(qualified.triggers[0].mode, TriggerMode::Unknown(_)),
+        "a qualified attacked-player phrase fails closed: {qualified:#?}"
     );
 }
 
