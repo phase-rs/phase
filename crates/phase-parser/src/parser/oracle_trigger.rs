@@ -12790,16 +12790,9 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             // live fix — but it makes the invariant hold BY CONSTRUCTION here instead
             // of depending on an upstream caller. (Pre-existing: the base commit passed
             // the untrimmed lower half alongside the trimmed original.)
-            let first = append_shared_object_if_bare_event(
+            let first = append_shared_complement_if_bare_event(
                 first_half.original.trim(),
                 first_half.lower.trim(),
-                second_half.lower.trim(),
-                second_event,
-            );
-            let first_lower = first.to_lowercase();
-            let first = append_shared_adjunct_if_bare_event(
-                &first,
-                &first_lower,
                 second_half.lower.trim(),
                 second_event,
             );
@@ -12844,10 +12837,7 @@ fn parse_event_verb_start(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("deal"),
         parse_event_word("enters"),
         parse_event_word("enter"),
-        parse_event_word("attacks"),
-        parse_event_word("attack"),
-        parse_event_word("blocks"),
-        parse_event_word("block"),
+        parse_combat_declaration_verb,
         parse_event_word("leaves"),
         // Left as a bare `tag` deliberately: "into" is always followed by a zone
         // name, so this phrase can never sit at a comma/period/EOF boundary and
@@ -13130,7 +13120,10 @@ fn parse_non_event_complement(input: &str) -> OracleResult<'_, ()> {
 /// `parse_event_verb_start`, `parse_bare_shared_event_verb`,
 /// `parse_shared_object_verb_head`, `parse_cross_subject_phrase_start` — plus ONE
 /// open shape detector, `parse_state_change_event_start`, which enumerates no
-/// complements at all. Each is scoped to one question and reached from a named
+/// complements at all. `parse_combat_declaration_verb` is not a fifth: it is
+/// `parse_event_verb_start`'s own combat subset, factored out so the
+/// shared-complement gate (`parse_bare_leg_verb`) reads the same arms. Each is
+/// scoped to one question and reached from a named
 /// consumer set. Consolidation into a single parameterized combinator becomes OWED
 /// when either (a) a FIFTH hand-maintained event-head lexicon is proposed in this
 /// file, or (b) any one of the four acquires a second consumer gate. At that point
@@ -13196,13 +13189,6 @@ fn parse_shared_object_verb_head(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-fn ends_with_bare_event_verb(text: &str) -> bool {
-    scan_preceded(text, |i| {
-        all_consuming(parse_bare_shared_event_verb).parse(i)
-    })
-    .is_some()
-}
-
 /// Extract the shared object from a verb+object phrase.
 /// E.g., `"sacrifice a token"` → `Some("a token")` (using original case).
 fn extract_shared_object<'a>(lower: &str, original: &'a str) -> Option<&'a str> {
@@ -13216,25 +13202,62 @@ fn extract_shared_object<'a>(lower: &str, original: &'a str) -> Option<&'a str> 
     }
 }
 
-fn append_shared_object_if_bare_event(
+/// What a first leg ending at a bare verb borrows from the second leg of an
+/// "X or Y <complement>" compound. Any other complement stays leg-local.
+#[derive(Debug, Clone, Copy)]
+enum SharedComplement {
+    /// CR 701.7 + CR 701.21: the direct object ("you create or sacrifice a token").
+    Object,
+    /// CR 508.1m / CR 509.1i: the "with X" adjunct naming the declared creatures
+    /// of both combat events (Sol, Advocate Eternal: "Whenever you attack or
+    /// block with both ~ and its partner").
+    CombatAdjunct,
+}
+
+fn parse_bare_leg_verb(input: &str) -> OracleResult<'_, SharedComplement> {
+    alt((
+        value(SharedComplement::Object, parse_bare_shared_event_verb),
+        value(
+            SharedComplement::CombatAdjunct,
+            parse_combat_declaration_verb,
+        ),
+    ))
+    .parse(input)
+}
+
+/// "with X" after the second leg's combat verb, in original case.
+fn extract_combat_adjunct<'a>(lower: &str, original: &'a str) -> Option<&'a str> {
+    let (rest_lower, _) = preceded(
+        parse_combat_declaration_verb,
+        peek(tag::<_, _, OracleError<'_>>(" with ")),
+    )
+    .parse(lower)
+    .ok()?;
+    Some(original[original.len() - rest_lower.len()..].trim())
+}
+
+/// The single shared-complement authority for or-split event compounds: a
+/// first leg that ends at a bare verb takes the complement its kind shares
+/// from the second leg.
+fn append_shared_complement_if_bare_event(
     first: &str,
     first_lower: &str,
     after_lower: &str,
     second_event: &str,
 ) -> String {
-    // CR 701.7 + CR 701.21: Shared-object compound verbs — "you create
-    // or sacrifice a token" shares the object between both verbs. If the
-    // first half ends with a bare verb (no object), propagate the object
-    // from the second verb.
-    if ends_with_bare_event_verb(first_lower) {
-        if let Some(obj) = extract_shared_object(after_lower, second_event) {
-            return format!("{first} {obj}");
-        }
+    let shared = scan_preceded(first_lower, |i| all_consuming(parse_bare_leg_verb).parse(i))
+        .and_then(|(_, kind, _)| match kind {
+            SharedComplement::Object => extract_shared_object(after_lower, second_event),
+            SharedComplement::CombatAdjunct => extract_combat_adjunct(after_lower, second_event),
+        });
+    match shared {
+        Some(complement) => format!("{first} {complement}"),
+        None => first.to_string(),
     }
-    first.to_string()
 }
 
-/// "attack[s]" / "block[s]" at a word boundary (CR 508.1 / CR 509.1).
+/// "attack[s]" / "block[s]" at a word boundary (CR 508.1 / CR 509.1): the
+/// combat subset of `parse_event_verb_start`, shared with `parse_bare_leg_verb`.
 fn parse_combat_declaration_verb(input: &str) -> OracleResult<'_, ()> {
     alt((
         parse_event_word("attacks"),
@@ -13243,39 +13266,6 @@ fn parse_combat_declaration_verb(input: &str) -> OracleResult<'_, ()> {
         parse_event_word("block"),
     ))
     .parse(input)
-}
-
-/// CR 603.2 + CR 508.1m / CR 509.1i: in "attack or block with X" the "with X"
-/// printed after the second leg names the declared creatures of BOTH events,
-/// so a first leg that ends at its combat verb gets it too (Sol, Advocate
-/// Eternal: "Whenever you attack or block with both ~ and its partner"). Any
-/// other complement after the second leg stays leg-local.
-fn append_shared_adjunct_if_bare_event(
-    first: &str,
-    first_lower: &str,
-    second_lower: &str,
-    second_event: &str,
-) -> String {
-    let first_is_bare_combat = scan_preceded(first_lower, |i| {
-        all_consuming(parse_combat_declaration_verb).parse(i)
-    })
-    .is_some();
-    let adjunct = preceded(
-        parse_combat_declaration_verb,
-        peek(tag::<_, _, OracleError<'_>>(" with ")),
-    )
-    .parse(second_lower)
-    .ok()
-    .filter(|_| first_is_bare_combat);
-    match adjunct {
-        // `second_lower` and `second_event` are the same trimmed span, so the
-        // adjunct's suffix length maps onto the original case.
-        Some((adjunct, _)) => format!(
-            "{first}{}",
-            &second_event[second_event.len() - adjunct.len()..]
-        ),
-        None => first.to_string(),
-    }
 }
 
 /// Extract the trigger keyword + subject from a condition prefix, preserving the

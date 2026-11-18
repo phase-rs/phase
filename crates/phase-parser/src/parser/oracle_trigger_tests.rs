@@ -44539,17 +44539,19 @@ fn or_split_carries_shared_adjunct_to_bare_leg() {
     let attack_leg = TriggerMode::Unknown("Whenever you attack with both ~ and its partner".into());
     assert_eq!(sol[0].mode, attack_leg);
     assert!(matches!(sol[1].mode, TriggerMode::Unknown(_)));
-    for (line, first_leg) in [
+    for (name, line, first_leg) in [
         (
-            "When ~ enters or deals combat damage to a player, draw a card.",
-            "When ~ enters, draw a card.",
+            "Tomebound Lich",
+            "Whenever this creature enters or deals combat damage to a player, draw a card, then discard a card.",
+            "Whenever ~ enters, draw a card, then discard a card.",
         ),
         (
-            "When ~ dies or is put into exile from the battlefield, draw a card.",
-            "When ~ dies, draw a card.",
+            "God-Eternal Kefnet",
+            "When God-Eternal Kefnet dies or is put into exile from the battlefield, you may put it into its owner's library third from the top.",
+            "When ~ dies, you may put it into its owner's library third from the top.",
         ),
     ] {
-        let legs = parse_trigger_lines(line, "Test");
-        assert_eq!(legs[0].description.as_deref(), Some(first_leg));
+        let legs = parse_trigger_lines(line, name);
+        assert_eq!(legs[0].description.as_deref(), Some(first_leg), "{name}");
     }
 }
