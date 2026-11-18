@@ -612,9 +612,9 @@ fn colorless_requirement_case(
         payment_mode: mode,
     });
     if mode == CastPaymentMode::Manual && cast.is_ok() {
-        // Pin mana one unit at a time. The remaining-cost view applies the
-        // first two black pips to Matter Reshaper's generic cost, leaving {C};
-        // only the third pip exercises Vizier's any-type permission.
+        // Pin mana one unit at a time. The cost matcher handles the {C} shard
+        // before generic mana, so Vizier lets the first black pip pay {C}; the
+        // next two pips reduce Matter Reshaper's generic cost.
         assert!(matches!(
             runner.state().waiting_for,
             WaitingFor::ManaPayment { .. }
@@ -640,14 +640,8 @@ fn colorless_requirement_case(
 
             let expected_remaining = if creature {
                 match index {
-                    0 => ManaCost::Cost {
-                        shards: vec![ManaCostShard::Colorless],
-                        generic: 1,
-                    },
-                    1 => ManaCost::Cost {
-                        shards: vec![ManaCostShard::Colorless],
-                        generic: 0,
-                    },
+                    0 => ManaCost::generic(2),
+                    1 => ManaCost::generic(1),
                     _ => ManaCost::NoCost,
                 }
             } else {
@@ -658,7 +652,11 @@ fn colorless_requirement_case(
                 Some(expected_remaining),
                 "{}",
                 if creature {
-                    "the first two black pips pay generic mana before the third pays {C}"
+                    match index {
+                        0 => "Vizier lets the first black pip pay {C}, leaving two generic",
+                        1 => "the second black pip reduces the generic remainder to one",
+                        _ => "the third black pip finishes the generic cost",
+                    }
                 } else {
                     "the pinned black mana covers the {C} pip"
                 }
