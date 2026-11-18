@@ -596,9 +596,10 @@ fn read_mana_ability_root(
             ControlFlow::Continue(())
         });
         // CR 605.3b: the rest of the chain resolves through
-        // `resolve_mana_ability_sub_chain` → `effects::resolve_ability_chain`,
-        // which stamps this activation's tap state on the sub-chain root
-        // (`SpellContext::mana_tap_state`) for every link to inherit.
+        // `resolve_mana_ability_sub_chain` → `effects::resolve_ability_chain`;
+        // `resolve_mana_ability_sub_chain` stamps this activation's tap state on
+        // the sub-chain root (`SpellContext::mana_tap_state`) for every link to
+        // inherit.
         if let Some(sub) = branch.sub_ability.as_deref() {
             walk_chain(&frame, sub, productions);
         }

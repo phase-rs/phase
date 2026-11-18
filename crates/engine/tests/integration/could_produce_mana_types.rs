@@ -913,7 +913,7 @@ fn untapping_an_assembled_urzas_mine_refunds_both_halves() {
 
 /// F3-10 (CR 106.12): Wild Cantor's mana ability has no {T} in its cost, so its
 /// production is not tapped for mana and Contamination leaves its five colors
-/// alone; its Forest ability (from Ashaya) is tapped for mana and gives {B}.
+/// alone; a control Forest on the same board, tapped for mana, gives {B}.
 #[test]
 fn sacrificed_wild_cantor_under_contamination_keeps_every_color() {
     let mut scenario = new_scenario();
@@ -925,9 +925,16 @@ fn sacrificed_wild_cantor_under_contamination_keeps_every_color() {
     let cantor = scenario
         .add_creature_from_oracle(P0, "Wild Cantor", 1, 1, WILD_CANTOR)
         .id();
+    let control_forest = scenario.add_basic_land(P0, ManaColor::Green);
     let mut runner = scenario.build();
     flush(&mut runner);
     assert_is_land(&runner, cantor);
+    let mut control = GameRunner::from_state(runner.state().clone());
+    assert_eq!(
+        tap_for_mana(&mut control, control_forest),
+        Produced::Pool(vec![ManaType::Black]),
+        "reach-guard: Contamination rewrites a Forest tapped for mana"
+    );
 
     let mut reading = squandered_reading(runner.state(), squandered, cantor);
     reading.sort();
