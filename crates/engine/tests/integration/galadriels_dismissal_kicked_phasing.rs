@@ -350,6 +350,9 @@ const SHUKO: &str = "Equipped creature gets +1/+0.\nEquip {0}";
 const CLOUDSHIFT: &str =
     "Exile target creature you control, then return that card to the battlefield under your control.";
 
+const SPELLSKITE: &str = "{U/P}: Change a target of target spell or ability to this creature. \
+({U/P} can be paid with either {U} or 2 life.)";
+
 /// Pacifism — verbatim Oracle text.
 const PACIFISM: &str = "Enchant creature\nEnchanted creature can't attack or block.";
 
@@ -416,6 +419,17 @@ fn install_barn_planes(runner: &mut GameRunner) -> (ObjectId, ObjectId) {
 }
 
 fn barn_board() -> BarnBoard {
+    barn_board_inner(false).0
+}
+
+/// [`barn_board`] with P0 additionally controlling a printed Spellskite, for the
+/// forced-retarget seam. Returns the board plus the Spellskite.
+fn barn_board_with_spellskite() -> (BarnBoard, ObjectId) {
+    let (board, spellskite) = barn_board_inner(true);
+    (board, spellskite.expect("Spellskite requested"))
+}
+
+fn barn_board_inner(with_spellskite: bool) -> (BarnBoard, Option<ObjectId>) {
     use engine::types::format::FormatConfig;
     use engine::types::player::PlayerId;
 
@@ -432,6 +446,11 @@ fn barn_board() -> BarnBoard {
         .add_artifact_from_oracle(P1, "Shuko", SHUKO)
         .with_subtypes(vec!["Equipment"])
         .id();
+    let spellskite = with_spellskite.then(|| {
+        scenario
+            .add_creature_from_oracle(P0, "Spellskite", 0, 4, SPELLSKITE)
+            .id()
+    });
 
     let mut runner = scenario.build();
     {
@@ -462,13 +481,16 @@ fn barn_board() -> BarnBoard {
         "the second plane must be waiting in the planar deck"
     );
 
-    BarnBoard {
-        runner,
-        barn,
-        host: chosen_host,
-        aura: chosen_aura,
-        equipment: incidental_equipment,
-    }
+    (
+        BarnBoard {
+            runner,
+            barn,
+            host: chosen_host,
+            aura: chosen_aura,
+            equipment: incidental_equipment,
+        },
+        spellskite,
+    )
 }
 
 /// CR 901.9b: raise the printed chaos ability and return its announced slots.
@@ -665,8 +687,10 @@ fn childhood_barn_blinked_pick_is_dropped_and_the_other_still_phases_out() {
         "the surviving pick binds the delayed phase-in, got {delayed_targets:?}"
     );
     // The delayed clause snapshots the ANNOUNCED permanents, so it also carries
-    // the blinked id. That is harmless and unobservable: the blinked object was
-    // never phased out, so a phase-in of it is a no-op (asserted below).
+    // the blinked id. That is harmless: the blinked object was never phased out,
+    // and `phase_in_object` early-returns on an already-phased-in object before
+    // any event or state write. The precondition for that no-op is asserted
+    // here; the no-op itself is `phasing.rs`'s invariant.
     assert!(
         runner.state().objects[&first].is_phased_in(),
         "the blinked pick was never phased out, so the delayed phase-in cannot affect it"
@@ -808,6 +832,147 @@ fn childhood_barn_declining_one_opponents_slot_keeps_the_other() {
         runner.state().objects[&chosen_aura].controller,
         p2,
         "reach guard: the pick belongs to the second opponent"
+    );
+
+    // CR 101.2 + CR 702.26b: the can't-phase-in rider is bound in this COMPACTED
+    // shape too (two auto-filled headers + one object), which is a different
+    // position layout from the two-pick shape.
+    let phase_in = engine::types::ability::ResolvedAbility::new(
+        engine::types::ability::Effect::PhaseIn {
+            target: engine::types::ability::TargetFilter::SpecificObject { id: chosen_aura },
+        },
+        vec![TargetRef::Object(chosen_aura)],
+        chosen_aura,
+        P0,
+    );
+    use engine::game::effects::phase_out::resolve_phase_in;
+    let mut phase_in_events = Vec::new();
+    resolve_phase_in(runner.state_mut(), &phase_in, &mut phase_in_events)
+        .expect("explicit phase-in resolves");
+    assert!(
+        runner.state().objects[&chosen_aura].is_phased_out(),
+        "the surviving pick stays locked while Barn is face up"
+    );
+}
+
+/// CR 115.7a + CR 115.1: Spellskite forces "a target" of the Barn's chaos
+/// ability to itself, which is P0's — so it is not a legal new target for
+/// either opponent's slot, and both announced picks stay unchanged. This is the
+/// FORCED-retarget seam (`change_targets`'s forced branch recomputes its own
+/// slot pools), a different call site from the interactive prompt.
+///
+/// Revert-failing: with a table-wide slot pool the change is admitted, the
+/// header-keyed validator then drops Spellskite, and the host it replaced is no
+/// longer affected — so `phased_out(host)` flips from `Some(false)` to `None`.
+#[test]
+fn childhood_barn_spellskite_keeps_the_announced_picks() {
+    use engine::types::game_state::CastPaymentMode;
+    use engine::types::player::PlayerId;
+
+    let (
+        BarnBoard {
+            mut runner,
+            host: chosen_host,
+            aura: chosen_aura,
+            ..
+        },
+        spellskite,
+    ) = barn_board_with_spellskite();
+    let p2 = PlayerId(2);
+    let life_before = runner.life(P0);
+
+    let mut events = Vec::new();
+    let target_slots = open_barn_prompt(&mut runner, &mut events);
+    assert_eq!(
+        target_slots.len(),
+        4,
+        "one header + object slot per opponent"
+    );
+
+    events.extend(
+        runner
+            .act(GameAction::SelectTargets {
+                targets: vec![
+                    TargetRef::Player(P1),
+                    TargetRef::Object(chosen_host),
+                    TargetRef::Player(p2),
+                    TargetRef::Object(chosen_aura),
+                ],
+            })
+            .expect("Barn accepts one permanent from each opponent")
+            .events,
+    );
+
+    // P0 activates its own Spellskite, paying 2 life for the {U/P} shard.
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: spellskite,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Spellskite");
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::PhyrexianPayment { .. }
+    ) {
+        runner
+            .act(GameAction::SubmitPhyrexianChoices {
+                choices: vec![engine::types::game_state::ShardChoice::PayLife],
+            })
+            .expect("pay 2 life");
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "reach guard: Spellskite's ability is on the chaos ability"
+    );
+
+    for _ in 0..24 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        events.extend(
+            runner
+                .act(GameAction::PassPriority)
+                .expect("pass priority through Spellskite and the chaos ability")
+                .events,
+        );
+    }
+    assert!(
+        runner.state().stack.is_empty(),
+        "Spellskite's ability and the chaos ability must both resolve"
+    );
+    assert_eq!(
+        runner.life(P0),
+        life_before - 2,
+        "reach guard: the {{U/P}} shard was paid with life"
+    );
+
+    let phased_out = |object_id: ObjectId| {
+        events.iter().find_map(|event| match event {
+            GameEvent::PermanentPhasedOut {
+                object_id: event_id,
+                indirect,
+            } if *event_id == object_id => Some(*indirect),
+            _ => None,
+        })
+    };
+    assert_eq!(
+        phased_out(chosen_host),
+        Some(false),
+        "CR 115.7a: the pick could not be changed to a legal target, so the \
+         original stays and still phases out"
+    );
+    assert_eq!(
+        phased_out(chosen_aura),
+        Some(true),
+        "the second opponent's pick is untouched"
+    );
+    assert!(
+        !runner.state().objects[&spellskite].is_phased_out(),
+        "Spellskite is not an affected permanent"
     );
 }
 
