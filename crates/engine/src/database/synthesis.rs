@@ -241,10 +241,7 @@ pub fn map_mtgjson_color(code: &str) -> Option<ManaColor> {
 }
 
 pub fn parse_pt_value(s: &str) -> PtValue {
-    match s.parse::<i32>() {
-        Ok(n) => PtValue::Fixed(n),
-        Err(_) => PtValue::Variable(s.to_string()),
-    }
+    PtValue::from_printed(s)
 }
 
 pub fn layout_faces(layout: &CardLayout) -> Vec<&CardFace> {

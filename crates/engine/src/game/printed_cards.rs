@@ -127,8 +127,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     // `rehydrate_game_from_card_db`. Used below to gate `class_level` seeding.
     let was_initialized = obj.base_characteristics_initialized;
 
-    let power = parse_pt(&card_face.power);
-    let toughness = parse_pt(&card_face.toughness);
+    let power = printed_pt(&card_face.power, PtSide::Power);
+    let toughness = printed_pt(&card_face.toughness, PtSide::Toughness);
     let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
     let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Printed defense number for battles.
@@ -299,8 +299,8 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
 }
 
 pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &CardFace) {
-    let power = parse_pt(&card_face.power);
-    let toughness = parse_pt(&card_face.toughness);
+    let power = printed_pt(&card_face.power, PtSide::Power);
+    let toughness = printed_pt(&card_face.toughness, PtSide::Toughness);
     let printed_loyalty = PrintedLoyalty::from_raw(card_face.loyalty.as_deref());
     let loyalty = printed_loyalty.map(PrintedLoyalty::off_stack_value);
     // CR 310.4a: Back-face printed defense for DFCs that transform into battles.
@@ -853,8 +853,8 @@ pub(crate) fn copiable_values_from_face(
         mana_cost: result_face.mana_cost.clone(),
         color: printed_colors_from_face(result_face),
         card_types: result_face.card_type.clone(),
-        power: parse_pt(&result_face.power),
-        toughness: parse_pt(&result_face.toughness),
+        power: printed_pt(&result_face.power, PtSide::Power),
+        toughness: printed_pt(&result_face.toughness, PtSide::Toughness),
         loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref())
             .map(PrintedLoyalty::off_stack_value),
         printed_loyalty: PrintedLoyalty::from_raw(result_face.loyalty.as_deref()),
@@ -2226,12 +2226,47 @@ fn repair_battlefield_trigger_index_after_face_reapply(
     }
 }
 
-fn parse_pt(val: &Option<PtValue>) -> Option<i32> {
-    val.as_ref().map(|pt| match pt {
-        PtValue::Fixed(n) => *n,
-        // No game state at deck-load time; dynamic P/T resolves to 0.
-        PtValue::Variable(_) | PtValue::Quantity(_) => 0,
-    })
+/// Which of the two power/toughness numbers a value is (CR 208.1), so a
+/// half-point value converts to the integer that keeps its combat outcomes
+/// (see [`half_point_pt`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PtSide {
+    Power,
+    Toughness,
+}
+
+/// The integer power or toughness the engine uses for a half-point value
+/// (`PtValue::HalfPoints`, counted in halves — Vile Bile's printed 2½ is 5).
+///
+/// CR 107.1a: the engine never holds a fractional number, so an Unhinged
+/// half-point value is stored as the integer that decides every damage
+/// outcome the same way the printed value does while damage stays whole:
+/// * toughness `t + ½` rounds up — CR 704.5f: it is 0 or less exactly when
+///   `t + 1` is; CR 120.6 + CR 704.5g: whole damage is lethal exactly when it
+///   reaches `t + 1`;
+/// * power `p + ½` rounds down — `p + ½` damage reaches a whole toughness `T`
+///   exactly when `p` does.
+pub fn half_point_pt(halves: i32, side: PtSide) -> i32 {
+    match side {
+        PtSide::Power => halves.div_euclid(2),
+        PtSide::Toughness => halves.saturating_add(1).div_euclid(2),
+    }
+}
+
+/// The integer a printed power or toughness stands for without game state —
+/// `Fixed` as is, a half-point value through [`half_point_pt`] — or `None` for
+/// a value only game state decides (`*`, `X`, a quantity).
+pub fn fixed_pt_value(value: &PtValue, side: PtSide) -> Option<i32> {
+    match value {
+        PtValue::Fixed(n) => Some(*n),
+        PtValue::HalfPoints(halves) => Some(half_point_pt(*halves, side)),
+        PtValue::Variable(_) | PtValue::Quantity(_) => None,
+    }
+}
+
+fn printed_pt(val: &Option<PtValue>, side: PtSide) -> Option<i32> {
+    // No game state at deck-load time; dynamic P/T resolves to 0.
+    val.as_ref().map(|pt| fixed_pt_value(pt, side).unwrap_or(0))
 }
 
 fn shard_colors(shard: &ManaCostShard) -> Vec<ManaColor> {
@@ -2320,6 +2355,35 @@ mod tests {
     use crate::types::ability::ChooseOneOfKind;
     use crate::types::ability::{TypeFilter, TypedFilter};
     use crate::types::format::FormatConfig;
+
+    /// CR 107.1a + CR 704.5f + CR 704.5g: a half-point toughness rounds up and a
+    /// half-point power rounds down, including at and below zero.
+    #[test]
+    fn half_point_pt_keeps_whole_damage_outcomes() {
+        for (halves, power, toughness) in [
+            (5, 2, 3),   // Vile Bile 2½
+            (1, 0, 1),   // Little Girl ½
+            (7, 3, 4),   // Bad Ass 3½
+            (-1, -1, 0), // -½: toughness 0 or less, still dies to CR 704.5f
+            (-3, -2, -1),
+        ] {
+            assert_eq!(half_point_pt(halves, PtSide::Power), power, "{halves}");
+            assert_eq!(
+                half_point_pt(halves, PtSide::Toughness),
+                toughness,
+                "{halves}"
+            );
+        }
+        assert_eq!(
+            fixed_pt_value(&PtValue::HalfPoints(5), PtSide::Toughness),
+            Some(3)
+        );
+        assert_eq!(fixed_pt_value(&PtValue::Fixed(4), PtSide::Power), Some(4));
+        assert_eq!(
+            fixed_pt_value(&PtValue::Variable("*".into()), PtSide::Power),
+            None
+        );
+    }
 
     /// CR 614.1a + CR 400.7 + CR 707.2: the resolution-installed die-exile rider is
     /// recognized by the carrier-scoped `valid_card` it carries, bare (a subject with

@@ -27,6 +27,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use engine::game::printed_cards::{fixed_pt_value, PtSide};
 use engine::types::ability::PtValue;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -159,8 +160,8 @@ pub fn evaluate_draft_card(face: &CardFace, w: &DraftWeights) -> f64 {
 
     // ── Body value ──────────────────────────────────────────────────────
     if is_creature {
-        let power = fixed_pt(&face.power).unwrap_or(0);
-        let toughness = fixed_pt(&face.toughness).unwrap_or(0);
+        let power = fixed_pt(&face.power, PtSide::Power).unwrap_or(0);
+        let toughness = fixed_pt(&face.toughness, PtSide::Toughness).unwrap_or(0);
         let mv = face.mana_cost.mana_value().max(1) as f64;
         let combat = creature_combat_value(
             power,
@@ -245,11 +246,8 @@ pub fn dominant_colors(color_lists: &[&[String]], min_samples: usize) -> Vec<Str
 }
 
 /// Extract a fixed power/toughness value, ignoring `*` / variable / derived stats.
-fn fixed_pt(pt: &Option<PtValue>) -> Option<i32> {
-    match pt {
-        Some(PtValue::Fixed(v)) => Some(*v),
-        _ => None,
-    }
+fn fixed_pt(pt: &Option<PtValue>, side: PtSide) -> Option<i32> {
+    pt.as_ref().and_then(|pt| fixed_pt_value(pt, side))
 }
 
 #[cfg(test)]

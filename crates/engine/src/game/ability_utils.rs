@@ -5203,6 +5203,8 @@ fn target_effect_detail(effect: &Effect) -> TargetEffectDetail {
 fn pt_direction(power: &PtValue, toughness: &PtValue) -> Option<PtDirection> {
     let fixed = |value: &PtValue| match value {
         PtValue::Fixed(amount) => Some(*amount),
+        // A half-point count has the sign of the value it counts.
+        PtValue::HalfPoints(halves) => Some(*halves),
         PtValue::Variable(_) | PtValue::Quantity(_) => None,
     };
     let (power, toughness) = (fixed(power)?, fixed(toughness)?);

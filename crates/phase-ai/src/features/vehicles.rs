@@ -6,9 +6,10 @@
 //!   `crates/phase-ast/src/types/keywords.rs` — the Vehicle payoff and, in
 //!   `power`, the exact total power CR 702.122a requires to crew it.
 //! - `CardFace.keywords: Vec<Keyword>` at `crates/phase-ast/src/types/card.rs`.
-//! - `CardFace.power: Option<PtValue>` at `card.rs:171`; `PtValue::Fixed(i32)`
-//!   is the only deck-time-knowable form — a `*` power is `PtValue::Variable`
-//!   and is excluded rather than guessed.
+//! - `CardFace.power: Option<PtValue>` at `card.rs:171`, read through the
+//!   engine's `printed_cards::fixed_pt_value` — fixed and half-point powers are
+//!   deck-time-knowable; a `*` power is `PtValue::Variable` and is excluded
+//!   rather than guessed.
 //! - Vehicle subtype via the shared `reanimator::VEHICLE_SUBTYPE` constant,
 //!   promoted rather than redefined so the two features cannot disagree about
 //!   what a Vehicle is. The subtype widens ARCHETYPE membership only — CR 702.122a
@@ -48,8 +49,8 @@
 //! axis is the narrower question of whether those artifacts are crewable bodies
 //! with the creatures to crew them, which artifact density cannot answer.
 
+use engine::game::printed_cards::{fixed_pt_value, PtSide};
 use engine::game::DeckEntry;
-use engine::types::ability::PtValue;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::keywords::Keyword;
@@ -198,7 +199,8 @@ pub(crate) fn face_has_vehicle_subtype(face: &CardFace) -> bool {
 /// CR 702.122a: the printed power this face can contribute toward a crew cost,
 /// or `None` when it cannot contribute.
 ///
-/// Requires a creature with a KNOWN, positive, fixed power:
+/// Requires a creature with a KNOWN, positive, fixed power (a half-point power
+/// counts as the integer the engine plays it at):
 /// * A Vehicle is excluded even when it is also a creature card, because crew
 ///   taps *other* creatures.
 /// * `PtValue::Variable` ("*", "1+*") has no deck-time value, so it is excluded
@@ -211,10 +213,11 @@ pub(crate) fn crew_capable_power(face: &CardFace) -> Option<u32> {
     if face_has_vehicle_subtype(face) {
         return None;
     }
-    match face.power {
-        Some(PtValue::Fixed(power)) if power > 0 => u32::try_from(power).ok(),
-        _ => None,
-    }
+    face.power
+        .as_ref()
+        .and_then(|power| fixed_pt_value(power, PtSide::Power))
+        .filter(|power| *power > 0)
+        .and_then(|power| u32::try_from(power).ok())
 }
 
 /// Calibration — every figure below is the value `compute_commitment` actually

@@ -13999,7 +13999,7 @@ pub(super) fn rebind_cost_paid_object_pt_to_target(expr: &mut QuantityExpr) {
 fn rebind_cost_paid_object_pt_value_to_target(value: &mut PtValue) {
     match value {
         PtValue::Quantity(expr) => rebind_cost_paid_object_pt_to_target(expr),
-        PtValue::Fixed(_) | PtValue::Variable(_) => {}
+        PtValue::Fixed(_) | PtValue::HalfPoints(_) | PtValue::Variable(_) => {}
     }
 }
 

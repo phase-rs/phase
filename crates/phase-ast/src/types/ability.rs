@@ -3671,8 +3671,49 @@ pub enum SpellStackToGraveyardReplacement {
 #[serde(tag = "type", content = "value")]
 pub enum PtValue {
     Fixed(i32),
+    /// A printed half-point value, counted in halves: `2½` is `HalfPoints(5)`,
+    /// `½` is `HalfPoints(1)`. Only the Unhinged half-point creatures (Vile
+    /// Bile, Little Girl, Bad Ass, ...) print one; an integral value is always
+    /// `Fixed`, so the count is odd.
+    HalfPoints(i32),
     Variable(String),
     Quantity(QuantityExpr),
+}
+
+impl PtValue {
+    /// Classifies a printed power/toughness string (MTGJSON / legacy
+    /// card-data): an integer is `Fixed`, a half-point number (`"2.5"`,
+    /// `".5"`, `"2½"`) is `HalfPoints`, and anything else (`"*"`, `"1+*"`,
+    /// `"∞"`) stays `Variable`.
+    pub fn from_printed(s: &str) -> PtValue {
+        if let Ok(n) = s.parse::<i32>() {
+            return PtValue::Fixed(n);
+        }
+        match printed_half_points(s) {
+            Some(halves) => PtValue::HalfPoints(halves),
+            None => PtValue::Variable(s.to_string()),
+        }
+    }
+}
+
+/// The half-point count of a printed `<whole>.5` / `<whole>½` number, where the
+/// whole part may be empty (`".5"`) or negated. `None` for any other string.
+fn printed_half_points(s: &str) -> Option<i32> {
+    let whole = s.strip_suffix(".5").or_else(|| s.strip_suffix('½'))?;
+    let (negative, digits) = match whole.strip_prefix('-') {
+        Some(digits) => (true, digits),
+        None => (false, whole),
+    };
+    if !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let magnitude = if digits.is_empty() {
+        0
+    } else {
+        digits.parse::<i32>().ok()?
+    };
+    let halves = magnitude.checked_mul(2)?.checked_add(1)?;
+    Some(if negative { -halves } else { halves })
 }
 
 impl<'de> serde::Deserialize<'de> for PtValue {
@@ -3682,13 +3723,8 @@ impl<'de> serde::Deserialize<'de> for PtValue {
     {
         let value = serde_json::Value::deserialize(deserializer)?;
         match &value {
-            serde_json::Value::String(s) => {
-                // Legacy format: plain string like "2", "*", "1+*"
-                match s.parse::<i32>() {
-                    Ok(n) => Ok(PtValue::Fixed(n)),
-                    Err(_) => Ok(PtValue::Variable(s.clone())),
-                }
-            }
+            // Legacy format: plain string like "2", "2.5", "*", "1+*"
+            serde_json::Value::String(s) => Ok(PtValue::from_printed(s)),
             serde_json::Value::Number(n) => Ok(PtValue::Fixed(n.as_i64().unwrap_or(0) as i32)),
             serde_json::Value::Object(_) => {
                 // New tagged format: {"type":"Fixed","value":2}
@@ -3696,6 +3732,7 @@ impl<'de> serde::Deserialize<'de> for PtValue {
                 #[serde(tag = "type")]
                 enum PtValueHelper {
                     Fixed { value: i32 },
+                    HalfPoints { value: i32 },
                     Variable { value: String },
                     Quantity { value: QuantityExpr },
                 }
@@ -3703,6 +3740,7 @@ impl<'de> serde::Deserialize<'de> for PtValue {
                     serde_json::from_value(value).map_err(serde::de::Error::custom)?;
                 match helper {
                     PtValueHelper::Fixed { value: n } => Ok(PtValue::Fixed(n)),
+                    PtValueHelper::HalfPoints { value: n } => Ok(PtValue::HalfPoints(n)),
                     PtValueHelper::Variable { value: s } => Ok(PtValue::Variable(s)),
                     PtValueHelper::Quantity { value: q } => Ok(PtValue::Quantity(q)),
                 }
@@ -31680,7 +31718,7 @@ impl Effect {
         {
             let reads = |value: &PtValue| match value {
                 PtValue::Quantity(expr) => expr.references_cost_paid_object(),
-                PtValue::Fixed(_) | PtValue::Variable(_) => false,
+                PtValue::Fixed(_) | PtValue::HalfPoints(_) | PtValue::Variable(_) => false,
             };
             return reads(power) || reads(toughness);
         }
@@ -34437,7 +34475,7 @@ macro_rules! define_effect_quantity_walk {
     pub fn $name<'a>(&'a $($mut_)? self, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
         fn visit_pt<'a>(value: &'a $($mut_)? PtValue, f: &mut dyn FnMut(&'a $($mut_)? QuantityExpr)) {
             match value {
-                PtValue::Fixed(_) | PtValue::Variable(_) => {}
+                PtValue::Fixed(_) | PtValue::HalfPoints(_) | PtValue::Variable(_) => {}
                 PtValue::Quantity(expr) => f(expr),
             }
         }
@@ -50514,12 +50552,40 @@ mod tests {
     fn pt_value_roundtrip() {
         let values = vec![
             PtValue::Fixed(4),
+            PtValue::HalfPoints(5),
             PtValue::Variable("*".to_string()),
             PtValue::Variable("X".to_string()),
         ];
         let json = serde_json::to_string(&values).unwrap();
         let deserialized: Vec<PtValue> = serde_json::from_str(&json).unwrap();
         assert_eq!(values, deserialized);
+    }
+
+    #[test]
+    fn printed_pt_strings_classify_by_shape() {
+        for (printed, expected) in [
+            ("2", PtValue::Fixed(2)),
+            ("-1", PtValue::Fixed(-1)),
+            // Unhinged half-points: Vile Bile, Little Girl, Bad Ass.
+            ("2.5", PtValue::HalfPoints(5)),
+            (".5", PtValue::HalfPoints(1)),
+            ("3.5", PtValue::HalfPoints(7)),
+            ("2½", PtValue::HalfPoints(5)),
+            ("½", PtValue::HalfPoints(1)),
+            ("-1.5", PtValue::HalfPoints(-3)),
+            // Not a half-point number: stays an unresolved printed value.
+            ("*", PtValue::Variable("*".to_string())),
+            ("1+*", PtValue::Variable("1+*".to_string())),
+            ("∞", PtValue::Variable("∞".to_string())),
+            ("2.25", PtValue::Variable("2.25".to_string())),
+            ("*.5", PtValue::Variable("*.5".to_string())),
+            ("--1.5", PtValue::Variable("--1.5".to_string())),
+        ] {
+            assert_eq!(PtValue::from_printed(printed), expected, "{printed:?}");
+            // The legacy plain-string card-data form reads the same way.
+            let legacy: PtValue = serde_json::from_value(serde_json::json!(printed)).unwrap();
+            assert_eq!(legacy, expected, "legacy {printed:?}");
+        }
     }
 
     #[test]

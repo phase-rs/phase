@@ -1463,9 +1463,28 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
     .into()
 }
 
+/// A half-point count as printed: 5 → "2½", 1 → "½", -3 → "-1½".
+fn fmt_half_points(halves: i32) -> String {
+    let sign = if halves < 0 { "-" } else { "" };
+    let whole = halves.unsigned_abs() / 2;
+    if whole == 0 {
+        format!("{sign}½")
+    } else {
+        format!("{sign}{whole}½")
+    }
+}
+
 fn fmt_pt(p: &PtValue) -> String {
     match p {
         PtValue::Fixed(n) => format!("{n:+}"),
+        PtValue::HalfPoints(halves) => {
+            let value = fmt_half_points(*halves);
+            if *halves < 0 {
+                value
+            } else {
+                format!("+{value}")
+            }
+        }
         PtValue::Variable(s) => format!("+{s}"),
         PtValue::Quantity(q) => format!("+{}", fmt_quantity(q)),
     }
@@ -3682,6 +3701,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         } => {
             let fmt_pt = |v: &PtValue| match v {
                 PtValue::Fixed(n) => n.to_string(),
+                PtValue::HalfPoints(halves) => fmt_half_points(*halves),
                 PtValue::Variable(s) => s.clone(),
                 PtValue::Quantity(_) => "dyn".to_string(),
             };

@@ -1752,6 +1752,7 @@ fn has_toughness_shrink(effects: &[&Effect]) -> bool {
     effects.iter().any(|e| match e {
         Effect::Pump { toughness, .. } => match toughness {
             PtValue::Fixed(v) => *v < 0,
+            PtValue::HalfPoints(halves) => *halves < 0,
             PtValue::Variable(_) | PtValue::Quantity(_) => true,
         },
         Effect::PutCounter { counter_type, .. } => counter_type

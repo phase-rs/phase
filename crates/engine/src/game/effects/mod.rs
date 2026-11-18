@@ -10456,7 +10456,7 @@ fn quantity_is_fixed(quantity: &QuantityExpr) -> bool {
 /// Whether a printed power or toughness is a fixed number.
 fn pt_value_is_fixed(value: &PtValue) -> bool {
     match value {
-        PtValue::Fixed(_) => true,
+        PtValue::Fixed(_) | PtValue::HalfPoints(_) => true,
         PtValue::Quantity(quantity) => quantity_is_fixed(quantity),
         PtValue::Variable(_) => false,
     }

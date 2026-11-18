@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use crate::game::printed_cards::{half_point_pt, PtSide};
 use crate::types::ability::{
     ContinuousModification, Duration, Effect, EffectError, EffectKind, PtValue, ResolvedAbility,
     TargetFilter, TargetRef,
@@ -91,6 +92,9 @@ pub(crate) fn animate_modifications(
         Some(PtValue::Fixed(n)) => {
             modifications.push(ContinuousModification::SetPower { value: n })
         }
+        Some(PtValue::HalfPoints(halves)) => modifications.push(ContinuousModification::SetPower {
+            value: half_point_pt(halves, PtSide::Power),
+        }),
         Some(PtValue::Quantity(q)) => {
             modifications.push(set_pt_modification(state, ability, q, false))
         }
@@ -99,6 +103,11 @@ pub(crate) fn animate_modifications(
     match toughness {
         Some(PtValue::Fixed(n)) => {
             modifications.push(ContinuousModification::SetToughness { value: n })
+        }
+        Some(PtValue::HalfPoints(halves)) => {
+            modifications.push(ContinuousModification::SetToughness {
+                value: half_point_pt(halves, PtSide::Toughness),
+            })
         }
         Some(PtValue::Quantity(q)) => {
             modifications.push(set_pt_modification(state, ability, q, true))

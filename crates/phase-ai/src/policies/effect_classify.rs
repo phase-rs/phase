@@ -124,6 +124,8 @@ fn counter_sign_polarity(counter_type: &CounterType) -> EffectPolarity {
 pub(crate) fn pt_value_is_non_negative(value: &PtValue) -> bool {
     match value {
         PtValue::Fixed(v) => *v >= 0,
+        // A half-point count has the sign of the value it counts.
+        PtValue::HalfPoints(halves) => *halves >= 0,
         PtValue::Variable(name) => !name.starts_with('-'),
         PtValue::Quantity(quantity) => quantity_is_non_negative(quantity),
     }
@@ -843,8 +845,11 @@ pub(crate) fn lethal_to_creature(
                     saw_relevant = true;
                 }
                 PtValue::Fixed(_) => {}
-                // -X/-X: variable shrink, undecidable here.
-                PtValue::Variable(_) | PtValue::Quantity(_) => return None,
+                // -X/-X: variable shrink, undecidable here. A half-point
+                // modifier has no whole-number amount to sum.
+                PtValue::HalfPoints(_) | PtValue::Variable(_) | PtValue::Quantity(_) => {
+                    return None
+                }
             },
             Effect::PutCounter {
                 counter_type,

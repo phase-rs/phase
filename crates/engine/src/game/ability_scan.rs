@@ -8168,6 +8168,7 @@ fn pump_payload_source_counters(payload: Axes) -> Axes {
 fn scan_pt_value(pt: &PtValue, mode: ScanMode) -> Axes<'_> {
     match pt {
         PtValue::Fixed(_) => Axes::NONE,
+        PtValue::HalfPoints(_) => Axes::NONE,
         PtValue::Variable(_) => Axes::NONE,
         PtValue::Quantity(q) => scan_quantity_expr(q, mode),
     }

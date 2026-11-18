@@ -6,6 +6,7 @@ use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::game_object::{
     AttachTarget, BackFaceData, DisplayIdentity, DisplaySource, GameObject,
 };
+use crate::game::printed_cards::{half_point_pt, PtSide};
 use crate::game::quantity::{
     resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
 };
@@ -1120,8 +1121,8 @@ fn build_token_spec(
         } else {
             // No parsed attrs — resolve fallback P/T, and defer type/color
             // inference to the apply path's creature-only fallback branch.
-            let rp = resolve_pt_value(fallback_power, state, ability);
-            let rt = resolve_pt_value(fallback_toughness, state, ability);
+            let rp = resolve_pt_value(fallback_power, PtSide::Power, state, ability);
+            let rt = resolve_pt_value(fallback_toughness, PtSide::Toughness, state, ability);
             let (p, t, core) = if rp != 0 || rt != 0 {
                 (Some(rp), Some(rt), vec![CoreType::Creature])
             } else {
@@ -4926,8 +4927,8 @@ fn build_token_attrs_from_effect(
         }
     }
 
-    let resolved_power = resolve_pt_value(power, state, ability);
-    let resolved_toughness = resolve_pt_value(toughness, state, ability);
+    let resolved_power = resolve_pt_value(power, PtSide::Power, state, ability);
+    let resolved_toughness = resolve_pt_value(toughness, PtSide::Toughness, state, ability);
     if core_types.is_empty() && (resolved_power != 0 || resolved_toughness != 0) {
         core_types.push(CoreType::Creature);
     }
@@ -4949,9 +4950,15 @@ fn build_token_attrs_from_effect(
     })
 }
 
-fn resolve_pt_value(value: &PtValue, state: &GameState, ability: &ResolvedAbility) -> i32 {
+fn resolve_pt_value(
+    value: &PtValue,
+    side: PtSide,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> i32 {
     match value {
         PtValue::Fixed(n) => *n,
+        PtValue::HalfPoints(halves) => half_point_pt(*halves, side),
         PtValue::Variable(_) => 0,
         PtValue::Quantity(expr) => resolve_quantity_with_targets(state, expr, ability),
     }
