@@ -126,9 +126,11 @@ interface ResizeCase {
   maxWidth: string;
 }
 
-/** One resize per subscription the row makes, each reported on its own, from
- *  the docked 302px bound. Every outcome differs from 302px, so a subscription
- *  that went missing leaves the stale bound and fails its case. */
+/** One reported resize for each subscription on the HUD, the board rows, the
+ *  rail and the chips present at mount, each from the docked 302px bound. Every
+ *  outcome differs from 302px, so a subscription that went missing leaves the
+ *  stale bound and fails its case. The row's own subscription and a chip that
+ *  mounts later need a different start, so their tests follow the table. */
 const RESIZE_CASES: ResizeCase[] = [
   {
     what: "the Manual / Undo column growing (Undo appears)",
@@ -155,6 +157,15 @@ const RESIZE_CASES: ResizeCase[] = [
       playerHud.getBoundingClientRect = () => new DOMRect(330, 200, 150, 46);
       sideControls.getBoundingClientRect = () => new DOMRect(484, 196, 46, 54);
       return otherRow;
+    },
+    maxWidth: "",
+  },
+  {
+    what: "the creature row growing (the other-permanent row emptied), which drops the HUD below the row",
+    resize: ({ playerHud, sideControls, creatureRow }) => {
+      playerHud.getBoundingClientRect = () => new DOMRect(330, 352, 150, 46);
+      sideControls.getBoundingClientRect = () => new DOMRect(484, 348, 46, 54);
+      return creatureRow;
     },
     maxWidth: "",
   },
@@ -315,6 +326,27 @@ describe("ActionRailStatusRow", () => {
     // Back to one line at 318-344: nothing level with the HUD any more.
     row.getBoundingClientRect = () => new DOMRect(520, 318, 318, 26);
     reportResize(row);
+    expect(row.style.maxWidth).toBe("");
+  });
+
+  it("keeps the bound current when a chip that mounted later resizes", async () => {
+    const { playerHud, sideControls } = mountPlayerHud();
+    const row = renderRow(playerHud);
+    expect(row.style.maxWidth).toBe("302px");
+
+    // The plate moves, then Full Control's chip mounts: the mount's own
+    // remeasure picks up the 232px of room the moved plate leaves.
+    playerHud.getBoundingClientRect = () => new DOMRect(400, 300, 150, 46);
+    sideControls.getBoundingClientRect = () => new DOMRect(554, 296, 46, 54);
+    await act(async () => {
+      useUiStore.setState({ fullControl: true });
+    });
+    await waitFor(() => expect(row.style.maxWidth).toBe("232px"));
+
+    // Then the new chip grows wider than that room, reported as a resize alone.
+    const fullControlChip = screen.getByRole("button", { name: "Full Control On" });
+    fullControlChip.getBoundingClientRect = () => new DOMRect(598, 320, 240, 22);
+    reportResize(fullControlChip);
     expect(row.style.maxWidth).toBe("");
   });
 
