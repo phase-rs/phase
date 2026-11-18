@@ -1110,7 +1110,14 @@ fn produce_mana_from_bound_ability(
     // effect chain (e.g. painlands' "This land deals 1 damage to you.")
     // resolves that chain inline — mana abilities don't use the stack, so
     // the sub-ability runs as part of the same atomic resolution.
-    resolve_mana_ability_sub_chain(state, resolved_for_quantity, events);
+    // CR 106.12b: it is still this ability resolving, so it carries the
+    // activation's tap state.
+    resolve_mana_ability_sub_chain(
+        state,
+        resolved_for_quantity,
+        ManaTapState::from_tap(tapped),
+        events,
+    );
 }
 
 /// CR 605.3b + CR 602.2a: Build the transient ability for a mana ability's
@@ -5153,9 +5160,17 @@ pub(crate) fn resume_mana_ability_cost_move(
 /// (e.g. `Effect::RevealHand` for Metalworker), `produce_mana_from_ability` already
 /// consumed the `Effect::Mana` sub-node, so we skip only that consumed node and resolve
 /// any remaining sub-ability tail.
+///
+/// CR 106.12 + CR 106.12b: `tap_state` is this activation's tap state
+/// (`ManaTapState::from_tap` of its {T} cost). The sub-chain is still this
+/// mana ability resolving, so a "tapped for mana" replacement modifies its
+/// productions too (Urza's Mine's "add {C}{C} instead" under Contamination).
+/// The state rides the sub root as `SpellContext::mana_tap_state`, which every
+/// link inherits.
 fn resolve_mana_ability_sub_chain(
     state: &mut GameState,
     ability: &ResolvedAbility,
+    tap_state: ManaTapState,
     events: &mut Vec<GameEvent>,
 ) {
     let Some(sub) = ability.sub_ability.as_deref() else {
@@ -5179,15 +5194,20 @@ fn resolve_mana_ability_sub_chain(
     // whose prelude resets `last_effect_amount`; carry the head's cost-removed
     // counter count onto the sub root so that prelude reseeds it ("then add an
     // additional {B} for each charge counter removed this way").
+    // CR 106.12b: the sub root also carries this activation's tap state, which
+    // that prelude leaves in place and every link inherits.
+    let cost_removed = ability.context.cost_removed_counter_amount;
     let carried;
-    let sub = match ability.context.cost_removed_counter_amount {
-        Some(removed) => {
-            let mut owned = sub.clone();
+    let sub = if cost_removed.is_some() || tap_state.tapped_for_mana() {
+        let mut owned = sub.clone();
+        if let Some(removed) = cost_removed {
             owned.context.cost_removed_counter_amount = Some(removed);
-            carried = owned;
-            &carried
         }
-        None => sub,
+        owned.context.mana_tap_state = tap_state;
+        carried = owned;
+        &carried
+    } else {
+        sub
     };
     // Errors during the sub-chain are non-fatal — mana has already been
     // added to the pool and the cost has been paid. The damage/life clause

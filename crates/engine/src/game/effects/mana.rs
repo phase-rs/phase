@@ -395,6 +395,11 @@ pub fn resolve(
         },
     };
 
+    // CR 106.12b: a production of a {T} mana ability's inline sub-chain is still
+    // that ability resolving, so it is tapped for mana
+    // (`resolve_mana_ability_sub_chain` stamps `SpellContext::mana_tap_state`);
+    // every other production is not.
+    let tapped_for_mana = ability.context.mana_tap_state.tapped_for_mana();
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
     // into that player's mana pool.
     let produced_mana = !mana_types.is_empty();
@@ -405,7 +410,7 @@ pub fn resolve(
             ability.source_id,
             mana_type,
             recipient,
-            false,
+            tapped_for_mana,
             source_could_produce_two_or_more_colors,
             &concrete_restrictions,
             grants,
@@ -531,6 +536,11 @@ pub fn handle_choose_mana_effect(
     let produced_mana = recipient.is_some() && !mana_types.is_empty();
     let is_triggered_mana_inline =
         crate::game::mana_abilities::is_resolving_triggered_mana(state, ability);
+    // CR 106.12b: a production of a {T} mana ability's inline sub-chain is still
+    // that ability resolving, so it is tapped for mana
+    // (`resolve_mana_ability_sub_chain` stamps `SpellContext::mana_tap_state`);
+    // every other production is not.
+    let tapped_for_mana = ability.context.mana_tap_state.tapped_for_mana();
     let mut deposited = false;
     if let Some(recipient) = recipient {
         for &mana_type in &mana_types {
@@ -539,7 +549,7 @@ pub fn handle_choose_mana_effect(
                 ability.source_id,
                 mana_type,
                 recipient,
-                false,
+                tapped_for_mana,
                 source_could_produce_two_or_more_colors,
                 &concrete_restrictions,
                 grants,

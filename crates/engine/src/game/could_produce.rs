@@ -41,10 +41,13 @@
 //! - **How much** (CR 106.5 + CR 106.7's last sentence): an instruction that
 //!   would add no mana contributes nothing (Gaea's Cradle with no creatures).
 //! - **Replacements** (CR 614.1a + CR 616.1): each type is mapped through
-//!   `replacement::hypothetical_produced_mana_types`, in every order, with
-//!   CR 106.12's "tapped for mana" only for the {T} mana ability's own root
-//!   instruction. One scan per solve (`replacement::produced_mana_may_be_replaced`)
-//!   skips that lookup when no replacement in the game could apply.
+//!   `replacement::hypothetical_produced_mana_types`, in every order. Every
+//!   production of a {T} mana ability's resolution is "tapped for mana"
+//!   (CR 106.12 + CR 106.12b: such a replacement applies "while such an
+//!   ability is resolving and producing mana"); a production of any other
+//!   ability is not. One scan per solve
+//!   (`replacement::produced_mana_may_be_replaced`) skips that lookup when no
+//!   replacement in the game could apply.
 //! - **Referential clauses**: a permanent whose ability is itself a
 //!   could-produce clause reads its population's answers. The populations form a
 //!   graph that may be cyclic (two Reflecting Pools; an Orchard on each side), so
@@ -154,10 +157,11 @@ enum ProductionReading {
 /// now (CR 106.7).
 struct HypotheticalProduction {
     reading: ProductionReading,
-    /// CR 106.12: `FromTap` only for the root mana instruction of an activated
-    /// mana ability whose cost includes {T} — exactly when
-    /// `produce_mana_from_ability` marks production tapped. Chain / inline-branch
-    /// mana and every stack-resolved ability produce with `NotFromTap`.
+    /// CR 106.12 + CR 106.12b: `FromTap` for every instruction of an activated
+    /// mana ability whose cost includes {T} (its root, a production after an
+    /// earlier instruction, its sub-chain), from the frame's `tap_state`. A
+    /// non-mana ability, a mana ability without {T} and a triggered ability
+    /// produce with `NotFromTap`.
     tap_state: ManaTapState,
     /// CR 106.5: the amount the instruction would add, already known to be
     /// positive — the resolved count, or 1 for a count the ability's own
@@ -468,7 +472,9 @@ fn hypothetical_productions(state: &GameState, object_id: ObjectId) -> Vec<Hypot
                     definition,
                     HypotheticalEntry::Activation,
                 );
-                let frame = Frame::root(&entry_state, ledger, definition);
+                // CR 106.12: only a mana ability is tapped for mana, so a non-mana
+                // ability's productions are not, {T} in its cost or not (Millikin).
+                let frame = Frame::root(&entry_state, ledger, definition, ManaTapState::NotFromTap);
                 walk_chain(&frame, &resolved, &mut productions);
             }
         }
@@ -561,7 +567,12 @@ fn read_mana_ability_root(
     // runtime builds this root index-less, so the projection reads `Live`.
     let (entry_state, ledger) =
         resolution_entry_state(state, &unswapped, definition, HypotheticalEntry::Activation);
-    let frame = Frame::root(&entry_state, ledger, definition);
+    // CR 106.12 + CR 106.12b: tapping a permanent for mana is activating a mana
+    // ability whose cost includes {T}, and a "tapped for mana" replacement
+    // modifies every production made while that ability resolves, so the whole
+    // resolution reads one tap state.
+    let tap_state = ManaTapState::from_tap(has_tap_component(&definition.cost));
+    let frame = Frame::root(&entry_state, ledger, definition, tap_state);
     let branches = match unswapped.sub_ability.as_deref() {
         // CR 608.2c + CR 106.7: a wrapped condition the resolution itself fixes
         // could go either way, so both branches are read.
@@ -579,25 +590,15 @@ fn read_mana_ability_root(
         }
         _ => vec![apply_condition_instead_mana_swap(frame.state, &unswapped)],
     };
-    // CR 106.12: the root instruction of a {T} mana ability is "tapped for mana".
-    let root_tap_state = ManaTapState::from_tap(has_tap_component(&definition.cost));
     for branch in &branches {
         let _ = visit_own_resolution_effects(&branch.effect, &mut |effect| {
-            // The root instruction is the node that IS `branch.effect`, the one
-            // `produce_mana_from_ability` matches as `Effect::Mana { target: None }`;
-            // anything reached beneath it produces through `effects::mana`.
-            let is_root_instruction = std::ptr::eq(effect, &branch.effect)
-                && matches!(effect, Effect::Mana { target: None, .. });
-            let tap_state = if is_root_instruction {
-                root_tap_state
-            } else {
-                ManaTapState::NotFromTap
-            };
-            push_production(&frame, branch, effect, tap_state, productions);
+            push_production(&frame, branch, effect, productions);
             ControlFlow::Continue(())
         });
         // CR 605.3b: the rest of the chain resolves through
-        // `resolve_mana_ability_sub_chain` → `effects::resolve_ability_chain`.
+        // `resolve_mana_ability_sub_chain` → `effects::resolve_ability_chain`,
+        // which stamps this activation's tap state on the sub-chain root
+        // (`SpellContext::mana_tap_state`) for every link to inherit.
         if let Some(sub) = branch.sub_ability.as_deref() {
             walk_chain(&frame, sub, productions);
         }
@@ -651,7 +652,9 @@ fn read_triggered_abilities(
         resolved.inherit_ability_index_recursive(Some(trigger_index));
         let (entry_state, ledger) =
             resolution_entry_state(state, &resolved, execute, HypotheticalEntry::Trigger);
-        let frame = Frame::root(&entry_state, ledger, execute);
+        // CR 106.12: a triggered ability is not activated, so its productions are
+        // never tapped for mana.
+        let frame = Frame::root(&entry_state, ledger, execute, ManaTapState::NotFromTap);
         walk_chain(&frame, &resolved, productions);
     }
 }
@@ -669,6 +672,11 @@ struct Frame<'a> {
     /// activated (or mana) ability's own definition, or a triggered ability's
     /// execute definition.
     cost_owner: &'a AbilityDefinition,
+    /// CR 106.12 + CR 106.12b: whether this resolution's productions are
+    /// "tapped for mana": `FromTap` throughout an activated mana ability whose
+    /// cost includes {T}, `NotFromTap` for every other ability. Set at the root
+    /// and handed unchanged to every child.
+    tap_state: ManaTapState,
 }
 
 impl<'a> Frame<'a> {
@@ -677,6 +685,7 @@ impl<'a> Frame<'a> {
         state: &'a GameState,
         ledger: HypotheticalLedger,
         cost_owner: &'a AbilityDefinition,
+        tap_state: ManaTapState,
     ) -> Self {
         Frame {
             state,
@@ -685,6 +694,7 @@ impl<'a> Frame<'a> {
                 ..HypotheticalBindings::NONE
             },
             cost_owner,
+            tap_state,
         }
     }
 
@@ -713,6 +723,9 @@ struct BoundChild<'s, 'n> {
     state: Cow<'s, GameState>,
     node: Cow<'n, ResolvedAbility>,
     bindings: HypotheticalBindings,
+    /// CR 106.12b: the tap state of the resolution the child belongs to, its
+    /// parent frame's.
+    tap_state: ManaTapState,
 }
 
 impl BoundChild<'_, '_> {
@@ -721,6 +734,7 @@ impl BoundChild<'_, '_> {
             state: &self.state,
             bindings: self.bindings,
             cost_owner,
+            tap_state: self.tap_state,
         };
         walk_chain(&frame, &self.node, productions);
     }
@@ -775,6 +789,7 @@ fn bind_child<'s, 'n>(
             optional_outcome,
             ledger: frame.bindings.ledger,
         },
+        tap_state: frame.tap_state,
     }
 }
 
@@ -1047,7 +1062,7 @@ fn walk_performed(
     }
 
     let _ = visit_own_resolution_effects(&node.effect, &mut |effect| {
-        push_production(frame, node, effect, ManaTapState::NotFromTap, productions);
+        push_production(frame, node, effect, productions);
         ControlFlow::Continue(())
     });
 
@@ -1086,12 +1101,12 @@ fn walk_false_gate_path(
 
 /// Records `effect` when it is a mana instruction that would add mana, read for
 /// `node`, the hypothetical resolving node that carries it (anchored to the
-/// surveyed permanent's own controller and id, CR 109.5).
+/// surveyed permanent's own controller and id, CR 109.5), with the frame's tap
+/// state (CR 106.12b).
 fn push_production(
     frame: &Frame<'_>,
     node: &ResolvedAbility,
     effect: &Effect,
-    tap_state: ManaTapState,
     productions: &mut Vec<HypotheticalProduction>,
 ) {
     let Effect::Mana { produced, .. } = effect else {
@@ -1102,7 +1117,7 @@ fn push_production(
     };
     productions.push(HypotheticalProduction {
         reading: production_reading(frame, produced, node),
-        tap_state,
+        tap_state: frame.tap_state,
         amount,
         controller: node.controller,
     });

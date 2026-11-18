@@ -41,7 +41,7 @@ use crate::types::ability::{
 };
 #[cfg(test)]
 use crate::types::ability::{AttackSubject, CombatHistoryScope};
-use crate::types::events::{ClashResult, GameEvent, PlayerActionKind};
+use crate::types::events::{ClashResult, GameEvent, ManaTapState, PlayerActionKind};
 use crate::types::format::ZoneScope;
 use crate::types::game_state::{
     AutoMayChoice, CastOfferKind, ClauseMinimumSnapshot, ContinuationXAnnouncement,
@@ -4587,6 +4587,10 @@ fn build_reflexive_pending_trigger(
         "build_reflexive_pending_trigger requires a WhenYouDo, QuantityCheck, or QuantityQuality gate"
     );
     consume_reflexive_creation_gate(&mut ability);
+    // CR 603.12 + CR 106.12b: a reflexive triggered ability is a separate
+    // ability, not the mana ability whose resolution created it, so it is not
+    // tapped for mana (Shaun & Rebecca, Agents' "When you do, mill two cards").
+    ability.context.mana_tap_state = ManaTapState::NotFromTap;
 
     let source_id = parent.map_or(ability.source_id, |parent| parent.source_id);
     let controller = parent.map_or(ability.controller, |parent| parent.controller);

@@ -18,12 +18,14 @@
 
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::AbilityKind;
+use engine::types::ability::{AbilityKind, Effect};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::parse_counter_type;
+use engine::types::events::ManaTapState;
 use engine::types::game_state::{
-    CastPaymentMode, ExileLink, ExileLinkKind, GameState, ManaChoicePrompt, PayCostKind, WaitingFor,
+    CastPaymentMode, ExileLink, ExileLinkKind, GameState, ManaChoicePrompt, PayCostKind,
+    StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -331,10 +333,33 @@ fn actual_types(state: &GameState, land: ObjectId) -> Vec<ManaType> {
     types
 }
 
+/// P0's Urza's Mine and Urza's Tower, plus Urza's Power Plant when
+/// `assembled`, each with its land types (the Urza's lands ruling: "The
+/// ability checks for land types, not the names of other permanents you
+/// control."). Returns the scenario and the Mine.
+fn tron_scenario(assembled: bool) -> (GameScenario, ObjectId) {
+    let mut scenario = new_scenario();
+    let mine = scenario
+        .add_land_from_oracle(P0, "Urza's Mine", URZAS_MINE)
+        .with_subtypes(vec!["Urza's", "Mine"])
+        .id();
+    scenario
+        .add_land_from_oracle(P0, "Urza's Tower", URZAS_TOWER)
+        .with_subtypes(vec!["Urza's", "Tower"]);
+    if assembled {
+        scenario
+            .add_land_from_oracle(P0, "Urza's Power Plant", URZAS_POWER_PLANT)
+            .with_subtypes(vec!["Urza's", "Power-Plant"]);
+    }
+    (scenario, mine)
+}
+
 /// C7 (differential): for every conditional producer in both states of its
 /// condition, the CR 106.7 reading — observed through Squandered Resources'
 /// capture of the sacrificed land — names exactly the types the land's own
-/// activation offers or adds in the same state.
+/// activation offers or adds in the same state. Urza's Mine is also read under
+/// Contamination, where every production of its {T} mana ability is tapped for
+/// mana (CR 106.12b).
 #[test]
 fn hypothetical_reading_matches_the_real_activation() {
     fn with_squandered(scenario: &mut GameScenario) -> ObjectId {
@@ -392,6 +417,19 @@ fn hypothetical_reading_matches_the_real_activation() {
         }
         let runner = scenario.build();
         cases.push(("Urza's Tower", runner.state().clone(), squandered, tower));
+    }
+
+    for assembled in [false, true] {
+        let (mut scenario, mine) = tron_scenario(assembled);
+        let squandered = with_squandered(&mut scenario);
+        scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
+        let runner = scenario.build();
+        cases.push((
+            "Urza's Mine under Contamination",
+            runner.state().clone(),
+            squandered,
+            mine,
+        ));
     }
 
     for exiled in [false, true] {
@@ -609,4 +647,399 @@ fn reflecting_pool_does_not_read_omnaths_hidden_top_card() {
         tap_for_mana(&mut runner, reflecting_pool),
         Produced::Pool(vec![ManaType::Green])
     );
+}
+
+// ---- One mana ability's tap-for-mana context (CR 106.12 + CR 106.12b) ----
+
+// Verbatim Oracle text (MTGJSON), reminder text omitted.
+const MANA_REFLECTION: &str =
+    "If you tap a permanent for mana, it produces twice as much of that mana instead.";
+const VORINCLEX_VOICE_OF_HUNGER: &str = "Trample\nWhenever you tap a land for mana, add one mana \
+     of any type that land produced.\nWhenever an opponent taps a land for mana, that land \
+     doesn't untap during its controller's next untap step.";
+const METALWORKER: &str = "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for \
+     each card revealed this way.";
+const EMPOWERED_AUTOGENERATOR: &str = "This artifact enters tapped.\n{T}: Put a charge counter on \
+     this artifact. Add X mana of any one color, where X is the number of charge counters on this \
+     artifact.";
+const MARCH_OF_THE_MACHINES: &str = "Each noncreature artifact is an artifact creature with power \
+     and toughness each equal to its mana value.";
+const WILD_CANTOR: &str = "Sacrifice this creature: Add one mana of any color.";
+const SHAUN_AND_REBECCA_AGENTS: &str = "Vigilance\nWhen Shaun & Rebecca enters, search your \
+     graveyard, hand, and library for a card named The Animus and put it onto the battlefield, \
+     then shuffle.\n{T}: Add {C}. When you do, mill two cards.";
+const MAGUS_OF_THE_VINEYARD: &str =
+    "At the beginning of each player's first main phase, that player adds {G}{G}.";
+
+/// F3-1 (CR 106.12 + CR 106.12b): an assembled Urza's Mine adds {C}{C} by one
+/// {T} mana ability, so Contamination modifies that whole production, the
+/// "add {C}{C} instead" link included, and only {B} arrives. Control: without
+/// Contamination the same activation adds {C}{C}, so the link ran.
+#[test]
+fn tapping_assembled_urzas_mine_under_contamination_adds_only_black() {
+    let (scenario, mine) = tron_scenario(true);
+    let mut runner = scenario.build();
+    assert_eq!(
+        tap_for_mana(&mut runner, mine),
+        Produced::Pool(vec![ManaType::Colorless, ManaType::Colorless]),
+        "control: the assembled Mine's gated link adds its second colorless mana"
+    );
+
+    let (mut scenario, mine) = tron_scenario(true);
+    scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
+    let mut runner = scenario.build();
+    let Produced::Pool(produced) = tap_for_mana(&mut runner, mine) else {
+        panic!("reach-guard: the Mine adds its mana without a type prompt");
+    };
+    assert!(!produced.is_empty(), "reach-guard: the Mine added mana");
+    assert!(
+        produced
+            .iter()
+            .all(|mana_type| *mana_type == ManaType::Black),
+        "CR 106.12b: every unit the Mine produced was tapped for mana, got {produced:?}"
+    );
+}
+
+/// F3-2 (CR 106.12 + CR 106.12b): Mana Reflection doubles every unit of an
+/// assembled Urza's Mine's {C}{C}, the "instead" link's included, so four {C}
+/// arrive. Disabled sibling: an unassembled Mine's single {C} doubles to two.
+#[test]
+fn tapping_assembled_urzas_mine_under_mana_reflection_doubles_both_halves() {
+    for (assembled, colorless) in [(false, 2), (true, 4)] {
+        let (mut scenario, mine) = tron_scenario(assembled);
+        scenario.add_enchantment_from_oracle(P0, "Mana Reflection", MANA_REFLECTION);
+        let mut runner = scenario.build();
+        assert_eq!(
+            tap_for_mana(&mut runner, mine),
+            Produced::Pool(vec![ManaType::Colorless; colorless]),
+            "assembled: {assembled}"
+        );
+    }
+}
+
+/// F3-3 (CR 106.7 + CR 106.12b): the hypothetical resolution of Urza's Mine
+/// reads every production of its {T} mana ability as tapped for mana, so under
+/// Contamination the sacrificed Mine could produce only {B}, whether its
+/// "instead" link runs (assembled) or not.
+#[test]
+fn sacrificed_urzas_mine_under_contamination_offers_only_black() {
+    for assembled in [false, true] {
+        let (mut scenario, mine) = tron_scenario(assembled);
+        let squandered = scenario
+            .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
+        let runner = scenario.build();
+        assert_eq!(
+            squandered_reading(runner.state(), squandered, mine),
+            vec![ManaType::Black],
+            "assembled: {assembled}"
+        );
+    }
+}
+
+/// F3-4 (CR 106.7 + CR 106.12b): the "could produce" census over P0's lands
+/// reads Tron under Contamination as {B} alone, assembled or not. Naga Vitalist
+/// (a creature, so Contamination leaves its own production alone) adds the
+/// census's one type, and Reflecting Pool, offered one type, adds it without a
+/// prompt.
+#[test]
+fn pool_census_reads_assembled_tron_under_contamination_as_black() {
+    for assembled in [false, true] {
+        let (mut scenario, _mine) = tron_scenario(assembled);
+        let reflecting_pool = scenario
+            .add_land_from_oracle(P0, "Reflecting Pool", REFLECTING_POOL)
+            .id();
+        scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
+        let vitalist = scenario
+            .add_creature_from_oracle(P0, "Naga Vitalist", 1, 2, NAGA_VITALIST)
+            .id();
+        let runner = scenario.build();
+        let vitalist_object = &runner.state().objects[&vitalist];
+        assert!(
+            !vitalist_object
+                .card_types
+                .core_types
+                .contains(&CoreType::Land)
+                && !vitalist_object.tapped
+                && vitalist_object.controller == P0,
+            "reach-guard: Naga Vitalist is P0's untapped nonland creature"
+        );
+        let pool_object = &runner.state().objects[&reflecting_pool];
+        assert!(
+            pool_object.card_types.core_types.contains(&CoreType::Land)
+                && pool_object.controller == P0,
+            "reach-guard: Reflecting Pool is P0's land"
+        );
+
+        for (name, reader) in [
+            ("Naga Vitalist", vitalist),
+            ("Reflecting Pool", reflecting_pool),
+        ] {
+            let mut read = GameRunner::from_state(runner.state().clone());
+            assert_eq!(
+                tap_for_mana(&mut read, reader),
+                Produced::Pool(vec![ManaType::Black]),
+                "{name}, assembled: {assembled}"
+            );
+        }
+    }
+}
+
+/// F3-6 (CR 106.12 + CR 106.12b): Metalworker's production follows its {T}
+/// mana ability's first instruction (the reveal) and is still tapped for mana.
+/// Ashaya makes Metalworker a Forest land for Squandered Resources to
+/// sacrifice; under Contamination it could produce only {B}.
+#[test]
+fn sacrificed_metalworker_under_contamination_offers_only_black() {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
+    let metalworker = scenario
+        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER)
+        .id();
+    let mut runner = scenario.build();
+    flush(&mut runner);
+    assert_is_land(&runner, metalworker);
+
+    assert_eq!(
+        squandered_reading(runner.state(), squandered, metalworker),
+        vec![ManaType::Black]
+    );
+}
+
+/// F3-7 (CR 106.12 + CR 106.12b): Empowered Autogenerator's production follows
+/// an inline counter instruction of the same {T} mana ability and is still
+/// tapped for mana. March of the Machines makes the Autogenerator a creature
+/// and Ashaya makes it a Forest land; under Contamination it could produce only
+/// {B}. One charge counter keeps the production's amount positive.
+#[test]
+fn sacrificed_charged_autogenerator_under_contamination_offers_only_black() {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    scenario.add_enchantment_from_oracle(P0, "March of the Machines", MARCH_OF_THE_MACHINES);
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
+    let autogenerator = scenario
+        .add_artifact_from_oracle(P0, "Empowered Autogenerator", EMPOWERED_AUTOGENERATOR)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 4,
+        })
+        .id();
+    scenario.with_counter(autogenerator, parse_counter_type("charge"), 1);
+    let mut runner = scenario.build();
+    flush(&mut runner);
+    assert_is_land(&runner, autogenerator);
+    assert_eq!(
+        runner.state().objects[&autogenerator]
+            .counters
+            .get(&parse_counter_type("charge"))
+            .copied(),
+        Some(1),
+        "reach-guard: the Autogenerator has one charge counter"
+    );
+
+    assert_eq!(
+        squandered_reading(runner.state(), squandered, autogenerator),
+        vec![ManaType::Black]
+    );
+}
+
+/// F3-8 (CR 106.12a): Vorinclex, Voice of Hunger's echo triggers once per
+/// resolution of a mana ability that produced mana, however many of its links
+/// produce: an assembled Urza's Mine adds {C}{C} and the echo one {C}.
+#[test]
+fn vorinclex_echoes_an_assembled_urzas_mine_once() {
+    let (mut scenario, mine) = tron_scenario(true);
+    let vorinclex = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Vorinclex, Voice of Hunger",
+            7,
+            6,
+            VORINCLEX_VOICE_OF_HUNGER,
+        )
+        .id();
+    let mut runner = scenario.build();
+    assert_eq!(
+        runner.state().objects[&vorinclex].controller,
+        P0,
+        "reach-guard: P0 controls Vorinclex"
+    );
+
+    assert_eq!(
+        tap_for_mana(&mut runner, mine),
+        Produced::Pool(vec![ManaType::Colorless; 3])
+    );
+}
+
+/// F3-9 (CR 106.12b): under Contamination both halves of an assembled Urza's
+/// Mine's production are tapped for mana and come from the Mine, so undoing
+/// the manual tap refunds both. The refund itself is the engine's manual-tap
+/// undo, not a rule of the game (CR 605.3b: the ability resolved at once).
+#[test]
+fn untapping_an_assembled_urzas_mine_refunds_both_halves() {
+    let (mut scenario, mine) = tron_scenario(true);
+    scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
+    let mut runner = scenario.build();
+    let Produced::Pool(produced) = tap_for_mana(&mut runner, mine) else {
+        panic!("reach-guard: the Mine adds its mana without a type prompt");
+    };
+    assert!(!produced.is_empty(), "reach-guard: the Mine added mana");
+    assert!(
+        runner
+            .state()
+            .lands_tapped_for_mana
+            .get(&P0)
+            .is_some_and(|lands| lands.contains(&mine)),
+        "the Mine's manual tap is recorded for undo"
+    );
+
+    runner
+        .act(GameAction::UntapLandForMana { object_id: mine })
+        .expect("undoing the Mine's manual tap");
+    assert!(pool(&runner, P0).is_empty(), "both halves were refunded");
+    assert!(
+        !runner.state().objects[&mine].tapped,
+        "the Mine is untapped"
+    );
+}
+
+/// F3-10 (CR 106.12): Wild Cantor's mana ability has no {T} in its cost, so its
+/// production is not tapped for mana and Contamination leaves its five colors
+/// alone; its Forest ability (from Ashaya) is tapped for mana and gives {B}.
+#[test]
+fn sacrificed_wild_cantor_under_contamination_keeps_every_color() {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
+    let cantor = scenario
+        .add_creature_from_oracle(P0, "Wild Cantor", 1, 1, WILD_CANTOR)
+        .id();
+    let mut runner = scenario.build();
+    flush(&mut runner);
+    assert_is_land(&runner, cantor);
+
+    let mut reading = squandered_reading(runner.state(), squandered, cantor);
+    reading.sort();
+    assert_eq!(
+        reading,
+        vec![
+            ManaType::White,
+            ManaType::Blue,
+            ManaType::Black,
+            ManaType::Red,
+            ManaType::Green,
+        ]
+    );
+}
+
+/// F3-11 (CR 603.12 + CR 106.12b): Shaun & Rebecca, Agents' "When you do, mill
+/// two cards" is a reflexive triggered ability, separate from the {T} mana
+/// ability whose resolution created it, so it is not tapped for mana. The mana
+/// ability resolves at once (CR 605.3b) and the trigger waits on the stack.
+#[test]
+fn shaun_and_rebeccas_reflexive_mill_is_not_tapped_for_mana() {
+    let mut scenario = new_scenario();
+    let shaun = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Shaun & Rebecca, Agents",
+            4,
+            4,
+            SHAUN_AND_REBECCA_AGENTS,
+        )
+        .id();
+    let mut runner = scenario.build();
+    let source = &runner.state().objects[&shaun];
+    assert!(
+        !source.tapped && !source.summoning_sick,
+        "reach-guard: Shaun & Rebecca can tap for mana"
+    );
+    let ability_index = source
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == AbilityKind::Activated)
+        .expect("reach-guard: Shaun & Rebecca has an activated ability");
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: shaun,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("reach-guard: the mana ability is activatable");
+
+    assert_eq!(
+        pool(&runner, P0),
+        vec![ManaType::Colorless],
+        "reach-guard: the mana ability resolved at once"
+    );
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "reach-guard: priority returns with the trigger on the stack"
+    );
+    assert_eq!(
+        state.stack.len(),
+        1,
+        "reach-guard: the reflexive trigger is on the stack"
+    );
+    let StackEntryKind::TriggeredAbility {
+        source_id, ability, ..
+    } = &state.stack[0].kind
+    else {
+        panic!(
+            "expected the reflexive trigger, got {:?}",
+            state.stack[0].kind
+        );
+    };
+    assert_eq!(*source_id, shaun, "reach-guard: Shaun & Rebecca's trigger");
+    assert!(
+        matches!(ability.effect, Effect::Mill { .. }),
+        "reach-guard: the trigger mills"
+    );
+    assert_eq!(
+        ability.context.mana_tap_state,
+        ManaTapState::NotFromTap,
+        "CR 603.12: the reflexive ability is not the mana ability, so not tapped for mana"
+    );
+}
+
+/// F3-12 (CR 106.12): Magus of the Vineyard's {G}{G} comes from a triggered
+/// ability, which is not activated and so never tapped for mana: under
+/// Contamination the sacrificed Magus could still produce {G}, beside the {B}
+/// its Forest ability (from Ashaya) gives.
+#[test]
+fn sacrificed_magus_of_the_vineyard_under_contamination_keeps_its_triggered_green() {
+    let mut scenario = new_scenario();
+    let squandered = scenario
+        .add_enchantment_from_oracle(P0, "Squandered Resources", SQUANDERED_RESOURCES)
+        .id();
+    scenario.add_creature_from_oracle(P0, "Ashaya, Soul of the Wild", 0, 0, ASHAYA);
+    scenario.add_enchantment_from_oracle(P0, "Contamination", CONTAMINATION);
+    let magus = scenario
+        .add_creature_from_oracle(P0, "Magus of the Vineyard", 1, 1, MAGUS_OF_THE_VINEYARD)
+        .id();
+    let mut runner = scenario.build();
+    flush(&mut runner);
+    assert_is_land(&runner, magus);
+    assert_eq!(
+        runner.state().objects[&magus].trigger_definitions.len(),
+        1,
+        "reach-guard: Magus carries its one triggered ability"
+    );
+
+    let mut reading = squandered_reading(runner.state(), squandered, magus);
+    reading.sort();
+    assert_eq!(reading, vec![ManaType::Black, ManaType::Green]);
 }

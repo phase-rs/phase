@@ -8,6 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::card::PrintedCardRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
+use super::events::ManaTapState;
 use super::game_state::{CastOccurrence, LKISnapshot, MayTriggerOrigin, TriggerSourceContext};
 use super::game_state_kinds::{DistributionUnit, TargetSelectionConstraint};
 use super::identifiers::{
@@ -1938,6 +1939,21 @@ pub struct SpellContext {
     /// the copy uses that same information").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_removed_counter_amount: Option<u32>,
+    /// CR 106.12 + CR 106.12b: the tap state of the activated mana ability whose
+    /// inline sub-chain this chain is. A "tapped for mana" replacement modifies a
+    /// production made "while such an ability is resolving and producing mana", so
+    /// the productions of the sub-chain's links deposit as tapped for mana (Urza's
+    /// Mine's "add {C}{C} instead"). Written only by
+    /// `mana_abilities::resolve_mana_ability_sub_chain` on the sub-chain root;
+    /// every link inherits it through the chain hand-off
+    /// (`effects::apply_parent_chain_context`). An inline carrier that starts its
+    /// branch from a fresh context (a die roll's result row, a coin flip's
+    /// outcome) does not carry it. Cleared by
+    /// `effects::build_reflexive_pending_trigger`, which builds every "when you
+    /// do" reflexive triggered ability, because such an ability is a separate
+    /// ability (CR 603.12). `NotFromTap` everywhere else.
+    #[serde(default, skip_serializing_if = "ManaTapState::is_not_from_tap")]
+    pub mana_tap_state: ManaTapState,
     /// CR 701.9a + CR 608.2c: The result of the immediately preceding discard
     /// instruction. `apply_parent_chain_context` copies this only to that
     /// discard's direct child and clears it on every other hand-off.
@@ -6787,6 +6803,32 @@ mod tests {
                 .expect("a payload without the key deserializes")
                 .prior_player_choices,
             Vec::<PlayerId>::new()
+        );
+    }
+
+    /// CR 106.12b: the sub-chain tap state is an additive, default-skipped
+    /// field: `FromTap` round-trips under its own key, `NotFromTap` is not
+    /// serialized, and a payload without the key reads as `NotFromTap`.
+    #[test]
+    fn spell_context_mana_tap_state_round_trip_and_default_skip() {
+        let tapped = SpellContext {
+            mana_tap_state: ManaTapState::FromTap,
+            ..SpellContext::default()
+        };
+        let wire = serde_json::to_value(&tapped).expect("context serializes");
+        assert_eq!(wire["mana_tap_state"], serde_json::json!("FromTap"));
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(wire).expect("context deserializes"),
+            tapped
+        );
+
+        let absent = serde_json::to_value(SpellContext::default()).expect("context serializes");
+        assert!(absent.get("mana_tap_state").is_none());
+        assert_eq!(
+            serde_json::from_value::<SpellContext>(absent)
+                .expect("a payload without the key deserializes")
+                .mana_tap_state,
+            ManaTapState::NotFromTap
         );
     }
 
